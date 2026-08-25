@@ -10,7 +10,7 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded PR runs (the ~8 min γ-suite is the priciest PR check);
+# Cancel superseded PR runs (the 8-12 min γ-suite is the priciest PR check);
 # never cancel a push to main — it's a required check + nightly gate input.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,7 +23,12 @@ jobs:
   e2e:
     name: γ-suite (chromium)
     runs-on: ubuntu-latest
-    timeout-minutes: 12  # PLAN §10.3 budget is 8 min; 12 leaves headroom
+    # Runner variance is extreme: the same 658-spec suite has completed green
+    # in 7m24s and been cancelled mid-run at 18m19s on this very PR (see
+    # #1926 — a 12-minute cap cost 5 reruns across #1913/#1934/#1942, and an
+    # 18-minute trial cap was itself hit by a slow runner). 25 bounds a
+    # genuinely wedged run; sharding is the real fix if variance grows.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: ui

@@ -28,6 +28,7 @@ from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
+from hal0.providers._gpu import host_is_amd_gpu
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
 from hal0.runners import RUNNER_IMAGES
@@ -416,8 +417,45 @@ def _backend_variants(entry: Any) -> list[str]:
             # Llama.cpp-compatible — fan out to every GPU/CPU backend
             # the host actually advertises so the picker shows what's
             # really runnable here.
+            #
+            # ROCm FIRST on an AMD host, then Vulkan, then CPU.
+            #
+            # #1923 SUPPRESSED gpu-vulkan here entirely on AMD, because both
+            # GPU devices ran the same ROCmFPX runner image and that image's
+            # Vulkan backend emitted invalid tokens for every model (#1888) —
+            # the picker was offering a lane whose slot reads ready, serves
+            # HTTP 200 and returns garbage. #1948 fixed the image instead:
+            # ``VULKAN_FIXED_IMAGE``'s Vulkan backend is validated correct on
+            # both a kfd-present and a kfd-ABSENT box, so the lane is offered
+            # again. The picker is an OFFER, not a promise: a slot created on
+            # this row still has to clear the load-time image gate
+            # (:func:`hal0.providers._gpu.require_kfd_for_gpu_slot`, which
+            # refuses the ade07ba lineage by name) and then the output-sanity
+            # readiness probe (#1922) before it can serve a single token.
+            #
+            # Ordering is deliberate but is NOT a speed ranking: on the
+            # reference hardware Vulkan measures faster on both metrics (#1948
+            # §3-C: +13.96% prefill, +20.45% decode). ROCm is offered first
+            # because it is the lane with the validation history and the one
+            # MTP/speculative decode is tuned on, so it is the safer thing to
+            # put under an operator's cursor by default. Vulkan sits directly
+            # beside it, one click away, and the docs say why one might take
+            # it. On the no-/dev/kfd box the catalog advertises gpu-vulkan but
+            # NOT gpu-rocm, so that box now gets a GPU row again instead of
+            # falling to CPU-only.
+            #
+            # For the non-llama runtimes below, "gpu-vulkan" is this picker's
+            # GPU ROW, NOT a claim about the image (#1941). Kokoro and
+            # Moonshine are CPU ONNX images that forward no GPU node at all;
+            # ComfyUI's Strix Halo build and Qwen3-TTS are ROCm images that DO
+            # need /dev/kfd. Nothing derived from this device string can tell
+            # them apart — the load-path guard keys off the provider's own
+            # ``gpu_runtime_needs_rocm`` declaration instead.
             host_backends = {b["id"] for b in available_backends()}
-            for candidate in ("gpu-vulkan", "gpu-rocm", "cpu"):
+            candidates = (
+                ("gpu-rocm", "gpu-vulkan", "cpu") if host_is_amd_gpu() else ("gpu-vulkan", "cpu")
+            )
+            for candidate in candidates:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)
         elif low in {"rocm", "gpu-rocm"}:

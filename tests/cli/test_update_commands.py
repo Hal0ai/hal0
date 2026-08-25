@@ -156,6 +156,57 @@ def test_restart_slots_bounces_only_drifted_and_skips_apply(
     assert "/api/updates/commit" not in calls["post"]
 
 
+def test_restart_slots_scales_timeout_with_drifted_slot_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restart-slots POST must out-wait the whole server-side sweep (#1832).
+
+    ``restart_drifted_slots`` loops ``await sm.restart(name)`` over every
+    drifted slot in ONE request, and each restart is unload-then-load. At
+    ``api_post``'s generic 10s default the CLI reports failure while the sweep
+    goes on bouncing every slot unattended. The floor here is read from the
+    server modules, so a server-side retune breaks this test rather than
+    silently under-budgeting the client.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    drifted = ["chat", "code", "embed"]
+    posted: dict = {}
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {
+                "count": len(drifted),
+                "slots": [{"slot": name, "diffs": []} for name in drifted],
+            }
+        return {}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted[path] = {**kwargs, "json": json}
+        return {"restarted": drifted, "failed": [], "count": len(drifted)}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+
+    kwargs = posted["/api/updates/restart-slots"]
+    # The sweep is pinned to the slots the timeout was derived from — the route
+    # otherwise recomputes drift and can restart more than we budgeted for.
+    assert kwargs["json"] == {"slots": drifted}
+    terminate = float(SlotManager._terminate_timeout_s)
+    # Per slot: the unload (one terminate) plus the load (health poll + two
+    # sequential pre-load evictions), times every drifted slot in the sweep.
+    floor = len(drifted) * (terminate + float(_HEALTH_TIMEOUT_S) + 2 * terminate)
+    assert "timeout" in kwargs, "restart-slots POST passed no explicit timeout kwarg"
+    assert kwargs["timeout"] >= floor, (
+        f"timeout={kwargs['timeout']} is under the {floor}s worst case for "
+        f"{len(drifted)} drifted slots"
+    )
+
+
 def test_restart_slots_clean_message_when_nothing_drifted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -474,6 +525,114 @@ def test_render_notes_none_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """No notes → nothing rendered (older releases without a notes payload)."""
     uc._render_notes(None)
     assert capsys.readouterr().out == ""
+
+
+# ── _print_convergence: post-activation migrations (#1960) ─────────────────────
+
+
+def test_print_convergence_reports_a_failed_post_swap_migration(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A commit() whose post-swap migration subprocess failed must not be
+    reported as a clean success — see Updater.commit()'s #1960 failure-mode
+    note. The CLI has to say so, loudly, and _print_convergence must return
+    False so the caller's exit code reflects it."""
+    converged = uc._print_convergence(
+        {
+            "profile_reset": {"outcome": "no_config"},
+            "slot_enabled_swept": [],
+            "ownership_migrations": {"pending": []},
+            "post_activation_migrations": {
+                "ok": False,
+                "from": 1,
+                "to": 1,
+                "error": "post-activation migrations failed in the newly activated tree "
+                "(rc=1): Hal0Error: kaboom",
+                "pass_warnings": [],
+            },
+            "converged": False,
+        }
+    )
+    out = capsys.readouterr().out
+    assert converged is False
+    assert "Migration incomplete" in out
+    assert "kaboom" in out
+
+
+def test_print_convergence_shows_the_migrated_schema_range_on_success(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    converged = uc._print_convergence(
+        {
+            "profile_reset": {"outcome": "no_config"},
+            "slot_enabled_swept": [],
+            "ownership_migrations": {"pending": []},
+            "post_activation_migrations": {
+                "ok": True,
+                "from": 1,
+                "to": 2,
+                "error": None,
+                "pass_warnings": [],
+            },
+            "converged": True,
+        }
+    )
+    out = capsys.readouterr().out
+    assert converged is True
+    # N4: tightened from a loose "v1" / "v2" substring check — this pins
+    # the exact rendered phrase so it can't false-positive against
+    # unrelated "v1"/"v2" text elsewhere in the panel.
+    assert "schema migrated v1 → v2" in out
+
+
+def test_print_convergence_says_nothing_extra_when_schema_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No migration ran (already-converged box) — no spurious 'v1 -> v1' line."""
+    uc._print_convergence(
+        {
+            "profile_reset": {"outcome": "no_config"},
+            "slot_enabled_swept": [],
+            "ownership_migrations": {"pending": []},
+            "post_activation_migrations": {
+                "ok": True,
+                "from": 1,
+                "to": 1,
+                "error": None,
+                "pass_warnings": [],
+            },
+            "converged": True,
+        }
+    )
+    out = capsys.readouterr().out
+    assert "schema migrated" not in out
+
+
+def test_print_convergence_reports_a_nonfatal_pass_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1960 B2: a pass that swallowed its own exception into a warning
+    (rc=0, ok=True, by design non-fatal) must still be visible to the
+    operator, distinct from the red 'Migration incomplete' panel."""
+    converged = uc._print_convergence(
+        {
+            "profile_reset": {"outcome": "no_config"},
+            "slot_enabled_swept": [],
+            "ownership_migrations": {"pending": []},
+            "post_activation_migrations": {
+                "ok": True,
+                "from": 1,
+                "to": 1,
+                "error": None,
+                "pass_warnings": ["updater.mtp_migration_failed"],
+            },
+            "converged": True,
+        }
+    )
+    out = capsys.readouterr().out
+    assert converged is True
+    assert "mtp override cleanup" in out
+    assert "Migration incomplete" not in out
 
 
 # ── _poll_job across the restart window (#1540) ───────────────────────────────

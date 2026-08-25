@@ -25,6 +25,7 @@ import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServices } from '@/api/hooks/useServices'
+import { servicesForWidget } from './services-widget-pure'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useActivityRecent } from '@/api/hooks/useActivity'
 import { useApprovalList } from '@/api/hooks/useAgents'
@@ -271,6 +272,9 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
   ].filter(Boolean).join(' · ')
   const stats = useStatsHardware()
   const st = stats.data
+  // Shared memory-map model — the same pool total the Slots-page map and
+  // the memory hero card render, so the three figures can never diverge.
+  const mm = useMemoryMapModel()
 
   const readyCount = slots.filter((s) => {
     const cls = slotIndicatorFromPhase(s).cls
@@ -279,6 +283,7 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
 
   const ramUsedGb = st?.ram_used_mb != null ? mbToGb(st.ram_used_mb) : null
   const ramTotalGb = st?.ram_total_mb != null ? mbToGb(st.ram_total_mb) : null
+  const memTotalGb = (mm.pool.kind === 'unified' ? mm.pool.totalGb : 0) || ramTotalGb
   const gpuPct = typeof st?.gpu_util === 'number' ? Math.round(st.gpu_util * 100) : null
   const gpuTemp = typeof st?.gpu_temp_c === 'number' ? Math.round(st.gpu_temp_c) : null
 
@@ -299,8 +304,8 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
       <div className="rd-health-cell">
         <div className="rd-health-k mono">unified memory</div>
         <div className="rd-health-v mono num">
-          {ramUsedGb != null && ramTotalGb != null
-            ? <>{ramUsedGb.toFixed(1)}<span className="dim2">/{Math.round(ramTotalGb)} GB</span></>
+          {ramUsedGb != null && memTotalGb != null && memTotalGb > 0
+            ? <>{ramUsedGb.toFixed(1)}<span className="dim2">/{Math.round(memTotalGb)} GB</span></>
             : '—'}
         </div>
       </div>
@@ -393,7 +398,14 @@ function MemoryHeroCard({ swap, onGo }) {
   const ramTotalGb =
     (stats.data?.ram_total_mb != null ? mbToGb(stats.data.ram_total_mb) : 0) ||
     hw.data?.ram?.total || 0
-  const totalGb = pveConfigured ? (mm.host.totalGb || ramTotalGb) : ramTotalGb
+  // On a UMA/GPU box the pool ceiling is the shared memory-map model's GTT
+  // cap (live ttm.pages_limit) — the SAME total the Slots-page map renders.
+  // This card used to size the bar off ram_total_mb, so raising the GTT
+  // ceiling showed 116 GB on the Slots page and a stale 96 GB here.
+  const poolGb = mm.pool.kind === 'unified' ? (mm.pool.totalGb || 0) : 0
+  const totalGb = pveConfigured
+    ? (mm.host.totalGb || poolGb || ramTotalGb)
+    : (poolGb || ramTotalGb)
   const ramUsedGb = stats.data?.ram_used_mb != null ? mbToGb(stats.data.ram_used_mb) : null
 
   // Per-slot allocations (BE-METRICS mem_mb, via the shared memory-map
@@ -847,11 +859,7 @@ const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
 
 function RDServicesCard({ swap, onGo }) {
   const svc = useServices()
-  const services = svc.data?.services ?? []
-  const ordered = [
-    ...SERVICE_ORDER.map((id) => services.find((s) => s.id === id)).filter(Boolean),
-    ...services.filter((s) => !SERVICE_ORDER.includes(s.id)),
-  ].slice(0, 4)
+  const ordered = servicesForWidget(svc, SERVICE_ORDER)
 
   return (
     <RDCard title="Services" swap={swap} className="rd-fill" flush>

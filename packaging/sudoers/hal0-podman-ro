@@ -4,10 +4,18 @@
 # root's image store). hal0-api runs as the unprivileged `hal0` system user,
 # so its own podman calls hit hal0's ROOTLESS store — a different store from
 # the one slots actually populate, producing false "installable" backend
-# states (halo143/halo150). It delegates exactly the read-only introspection
-# ops to /usr/lib/hal0/bin/hal0-podman-ro, which is the entire privileged
-# surface: today just `images`, each a single hardcoded podman invocation —
-# no operator-supplied argv, no shell. rm/run/build/exec are never exposed.
+# states (halo143/halo150) and — until #1889 — an `image_status` of "missing"
+# for every running, healthy slot. It delegates exactly the read-only
+# introspection ops to /usr/lib/hal0/bin/hal0-podman-ro, which is the entire
+# privileged surface: `images`, `image-exists <ref>`, `image-user <ref>`,
+# `container-image <slot-token>`, `container-argv <slot-token>` plus two
+# side-effect-free validator probes. Every podman subcommand, flag and
+# --format string is a literal in the wrapper; no shell is ever evaluated.
+# The four verbs that take an argument accept exactly ONE positional operand,
+# validated ROOT-side
+# against a closed regex before exec (#1889) — the container verbs take the
+# bare slot token and build `hal0-slot-<token>` themselves, so the caller can
+# never name a non-hal0 container. rm/run/build/exec/pull are never exposed.
 #
 # Install (as root):
 #   install -m 0755 -o root -g root hal0-podman-ro /usr/lib/hal0/bin/hal0-podman-ro
@@ -15,6 +23,13 @@
 #   visudo -cf /etc/sudoers.d/hal0-podman-ro
 #
 # Keep this grant pinned to the helper binary; a broader grant would let the
-# API run arbitrary root commands. Revoke with: rm /etc/sudoers.d/hal0-podman-ro
+# API run arbitrary root commands. Note the grant deliberately does NOT
+# enumerate argv (a bare command path in sudoers permits any arguments): the
+# wrapper itself is the control surface, exactly as for hal0-systemctl, whose
+# slot/agent verbs have taken a validated id since P3-perms. Constraining argv
+# in sudoers instead would be a second, silently-drifting copy of the verb
+# list, and sudoers wildcards are a well-known footgun. Every new verb is
+# gated by a ROOT-side validator in the wrapper (#1889).
+# Revoke with: rm /etc/sudoers.d/hal0-podman-ro
 
 hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-podman-ro

@@ -253,6 +253,28 @@ def test_flip_keeps_agents_and_secrets_root_owned(tmp_hal0_home: str) -> None:
     assert (secrets.owner, secrets.group) == ("root", "root")
 
 
+def test_agent_skills_mirror_is_service_writable(tmp_hal0_home: str) -> None:
+    """#1828: /etc/hal0/agent-skills must be writable by the service account.
+
+    install.sh births it root:root 0755 and the §7.4 privilege drop then runs
+    `hal0 agent bootstrap hermes` as hal0, so context_link's five
+    ``os.symlink`` calls all hit EACCES and the agent comes up with an empty
+    skill manifest. The row is dir-only (its contents are symlinks, which the
+    store never writes) and mirrors the /etc/hal0 config-root row: setgid 2775
+    so links the hal0 group plants inherit the shared group.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    mirror = rows[paths.etc() / "agent-skills"]
+    assert (mirror.owner, mirror.group, mirror.mode) == ("hal0", "hal0", 0o2775)
+    # Narrow on purpose: no glob/recursion into the mirrored skill symlinks.
+    assert mirror.glob is None
+    assert mirror.recursive is False
+    # The root-era table keeps its byte-identical root:root 0755.
+    root_rows = _by_target(perms.ownership_table(service_user="root"))
+    root_mirror = root_rows[paths.etc() / "agent-skills"]
+    assert (root_mirror.owner, root_mirror.group, root_mirror.mode) == ("root", "root", 0o755)
+
+
 def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:
     """/var/lib/hal0 + HERMES_HOME flip to the service user under the flip."""
     rows = _by_target(perms.ownership_table(service_user="hal0"))
@@ -724,3 +746,180 @@ def test_regular_files_are_still_reconciled_alongside_symlinks(tmp_path: Path) -
     assert plain in applied
     assert oct(plain.stat().st_mode & 0o7777) == oct(0o644)
     assert oct(outside.stat().st_mode & 0o7777) == oct(0o600)
+
+
+def test_glob_row_target_itself_a_symlinked_directory_is_never_dereferenced(
+    tmp_path: Path,
+) -> None:
+    """#1958 review finding 2 (Codex P1): the glob ROW'S OWN TARGET can be a link.
+
+    ``_is_or_is_under_symlink`` only guards children reached THROUGH a symlink
+    *below* ``row.target`` — it never checks ``row.target`` itself. But
+    ``Path.is_dir()`` FOLLOWS symlinks, so a row whose declared directory (e.g.
+    ``models/chat-templates``) is itself a symlink to an operator-managed tree
+    used to pass the ``is_dir()`` gate in ``_expand_row``, glob the link's REAL
+    children, and hand them to ``plan()``/``commit()`` as ordinary entries —
+    chowning/chmodding files that live outside hal0's declared tree entirely,
+    the exact thing the module docstring (#1739) promises never happens. The
+    symlinked directory itself must be reported (and skipped) exactly like a
+    non-glob row whose target is a symlink; nothing under it may enter the plan.
+    """
+    owner, group = _me()
+    real_dir = tmp_path / "external-templates"
+    real_dir.mkdir()
+    real_file = real_dir / "custom.jinja"
+    real_file.write_text("{{ x }}")
+    os.chmod(real_file, 0o600)
+    os.chmod(real_dir, 0o700)
+
+    linked_target = tmp_path / "models" / "chat-templates"
+    linked_target.parent.mkdir(parents=True)
+    linked_target.symlink_to(real_dir)
+
+    row = perms.PermRow(
+        linked_target, owner, group, 0o2775, glob="*.jinja", child_mode=0o644, role="chat-templates"
+    )
+    pl = perms.plan([row])
+
+    # Only the (symlinked) target itself is planned — no child of the real
+    # directory it points at ever entered the plan.
+    assert [d.path for d in pl.diffs] == [linked_target]
+    assert pl.diffs[0].before.is_symlink is True
+    assert pl.changed is False
+
+    rows = perms.audit_rows(pl)
+    assert rows[0]["status"] == "symlink"
+
+    applied = perms.commit(pl)
+    assert applied == []
+    assert oct(real_dir.stat().st_mode & 0o7777) == oct(0o700), "symlink target dir was chmod'd"
+    assert oct(real_file.stat().st_mode & 0o7777) == oct(0o600), "symlinked dir's child was chmod'd"
+
+
+def test_upstreams_toml_is_not_world_readable(tmp_hal0_home: str) -> None:
+    """upstreams.toml drops the world bit (ADR-0002, Option C item 3).
+
+    The file carries no credential *values* — ``auth_value_env`` names an
+    environment variable and the registry resolves it at request time — but the
+    provider/endpoint inventory it does carry was readable by every local
+    account at 0644. 0640 keeps every in-tree consumer working: hal0-api,
+    hal0-agent@* and the CLI all run as ``hal0`` (or root), and the file's group
+    is ``hal0``. Asserted against the ownership table under the service-user
+    flip, because that is the posture every installed box runs.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    row = rows[paths.etc() / "upstreams.toml"]
+    assert (row.owner, row.group) == ("hal0", "hal0")
+    assert row.mode & 0o007 == 0, f"upstreams.toml is world-readable: {row.mode:o}"
+    assert row.mode == 0o640
+
+
+# ── hal0-api write-path coverage (#1895) ───────────────────────────────────────
+#
+# ``hal0-api`` runs ``User=hal0``. Every ``var_lib()``-rooted path it can be
+# the FIRST writer of on a fresh install must carry a row here, or a
+# root-run installer step (a bundle-tier model pull, a schema migration, a
+# health check — anything that touches the path before the daemon's first
+# request) leaves it root-owned with no way for `doctor perms --fix` to
+# heal it (the O13 class: #1546 for hal0.db, #1895 for model-pull-jobs +
+# activity.db). This table is the durable form of that check: add a row
+# HERE whenever a new lazily-created ``var_lib()`` path is wired into
+# ``hal0-api``, matching the row(s) added to ``ownership_table`` in the
+# same change, so a future writer can't be missed the way model-pull-jobs
+# was.
+# Labels only at collection time — the concrete ``Path`` each label resolves
+# to depends on ``HAL0_HOME``, which ``tmp_hal0_home`` sets PER TEST FUNCTION
+# (after collection already ran). Resolving paths here instead of inside the
+# test body would race that fixture: the parametrize list would freeze
+# whatever ``HAL0_HOME`` was active at collection time, while
+# ``ownership_table()`` inside the test resolves against the per-test tmp
+# dir — two different tmp trees that would never compare equal.
+_HAL0_API_WRITE_LABELS = [
+    # primary database + WAL siblings (#1546)
+    "hal0.db",
+    "hal0.db-wal",
+    "hal0.db-shm",
+    # durable audit trail + WAL siblings (#1895)
+    "activity.db",
+    "activity.db-wal",
+    "activity.db-shm",
+    # durable pull-job snapshot store (#1895, the #626/#MR-1 fallback)
+    "model-pull-jobs/",
+    # pre-existing O13-class runtime trees, kept here as regression anchors
+    # so this test is the one place that answers "is hal0-api's write
+    # surface fully covered" rather than one more scattered check.
+    "registry/",
+    "slots/",
+    "models/",
+    # four more write paths surfaced during #1895's enumeration but
+    # deliberately left out of that PR to keep its diff minimal (#1938):
+    # image-gen PNG cache, the dashboard layout file, the durable
+    # update-job snapshot store, and the custom chat-template store nested
+    # under the default model store.
+    "images/cache/",
+    "dashboard-layout.json",
+    "update-jobs/",
+    "models/chat-templates/",
+]
+
+
+def _resolve_hal0_api_write_target(label: str) -> Path:
+    from hal0.registry.pull import _pull_jobs_dir
+
+    var_lib = paths.var_lib()
+    targets = {
+        "hal0.db": paths.db_path(),
+        "hal0.db-wal": paths.db_path().with_name("hal0.db-wal"),
+        "hal0.db-shm": paths.db_path().with_name("hal0.db-shm"),
+        "activity.db": paths.activity_db(),
+        "activity.db-wal": paths.activity_db().with_name("activity.db-wal"),
+        "activity.db-shm": paths.activity_db().with_name("activity.db-shm"),
+        "model-pull-jobs/": _pull_jobs_dir(),
+        "registry/": var_lib / "registry",
+        "slots/": var_lib / "slots",
+        "models/": var_lib / "models",
+        "images/cache/": var_lib / "images" / "cache",
+        "dashboard-layout.json": var_lib / "dashboard-layout.json",
+        "update-jobs/": var_lib / "update-jobs",
+        "models/chat-templates/": var_lib / "models" / "chat-templates",
+    }
+    return targets[label]
+
+
+@pytest.mark.parametrize("label", _HAL0_API_WRITE_LABELS)
+def test_every_hal0_api_write_path_has_an_ownership_row(tmp_hal0_home: str, label: str) -> None:
+    """Every path ``hal0-api`` (``User=hal0``) can write must have a table row.
+
+    A missing row is exactly the #1895 defect: the path is born from
+    whichever process touches it first (often root, during install), the
+    ``hal0`` daemon then can't write it, and ``doctor perms --fix`` has
+    nothing to reconcile because the table never declared an opinion.
+    """
+    target = _resolve_hal0_api_write_target(label)
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+    assert target in by_target, f"no ownership row for {label} ({target}) — see #1895"
+    row = by_target[target]
+    assert row.owner == "hal0", f"{label} row is not hal0-owned: {row.owner}"
+    assert row.group == "hal0", f"{label} row is not hal0-grouped: {row.group}"
+
+
+def test_model_pull_jobs_dir_snapshot_files_get_hal0_owned_child_rows(
+    tmp_hal0_home: str,
+) -> None:
+    """The ``model-pull-jobs/`` dir row must also cover its ``*.json`` children.
+
+    ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp`` +
+    ``os.replace`` — mkstemp always births its tempfile ``0600`` regardless
+    of umask, so the row's ``child_mode`` must match that birth mode (not
+    fight it), the same convention as ``registry.toml`` /
+    ``slots/*/state.json`` above.
+    """
+    from hal0.registry.pull import _pull_jobs_dir
+
+    table = perms.ownership_table(service_user="hal0")
+    by_target = {r.target: r for r in table}
+    row = by_target[_pull_jobs_dir()]
+    assert row.glob == "*.json"
+    assert row.child_mode == 0o600
+    assert row.optional is False

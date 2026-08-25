@@ -327,14 +327,23 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
 
 @pytest.mark.xfail(
     reason=(
-        "SECURITY item-4 deviation: the pinned Hermes ref defaults "
-        "terminal.backend to 'local' (host command execution), which the "
-        "lxc105 checklist flags as an unsandboxed-by-default local terminal. "
-        "hal0's compensating control is the systemd-sandboxed Hermes service; "
-        "hal0's own provisioning (src/hal0/agents/hermes_provision.py) also "
-        "explicitly sets terminal.backend='local'. Orchestrator decides whether "
-        "to require an explicit sandboxed backend. Recorded, not silently "
-        "accepted — see the handback."
+        "SECURITY item-4 deviation: terminal.backend is 'local' (host command "
+        "execution) whenever the terminal tool is enabled, which the lxc105 "
+        "checklist flags as an unsandboxed-by-default local terminal. The pin "
+        "is NOT what forces this: the pinned ref also ships sandboxed backends "
+        "(hermes_cli/config.py branches on docker | singularity | modal | "
+        "daytona | ssh, and tools/environments/{docker,singularity,modal,"
+        "daytona,ssh}.py all exist in the installed venv), so no pin bump is "
+        "needed to change it. None is viable here: a containerised shell cannot "
+        "reach the host filesystem or 127.0.0.1:8080, which would break the "
+        "bundled host-management skills (hal0-service-management, hal0-bench, "
+        "hal0-tune, hal0-quantize). The 'by default' half is now answered "
+        "(#1863): hal0 ships the terminal tool OFF and subtracts the `terminal`, "
+        "`code_execution` and `delegation` toolsets via agent.disabled_toolsets "
+        "unless the operator explicitly opts in, in which case 'local' is what "
+        "they get. "
+        "This xfail asserts on the UPSTREAM default, which is still 'local', so "
+        "it stays as the drift watch."
     ),
     strict=True,
 )

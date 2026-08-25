@@ -11,7 +11,7 @@ import contextlib
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -181,6 +181,23 @@ async def _fetch_hal0_composite_models(
     now: Callable[[], float] = time.monotonic,
     ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
 ) -> list[str]:
+    """Aggregated catalogue only — see :func:`_fetch_hal0_composite_models_detailed`.
+
+    Drops the ``degraded`` flag, so callers that REPLACE state from this
+    result should use the detailed form instead (#1837 follow-up).
+    """
+    models, _degraded = await _fetch_hal0_composite_models_detailed(
+        slot_manager, now=now, ttl_seconds=ttl_seconds
+    )
+    return models
+
+
+async def _fetch_hal0_composite_models_detailed(
+    slot_manager: SlotManager,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
+) -> tuple[list[str], bool]:
     """Aggregate every ready chat-capable slot's model id into one catalogue.
 
     Direct read over the live slot config — no pseudo-upstream is
@@ -191,20 +208,52 @@ async def _fetch_hal0_composite_models(
     place without an operator having to wire a matching upstreams.toml
     entry per slot.
 
+    Also folds in the FLM multiplex tags (``embed-gemma:300m`` /
+    ``whisper-v3:turbo``, see :func:`_seed_multiplex_models`) for any FLM
+    slot whose config opts into them — those tags never appear in an FLM
+    slot's own ``model.default`` (they ride along on the same process) so
+    they have to be derived here, freshly, on every fetch. Doing it inside
+    this fetch (rather than as a separate merge step downstream) is what
+    lets callers safely REPLACE their cache with this return value instead
+    of merging it forward (#1837 — a merge-forward is how a deleted slot's
+    model id kept getting advertised after the slot was gone).
+
     The returned list is sorted + deduplicated and cached for
     ``ttl_seconds`` to keep the cold-start fan-out cheap while still
     picking up new slots within a handful of seconds.
+
+    Returns:
+        ``(models, degraded)``. ``degraded=True`` means the enumeration
+        did NOT see every configured slot — ``iter_configs`` raised, or
+        it skipped a slot whose TOML wouldn't parse. A degraded result is
+        a floor, not a catalogue: because callers REPLACE their bucket
+        with it, a degraded result must never be cached under the TTL nor
+        written over a known-good bucket, or one momentarily unparseable
+        slot TOML un-advertises a healthy slot's model until the next
+        refresh (and, since ``/v1/models`` reads the bucket rather than
+        this fetch, there is no self-heal short of another slot-ready
+        event or an ``hal0-api`` restart).
     """
     cached = _HAL0_MODEL_CACHE.get(_HAL0_COMPOSITE_CACHE_KEY)
     monotonic_now = now()
     if cached is not None and cached[0] > monotonic_now:
-        return list(cached[1])
+        return list(cached[1]), False
 
+    skipped: list[str] = []
     try:
-        cfgs = await slot_manager.iter_configs()
-    except Exception as exc:  # pragma: no cover — defensive
+        detailed = getattr(slot_manager, "iter_configs_detailed", None)
+        if callable(detailed):
+            cfgs, skipped = await detailed()
+        else:  # pragma: no cover — test doubles / older managers
+            cfgs = await slot_manager.iter_configs()
+    except Exception as exc:
         log.warning("upstream.hal0_composite_iter_failed", error=str(exc))
-        cfgs = []
+        # Enumeration failed outright — report an empty FLOOR, flagged
+        # degraded, and leave the TTL cache untouched so the next call
+        # retries immediately instead of serving this failure for 5s.
+        return [], True
+    if skipped:
+        log.warning("upstream.hal0_composite_partial_enumeration", skipped=list(skipped))
 
     seen: set[str] = set()
     models: list[str] = []
@@ -232,9 +281,18 @@ async def _fetch_hal0_composite_models(
         seen.add(model_id)
         models.append(model_id)
 
+    for cfg in cfgs:
+        for tag in _flm_multiplex_tags(cfg):
+            if tag in seen:
+                continue
+            seen.add(tag)
+            models.append(tag)
+
     models.sort()
+    if skipped:
+        return models, True
     _HAL0_MODEL_CACHE[_HAL0_COMPOSITE_CACHE_KEY] = (monotonic_now + ttl_seconds, list(models))
-    return models
+    return models, False
 
 
 def _slot_model_id(cfg: dict[str, Any]) -> str:
@@ -595,6 +653,8 @@ async def _prime_hal0_composite_cache(
     upstreams: UpstreamRegistry,
     slot_manager: SlotManager,
     model_cache: dict[str, list[str]],
+    *,
+    evict: Iterable[str] = (),
 ) -> None:
     """Warm the ``model_cache["hal0"]`` bucket via a direct slot-config read.
 
@@ -604,10 +664,31 @@ async def _prime_hal0_composite_cache(
     means the first request after startup doesn't have to pay the
     slot-iteration cost.
 
-    Merges rather than replaces: any tag already in the bucket that the
-    fresh catalogue read doesn't reproduce (e.g. FLM multiplex tags seeded
-    by :func:`_seed_multiplex_models`) is preserved, mirroring
-    ``_fetch_and_cache``'s merge behaviour for ordinary upstreams.
+    REPLACES ``model_cache["hal0"]`` wholesale on every call — it must NOT
+    merge the fresh catalogue read with whatever was there before. A slot
+    that's since been deleted (or rebound to a different model) must have
+    its old id fall out of the bucket, not accumulate forever (#1837: a
+    merge-forward left deleted slots' model ids advertised via
+    ``/v1/models`` for the life of the ``hal0-api`` process — ids that hard
+    404 on dispatch since neither a slot nor a registry entry backs them
+    anymore). FLM multiplex tags (``embed-gemma:300m`` / ``whisper-v3:turbo``)
+    are freshly re-derived on every call too — see
+    :func:`_fetch_hal0_composite_models` — so replacing here doesn't drop
+    them.
+
+    The one exception to the replace is a DEGRADED enumeration — see
+    :func:`_fetch_hal0_composite_models_detailed`. If the slot catalogue
+    couldn't be read in full (``iter_configs`` raised, or a slot's TOML
+    wouldn't parse) the previous bucket is left exactly as it was: a
+    partial read is a floor, and replacing with it would un-advertise a
+    healthy slot's model permanently. Deletion still evicts — a deleted
+    slot is simply absent from a complete enumeration.
+
+    ``evict`` is for callers that KNOW an id just went away (the delete /
+    config-rebind routes). Those ids are dropped from the bucket even on
+    the degraded path, unless the partial read shows another slot still
+    binding them — otherwise one unrelated malformed slot TOML would keep
+    a genuinely deleted model id advertised.
 
     Skipped if an explicit ``upstreams.toml`` entry already claims the
     name ``hal0`` — operator overrides win, and their entry's model cache
@@ -618,13 +699,76 @@ async def _prime_hal0_composite_cache(
     if upstreams.get("hal0") is not None:
         log.info("slots.hal0_composite_skipped", reason="explicit_upstream_registered")
         return
-    models = await _fetch_hal0_composite_models(slot_manager)
-    existing = model_cache.get("hal0", [])
-    merged = list(models)
-    for tag in existing:
-        if tag not in merged:
-            merged.append(tag)
-    model_cache["hal0"] = merged
+    models, degraded = await _fetch_hal0_composite_models_detailed(slot_manager)
+    if degraded:
+        log.warning(
+            "slots.hal0_composite_prime_skipped",
+            reason="degraded_enumeration",
+            kept=len(model_cache.get("hal0", []) or []),
+        )
+        _evict_from_composite_bucket(model_cache, evict, still_bound=set(models))
+        return
+    model_cache["hal0"] = list(models)
+
+
+def _evict_from_composite_bucket(
+    model_cache: dict[str, list[str]],
+    evict: Iterable[str],
+    *,
+    still_bound: set[str],
+) -> None:
+    """Drop caller-KNOWN-dead ids from the bucket without a full replace.
+
+    Only used on the degraded path: the enumeration was partial, so the
+    bucket has to be kept, but a caller that just deleted a slot (or
+    rebound its model) knows for certain that id is gone and shouldn't
+    have to wait for a healthy read. ``still_bound`` is the partial read's
+    own catalogue — if the id is in there, another slot still serves it
+    and it must survive.
+    """
+    doomed = {mid for mid in evict if mid and mid not in still_bound}
+    if not doomed:
+        return
+    bucket = model_cache.get("hal0")
+    if not bucket:
+        return
+    model_cache["hal0"] = [mid for mid in bucket if mid not in doomed]
+    log.info("slots.hal0_composite_partial_evict", evicted=sorted(doomed))
+
+
+async def hal0_refresh_composite_models(app: Any, *, evict: Iterable[str] = ()) -> None:
+    """Re-derive ``model_cache["hal0"]`` right now, from live slot config.
+
+    Slot mutations that change the composite catalogue — DELETE
+    ``/api/slots/{name}``, or a config write that rebinds
+    ``model.default`` — produce no ``slot.state`` ``ready`` event, so the
+    event-driven re-prime in :func:`_refresh_model_cache_on_ready` never
+    fires for them. Without this, a deleted slot's model id stayed
+    advertised by ``/v1/models`` (and the dashboard's synthetic ``hal0``
+    tile) until some UNRELATED slot happened to go ready, or ``hal0-api``
+    restarted — #1837, reproduced on ct152.
+
+    ``evict`` carries the ids the caller KNOWS it just removed (a deleted
+    slot's model id, the pre-write id of a rebind). They're dropped even
+    when the fresh read comes back degraded — see
+    :func:`_prime_hal0_composite_cache` — so one unrelated malformed slot
+    TOML can't keep a deleted id advertised.
+
+    Best-effort and never raises: the catalogue is a discovery surface,
+    and failing a successful delete because the cache refresh hiccupped
+    would be worse than a few seconds of staleness.
+    """
+    state = getattr(app, "state", None)
+    upstreams = getattr(state, "upstreams", None)
+    slot_manager = getattr(state, "slot_manager", None)
+    model_cache = getattr(state, "upstream_models", None)
+    if upstreams is None or slot_manager is None or model_cache is None:
+        return
+    try:
+        _hal0_model_cache_clear()
+        await _prime_hal0_composite_cache(upstreams, slot_manager, model_cache, evict=evict)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("model_cache.hal0_composite_refresh_failed", error=str(exc))
 
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
@@ -637,6 +781,34 @@ async def _prime_hal0_composite_cache(
 # to nowhere. Seed the cache explicitly.
 _FLM_EMBED_TAG = "embed-gemma:300m"
 _FLM_ASR_TAG = "whisper-v3:turbo"
+
+
+def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
+    """Multiplex tags an FLM slot's config opts into, in stable order.
+
+    One shared derivation for both consumers — the composite fetch
+    (:func:`_fetch_hal0_composite_models_detailed`, which re-derives them
+    on every read so a REPLACE-based prime can't drop them) and
+    :func:`_seed_multiplex_models`. They used to be verbatim copies; a
+    drift between them would show as tags present at startup and silently
+    vanishing on the first slot-ready re-prime.
+
+    Two config shapes are accepted: the container-era ``[npu]`` table
+    (what FLMProvider builds its ``--asr`` / ``--embed`` argv from) and
+    the pre-#733 ``[defaults] load_*`` legacy keys.
+    """
+    if not cfg.get("name"):
+        return []
+    if "flm" not in (cfg.get("provider", ""), cfg.get("backend", "")):
+        return []
+    npu_table = cfg.get("npu") or {}
+    defaults = cfg.get("defaults") or {}
+    tags: list[str] = []
+    if npu_table.get("embed") or defaults.get("load_embed"):
+        tags.append(_FLM_EMBED_TAG)
+    if npu_table.get("asr") or defaults.get("load_asr"):
+        tags.append(_FLM_ASR_TAG)
+    return tags
 
 
 async def _refresh_model_cache_on_ready(
@@ -700,10 +872,15 @@ async def _seed_multiplex_models(
     """Add FLM multiplex tags (embed-gemma, whisper-v3:turbo) to the model
     cache for slots whose config opts into the matching multiplex.
 
-    Idempotent — appends only when missing. Runs after
-    ``_prime_hal0_composite_cache``. The multiplex tags are merged into the
-    ``hal0`` cache bucket (the direct-read composite catalogue) so the
-    dispatcher's passthrough match still picks them up.
+    Idempotent — appends only when missing. Historically ran after
+    ``_prime_hal0_composite_cache`` to backfill tags a merge-based prime
+    wouldn't otherwise produce; :func:`_fetch_hal0_composite_models` (and
+    therefore ``_prime_hal0_composite_cache``, which now REPLACES rather
+    than merges — #1837) derives the same tags itself on every call, so
+    this is a no-op belt-and-braces call on the startup path. Kept as a
+    standalone helper for direct unit coverage and for any caller that
+    populates ``model_cache["hal0"]`` some other way (e.g. an explicit
+    ``upstreams.toml`` override, where priming is skipped entirely).
     """
     try:
         cfgs = await slot_manager.iter_configs()
@@ -712,23 +889,11 @@ async def _seed_multiplex_models(
         return
     bucket = model_cache.setdefault("hal0", [])
     for cfg in cfgs:
-        name = cfg.get("name", "")
-        is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
-        if not is_flm or not name:
-            continue
-        # Container-era schema is the [npu] table (what FLMProvider builds
-        # the --asr/--embed argv from); [defaults] load_* is the pre-#733
-        # legacy shape, kept so older tomls keep seeding.
-        npu_table = cfg.get("npu") or {}
-        defaults = cfg.get("defaults") or {}
-        load_embed = npu_table.get("embed") or defaults.get("load_embed")
-        load_asr = npu_table.get("asr") or defaults.get("load_asr")
-        if load_embed and _FLM_EMBED_TAG not in bucket:
-            bucket.append(_FLM_EMBED_TAG)
-            log.info("slots.multiplex_seeded", slot=name, model=_FLM_EMBED_TAG)
-        if load_asr and _FLM_ASR_TAG not in bucket:
-            bucket.append(_FLM_ASR_TAG)
-            log.info("slots.multiplex_seeded", slot=name, model=_FLM_ASR_TAG)
+        for tag in _flm_multiplex_tags(cfg):
+            if tag in bucket:
+                continue
+            bucket.append(tag)
+            log.info("slots.multiplex_seeded", slot=cfg.get("name", ""), model=tag)
 
 
 def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
@@ -1148,6 +1313,8 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
         model_registry=ctx.model_registry,
         prefetch_timeout_s=ctx.hal0_config.dispatcher.prefetch_timeout_s,
         direct_read_timeout_s=ctx.hal0_config.dispatcher.direct_read_timeout_s,
+        stream_total_timeout_s=ctx.hal0_config.dispatcher.stream_total_timeout_s,
+        stream_idle_timeout_s=ctx.hal0_config.dispatcher.stream_idle_timeout_s,
         prefetch_parallel_cap=ctx.hal0_config.dispatcher.prefetch_parallel_cap,
         cached_models=lambda name: ctx.model_cache.get(name, []),
         fetch_models=ctx.fetch_and_cache,
@@ -1158,12 +1325,33 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
 async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     """Phase — one-shot slot reconciliation passes + idle-monitor start.
 
-    ORDERING: ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots``
-    → ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
-    trio shadows just reconciled) → ``start_idle_monitor``. Otherwise preserved
-    exactly from the monolithic boot.
+    ORDERING: ``check_outstanding_migrations`` (#1960, safety net) →
+    ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots`` →
+    ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
+    trio shadows just reconciled) → ``start_idle_monitor``. Everything from
+    ``migrate_slot_dir`` on is otherwise preserved exactly from the
+    monolithic boot.
     """
-    # #1369 one-shot sweep, FIRST: every pass below reads ``model.default`` to
+    # #1960 safety net, FIRST: heal a box whose post-activation data
+    # migrations (schema, slot-TOML relabels, registry cleanup) never ran —
+    # either because it upgraded before this fix existed, or because
+    # Updater.commit()'s post-swap migration subprocess itself failed (see
+    # that function's docstring). Every pass check_outstanding_migrations
+    # runs is a documented idempotent "stale? fix it : no-op" sweep, so a
+    # converged box pays for one hal0.toml read plus five near-instant
+    # no-ops. Runs before every pass below because those passes read slot
+    # TOMLs / registry rows this can rewrite. Never raises — see its own
+    # docstring — so no try/except is needed here, but exceptions are boxed
+    # anyway (defensive-in-depth, matching every neighbouring pass in this
+    # phase) in case the import itself fails.
+    try:
+        from hal0.updater.updater import check_outstanding_migrations
+
+        check_outstanding_migrations()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slot.outstanding_migrations_check_failed", error=str(exc))
+
+    # #1369 one-shot sweep, next: every pass below reads ``model.default`` to
     # decide what is configured, so a slot the operator had switched off with
     # ``enabled = false`` (whose model is therefore still bound on disk) would
     # be reconciled as live for one boot. Idempotent — after the first sweep
@@ -1594,6 +1782,53 @@ async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
     app.state.metrics_seam = ctx.metrics_seam
 
 
+async def _memory_reprobe_loop(
+    provider: Any, interval_s: float, *, max_replay_attempts: int = 20
+) -> None:
+    """Poll a boot-degraded memory provider until the durable engine answers.
+
+    Armed by ``_boot_background_tasks`` only when ``create_app`` wrapped a
+    degraded boot result in ``SelfHealingMemoryProvider`` (#1613). ``try_heal``
+    is synchronous, probe-bounded I/O, so it runs off-loop via ``to_thread``.
+
+    After the swap, drain the provider's heal hooks (#1897) — the writes hal0-api
+    made through the volatile fallback during the degrade window are gone from
+    the engine that just came up, and the phases that issued them registered a
+    replay. Draining here, on the loop, is what makes those writes durable
+    without waiting for the next hal0-api restart.
+
+    A drain that reports failure keeps its hooks armed, so the loop keeps
+    ticking and retries — up to ``max_replay_attempts``, after which it gives
+    up loudly rather than retrying forever. Only a replay that was actually
+    TRIED spends the budget: a drain whose armed hooks were all still waiting
+    on their arming boot phase (``last_drain_attempted`` False) is free, so a
+    short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
+    the brain lane finishes and hands its replay over (#1912 review).
+    """
+    attempts = 0
+    while True:
+        await asyncio.sleep(interval_s)
+        if not await asyncio.to_thread(provider.try_heal):
+            continue
+        run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is None or await run_hooks():
+            return
+        if not getattr(provider, "last_drain_attempted", True):
+            # Every armed replay is still waiting on its boot lane — nothing
+            # was tried, so this tick does not count against the budget.
+            continue
+        attempts += 1
+        if attempts >= max_replay_attempts:
+            log.error(
+                "hal0.memory.heal_replay_abandoned",
+                attempts=attempts,
+                detail="post-heal replay of degraded-window writes kept failing — "
+                "restart hal0-api to re-run the boot writes against the durable engine",
+            )
+            return
+        log.warning("hal0.memory.heal_replay_retry", attempt=attempts)
+
+
 async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     """Phase — MCP session managers + refresh / GPU-arbiter loops + omni & NPU routers.
 
@@ -1661,14 +1896,9 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     _mem_provider = getattr(app.state, "memory_provider", None)
     if hasattr(_mem_provider, "try_heal"):
         _reprobe_interval = float(os.environ.get("HAL0_MEMORY_REPROBE_INTERVAL_S", "30") or "30")
-
-        async def _memory_reprobe_loop(provider: Any = _mem_provider) -> None:
-            while True:
-                await asyncio.sleep(_reprobe_interval)
-                if await asyncio.to_thread(provider.try_heal):
-                    return
-
-        ctx.memory_reprobe_task = asyncio.create_task(_memory_reprobe_loop())
+        ctx.memory_reprobe_task = asyncio.create_task(
+            _memory_reprobe_loop(_mem_provider, _reprobe_interval)
+        )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
 
     async def _stop_memory_reprobe_task() -> None:
@@ -1845,7 +2075,47 @@ def _boot_mcp_memory_call(
         return {"ok": False, "error": str(exc)}
 
 
-async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
+class _BrainLaneReplay:
+    """Heal hook that re-issues the brain-lane publishes lost while degraded (#1897).
+
+    Armed on the self-healing provider BEFORE the lane's publishes run, so a
+    heal that lands mid-lane cannot drain an empty replay and leave the lane
+    with nothing to register onto. Until :meth:`finish` hands over the result,
+    the hook reports "not done" (``False``) so the drain keeps it armed.
+
+    Each run narrows ``pending`` to the publishes that still did not land, so
+    a partially successful retry never repeats one that already succeeded —
+    ``_phase_self_report`` has no dedupe, and re-running it would leave one
+    extra private self-report per tick.
+    """
+
+    def __init__(self, app: FastAPI, ctx: BootState) -> None:
+        self._app = app
+        self._ctx = ctx
+        self.pending: tuple[str, ...] = ()
+        self.ready = False
+
+    def finish(self, owed: tuple[str, ...]) -> None:
+        """Hand over the publishes the degraded window lost (may be empty)."""
+        self.pending = owed
+        self.ready = True
+
+    async def __call__(self) -> bool:
+        if not self.ready:
+            return False
+        if not self.pending:
+            return True
+        self.pending = await _boot_brain_lane(self._app, self._ctx, only=self.pending, replay=True)
+        return not self.pending
+
+
+async def _boot_brain_lane(
+    app: FastAPI,
+    ctx: BootState,
+    *,
+    only: tuple[str, ...] | None = None,
+    replay: bool = False,
+) -> tuple[str, ...]:
     """Phase — RELOCATE(brain-lane): identity-card + self-report memory publishes.
 
     Runs LAST (after ``background_tasks``, the final named phase before this
@@ -1868,8 +2138,47 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
     self-test of chat/memory/etc. Flagged here and in the relocation
     handoff notes; a future lane could add a lightweight post-boot
     self-check if a closer smoke_tests equivalent is wanted.
+
+    #1897 — degraded-window replay. On a fresh install this phase always runs
+    inside the memory degrade window: the installer starts hal0-api and the
+    hindsight daemon in the same pass, so the engine is still cold-starting
+    (embedded postgres init + model load) and ``create_app`` handed every
+    consumer the volatile in-memory ``PgVectorProvider``. All three publishes
+    below are then accepted, warned about ("VOLATILE and will be LOST"), and
+    dropped — the durable ``agents`` bank is never created. The #1613 self-heal
+    swaps the engine in later but cannot recover writes the engine never saw,
+    so the bank stayed missing until an unrelated hal0-api restart happened to
+    re-run this phase against a healthy provider. Each publish is therefore run
+    with the fallback's volatile-write counter watched: the ones whose writes
+    the fallback actually swallowed are armed for replay on the heal path
+    (``only=`` re-runs exactly those, ``replay=True`` stops the re-run arming
+    another). Re-running a publish is safe — each searches + deletes its prior
+    card before rewriting — but is not free of consequence, which is why only
+    the lost ones are replayed: a replay of a write that already landed
+    durably races the engine's asynchronous retain and can duplicate the card.
+
+    Returns the names of the publishes it ran that did NOT report success —
+    empty means everything landed. :class:`_BrainLaneReplay` narrows its retry
+    set to exactly that, so a retry never repeats a publish that already
+    succeeded (``_phase_self_report`` has no dedupe of its own; repeating it
+    would leave a second private self-report per tick).
     """
     import functools
+
+    provider = getattr(app.state, "memory_provider", None)
+    degraded_on_entry = bool(getattr(provider, "degraded", False))
+
+    # #1897: arm the replay BEFORE the publishes run. The hook reports
+    # "not done" until this lane hands it its result, so a heal that lands
+    # mid-lane cannot drain-and-drop an empty replay and leave the lane with
+    # nothing to register onto afterwards.
+    replay_state: _BrainLaneReplay | None = None
+    if not replay and degraded_on_entry:
+        _add_heal_hook = getattr(provider, "add_heal_hook", None)
+        if _add_heal_hook is not None:
+            replay_state = _BrainLaneReplay(app, ctx)
+            if not _add_heal_hook(replay_state):  # pragma: no cover — heal beat the arm
+                replay_state = None
 
     from hal0.agents.hermes_provision import (
         BootstrapState,
@@ -1884,43 +2193,132 @@ async def _boot_brain_lane(app: FastAPI, ctx: BootState) -> None:
     loop = asyncio.get_running_loop()
     io = InstallIO(mcp_memory_call=functools.partial(_boot_mcp_memory_call, app, loop))
 
-    try:
-        ns_result = await asyncio.to_thread(_phase_namespace_register, _StepCtx(state=state, io=io))
-        if not ns_result.details.get("registered"):
-            log.info(
-                "brain_lane.namespace_register_degraded",
-                warnings=ns_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.namespace_register_failed", error=str(exc))
-
-    try:
-        brain_result = await asyncio.to_thread(
-            _phase_brain_profile_seed, _StepCtx(state=state, io=io)
-        )
-        if not brain_result.details.get("registered"):
-            log.info(
-                "brain_lane.brain_profile_seed_degraded",
-                warnings=brain_result.details.get("warnings"),
-            )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.brain_profile_seed_failed", error=str(exc))
-
     # self_report MUST run last — see docstring above re: the smoke_tests
     # substitution.
     boot_failures = [p.name for p in ctx.boot_report.phases if p.status == "error"]
-    prior = {"smoke_tests": {"failures": boot_failures}}
-    try:
-        report_result = await asyncio.to_thread(
-            _phase_self_report, _StepCtx(state=state, io=io, _prior=prior)
+    steps: tuple[tuple[str, Any, str, dict[str, Any] | None], ...] = (
+        ("namespace_register", _phase_namespace_register, "registered", None),
+        ("brain_profile_seed", _phase_brain_profile_seed, "registered", None),
+        (
+            "self_report",
+            _phase_self_report,
+            "published",
+            {"smoke_tests": {"failures": boot_failures}},
+        ),
+    )
+
+    # #1897: the volatile fallback counts the writes it swallows, so we can
+    # ask — per step — whether THAT step's writes were lost, instead of
+    # replaying the whole lane on the assumption that they all were. The
+    # counter lives on the fallback object itself, so once the shell rebinds
+    # to the durable engine mid-lane it stops moving and later steps are
+    # (correctly) not replayed. Replaying a step whose writes already landed
+    # durably is what would duplicate cards: the dedupe search that makes a
+    # replay safe races the engine's asynchronous retain of the write it is
+    # meant to supersede.
+    #
+    # Known, pre-existing, very narrow window (Codex review on #1912): if the
+    # swap lands between a phase's dedupe search (ran against the empty
+    # fallback) and its add (durable), the counter does not move, the step is
+    # not replayed, and the durable dedupe never ran — a degraded RESTART on a
+    # box whose agents bank already holds a prior card can duplicate it. The
+    # window is one in-process search round-trip against a 30s reprobe tick,
+    # and it predates this replay (the #1613 loop already ran concurrently
+    # with the lane).
+    fallback = getattr(provider, "target", provider)
+
+    def _volatile_writes() -> int:
+        return int(getattr(fallback, "volatile_writes", 0) or 0)
+
+    # ``volatile`` and ``failed`` are DIFFERENT findings and drive different
+    # messaging: "the fallback swallowed this write" (durable data loss unless
+    # replayed) vs "this publish just failed" (a normal warn-as-OK outcome the
+    # per-step log above already covers — including every boot with
+    # [memory].enabled = false, where all three fail). Only their union feeds
+    # the replay set; the degraded-window warnings key off ``volatile`` alone,
+    # so a healthy-provider publish failure can never fire a WARNING claiming
+    # volatile data loss (rc-validate greps the journal for exactly that key).
+    volatile: list[str] = []
+    failed: list[str] = []
+    for name, phase, done_key, prior in steps:
+        if only is not None and name not in only:
+            continue
+        before = _volatile_writes()
+        step_ctx = (
+            _StepCtx(state=state, io=io)
+            if prior is None
+            else _StepCtx(state=state, io=io, _prior=prior)
         )
-        if not report_result.details.get("published"):
-            log.info(
-                "brain_lane.self_report_degraded",
-                warning=report_result.details.get("warning"),
+        try:
+            result = await asyncio.to_thread(phase, step_ctx)
+            if not result.details.get(done_key):
+                failed.append(name)
+                log.info(
+                    f"brain_lane.{name}_degraded",
+                    warnings=result.details.get("warnings") or result.details.get("warning"),
+                )
+        except Exception as exc:  # pragma: no cover — defensive, must never block boot
+            failed.append(name)
+            log.warning(f"brain_lane.{name}_failed", error=str(exc))
+        if _volatile_writes() > before:
+            volatile.append(name)
+
+    # Owed a replay when a step's write was swallowed by the volatile fallback,
+    # or when it did not land at all — in both cases no durable card exists, so
+    # re-running cannot duplicate one.
+    owed = [name for name, *_rest in steps if name in volatile or name in failed]
+
+    if replay:
+        # The drain narrows the retry set to what came back here.
+        return tuple(failed)
+    if replay_state is not None:
+        # Hand the armed hook its work; empty means the drain drops it and
+        # the re-probe loop can exit.
+        replay_state.finish(tuple(owed))
+        if owed:
+            log.warning(
+                "brain_lane.degraded_replay_armed",
+                steps=owed,
+                detail="brain-lane publishes landed in the volatile pgvector fallback — "
+                "queued for replay once the durable memory engine heals",
             )
-    except Exception as exc:  # pragma: no cover — defensive, must never block boot
-        log.warning("brain_lane.self_report_failed", error=str(exc))
+        return tuple(failed)
+    if not volatile:
+        # Nothing was swallowed by a volatile fallback. Any failed steps were
+        # plain publish failures against whatever provider is live (or absent —
+        # every [memory].enabled = false boot lands here with all three
+        # failed), already logged per-step above; no durable data was lost, so
+        # the degraded-window warnings below would be false alarms.
+        return tuple(failed)
+    if getattr(provider, "add_heal_hook", None) is None:
+        # Deliberate [memory].engine = "pgvector": no durable engine is ever
+        # coming, so there is nothing to replay onto.
+        log.warning(
+            "brain_lane.degraded_writes_volatile",
+            steps=volatile,
+            detail="brain-lane publishes accepted by a volatile provider with no self-heal "
+            "shell — the agents dataset will not survive a restart",
+        )
+        return tuple(failed)
+    # Provider healed between the degraded-on-entry check and the arming, so
+    # the shell refused the hook and nothing else will run the replay: do it
+    # inline. A replay that still does not land is out of retries here — say
+    # so loudly rather than pretending the cards are durable.
+    log.warning(
+        "brain_lane.degraded_replay_inline",
+        steps=owed,
+        detail="memory provider healed before the replay could be armed — replaying "
+        "the lost brain-lane publishes against the durable engine now",
+    )
+    still_owed = await _boot_brain_lane(app, ctx, only=tuple(owed), replay=True)
+    if still_owed:
+        log.error(
+            "brain_lane.replay_incomplete",
+            steps=still_owed,
+            detail="inline replay of the degraded-window publishes did not land — "
+            "restart hal0-api to re-run them against the durable engine",
+        )
+    return tuple(failed)
 
 
 @asynccontextmanager

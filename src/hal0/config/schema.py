@@ -1010,7 +1010,13 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
 #: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
 #: drop ``image`` from SEED_PROFILES entirely.
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
+#: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe — same pinned
+#: ROCmFPX source ref, same three patches, same base digest — rebuilt via
+#: packaging/runner/rocmfpx/build.sh for exactly one delta: the #2037
+#: fail-fast entrypoint (supervises llama-server, translates a non-signal
+#: death before /health ever answered 200 into exit 64 so the template's
+#: RestartPreventExitStatus=64 can park a doomed model immediately).
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
@@ -1040,6 +1046,14 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
 #: control-token pieces are stripped before the parser sees them).
 STALE_ROCMFPX_IMAGE_REFS = frozenset(
     {
+        # Former default (rc.7). Same recipe lineage as the current 0824 pin
+        # but with the pre-#2037 exec-only entrypoint, so a slot still pinned
+        # here never fail-fasts a doomed model — creation-time debris, retag.
+        "ghcr.io/hal0ai/hal0-combined:0822",
+        # Former default (rc.6). Its Vulkan backend emits invalid tokens for
+        # every model (#1888) — a slot still pinned here is debris from an
+        # older release, not an opt-out, and must be retagged.
+        "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
         "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
         "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
         "localhost/hal0-rocmfpx:vulkan-minicpm5",
@@ -1053,6 +1067,52 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
     }
 )
+
+#: The runner image whose Vulkan backend was proven CORRECT (#1948 §3-C).
+#:
+#: ``:0822`` is built from ``charlie12345/ROCmFPX`` main — the only ROCmFPX
+#: tree with a demonstrated-correct Vulkan backend — with the MiniCPM5 XML
+#: tool-call parser restored, so it is a superset of the ade07ba lineage:
+#: correct Vulkan output AND native brain tool calls. Validated on ct150
+#: (kfd present) and on ct151 (kfd ABSENT — the box #1888 was reproduced on,
+#: where Vulkan is the ONLY lane): temp-0 Paris probe on both lanes, FPX and
+#: plain non-FPX ggufs, a ≥256-token generation with a clean tail, native
+#: ``tool_calls`` on the shipped brain, and a readable diagnostic instead of
+#: a SIGSEGV with zero devices mapped (#1936).
+#:
+#: ``:0824`` re-earned membership per the rule below rather than inheriting
+#: it: same pinned source/patches/base as ``:0822`` (only the #2037 entrypoint
+#: differs), but the builder stage's dnf toolchain is unpinned, so "same
+#: recipe" does not prove same binaries. Probed 2026-08-24 on ct105
+#: (kfd present) and ct151 (kfd ABSENT): temp-0 Paris probe on the Vulkan
+#: lane, ≥256-token clean tail, and the #1936 device-less diagnostic.
+VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
+
+#: Runner images allowed to serve the ``gpu-vulkan`` llama.cpp lane on an AMD
+#: host. Consulted by :func:`hal0.providers._gpu.image_serves_vulkan_lane`,
+#: which the slot-load preflight uses to refuse the lane on any other image.
+#:
+#: WHY AN EXPLICIT SET AND NOT "the pin or later".
+#: An ordering comparison over these refs cannot be written honestly. The tags
+#: are not versions: ``ade07ba`` and ``c077206`` are git shortrefs, ``0822`` is
+#: a date stamp, ``server`` and ``vulkan-minicpm5`` are names — there is no
+#: total order to compare against, and inventing one (lexical, date-shaped,
+#: "newer digest") would silently admit the next tag that happens to sort
+#: high. Worse, Vulkan correctness here is not monotonic in build recency: the
+#: #1948 bisect found the OLDER charlie tree correct and the NEWER ciru tree
+#: broken, so "later than the fixed pin" is not even a proxy for "fixed".
+#:
+#: So membership is earned by evidence, one ref at a time: an image joins this
+#: set only after it passes the §3-C matrix on a kfd-present AND a kfd-absent
+#: box. The cost is that a new runner pin must ALSO be added here or the Vulkan
+#: lane refuses it — that failure is loud, static, and correct-by-default,
+#: which is exactly the trade #1888 argues for.
+#:
+#: Deliberately disjoint from :data:`STALE_ROCMFPX_IMAGE_REFS`, and note that
+#: :data:`DEFAULT_ROCMFPX_IMAGE` is NOT a member while the default pin is still
+#: the ade07ba lineage — which is the whole reason the gate cannot key off the
+#: default.
+VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE})
 
 #: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
 #: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU
@@ -2101,6 +2161,61 @@ class SlotsConfig(BaseModel):
         ),
     )
 
+    default_images: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-runner-family operator default-image overrides "
+            "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
+            "family keys (rocmfpx, vulkanfpx, cuda, cpu, flm, kokoro, "
+            "moonshine, qwen3tts, comfyui); values are full image refs "
+            "(e.g. 'ghcr.io/hal0ai/hal0-combined:0824'). A family listed "
+            "here launches that ref instead of the release-baked default "
+            "wherever no per-slot image_pin applies "
+            "(hal0.providers.container._resolve_image_ref). CLEAR SEMANTICS: "
+            "the settings PUT deep-merge has no key-delete idiom, so sending "
+            "an explicit null value for a family removes the override (the "
+            "validator drops null-valued keys); an empty string is rejected. "
+            "Applies on the next slot (re)start."
+        ),
+    )
+
+    @field_validator("default_images", mode="before")
+    @classmethod
+    def _default_images_known_families(cls, v: Any) -> Any:
+        """Validate the override map — and implement its clear idiom.
+
+        A ``None`` VALUE is the documented way to clear one family's
+        override (the settings PUT deep-merge replaces scalars and has no
+        delete idiom, so ``{"rocmfpx": null}`` must mean "remove the key"
+        rather than fail validation). Unknown family keys and empty/
+        non-string refs are rejected with the offending key named — the
+        family vocabulary is ``hal0.runners.RUNNER_IMAGES`` (imported
+        lazily: hal0.runners imports THIS module at import time, so a
+        module-level import here would be a cycle).
+        """
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            return v  # let pydantic's dict[str, str] coercion produce the error
+        from hal0.runners import RUNNER_IMAGES
+
+        cleaned: dict[str, Any] = {}
+        for key, ref in v.items():
+            if ref is None:
+                continue  # explicit null = clear this family's override
+            if key not in RUNNER_IMAGES:
+                raise ValueError(
+                    f"[slots].default_images key {key!r} is not a known runner "
+                    f"family (valid: {', '.join(sorted(RUNNER_IMAGES))})"
+                )
+            if not isinstance(ref, str) or not ref.strip():
+                raise ValueError(
+                    f"[slots].default_images[{key!r}] must be a non-empty image "
+                    "ref (send null to clear the override)"
+                )
+            cleaned[key] = ref.strip()
+        return cleaned
+
     @field_validator("publish_host")
     @classmethod
     def _publish_host_sane(cls, v: str) -> str:
@@ -2175,7 +2290,37 @@ class DispatcherConfig(BaseModel):
         description=(
             "Non-streaming upstream read timeout in seconds. "
             "Large consolidation/extraction prompts can exceed 60s on slow slots. "
-            "Streaming paths are unaffected. Range 30-600."
+            "Streaming requests disable this per-request while the stall guard "
+            "is active so the guard owns the body bound; it still bounds the "
+            "wait for response headers on those requests, since the guard's "
+            "own clocks only start once headers arrive. With both stall-guard "
+            "bounds set to 0 it applies per body read as the transport "
+            "backstop. Range 30-600."
+        ),
+    )
+    stream_total_timeout_s: float = Field(
+        default=900.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "Stall guard: max wall-clock duration of a relayed upstream stream "
+            "before hal0 cuts it off and emits a terminal diagnostic chunk. "
+            "Without this a chatty never-terminating upstream is relayed "
+            "forever — each chunk resets the transport read timer (#1893). "
+            "Note this is wall clock: a healthy long generation on slow "
+            "hardware that outlives the budget is also cut. 0 disables the "
+            "bound."
+        ),
+    )
+    stream_idle_timeout_s: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "Stall guard: max gap between two chunks of a relayed upstream "
+            "stream before hal0 cuts it off. Must stay above the slowest "
+            "expected prompt-processing silence on a cold CPU slot. "
+            "0 disables the bound."
         ),
     )
     prefetch_parallel_cap: int = Field(

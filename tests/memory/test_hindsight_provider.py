@@ -49,6 +49,7 @@ class FakeHindsightClient:
                 "document_id": document_id,
                 "content": content,
                 "tags": list(tags or []),
+                "metadata": dict(metadata or {}),
                 **kwargs,
             }
         )
@@ -259,6 +260,68 @@ async def test_add_routes_to_retain_under_mapped_bank():
     assert fake.retained[0]["document_id"] == res["id"]
     # retain is async on this engine — the operation id surfaces for polling.
     assert res["operation_id"] == "op-test"
+
+
+@pytest.mark.asyncio
+async def test_add_serializes_nested_metadata_as_json_not_repr():
+    """#1905: ``str(v)`` on a nested dict/list produced a Python repr with
+    single quotes (``"{'registered_at': ...}"``) that no JSON reader could
+    decode — the peer registry's identity cards were unreadable on upgraded
+    boxes. Nested values must round-trip as JSON; scalars stay ``str()``.
+    """
+    import json
+
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+    await p.add(
+        "identity card",
+        metadata={
+            "hal0_state": {"registered_at": "2026-08-10T00:00:00Z", "bootstrap_version": 1},
+            "roles": ["homelab-admin", "generalist-chat"],
+            "agent_id": "hermes-ct150",
+        },
+        client_id="hermes",
+    )
+    sent = fake.retained[0]["metadata"]
+    # Nested structures decode back to the original value via json.loads…
+    assert json.loads(sent["hal0_state"]) == {
+        "registered_at": "2026-08-10T00:00:00Z",
+        "bootstrap_version": 1,
+    }
+    assert json.loads(sent["roles"]) == ["homelab-admin", "generalist-chat"]
+    # …i.e. no single-quoted Python repr on the wire.
+    assert "'" not in sent["hal0_state"]
+    # Scalars keep the plain-string shape existing readers expect.
+    assert sent["agent_id"] == "hermes-ct150"
+
+
+def test_fact_to_item_decodes_nested_metadata_strings():
+    """#1905 follow-up (Codex): the write path stores nested dict/list
+    metadata as JSON strings, so the general read adapter must inflate
+    them back — otherwise only CLI-specific coercion sees dicts and every
+    other REST/MCP consumer gets strings. Scalars stay strings (that was
+    always this engine's wire shape)."""
+    import json
+
+    item = HindsightProvider._fact_to_item(
+        {
+            "text": "identity card",
+            "metadata": {
+                "hal0_state": json.dumps({"registered_at": "2026-08-10T00:00:00Z"}),
+                "roles": json.dumps(["chat", "voice"]),
+                "agent_id": "hermes-ct150",
+                "count": "1",
+                "not_json": "{broken",
+            },
+        },
+        "shared",
+    )
+    md = item["metadata"]
+    assert md["hal0_state"] == {"registered_at": "2026-08-10T00:00:00Z"}
+    assert md["roles"] == ["chat", "voice"]
+    assert md["agent_id"] == "hermes-ct150"
+    assert md["count"] == "1"
+    assert md["not_json"] == "{broken"  # undecodable passes through
 
 
 class FakeReranker:

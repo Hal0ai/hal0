@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from hal0.agents import hermes_provision as hp
+from hal0.config import paths
 
 # ── secrets vault ────────────────────────────────────────────────────────────
 
@@ -48,6 +49,27 @@ def test_secrets_env_root_preserves_existing_lines(
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
     hp._write_secrets_env({"A": "99", "C": "3"})
     assert vault.read_text() == "# operator note\nA=99\nKEEP=yes\nC=3\n"
+
+
+def test_secrets_env_root_births_absent_parent_at_0700(monkeypatch: pytest.MonkeyPatch) -> None:
+    """euid==0, secrets/agents/ absent (fresh box): the birthed dir is 0700.
+
+    #1942 review finding 3: ``_merge_env_file`` used a bare
+    ``path.parent.mkdir(parents=True, exist_ok=True)`` — no mode — so a
+    root-run provision on a box where ``secrets/agents`` doesn't exist yet
+    births it 0755 under the installer/daemon umask, reintroducing the exact
+    #1896 drift class this PR tightened the table and install.sh to close.
+    """
+    # Must sit under paths.var_lib() (not a bare tmp_path): ensure_shared_dir's
+    # containment check only chmod's paths inside hal0's own declared roots
+    # (see #1739 / #1896 in perms.py) — the autouse _isolate_hal0_home
+    # fixture points paths.var_lib() at tmp_path/var-lib for this test.
+    vault = paths.var_lib() / "secrets" / "agents" / "hermes.env"
+    assert not vault.parent.exists()
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    hp._write_secrets_env({"A": "1"})
+    assert (vault.parent.stat().st_mode & 0o777) == 0o700
 
 
 def test_secrets_env_nonroot_routes_through_seam(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,6 +227,98 @@ def test_driver_env_self_heals_perms_on_content_match(
     target.chmod(0o644)  # simulate an older build's world-readable artifact
     path, wrote = hp._write_driver_env(state)
     assert wrote is False  # content unchanged — hash-skip branch
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def _fake_agentenv_seam(target: Path):
+    """Stand-in for `sudo -n hal0-agentenv write-driver-env hermes`.
+
+    Mirrors the real wrapper's observable contract (installer/wrappers/
+    hal0-agentenv): write stdin to the driver path atomically and pin 0600.
+    Ownership is out of reach in a test, so only the mode is modelled.
+    """
+    calls: list[tuple[list[str], str]] = []
+
+    # `input` shadows the builtin on purpose — it is subprocess.run's kwarg name.
+    def _run(argv, *, input="", **_kw):
+        calls.append((list(argv), input))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".seamtmp")
+        tmp.write_text(input, encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(target)
+        return None
+
+    return calls, _run
+
+
+def test_driver_env_nonroot_self_heals_perms_on_content_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE regression shape for issue #1876: NON-root, content unchanged,
+    pre-existing mode 0644 → must end 0600.
+
+    This is the exact case an UPGRADED box hits on every reprovision, and the
+    only case the old code missed: provisioning runs as ``hal0``, so the
+    root-only ``path.chmod`` self-heal above never fired and the file kept a
+    world-readable ``HAL0_MCP_TOKEN``. A root-run test passes against the
+    broken code, which is why this survived — so this one must be non-root.
+    """
+    target = tmp_path / "agents" / "hermes.env"
+    target.parent.mkdir(parents=True)
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setattr(hp, "_HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agentenv")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "driver-env-admin-key")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+
+    # An older build's artifact: correct content, world-readable mode.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    hp._write_driver_env(state)
+    target.chmod(0o644)
+    assert "HAL0_MCP_TOKEN=" in target.read_text()  # the file really carries a secret
+
+    # Now reprovision the way a real box does it: as the unprivileged hal0 user.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    calls, run = _fake_agentenv_seam(target)
+    monkeypatch.setattr(hp.subprocess, "run", run)
+    path, wrote = hp._write_driver_env(state)
+
+    assert wrote is False  # content unchanged — still the hash-skip branch
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert len(calls) == 1
+    argv, body = calls[0]
+    assert argv == [
+        "sudo",
+        "-n",
+        "/usr/lib/hal0/bin/hal0-agentenv",
+        "write-driver-env",
+        "hermes",
+    ]
+    assert "HAL0_MCP_TOKEN=" in body  # byte-identical re-drive, secret intact
+
+
+def test_driver_env_nonroot_skips_seam_when_mode_already_tight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-root + content unchanged + already 0600: stay a pure no-op.
+
+    The self-heal must not turn every reprovision into a sudo round-trip.
+    """
+    target = tmp_path / "agents" / "hermes.env"
+    target.parent.mkdir(parents=True)
+    monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "driver-env-admin-key")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), agent_id="hermes-agent")
+
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    hp._write_driver_env(state)
+    assert (target.stat().st_mode & 0o777) == 0o600
+
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    with patch.object(hp.subprocess, "run") as run:
+        path, wrote = hp._write_driver_env(state)
+    run.assert_not_called()
+    assert wrote is False
     assert (path.stat().st_mode & 0o777) == 0o600
 
 

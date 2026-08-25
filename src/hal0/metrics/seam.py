@@ -124,6 +124,7 @@ class RequestSeam:
             first_content_ts: float | None = None
             token_chunks = 0
             last_payload: dict[str, Any] | None = None
+            stall_reason: str | None = None
             ok = True
             error_code: str | None = None
             try:
@@ -134,7 +135,14 @@ class RequestSeam:
                         if raw is not None
                         else (chunk if isinstance(chunk, str) else "")
                     )
-                    if '"delta":' in text:
+                    # The dispatcher's stall-guard terminal frame (#1893) is
+                    # synthetic: its "delta" is not a generated token and its
+                    # finish_reason must not masquerade as a clean stop.  It
+                    # is always yielded as its own chunk; keep it out of the
+                    # token/TTFT/payload accounting and record the request as
+                    # a stalled failure instead.
+                    is_stall_frame = '"x_hal0_stall"' in text
+                    if '"delta":' in text and not is_stall_frame:
                         token_chunks += text.count('"delta":')
                         if first_content_ts is None:
                             first_content_ts = time.monotonic()
@@ -146,7 +154,12 @@ class RequestSeam:
                         if not data_str or data_str == "[DONE]":
                             continue
                         parsed = parse_json_object(data_str)
-                        if parsed is not None:
+                        if parsed is None:
+                            continue
+                        stall_info = parsed.get("x_hal0_stall")
+                        if isinstance(stall_info, dict):
+                            stall_reason = str(stall_info.get("reason") or "unknown")
+                        else:
                             last_payload = parsed
                     yield chunk
             except Exception as exc:  # pragma: no cover -- upstream/client disconnect
@@ -154,6 +167,9 @@ class RequestSeam:
                 error_code = type(exc).__name__
                 raise
             finally:
+                if stall_reason is not None and ok:
+                    ok = False
+                    error_code = f"stream_stall_{stall_reason}"
                 now = time.monotonic()
                 ttft_ms = (
                     (first_content_ts - dispatch_started) * 1000.0
@@ -202,6 +218,12 @@ class RequestSeam:
     ) -> None:
         if not self.enabled:
             return
+        if call is None:
+            # A typed error raised AFTER resolution completed (e.g. the
+            # #1894 capability-mismatch gate in Dispatcher.dispatch) carries
+            # the resolved UpstreamCall on the exception, so the failed
+            # request is still attributed to its slot/model in metrics.
+            call = getattr(exc, "upstream_call", None)
         now = time.monotonic()
         row = build_request_metric_row(
             ts=now_iso(),

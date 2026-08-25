@@ -18,7 +18,7 @@ the dashboard SSE stream, and the `state.json` persistence layer.
 | `PULLING` | Model files are being downloaded or verified. systemd unit not yet started. |
 | `STARTING` | systemd unit has been started; waiting for the container to come up. |
 | `WARMING` | Container is up; the health probe is returning non-ready responses while the model loads into VRAM/GTT. |
-| `READY` | Passed the full health probe (non-empty `/v1/models` plus a sentinel completion). Ready to serve. |
+| `READY` | Passed the full health probe (non-empty `/v1/models` plus a sentinel completion) **and**, for a `type = "llm"` slot, the output-sanity probe below. Ready to serve. |
 | `SERVING` | An inference request is actively in-flight on this slot. |
 | `IDLE` | Reached two ways, both render identically on the wire: `warming → idle` (process up but `/v1/models` is empty — launched with `--model ""` or a missing file; routers must not treat this as ready), or `ready → idle` (no request for longer than the idle timeout — eviction candidate). |
 | `UNLOADING` | Graceful shutdown in progress. systemd stop issued; waiting for the container to exit. |
@@ -80,6 +80,7 @@ Each is an HTTP-status-bearing error under the `slot.*` namespace:
 | `SlotNotReady` | 503 | — |
 | `SlotSpawnFailed` | 500 | — |
 | `SlotHealthFailed` | 503 | — |
+| `SlotOutputSanityFailed` | 500 | The server is healthy but its output is not language — see [Output-sanity gate](#output-sanity-gate). |
 | `SlotCrashLooping` | 503 | Reload blocked during exponential backoff, or after too many consecutive failures. Carries `retry_after_s`. |
 | `SlotTerminateTimeout` | 504 | Stop didn't return in time — the request unblocks anyway. |
 | `SlotConfigError` | 400 | — |
@@ -88,6 +89,47 @@ Each is an HTTP-status-bearing error under the `slot.*` namespace:
 
 Health-probe resolution on timeout: unresolved health checks resolve to `WARMING`, not
 `ERROR` — an ambiguous outcome is treated as "still loading," not "failed."
+
+## Output-sanity gate
+
+`/health` proves the runner bound its port and mapped its weights. It does not prove the
+backend turns those weights into coherent text — a GPU backend that mis-computes answers
+`/health`, streams tokens and closes the SSE stream cleanly while emitting garbage.
+
+So a `type = "llm"` slot on the container/llama-server lane runs one last check before it
+is published as `READY`: a single greedy completion whose answer is known
+(`The capital of France is` → `Paris`), once per load, while the slot still holds its lock
+and is not yet dispatchable. A wrong answer on the raw `/completion` endpoint buys one
+retry through `/v1/chat/completions` (with room for a reasoning model's `<think>` block)
+before the load is refused.
+
+A **wrong answer** is terminal for that load: the slot lands in `ERROR` with a message
+naming the probe, the expected token and what the model actually said, its unit is stopped
+(best-effort — a stop that does not return is reported in the same message), and it will
+**not** be re-adopted as `READY` by a later `/api/slots` poll or by the boot-time
+reconcile. A passing gate on a subsequent load is what clears the verdict.
+
+A **probe that never answers** is treated differently. A timeout says the answer did not
+arrive inside a wall clock, not that the answer was wrong, so the slot resolves to
+`WARMING` — the same policy the health wait already applies to its own ambiguous outcome.
+Nothing is published as `READY`, nothing is stamped, the unit is left alone, and the next
+load re-runs the gate. Slow hardware is judged on its answer; the budget widens to match on
+a `device = "cpu"` slot, which decodes far slower than the accelerated lane.
+
+<Aside type="note">
+"Inconclusive, so let it through" remains the one thing the gate never does: an
+unanswered probe can only produce `WARMING`, never `READY`.
+</Aside>
+
+Embedding, reranking, TTS, STT and image slots are never gated (they cannot serve a chat
+completion), and the FLM/NPU lane keeps its own `verify_inference` sentinel.
+
+Escape hatches, both default-ON:
+
+| Scope | How |
+|---|---|
+| Whole box | `HAL0_SLOT_OUTPUT_SANITY=0` in the api environment |
+| One slot | `output_sanity = false` in the slot TOML, or via `PUT /api/slots/{name}/config` |
 
 ## Persistence
 

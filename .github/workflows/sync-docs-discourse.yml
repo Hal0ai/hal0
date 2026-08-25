@@ -1,0 +1,139 @@
+# Sync hal0/docs/<published sections> -> Discourse "Doc Categories" at
+# forum.hal0.dev whenever user docs change on main. docs/ stays the source
+# of truth — same one-way direction as mirror-docs.yml's hal0-web mirror,
+# just to the forum instead of the marketing site.
+#
+# Setup (one-time):
+#   1. Create a Discourse API key scoped to a bot/system user with access
+#      to the target doc category (Admin > API > New API Key).
+#   2. Add these Actions secrets:
+#        DISCOURSE_DOCS_URL           e.g. https://forum.hal0.dev
+#        DISCOURSE_DOCS_API_KEY
+#        DISCOURSE_DOCS_API_USERNAME
+#        DISCOURSE_DOCS_CATEGORY_ID   numeric category id
+#   3. Until then, the sync job below skips itself (logged, not a failure)
+#      — this workflow is safe to merge before the forum exists.
+#
+# What syncs: see scripts/docs_discourse_sync/ — MDX -> Discourse markdown,
+# topics keyed by a path-derived external_id, image upload, two-pass
+# internal-link rewrite, per-section index topics, and a redirect-map
+# artifact for hal0-web's eventual 301 layer (uploaded here, not committed
+# — hal0-web reads it from the workflow run, this repo doesn't own it).
+#
+# hal0-web's public/ (screenshots the docs reference) isn't tracked in
+# this repo, so a second, unauthenticated checkout of it supplies
+# --assets-root; a missing/renamed screenshot falls back to linking the
+# live hal0.dev URL rather than failing the run (see images.py).
+
+name: sync-docs-discourse
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/getting-started/**"
+      - "docs/concepts/**"
+      - "docs/guides/**"
+      - "docs/operate/**"
+      - "docs/reference/**"
+      - "scripts/docs_discourse_sync/**"
+      - ".github/workflows/sync-docs-discourse.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan only — resolve + diff, never create/update/upload"
+        type: boolean
+        default: true
+
+concurrency:
+  group: sync-docs-discourse
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check Discourse secrets are configured
+        id: gate
+        run: |
+          if [ -z "${{ secrets.DISCOURSE_DOCS_API_KEY }}" ]; then
+            echo "DISCOURSE_DOCS_API_KEY is not set — skipping the docs->Discourse sync."
+            echo "See the setup steps at the top of this workflow file."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout hal0
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          # workflow_dispatch has no branch input, so a manual run is
+          # pinned to main here rather than defaulting to whatever ref it
+          # was invoked from (same rule as mirror-docs.yml) — a manual
+          # dry-run off a feature branch must never publish that branch's
+          # unmerged docs to the live forum, even in dry-run mode where
+          # nothing writes but the *plan* would still be based on it.
+          ref: main
+
+      # Public repo, read-only — no token needed. Screenshots the docs
+      # reference (/screenshots/*.png) live here, not in hal0/docs/.
+      - name: Checkout hal0-web (for screenshot assets)
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Hal0ai/hal0-web
+          path: hal0-web
+          sparse-checkout: |
+            public/screenshots
+
+      - name: Setup Python
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install uv
+        if: steps.gate.outputs.skip != 'true'
+        run: pip install uv
+
+      - name: Install
+        if: steps.gate.outputs.skip != 'true'
+        run: uv sync --frozen --extra dev --python "$(which python)"
+
+      # Pre-flight gate: a doc that fails to transform aborts here, before
+      # anything is planned or written to the forum.
+      - name: Test the transform + sync-planning logic
+        if: steps.gate.outputs.skip != 'true'
+        run: uv run pytest tests/scripts/docs_discourse_sync -q
+
+      - name: Sync docs -> Discourse
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          DISCOURSE_URL: ${{ secrets.DISCOURSE_DOCS_URL }}
+          DISCOURSE_API_KEY: ${{ secrets.DISCOURSE_DOCS_API_KEY }}
+          DISCOURSE_API_USERNAME: ${{ secrets.DISCOURSE_DOCS_API_USERNAME }}
+          DOCS_CATEGORY_ID: ${{ secrets.DISCOURSE_DOCS_CATEGORY_ID }}
+          # A push to main always does the real thing; a manual dispatch
+          # defaults to dry-run and only goes live if explicitly unchecked.
+          DRY_RUN: ${{ github.event_name != 'push' && inputs.dry_run }}
+        run: |
+          args=(--assets-root hal0-web/public)
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          uv run python -m scripts.docs_discourse_sync.cli "${args[@]}"
+
+      - name: Upload redirect map
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-discourse-redirect-map
+          path: scripts/docs_discourse_sync/redirect-map.json
+          if-no-files-found: warn
+          retention-days: 90

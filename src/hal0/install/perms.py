@@ -72,6 +72,122 @@ from hal0.config import paths
 log = logging.getLogger(__name__)
 
 
+# ── umask-proof directory creation (#1896) ────────────────────────────────────
+
+#: The mode every SHARED hal0 state directory is declared at below: setgid so
+#: children inherit the ``hal0`` group, group-writable so any hal0-group member
+#: (the daemon, a root-run CLI, the wrapper seams) can write the same tree.
+SHARED_DIR_MODE = 0o2775
+
+#: The mode ``secrets/`` and ``secrets/agents/`` are declared at in the
+#: ownership table below (root:root, root-only traverse+list — #1896). NOT
+#: "shared": callers birthing either dir off the umask-proof path (root-run
+#: provisioners, not just install.sh) pass this explicitly to
+#: :func:`ensure_shared_dir` instead of the group-writable default.
+SECRETS_DIR_MODE = 0o700
+
+
+def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
+    """``mkdir -p`` whose result the process umask cannot narrow (#1896).
+
+    ``Path.mkdir(mode=...)`` masks its mode with the umask, and the setgid bit
+    a parent passes down only carries GROUP OWNERSHIP, not the group-write bit.
+    So a daemon under the shipped ``UMask=0022`` births ``2755`` everywhere the
+    table declares ``2775`` — drift that regenerates after every ``--fix``,
+    once per slot loaded and once per model pulled. Creating the dir and then
+    ``chmod``-ing it is the only way to land the declared mode.
+
+    Only the components THIS call creates are chmod'ed. A dir that already
+    exists is left exactly as it is, so a lazy ``mkdir(parents=True)`` passing
+    through a deliberately tighter parent (``secrets/`` 0700, ``agents/`` 0711)
+    can never widen it.
+
+    The ``chmod`` is CONTAINED: it only ever touches a path that resolves
+    inside one of hal0's own roots (:func:`_shared_dir_roots`). Callers derive
+    these paths from request-supplied ids (``persist_pull_job`` ->
+    ``pull_job_file(job.model_id)``, a slot's state dir, ...), and while each
+    caller sanitises its own component, a mode-changing sink must not depend on
+    that being true forever. Same shape as
+    :func:`hal0.config.store.assert_under_store` with ``severity="warn"``: an
+    out-of-tree path is still created (behaviour preserved for callers pointed
+    at an operator's own store) but never re-moded.
+
+    Fail-soft on ``chmod``, like :func:`hal0.config.store.finalize_perms`: an
+    operator's model store may live on an NFS export that refuses the call, and
+    a permissions nice-to-have must never break a pull or a slot load.
+    """
+    path = Path(path)
+    # CodeQL note: the `exists()` probe and the `mkdir` below still carry the
+    # caller's taint (py/path-injection, the rule this repo already carries 71
+    # standing alerts for). They are byte-for-byte the operation each caller
+    # performed on the IDENTICAL path before this helper existed — no new
+    # capability, just relocated. The one genuinely new sink, `chmod`, is
+    # contained by the root check below. Containing the `mkdir` too was
+    # rejected: an operator's model store may sit outside every enumerated
+    # mount, and hard-failing a multi-GB pull to satisfy a static-analysis
+    # rule the tree already tolerates is a worse trade.
+    # Deepest-first list of the components that do NOT exist yet.
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists():
+        missing.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    roots = _shared_dir_roots()
+    for created in reversed(missing):
+        resolved = created.resolve()
+        if not any(_is_within(resolved, root) for root in roots):
+            # #1942 review finding 8: INFO, not WARNING — an operator model
+            # store outside every enumerated mount is a supported, expected
+            # configuration (see the CodeQL note above), and a migration or a
+            # multi-directory pull into one can log this once per component
+            # created. WARNING-per-directory on a routine path trains
+            # operators to ignore the log, same failure mode #1896 itself
+            # names for a self-audit that can never be green.
+            log.info(
+                "perms.ensure_shared_dir_outside_hal0_roots path=%s (created, not chmod'ed)",
+                resolved,
+            )
+            continue
+        try:
+            os.chmod(resolved, mode)
+        except OSError as exc:  # pragma: no cover - exercised via monkeypatch
+            log.debug("perms.ensure_shared_dir_chmod_failed path=%s error=%s", resolved, exc)
+    return path
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` (already resolved) sits at or under ``root``."""
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _shared_dir_roots() -> tuple[Path, ...]:
+    """Resolved roots :func:`ensure_shared_dir` is allowed to ``chmod`` inside.
+
+    hal0's own state + config trees, plus whatever model-store mounts the
+    operator configured (a pull stages and installs weights there). Root
+    discovery is best-effort: a config-load failure must degrade to the two
+    built-in trees, never raise into a pull.
+    """
+    roots: list[Path] = []
+    for probe in (paths.var_lib, paths.etc, paths.var_log):
+        with contextlib.suppress(OSError, ValueError):
+            roots.append(probe().resolve())
+    try:
+        roots.extend(Path(m).resolve() for m in paths.model_mount_roots())
+    except Exception as exc:  # config load is untrusted here; never raise into a pull
+        log.debug("perms.shared_dir_roots_model_mounts_failed error=%s", exc)
+    return tuple(roots)
+
+
 # ── the declarative table ─────────────────────────────────────────────────────
 
 
@@ -214,7 +330,20 @@ def ownership_table(
         # one.
         PermRow(etc / "update.conf", "root", "root", 0o644, role="update.conf"),
         PermRow(etc / "capabilities.toml", etc_owner, etc_group, 0o600, role="capabilities.toml"),
-        PermRow(etc / "upstreams.toml", etc_owner, etc_group, 0o644, role="upstreams.toml"),
+        # upstreams.toml holds no credential VALUES — `auth_value_env` names the
+        # variable and the registry resolves it from the process environment at
+        # request time (upstreams/registry.py). Its 0644 was therefore metadata
+        # disclosure, not credential exposure: the box's provider/endpoint
+        # inventory readable by every local account. 0640 keeps every real
+        # consumer working (hal0-api, hal0-agent@* and the CLI all run as
+        # hal0/root, group hal0) and drops the world bit (ADR-0002, Option C).
+        PermRow(
+            etc / "upstreams.toml",
+            etc_owner,
+            etc_group,
+            paths.UPSTREAMS_TOML_MODE,
+            role="upstreams.toml",
+        ),
         PermRow(paths.hardware_json(), etc_owner, etc_group, 0o644, role="hardware.json"),
         PermRow(paths.openwebui_env(), etc_owner, etc_group, 0o600, role="openwebui.env"),
         PermRow(
@@ -246,6 +375,33 @@ def ownership_table(
         # agents/ is the dashboard-only Hermes world — pinned root:root (#843),
         # under the flip too: the API only reads it.
         PermRow(paths.agents_config_dir(), "root", "root", 0o755, role="agents/"),
+        # agent-skills/ — the bundled-skill MIRROR (#1828). Unlike agents/ next
+        # to it, this dir is WRITTEN by the provisioner: context_link's
+        # ``_mirror_bundled_skills`` symlinks each /usr/share/hal0/skills entry
+        # into it, and since the §7.4 privilege drop (5faef6d6) that writer is
+        # `hal0 agent bootstrap hermes` re-exec'd as the hal0 user. install.sh
+        # creates the dir as root (root:root 0755) and the /etc/hal0 root row
+        # above is non-recursive, so nothing ever handed it to hal0 — all five
+        # symlinks got EACCES on 100% of fresh installs and Hermes came up with
+        # an empty skill manifest.
+        #
+        # Narrowest row that fixes it: the DIRECTORY only, group-writable to the
+        # already-shared hal0 group, mirroring the /etc/hal0 config-root row
+        # (2775 — setgid so links planted by any hal0-group member keep the
+        # shared group). Deliberately NOT: world-writable (0777 would let any
+        # local user plant a skill Hermes then executes), recursive/globbed (the
+        # contents are symlinks, which the store refuses to write anyway —
+        # #1739), and NOT a change to any root-owned parent (/etc/hal0 is
+        # already hal0:hal0 2775 under the flip; nothing above it moves).
+        # Root-era (service_user="root") keeps root:root 0755 byte-for-byte —
+        # that era never drops privileges, so it never had the bug.
+        PermRow(
+            etc / "agent-skills",
+            etc_owner,
+            etc_group,
+            etc_dir_mode,
+            role="agent-skills/ (bundled-skill mirror)",
+        ),
         # ── /var/lib/hal0 — mutable state (already service-owned) ──────────────
         PermRow(
             var_lib,
@@ -361,6 +517,85 @@ def ownership_table(
             0o644,
             role="hal0.db-shm (WAL shared-memory index)",
         ),
+        # activity.db — the durable audit trail (``paths.activity_db()`` ->
+        # ``var_lib/"activity.db"``, :class:`hal0.activity.AuditStore`). Same
+        # O13 birth-ownership class as ``hal0.db`` above: no row existed, so a
+        # box where the file's first writer was root (an install-time /
+        # doctor-invoked path) left it unreadable/unwritable to the
+        # User=hal0 daemon with no way for ``doctor perms --fix`` to heal it.
+        # ``AuditStore.__init__`` sets ``PRAGMA journal_mode=WAL``, so the
+        # ``-wal``/``-shm`` siblings need their own rows for the identical
+        # reason the ``hal0.db`` journal siblings do above.
+        PermRow(
+            var_lib / "activity.db",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db (durable audit trail)",
+        ),
+        PermRow(
+            var_lib / "activity.db-wal",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db-wal (WAL journal)",
+        ),
+        PermRow(
+            var_lib / "activity.db-shm",
+            state_owner,
+            service_group,
+            0o644,
+            role="activity.db-shm (WAL shared-memory index)",
+        ),
+        # model-pull-jobs/ — the durable pull-job snapshot store
+        # (``hal0.registry.pull._pull_jobs_dir()`` -> ``var_lib/"model-pull-jobs"``,
+        # the #626/#MR-1 restart-survival fallback). Same O13 birth-ownership
+        # class as ``models/`` above: the installer's root-run brain-model
+        # pull (bundle-tier auto-pull) calls ``persist_pull_job`` -> lazy
+        # ``path.parent.mkdir(parents=True, exist_ok=True)`` as root on a
+        # fresh install, so the dir is born ``root:root 0755`` with a
+        # root-only ``0600`` snapshot inside. ``hal0-api`` (``User=hal0``)
+        # then fails every pull-job snapshot write
+        # (``model.pull_job_persist_failed``, WARNING-only fail-soft — a
+        # write failure here must never break the pull itself) and cannot
+        # read the existing one, so ``GET /api/models/<id>/pull/status``
+        # 404s after a restart even though the pull succeeded (#1895). No
+        # row meant ``doctor perms --fix`` could not heal it either.
+        # ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp``
+        # + ``os.replace`` — mkstemp always creates its tempfile ``0600``
+        # regardless of umask, matching the ``registry.toml`` /
+        # ``slots/*/state.json`` convention above.
+        PermRow(
+            var_lib / "model-pull-jobs",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.json",
+            child_mode=0o600,
+            optional=False,
+            role="model-pull-jobs/ (durable pull-job snapshots)",
+        ),
+        # update-jobs/ — the durable update-job snapshot store
+        # (``api/routes/updater.py`` ``_jobs_dir``/``_persist_job``), which
+        # mirrors the process-local ``app.state.update_jobs`` dict to disk so
+        # a ``hal0-api`` restart mid-apply doesn't 404 the CLI's status poll.
+        # Same O13 birth-ownership class as ``model-pull-jobs/`` immediately
+        # above — surfaced during #1895's write-path enumeration but left out
+        # of that PR to keep its diff minimal (#1938). Optional, unlike
+        # ``model-pull-jobs/``: nothing touches this path during install, so
+        # it is only ever born once an update actually runs. ``_persist_job``
+        # writes each snapshot via ``tempfile.mkstemp`` + ``os.replace``,
+        # which always births the tempfile ``0600`` regardless of umask —
+        # the same convention as ``model-pull-jobs/*.json`` above.
+        PermRow(
+            var_lib / "update-jobs",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.json",
+            child_mode=0o600,
+            role="update-jobs/ (durable update-job snapshots)",
+        ),
         # registry/ — the model registry, also born root:root from the same
         # install.sh mkdir and also written by the User=hal0 daemon. Same O13
         # birth-ownership class as slots/ above; heal the dir. registry/ is
@@ -443,6 +678,73 @@ def ownership_table(
             optional=False,
             role="models/ (default model store, recursive)",
         ),
+        # models/chat-templates/ — the custom chat-template store
+        # (``api/routes/chat_templates.py`` ``_templates_dir``), nested one
+        # level under the DEFAULT model store above. Declared as its own row
+        # rather than left to the ``models/`` recursive glob alone, for the
+        # same reason ``registry.toml`` gets its own row next to
+        # ``registry/``: `doctor perms`'s coverage check and audit table work
+        # off concrete declared rows, and the earlier omission was exactly
+        # the #1938 gap (surfaced during #1895's enumeration, left out of
+        # that PR to keep its diff minimal). Files are written via a plain
+        # ``Path.write_text`` (birth mode ``0666 & ~umask``), so the child
+        # mode matches ``models/``'s own file convention (0644) rather than
+        # fighting it.
+        #
+        # NOTE, matching the ``models/`` comment above: an operator who
+        # points ``[models].store`` at an external mount (the common
+        # production case) puts chat-templates OUTSIDE this fixed path
+        # entirely, and this row — like every other model-store row in this
+        # table — does not follow it there. That is an accepted, pre-existing
+        # limitation of this table (the table only ever declares opinions
+        # about hal0's own FHS roots), not a regression #1938 introduces.
+        PermRow(
+            var_lib / "models" / "chat-templates",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.jinja",
+            child_mode=0o644,
+            role="models/chat-templates/ (custom chat-template store)",
+        ),
+        # images/cache/ — the on-disk PNG cache for
+        # ``/v1/images/generations`` (``response_format: "url"``) responses
+        # (``api/image_cache.py`` ``cache_dir``/``write_png``). Same O13
+        # birth-ownership class as the durable-snapshot rows above: no row
+        # existed, so a root-run process that happens to touch the tree
+        # first (or a future migration walking ``var_lib``) could leave it
+        # root-owned with no ``doctor perms --fix`` remedy, even though the
+        # ``User=hal0`` daemon is the only real writer (#1938). PNGs are
+        # served straight back to the client over HTTP — no secrecy
+        # requirement — so child files get 0644, matching ``write_png``'s
+        # plain ``open(..., "wb")`` birth mode (``0666 & ~umask``) rather
+        # than fighting it.
+        PermRow(
+            var_lib / "images" / "cache",
+            state_owner,
+            service_group,
+            0o2775,
+            glob="*.png",
+            child_mode=0o644,
+            role="images/cache/ (image-gen PNG cache)",
+        ),
+        # dashboard-layout.json — the operator's persisted dashboard layout
+        # (``dashboard/layout_store.py`` ``save``/``load``); single-writer
+        # (``hal0-api``), single-operator LAN device (no auth, no per-user
+        # keys). Same O13 birth-ownership class as the rows above: no row
+        # existed, so a root-run process touching ``var_lib`` before the
+        # daemon's first save leaves it un-writable to ``hal0`` with no
+        # ``doctor perms --fix`` remedy (#1938). Written via
+        # ``tempfile.mkstemp`` + ``os.replace`` (the same atomic-write shape
+        # as ``hal0.toml``/``registry.toml`` above), which always births the
+        # tempfile ``0600`` regardless of umask.
+        PermRow(
+            var_lib / "dashboard-layout.json",
+            state_owner,
+            service_group,
+            0o600,
+            role="dashboard-layout.json",
+        ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able
         # to enumerate siblings. Was repaired ad hoc by hermes_provision's late
@@ -458,18 +760,48 @@ def ownership_table(
         # secrets/ stays root:root even under the flip: systemd reads the
         # EnvironmentFile here AS ROOT before dropping to the service user, so it
         # must not be service-writable (hardened-model decision).
-        PermRow(var_lib / "secrets", "root", "root", 0o755, role="secrets/"),
+        #
+        # 0700, NOT 0755 (#1896). The table used to declare 0755 while the
+        # shipped `hal0-agentenv` seam ran `install -d -m 0700` on the same two
+        # dirs on every merge-secrets — two shipped components asserting
+        # different truths, so the mode oscillated and `doctor perms` could
+        # never be durably green. Reconciled toward the RESTRICTIVE side
+        # because nothing outside root has business here: systemd reads the
+        # EnvironmentFile as root, the agentenv seam runs as root via
+        # /etc/sudoers.d. The one non-root traverser, `installer/wrappers/
+        # hermes` (it re-execs as the unprivileged `hal0` user per the #843
+        # run-as-hal0 guard, then sources secrets/agents/hermes.env), is
+        # already blocked one level down — every *.env inside is 0600
+        # root:root, so `hal0` can `stat` the directory but still can't read
+        # the file. 0700 costs no reader any access it actually had. What it
+        # removes is agent-id ENUMERATION by any local user — small, but free
+        # (ADR-0002, agent credential isolation). See known-issues.yaml
+        # `doctor-perms-secrets-dir-0700-is-declared`.
+        PermRow(
+            var_lib / "secrets",
+            "root",
+            "root",
+            SECRETS_DIR_MODE,
+            optional=False,
+            role="secrets/",
+        ),
         # secrets/agents/ — per-agent secret .env files (written by the
         # hal0-agentenv seam, never by the service directly). Pinned root:root
-        # like secrets/ itself; the dir mode is 0755 (traverse + list), the
-        # per-agent .env files are 0600 (owner-read-only tokens).
+        # like secrets/ itself; the dir mode is 0700 (root-only traverse+list,
+        # matching the seam — see above), the per-agent .env files are 0600
+        # (owner-read-only tokens), unchanged by the tightening. Non-optional
+        # (#1942 review finding 4): the default `optional=True` meant
+        # `_materialise_fresh_install` never created either secrets row, so
+        # the fresh-install convergence tests never exercised the 0700 change
+        # this PR makes — see test_fresh_install_tree_actually_exercises_the_secrets_mode.
         PermRow(
             var_lib / "secrets" / "agents",
             "root",
             "root",
-            0o755,
+            SECRETS_DIR_MODE,
             glob="*.env",
             child_mode=0o600,
+            optional=False,
             role="secrets/agents/ (+ <id>.env)",
         ),
         # benchmarks/ (+ runs/, logs/, server-ab/) — GPU bench artifacts,
@@ -666,8 +998,21 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     """
     if row.glob is None:
         return [(row.target, row)]
-    if not row.target.is_dir():
-        return [(row.target, row)]  # the dir itself (absent/optional handled in plan)
+    # #1739-class guard (the PR #1743 fix missed this exact spot): ``Path.is_dir()``
+    # FOLLOWS symlinks, so a row whose ``target`` is itself a symlinked
+    # directory (e.g. an operator symlinking
+    # ``models/chat-templates`` to an external store) would otherwise pass
+    # this check, glob the link's REAL children, and hand them to `commit()`
+    # as ordinary plan entries — `_is_or_is_under_symlink` only guards
+    # children reached THROUGH a symlink *below* `row.target`, it never
+    # checks `row.target` itself, so those children are real paths outside
+    # hal0's declared tree that would get chowned/chmodded. Falling through
+    # to the plain (non-glob) return here means `plan()`/`observe_fn` sees
+    # the symlink via `lstat` and reports it via the existing `is_symlink`
+    # path (never dereferenced, never "changed") — exactly like a declared
+    # row whose own target is a symlink.
+    if not row.target.is_dir() or row.target.is_symlink():
+        return [(row.target, row)]  # the dir itself (absent/optional/symlink handled in plan)
     out: list[tuple[Path, PermRow]] = [(row.target, row)]
     matches = row.target.rglob(row.glob) if row.recursive else row.target.glob(row.glob)
     for child in sorted(matches):
@@ -832,12 +1177,14 @@ def audit_rows(plan_: OwnershipPlan) -> list[dict[str, str]]:
 
 
 __all__ = [
+    "SHARED_DIR_MODE",
     "OwnershipPlan",
     "PermDiff",
     "PermObservation",
     "PermRow",
     "audit_rows",
     "commit",
+    "ensure_shared_dir",
     "observe",
     "ownership_table",
     "plan",

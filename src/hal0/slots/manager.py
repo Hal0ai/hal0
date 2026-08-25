@@ -43,6 +43,7 @@ from hal0.slot_config import (
     slot_write_lock,
     write_slot_toml,
 )
+from hal0.slot_lifecycle_budget import TERMINATE_TIMEOUT_S
 from hal0.slots._cfg_helpers import (
     _cfg_port,
     _cfg_provider,
@@ -78,6 +79,7 @@ from hal0.slots.profile_adopt import (
     preferred_profile_for as _profile_adopt_preferred_profile_for,
 )
 from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
+from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
 from hal0.slots.reaper import is_pinned as _reaper_is_pinned
 from hal0.slots.reaper import probe_host_free_mb as _reaper_probe_host_free_mb
@@ -103,6 +105,7 @@ from hal0.slots.state import (
     SlotConfigError,
     SlotCrashLooping,
     SlotNotFound,
+    SlotOutputSanityFailed,
     SlotPinned,
     SlotSpawnFailed,
     SlotState,
@@ -166,11 +169,37 @@ class RegistryUnavailableError(Hal0Error):
 
 # Crash-loop breaker (issue i4): a load() from ERROR is throttled with
 # exponential backoff — min(base * 2**(failures-1), max) — and after
-# _CRASH_LOOP_PARK_AFTER consecutive failures the slot is parked (refuses
-# lazy-load until an operator action resets the breaker).
+# _CRASH_LOOP_PARK_AFTER consecutive failures the slot is parked. A parked
+# breaker HALF-OPENS once its cool-down elapses: one trial load rides the
+# normal path (which clears systemd's start-limit latch before the start),
+# success closes the breaker, failure re-parks it with a doubled cool-down
+# up to _CRASH_LOOP_PARK_MAX_S. Operator actions (reset_load_failures)
+# still short-circuit all of it.
 _CRASH_LOOP_BASE_S = 5.0
 _CRASH_LOOP_MAX_S = 300.0
 _CRASH_LOOP_PARK_AFTER = 5
+_CRASH_LOOP_PARK_MAX_S = 3600.0
+
+
+def _crash_loop_remaining_s(failures: int, last_failure: float) -> float:
+    """Seconds until the breaker permits the next spawn attempt (0 = now).
+
+    Below the park threshold: the i4 backoff curve. At or past it: the
+    half-open cool-down, doubling per failed trial and capped at
+    ``_CRASH_LOOP_PARK_MAX_S``.
+    """
+    if failures <= 0:
+        return 0.0
+    interval: float
+    if failures >= _CRASH_LOOP_PARK_AFTER:
+        interval = min(
+            _CRASH_LOOP_MAX_S * (2 ** (failures - _CRASH_LOOP_PARK_AFTER)),
+            _CRASH_LOOP_PARK_MAX_S,
+        )
+    else:
+        interval = min(_CRASH_LOOP_BASE_S * (2 ** (failures - 1)), _CRASH_LOOP_MAX_S)
+    return max(0.0, last_failure + interval - time.monotonic())
+
 
 # slot.state event coalescing window: identical ERROR-edged transition
 # pairs (error→starting / starting→error) within this window fold into
@@ -293,7 +322,13 @@ class SlotManager:
     #: an already-``failed`` unit can block forever; past this we abandon the
     #: wait so the caller can converge instead of hanging. Class-level so a
     #: deployment (or a test) can retune it without touching every call site.
-    _terminate_timeout_s: float = 30.0
+    #: The value lives in :mod:`hal0.slot_lifecycle_budget` so the clients of
+    #: the blocking lifecycle endpoints derive their read timeout from the same
+    #: number (#1832). Retune it THERE, not by overriding this attribute at
+    #: runtime: the CLI and the MCP bridge are separate processes that read the
+    #: module constant, so an instance-level override widens the server's wait
+    #: without widening theirs and re-opens the timeout drift.
+    _terminate_timeout_s: float = TERMINATE_TIMEOUT_S
 
     def __init__(
         self,
@@ -686,8 +721,16 @@ class SlotManager:
             return str(name)
         return None
 
-    def _iter_configured_slots(self) -> list[tuple[int | None, str, Path]]:
+    def _iter_configured_slots(
+        self, *, dropped: list[str] | None = None
+    ) -> list[tuple[int | None, str, Path]]:
         """Enumerate configured slots as ``(slot_id | None, name, toml_path)``.
+
+        Pass ``dropped`` to collect the stems of files this enumeration
+        threw away before the caller ever saw them (an id-keyed TOML whose
+        name can't be recovered). Callers that REPLACE derived state need
+        that: an omission here is indistinguishable from a deletion, and
+        :meth:`iter_configs_detailed` folds it into its skip report.
 
         THE single bilingual chokepoint that replaced the three glob-stem-as-
         name sites (``list_slots`` / ``_all_configured_slot_names`` /
@@ -714,6 +757,8 @@ class SlotManager:
                 name = self._slot_name_from_id_toml(p, sid)
                 if name is None:
                     log.warning("slot.id_toml_no_name", extra={"path": str(p), "id": sid})
+                    if dropped is not None:
+                        dropped.append(stem)
                     continue
                 assert not name.isdigit(), f"enumerator leaked a digit name for {p}"
                 out.append((sid, name, p))
@@ -1242,6 +1287,15 @@ class SlotManager:
             self._load_failures.pop(key, None)
             carried_extra.pop("parked", None)
             carried_extra.pop("load_failures", None)
+            # …and the output-sanity verdict (#1922). Reaching READY/IDLE means
+            # a load ran the gate and the model answered (or the operator
+            # switched the gate off for this slot) — the one piece of evidence
+            # that retires a FAIL. Adoption can never clear it by accident: a
+            # slot carrying the mark is refused before it gets this far.
+            from hal0.slots.output_sanity import SANITY_EXTRA_KEYS
+
+            for sanity_key in SANITY_EXTRA_KEYS:
+                carried_extra.pop(sanity_key, None)
         effective_model_id = (
             model_id if model_id is not None else (prior.model_id if prior else None)
         )
@@ -1468,29 +1522,38 @@ class SlotManager:
         failures, last_failure = self._load_failures.get(self._key(slot_name), (0, 0.0))
         if failures <= 0:
             return
+        remaining = _crash_loop_remaining_s(failures, last_failure)
+        if remaining <= 0:
+            # Half-open: the cool-down has elapsed, so this ONE attempt is
+            # permitted through the normal path (which clears systemd's
+            # start-limit latch before starting the unit). The slot lock
+            # serialises it; a concurrent caller lands after either the
+            # healthy convergence (breaker cleared) or the failure stamp
+            # (fresh timestamp → gate refuses again). Without this, a
+            # parked slot stayed down until a human noticed: the breaker
+            # returned 503s forever while systemd held the unit ``failed``.
+            return
         if failures >= _CRASH_LOOP_PARK_AFTER:
             raise SlotCrashLooping(
                 f"slot {slot_name!r} is parked after {failures} consecutive load "
-                "failures — fix the cause, then load/restart it manually",
+                f"failures — next automatic trial in {remaining:.0f}s "
+                "(or fix the cause and load/restart it manually)",
                 details={
                     "slot": slot_name,
                     "failures": failures,
                     "parked": True,
-                    "retry_after_s": int(_CRASH_LOOP_MAX_S),
-                },
-            )
-        backoff_s = min(_CRASH_LOOP_BASE_S * (2 ** (failures - 1)), _CRASH_LOOP_MAX_S)
-        remaining = last_failure + backoff_s - time.monotonic()
-        if remaining > 0:
-            raise SlotCrashLooping(
-                f"slot {slot_name!r} failed {failures} consecutive load(s) — "
-                f"backing off {remaining:.0f}s before the next spawn attempt",
-                details={
-                    "slot": slot_name,
-                    "failures": failures,
                     "retry_after_s": max(1, int(remaining) + 1),
                 },
             )
+        raise SlotCrashLooping(
+            f"slot {slot_name!r} failed {failures} consecutive load(s) — "
+            f"backing off {remaining:.0f}s before the next spawn attempt",
+            details={
+                "slot": slot_name,
+                "failures": failures,
+                "retry_after_s": max(1, int(remaining) + 1),
+            },
+        )
 
     def reset_load_failures(self, slot_name: str) -> None:
         """Clear the crash-loop breaker for *slot_name* (operator intent).
@@ -1503,6 +1566,31 @@ class SlotManager:
         key = self._peek_key(self._resolve_alias(slot_name))
         if key is not None:
             self._load_failures.pop(key, None)
+
+    def _breaker_snapshot(self, slot_name: str) -> dict[str, Any] | None:
+        """Live breaker view for status surfaces, or ``None`` when closed.
+
+        The breaker used to be invisible: it refused dispatch with 503s
+        while the slot card showed a bare ERROR/OFFLINE, and nothing short
+        of ``systemctl`` told the operator why — which is how a parked slot
+        survived four hours unnoticed. ``status()`` stamps this into slot
+        metadata so the inventory carries the state and the wait.
+        """
+        failures, last_failure = self._load_failures.get(self._key(slot_name), (0, 0.0))
+        if failures <= 0:
+            return None
+        remaining = _crash_loop_remaining_s(failures, last_failure)
+        if remaining <= 0:
+            state = "half-open"
+        elif failures >= _CRASH_LOOP_PARK_AFTER:
+            state = "parked"
+        else:
+            state = "backoff"
+        return {
+            "state": state,
+            "failures": failures,
+            "retry_after_s": 0 if remaining <= 0 else max(1, int(remaining) + 1),
+        }
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -1739,6 +1827,60 @@ class SlotManager:
                             },
                         )
             except Exception as exc:
+                error_message = str(exc)
+                gate_extra: dict[str, Any] = {}
+                if isinstance(exc, SlotOutputSanityFailed):
+                    # The gate failed on a unit that is ACTIVE and healthy — it
+                    # just talks nonsense. Stamping ERROR is not enough on its
+                    # own: the inverse-drift branch in ``status()`` (and the
+                    # boot-time upstream reconcile) adopt any ERROR/OFFLINE slot
+                    # whose unit is active straight back to READY, so the very
+                    # next /api/slots poll would undo the gate and re-publish
+                    # the garbage slot as dispatchable.
+                    #
+                    # Two independent remedies, because they fail differently:
+                    #
+                    #  1. Stop the unit — right on its own merits (a slot that
+                    #     cannot produce language should not hold VRAM), and it
+                    #     removes the "active" half adoption keys on. But
+                    #     ``terminate`` is best-effort by construction: it
+                    #     raises SlotTerminateTimeout when ``systemctl stop``
+                    #     does not return (#1224), which is exactly what a
+                    #     wedged container does. Suppressed, that silently
+                    #     handed the slot back to the adopter.
+                    #  2. Stamp the verdict on the state record. THIS is what
+                    #     the gate's durability rests on: adoption refuses a
+                    #     slot carrying it (see ``_maybe_adopt_running_slot``)
+                    #     whether or not the unit is still up, and the record is
+                    #     on disk, so an api restart cannot forget it either.
+                    #
+                    # A later load that PASSES the gate clears the mark
+                    # (``_transition``), so recovery needs no manual step and is
+                    # never silent.
+                    from hal0.slots import output_sanity
+
+                    unit_stopped = True
+                    try:
+                        await self.terminate(slot_name)
+                    except Exception as stop_exc:
+                        unit_stopped = False
+                        log.error(
+                            "slot.output_sanity_teardown_failed",
+                            extra={"slot": slot_name, "error": str(stop_exc)},
+                        )
+                        # terminate() only deregisters the upstream when the
+                        # stop returned; do it here so nothing can route to a
+                        # slot we have just judged unfit to answer.
+                        with contextlib.suppress(Exception):
+                            self._deregister_container_upstream(slot_name)
+                        error_message += output_sanity.teardown_failure_note(
+                            slot_name, str(stop_exc)
+                        )
+                    details = getattr(exc, "details", None) or {}
+                    gate_extra = output_sanity.failure_extra(
+                        str(details.get("probe_status") or ""),
+                        unit_stopped=unit_stopped,
+                    )
                 # Crash-loop bookkeeping: consecutive failures drive the
                 # backoff/park gate above. ``parked`` rides ``extra`` (not a
                 # new enum value — wire/state-machine compatible) so the UI
@@ -1746,7 +1888,7 @@ class SlotManager:
                 key = self._key(slot_name)
                 failures = self._load_failures.get(key, (0, 0.0))[0] + 1
                 self._load_failures[key] = (failures, time.monotonic())
-                err_extra: dict[str, Any] = {"load_failures": failures}
+                err_extra: dict[str, Any] = {"load_failures": failures, **gate_extra}
                 if failures >= _CRASH_LOOP_PARK_AFTER:
                     err_extra["parked"] = True
                 # TIER1: never swallow — record ERROR with details, re-raise.
@@ -1755,7 +1897,7 @@ class SlotManager:
                     SlotState.ERROR,
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
-                    message=str(exc),
+                    message=error_message,
                     extra=err_extra,
                     force=True,
                 )
@@ -2082,6 +2224,9 @@ class SlotManager:
         }
         if backend:
             meta["backend"] = backend
+        breaker = self._breaker_snapshot(slot_name)
+        if breaker:
+            meta["breaker"] = breaker
         if include_config_drift:
             config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
             if config_drift is not None:
@@ -2183,8 +2328,35 @@ class SlotManager:
             least ``name`` and ``port``; the rest of the SlotConfig
             shape (``backend``, ``provider``, …) round-trips verbatim.
         """
+        cfgs, _skipped = await self.iter_configs_detailed()
+        return cfgs
+
+    async def iter_configs_detailed(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """Like :meth:`iter_configs`, but also report the slots it skipped.
+
+        A slot whose TOML is momentarily unreadable or unparseable is
+        skipped with a warning and omitted from the returned list — so a
+        bare ``iter_configs()`` result is indistinguishable from "that
+        slot no longer exists". Callers that REPLACE derived state from
+        this enumeration (the ``/v1/models`` composite catalogue, #1837)
+        must be able to tell a genuinely shorter catalogue from a partial
+        read, or one unparseable TOML silently un-advertises a healthy
+        slot's model until the next refresh.
+
+        Both omission points are reported: a config that fails to parse
+        here, AND a file the bilingual enumerator itself dropped (an
+        id-keyed ``143.toml`` whose name can't be recovered never reaches
+        this loop at all).
+
+        Returns:
+            ``(configs, skipped)`` — the config dicts in stable order, and
+            the names (or bare file stems, for a pre-enumeration drop) of
+            the slots this read did not see.
+        """
         out: list[dict[str, Any]] = []
-        for name in self._all_configured_slot_names():
+        skipped: list[str] = []
+        entries = self._iter_configured_slots(dropped=skipped)
+        for _sid, name, _path in entries:
             try:
                 cfg = await self._load_slot_config(name)
             except SlotConfigError as exc:
@@ -2192,9 +2364,10 @@ class SlotManager:
                     "slot.config_skipped",
                     extra={"slot": name, "error": str(exc)},
                 )
+                skipped.append(name)
                 continue
             out.append(cfg)
-        return out
+        return out, skipped
 
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
     #
@@ -2413,6 +2586,30 @@ class SlotManager:
             preferred = await self._preferred_profile_for(model_tbl.get("default"))
             if preferred and self._profile_fits_slot(preferred, cfg_dict):
                 cfg_dict["profile"] = preferred
+        # #1830: the model preference above was the ONLY create-time profile
+        # source, and auto-scan / ``model add`` / pull / the curated catalog all
+        # register models with ``defaults: null`` — so an embedding/reranking
+        # slot from ``hal0 slot create``, the New-slot modal, a stack apply or
+        # the capability orchestrator landed on disk with NO ``profile`` key.
+        # For those types the profile is not a tune, it is the mode flag
+        # (``--embedding`` / ``--reranking``) or the runtime engine; without it
+        # the slot loads to ``state=ready`` and 501s its own endpoint. Fall back
+        # to the profile the slot's TYPE implies (vetoed by the same fit check;
+        # ``llm`` slots infer nothing). An explicit profile still wins, and so
+        # does the model's stamped preference above.
+        if not cfg_dict.get("profile"):
+            implied = type_implied_profile(cfg_dict)
+            if implied:
+                cfg_dict["profile"] = implied
+                log.info(
+                    "slot.profile_inferred_from_type",
+                    extra={
+                        "slot": slot_name,
+                        "type": cfg_dict.get("type"),
+                        "device": cfg_dict.get("device"),
+                        "profile": implied,
+                    },
+                )
         # spec-hw-slot-ownership §2/§3: no model-driven runner/image adoption on
         # create. The runner is the slot's own ``binary`` field (default ""),
         # from which the launch path derives the image via
@@ -3533,6 +3730,21 @@ class SlotManager:
 
         registry_dump = model.model_dump() if hasattr(model, "model_dump") else dict(model)
         info.update(registry_dump)
+        # #1890: belt-and-suspenders — the pull registration path now stores
+        # ``quant`` directly (the root fix), but this is also the ONE place
+        # every launch/preview path resolves model_info for
+        # ``_guard_fpx_quant_runner``. A row that somehow still has no quant
+        # (a hand-staged model, a pre-#1890 registry never re-pulled) must
+        # not silently disarm the guard — fall back to the same filename-
+        # token derivation the API list serializer already uses
+        # (``models_service.lazy_quant``) rather than trusting ``quant`` is
+        # always populated.
+        if not info.get("quant"):
+            from hal0.services.models_service import lazy_quant
+
+            derived_quant = lazy_quant(registry_dump)
+            if derived_quant:
+                info["quant"] = derived_quant
         return info
 
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
@@ -3540,14 +3752,27 @@ class SlotManager:
     async def _await_ready(self, slot_name: str, port: int) -> SlotState:
         """Resolve the slot's final readiness state after spawning.
 
-        Polls GET /health on the slot's container port until 200.
+        Polls GET /health on the slot's container port until 200, then — for a
+        chat-capable (``type=llm``) slot — proves the server can actually
+        produce language before it is published as READY (#1922).
 
         Returns:
             SlotState.READY when the container is serving. On a health-wait
-            timeout, resolves to SlotState.WARMING (non-dispatchable) rather
-            than a lying READY: WARMING keeps the slot retryable so the fail
-            watcher / next-request reload governs recovery, instead of live
-            traffic being forwarded to a wedged server on a false READY.
+            timeout — or an output-sanity probe that never came back
+            (``output_sanity.AMBIGUOUS_STATUSES``) — resolves to
+            SlotState.WARMING (non-dispatchable) rather than a lying READY:
+            WARMING keeps the slot retryable so the fail watcher /
+            next-request reload governs recovery, instead of live traffic
+            being forwarded to a wedged server on a false READY. One policy,
+            applied to every ambiguous outcome this method can reach.
+
+        Raises:
+            SlotOutputSanityFailed: the server is healthy, ANSWERED, and what
+                it said is not language (garbage / empty / off-topic). Unlike
+                a timeout this is not ambiguous — retrying cannot fix a
+                backend that mis-computes — so it raises into ``load``'s ERROR
+                branch (red dot, actionable message, crash-loop bookkeeping)
+                instead of parking the slot in a retryable WARMING.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -3637,6 +3862,103 @@ class SlotManager:
                     },
                 )
                 return SlotState.WARMING
+            return SlotState.READY
+
+        # ── output-sanity gate (#1922) ───────────────────────────────────────
+        #
+        # The container/llama-server lane's readiness proof stopped at /health
+        # 200 — a TRANSPORT proof. A GPU backend that loads weights and then
+        # mis-computes answers /health, streams at 60-120 tok/s and closes with
+        # a `done` frame while emitting runs of `)` or nothing at all (#1888,
+        # ct151/rc.6: two hours of garbage behind five green surfaces). The FLM
+        # lane already had a one-shot inference gate here; this is the same
+        # promise for every other llm slot — one greedy completion whose answer
+        # is known, run exactly once, where the FLM gate runs and for the same
+        # reasons (slot lock held, not yet dispatchable, warming fail-watcher
+        # skips /health, so there is no contention and no repetition).
+        #
+        # Scoped by ``skip_reason``: llm slots only (an embed/rerank/TTS/STT/
+        # image slot cannot serve a chat completion), and escapable per box or
+        # per slot.
+        #
+        # A failure that JUDGED THE MODEL raises rather than returning WARMING:
+        # a wedged loader may converge on a retry, a backend that computes
+        # wrong answers never will, so this is a red dot with an actionable
+        # message — not a slot that quietly re-loads at request cadence and
+        # burns the GPU. A failure that judged only the CLOCK
+        # (``output_sanity.AMBIGUOUS_STATUSES``) returns WARMING instead, the
+        # same answer this method already gives an ambiguous health wait: see
+        # that constant for why a timeout is not the #1888 signature and must
+        # not be re-classified as one.
+        if provider is None:
+            from hal0.slots import output_sanity
+
+            # A portless slot cannot be probed at all — that is a config
+            # fault for the health path to report, not something to
+            # mis-attribute to the model's output.
+            skip = output_sanity.skip_reason(cfg) if slot_port > 0 else "no_port"
+            if skip is not None:
+                log.debug(
+                    "slot.output_sanity_skipped",
+                    extra={"slot": slot_name, "reason": skip},
+                )
+            else:
+                # A cpu-device slot decodes far slower than the accelerated
+                # lane the default budget is sized for, so it is judged on its
+                # answer instead of on the clock.
+                sanity = await output_sanity.probe(
+                    slot_port, timeout_s=output_sanity.probe_budget_s(cfg)
+                )
+                log.info(
+                    "slot.output_sanity",
+                    extra={
+                        "slot": slot_name,
+                        "port": slot_port,
+                        "ok": sanity.ok,
+                        "status": sanity.status,
+                        "sample": sanity.sample,
+                    },
+                )
+                if not sanity.ok and output_sanity.is_ambiguous(sanity.status):
+                    # Not a verdict: the answer did not arrive, which is not
+                    # the same as the answer being wrong. WARMING is not
+                    # dispatchable, so nothing is published as READY on this
+                    # path — but nothing is condemned either. The next load
+                    # re-runs the gate (``load``'s stale-in-flight branch
+                    # tears the unit down and re-enters from OFFLINE), and a
+                    # unit systemd has given up on is still converted to ERROR
+                    # by ``load``'s ``unit_failure_reason`` check.
+                    log.warning(
+                        "slot.output_sanity_inconclusive",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    return SlotState.WARMING
+                if not sanity.ok:
+                    message = output_sanity.failure_message(sanity)
+                    log.error(
+                        "slot.output_sanity_failed",
+                        extra={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "status": sanity.status,
+                            "sample": sanity.sample,
+                            "detail": sanity.detail,
+                        },
+                    )
+                    raise SlotOutputSanityFailed(
+                        message,
+                        details={
+                            "slot": slot_name,
+                            "port": slot_port,
+                            "probe_status": sanity.status,
+                            "sample": sanity.sample,
+                        },
+                    )
         return SlotState.READY
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
@@ -3647,6 +3969,13 @@ class SlotManager:
         Checks systemctl is-active (via _is_active). Returns the
         post-adoption Slot snapshot, or ``None`` when the slot is not
         running — caller falls back to the on-disk record.
+
+        Refuses outright for a slot whose record carries a failed
+        output-sanity verdict (#1922): "the unit is active" is the ONLY thing
+        adoption ever proves, and a slot that failed the gate is active by
+        definition — healthy unit, healthy ``/health``, garbage output. Without
+        this the gate lasted exactly one ``/api/slots`` poll whenever stopping
+        the unit did not work.
         """
         port = _cfg_port(cfg)
         model_id = _model_default(cfg) or None
@@ -3656,6 +3985,26 @@ class SlotManager:
 
         active = await self._is_active(slot_name)
         if not active:
+            return None
+
+        # #1922: an active unit that failed the output-sanity gate is not a
+        # slot to recover, it is the slot the gate refused. Read through to
+        # disk — after an api restart nothing is in ``_states`` yet, and that
+        # restart is the exact moment the boot-time reconcile tries to adopt
+        # every active unit it finds.
+        from hal0.slots.output_sanity import SANITY_STATUS_KEY, gate_failed
+
+        prior = self._states.get(self._key(slot_name)) or read_state(
+            self._state_file_for(slot_name)
+        )
+        if prior is not None and gate_failed(prior.extra):
+            log.warning(
+                "slot.adopt_refused_output_sanity",
+                extra={
+                    "slot": slot_name,
+                    "probe_status": prior.extra.get(SANITY_STATUS_KEY),
+                },
+            )
             return None
 
         # #790: an active unit is not necessarily ready. A still-loading or

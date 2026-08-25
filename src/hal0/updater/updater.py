@@ -1620,6 +1620,7 @@ def run_post_activation_migrations(
     *,
     job_id: str | None = None,
     ceiling: int | None = None,
+    skip_image_retag: bool = False,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1652,7 +1653,7 @@ def run_post_activation_migrations(
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
-    non-zero exit). The four data-cleanup passes after it are each
+    non-zero exit). The five data-cleanup passes after it are each
     independently best-effort, exactly as before: one pass's exception is
     logged and never blocks the others or the caller's activation.
 
@@ -1660,6 +1661,23 @@ def run_post_activation_migrations(
     :func:`_maybe_run_config_migrations` for why (the one-shot v1.0
     profile-catalog reset gate). ``None`` (the default, and what
     install.sh's caller always passes) applies no cap.
+
+    ``skip_image_retag`` (#1960 N2) omits ``retag_stale_slot_images``.
+    Every OTHER pass here is either purely additive (seed profiles, mtp
+    clearing) or corrects a state that actively breaks something (a
+    gpu-vulkan slot that refuses to load, an unsanitised managed flag) —
+    running them outside an update is harmless or actively good.
+    ``retag_stale_slot_images`` is different: it rewrites a slot's image
+    pin whenever that pin exactly matches a KNOWN FORMER default, which is
+    a good bet during an actual release (a new default just shipped) but
+    is not correlated with "a release just shipped" at all when called on
+    every daemon boot — an operator who deliberately re-pinned a slot to
+    an older image that happens to be a listed former default would have
+    that choice silently reverted on every crash-restart or reboot, not
+    just when they run an update. :func:`check_outstanding_migrations`
+    passes ``True`` here for exactly that reason; :meth:`Updater.commit`'s
+    post-swap subprocess (an actual update) always passes the default
+    ``False``, so the pass still gets its shot every time a release ships.
 
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned.
@@ -1681,10 +1699,18 @@ def run_post_activation_migrations(
         # operator flips MTP to Auto/Off in the drawer.
 
     try:
-        retag_stale_slot_images(job_id=job_id)
+        relabel_stale_vulkan_slots(job_id=job_id)
     except Exception as exc:
-        log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: a stale pin just keeps the previous runner image.
+        log.warning("updater.vulkan_migration_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: an affected slot keeps refusing to load (the #1923
+        # preflight guard) until the operator manually relabels its device.
+
+    if not skip_image_retag:
+        try:
+            retag_stale_slot_images(job_id=job_id)
+        except Exception as exc:
+            log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
+            # Non-fatal: a stale pin just keeps the previous runner image.
 
     try:
         sanitize_model_extra_args(job_id=job_id)
@@ -1694,6 +1720,60 @@ def run_post_activation_migrations(
         # operator removes the managed flag in the model drawer.
 
     return migration_info
+
+
+def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int] | None:
+    """Boot-time safety net for #1960: heal a box that missed its migrations.
+
+    Two boxes need this, not one: (a) any box that upgraded through the
+    pre-#1960 in-process/pre-swap call never got the incoming release's
+    migrations at all, permanently — there is no later ``commit()`` call
+    that will ever re-run them; (b) even post-fix,
+    :func:`_run_post_activation_migrations_after_swap` can itself fail (disk
+    full, a bug in one specific pass), and ``commit()`` deliberately does not
+    retry it inline — see that function's caller for why. Calling this once
+    at every ``hal0-api`` boot heals both: every pass
+    ``run_post_activation_migrations`` runs here is documented as an
+    idempotent "stale? fix it : no-op" sweep (see each pass's own
+    docstring), so a converged box pays for one ``hal0.toml`` read plus a
+    handful of near-instant no-ops.
+
+    ``skip_image_retag=True`` (#1960 N2): unlike every other pass here,
+    ``retag_stale_slot_images``'s heuristic ("this pin exactly matches a
+    known FORMER default") is only actually correlated with staleness right
+    after a release ships a new default — see
+    :func:`run_post_activation_migrations`'s own docstring for the full
+    reasoning. Running it on every boot (crash-restarts and reboots
+    included, not just updates) would silently revert an operator's
+    deliberate re-pin to an old image on every bounce — the same class of
+    bug as #1867 (an automated convergence pass overwriting deliberate
+    operator state), just with a much higher firing frequency. The pass
+    still gets its shot on every actual update, via
+    :meth:`Updater.commit`'s post-swap subprocess, which does not skip it —
+    a box that misses it there only waits until its next real update to
+    converge, same as before this function existed.
+
+    Mirrors :meth:`Updater.commit`'s own ``ceiling`` derivation, using
+    :func:`profile_reset_status` — a pure read — so a box whose one-shot
+    profile-catalog reset is still outstanding does not have this safety net
+    race ``meta.schema_version`` past that gate. No ``reset_profile_catalog``
+    call happens here, only the read: this function never deletes
+    ``profiles.toml``.
+
+    Never raises — a startup safety net that could itself fail startup would
+    be worse than the staleness it exists to fix. Returns the ``(source,
+    target)`` schema tuple on success, ``None`` on any failure (already
+    logged as a warning; this is a background sweep, not a user-initiated
+    update, so it does not warrant the ERROR level
+    :meth:`Updater.commit` uses for the same failure).
+    """
+    try:
+        reset_outstanding = bool(profile_reset_status().get("due"))
+        ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
+        return run_post_activation_migrations(job_id=job_id, ceiling=ceiling, skip_image_retag=True)
+    except Exception as exc:
+        log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
+        return None
 
 
 # ── Filesystem layout (paths-aware) ────────────────────────────────────────────
@@ -2781,21 +2861,43 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
         # An image REF is a top-level or [slot]-nested STRING. The ``[image]``
         # TOML table (image-gen settings, #599) shares the key and must be
         # ignored — same trap as providers.container._resolve_image_ref.
+        #
+        # BOTH key shapes, deliberately (#1948 B1). The bare ``image`` string is
+        # only half the population: ``_resolve_image_ref`` now resolves the
+        # TYPED ``image_pin`` field, and ``hal0 slot migrate-hw --apply`` folds
+        # ``image`` into it — recording the then-current default as a
+        # "deliberate pin" (it was not in STALE_RUNNER_IMAGE_REFS at the time)
+        # and dropping the older key. A folded box therefore carries
+        # ``image_pin = <old default>``, honoured verbatim and INVISIBLE to a
+        # sweep that reads only the bare key, so it would keep serving a
+        # retired runner forever — behind the release that replaces it.
+        # Matching against the stale set is what keeps this safe: a genuine
+        # operator pin is never an exact former default.
+        # PRECEDENCE MATCHES THE RESOLVER (#1959 review nit): ``image_pin``
+        # binds first, because ``_resolve_image_ref`` reads it first and no
+        # longer reads the bare key at all. Binding ``image`` first here made
+        # the sweep retag (or skip on) a value the runtime never serves while
+        # the pin that IS served stayed stale.
         holder: dict | None = None
-        if isinstance(raw.get("image"), str):
+        key = "image_pin"
+        if isinstance(raw.get("image_pin"), str):
             holder = raw
-        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image_pin"), str):
             holder = raw["slot"]
-        if holder is None or holder["image"] not in STALE_RUNNER_IMAGE_REFS:
+        elif isinstance(raw.get("image"), str):
+            holder, key = raw, "image"
+        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
+            holder, key = raw["slot"], "image"
+        if holder is None or holder[key] not in STALE_RUNNER_IMAGE_REFS:
             continue
-        old_ref = holder["image"]
+        old_ref = holder[key]
         # HW-gated target: rocmfpx on a Strix GPU lane, the lean toolbox
         # elsewhere. When the host/lane default already equals the pin (e.g. a
         # non-Strix box on the vulkan toolbox), it's a no-op — leave it be.
         new_ref = resolve_default_image(_backend_of(raw), _device_class_of(raw))
         if new_ref == old_ref:
             continue
-        holder["image"] = new_ref
+        holder[key] = new_ref
         try:
             write_toml_atomic(toml_path, raw)
         except Exception as exc:
@@ -2806,6 +2908,7 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             "updater.slot_image_retagged",
             job_id=job_id,
             slot=slot_name,
+            field=key,
             old=old_ref,
             new=new_ref,
             note=(
@@ -2852,6 +2955,308 @@ def retag_stale_slot_images(*, job_id: str | None = None) -> int:
             except Exception as exc:
                 log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
     return retagged
+
+
+def converge_kfd_group(*, job_id: str | None = None) -> str:
+    """Align ``/dev/kfd``'s group with the render node's. PRIVILEGED CALLERS ONLY.
+
+    NOT part of :func:`run_post_activation_migrations`, deliberately. That chain
+    runs in an ``asyncio.to_thread`` inside ``hal0-api`` — ``User=hal0`` — and
+    BEFORE ``seam.activate()``. Calling it from there was wrong twice over: the
+    ``chown`` hit EPERM as an unprivileged user and reported ``failed`` for
+    exactly the boxes it was meant to converge, and on the FIRST update
+    delivering this code the running daemon is still executing the previous
+    release, where this function does not exist at all.
+
+    Convergence now happens root-side in :func:`refresh_gpu_perms_unit`, which
+    runs during ``activate`` (euid 0) and starts the freshly-installed unit once
+    so a box converges without waiting for a reboot. ``install.sh`` covers the
+    fresh-install path, also as root.
+
+    Kept as a callable seam for those privileged entry points and for tests.
+
+    #1953. A plain LXC passthrough leaves the compute node ``root:root 0660``
+    while ``/dev/dri/renderD128`` lands ``root:render 0660``. Slot containers
+    run rootful so ROCm works fine, but every hal0-user probe reports the GPU
+    unusable — and the operator is told to re-forward a device that is already
+    forwarded. Converging the two nodes makes both identities agree.
+
+    Runs BEFORE :func:`relabel_stale_vulkan_slots` deliberately: that pass
+    branches on the compute node's state to decide ``gpu-rocm`` vs ``cpu``, so
+    it must see the converged answer rather than race the repair.
+
+    Best-effort by construction. On an unprivileged LXC the node's ownership is
+    host-mapped and ``chown`` raises ``EPERM``; the remedy there is a ``gid=``
+    on the host's ``dev`` entry, which the guard's own error text now spells
+    out. Never raises, never blocks an update.
+    """
+    from hal0.providers._gpu import converge_kfd_device_group, host_is_amd_gpu
+
+    if not host_is_amd_gpu():
+        return "skipped"
+    status, detail = converge_kfd_device_group()
+    if status == "changed":
+        log.warning("updater.kfd_group_converged", job_id=job_id, detail=detail)
+    elif status == "failed":
+        log.warning("updater.kfd_group_converge_refused", job_id=job_id, detail=detail)
+    else:
+        log.info("updater.kfd_group_noop", job_id=job_id, status=status, detail=detail)
+    return status
+
+
+def _vulkan_lane_is_loadable(holder: dict) -> bool:
+    """Would ``load_sync`` accept this ``gpu-vulkan`` llama slot as configured?
+
+    #1948 re-enabled the Vulkan LLM lane behind an image gate, which turns
+    this migration's premise into a question rather than a constant. Under
+    #1923 every ``gpu-vulkan`` llama slot was unloadable by definition, so
+    relabeling all of them was strictly a rescue. Now a slot whose resolved
+    runner image is Vulkan-validated loads fine — relabeling THAT one would be
+    a reverse migration of a working configuration, and on a kfd-less box it
+    would push a functioning GPU slot onto the CPU.
+
+    Delegates to :func:`hal0.providers._gpu.vulkan_lane_serves`, the one
+    predicate the derivation ladders, the bench harness and the installer
+    preflight also use — so no two of them can reach different conclusions
+    about the same box.
+
+    Critically, that predicate looks through the retag (review B5). This pass
+    runs BEFORE :func:`retag_stale_slot_images`, so a slot carrying a stale
+    former-default pin is about to have that pin rewritten. Judging it on the
+    pin it has *right now* rewrote ``device`` to ``cpu`` first, and the retag —
+    which computes its replacement from the freshly-rewritten TOML — then read
+    ``device = "cpu"`` and installed the CPU toolbox image: the GPU stranded,
+    and a pin that looks like a deliberate CPU choice nobody made.
+
+    Fails CLOSED on any error: an unresolvable image is not an
+    established-safe one, and the relabel is the conservative outcome.
+    """
+    from hal0.providers._gpu import vulkan_lane_serves
+
+    return vulkan_lane_serves(holder)
+
+
+def relabel_stale_vulkan_slots(
+    *,
+    job_id: str | None = None,
+    kfd_present: bool | None = None,
+    amd_host: bool | None = None,
+) -> int:
+    """Relabel retired ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
+
+    #1888/PR #1923 retired the Vulkan LLM lane and switched ``load_sync`` to
+    hard-refuse loading a GPU slot when the ROCm compute node (``/dev/kfd``)
+    is not visible (:func:`hal0.providers._gpu.require_kfd_for_gpu_slot`). PR
+    #1923 relabeled the SEED slot TOMLs the installer ships
+    (``installer/etc-hal0/slots/*.toml``) from ``gpu-vulkan`` to ``gpu-rocm``,
+    but deliberately did NOT touch slot TOMLs already materialised on an
+    existing install — see #1924. This is that follow-up: every EXISTING
+    on-disk slot TOML carrying the retired label is relabeled here, so an
+    updated install doesn't refuse to load slots it was serving fine
+    yesterday.
+
+    AMD-only, exactly matching :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s
+    own scope for a ``gpu-vulkan`` device: that guard only fires when the
+    amdgpu kernel driver is bound on THIS host
+    (:func:`hal0.providers._gpu.host_is_amd_gpu`). An Intel iGPU or an NVIDIA
+    card without CDI has no ``/dev/kfd`` by design, is never gated, and keeps
+    working post-#1923 exactly as it did before — relabeling its
+    ``gpu-vulkan`` slots here (which an unscoped ``kfd_present()`` check
+    would do, since none of those hosts has ``/dev/kfd`` either) would
+    silently downgrade a perfectly working GPU slot to CPU for no reason. On
+    a non-AMD host this function is therefore a full no-op: nothing is
+    inspected or written.
+
+    On an AMD host, for every slot TOML with a literal ``device =
+    "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
+    handling :func:`retag_stale_slot_images` and
+    :func:`clear_stale_mtp_overrides` use) that is ALSO llama.cpp-backed
+    (see runtime scope below), relabel ``device`` to:
+
+    * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.kfd_present` reports
+      the ROCm compute node present and usable. This is the same target PR
+      #1923 gave the seed TOMLs, and the slot keeps running on the GPU.
+    * ``"cpu"`` — when it is not. This is a genuine, operator-visible
+      behavior change (the slot drops off the GPU entirely and gets much
+      slower) — the #1867 rails require every mutation to be logged
+      explicitly, so this is logged as its own WARNING-level breadcrumb,
+      never folded silently into the routine "migrated" line.
+
+    Runtime scope — llama.cpp-backed slots ONLY: ``device = "gpu-vulkan"``
+    is not exclusively an llama.cpp label. ``capabilities/catalog.py``
+    deliberately keeps it for the non-llama runtimes (Kokoro TTS,
+    whisper.cpp/Moonshine STT, ComfyUI), where it means "the picker's GPU
+    row", not "this image runs Vulkan" (#1941) — #1923's Vulkan-lane
+    retirement and its ``require_kfd_for_gpu_slot`` guard are about
+    llama.cpp's unified ROCmFPX runner specifically, not those.
+    Relabeling a non-llama slot here would be actively wrong on both kfd
+    axes: ``gpu-rocm`` is a label its image can't honor (and
+    ``gpu_visibility_env`` would silently swap
+    ``GGML_VK_VISIBLE_DEVICES`` for ``HIP_VISIBLE_DEVICES``, dropping any
+    ``gpu_index`` pin), and ``cpu`` would strip ``/dev/dri`` from a slot that
+    was working fine. So every candidate slot is resolved through
+    :func:`hal0.providers.container._spec_provider_for` — the same
+    authoritative runtime-family discriminator ``load_sync`` itself uses —
+    and skipped ENTIRELY (no relabel, no warning, no log line, on either kfd
+    axis) unless it resolves to ``None`` (the default llama-server GPU
+    provider). The kfd-absent non-llama case (``require_kfd_for_gpu_slot``
+    itself over-firing for non-llama runtimes) was a separate bug, fixed in
+    the guard itself (#1941): it now takes a ``runtime_lane`` derived from
+    the resolved provider's own ``gpu_runtime_needs_rocm`` declaration, so a
+    Kokoro/Moonshine ``gpu-vulkan`` slot is neither relabeled here nor
+    refused there — while a ComfyUI or Qwen3-TTS slot, whose image really is
+    ROCm, keeps its refusal. Note the two scopes are deliberately NOT the
+    same predicate: this migration skips every non-llama slot (relabeling
+    one would break its device passthrough regardless of backend), the guard
+    keys on what the image needs at launch.
+
+    Only the ``device`` key is ever changed in VALUE — narrow scope per the
+    #1867 rails (no other field or slot is touched, and a slot whose
+    ``device`` is not literally ``"gpu-vulkan"``, or that isn't
+    llama.cpp-backed, is skipped entirely). Note that "narrow scope" is
+    about which *keys* get new values, not byte-for-byte file preservation:
+    like every other pass in this module, the write goes through
+    :func:`~hal0.config.loader.write_toml_atomic`, which reserializes the
+    whole parsed document via ``tomli_w`` — so any comments in a touched
+    slot's TOML are dropped on that rewrite, exactly as they are for
+    :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`.
+    Image scope — #1948, and the reason this pass is no longer a blanket
+    rescue: the Vulkan LLM lane is supported again, on a runner image whose
+    Vulkan backend passed validation. Under #1923 every ``gpu-vulkan`` llama
+    slot was unloadable by definition, so relabeling all of them was strictly
+    a rescue. Now a slot whose resolved image serves the lane
+    (:func:`_vulkan_lane_is_loadable`) is SKIPPED — relabeling it would be a
+    reverse migration of a working configuration, and on a kfd-less box it
+    would push a functioning GPU slot onto the CPU. Slots on an unvalidated
+    image still refuse to load, so those are still rescued exactly as before.
+
+    Note what this does NOT do: it never relabels ``gpu-rocm`` BACK to
+    ``gpu-vulkan``. A box that already ran this migration keeps the device it
+    was given; the re-enabled lane is offered to new slots, not forced onto
+    old ones.
+
+    Idempotent: once a slot's ``device`` reads ``"gpu-rocm"`` or ``"cpu"`` it
+    no longer matches the ``"gpu-vulkan"`` guard, so a second run touches
+    nothing and logs nothing
+    new.
+
+    Args:
+        job_id: Optional breadcrumb for structured-log tracing.
+        kfd_present: Override for
+            :func:`hal0.providers._gpu.kfd_present` — test seam. ``None``
+            (the default) probes the real host's ``/dev/kfd``.
+        amd_host: Override for :func:`hal0.providers._gpu.host_is_amd_gpu` —
+            test seam, same shape as
+            :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s own
+            parameter. ``None`` (the default) probes the real host.
+
+    Returns:
+        Number of slot TOMLs relabeled.
+    """
+    import tomllib
+
+    from hal0.config.loader import write_toml_atomic
+    from hal0.config.paths import slots_config_dir
+    from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
+    from hal0.providers._gpu import kfd_present as _probe_kfd_present
+
+    # Private import, deliberate: this must be the EXACT discriminator
+    # load_sync uses to pick a provider, not a re-implementation of it — do
+    # not "clean this up" into a public wrapper or a local re-derivation,
+    # that would risk drifting from the real dispatch logic it mirrors.
+    from hal0.providers.container import _spec_provider_for
+
+    is_amd = _probe_host_is_amd_gpu() if amd_host is None else amd_host
+    if not is_amd:
+        # Not the hardware #1923's guard characterised or gates — a
+        # gpu-vulkan slot here was never broken by it. Leave it alone.
+        return 0
+
+    have_kfd = _probe_kfd_present() if kfd_present is None else kfd_present
+
+    relabeled = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("updater.vulkan_migration_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        holder: dict | None = None
+        if raw.get("device") == "gpu-vulkan":
+            holder = raw
+        elif isinstance(raw.get("slot"), dict) and raw["slot"].get("device") == "gpu-vulkan":
+            holder = raw["slot"]
+        if holder is None:
+            continue
+        try:
+            provider = _spec_provider_for(holder)
+        except Exception as exc:
+            log.warning(
+                "updater.vulkan_migration_slot_runtime_unresolved",
+                slot=slot_name,
+                error=str(exc),
+            )
+            continue
+        if provider is not None:
+            # A non-llama runtime (Kokoro/Moonshine/ComfyUI/FLM/Qwen3TTS)
+            # genuinely runs a Vulkan image on this device string — #1923's
+            # guard is scoped to llama.cpp's unified ROCmFPX runner, not
+            # these. Leave completely untouched (see docstring; #1941 tracks
+            # the separate kfd-absent over-firing issue for this class).
+            continue
+        if _vulkan_lane_is_loadable(holder):
+            # #1948: this slot's resolved runner image serves the Vulkan lane
+            # correctly, so it is NOT a stale label — it loads. Relabeling it
+            # would be a REVERSE migration of a deliberate, working choice,
+            # and on a kfd-less box it would drag the slot to CPU for no
+            # reason at all. Leave it exactly as the operator set it.
+            log.info(
+                "updater.vulkan_migration_slot_lane_supported",
+                job_id=job_id,
+                slot=slot_name,
+                note="gpu-vulkan slot runs a Vulkan-validated runner image — not migrated",
+            )
+            continue
+        new_device = "gpu-rocm" if have_kfd else "cpu"
+        holder["device"] = new_device
+        try:
+            write_toml_atomic(toml_path, raw)
+        except Exception as exc:
+            log.warning("updater.vulkan_migration_write_failed", slot=slot_name, error=str(exc))
+            continue
+        relabeled += 1
+        if have_kfd:
+            log.warning(
+                "updater.slot_vulkan_relabeled_rocm",
+                job_id=job_id,
+                slot=slot_name,
+                old="gpu-vulkan",
+                new=new_device,
+                note=(
+                    "this slot's runner image is not validated for the Vulkan lane "
+                    "(#1888); relabeled to gpu-rocm — /dev/kfd is present, slot keeps "
+                    "running on GPU"
+                ),
+            )
+        else:
+            log.warning(
+                "updater.slot_vulkan_relabeled_cpu_fallback",
+                job_id=job_id,
+                slot=slot_name,
+                old="gpu-vulkan",
+                new=new_device,
+                note=(
+                    "BEHAVIOR CHANGE: this slot's runner image is not validated for the "
+                    "Vulkan lane (#1888) and /dev/kfd (the ROCm compute node) is not "
+                    "present on this host — relabeled to cpu. This slot no longer runs "
+                    "on the GPU and will be significantly slower until either /dev/kfd "
+                    "is forwarded and the slot is re-pointed at gpu-rocm, or the slot "
+                    "is repinned to a Vulkan-validated runner image."
+                ),
+            )
+    return relabeled
 
 
 def rerender_slot_units(*, job_id: str | None = None) -> int:
@@ -3096,6 +3501,81 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 
 
+def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Install/refresh ``hal0-gpu-perms.service`` from the activated release (#1953).
+
+    Same #1689 shape as :func:`refresh_privileged_wrappers`: ``install.sh`` was
+    about to become the only installer of this unit, so a box that only ever
+    runs ``hal0 update`` would never receive it and its ``/dev/kfd`` group would
+    silently revert on the next reboot with nothing to re-apply it.
+
+    Privileged-side ONLY — a no-op unless ``os.geteuid() == 0``, matching
+    :func:`refresh_privileged_wrappers`. The unprivileged daemon must never
+    write ``/etc/systemd/system``.
+
+    Best-effort: a release tree without the unit source is skipped, and a
+    failed ``systemctl enable`` is logged rather than raised. A missing
+    permissions tidy-up must never fail an otherwise-successful activate.
+
+    Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    src = target / "installer" / "systemd" / "hal0-gpu-perms.service"
+    if not src.is_file():
+        log.info("updater.gpu_perms_unit_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    dst = Path("/etc/systemd/system/hal0-gpu-perms.service")
+    try:
+        desired = src.read_text(encoding="utf-8")
+        # NOT an early return on identical content: enable/start still re-run
+        # below so a previously-failed enable self-heals on the next activate.
+        up_to_date = dst.is_file() and dst.read_text(encoding="utf-8") == desired
+        if not up_to_date:
+            dst.write_text(desired, encoding="utf-8")
+            os.chmod(dst, 0o644)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+        # Enable is CHECKED. Treating the file write alone as success let a
+        # transient systemd failure latch permanently: the next update saw
+        # matching content, returned "unchanged" early, and never retried the
+        # enable — so the box silently lost the boot-time convergence this
+        # delivery path exists to provide.
+        enabled = subprocess.run(
+            ["systemctl", "enable", "hal0-gpu-perms.service"],
+            check=False,
+            capture_output=True,
+        )
+        if enabled.returncode != 0:
+            log.warning(
+                "updater.gpu_perms_unit_enable_failed",
+                job_id=job_id,
+                returncode=enabled.returncode,
+                stderr=(enabled.stderr or b"").decode(errors="replace").strip()[:400],
+            )
+            return "failed"
+        # Converge NOW, not just at next boot. This call site runs at euid 0
+        # during activate — unlike the migration chain, which runs as `hal0`
+        # and before activation — so an updated box does not have to reboot
+        # before its compute node becomes usable by the service user.
+        started = subprocess.run(
+            ["systemctl", "start", "hal0-gpu-perms.service"],
+            check=False,
+            capture_output=True,
+        )
+        if started.returncode != 0:
+            log.warning(
+                "updater.gpu_perms_unit_start_failed",
+                job_id=job_id,
+                returncode=started.returncode,
+                detail="unit installed and enabled; convergence deferred to next boot",
+            )
+    except OSError as exc:
+        log.warning("updater.gpu_perms_unit_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    log.info("updater.gpu_perms_unit_installed", job_id=job_id, path=str(dst))
+    return "unchanged" if up_to_date else "installed"
+
+
 def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> dict[str, Any]:
     """Re-install the privileged sudo wrappers from the just-activated release (#1689).
 
@@ -3297,6 +3777,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     # activate (a wrapper that fails to refresh keeps the OLD one in place,
     # same class of degradation as before this fix, not a new failure mode).
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
+    gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
 
     log.info(
         "updater.activate_ok",
@@ -3308,6 +3789,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "previous": str(prior) if prior else None,
         "target": str(target),
         "wrappers_refreshed": wrappers["refreshed"],
+        "gpu_perms_unit": gpu_perms_unit,
     }
 
 
@@ -3384,6 +3866,183 @@ async def _rerender_units_after_swap(job_id: str | None) -> None:
             job_id=job_id,
             error=str(exc),
         )
+
+
+#: Sentinel key on the single JSON stdout line the migration subprocess
+#: emits. Mirrors :data:`hal0.updater.privileged._RESULT_KEY`'s exact
+#: contract: structured logs go to STDERR (see the script built below) so
+#: stdout carries nothing but this envelope, scanned from the end.
+_MIGRATION_RESULT_KEY = "hal0_migration_result"
+
+#: The five non-fatal per-pass failure events ``run_post_activation_migrations``
+#: can log without raising (#1960 B2). A pass that swallows its own
+#: exception still exits the subprocess with rc=0 — by design, see that
+#: function's docstring — so it would otherwise be invisible outside
+#: journalctl. ``_run_post_activation_migrations_after_swap`` scans the
+#: relayed child log for these exact event names so a swallowed failure
+#: still surfaces in commit()'s convergence report.
+_NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
+    "updater.seed_profiles_prune_failed",
+    "updater.mtp_migration_failed",
+    "updater.vulkan_migration_failed",
+    "updater.image_retag_failed",
+    "updater.extra_args_sanitize_failed",
+)
+
+
+async def _run_post_activation_migrations_after_swap(
+    min_data_version: int,
+    *,
+    job_id: str | None,
+    reset_outstanding: bool,
+) -> dict[str, Any]:
+    """Run :func:`run_post_activation_migrations` in a subprocess of the
+    just-repipped venv, AFTER the ``current`` symlink swap (#1960).
+
+    Mirrors :func:`_rerender_units_after_swap`'s exact reasoning: this
+    process is still running the PRE-swap code — Python does not hot-swap
+    already-imported modules — so calling ``run_post_activation_migrations``
+    in-process at this point would run the OUTGOING version's migration set,
+    never the incoming release's. That was the bug: a migration shipped in
+    release N+1 never ran on the N → N+1 upgrade that shipped it, because the
+    old call site (this function's replacement) ran BEFORE the swap. A
+    subprocess of the just-repipped venv imports the NEW module instead.
+
+    ``reset_outstanding`` — a bool, not a pre-computed ``ceiling`` int
+    (#1960 N1): the ceiling is ``PROFILE_CATALOG_SCHEMA_VERSION - 1``, and
+    that constant has to be read from the INCOMING tree's code, not this
+    (still outgoing) process's. Passing an int computed here would bake the
+    OUTGOING tree's watermark into a call that runs the INCOMING tree's
+    migrations — inert today (the constant hasn't moved since it was
+    introduced), a version-skew bug the moment it does. The child script
+    re-derives the ceiling from its own import, exactly like
+    :func:`check_outstanding_migrations` already does for the same reason.
+
+    The child's structured log is pinned to stderr (mirrors
+    :func:`hal0.updater.privileged._pin_logs_to_stderr` exactly) so stdout
+    carries only the JSON result envelope; the parent relays that stderr
+    into its own journal via :func:`hal0.updater.privileged._relay_child_log`
+    (#1960 B2) — without this, every breadcrumb the six passes emit
+    (``updater.slot_vulkan_relabeled_rocm``, ``migrations_applied``, …) dies
+    in ``capture_output`` and #1935's journal-breadcrumb contract silently
+    regresses for this one call site (the release-validation kit's
+    post-upgrade check greps the journal for exactly these lines). The
+    relayed text is also scanned for :data:`_NON_FATAL_MIGRATION_FAILURE_EVENTS`
+    so a pass that swallowed its own exception into a warning (rc=0, by
+    design) still surfaces in the returned ``pass_warnings`` list.
+
+    Unlike ``_rerender_units_after_swap``, this raises :class:`UpdateError`
+    on any hard failure — subprocess launch failure (``OSError``), a
+    timeout, a non-zero exit, or a clean exit with no parsable result are
+    ALL converted to the same typed error, so :meth:`Updater.commit`'s
+    non-fatal-but-loud containment holds for every failure shape the
+    subprocess can produce, not just a non-zero return code.
+
+    Returns ``{"from": int, "to": int, "pass_warnings": list[str]}``.
+    """
+    payload = json.dumps(
+        {
+            "min_data_version": min_data_version,
+            "job_id": job_id,
+            "reset_outstanding": reset_outstanding,
+        }
+    )
+    envelope_line = (
+        "sys.stdout.write(json.dumps({"
+        + repr(_MIGRATION_RESULT_KEY)
+        + ": {'from': result[0], 'to': result[1]}}) + chr(10))\n"
+    )
+    script = (
+        "import json, sys\n"
+        "import structlog\n"
+        # Mirrors hal0.updater.privileged._pin_logs_to_stderr exactly: send
+        # structured logs to stderr so stdout carries only the result line.
+        "structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))\n"
+        "from hal0.updater.updater import (\n"
+        "    PROFILE_CATALOG_SCHEMA_VERSION,\n"
+        "    run_post_activation_migrations,\n"
+        ")\n"
+        "args = json.loads(sys.argv[1])\n"
+        "ceiling = (PROFILE_CATALOG_SCHEMA_VERSION - 1) if args['reset_outstanding'] else None\n"
+        "try:\n"
+        "    result = run_post_activation_migrations(\n"
+        "        args['min_data_version'], job_id=args['job_id'], ceiling=ceiling\n"
+        "    )\n"
+        "except Exception as exc:\n"
+        "    print('hal0-migrate: ' + str(exc), file=sys.stderr)\n"
+        "    raise SystemExit(1)\n" + envelope_line
+    )
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", script, payload],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Same containment class as _rerender_units_after_swap and the
+        # privileged seam's own _invoke — subprocess.run itself can raise
+        # rather than return a CompletedProcess, and the old code only
+        # handled the "returns a non-zero CompletedProcess" shape (#1960 B1).
+        raise UpdateError(
+            "post-activation migrations timed out after 300s in the newly activated tree",
+            details={"job_id": job_id, "timeout": 300},
+        ) from exc
+    except OSError as exc:
+        raise UpdateError(
+            f"post-activation migrations subprocess could not be launched: {exc}",
+            details={"job_id": job_id},
+        ) from exc
+
+    stderr = proc.stderr or ""
+    if proc.returncode == 0:
+        from hal0.updater.privileged import _relay_child_log
+
+        # Relay only on success, mirroring UpdateSeam._invoke exactly: a
+        # failure's stderr goes into the raised error's `details` below
+        # instead (a diagnostic breadcrumb, not the audit trail this
+        # replay closes).
+        _relay_child_log(stderr, verb="post_swap_migrations", job_id=job_id)
+        pass_warnings = [event for event in _NON_FATAL_MIGRATION_FAILURE_EVENTS if event in stderr]
+        # Scan stdout from the END, exactly like privileged._parse_result —
+        # an unexpected banner on stdout cannot displace the answer.
+        for line in reversed((proc.stdout or "").splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                envelope = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(envelope, dict) or _MIGRATION_RESULT_KEY not in envelope:
+                continue
+            result = envelope[_MIGRATION_RESULT_KEY]
+            if isinstance(result, dict) and "from" in result and "to" in result:
+                return {
+                    "from": int(result["from"]),
+                    "to": int(result["to"]),
+                    "pass_warnings": pass_warnings,
+                }
+        raise UpdateError(
+            "post-activation migrations subprocess exited 0 but produced no result marker",
+            details={"job_id": job_id, "stdout": (proc.stdout or "")[-2000:]},
+        )
+    # Last non-empty line is almost always the exception's own message (a
+    # traceback's final line, or the "hal0-migrate: ..." line the child
+    # prints itself) — surfaced in the message itself (not just `details`)
+    # so it reaches the operator-facing convergence report in
+    # cli/update_commands.py, not only the journal.
+    reason = next((line.strip() for line in reversed(stderr.splitlines()) if line.strip()), "")
+    raise UpdateError(
+        f"post-activation migrations failed in the newly activated tree (rc={proc.returncode})"
+        + (f": {reason}" if reason else ""),
+        details={
+            "job_id": job_id,
+            "returncode": proc.returncode,
+            "stderr": stderr[-2000:],
+        },
+    )
 
 
 # ── Updater class ──────────────────────────────────────────────────────────────
@@ -3594,29 +4253,20 @@ class Updater:
             # file in place (the overlay still serves the built-in seeds), and
             # the un-stamped gate re-offers it next update.
 
-        # Step 7: config migrations. Cap the target below the profile-catalog
-        # watermark ONLY while that reset is genuinely outstanding — an already
-        # converged box (or a future v3 migration) must not be held back.
-        migration_info: tuple[int, int]
+        # Step 7's CALL is moved below, to run AFTER seam.activate() (#1960) —
+        # see _run_post_activation_migrations_after_swap for why an in-process
+        # call here (the pre-fix behaviour) executed the OUTGOING version's
+        # migrations, never the incoming release's. What has to stay here,
+        # unchanged, is the `reset_outstanding` derivation: it decides whether
+        # the migration target must be capped below the profile-catalog
+        # watermark — an already converged box (or a future v3 migration)
+        # must not be held back — and it needs `profile_reset` (just computed
+        # above), so it is cheapest to compute right where the old call used
+        # to be. The INT ceiling itself is no longer derived here (#1960 N1) —
+        # only the bool crosses into the subprocess; see that function's
+        # docstring for why turning it into an int on this side would be a
+        # version-skew bug waiting to happen.
         reset_outstanding = bool(profile_reset.get("due")) and not profile_reset.get("stamped")
-        ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
-        try:
-            migration_info = await asyncio.to_thread(
-                run_post_activation_migrations,
-                manifest.min_data_version,
-                job_id=self.job_id,
-                ceiling=ceiling,
-            )
-        except Hal0Error as exc:
-            # Don't leave the new tree orphaned on a migration failure —
-            # nuke the half-installed dir so a retry starts fresh. Routed
-            # through the seam: /usr/lib/hal0 is root-only (#1464).
-            with contextlib.suppress(Exception):
-                seam.discard(release_dir_name(target_version))
-            raise UpdateError(
-                f"config migration failed during update: {exc.message}",
-                details={**exc.details, "version": target_version},
-            ) from exc
 
         # spec-hw-slot-ownership §6 / spec-flags-ownership §5 one-shot folds are
         # still NOT auto-run here — see detect_pending_ownership_migrations()
@@ -3663,6 +4313,62 @@ class Updater:
         prior_str = activated.get("previous")
         prior = Path(prior_str) if prior_str else None
 
+        # Step 7 (moved here, #1960): post-activation migrations now run in a
+        # subprocess of the just-repipped venv, AFTER the swap above — see
+        # _run_post_activation_migrations_after_swap. Must run BEFORE the
+        # unit re-render below so slot units render from already-migrated
+        # config (e.g. a relabelled device, sanitised extra_args). commit()
+        # already hard-refuses editable installs at its own top
+        # (_raise_if_editable_install), so — unlike _rerender_units_after_swap,
+        # which is shared with rollback() and therefore still guards on it —
+        # no editable-install branch is needed here.
+        migrations_error: str | None = None
+        pass_warnings: list[str] = []
+        try:
+            migration_result = await _run_post_activation_migrations_after_swap(
+                manifest.min_data_version,
+                job_id=self.job_id,
+                reset_outstanding=reset_outstanding,
+            )
+            migration_info = (migration_result["from"], migration_result["to"])
+            pass_warnings = list(migration_result.get("pass_warnings") or [])
+        except Exception as exc:
+            # LOUD, not silent (#1960's failure-mode decision): the tree is
+            # already active by this point — the symlink swap and venv re-pip
+            # above already succeeded — so raising here and reporting the
+            # whole commit() as "failed" would be misleading; the release IS
+            # running. What actually failed is narrower: on-disk data (slot
+            # TOMLs, hal0.toml schema, registry rows) may still reflect the
+            # OUTGOING release's shape — real, user-visible state divergence,
+            # so this logs at ERROR (louder than _rerender_units_after_swap's
+            # own WARNING for its lower-stakes non-fatal failure) and is
+            # threaded into `convergence` below so `hal0 update` refuses to
+            # call the run a clean success (see cli/update_commands.py's
+            # _print_convergence). hal0-api's boot-time
+            # check_outstanding_migrations retries this automatically at the
+            # next restart, so the failure is self-healing, not permanent.
+            #
+            # Bare `except Exception`, not `except UpdateError` (#1960 B1):
+            # the helper converts every failure shape it knows about to
+            # UpdateError, but subprocess.run can raise things outside that
+            # (a bug in the helper's own conversion, a future refactor that
+            # misses a case) — the same containment class
+            # _rerender_units_after_swap uses for its own subprocess call.
+            # This is the one place in commit() a bare except is correct: by
+            # this point the release is already active, so NOTHING may
+            # escape and abort the function — every later step (unit
+            # re-render, the previous-version breadcrumb, the response
+            # itself) still has to run.
+            migrations_error = str(exc)
+            fallback_version = _raw_schema_version(_raw_hal0_toml())
+            migration_info = (fallback_version, fallback_version)
+            log.error(
+                "updater.post_swap_migration_failed",
+                job_id=self.job_id,
+                version=target_version,
+                error=migrations_error,
+            )
+
         # Step 8c: re-render existing slot units through the NEW code. Must
         # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
         if not _is_editable_install():
@@ -3681,13 +4387,30 @@ class Updater:
         # A commit that swapped the tree but left the box on the pre-v1.0 slot /
         # model shape is not "done" — surface exactly what is outstanding so the
         # CLI can refuse to call it a clean success.
+        #
+        # `pass_warnings` (#1960 B2) does NOT factor into `ok`/`converged`:
+        # those five passes are independently best-effort BY DESIGN (see
+        # run_post_activation_migrations's own docstring — an affected slot
+        # or model just keeps its previous state until the operator acts),
+        # exactly as true before this PR as after it. What changed is only
+        # that a swallowed pass failure used to be invisible outside
+        # journalctl; it is now visible here too, without reclassifying a
+        # long-standing non-fatal outcome as a hard one.
         convergence = {
             "profile_reset": profile_reset,
             "slot_enabled_swept": enabled_swept,
             "ownership_migrations": pending_ownership,
+            "post_activation_migrations": {
+                "ok": migrations_error is None,
+                "from": migration_info[0],
+                "to": migration_info[1],
+                "error": migrations_error,
+                "pass_warnings": pass_warnings,
+            },
             "converged": (
                 not pending_ownership.get("pending")
                 and profile_reset.get("outcome") in {"reset", "already_reset", "no_config"}
+                and migrations_error is None
             ),
         }
         log.info(
@@ -3697,6 +4420,8 @@ class Updater:
             profile_reset=profile_reset.get("outcome"),
             slot_enabled_swept=len(enabled_swept),
             ownership_pending=pending_ownership.get("pending"),
+            post_activation_migrations_ok=migrations_error is None,
+            post_activation_migrations_pass_warnings=pass_warnings,
         )
 
         return {
@@ -3866,12 +4591,14 @@ __all__ = [
     "activate_release",
     "assert_release_dir_name",
     "assert_trusted_release_dir",
+    "check_outstanding_migrations",
     "convergence_report",
     "detect_pending_ownership_migrations",
     "discard_release",
     "ensure_seed_profiles",
     "fetch_release_manifest",
     "profile_reset_status",
+    "refresh_gpu_perms_unit",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",

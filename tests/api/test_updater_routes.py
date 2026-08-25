@@ -883,7 +883,6 @@ def test_prepare_job_reaches_prepared_with_notes(
             "version": "0.0.1",
             "install_dir": "/tmp/hal0-0.0.1",
             "cache_dir": "/tmp/cache/0.0.1",
-            "cosign_skipped": True,
             "notes": {
                 "markdown": "# 0.0.1\n- did xyz",
                 "highlights": ["h"],
@@ -908,6 +907,104 @@ def test_prepare_job_reaches_prepared_with_notes(
     assert final.get("state") == "prepared", final
     assert final.get("resolved_version") == "0.0.1"
     assert final.get("notes")
+
+
+def test_prepare_job_never_reports_cosign_skipped(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cosign_skipped`` is a removed dead field (#1901) — cosign verification
+    is always mandatory (see ``_verify_cosign``'s "no bypass" docstring), so a
+    job must never surface a stale/structurally-null key for it, even if a
+    caller's ``prepare()`` stub still returns one.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_prepare(self: object, version: str | None = None) -> dict:
+        return {
+            "version": "0.0.1",
+            "install_dir": "/tmp/hal0-0.0.1",
+            "cache_dir": "/tmp/cache/0.0.1",
+            "cosign_skipped": True,  # a stray value from an old caller shape
+            "notes": {"markdown": "# 0.0.1", "highlights": [], "breaking": [], "migrations": []},
+        }
+
+    monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
+
+    r = isolated_client.post("/api/updates/prepare", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("prepared", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "prepared", final
+    assert "cosign_skipped" not in final
+
+
+@pytest.mark.parametrize(
+    ("route", "phase", "body"),
+    [
+        ("/api/updates/apply", "apply", {}),
+        ("/api/updates/prepare", "prepare", {}),
+        ("/api/updates/commit", "commit", {"version": "0.0.1"}),
+    ],
+)
+def test_job_runners_thread_job_id_into_updater(
+    route: str,
+    phase: str,
+    body: dict,
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apply/prepare/commit must construct ``Updater`` with the job's own id.
+
+    Regression for #1901 gap 1: every job runner built ``Updater(channel=...)``
+    without the ``job_id`` the parameter exists to thread, so every
+    parent-side ``updater.*`` journal line logged ``job_id=None`` regardless
+    of which job produced it.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    captured: list[str | None] = []
+    real_init = u_mod.Updater.__init__
+
+    def spy_init(self: object, channel: str = "stable", job_id: str | None = None) -> None:
+        captured.append(job_id)
+        real_init(self, channel=channel, job_id=job_id)
+
+    monkeypatch.setattr(u_mod.Updater, "__init__", spy_init)
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.1"}
+
+    async def fake_prepare(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.1", "notes": {}}
+
+    async def fake_commit(self: object, version: str, reset_profiles: bool | None = None) -> dict:
+        return {"version": "0.0.1"}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+    monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+
+    r = isolated_client.post(route, json=body)
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] not in ("queued", "running"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") != "failed", final
+    assert job_id in captured, (job_id, captured)
 
 
 def test_commit_route_requires_version(isolated_client: TestClient) -> None:
@@ -1090,3 +1187,100 @@ def test_apply_reaches_applied_on_disk_even_if_the_restart_never_returns(
         time.sleep(0.05)
 
     assert on_disk.get("state") == "applied", on_disk
+
+
+def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1960 B3: convergence must be on disk BEFORE the restart subprocess
+    runs, not after — that call is systemd bouncing hal0-api's own unit
+    from inside its own cgroup, so it can SIGTERM this very process while
+    it's still in flight (#1540's exact mechanism, same file's own
+    ``_try_restart_hal0_api`` docstring). The old code set
+    ``job["convergence"]`` AFTER ``_try_restart_hal0_api()`` returned, so a
+    same-cgroup SIGTERM landing during the restart could strand a completed
+    commit with no convergence key on disk at all — and
+    ``_print_convergence(None)`` reports a clean success for what may have
+    been a red (unconverged) post-swap migration failure.
+
+    Mirrors ``test_apply_persists_applied_before_attempting_the_restart``'s
+    exact technique: read what has actually been persisted to disk AT THE
+    MOMENT the restart's subprocess is invoked, not after the fact.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    convergence_payload = {
+        "converged": False,
+        "post_activation_migrations": {
+            "ok": False,
+            "from": 1,
+            "to": 1,
+            "error": "boom",
+            "pass_warnings": [],
+        },
+    }
+
+    async def fake_commit(self: object, version: str, reset_profiles: bool | None = None) -> dict:
+        return {
+            "version": "0.0.9",
+            "installed_at": time.time(),
+            "convergence": convergence_payload,
+        }
+
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+
+    convergence_at_restart_time: list[Any] = []
+
+    def fake_run(cmd: list[str], *a: object, **k: object) -> object:
+        # At the instant the restart's subprocess is invoked, read what has
+        # actually been committed to disk so far — exactly the snapshot a
+        # same-cgroup SIGTERM landing right here would leave behind.
+        #
+        # Resolved from the jobs directory itself, NOT from a job id
+        # captured by the test's own main thread after the POST returns
+        # (the original version of this test did that, and was flaky on
+        # loaded CI runners — see #1966). TestClient runs the app on its
+        # own portal event loop; once the request handler returns, that
+        # loop is free to run the background commit task it just
+        # scheduled, and that task can reach this call before the test's
+        # main thread finishes crossing back over the transport and
+        # executing `r.json()["id"] = ...` — on a contended runner it
+        # reliably did, so the captured id was still None and this
+        # assertion raced to a false negative regardless of what was
+        # actually on disk. The jobs directory has no such race: the route
+        # handler (`commit_update`) persists the job SYNCHRONOUSLY —
+        # `_persist_job(jobs[job_id])` — before it ever spawns the
+        # background task, so by the time that task could possibly reach
+        # the restart, the (single) job file this test creates already
+        # exists on disk.
+        job_files = list(u_mod._jobs_dir().glob("*.json"))
+        on_disk: dict[str, Any] = {}
+        if job_files:
+            on_disk = json.loads(job_files[0].read_text(encoding="utf-8"))
+        convergence_at_restart_time.append(on_disk.get("convergence"))
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+
+    r = isolated_client.post("/api/updates/commit", json={"version": "0.0.9"})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] == "failed" or final.get("restarted") is not None:
+            break
+        time.sleep(0.05)
+
+    assert convergence_at_restart_time, "the restart ran without any job state persisted first"
+    assert convergence_at_restart_time[-1] == convergence_payload, (
+        "convergence was not durable on disk before the restart that can kill this "
+        f"process; convergence persisted by then was {convergence_at_restart_time!r}"
+    )

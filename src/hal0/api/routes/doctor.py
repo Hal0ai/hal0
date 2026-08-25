@@ -95,7 +95,7 @@ async def get_doctor(request: Request) -> DoctorResponse:
     urls_payload = await _safe(get_urls(request))
     system_payload = await _safe(health_system(request))
     memory_payload = await _safe(engine_status(request))
-    services_payload = await _safe(services_health())
+    services_payload = await _safe(services_health(request))
 
     capabilities_payload: dict[str, Any] | None
     try:

@@ -128,14 +128,40 @@ test.describe('Unified memory hero (dashboard)', () => {
   })
 
   test('health strip mirrors the unified-memory used/total reading', async ({ page }) => {
-    // The 5-cell health strip's "unified memory" cell reads the same
-    // ram_used/ram_total counters the hero frames — never a fabricated 0.
+    // The 5-cell health strip's "unified memory" cell reads ram_used against
+    // the shared memory-map pool total (the SAME figure the Slots-page map
+    // renders) — never the container's ram_total_mb, which diverged from the
+    // pool whenever the operator raised the GTT ceiling.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
     const cell = page.locator('.rd-health-cell', { hasText: 'unified memory' })
     await expect(cell).toBeVisible()
-    // 40000 MB used / 96000 MB total → "39.1/94 GB" (mb→GB, round1/round).
+    // 40000 MB used → 39.1; mock pool = unified_memory_mb 131072 → /128 GB
+    // (the mocked stats carry no gpu_vram_total_mb, so the probe fallback
+    // supplies the pool cap — same path memory-map's own header uses).
     await expect(cell.locator('.rd-health-v')).toContainText('39.1')
-    await expect(cell.locator('.rd-health-v')).toContainText('/94 GB')
+    await expect(cell.locator('.rd-health-v')).toContainText('/128 GB')
+  })
+
+  // Live screenshot feedback (2026-08-22): the operator spotted the
+  // Slots-page header's own "CPU · Memory" gauge cell (telemetry-
+  // header.jsx's ThCellCpuMem, a DIFFERENT file than #1978 touched)
+  // still reading the raw ram_total_mb (~94 GB) right next to ThRuler's
+  // memory-map band on the SAME page correctly showing the ~128 GB pool
+  // total — the exact class of divergence #1978 fixed for the dashboard's
+  // three other "memory" figures, just missed here.
+  test('Slots-page "CPU · Memory" gauge also reads the shared pool total, not raw ram_total_mb', async ({
+    page,
+  }) => {
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#slots')
+    const hero = page.getByTestId('telemetry-header')
+    const cell = hero.locator('.th-cell', { hasText: 'CPU · Memory' })
+    await expect(cell).toBeVisible()
+    // Same 40000 MB used / unified_memory_mb 131072 probe mock as the
+    // health-strip test above — same pool, same expected reading.
+    await expect(cell).toContainText('39.1')
+    await expect(cell).toContainText('/ 128 GB')
+    await expect(cell).not.toContainText('/ 94 GB')
   })
 })

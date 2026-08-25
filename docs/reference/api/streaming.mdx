@@ -16,11 +16,12 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
   specifically so a connect failure surfaces as a clean `502 UpstreamUnavailable`
   rather than failing partway through an already-started response generator.
 - The client response is a Starlette `StreamingResponse` whose body iterator does a
-  **raw byte passthrough** — `async for chunk in resp.aiter_raw(): yield chunk`. hal0
+  **raw byte passthrough** — every upstream chunk is yielded unmodified. hal0
   does **not** parse or re-emit SSE events itself; the OpenAI-standard
   `data: {...}\n\n` ... `data: [DONE]\n\n` framing and the `text/event-stream`
   content-type come from whatever upstream is serving the slot (llama-server, FLM, or
-  a remote provider), copied through verbatim.
+  a remote provider), copied through verbatim. The one exception is the stall guard
+  below, which may **append** a terminal chunk after cutting a stream off.
 - Status code and `content-type` on the client response are copied verbatim from the
   upstream response.
 
@@ -28,11 +29,74 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
 
 <Aside type="caution">
 `[dispatcher].direct_read_timeout_s` (default `300.0`, range `30.0-600.0` — see
-[Config schema](/docs/reference/config-schema/#dispatcher)) governs the
-**non-streaming** forward path only. Once a stream is open, this timeout does not
-apply — only the underlying HTTP client's `connect` (5.0s), `write` (10.0s), and
-`pool` (5.0s) timeouts constrain the streaming path's connection setup. There is no
-separate configurable read timeout once bytes start flowing.
+[Config schema](/docs/reference/config-schema/#dispatcher)) sets the HTTP client's
+`read` timeout, which httpx applies to **every** body read — streaming included.
+While the stall guard is active, streaming requests therefore disable it
+per-request so the guard owns the *body* bound and a stall always produces the
+diagnostic frame below (a bare `httpx.ReadTimeout` would tear the stream with no
+terminal frame). `direct_read_timeout_s` still bounds the wait for response
+headers on those requests — the guard's own clocks only start once headers
+arrive, so a header wait needs its own bound. Only with **both** stall-guard
+bounds set to `0` is the client's
+read timeout kept on the streaming path, as a per-read transport backstop; if it
+trips, the guard still converts it into a diagnostic frame with reason `read`.
+The `connect` (5.0s), `write` (10.0s), and `pool` (5.0s) timeouts constrain the
+streaming path's connection setup as usual.
+</Aside>
+
+## Stall guard
+
+httpx's per-read timeout is no defense against a *chatty* pathological upstream
+that never terminates (`finish_reason` forever `null`): every chunk resets the
+read timer, so the stream would be relayed forever, leaving the client — Hermes
+`--cli`, the dashboard, any OpenAI-compatible caller — waiting on a socket that
+never closes, with no output and no diagnostic. And against a *silent* upstream a
+bare transport timeout tears the stream without any terminal frame. Two
+guard-owned bounds prevent both:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[dispatcher].stream_total_timeout_s` | `900.0` | Max wall clock for one relayed stream |
+| `[dispatcher].stream_idle_timeout_s` | `300.0` | Max gap between two upstream chunks |
+
+Either bound tripping closes the upstream stream and logs
+`dispatch.stream_stall_guard_tripped` (with `reason`, `elapsed_s`, and the upstream
+name). `reason` is `total`, `idle`, or `read` (transport read timeout — only
+possible with the guard fully disabled). On a `text/event-stream` response hal0
+then appends a final chunk before `data: [DONE]`, preceded by a blank line so it
+parses as its own SSE event even when the upstream stalled midway through a
+`data:` line. For `/chat/completions` (and any other chat-shaped SSE stream) it is
+a `chat.completion.chunk`; for the legacy `/v1/completions` it is a
+`text_completion` chunk carrying the notice in `choices[].text` instead of
+`choices[].delta`:
+
+```json
+{
+  "id": "hal0-stall-guard",
+  "object": "chat.completion.chunk",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "role": "assistant", "content": "\n\n[hal0] stall guard: ..." },
+      "finish_reason": "length"
+    }
+  ],
+  "x_hal0_stall": { "reason": "total", "elapsed_s": 900.0, "upstream": "llm" }
+}
+```
+
+The notice is rendered as ordinary assistant content so the operator sees the cutoff,
+`finish_reason` is the standard `"length"` so strict clients terminate cleanly, and
+the precise cause lives in the `x_hal0_stall` extension. Non-SSE streaming bodies
+(audio, images) are cut off without any injected frame. Set either key to `0` to
+disable that bound.
+
+<Aside type="note">
+`stream_total_timeout_s` is wall clock, not a health signal: a genuinely healthy
+long generation — e.g. a big turn at a few tok/s on a CPU-only box — that outlives
+the budget is also cut, with the notice injected as assistant content. On slow
+hardware that routinely runs long turns, raise the total bound (up to `86400`) or
+set it to `0` and rely on the idle bound, which only fires on true silence.
 </Aside>
 
 ## Slot state during a stream
@@ -52,6 +116,11 @@ sent to the client:
 - **Time-to-first-token (TTFT)**: recorded at the first chunk containing a `"delta":`
   marker, deliberately skipping llama-server's initial role-only chunk — stored in a
   per-slot TTFT event deque.
+
+The synthetic stall-guard frame is recognized by its `x_hal0_stall` marker and
+excluded from both: it never counts as a generated token or a TTFT sample, and the
+request-metrics row for a guard-tripped stream is recorded as a failure
+(`ok = 0`, `error_code = stream_stall_<reason>`) rather than a clean success.
 
 Non-streaming responses get an analogous hook that pulls `usage.completion_tokens`
 (and, for FLM/NPU responses, the hal0-specific `usage.decoding_speed_tps` /

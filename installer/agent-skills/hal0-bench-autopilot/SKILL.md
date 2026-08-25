@@ -6,6 +6,11 @@ description: The weekly judgment pass over benchlab's benchmark dataset.
 
 # hal0-bench-autopilot
 
+> **Requires the terminal tool.** hal0 ships Hermes with no terminal tool unless the
+> operator opted in (`hal0 agent install hermes --terminal-tool`). Without it this skill
+> cannot run its commands — say so plainly instead of improvising.
+
+
 The weekly judgment pass, run by Hermes after the timer session (or invoked
 manually). Procedure encoded in SKILL.md:
 

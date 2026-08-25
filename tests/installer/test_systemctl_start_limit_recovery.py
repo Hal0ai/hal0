@@ -2,7 +2,7 @@
 
 ``installer/wrappers/hal0-systemctl`` is the ENTIRE privileged surface for slot
 lifecycle on a hal0-service-user box. Once systemd hits ``StartLimitBurst``
-(the slot quadlet ships ``StartLimitIntervalSec=300`` / ``StartLimitBurst=5``)
+(the slot quadlet ships ``StartLimitIntervalSec=1800`` / ``StartLimitBurst=10``)
 it parks the unit in ``failed`` with ``Result=start-limit-hit`` and refuses
 EVERY subsequent ``start``/``restart`` for the rest of the interval. The slot
 was then unloadable via the API until an operator ran ``reset-failed`` by hand.

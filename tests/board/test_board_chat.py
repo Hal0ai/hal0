@@ -1,8 +1,8 @@
 """Tests for the board chat orchestrator — src/hal0/api/routes/board_chat.py.
 
 The LLM backend is injected via app.state.board_chat_llm (a stub). Board
-mutations go through the real HermesKanbanClient behind an httpx.MockTransport
-recorder. Asserts SSE framing, tool→mutation mapping, per-tool audit, ?board
+tools run against a recording hal0 BoardStore (the SAME store /api/board/*
+serves from — #1829). Asserts SSE framing, tool→mutation mapping, per-tool audit, ?board
 threading, loop termination, and error handling.
 
 Run targeted:
@@ -11,6 +11,7 @@ Run targeted:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -29,45 +30,61 @@ from hal0.api.routes.board_chat import (
     _extract_tool_calls,
     _is_read_tool,
     _resolve_platform_tool,
-    _resolve_read_tool,
     _resolve_tool,
     _split_thinking,
     _tool_schemas,
 )
-from hal0.board import KANBAN_BASE_PATH, HermesKanbanClient
+from hal0.board.store import BoardStore
 from hal0.config.schema import BrainChatConfig, Hal0Config
-
-P = KANBAN_BASE_PATH
-
 
 # ── harness ─────────────────────────────────────────────────────────────────
 
 
 class _Recorder:
+    """Ordered log of every BoardStore call the chat makes.
+
+    Board tools run against the hal0-OWNED store now (#1829), not a Hermes
+    forward, so the double is a recording :class:`BoardStore` subclass
+    (:class:`_SpyStore`) rather than an httpx mock — the store really executes,
+    so these tests see real board state and a tool that stopped touching the
+    store would be caught here, not just upstream-path-shaped.
+    """
+
     def __init__(self) -> None:
-        self.requests: list[dict[str, Any]] = []
-        self.responses: dict[tuple[str, str], httpx.Response] = {}
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
-    def respond(self, method: str, path: str, body: Any, status: int = 200) -> None:
-        self.responses[(method, f"{P}{path}")] = httpx.Response(status, json=body)
+    def recorded(self, name: str) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+        return [(args, kwargs) for n, args, kwargs in self.calls if n == name]
 
-    async def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(
-            {
-                "method": request.method,
-                "path": request.url.path,
-                "params": dict(request.url.params),
-                "body": request.content.decode() if request.content else "",
-            }
-        )
-        key = (request.method, request.url.path)
-        if key in self.responses:
-            return self.responses[key]
-        return httpx.Response(200, json={"ok": True})
+    def names(self) -> list[str]:
+        return [n for n, _a, _k in self.calls]
 
-    def recorded(self, method: str, path: str) -> list[dict[str, Any]]:
-        full = f"{P}{path}"
-        return [r for r in self.requests if r["method"] == method and r["path"] == full]
+
+def _spy_store(recorder: _Recorder, db_path) -> BoardStore:
+    """A real BoardStore that logs every call it serves into ``recorder``."""
+
+    class _SpyStore(BoardStore):
+        def __getattribute__(self, name: str) -> Any:
+            attr = super().__getattribute__(name)
+            if name.startswith("_") or not callable(attr):
+                return attr
+
+            def _logged(*args: Any, **kwargs: Any) -> Any:
+                recorder.calls.append((name, args, kwargs))
+                return attr(*args, **kwargs)
+
+            return _logged
+
+    store = _SpyStore(db_path)
+    asyncio.run(store.ensure_initialized(None))
+    recorder.calls.clear()  # the seed is harness noise, not a chat call
+    return store
+
+
+def _seed_card(store: BoardStore, **fields: Any) -> str:
+    """Put one card on the board out-of-band and return its id."""
+    body = {"title": "seeded", **fields}
+    return str(store.create_task(body)["task"]["id"])
 
 
 class _PlatformRecorder:
@@ -155,20 +172,15 @@ def _make_app(
     stub: Any,
     tmp_path,
     *,
-    no_client: bool = False,
     platform: _PlatformRecorder | None = None,
 ) -> tuple:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(board.router, prefix="/api/board")
-    if no_client:
-        app.state.hermes_kanban = None
-    else:
-        transport = httpx.MockTransport(recorder.handler)
-        http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9119")
-        app.state.hermes_kanban = HermesKanbanClient(
-            http_client=http, session_token_resolver=lambda: "TOK"
-        )
+    # hal0 owns the board: the chat's board tools and /api/board/* share ONE
+    # store, and no Hermes client is wired at all (#1829).
+    app.state.board_store = _spy_store(recorder, tmp_path / "board.db")
+    app.state.hermes_kanban = None
     if platform is not None:
         app.state.platform_http = httpx.AsyncClient(
             transport=httpx.MockTransport(platform.handler),
@@ -231,32 +243,35 @@ def test_sse_framing_tool_then_token_then_done(tmp_path) -> None:
 def _tool_mutation_case(
     tool: str,
     args: dict,
-    expected_method: str,
-    expected_path: str,
-    expected_body_subset: dict | None,
+    expected_call: str,
+    expected_args: tuple,
     tmp_path,
-):
+    *,
+    expected_kwargs: dict | None = None,
+) -> None:
+    """Drive one mutation tool and assert it called the STORE method the
+    matching /api/board/* handler calls, with the same payload."""
     rec = _Recorder()
-    rec.respond(expected_method, expected_path, {"ok": True})
     stub = _StubLLM([_tool_call_response(tool, args, "c_mut"), _final_response("ok")])
     _app, client = _make_app(rec, stub, tmp_path)
+    rec.calls.clear()
     resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "do"}]})
     assert resp.status_code == 200
-    hits = rec.recorded(expected_method, expected_path)
-    assert len(hits) >= 1, f"Expected {expected_method} {expected_path}, got {rec.requests}"
-    if expected_body_subset:
-        body = json.loads(hits[0]["body"]) if hits[0]["body"] else {}
-        for k, v in expected_body_subset.items():
-            assert body.get(k) == v, f"body mismatch on {k}: {body}"
+    hits = rec.recorded(expected_call)
+    assert len(hits) >= 1, f"Expected store.{expected_call}(), got {rec.names()}"
+    call_args, call_kwargs = hits[0]
+    assert call_args == expected_args, f"args mismatch: {call_args}"
+    if expected_kwargs is not None:
+        for k, v in expected_kwargs.items():
+            assert call_kwargs.get(k) == v, f"kwarg mismatch on {k}: {call_kwargs}"
 
 
 def test_tool_move_task(tmp_path) -> None:
     _tool_mutation_case(
         "move_task",
         {"task_id": "t1", "status": "done"},
-        "PATCH",
-        "/tasks/t1",
-        {"status": "done"},
+        "update_task",
+        ("t1", {"status": "done"}),
         tmp_path,
     )
 
@@ -265,9 +280,8 @@ def test_tool_assign_task(tmp_path) -> None:
     _tool_mutation_case(
         "assign_task",
         {"task_id": "t2", "assignee": "bob"},
-        "PATCH",
-        "/tasks/t2",
-        {"assignee": "bob"},
+        "update_task",
+        ("t2", {"assignee": "bob"}),
         tmp_path,
     )
 
@@ -276,10 +290,10 @@ def test_tool_create_task(tmp_path) -> None:
     _tool_mutation_case(
         "create_task",
         {"title": "foo"},
-        "POST",
-        "/tasks",
-        {"title": "foo"},
+        "create_task",
+        ({"title": "foo"},),
         tmp_path,
+        expected_kwargs={"board": None},
     )
 
 
@@ -287,9 +301,8 @@ def test_tool_comment_task(tmp_path) -> None:
     _tool_mutation_case(
         "comment_task",
         {"task_id": "t3", "body": "lgtm"},
-        "POST",
-        "/tasks/t3/comments",
-        {"body": "lgtm"},
+        "comment_task",
+        ("t3", {"body": "lgtm"}),
         tmp_path,
     )
 
@@ -298,39 +311,30 @@ def test_tool_add_dependency(tmp_path) -> None:
     _tool_mutation_case(
         "add_dependency",
         {"parent_id": "p", "child_id": "c"},
-        "POST",
-        "/links",
-        {"parent_id": "p", "child_id": "c"},
+        "add_link",
+        ({"parent_id": "p", "child_id": "c"},),
         tmp_path,
     )
 
 
 def test_tool_remove_dependency(tmp_path) -> None:
-    # DELETE /links carries parent_id/child_id as QUERY params (SPEC §4).
-    rec = _Recorder()
-    rec.respond("DELETE", "/links", {"ok": True})
-    stub = _StubLLM(
-        [
-            _tool_call_response("remove_dependency", {"parent_id": "p1", "child_id": "c1"}, "c_rm"),
-            _final_response("ok"),
-        ]
+    # remove_link takes the two ids positionally (the REST handler reads them
+    # off the query string and does the same).
+    _tool_mutation_case(
+        "remove_dependency",
+        {"parent_id": "p1", "child_id": "c1"},
+        "remove_link",
+        ("p1", "c1"),
+        tmp_path,
     )
-    _app, client = _make_app(rec, stub, tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert resp.status_code == 200
-    hits = rec.recorded("DELETE", "/links")
-    assert len(hits) >= 1, f"got {rec.requests}"
-    assert hits[0]["params"]["parent_id"] == "p1"
-    assert hits[0]["params"]["child_id"] == "c1"
 
 
 def test_tool_block_task(tmp_path) -> None:
     _tool_mutation_case(
         "block_task",
         {"task_id": "t4", "block_reason": "waiting"},
-        "PATCH",
-        "/tasks/t4",
-        {"status": "blocked", "block_reason": "waiting"},
+        "update_task",
+        ("t4", {"status": "blocked", "block_reason": "waiting"}),
         tmp_path,
     )
 
@@ -339,9 +343,8 @@ def test_tool_specify_task(tmp_path) -> None:
     _tool_mutation_case(
         "specify_task",
         {"task_id": "t5"},
-        "POST",
-        "/tasks/t5/specify",
-        None,
+        "specify",
+        ("t5", {}),
         tmp_path,
     )
 
@@ -350,24 +353,21 @@ def test_tool_decompose_task(tmp_path) -> None:
     _tool_mutation_case(
         "decompose_task",
         {"task_id": "t6"},
-        "POST",
-        "/tasks/t6/decompose",
-        None,
+        "decompose",
+        ("t6", {}),
         tmp_path,
     )
 
 
 def test_tool_nudge_dispatcher(tmp_path) -> None:
-    rec = _Recorder()
-    rec.respond("POST", "/dispatch", {"ok": True})
-    stub = _StubLLM(
-        [_tool_call_response("nudge_dispatcher", {"max": 5}, "c_n"), _final_response("ok")]
+    _tool_mutation_case(
+        "nudge_dispatcher",
+        {"max": 5},
+        "dispatch_nudge",
+        (),
+        tmp_path,
+        expected_kwargs={"max_dispatch": 5},
     )
-    _app, client = _make_app(rec, stub, tmp_path)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "n"}]})
-    hits = rec.recorded("POST", "/dispatch")
-    assert len(hits) >= 1
-    assert hits[0]["params"]["max"] == "5"
 
 
 # ── audit per tool call ─────────────────────────────────────────────────────
@@ -393,11 +393,13 @@ def test_audit_per_tool_call(tmp_path) -> None:
 
 
 def test_board_threading_in_tool_dispatch(tmp_path) -> None:
+    """``?board=`` threads into the board-scoped store calls (create + reads),
+    exactly as ``/api/board/*?board=`` does."""
     rec = _Recorder()
-    rec.respond("PATCH", "/tasks/t1", {"ok": True})
     stub = _StubLLM(
         [
-            _tool_call_response("move_task", {"task_id": "t1", "status": "done"}, "c1"),
+            _tool_call_response("create_task", {"title": "scoped"}, "c1"),
+            _tool_call_response("get_board", {}, "c2"),
             _final_response("ok"),
         ]
     )
@@ -406,8 +408,8 @@ def test_board_threading_in_tool_dispatch(tmp_path) -> None:
         "/api/board/chat",
         json={"board": "alpha", "messages": [{"role": "user", "content": "go"}]},
     )
-    hits = rec.recorded("PATCH", "/tasks/t1")
-    assert hits[0]["params"]["board"] == "alpha"
+    assert rec.recorded("create_task")[0][1]["board"] == "alpha"
+    assert rec.recorded("get_board")[0][1]["board"] == "alpha"
 
 
 def test_multi_tool_one_response(tmp_path) -> None:
@@ -435,70 +437,67 @@ def test_multi_tool_one_response(tmp_path) -> None:
 # ── read tools (unaudited, board-scoped) ────────────────────────────────────
 
 
-def test_read_tool_get_board_forwards_and_is_not_audited(tmp_path) -> None:
+def test_read_tool_get_board_reads_the_store_and_is_not_audited(tmp_path) -> None:
     rec = _Recorder()
-    rec.respond(
-        "GET",
-        "/board",
-        {
-            "columns": [
-                {
-                    "name": "todo",
-                    "tasks": [
-                        {
-                            "id": "t1",
-                            "title": "fix",
-                            "status": "todo",
-                            "assignee": "bob",
-                            "body": "a very long body that must be trimmed",
-                        }
-                    ],
-                }
-            ]
-        },
-    )
     stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("ok")])
     app, client = _make_app(rec, stub, tmp_path)
+    task_id = _seed_card(
+        app.state.board_store,
+        title="fix",
+        status="todo",
+        assignee="bob",
+        body="a very long body that must be trimmed",
+    )
+    rec.calls.clear()
+
     resp = client.post(
         "/api/board/chat",
-        json={"board": "alpha", "messages": [{"role": "user", "content": "what's up"}]},
+        json={"messages": [{"role": "user", "content": "what's up"}]},
     )
     assert resp.status_code == 200
-    hits = rec.recorded("GET", "/board")
-    assert len(hits) == 1
-    assert hits[0]["params"]["board"] == "alpha"  # board scope threads through
+    assert len(rec.recorded("get_board")) == 1
     # tool_result carries the COMPACTED rows (no body field)
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
-    assert result["result"] == {
-        "tasks": [{"id": "t1", "title": "fix", "status": "todo", "assignee": "bob"}]
-    }
-    # reads write NO audit rows — matches the REST proxy's split
+    (row,) = result["result"]["tasks"]
+    assert row["id"] == task_id
+    assert (row["title"], row["status"], row["assignee"]) == ("fix", "todo", "bob")
+    assert "body" not in row  # compacted: the long body never reaches the loop
+    # reads write NO audit rows — matches the REST router's split
     assert app.state.audit.query(action="board.chat.turn") == []
 
 
-def test_read_tool_get_task_forwards(tmp_path) -> None:
+def test_read_tool_get_task_reads_the_store(tmp_path) -> None:
     rec = _Recorder()
-    rec.respond("GET", "/tasks/t9", {"task": {"id": "t9"}, "comments": []})
-    stub = _StubLLM(
-        [_tool_call_response("get_task", {"task_id": "t9"}, "c_gt"), _final_response("ok")]
-    )
+    stub = _StubLLM([_final_response("ok")])
     app, client = _make_app(rec, stub, tmp_path)
+    task_id = _seed_card(app.state.board_store, title="deep", body="the full body")
+    rec.calls.clear()
+    app.state.board_chat_llm = _StubLLM(
+        [_tool_call_response("get_task", {"task_id": task_id}, "c_gt"), _final_response("ok")]
+    )
+
     resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert len(rec.recorded("GET", "/tasks/t9")) == 1
+    assert rec.recorded("get_task")[0][0] == (task_id,)
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
-    assert result["result"]["task"]["id"] == "t9"  # detail is NOT compacted
+    assert result["result"]["id"] == task_id
+    assert result["result"]["body"] == "the full body"  # detail is NOT compacted
     assert app.state.audit.query(action="board.chat.turn") == []
 
 
-def test_read_tool_get_assignees_forwards(tmp_path) -> None:
+def test_read_tool_get_assignees_reads_the_store(tmp_path) -> None:
     rec = _Recorder()
-    rec.respond("GET", "/assignees", [{"name": "scout", "on_disk": True}])
     stub = _StubLLM([_tool_call_response("get_assignees", {}, "c_ga"), _final_response("ok")])
-    _app, client = _make_app(rec, stub, tmp_path)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert len(rec.recorded("GET", "/assignees")) == 1
+    app, client = _make_app(rec, stub, tmp_path)
+    _seed_card(app.state.board_store, title="assigned", assignee="scout")
+    rec.calls.clear()
+
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert len(rec.recorded("list_assignees")) == 1
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"] == [{"id": "scout", "label": "scout"}]
 
 
 # ── platform tools (slots/models/agents/stats via self-HTTP) ────────────────
@@ -535,8 +534,8 @@ def test_platform_slot_restart_forwards_and_audits(tmp_path) -> None:
     rows = app.state.audit.query(action="platform.chat.turn")
     assert len(rows) == 1
     assert rows[0]["target"] == "img"
-    # No Hermes traffic for a platform tool.
-    assert rec.requests == []
+    # No board-store traffic for a platform tool.
+    assert rec.calls == []
 
 
 def test_platform_error_becomes_tool_result(tmp_path) -> None:
@@ -553,10 +552,8 @@ def test_platform_error_becomes_tool_result(tmp_path) -> None:
     assert events[-1]["type"] == "done"
 
 
-def test_orchestration_tools_route_via_kanban_client(tmp_path) -> None:
+def test_orchestration_tools_route_through_the_store(tmp_path) -> None:
     rec = _Recorder()
-    rec.respond("GET", "/orchestration", {"orchestrator_profile": "admin"})
-    rec.respond("PUT", "/orchestration", {"ok": True})
     stub = _StubLLM(
         [
             _tool_call_response("get_orchestration", {}, "c_go"),
@@ -566,10 +563,12 @@ def test_orchestration_tools_route_via_kanban_client(tmp_path) -> None:
     )
     app, client = _make_app(rec, stub, tmp_path)
     client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
-    assert len(rec.recorded("GET", "/orchestration")) == 1
-    puts = rec.recorded("PUT", "/orchestration")
-    assert len(puts) == 1
-    assert json.loads(puts[0]["body"]) == {"auto_decompose": True}
+    assert len(rec.recorded("get_orchestration")) >= 1
+    updates = rec.recorded("update_orchestration")
+    assert len(updates) == 1
+    assert updates[0][0] == ({"auto_decompose": True},)
+    # The knob really moved — the REST surface agrees.
+    assert client.get("/api/board/orchestration").json()["auto_decompose"] is True
     # read unaudited, update audited as a board mutation
     rows = app.state.audit.query(action="board.chat.turn")
     assert len(rows) == 1
@@ -743,61 +742,82 @@ def test_llm_error_surfaces(tmp_path) -> None:
     assert events[-1]["type"] == "done"
 
 
-def test_backend_not_configured(tmp_path) -> None:
+def test_chat_serves_with_no_hermes_client(tmp_path) -> None:
+    """hal0 owns the board (KB-4/#1829): with NO Hermes client wired the chat
+    still runs and its board reads answer from the local store — the old
+    "operator board backend not configured" precondition is gone."""
     rec = _Recorder()
-    _app, client = _make_app(rec, _StubLLM([]), tmp_path, no_client=True)
+    stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("all clear")])
+    app, client = _make_app(rec, stub, tmp_path)
+    assert app.state.hermes_kanban is None
+    task_id = _seed_card(app.state.board_store, title="local card")
+    rec.calls.clear()
+
     resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)
-    assert any(e["type"] == "error" and "not configured" in e["message"] for e in events)
+    assert [e for e in events if e["type"] == "error"] == []
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert [t["id"] for t in result["result"]["tasks"]] == [task_id]
 
 
-# ── unit: _resolve_tool 5-tuple (method, path, params, body, target) ────────
+# ── unit: _resolve_tool → (store operation, audit target) ───────────────────
+
+
+class _OpSpy:
+    """Captures the store call a resolved operation makes."""
+
+    def __init__(self) -> None:
+        self.call: tuple[str, tuple, dict] | None = None
+
+    def __getattr__(self, name: str):
+        def _record(*args, **kwargs):
+            self.call = (name, args, kwargs)
+            return {"ok": True}
+
+        return _record
+
+
+def _resolved(name: str, args: dict, board: str | None = None):
+    op, target = _resolve_tool(name, args, board)
+    assert op is not None
+    spy = _OpSpy()
+    op(spy)
+    return spy.call, target
 
 
 def test_resolve_tool_move_task() -> None:
-    method, path, params, body, target = _resolve_tool(
-        "move_task", {"task_id": "t1", "status": "done"}
-    )
-    assert method == "PATCH"
-    assert path == "/tasks/t1"
-    assert body == {"status": "done"}
-    assert params == {}
+    call, target = _resolved("move_task", {"task_id": "t1", "status": "done"})
+    assert call == ("update_task", ("t1", {"status": "done"}), {})
     assert target == "t1"
 
 
 def test_resolve_tool_remove_dependency() -> None:
-    method, path, params, body, _target = _resolve_tool(
-        "remove_dependency", {"parent_id": "p", "child_id": "c"}
-    )
-    assert method == "DELETE"
-    assert path == "/links"
-    assert params == {"parent_id": "p", "child_id": "c"}
-    assert body is None
+    call, target = _resolved("remove_dependency", {"parent_id": "p", "child_id": "c"})
+    assert call == ("remove_link", ("p", "c"), {})
+    assert target == "p->c"
 
 
 def test_resolve_tool_nudge_dispatcher() -> None:
-    method, path, params, _body, _ = _resolve_tool("nudge_dispatcher", {"max": 5})
-    assert method == "POST"
-    assert path == "/dispatch"
-    assert params == {"max": 5}
+    call, _target = _resolved("nudge_dispatcher", {"max": 5})
+    assert call == ("dispatch_nudge", (), {"max_dispatch": 5})
+    # A junk / absent max degrades to "no cap", never a crash.
+    assert _resolved("nudge_dispatcher", {})[0][2] == {"max_dispatch": None}
+    assert _resolved("nudge_dispatcher", {"max": "lots"})[0][2] == {"max_dispatch": None}
 
 
-def test_resolve_tool_create_task_drops_none() -> None:
-    _m, _p, _params, body, _t = _resolve_tool("create_task", {"title": "x", "body": None})
-    assert body == {"title": "x"}
+def test_resolve_tool_create_task_drops_none_and_threads_board() -> None:
+    call, _target = _resolved("create_task", {"title": "x", "body": None}, "alpha")
+    assert call == ("create_task", ({"title": "x"},), {"board": "alpha"})
 
 
 def test_resolve_tool_unknown() -> None:
-    method, _path, _params, _body, _target = _resolve_tool("nope", {})
-    assert method is None
+    assert _resolve_tool("nope", {}) == (None, None)
 
 
-def test_resolve_read_tool_paths() -> None:
-    assert _resolve_read_tool("get_board", {}) == ("GET", "/board")
-    assert _resolve_read_tool("get_task", {"task_id": "t1"}) == ("GET", "/tasks/t1")
-    assert _resolve_read_tool("get_assignees", {}) == ("GET", "/assignees")
-    assert _resolve_read_tool("get_orchestration", {}) == ("GET", "/orchestration")
-    assert _resolve_read_tool("move_task", {}) == (None, "")
+def test_resolve_tool_ignores_read_tools() -> None:
+    """Reads are NOT mutations — they must not resolve to a store write."""
+    for read in ("get_board", "get_task", "get_assignees", "get_orchestration"):
+        assert _resolve_tool(read, {})[0] is None
 
 
 def test_resolve_platform_tool_paths() -> None:
@@ -922,9 +942,9 @@ def test_kill_switch_disables_chat_before_any_llm_call(tmp_path) -> None:
     err = next(e for e in events if e["type"] == "error")
     assert "disabled" in err["message"]
     assert events[-1]["type"] == "done"
-    # The LLM was never invoked and no board request went out.
+    # The LLM was never invoked and no board-store call went out.
     assert stub.calls == []
-    assert rec.requests == []
+    assert rec.calls == []
 
 
 def test_read_only_refuses_board_mutation_no_request_sent(tmp_path) -> None:
@@ -944,22 +964,21 @@ def test_read_only_refuses_board_mutation_no_request_sent(tmp_path) -> None:
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
     assert "read-only mode" in result["result"]["error"]
-    # No PATCH ever reached the board backend, and nothing was audited.
-    assert rec.recorded("PATCH", "/tasks/t1") == []
+    # No store write ever happened, and nothing was audited.
+    assert rec.recorded("update_task") == []
     assert app.state.audit.query(action="board.chat.turn") == []
 
 
 def test_read_only_still_allows_reads(tmp_path) -> None:
     rec = _Recorder()
-    rec.respond("GET", "/board", {"columns": []})
     stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("ok")])
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, read_only=True)
 
     resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert resp.status_code == 200
-    # The read passed straight through — one GET, no refusal on it.
-    assert len(rec.recorded("GET", "/board")) == 1
+    # The read passed straight through — one store read, no refusal on it.
+    assert len(rec.recorded("get_board")) == 1
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
     assert "read-only mode" not in json.dumps(result["result"])
@@ -969,7 +988,6 @@ def test_max_rounds_from_config_bounds_the_loop(tmp_path) -> None:
     rec = _Recorder()
     # A pathological model that ALWAYS emits a tool call and never terminates.
     never_ends = [_tool_call_response("get_board", {}, f"c{i}") for i in range(10)]
-    rec.respond("GET", "/board", {"columns": []})
     stub = _StubLLM(never_ends)
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, max_rounds=2)
@@ -1062,7 +1080,6 @@ def test_a_tool_round_routes_to_the_tool_model(tmp_path) -> None:
     # emits no parseable call on this runtime), so the tool round and every
     # continuation of it run on [brain_chat] tool_model.
     rec = _Recorder()
-    rec.respond("GET", "/board", {"columns": []})
     stub = _ModelTracingLLM(
         [_tool_call_response("get_board", {}, "c1"), _final_response("all clear")]
     )

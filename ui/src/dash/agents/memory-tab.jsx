@@ -44,9 +44,9 @@ function MemoryTab({ subsection } = {}) { // eslint-disable-line no-unused-vars
             <button
               className="btn ghost sm"
               data-testid="memory-open-graph"
-              onClick={() => { window.location.hash = "#memory/graph"; }}
+              onClick={() => { window.location.hash = "#memory/bank"; }}
             >
-              Open graph
+              Open bank
             </button>
           </div>
         </div>
@@ -77,6 +77,61 @@ function MemoryTab({ subsection } = {}) { // eslint-disable-line no-unused-vars
         <div className="rule" />
       </div>
       <MemoryGraphPanel />
+    </div>
+  );
+}
+
+// ── Active extraction tasks (per bank) ───────────────────────────────
+//
+// Detailed live view of every bank's in-flight operations, rendered
+// below the Built/Errors/Live stat grid in the graph-extraction card.
+// Bank cards themselves only carry a small spinner + count; this list
+// is where the operator sees WHAT is running WHERE. One row per bank
+// with work in flight: spinner, bank id, and in-flight task types
+// grouped with counts (e.g. "extraction ×18 · consolidation ×1").
+function GraphBankTasksRow({ bank }) {
+  const useBankOperations = window.__hal0UseBankOperations;
+  const summarize = window.__hal0MemSummarizeOps;
+  const q = useBankOperations ? useBankOperations(bank) : { data: null };
+  if (!q.data || !summarize) return null;
+  const a = summarize(q.data);
+  if (a.inFlight === 0) return null;
+  const inFlightOps = (q.data.operations || []).filter(
+    (o) => o.status === "pending" || o.status === "processing",
+  );
+  const byType = {};
+  for (const o of inFlightOps) byType[o.task_type || "unknown"] = (byType[o.task_type || "unknown"] || 0) + 1;
+  const detail = Object.entries(byType)
+    .map(([t, n]) => (n > 1 ? `${t} ×${n}` : t))
+    .join(" · ");
+  return (
+    <div className="graph-task-row" data-testid={`graph-task-row-${bank}`}>
+      <span className="mem-spin" aria-hidden="true" />
+      <span className="mono graph-task-bank">{bank}</span>
+      <span className="mono graph-task-detail" title={`${a.processing} processing · ${a.pending} pending`}>
+        {detail}
+      </span>
+      <span className="mono graph-task-counts num">
+        {a.processing > 0 && <span className="graph-task-proc">{a.processing} active</span>}
+        {a.pending > 0 && <span className="graph-task-pend">{a.pending} queued</span>}
+      </span>
+    </div>
+  );
+}
+
+function GraphActiveTasks() {
+  const useMemoryBanks = window.__hal0UseMemoryBanks;
+  const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null };
+  const banks = (banksQuery.data && banksQuery.data.banks) || [];
+  if (banks.length === 0) return null;
+  return (
+    <div className="graph-tasks" data-testid="graph-active-tasks">
+      <div className="mono graph-tasks-h">Active tasks</div>
+      {banks.map((b) => (
+        <GraphBankTasksRow key={b.bank_id} bank={b.bank_id} />
+      ))}
+      {/* Hidden via CSS :has() whenever at least one task row renders. */}
+      <div className="mono graph-tasks-quiet">no active tasks</div>
     </div>
   );
 }
@@ -197,6 +252,7 @@ function MemoryGraphPanel() {
               </div>
             ))}
           </div>
+          <GraphActiveTasks />
           {lastBuilt && (
             <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginBottom: 10}}>
               Last build: {lastBuilt}

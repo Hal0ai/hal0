@@ -1,5 +1,5 @@
-# suites/lane-matrix.toml — feeds hal0-tune. Both lanes across the full
-# 2k/32k/128k depth axis, on a small set of profile-class representatives
+# suites/lane-matrix.toml — feeds hal0-tune. Both supported GPU lanes across
+# the full 2k/32k/128k depth axis, on a small set of profile-class representatives
 # — NOT the whole roster. This is a tuning signal, not a display board.
 # See the bench design handoff §4.
 
@@ -22,7 +22,7 @@ priority    = 40
 # is a judgment call. Update it when the profile-class lineup changes.
 #
 # include_only: with the list unset this suite selects NOTHING. Without it,
-# an empty include fell back to "every installed GGUF x 2 lanes x 3 depths" —
+# an empty include fell back to "every installed GGUF x every lane x 3 depths" —
 # an accidental multi-day exclusive GPU job.
 include_only = true
 include = [
@@ -32,7 +32,10 @@ include = [
 ]
 
 [matrix]
-lanes    = ["rocm", "vulkan_radv"]     # both lanes, unlike roster's "default"
+lanes    = ["rocm", "vulkan_radv"]     # both GPU lanes, unlike roster's "default".
+                                        # vulkan_radv was retired under #1888 and restored
+                                        # by #1948 on the Vulkan-fixed runner image — a
+                                        # lane comparison is the point of this suite.
 depths   = [2048, 32768, 131072]        # the full 2k/32k/128k ctx-fill axis
 samplers = ["greedy"]
 reps     = 3

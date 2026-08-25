@@ -104,6 +104,15 @@ const HAL0_DATA = {
       backend: "vulkan",
       runtime: "container",
       profile: "vulkan",
+      image: "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+      // #1939 regression fixture — the seed's one `image_status: "unknown"`
+      // slot, and a realistic one: an offline slot whose image store hal0
+      // could not READ (rootful hal0-podman-ro seam rc 66, absent sudoers
+      // grant, or a probe timeout). Deliberately NOT the same claim as
+      // "missing", which is podman having been asked and answered "no".
+      // Keeping it in the seed means the indeterminate chip is rendered by
+      // real card code on every γ run, not only in a unit test.
+      image_status: "unknown",
       container_status: "stopped",
       container_health: false,
       model: "",
@@ -226,6 +235,12 @@ const HAL0_DATA = {
       device_class: "cpu",
       runtime: "container",
       profile: "tts",
+      image: "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
+      // #1939 follow-up: the seed's UTILITY-tier seam-blind slot, alongside
+      // `legacy` in the headline tier. Utility slots render as MiniCard, a
+      // different component, and the indeterminate chip was missing there —
+      // so the γ-suite now exercises both card shapes.
+      image_status: "unknown",
       container_status: "running",
       container_health: true,
       model: "kokoro-v1",

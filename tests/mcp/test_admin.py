@@ -44,9 +44,18 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return self._payload
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: httpx.Timeout | float) -> None:
             captured["base_url"] = base_url
-            captured["timeout"] = timeout
+            # ``_call_rest`` splits the budget per phase (#1832): the lifecycle
+            # budget is the READ bound, connect stays short. Record both, and
+            # keep ``timeout`` meaning "the read budget" so the existing
+            # per-tool assertions still read naturally.
+            if isinstance(timeout, httpx.Timeout):
+                captured["timeout"] = timeout.read
+                captured["connect_timeout"] = timeout.connect
+            else:
+                captured["timeout"] = timeout
+                captured["connect_timeout"] = timeout
 
         async def __aenter__(self) -> _MockClient:
             return self
@@ -1355,6 +1364,124 @@ async def test_registered_tool_raises_toolerror_on_missing_arg(queue: ApprovalQu
         await server.call_tool("model_show", {"args": {}})
 
 
+@pytest.mark.asyncio
+async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """model_swap blocks on the slot state machine — 30s is not enough (#1832).
+
+    ``_call_rest``'s generic 30s forward timeout is far under the server's own
+    health-poll budget, so an agent driving a slot swap is told the call failed
+    while it succeeds server-side — the same defect the CLI carried. The floor
+    is read from the server modules, never from the budget module under test.
+    """
+    from hal0.providers.container import _HEALTH_TIMEOUT_S
+    from hal0.slots.manager import SlotManager
+
+    terminate = float(SlotManager._terminate_timeout_s)
+    # swap is unload-then-load: one terminate, plus the health poll and the two
+    # sequential pre-load evictions ``preload_evict.admit`` may run.
+    floor = terminate + float(_HEALTH_TIMEOUT_S) + 2 * terminate
+
+    await admin.dispatch(
+        tool="model_swap",
+        args={"name": "primary", "model_id": "qwen3:0.6b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert mock_transport["timeout"] >= floor, (
+        f"model_swap forwarded at {mock_transport['timeout']}s, under the "
+        f"{floor}s server worst case"
+    )
+
+    # npu_backend_load's handler awaits SlotManager.load on the dynamic NPU
+    # slot in-request, so it blocks the same way and needs the same budget.
+    # It is gated, so the REST hop only happens once approved.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="npu_backend_load",
+        args={"model_id": "qwen3-4b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "npu_backend_load never reached REST"
+    assert mock_transport["timeout"] >= floor
+
+    # slot_delete unloads a running slot before removing it, so it blocks too.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="slot_delete",
+        args={"name": "scratch"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "slot_delete never reached REST"
+    # It can queue behind an in-flight load on that slot and then terminate,
+    # so the generic 30s forward timeout — exactly the terminate bound, with
+    # nothing left for the lock wait — is not enough.
+    assert mock_transport["timeout"] >= float(_HEALTH_TIMEOUT_S) + terminate
+
+    # capability_set drives the same state machine one level up: the route
+    # awaits CapabilityOrchestrator.apply, which awaits SlotManager.load /
+    # unload / swap inline. Budget the worst branch — swap — exactly as the
+    # slot verbs do; the 30s generic forward is #1832 for agents.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="capability_set",
+        args={"slot": "embed", "child": "embed", "model": "bge-small"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "capability_set never reached REST"
+    assert mock_transport["timeout"] >= floor, (
+        f"capability_set forwarded at {mock_transport['timeout']}s, under the "
+        f"{floor}s server worst case"
+    )
+
+    # stack_apply fans the same state machine out over a whole stack:
+    # StackApplyEngine.converge loads/swaps/restarts per entry and then unloads
+    # every residual running slot, all inside the one request. It must clear at
+    # least a multi-slot worst case, not the single-slot one.
+    mock_transport["timeout"] = None
+    pending = await admin.dispatch(
+        tool="stack_apply",
+        args={"slug": "daily-driver"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    await queue.approve(pending["approval_id"])
+    assert mock_transport["timeout"] is not None, "stack_apply never reached REST"
+    assert mock_transport["timeout"] >= 2 * floor, (
+        f"stack_apply forwarded at {mock_transport['timeout']}s — it converges a "
+        f"whole stack sequentially, so it cannot ride a single slot's {floor}s"
+    )
+
+    # A non-blocking read keeps the short generic default — the override is
+    # scoped to the lifecycle tools, not a blanket widening.
+    await admin.dispatch(
+        tool="slot_list",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert mock_transport["timeout"] < floor
+
+
 def test_server_stamps_hal0_version_not_sdk_version(queue: ApprovalQueue) -> None:
     """serverInfo.version must be hal0's own version, not the ``mcp`` SDK
     package version FastMCP falls back to when nothing sets it explicitly."""
@@ -1362,3 +1489,41 @@ def test_server_stamps_hal0_version_not_sdk_version(queue: ApprovalQueue) -> Non
 
     server = admin.build_server(approval_queue=queue, base_url="http://t")
     assert server._mcp_server.version == hal0.__version__
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_budget_bounds_the_read_not_the_connect(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """A multi-minute lifecycle budget must not also be the TCP connect bound.
+
+    ``httpx.AsyncClient(timeout=<float>)`` applies that value to every phase, so
+    widening the forward budget from 30s to the slot lifecycle budget (#1832)
+    also widened *connect*. Against a half-open hal0-api that turns a fast
+    failure into a multi-minute hang — for ``stack_apply``, a 96-minute one.
+    The CLI already splits these in ``hal0.cli._shared._client_timeout``; the
+    MCP bridge has to do the same.
+    """
+    await admin.dispatch(
+        tool="model_swap",
+        args={"name": "primary", "model_id": "qwen3:0.6b"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert mock_transport["connect_timeout"] == admin._CONNECT_TIMEOUT_S, (
+        f"connect bound is {mock_transport['connect_timeout']}s, expected the "
+        f"short {admin._CONNECT_TIMEOUT_S}s bound"
+    )
+    assert mock_transport["connect_timeout"] < mock_transport["timeout"], (
+        "connect must stay well under the read budget, otherwise the lifecycle "
+        "budget is being spent waiting for a socket that will never open"
+    )
+
+
+def test_max_slot_lifecycle_timeout_covers_every_bridge_tool() -> None:
+    """The advertised worst case must really be the worst of the table."""
+    assert admin.max_slot_lifecycle_timeout_s() == max(admin._SLOT_LIFECYCLE_TIMEOUT_S.values())
+    assert admin.max_slot_lifecycle_timeout_s() == admin._SLOT_LIFECYCLE_TIMEOUT_S["stack_apply"]

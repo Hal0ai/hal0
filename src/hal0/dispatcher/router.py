@@ -49,6 +49,7 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.dispatcher._capability_resolve import (
     _DEFAULT_MODEL,
     LegacyResolutionFailed,
+    guard_capability_mismatch,
     resolve_by_capability,
 )
 from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
@@ -131,9 +132,39 @@ _DISPATCHER_MAX_KEEPALIVE: int = 16
 # Non-streaming (direct) read timeout.  300 s was too generous: a stuck
 # upstream could hold a connection slot for 5 min, rapidly exhausting the
 # pool under even modest sustained load.  60 s is still well above the
-# longest expected non-streaming completion time (and streaming paths are
-# unaffected — the read timeout is not applied once the stream is open).
+# longest expected non-streaming completion time.  Streaming requests
+# override this per-request (see ``_forward_streaming``): while the stall
+# guard is active the httpx read timeout is disabled so the guard owns the
+# bound; with the guard fully disabled this read timeout is the per-read
+# transport backstop (httpx applies ``read`` to every body read, streaming
+# included, and raises ``httpx.ReadTimeout`` — NOT the builtin
+# ``TimeoutError``).
 _DIRECT_READ_TIMEOUT_S: float = 60.0
+
+# Streaming stall guard (#1893).  Before the guard, the only bound on an open
+# stream was httpx's per-read timeout, which tears the socket with a bare
+# ``httpx.ReadTimeout`` — no terminal frame, no ``[DONE]`` — and does nothing
+# at all against a *chatty* never-terminating upstream (the shape the Vulkan
+# garbage-token defect produces, ``finish_reason`` forever null): each read
+# resets the timer, so the stream was relayed forever.  The client (Hermes
+# ``--cli``, the dashboard, any OpenAI-compat caller) sat on an open socket
+# with no output and no diagnostic for as long as the operator waited.  Two
+# independent bounds close that:
+#
+#   * total   — wall clock from first byte of the response to end of stream.
+#   * idle    — the gap between two consecutive upstream chunks.
+#
+# Both are deliberately generous: prompt processing on a cold CPU-only slot is
+# genuinely silent for minutes, and a long agentic turn genuinely runs for
+# minutes.  The guard exists to convert "hangs forever" into "ends with a named
+# reason", not to police slow-but-working inference.  ``0`` disables a bound.
+_STREAM_TOTAL_TIMEOUT_S: float = 900.0
+_STREAM_IDLE_TIMEOUT_S: float = 300.0
+
+# Content types that get the operator-visible terminal frame.  Anything else
+# (binary audio, image bytes) is cut off silently — injecting SSE into a
+# non-SSE body would corrupt it.
+_SSE_CONTENT_TYPE = "text/event-stream"
 
 # Outgoing upstream path rewrites applied before forwarding.
 # Key: incoming /v1/* path (as-is from the client).
@@ -379,6 +410,11 @@ class Dispatcher:
                             (PLAN.md §5 Tier 2 — was hardcoded 4s, now 8s).
         direct_read_timeout_s: Non-streaming upstream read timeout in seconds.
                             Configurable via [dispatcher].direct_read_timeout_s.
+        stream_total_timeout_s: Max wall-clock duration of a relayed stream
+                            before the stall guard cuts it off (#1893).
+                            ``0`` disables the bound.
+        stream_idle_timeout_s: Max gap between two upstream chunks before the
+                            stall guard cuts the stream off.  ``0`` disables.
         prefetch_parallel_cap: Max concurrent cold-prefetch legs
                             ([dispatcher].prefetch_parallel_cap, default 4).
         cached_models:      Returns the cached /v1/models for an upstream.
@@ -394,6 +430,8 @@ class Dispatcher:
         *,
         prefetch_timeout_s: float = 8.0,  # TIER2 — configurable (was hardcoded 4s)
         direct_read_timeout_s: float = _DIRECT_READ_TIMEOUT_S,
+        stream_total_timeout_s: float = _STREAM_TOTAL_TIMEOUT_S,
+        stream_idle_timeout_s: float = _STREAM_IDLE_TIMEOUT_S,
         prefetch_parallel_cap: int = 4,  # max concurrent cold-prefetch legs
         cached_models: CachedModelsFn | None = None,
         is_online: IsOnlineFn | None = None,
@@ -419,6 +457,11 @@ class Dispatcher:
         self._owns_http_client: bool = http_client is None
         # Non-streaming read timeout — configurable via TOML (default 300s).
         self._direct_read_timeout_s: float = direct_read_timeout_s
+        # Streaming stall guard bounds (#1893) — configurable via TOML.
+        # Negative is coerced to 0 ("disabled") so a bad value can never make
+        # every stream cut off instantly.
+        self._stream_total_timeout_s: float = max(0.0, stream_total_timeout_s)
+        self._stream_idle_timeout_s: float = max(0.0, stream_idle_timeout_s)
         # SlotManager — when supplied, forward() wraps slot-kind calls in
         # SlotManager.serving() so the slot transitions READY/IDLE →
         # SERVING → READY around each /v1 request (task #10 SERVING).
@@ -427,9 +470,10 @@ class Dispatcher:
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            # Short connect/write/pool; non-streaming read capped at
-            # _direct_read_timeout_s (streaming paths ignore the read timeout
-            # once the first byte arrives — see httpx docs on stream=True).
+            # Short connect/write/pool; read capped at _direct_read_timeout_s.
+            # httpx applies ``read`` to *every* body read, streaming included —
+            # streaming requests therefore override it per-request in
+            # _forward_streaming so the stall guard owns the bound (#1893).
             # Connection limits match registry.py to prevent pool starvation
             # under sustained slow-upstream load (#415).
             self._http_client = httpx.AsyncClient(
@@ -474,7 +518,51 @@ class Dispatcher:
             NoRouteFound: No upstream could serve the request.
             UnknownUpstream: Registry pointed at a non-existent upstream.
             RegistryLoadFailed: Reading the registry raised.
+            CapabilityMismatch: The request resolved to a capability-only
+                slot (embed/rerank/tts/img) that structurally cannot serve
+                its chat/completions-shaped path (#1894).
         """
+        call = await self._resolve(request, body)
+        # ── Capability-mismatch choke point (#1894) ──────────────────────
+        # Every resolution branch above (container preemption, registry,
+        # warm-cache passthrough, cold-prefetch passthrough, capability/path
+        # routing) converges here, so the gate covers all of them at once: a
+        # chat/completions-shaped request that resolved to an embed/rerank/
+        # tts/img slot gets a typed 409 BEFORE any upstream call, instead of
+        # forward()'s verbatim passthrough leaking that server's raw 500.
+        # When nothing resolves (embed offline / fresh install), _resolve
+        # already raised the documented clean dispatch.no_route 404 — the
+        # gate never sees it, so that contract is preserved untouched.
+        try:
+            guard_capability_mismatch(
+                call.slot_name or call.container_slot_name,
+                request.url.path,
+                model=call.requested_model or call.resolved_model,
+                resolution_path=call.resolution_path,
+            )
+        except Hal0Error as exc:
+            log.warning(
+                "dispatch.capability_mismatch",
+                model=call.requested_model or call.resolved_model,
+                slot=call.slot_name or call.container_slot_name,
+                path=request.url.path,
+                resolution_path=call.resolution_path,
+                error=exc.message,
+            )
+            # Resolution DID complete before the gate fired — expose the
+            # resolved call on the exception so the metrics seam
+            # (RequestSeam.record_error) can attribute the failed request
+            # to its slot/model instead of writing a null-attributed row.
+            exc.upstream_call = call  # type: ignore[attr-defined]
+            raise
+        return call
+
+    async def _resolve(
+        self,
+        request: Request,
+        body: dict[str, Any] | None = None,
+    ) -> UpstreamCall:
+        """Run the resolution ladder (Steps 0-4) — see :meth:`dispatch`."""
         t0 = time.monotonic()
         if body is None:
             try:
@@ -1123,14 +1211,48 @@ class Dispatcher:
         # We open the stream eagerly so connect errors surface as
         # UpstreamUnavailable instead of leaking through StreamingResponse
         # as a generator-time exception that confuses the error middleware.
+        # While the stall guard is active, disable the client's per-read
+        # timeout for this request so the guard owns the bound outright.
+        # httpx applies ``read`` to every body read — streaming included —
+        # and raises ``httpx.ReadTimeout``, which is NOT a subclass of the
+        # builtin ``TimeoutError``; left in place it would race the guard
+        # and tear the stream with no terminal frame.  With the guard fully
+        # disabled (both bounds 0) the client's read timeout is kept as the
+        # transport backstop; _guarded_stream still converts its ReadTimeout
+        # into a diagnostic frame rather than a torn stream.
+        timeout: httpx.Timeout | httpx._client.UseClientDefault
+        guard_active = bool(self._stream_total_timeout_s or self._stream_idle_timeout_s)
+        if guard_active:
+            timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
+        else:
+            timeout = httpx.USE_CLIENT_DEFAULT
         try:
             req = client.build_request(
                 call.method,
                 call.target_url,
                 content=call.body or None,
                 headers=call.headers,
+                timeout=timeout,
             )
-            resp = await client.send(req, stream=True)
+            # client.send() blocks until response *headers* are on the wire,
+            # even with stream=True — and it's bound by the same ``read``
+            # timeout we just set.  With the guard active that's ``None``
+            # (the guard's own clocks in _guarded_stream own the body bound),
+            # which also disables the bound on *this* header wait.  Those
+            # clocks only start after send() returns, so an upstream that
+            # accepts the TCP connection and then wedges before writing a
+            # status line would hang forward() forever (#1918 review,
+            # blocking).  Bound the header wait explicitly, matching the
+            # pre-guard direct-request timeout — asyncio.TimeoutError is a
+            # builtin TimeoutError, itself an OSError subclass, so it falls
+            # into the same UpstreamUnavailable handling as a transport
+            # error below.
+            if guard_active:
+                resp = await asyncio.wait_for(
+                    client.send(req, stream=True), timeout=self._direct_read_timeout_s
+                )
+            else:
+                resp = await client.send(req, stream=True)
         except _DEAD_PORT_TRANSPORT_ERRORS as exc:
             self._guard_dead_port_image_mode(call)
             log.warning(
@@ -1167,19 +1289,102 @@ class Dispatcher:
                 },
             ) from exc
 
-        async def _iter() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in resp.aiter_raw():
-                    yield chunk
-            finally:
-                await resp.aclose()
-
         return StreamingResponse(
-            _iter(),
+            self._guarded_stream(resp, call),
             status_code=resp.status_code,
             headers=_filter_response_headers(resp.headers),
             media_type=resp.headers.get("content-type"),
         )
+
+    async def _guarded_stream(
+        self,
+        resp: httpx.Response,
+        call: UpstreamCall,
+    ) -> AsyncIterator[bytes]:
+        """Relay ``resp`` to the client under the stall guard (#1893).
+
+        Chunks pass through byte-for-byte.  What changes is that the relay is
+        now *bounded*: it ends when the upstream ends, when the total
+        wall-clock budget is spent, or when the gap since the last chunk
+        exceeds the idle budget — whichever comes first.  A stream that trips
+        a bound is closed and, if it is an OpenAI-compatible SSE stream,
+        terminated with one chunk naming the cutoff plus ``data: [DONE]``, so
+        the client's stream loop exits cleanly with the partial output it
+        already received instead of waiting forever on a socket that will
+        never close.
+        """
+        started = time.monotonic()
+        source = resp.aiter_raw().__aiter__()
+        stall: str | None = None
+        try:
+            while True:
+                budget = self._next_chunk_budget(started)
+                if budget is not None and budget <= 0.0:
+                    stall = "total"
+                    break
+                try:
+                    if budget is None:
+                        chunk = await source.__anext__()
+                    else:
+                        chunk = await asyncio.wait_for(source.__anext__(), timeout=budget)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    stall = self._stall_reason(started)
+                    break
+                except httpx.ReadTimeout:
+                    # Transport-level per-read timeout.  Reached only when the
+                    # guard is fully disabled (both bounds 0, so the client's
+                    # read timeout was kept) or when an injected http_client
+                    # carries its own read bound.  ``httpx.ReadTimeout`` is
+                    # NOT a subclass of builtin ``TimeoutError``; without this
+                    # clause it would escape after response headers are on the
+                    # wire — a torn stream with no diagnostic, the exact
+                    # outcome #1893 is about.
+                    stall = "read"
+                    break
+                yield chunk
+        finally:
+            await resp.aclose()
+
+        elapsed = round(time.monotonic() - started, 3)
+        log.warning(
+            "dispatch.stream_stall_guard_tripped",
+            upstream=call.upstream_name,
+            target=call.target_url,
+            reason=stall,
+            elapsed_s=elapsed,
+            total_timeout_s=self._stream_total_timeout_s,
+            idle_timeout_s=self._stream_idle_timeout_s,
+        )
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if content_type.startswith(_SSE_CONTENT_TYPE):
+            yield _stall_sse_frames(
+                reason=stall or "total",
+                elapsed_s=elapsed,
+                upstream=call.upstream_name,
+                total_timeout_s=self._stream_total_timeout_s,
+                idle_timeout_s=self._stream_idle_timeout_s,
+                endpoint=call.target_url,
+            )
+
+    def _next_chunk_budget(self, started: float) -> float | None:
+        """Seconds to wait for the next chunk, or ``None`` when unbounded."""
+        idle = self._stream_idle_timeout_s or None
+        if not self._stream_total_timeout_s:
+            return idle
+        remaining_total = self._stream_total_timeout_s - (time.monotonic() - started)
+        if idle is None:
+            return remaining_total
+        return min(idle, remaining_total)
+
+    def _stall_reason(self, started: float) -> str:
+        """Classify which bound a timed-out read hit."""
+        if not self._stream_total_timeout_s:
+            return "idle"
+        if (time.monotonic() - started) >= self._stream_total_timeout_s:
+            return "total"
+        return "idle"
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -1476,6 +1681,102 @@ def _join_url(upstream_url: str, request_path: str) -> str:
 def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
     """Drop hop-by-hop and length headers so Starlette can recompute them."""
     return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS}
+
+
+_STALL_MESSAGES = {
+    "total": (
+        "upstream stream exceeded the {total_timeout_s:g}s total budget "
+        "without terminating (stall guard)"
+    ),
+    "idle": ("upstream stream sent nothing for {idle_timeout_s:g}s (stall guard)"),
+    "read": ("upstream stream read timed out at the transport (stall guard)"),
+}
+
+
+def _stall_sse_frames(
+    *,
+    reason: str,
+    elapsed_s: float,
+    upstream: str,
+    total_timeout_s: float,
+    idle_timeout_s: float,
+    endpoint: str = "",
+) -> bytes:
+    """Build the terminal SSE frames for a stall-guard cutoff (#1893).
+
+    Shaped as a normal stream chunk for the endpoint being relayed — a
+    ``chat.completion.chunk`` with ``choices[].delta`` for
+    ``/chat/completions``, a ``text_completion`` chunk with ``choices[].text``
+    for the pre-chat ``/completions`` — so every OpenAI-compatible client
+    handles it without special-casing:
+
+    * the content field carries a human-readable line — the operator sees
+      *something* rather than a silent terminal, which is the whole point.
+    * ``finish_reason`` is ``"length"``, the closest standard enum member for
+      "cut off at a limit"; clients that branch on the enum terminate cleanly.
+      The precise cause lives in the ``x_hal0_stall`` extension so nothing is
+      lost to that approximation.
+    * ``data: [DONE]`` ends the stream loop for clients that wait for the
+      sentinel rather than for the socket to close.
+
+    The frames start with a blank line: ``aiter_raw()`` yields transport
+    chunks, not complete SSE events, so the upstream may have stalled midway
+    through a ``data:`` line.  The leading separator terminates any such
+    partial event so the diagnostic frame always parses on its own; before a
+    complete event a stray blank line is a no-op for every SSE parser.
+    """
+    detail = _STALL_MESSAGES.get(reason, _STALL_MESSAGES["total"]).format(
+        total_timeout_s=total_timeout_s,
+        idle_timeout_s=idle_timeout_s,
+    )
+    text = (
+        f"\n\n[hal0] stall guard: {detail} after {elapsed_s:g}s "
+        f"(upstream {upstream!r}). Output above is partial."
+    )
+    x_hal0_stall = {
+        "reason": reason,
+        "elapsed_s": elapsed_s,
+        "upstream": upstream,
+        "total_timeout_s": total_timeout_s,
+        "idle_timeout_s": idle_timeout_s,
+        "detail": detail,
+    }
+    # Legacy /v1/completions streams carry ``choices[].text``; everything else
+    # SSE-shaped through this dispatcher is chat-completions-compatible.
+    legacy_completions = "/completions" in endpoint and "/chat/completions" not in endpoint
+    chunk: dict[str, Any]
+    if legacy_completions:
+        chunk = {
+            "id": "hal0-stall-guard",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": "",
+            "choices": [
+                {
+                    "index": 0,
+                    "text": text,
+                    "logprobs": None,
+                    "finish_reason": "length",
+                }
+            ],
+            "x_hal0_stall": x_hal0_stall,
+        }
+    else:
+        chunk = {
+            "id": "hal0-stall-guard",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": text},
+                    "finish_reason": "length",
+                }
+            ],
+            "x_hal0_stall": x_hal0_stall,
+        }
+    return (f"\n\ndata: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n").encode()
 
 
 __all__ = [

@@ -74,14 +74,19 @@ from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
 from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
+from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
     nvidia_cdi_devices,
+    require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
     resolve_gpu_group_ids,
+    resolve_image_runtime_uid,
+    runtime_lane_for_provider,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.slot_lifecycle_budget import HEALTH_TIMEOUT_S
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, resolve_argv
 from hal0.slots.naming import (
@@ -90,7 +95,8 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.system.seam import SystemCtlSeam
+from hal0.slots.state import SlotSpawnFailed
+from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -288,7 +294,9 @@ def _resolve_image_ref(
     Resolution (spec-hw-slot-ownership §3 — collapses the prior §7.1b chain)::
 
         image_default = RUNNER_IMAGES[slot.BINARY]     (code registry)
-        effective     = slot.image_pin or image_default
+        effective     = slot.image_pin
+                        or [slots].default_images[family]
+                        or image_default
 
       1. ``slot_cfg["image_pin"]`` — the single canonical escape hatch (debug
          build / A-B / rollback-to-last-known-good). A non-empty string is
@@ -296,7 +304,14 @@ def _resolve_image_ref(
          ``_resolve_image_ref`` tiers 1-2 (``slot.image`` / ``[slot].image``)
          to a first-class typed field; those old nestings are folded into
          ``image_pin`` by the migration lane, not read here.
-      2. ``image_default`` — :func:`hal0.runners.resolve_runner_image` of the
+      2. ``[slots].default_images[<family>]`` — the per-family operator
+         override (runner-image-catalogue v2), keyed by the effective
+         runner's :data:`~hal0.runners.RUNNER_IMAGES` key and read live via
+         :func:`_slot_default_images`. Sits ABOVE the whole
+         :func:`hal0.runners.resolve_runner_image` chain (env var / manifest
+         pin / baked default): a default the operator set in the UI is
+         box-wide intent, only the per-slot ``image_pin`` outranks it.
+      3. ``image_default`` — :func:`hal0.runners.resolve_runner_image` of the
          :func:`_effective_runner` (the slot's ``binary`` when set, else the
          HW-gated default via :func:`hal0.runners.runner_for_backend`). Same
          runner :func:`_resolve_llama_scalars` uses to gate mtp/jinja, so the
@@ -321,7 +336,11 @@ def _resolve_image_ref(
     # image_default = RUNNER_IMAGES[slot.BINARY] (or the HW-gated default).
     from hal0.runners import resolve_runner_image
 
-    return resolve_runner_image(_effective_runner(slot_cfg, profile))
+    runner = _effective_runner(slot_cfg, profile)
+    override = _slot_default_images().get(runner.key)
+    if isinstance(override, str) and override:
+        return override  # [slots].default_images — operator family default
+    return resolve_runner_image(runner)
 
 
 def _profile_image_and_flags(
@@ -489,6 +508,23 @@ def _container_runtime() -> str:
     raise RuntimeError("no podman runtime found; install podman or set HAL0_CONTAINER_RUNTIME")
 
 
+def _decode_argv_json(raw: str) -> list[str] | None:
+    """Decode a podman ``{{json .Config.Cmd}}`` payload into an argv list.
+
+    Shared by :meth:`ContainerProvider.running_argv`'s two read paths (the
+    ``hal0-podman-ro`` seam and the rootless fallback) so both apply the same
+    shape check. ``None`` on anything that is not a JSON array — status
+    callers treat missing data as "unknown", never as drift.
+    """
+    try:
+        payload = json.loads(raw.strip())
+    except ValueError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [str(part) for part in payload]
+
+
 def _slot_publish_host() -> str:
     """Live ``[slots].publish_host`` — the address slot ports publish on.
 
@@ -505,6 +541,27 @@ def _slot_publish_host() -> str:
     except Exception:
         log.warning("container.publish_host_load_failed", exc_info=True)
         return "127.0.0.1"
+
+
+def _slot_default_images() -> Mapping[str, str]:
+    """Live ``[slots].default_images`` — per-family operator image overrides.
+
+    Runner-image-catalogue v2: an operator can point a runner family (a
+    ``hal0.runners.RUNNER_IMAGES`` key) at a specific image ref from the
+    runner-images page; :func:`_resolve_image_ref` honors it for every slot
+    of that family that carries no ``image_pin``. Read fresh each resolve —
+    same idiom as :func:`_slot_publish_host` — so a Settings change lands on
+    the next slot (re)start without an api process bounce. Fail-soft to ``{}``:
+    a malformed/unreadable hal0.toml must never wedge a slot launch.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        overrides = load_hal0_config().slots.default_images
+        return overrides if isinstance(overrides, Mapping) else {}
+    except Exception:
+        log.warning("container.default_images_load_failed", exc_info=True)
+        return {}
 
 
 def _slot_network_mode() -> str:
@@ -585,8 +642,11 @@ def _loopback_fence_command(command: list[str]) -> list[str]:
 
 
 # Health-check tuning: poll GET /health on the slot port.
+# The overall bound lives in hal0.slot_lifecycle_budget so the clients of the
+# blocking lifecycle endpoints derive their read timeout from it instead of
+# hardcoding a number this module can silently outgrow (#1832).
 _HEALTH_POLL_INTERVAL_S = 2.0
-_HEALTH_TIMEOUT_S = 180.0
+_HEALTH_TIMEOUT_S = HEALTH_TIMEOUT_S
 _HEALTH_REQUEST_TIMEOUT_S = 3.0
 
 #: Wall-clock bound on the teardown systemd verbs issued by
@@ -707,16 +767,30 @@ def _render_quadlet_from_plan(
         # slot's restart rate-limiting (install-validation m2, halo150,
         # 2026-07-19). Restart=/RestartSec= stay in [Service] below — those
         # ARE Service-section keys.
-        "StartLimitIntervalSec=300",
-        "StartLimitBurst=5",
+        #
+        # Window/burst are sized for the RestartSteps= ramp below: ~10
+        # attempts spread over ~20 minutes (5s → 300s geometric), so a
+        # transient cause — a neighbour hogging the GPU, a cold mount, a
+        # slow image pull — gets real time to clear before systemd gives
+        # up. The old 300s/5 pairing burned all 5 attempts in ~16s and
+        # LATCHED the unit in ``failed`` (#1424): slot 15 stayed down for
+        # hours after the actual contention had passed.
+        "StartLimitIntervalSec=1800",
+        "StartLimitBurst=10",
         "",
         "[Container]",
         f"Image={plan.image}",
         f"ContainerName={container_name}",
-        # ``LogDriver=none`` keeps conmon→journal the single sink so
-        # ``journalctl -u`` isn't double-fed (podman's own journald driver
-        # would tag a second copy — the old B3 note).
-        "LogDriver=none",
+        # ``LogDriver=passthrough`` hands the container's stdout/stderr to
+        # the unit itself, which systemd journals exactly once. The old
+        # ``LogDriver=none`` assumed conmon→journal held the streams, but
+        # the Quadlet service runs podman detached: the client exits after
+        # echoing the container id, conmon holds the real streams, and with
+        # podman's own sink disabled there was NO sink at all — every slot
+        # produced zero container output and a crashing model's actual
+        # error was invisible. (#721/B3 was a real double-logging bug; the
+        # wrong copy was removed.)
+        "LogDriver=passthrough",
     ]
     # ── ONE quadlet render for every substrate (halo150/143 O8+O11) ──────
     # DELIBERATE: no native AutoRemove=/GroupAdd=/SecurityOpt= keys and no
@@ -814,7 +888,19 @@ def _render_quadlet_from_plan(
             "",
             "[Service]",
             "Restart=always",
-            "RestartSec=3",
+            # Geometric restart ramp (systemd ≥ 254; the lxc105 reference
+            # substrate runs 255): 5s → 10 → 20 → 39 → 77 → 152 → 300,
+            # capped at RestartMaxDelaySec. Sized together with the
+            # StartLimit window in [Unit] above.
+            "RestartSec=5",
+            "RestartSteps=6",
+            "RestartMaxDelaySec=300",
+            # #2037 fail-fast: the runner entrypoint translates a death
+            # before /health ever answered into exit 64 ("died during model
+            # load" — corrupt GGUF, bogus flag), which would otherwise burn
+            # the whole ramp above on a doomed model. Old images never exit
+            # 64, so this is inert against them — safe version skew.
+            "RestartPreventExitStatus=64",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
@@ -1195,6 +1281,12 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
 # GGUF arch max, cap dense models so an unconfigured slot can't request an
 # impractically large KV cache, and otherwise use a safe floor. Mirrors
 # hal0.hardware.recommend's installer-side policy.
+#
+# _CTX_DENSE_CAP is an UNCONFIGURED-slot guard, not a hardware fact — see
+# _dense_cap_for. A slot that pins its own [model].context_size is by
+# definition configured, and applying this blanket constant *underneath* that
+# number is what shipped every fresh install at 32768 despite three seeds
+# asking for 65536 (#1827).
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
 
@@ -1287,7 +1379,7 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
             return int(md["context_length"])
         except (TypeError, ValueError):
             pass
-    model_id = model_info.get("_model_key")
+    model_id = model_info.get("_model_key") or model_info.get("id")
     if model_id:
         try:
             from hal0.registry.curated import get_curated
@@ -1298,6 +1390,90 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
         if curated is not None and curated.context_length:
             return int(curated.context_length)
     return None
+
+
+def _slot_ceiling_int(slot_ceiling: Any) -> int | None:
+    """The slot's ``[model].context_size`` as an int, or None when unusable.
+
+    The slot table reaches :func:`_resolve_context_size` as a raw dict straight
+    off the TOML — no schema validation between disk and here — so a
+    hand-edited ``context_size = "64k"`` used to take the launch path out with a
+    ``ValueError``. Unusable means ABSENT: the slot simply expresses no ceiling,
+    exactly like a slot that never wrote one.
+
+    Implausible means unusable too, on the same
+    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]`` range the MODEL path screens
+    against (:func:`_model_declared_ctx`). This matters more now than it did
+    when the ceiling could only clamp down: under #1827 the ceiling REPLACES
+    the dense cap on the derived path, so a hand-written ``context_size =
+    99999999`` (or a row persisted before the API's
+    ``model.context_size_out_of_range`` screen existed) would hand a 262144-
+    native model the very impractically-large KV cache :data:`_CTX_DENSE_CAP`
+    exists to prevent — #1108's first-warm OOM. ``0`` and ``-1`` are screened
+    here for the same reason: they are not a ceiling of zero, they are a slot
+    that never wrote one, and passing them through to ``--ctx-size`` is a slot
+    that never warms.
+    """
+    if slot_ceiling is None:
+        return None
+    try:
+        value = int(slot_ceiling)
+    except (TypeError, ValueError):
+        log.warning(
+            "slot.context_size_unparseable_ceiling",
+            extra={
+                "raw": repr(slot_ceiling),
+                "hint": "the slot's [model].context_size is not a number; ignoring it "
+                "and letting the model's own window decide. Fix it in the slot drawer.",
+            },
+        )
+        return None
+    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
+        log.warning(
+            "slot.context_size_implausible_ceiling",
+            extra={
+                "value": value,
+                "min": _CTX_MIN_PLAUSIBLE,
+                "max": _CTX_MAX_PLAUSIBLE,
+                "hint": "the slot's [model].context_size is outside the plausible range; "
+                "ignoring it and letting the model's own window decide. Fix it in the "
+                "slot drawer.",
+            },
+        )
+        return None
+    return value
+
+
+def _dense_cap_for(slot_ceiling: int | None) -> int:
+    """The cap to apply to a DERIVED (native/curated) window for this slot.
+
+    :data:`_CTX_DENSE_CAP` exists so an **unconfigured** slot cannot ask for an
+    impractically large KV cache off the back of a 131072/262144-token arch max.
+    It is a blanket constant: hardware-independent, box-independent and —
+    the bug — configuration-independent.
+
+    #1827: a slot with an on-disk ``[model].context_size`` is *configured*. That
+    number was written either by the installer as a hardware budget
+    (:func:`hal0.install.orchestrate._clamp_context_size`), by a shipped seed, or
+    by an operator in the slot drawer. Applying the 32768 constant underneath it
+    meant a fresh install resolved every installer-pulled model to 32768 no
+    matter what the slot asked for — ``installer/etc-hal0/slots/{agent,brain,
+    utility}.toml`` all ask for 65536, and all three silently launched (and,
+    post-#1802, honestly advertised) 32768. That is below the bundled Hermes
+    agent's hard 64,000 floor, so ``hermes -z`` could not start on a box
+    straight out of ``install.sh``.
+
+    So: when a ceiling is on disk, it *is* the cap. The result stays bounded
+    twice over — never above the model's own native window, and never above the
+    ceiling itself (the caller's clamp) — so a slot can only reach a window that
+    BOTH the model supports and the box was explicitly configured for. With no
+    ceiling on disk nothing is configured and the blanket cap still applies,
+    which keeps :data:`hal0.slots.capacity._DEFAULT_CTX_TOKENS` (the
+    unpinned-slot budget estimate) correct as written.
+    """
+    if slot_ceiling is None:
+        return _CTX_DENSE_CAP
+    return max(_CTX_DENSE_CAP, slot_ceiling)
 
 
 def _resolve_context_size(
@@ -1318,10 +1494,11 @@ def _resolve_context_size(
        but an unparseable or implausible value is ignored rather than launched
        (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
     2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
-       window (:func:`_native_ctx`), dense-capped at :data:`_CTX_DENSE_CAP`.
-       Still a model fact, but a *derived* one, so an explicit choice outranks
-       it — the reverse of the pre-1.0 order, which let a 262144-token arch max
-       shadow a deliberate ``defaults.context_size``.
+       window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
+       (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
+       is higher — #1827). Still a model fact, but a *derived* one, so an
+       explicit choice outranks it — the reverse of the pre-1.0 order, which let
+       a 262144-token arch max shadow a deliberate ``defaults.context_size``.
     3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
 
     ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
@@ -1337,29 +1514,37 @@ def _resolve_context_size(
 
     Net effect on a box that already has a slot-level ``context_size`` on disk:
     where the clamp was below the model's window (the installer's case) the
-    effective context is UNCHANGED; where the slot was silently inflating the
-    model's window (the dual-ownership bug) it drops to what the model asked
-    for. The effective context can therefore only stay the same or shrink —
-    never grow — so no box gains a KV cache it cannot hold. Every case where
-    the ceiling actually changes the answer is logged, so the change is visible
-    in ``journalctl -u hal0-api`` rather than silent.
+    effective context is UNCHANGED; where the slot was silently inflating a
+    model's EXPLICIT window (the dual-ownership bug) it drops to what the model
+    asked for. The one case where the ceiling can RAISE the answer is the
+    *derived* window (path 2): there the ceiling replaces the blanket dense cap
+    instead of being applied under it (:func:`_dense_cap_for`, #1827), so the
+    slot gets the window its own config asked for — still bounded by the
+    model's native window, still never above the ceiling, and never reached at
+    all on a slot with no ceiling written. Every case where the ceiling changes
+    the answer is logged, so the change is visible in ``journalctl -u hal0-api``
+    rather than silent.
 
     Guarantees a non-None int.
     """
+    ceiling = _slot_ceiling_int(slot_ceiling)
+
     declared = _model_declared_ctx(model_info)
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
         native = _native_ctx(model_info)
         if native:
-            resolved, source = min(native, _CTX_DENSE_CAP), "model.metadata.context_length"
+            resolved, source = (
+                min(native, _dense_cap_for(ceiling)),
+                "model.metadata.context_length",
+            )
         else:
             resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
 
-    if slot_ceiling is None:
+    if ceiling is None:
         return resolved
 
-    ceiling = int(slot_ceiling)
     if ceiling < resolved:
         log.info(
             "slot.context_size_clamped_by_slot",
@@ -1376,6 +1561,13 @@ def _resolve_context_size(
         )
         return ceiling
     if ceiling > resolved:
+        # Two different situations share this branch, and the hint has to say
+        # which one it is. On the DERIVED path the ceiling already won as far
+        # as it can (#1827) and the remaining limit is the model's real native
+        # window — telling that operator to "set the window on the model" would
+        # invite them to write a defaults.context_size ABOVE what the GGUF
+        # actually supports, which is not dense-capped.
+        derived = source == "model.metadata.context_length"
         log.warning(
             "slot.context_size_no_longer_overrides",
             extra={
@@ -1384,9 +1576,15 @@ def _resolve_context_size(
                 "model_ctx_source": source,
                 "slot_context_size": ceiling,
                 "effective": resolved,
-                "hint": "the MODEL owns context size in 1.0; this slot's larger "
-                "[model].context_size no longer wins. Set the window on the model to "
-                "restore it.",
+                "hint": (
+                    "clamped to the model's native window; this slot's larger "
+                    "[model].context_size cannot conjure context the model does not "
+                    "support."
+                    if derived
+                    else "the MODEL owns context size in 1.0; this slot's larger "
+                    "[model].context_size no longer wins. Set the window on the model to "
+                    "restore it."
+                ),
             },
         )
     return resolved
@@ -1500,6 +1698,19 @@ def resolve_effective_context_size(
                 model_info = entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
             except Exception:
                 model_info = {}
+    # The launch path stamps ``_model_key`` onto the info dict it builds
+    # (:mod:`hal0.slots.manager`, :func:`_best_effort_model_info`);
+    # ``Model.model_dump()`` does NOT — it is not a
+    # field on :class:`hal0.registry.model.Model` and pydantic would not accept
+    # a leading-underscore one. Without this line the read-only surfaces reach
+    # :func:`_native_ctx` with no model id, so the #1617 curated backfill can
+    # never fire here and an empty-``metadata`` registry row advertises the
+    # 8192 safe floor while llama-server is launched with the real window.
+    # That is the Hermes-visible number (``/v1/models``,
+    # ``api.__init__._slot_ctx_size``, the SlotView aggregator), so the gate it
+    # refuses on was the advertised one, not the served one.
+    if model_id:
+        model_info.setdefault("_model_key", model_id)
     return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
 
 
@@ -1858,6 +2069,13 @@ class ContainerProvider(Provider):
 
     name = "container"
 
+    #: The unified ROCmFPX runner: HIP first, poisoned Vulkan fallback second
+    #: (#1888). ``runtime_lane_for_provider`` never actually sees this class —
+    #: ``_spec_provider_for`` returns ``None`` for the llama-server default and
+    #: that maps to the richer ``"llama"`` lane — but declaring it keeps every
+    #: possible input to that translation fail-CLOSED rather than fail-open.
+    gpu_runtime_needs_rocm = True
+
     # ── Provider ABC stubs (not used in the container path) ──────────────────
 
     def build_env(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> dict[str, str]:
@@ -2074,8 +2292,19 @@ class ContainerProvider(Provider):
                     "ok": ok,
                     "status": "healthy" if ok else f"http_{models_resp.status_code}",
                 }
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            return {"ok": False, "status": str(exc)}
+        except httpx.TransportError as exc:
+            # TransportError is the base class for ConnectError,
+            # TimeoutException, ReadError, WriteError, etc. — every failure
+            # mode where the connection dies without producing an HTTP
+            # response (#1898: a runner that binds its port and then dies
+            # mid-read raises ReadError, whose str() is empty; that escaped
+            # the old narrow (ConnectError, TimeoutException) catch as an
+            # unhandled exception, abandoning wait_ready()'s poll loop after
+            # a single strike instead of reporting "unhealthy" and retrying
+            # for the full window). status falls back to the exception's
+            # class name so metadata.message is never empty even when
+            # str(exc) is "".
+            return {"ok": False, "status": str(exc) or type(exc).__name__}
 
     async def wait_ready(self, port: int) -> None:
         """Poll /health until 200 or HEALTH_TIMEOUT_S exceeded.
@@ -2132,7 +2361,32 @@ class ContainerProvider(Provider):
         # path every load/restart/swap goes through, before the start. No-op
         # for a healthy unit.
         self.reset_failed(slot_name)
-        self._run("systemctl", "restart", self._unit_name(slot_name))
+        unit = self._unit_name(slot_name)
+        try:
+            self._run("systemctl", "restart", unit)
+        except subprocess.CalledProcessError as exc:
+            # #1424 facet 2: raw, this is not a Hal0Error — it falls through
+            # SlotManager.load()'s re-raise into the API's generic Exception
+            # handler as 500 ``system.internal``, and ``str(exc)`` (the full
+            # sudo seam argv) is what gets stamped into the slot's
+            # user-visible ``metadata.message``. Wrap it typed: the envelope
+            # is ``slot.spawn_failed`` and the message is systemd's failure
+            # reason (the #1791 probe), never the argv. The raw error stays
+            # on the cause chain for logs.
+            reason = self.unit_failure_reason(slot_name)
+            if not reason:
+                # Probe read nothing terminal (seam denied the verb, race
+                # with systemd, …) — still name the unit and the next step,
+                # not the command line.
+                reason = (
+                    f"systemctl restart {unit} failed (exit {exc.returncode}) "
+                    f"— see `journalctl -u {unit}`"
+                )
+            log.error(
+                "container.unit_start_failed",
+                extra={"slot": slot_name, "unit": unit, "reason": reason},
+            )
+            raise SlotSpawnFailed(reason, details={"slot": slot_name}) from exc
         log.info(
             "container.unit_started",
             extra={"slot": slot_name, "unit": self._unit_name(slot_name)},
@@ -2190,16 +2444,66 @@ class ContainerProvider(Provider):
 
         Single launch path: unit text comes from the one renderer
         :meth:`_render_quadlet_text` (shared with the update-time re-render), and
-        this method layers on the install-only steps — the NPU loud-fail guard
-        plus writing the Quadlet file and starting the service.
+        this method layers on the install-only steps — the NPU and ROCm
+        loud-fail guards plus writing the Quadlet file and starting the service.
         """
         token = slot_instance_token(slot_cfg)
+
+        # The slot's runtime family, resolved ONCE for both loud-fail guards
+        # below (and re-resolved inside _render_quadlet_text, which owns the
+        # dispatch). ``None`` means the default llama-server GPU provider.
+        spec_provider = _spec_provider_for(slot_cfg)
+
+        # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
+        # the ROCmFPX runner would silently fall back to its Vulkan backend,
+        # which emits invalid tokens for every model while every health
+        # surface reads green (#1888). Enforced HERE (the load path) rather
+        # than in ``container_spec`` so unit rendering, previews and status
+        # renders stay host-independent.
+        #
+        # The lane — not the device string — decides (#1941). ``device =
+        # "gpu-vulkan"`` is the catalog's GPU-row label for EVERY non-llama
+        # runtime, so it says nothing about the image: Kokoro and Moonshine
+        # are CPU ONNX images that need no compute node, while ComfyUI and
+        # Qwen3-TTS are ROCm builds that do. Each provider declares
+        # ``gpu_runtime_needs_rocm``; ``runtime_lane_for_provider`` turns that
+        # into the lane.
+        #
+        # The guard needs TWO further facts about this launch, and they are
+        # different questions about the same image.
+        #
+        # WHICH IMAGE (#1948 Phase D): the Vulkan LLM lane is supported again,
+        # but only on a runner whose Vulkan backend passed the §3-C validation
+        # matrix — the ade07ba lineage never can. So the guard needs the ref
+        # this slot will ACTUALLY launch, ``image_pin`` included.
+        #
+        # WHICH IDENTITY (#1953): given the lane needs the compute node, which
+        # uid opens it. Derived from the image rather than assumed root —
+        # rootful podman still honours a USER-declaring image, and assuming
+        # root there would fail OPEN into the poisoned lane the guard blocks.
+        #
+        # Resolved ONCE into a local. ``_resolve_image_ref`` is cheap (a dict
+        # read plus a registry lookup, no subprocess), so hoisting it costs
+        # nothing and removes the chance of the two arguments describing
+        # different images. What is expensive is ``resolve_image_runtime_uid``
+        # — a sudo round-trip plus two podman calls — so THAT stays behind the
+        # lambda: the guard returns early for cpu/npu/gpu-cuda and for
+        # non-ROCm lanes, and charging every slot on the box for a probe only
+        # the gated ones need is what the laziness exists to avoid.
+        resolved_image = _resolve_image_ref(slot_cfg, None)
+        require_kfd_for_gpu_slot(
+            str(slot_cfg.get("name", "") or token),
+            device=str(slot_cfg.get("device", "") or ""),
+            runtime_lane=runtime_lane_for_provider(spec_provider),
+            image=resolved_image,
+            runner_uid=lambda: resolve_image_runtime_uid(resolved_image),
+        )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
         # self-managed and need no registry tag — the check fires ONLY when
         # device == "npu" and the slot resolves to a spec provider.
-        if str(slot_cfg.get("device", "")) == "npu" and _spec_provider_for(slot_cfg) is not None:
+        if str(slot_cfg.get("device", "")) == "npu" and spec_provider is not None:
             model_table = slot_cfg.get("model") or {}
             tag = (
                 model_info.get("flm_tag")
@@ -2305,6 +2609,18 @@ class ContainerProvider(Provider):
         if unit_path.exists():
             _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
             self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
+        # A DELIBERATE stop must not leave the unit parked in `failed`.
+        # The bounded stop above escalates to SIGKILL (exit 137) — and a
+        # container that traps SIGTERM exits 143 — so systemd records
+        # Result=exit-code and keeps the failed unit resident in memory
+        # even after the Quadlet source is gone (daemon-reload does NOT
+        # clear failed runtime state, contrary to what this teardown used
+        # to assume). The slot-view status probe reads that as "crashed"
+        # and the dashboard painted every cleanly-stopped slot red.
+        # reset-failed marks the stop as intentional; a unit that failed
+        # on its own (crash, OOM) never passes through this teardown and
+        # stays `failed` → red.
+        self._run("systemctl", "reset-failed", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
 
     def is_active(self, slot: Mapping[str, Any] | str) -> bool:
         """Return True if the slot's systemd unit is in an active state.
@@ -2405,23 +2721,98 @@ class ContainerProvider(Provider):
         """
         self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
 
-    def image_present(self, image: str) -> bool:
-        """Return True if ``image`` is in the local container image store.
+    def image_present(self, image: str) -> bool | None:
+        """Is ``image`` in the container image store slots use? Tri-state.
 
-        Uses ``<runtime> image inspect`` (exit 0 = present, non-zero = missing).
+        ``True`` / ``False`` are answers: something actually looked in the
+        right store. ``None`` means **nobody could look** — the rootful seam
+        was unusable and this process has no other store worth asking.
+
+        #1889: asks ROOT's store first, through the ``hal0-podman-ro``
+        ``image-exists`` seam. Slots run ROOTFUL podman (Quadlet), while
+        hal0-api runs as the unprivileged ``hal0`` user with no subuid ranges,
+        so the bare ``<runtime> image inspect`` below reads hal0's own
+        ROOTLESS store — a different store, which never contains a slot image.
+        That is why ``image_status`` was ``"missing"`` for every running,
+        healthy slot on every standard install. The seam reports ``unknown``
+        when it cannot answer, and only then do we fall back to the rootless
+        read — and only when this process is NOT the hal0 service user. On a
+        provisioned box the rootless store is definitionally the wrong store,
+        so consulting it after a seam failure would collapse "podman is
+        broken / the grant is missing" (wrapper rc 66 / sudo rc 1) back into
+        an authoritative-looking "missing", which is #1889 with extra steps.
+
+        #1939: and so is answering ``False`` there, which is what this method
+        used to do because its contract was a bool. It is now a tri-state, and
+        every ``None`` is logged at WARNING with the seam's own reason —
+        ``image_status: "unknown"`` tells a reader the answer is untrustworthy,
+        the journal line tells an operator which grant or store to go fix.
+
+        In a dev checkout, where hal0-api runs as the operator, the rootless
+        store IS the store slots use, so the fallback is correct there — but
+        only for the one reason that actually means "we never asked because
+        this is not a provisioned box" (``not-service-user``). Any other
+        reason means the seam was tried, or that our own mirror of the
+        wrapper's validator rejected the ref — and a ref this side rejects is
+        one podman would reject too, so the rootless store has nothing to add.
+
+        The fallback probe is ``podman image exists``, NOT ``image inspect``,
+        for exactly the reason the wrapper header gives: ``exists`` has the
+        contract rc 0 = yes / rc 1 = no / anything else = operational failure,
+        while ``inspect`` collapses "not found" and "podman is broken" into a
+        single non-zero rc. Using ``inspect`` here would reintroduce the same
+        conflation on dev boxes that the seam removed on deployed ones.
+
         Runs synchronously — callers must dispatch to a thread executor when
         called from an async context.
         """
+        probe = podman_introspect.image_presence(image)
+        if probe.presence != "unknown":
+            return probe.presence == "present"
+        if probe.reason != "not-service-user":
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s reason=%s — the rootful "
+                "seam did not answer; reporting image_status=unknown rather than consulting "
+                "the unrelated rootless store (see `hal0 doctor seams`)",
+                image,
+                probe.reason,
+            )
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s reason=podman-absent — "
+                "no container runtime on this box, so nothing can be asked about the image; "
+                "reporting image_status=unknown",
+                image,
+            )
+            return None
+        try:
+            result = subprocess.run(
+                [runtime, "image", "exists", image],
+                capture_output=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(
+                "hal0.podman_ro.image_present_unanswered image=%s reason=seam-error error=%s — "
+                "the local podman could not be run; reporting image_status=unknown",
+                image,
+                exc,
+            )
+            return None
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
             return False
-        result = subprocess.run(
-            [runtime, "image", "inspect", image],
-            capture_output=True,
-            check=False,
+        log.warning(
+            "hal0.podman_ro.image_present_unanswered image=%s reason=podman-failed rc=%s — "
+            "the local podman ran but failed operationally; reporting image_status=unknown",
+            image,
+            result.returncode,
         )
-        return result.returncode == 0
+        return None
 
     def running_image(self, slot: Mapping[str, Any] | str) -> str | None:
         """Return the image ref of the running container for a slot (#663).
@@ -2436,12 +2827,30 @@ class ContainerProvider(Provider):
         when the container is not running or inspect fails. Reads stdout only —
         podman emits benign device warnings to stderr under LXC. Never raises;
         callers dispatch to a thread executor from the async status path.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-image`` seam
+        first, for the same reason as :meth:`image_present` — the slot's
+        container lives in ROOT's podman store, so hal0-api's own rootless
+        inspect never found it and ``actual_image`` was always ``null``. The
+        seam takes the bare instance TOKEN and builds ``hal0-slot-<token>``
+        root-side; the rootless path below is the dev/CI fallback.
         """
+        token = _artefact_token(slot)
+        seam_ref = podman_introspect.container_image(token)
+        if seam_ref:
+            return seam_ref
+        if is_hal0_service_user():
+            # Same reasoning as image_present: on a provisioned box the
+            # rootless store cannot hold this container, so asking it is a
+            # wasted spawn in the status hot path that can only ever answer
+            # None — or, worse, answer about a same-named container that is
+            # not this slot's.
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
@@ -2465,12 +2874,23 @@ class ContainerProvider(Provider):
         as :meth:`running_image` (#1417). Returns None when the container is
         not running, inspect fails, or the runtime returns an unexpected shape.
         Never raises; status callers treat missing data as "unknown", not drift.
+
+        #1889: routed through the ``hal0-podman-ro`` ``container-argv`` seam
+        first, same rationale as :meth:`running_image`.
         """
+        token = _artefact_token(slot)
+        seam_json = podman_introspect.container_argv(token)
+        if seam_json is not None:
+            parsed = _decode_argv_json(seam_json)
+            if parsed is not None:
+                return parsed
+        if is_hal0_service_user():
+            return None
         try:
             runtime = _container_runtime()
         except RuntimeError:
             return None
-        container_name = slot_container_name(_artefact_token(slot))
+        container_name = slot_container_name(token)
         try:
             result = subprocess.run(
                 [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],
@@ -2483,13 +2903,7 @@ class ContainerProvider(Provider):
             return None
         if result.returncode != 0:
             return None
-        try:
-            payload = json.loads(result.stdout.strip())
-        except ValueError:
-            return None
-        if not isinstance(payload, list):
-            return None
-        return [str(part) for part in payload]
+        return _decode_argv_json(result.stdout)
 
     async def pull_image_stream(self, image: str):
         """Async generator that runs ``<runtime> pull <image>`` and yields
@@ -2730,16 +3144,115 @@ __all__ = [
 ]
 
 
+def _split_image_tag(name: str) -> tuple[str, str]:
+    """Split ``repo[:tag]`` on the tag colon only.
+
+    A registry port (``localhost:5000/foo``) puts a colon BEFORE the last
+    ``/``; a naive ``split(":")`` would amputate the host and silently compare
+    two different repositories as equal.
+    """
+    last_slash = name.rfind("/")
+    last_colon = name.rfind(":")
+    if last_colon > last_slash:
+        return name[:last_colon], name[last_colon + 1 :]
+    return name, ""
+
+
+def canonical_image_ref(ref: str) -> str:
+    """Expand an image ref to its fully-qualified form for comparison (#1889).
+
+    Podman reports a container's ``ImageName`` in canonical form —
+    ``docker.io/library/alpine:latest`` — while hal0 profiles routinely
+    declare the shorthand an operator would type (``alpine``,
+    ``alpine:latest``, ``myorg/img``). Before #1889 that never mattered:
+    :meth:`ContainerProvider.running_image` read the wrong podman store and
+    returned ``None`` on every deployed box, so :func:`_image_mismatch` was
+    unreachable. Making it reachable without this normalisation would have
+    turned a literal string compare into a drift alarm on every correctly
+    running slot — trading an inert detector for a lying one.
+
+    Applies exactly the two implicit rules the OCI/distribution reference
+    grammar defines, and nothing else:
+
+      * a name with no registry component gets ``docker.io/``. A first
+        component is a registry only if it contains ``.`` or ``:``, or is
+        literally ``localhost`` — the standard heuristic;
+      * a Docker Hub name whose repository is a single component gets the
+        implicit ``library/`` namespace. This is applied AFTER the registry
+        rule so it also catches an explicitly-qualified ``docker.io/alpine``,
+        which podman likewise reports as ``docker.io/library/alpine``;
+      * a name with neither tag nor digest gets ``:latest``.
+
+    Never raises and never invents: anything it cannot parse is returned
+    stripped but otherwise untouched.
+    """
+    ref = ref.strip()
+    if not ref:
+        return ""
+
+    name, sep, digest = ref.partition("@")
+    digest = f"@{digest}" if sep else ""
+
+    name, tag = _split_image_tag(name)
+
+    first, slash, _rest = name.partition("/")
+    has_registry = bool(slash) and ("." in first or ":" in first or first == "localhost")
+    if not has_registry:
+        name = f"docker.io/{name}"
+
+    # Docker Hub's implicit `library/` namespace, applied to the repository
+    # portion regardless of how the registry got there — `alpine`,
+    # `docker.io/alpine` and `docker.io/library/alpine` all name one image,
+    # and podman reports the last form.
+    registry, _, repository = name.partition("/")
+    if registry == "docker.io" and "/" not in repository:
+        name = f"docker.io/library/{repository}"
+
+    if not tag and not digest:
+        tag = "latest"
+
+    return f"{name}{f':{tag}' if tag else ''}{digest}"
+
+
 def _image_mismatch(running_image: str | None, declared_image: str | None) -> bool:
     """Return True iff both image refs are known AND differ (#663).
 
     The deterministic replacement for the /proc ``actual_backend`` sniff on
-    container slots: the running backend IS the image tag, so drift is a plain
-    ref comparison (the running container's image vs the slot profile's
-    declared image). Returns False whenever the running image can't be
-    determined (container down / inspect failed) - never cry wolf on missing
-    data, same omit-don't-guess contract as ``resolve_actual_backend``.
+    container slots: the running backend IS the image tag, so drift is a ref
+    comparison (the running container's image vs the slot profile's declared
+    image). Returns False whenever the running image can't be determined
+    (container down / inspect failed) - never cry wolf on missing data, same
+    omit-don't-guess contract as ``resolve_actual_backend``.
+
+    Both sides are canonicalised first (:func:`canonical_image_ref`) so the
+    shorthand a profile declares compares equal to the fully-qualified name
+    podman reports — see that function for why #1889 makes this load-bearing.
+
+    Digests decide identity whenever both sides carry one: a digest IS the
+    immutable image id, so ``ghcr.io/x/y:v1@sha256:D`` and
+    ``ghcr.io/x/y@sha256:D`` are the same image and the tag text is noise.
+    When only ONE side is digest-pinned the comparison falls back to the
+    REPOSITORY alone — deciding whether ``ghcr.io/x/y:v2`` and
+    ``ghcr.io/x/y@sha256:…`` match needs a registry round-trip this hot path
+    will never make, and guessing "drifted" there is the same cry-wolf
+    failure the docstring above forbids.
     """
     if not running_image or not declared_image:
         return False
-    return running_image.strip() != declared_image.strip()
+
+    running = canonical_image_ref(running_image)
+    declared = canonical_image_ref(declared_image)
+    if running == declared:
+        return False
+
+    running_repo, _, running_digest = running.partition("@")
+    declared_repo, _, declared_digest = declared.partition("@")
+    running_name = _split_image_tag(running_repo)[0]
+    declared_name = _split_image_tag(declared_repo)[0]
+
+    if running_digest and declared_digest:
+        return running_name != declared_name or running_digest != declared_digest
+    if running_digest or declared_digest:
+        return running_name != declared_name
+
+    return True

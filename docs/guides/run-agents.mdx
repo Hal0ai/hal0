@@ -39,6 +39,82 @@ normal user it aborts cleanly up front with a `sudo` hint.
 Pass `--switch` to atomically uninstall whatever agent is currently
 installed before installing this one.
 
+## Hermes' terminal tool — off by default
+
+Hermes ships **without** a terminal tool. It can read your box through the
+hal0 MCP tools, but it cannot run shell commands unless you say so.
+
+That is a deliberate default. The only terminal backend that works on a hal0
+box is Hermes' `local` one, which runs commands as the `hal0` service user —
+and on this box that user is root-equivalent (rootful podman plus the
+`hal0-systemctl` / `hal0-agentenv` sudo wrappers). Hermes also reads content
+it did not write: web pages, stored memories, MCP tool output. Turning the
+tool on therefore means anything that can talk to your agent can, in
+principle, get a root-equivalent command run on the machine.
+
+There is no sandboxed middle ground. Hermes' other backends are
+`docker | singularity | modal | daytona | ssh`: hal0 ships podman rather than
+docker, singularity is not installed, modal and daytona are paid cloud
+services, and a containerised shell could not reach the host or the local API
+on `127.0.0.1:8080` — which is exactly what the host-management skills need.
+So the choice is on or off.
+
+Turn it on when you want it:
+
+```sh
+sudo hal0 agent install hermes --terminal-tool     # opt in
+sudo hal0 agent install hermes --no-terminal-tool  # opt back out
+```
+
+The installer also asks once, on an interactive install. A piped
+(`curl … | bash`), headless, or `HAL0_NONINTERACTIVE=1` install is never
+asked and always leaves it off; set `HAL0_HERMES_TERMINAL=1` to opt in
+unattended.
+
+Your answer is recorded at `/etc/hal0/agents/hermes-terminal-tool`, so
+re-provisioning, `--repair` and updates all keep it. That file is root-owned on
+purpose: it sits outside the agent's own writable home, so nothing the agent
+writes can present itself to a later provision as your decision.
+
+`hal0 agent status hermes` prints the current posture on its own line.
+
+**Upgrades keep your setting.** Every hal0 release that provisioned Hermes
+wrote both `terminal.backend: local` and a `terminal.cwd` of its own — first
+`/etc/hal0`, then `$HERMES_HOME/scratch`. An update recognises any of those
+shapes, and any `cwd` you set yourself, as your answer and leaves the terminal
+enabled. Only Hermes' own untouched default (backend `local` with no `cwd`, or
+`cwd: "."`, which `hermes config migrate` writes on a box hal0 never finished
+provisioning) is not read as consent — those boxes start off, like a fresh
+install. Run `sudo hal0 agent install hermes --no-terminal-tool` if you would
+rather an upgraded box were off.
+
+### What you lose with it off
+
+These bundled skills drive the host through shell commands and stop working
+when the terminal tool is off:
+
+| Skill | What it does |
+|---|---|
+| `hal0-service-management` | Restart / inspect hal0 units and slot services |
+| `hal0-bench` | Run benchmark sweeps against loaded slots |
+| `hal0-bench-autopilot` | The weekly judgment pass over the benchmark dataset |
+| `hal0-tune` | Apply and measure runtime/tuning parameter changes |
+| `hal0-quantize` | Produce quantised model variants on the box |
+
+Hermes' `delegation` toolset (`delegate_task`, which spawns subagents) goes off
+with them. A subagent's tools are chosen in the call that creates it and the
+parent's disabled toolsets are not inherited, so leaving `delegate_task`
+reachable would let anything that can talk to your agent ask for a child
+*with* a terminal — the shell you declined, one hop away. Turning the terminal
+on brings delegation back with it. What you give up in the meantime is
+parallel fan-out for subagent work that needs no shell; no bundled skill or
+persona uses it.
+
+Everything else — chat, memory, personas, the kanban board (its workers are
+spawned by hal0's own dispatcher, not `delegate_task`), and the hal0 MCP tools
+(slot state, model management, hardware readouts) — is unaffected: those go
+through the hal0 API, not a shell.
+
 ## Manage the lifecycle
 
 <Tabs>

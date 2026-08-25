@@ -188,3 +188,77 @@ def test_window_clamped_to_max(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["window_s"] == 3600
+
+
+# ── stall-guard frame exclusion (#1893 / PR #1918 review) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stall_guard_frame_excluded_from_throughput_and_ttft() -> None:
+    """The dispatcher's synthetic stall frame carries a ``"delta":`` but is
+    not generated output: it must record neither a token event nor a TTFT
+    sample (for a silent upstream that would be a bogus ~idle-timeout TTFT)."""
+    from types import SimpleNamespace
+
+    from starlette.responses import StreamingResponse
+
+    from hal0.api.routes.v1 import _instrument_streaming_throughput
+
+    stall_frame = (
+        b'\n\ndata: {"id":"hal0-stall-guard","object":"chat.completion.chunk",'
+        b'"choices":[{"index":0,"delta":{"role":"assistant","content":"[hal0] stall"},'
+        b'"finish_reason":"length"}],'
+        b'"x_hal0_stall":{"reason":"idle","elapsed_s":300.0}}\n\ndata: [DONE]\n\n'
+    )
+
+    async def _gen():
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield stall_frame
+
+    app_state = SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=64)),
+        ttft_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+    response = StreamingResponse(_gen(), media_type="text/event-stream")
+    wrapped = _instrument_streaming_throughput(
+        response, app_state, "primary", dispatch_started=time.monotonic()
+    )
+    async for _ in wrapped.body_iterator:
+        pass
+
+    # Only the real upstream delta counted — one token event, one TTFT sample.
+    assert [tokens for _, tokens in app_state.tps_events["primary"]] == [1]
+    assert len(app_state.ttft_events["primary"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_stall_guard_frame_alone_records_nothing() -> None:
+    """A guard-cut silent upstream yields only the synthetic frame — no token
+    events and, crucially, no TTFT sample at all."""
+    from types import SimpleNamespace
+
+    from starlette.responses import StreamingResponse
+
+    from hal0.api.routes.v1 import _instrument_streaming_throughput
+
+    async def _gen():
+        yield (
+            b'\n\ndata: {"id":"hal0-stall-guard","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{"role":"assistant","content":"[hal0] stall"},'
+            b'"finish_reason":"length"}],'
+            b'"x_hal0_stall":{"reason":"total","elapsed_s":900.0}}\n\ndata: [DONE]\n\n'
+        )
+
+    app_state = SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=64)),
+        ttft_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+    response = StreamingResponse(_gen(), media_type="text/event-stream")
+    wrapped = _instrument_streaming_throughput(
+        response, app_state, "primary", dispatch_started=time.monotonic()
+    )
+    async for _ in wrapped.body_iterator:
+        pass
+
+    assert len(app_state.tps_events["primary"]) == 0
+    assert len(app_state.ttft_events["primary"]) == 0

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from hal0.api import _seed_multiplex_models
+from hal0.api import (
+    _hal0_model_cache_clear,
+    _prime_hal0_composite_cache,
+    _seed_multiplex_models,
+)
+from hal0.upstreams.registry import UpstreamRegistry
 
 CANONICAL_EMBED = "embed-gemma:300m"
 CANONICAL_ASR = "whisper-v3:turbo"
@@ -94,3 +99,59 @@ class TestNonMatching:
         await _seed([_npu_cfg()], cache)
         assert cache["hal0"].count(CANONICAL_EMBED) == 1
         assert cache["hal0"].count(CANONICAL_ASR) == 1
+
+
+class TestPrimePathDerivesTheSameTags:
+    """The LIVE path is the composite prime, not the seeder.
+
+    Since #1837 the prime REPLACES ``model_cache["hal0"]``, which makes
+    :func:`_prime_hal0_composite_cache` — not ``_seed_multiplex_models``
+    — the thing that has to emit these tags on every slot-ready refresh.
+    The seeder is now a belt-and-braces no-op on the startup path, so a
+    suite that only exercises it would stay green while the tags vanished
+    on the first re-prime.
+    """
+
+    async def test_prime_emits_the_tags_for_the_npu_table_shape(self) -> None:
+        _hal0_model_cache_clear()
+        cache: dict[str, list[str]] = {}
+        await _prime_hal0_composite_cache(UpstreamRegistry(), FakeSlotManager([_npu_cfg()]), cache)
+        assert CANONICAL_EMBED in cache["hal0"]
+        assert CANONICAL_ASR in cache["hal0"]
+
+    async def test_prime_emits_the_tags_for_the_legacy_defaults_shape(self) -> None:
+        _hal0_model_cache_clear()
+        cache: dict[str, list[str]] = {}
+        await _prime_hal0_composite_cache(
+            UpstreamRegistry(),
+            FakeSlotManager(
+                [
+                    {
+                        "name": "npu",
+                        "type": "llm",
+                        "provider": "flm",
+                        "defaults": {"load_embed": True, "load_asr": True},
+                    }
+                ]
+            ),
+            cache,
+        )
+        assert CANONICAL_EMBED in cache["hal0"]
+        assert CANONICAL_ASR in cache["hal0"]
+
+    async def test_reprime_keeps_the_tags_while_evicting_a_deleted_slot(self) -> None:
+        """The exact interaction #1837's replace put at risk."""
+        _hal0_model_cache_clear()
+        cache: dict[str, list[str]] = {}
+        mgr = FakeSlotManager(
+            [_npu_cfg(), {"name": "chat", "type": "llm", "model_default": "ghost-model"}]
+        )
+        await _prime_hal0_composite_cache(UpstreamRegistry(), mgr, cache)
+        assert "ghost-model" in cache["hal0"]
+
+        _hal0_model_cache_clear()
+        mgr._configs = [_npu_cfg()]
+        await _prime_hal0_composite_cache(UpstreamRegistry(), mgr, cache)
+        assert "ghost-model" not in cache["hal0"]
+        assert CANONICAL_EMBED in cache["hal0"]
+        assert CANONICAL_ASR in cache["hal0"]

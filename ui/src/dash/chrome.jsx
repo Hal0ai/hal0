@@ -14,6 +14,7 @@ import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
+import { slotIndicatorFromPhase } from './slot-status.js'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 
@@ -70,6 +71,12 @@ const GLYPHS = {
   minus: <path d="M3 8h10"/>,
   fit: <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"/>,
   overview: <g><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="9" width="5.5" height="4.5" rx="1"/><rect x="8.5" y="9" width="5.5" height="4.5" rx="1"/></g>,
+  // task C7: graph/focus/layers were the pre-v2 graph explorer's
+  // (memory-graph.jsx, memory-graph-engine.jsx) direction-switcher icons —
+  // both files are deleted, so these three are orphaned (no consumer left
+  // in the tree). Left in place — harmless, and window.MemV2.Icon
+  // (memory-v2-shared.jsx) already carries its own independent copies of
+  // the same glyph names for the new Bank workspace.
   graph: <g><circle cx="4" cy="11" r="1.7"/><circle cx="11.5" cy="4" r="1.7"/><circle cx="12" cy="12" r="1.7"/><path d="M5.4 9.9l4.8-4.2M5.7 11.3l4.6 0.6"/></g>,
   tools: <g><path d="M9.5 2.5a3 3 0 0 0 3.9 3.9l-2 2L6 13.8a1.6 1.6 0 0 1-2.3-2.3l5.4-5.4z"/></g>,
   clock: <g><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></g>,
@@ -402,7 +409,9 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
     connections: ["Network", "Connections"],
-    profiles:  ["iGPU Slots", "Profiles"],
+    // (runner-catalogue-v2: the legacy top-level "profiles" route is gone —
+    // #profiles now redirects to the Models ▸ Profiles tab in main.jsx, so
+    // the Models labels apply.)
     board:     ["Orchestration", "Board"],
     benchmarks: ["Performance", "Benchmarks"],
     services:  ["Companions", "Services"],
@@ -482,13 +491,19 @@ function useNavItems() {
   return [
     { id: "dashboard", label: "Overview", icon: Icons.dashboard },
     // v0.5 nav: Slots hosts Endpoints (local OpenAI endpoints, from the old
-    // Connections page) and Profiles (container-slot templates, #658) as tabs.
+    // Connections page) as a tab; runner-catalogue-v2 adds Runner Images (the
+    // container images slots run on — a lifecycle concern, so it lives here,
+    // not under the model catalog) and moves Profiles under Models.
     { id: "slots", label: "Slots", icon: Icons.slots, cnt: slotCount, children: [
-      { id: "slots/endpoints", label: "Endpoints" },
-      { id: "slots/profiles",  label: "Profiles" },
-      { id: "slots/stacks",    label: "Stacks" },
+      { id: "slots/endpoints",     label: "Endpoints" },
+      { id: "slots/runner-images", label: "Runner Images" },
+      { id: "slots/stacks",        label: "Stacks" },
     ] },
-    { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
+    // Profiles (container-slot templates, #658) template what a slot SERVES —
+    // model-catalog territory — so runner-catalogue-v2 files them under Models.
+    { id: "models", label: "Models", icon: Icons.models, cnt: modelCount, children: [
+      { id: "models/profiles", label: "Profiles" },
+    ] },
     // The Operator Board (#board) is no longer a top-level nav row — it lives
     // in the sidebar Services zone (ServiceLinks) as the "Kanban" option, and
     // stays reachable via ⌘B.
@@ -719,16 +734,11 @@ const _shortTs = (ts) => {
   return m ? (m[2] ? `${m[1]}.${m[2]}` : m[1]) : String(ts ?? '');
 };
 
-// A slot's LED tone for the `runtimes` group: green ready · amber warming ·
-// grey offline. Mirrors useRuntimeRollup's readiness rule.
-const _slotPip = (s) => {
-  const st = String(s?.state ?? '').toLowerCase();
-  if (s?.container_status === 'running' || ['ready', 'serving', 'idle'].includes(st)) return 'ok';
-  if (['warming', 'starting', 'loading', 'connecting'].includes(st)) return 'warm';
-  return 'off';
-};
-// A service indicator's tone (up/warn/err) → LED tone (ok/warm/err).
-const _svcPip = (tone) => (tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : 'err');
+// Slot pips reuse slotIndicatorFromPhase (slot-status.js) so the footer
+// matches the slot-card indicator dots exactly — no parallel vocabulary.
+// A service indicator's tone (up/warn/off/err) → LED tone (ok/warm/off/err).
+const _svcPip = (tone) =>
+  tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : tone === 'off' ? 'off' : 'err';
 
 // ─── Footer ───
 // Phase 3 of #322: the journal pane reads `useLogsStream` against
@@ -816,7 +826,24 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   const runtimeTitle = degraded
     ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
     : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
-  const serviceById = Object.fromEntries((serviceHealth.services || []).map((s) => [s.id, s]));
+  // The `services` group is driven by whatever /api/services/health actually
+  // reports (#1899) — NOT a hardcoded id list. The three-member array here
+  // used to omit `comfyui` (and would silently omit any future service too),
+  // leaving the always-visible footer reporting an unqualified "3 / 3 ready"
+  // while a real backing service sat down. `hal0` itself is prepended since
+  // it isn't in the services-health payload (it IS the API answering the
+  // request) but every backend-reported id — including comfyui — renders a
+  // pip and counts toward the ready total.
+  //
+  // When /api/services/health itself has not answered — first paint, 404
+  // (older API), non-2xx, or network error all surface as `pending` with an
+  // empty `services` list (useServicesHealth fails soft) — the group must NOT
+  // collapse to a green "1 / 1 ready" hal0 self-check: the state of the real
+  // backing services is unknown, which is exactly the unqualified-green defect
+  // #1899 describes. Render a single warn-toned "services unknown" pip so the
+  // count stays honest and the warn styling trips until real data arrives.
+  const servicesUnknown =
+    (serviceHealth.pending || serviceHealth.error) && !(serviceHealth.services || []).length;
   const footerIndicators = [
     {
       id: 'hal0',
@@ -824,23 +851,36 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       tone: degraded ? 'warn' : health.isError ? 'warn' : 'up',
       title: degraded ? `hal0 degraded — ${failing.join("; ") || "see /api/health/system"}` : 'hal0 api ok',
     },
-    {
-      id: 'hermes',
-      label: 'hermes',
-      tone: serviceHealth.pending ? 'warn' : serviceById.hermes?.up ? 'up' : 'err',
-      title: serviceById.hermes?.detail || (serviceHealth.pending ? 'service health pending' : 'hermes down'),
-    },
-    {
-      id: 'openwebui',
-      label: 'openwebui',
-      tone: serviceHealth.pending ? 'warn' : serviceById.openwebui?.up ? 'up' : 'err',
-      title: serviceById.openwebui?.detail || (serviceHealth.pending ? 'service health pending' : 'openwebui down'),
-    },
+    ...(servicesUnknown
+      ? [{
+          id: 'services-unknown',
+          label: 'services',
+          tone: 'warn',
+          title: 'service health unknown — /api/services/health not answering',
+        }]
+      : (serviceHealth.services || []).map((s) => ({
+          id: s.id,
+          label: s.name || s.id,
+          // 'stopped' is deliberate (grey pip, out of the ready count);
+          // only a failed/unknown service reads red. Older backends omit
+          // `state` — fall back to the boolean.
+          tone: s.state === 'stopped' ? 'off' : (s.state ? (s.state === 'up' ? 'up' : 'err') : (s.up ? 'up' : 'err')),
+          title: s.detail || `${s.name || s.id} down`,
+        }))),
   ];
-  // runtimes group — one LED pip per CONFIGURED slot (a model bound is what
-  // makes a slot real, #1369), plus the ready count.
+  // slots group — one LED pip per ACTIVE configured slot (a model bound is
+  // what makes a slot real, #1369). Stopped slots render no pip — the ready
+  // count already says how many of the total are up. Pip colours mirror the
+  // slot-card indicator dot exactly (slotIndicatorFromPhase: serving green
+  // pulse · ready yellow · warming amber pulse · error red).
   const configuredSlots = (useSlots().data || []).filter((s) => !!(s.model || s.model_default));
-  const servicesReady = footerIndicators.filter((s) => s.tone === 'up').length;
+  const slotPips = configuredSlots
+    .map((s) => ({ slot: s, ind: slotIndicatorFromPhase(s) }))
+    .filter(({ ind }) => ind.cls !== 'offline');
+  // Deliberately-stopped services keep a grey pip but leave the ready
+  // fraction — "2 / 2 ready" with a grey comfyui pip, not "2 / 3".
+  const servicesActive = footerIndicators.filter((s) => s.tone !== 'off');
+  const servicesReady = servicesActive.filter((s) => s.tone === 'up').length;
 
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
@@ -971,15 +1011,20 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         </>
       )}
       <div className="foot-chips">
-        {/* runtimes — one LED pip per enabled slot + ready count */}
+        {/* slots — one LED pip per ACTIVE slot (stopped slots hidden) + ready
+            count; pip colours mirror the slot-card indicator dots */}
         <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
           <span className="pips" aria-hidden="true">
-            {configuredSlots.map((s, i) => (
-              <span key={s.name ?? i} className={"pip " + _slotPip(s)} />
+            {slotPips.map(({ slot: s, ind }, i) => (
+              <span
+                key={s.name ?? i}
+                className={"pip " + ind.cls}
+                title={`${s.name ?? "slot"} — ${ind.label}`}
+              />
             ))}
           </span>
           <span className="lbl">
-            <span className="k">runtimes</span>
+            <span className="k">slots</span>
             <span className={"v" + (L.ready < L.total ? " warn" : "")}>
               <b>{L.ready} / {L.total}</b> ready
             </span>
@@ -992,6 +1037,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             {footerIndicators.map((svc) => (
               <span
                 key={svc.id}
+                data-service-id={svc.id}
                 className={"pip " + _svcPip(svc.tone)}
                 title={`${svc.label}: ${svc.title}`}
                 aria-label={`${svc.label}: ${svc.tone}`}
@@ -1000,8 +1046,8 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
           </span>
           <span className="lbl">
             <span className="k">services</span>
-            <span className={"v" + (servicesReady < footerIndicators.length ? " warn" : "")}>
-              <b>{servicesReady} / {footerIndicators.length}</b> ready
+            <span className={"v" + (servicesReady < servicesActive.length ? " warn" : "")}>
+              <b>{servicesReady} / {servicesActive.length}</b> ready
             </span>
           </span>
         </div>

@@ -124,6 +124,25 @@ async def _read_body(request: Request) -> Any | None:
         raise BadRequest("request body must be valid JSON") from exc
 
 
+def _int_param(qp: Any, name: str, default: int) -> int:
+    """Parse an int query param, 422ing (not 500ing) on garbage input.
+
+    ``int(qp.get(name, default))`` lets a malformed value (``?limit=abc``)
+    escape as an unhandled ``ValueError`` all the way to
+    ``ServerErrorMiddleware`` → 500. Every other invalid-input path on these
+    composed endpoints (``sort=bogus``, ``kind=bogus``, ...) 422s with
+    ``memory.invalid_query``; this keeps int params on the same contract.
+    See PR #1987 review M4.
+    """
+    raw = qp.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise UnprocessableEntity(f"invalid {name}: {raw!r}", code="memory.invalid_query") from None
+
+
 async def _forward(
     client: Any,
     method: str,
@@ -271,7 +290,7 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
         raise UnprocessableEntity(f"invalid kind: {kind!r}", code="memory.invalid_query")
     if mode not in ("ego", "top"):
         raise UnprocessableEntity(f"invalid mode: {mode!r}", code="memory.invalid_query")
-    limit = min(int(qp.get("limit", 240)), 500)
+    limit = min(_int_param(qp, "limit", 240), 500)
 
     upstream = (
         f"/v1/default/banks/{bank_id}/entities/graph"
@@ -294,14 +313,14 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
         node = qp.get("node")
         if not node:
             raise UnprocessableEntity("ego mode requires ?node=", code="memory.invalid_query")
-        depth = min(int(qp.get("depth", 1)), 2)
+        depth = min(_int_param(qp, "depth", 1), 10)
         keep = _sg.ego_bfs(graph, node, depth=depth, limit=limit)
         if not keep:
             raise NotFound(f"node {node!r} not in bank graph", code="memory.node_not_found")
     else:
         by = qp.get("by") or ("degree" if kind == "entities" else "recency")
         ranked = _sg.rank_by_degree(graph) if by == "degree" else _sg.rank_by_recency(graph)
-        top_k = min(int(qp.get("top_k", 200)), 500)
+        top_k = min(_int_param(qp, "top_k", 200), 500)
         keep = set(ranked[: min(top_k, limit)])
 
     sub = _sg.induce_subgraph(graph, keep)
@@ -314,6 +333,188 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
     out["mode"] = mode
     out["center"] = qp.get("node")
     return out
+
+
+# ── composed ranked units endpoint (NOT a passthrough) ─────────────────────────
+#
+# Upstream /memories/list only understands q/type/state/document_id/limit/offset
+# (0.8.4); tag, time-window filtering and salience ranking are computed here
+# over a cached slab — same tradeoff, and the same per-bank graph cache, as
+# bank_subgraph. Registered explicitly BEFORE the _FORWARDS loop.
+
+#: 0.8.4 list rows carry no ``created_at`` — timestamps come from whichever of
+#: these is present (first match wins).
+_UNIT_TS_KEYS = ("mentioned_at", "date")
+
+#: Upstream ``/memories/list``'s ``type`` param is single-value
+#: exact-equality (0.8.4) — ``type=world,experience`` silently returns an
+#: empty page, no 422. hal0 fails loudly on an unknown value instead, and
+#: does the OR itself hal0-side when more than one is selected.
+_VALID_FACT_TYPES = ("world", "experience", "observation")
+
+
+def _unit_ts(row: dict[str, Any]) -> str:
+    for key in _UNIT_TS_KEYS:
+        value = row.get(key)
+        if value:
+            return str(value)
+    return ""  # missing sorts last
+
+
+@router.get("/banks/{bank_id}/units")
+async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
+    """Ranked, filterable fact slice for the Bank workspace (memory_v2 ask #2).
+
+    Each returned unit is the upstream ``/memories/list`` row verbatim plus
+    computed ``salience`` (graph-degree weighted, see ``_sg.degree_by_node``)
+    and ``link_counts_by_type`` (whatever link types the bank graph emits —
+    ``temporal``/``semantic``/``entity`` today; never hardcoded). ``tags``,
+    ``from``/``to`` and ``sort=salience`` are hal0-side; ``q``/``type``/
+    ``state``/``document_id`` forward upstream verbatim (``state`` matters:
+    invalidated facts live in a separate archive excluded from the default
+    listing, so the inspector's revert flow needs ``state=invalidated`` to
+    have anything to list).
+
+    Both the unit listing and the salience graph are pulled as a single
+    ``limit=2000``-row slab (see ``src_params`` below, and the unfiltered
+    bank-graph fetch further down); a bank with more than 2000 matching units
+    or more than 2000 graph nodes is silently clipped at that slab boundary.
+    The response's ``truncated`` flag covers the unit-listing slab
+    (``total_matched``/paging are only accurate within it). A unit outside
+    the 2000-node graph slab has genuinely unknown connectivity — it reads
+    back as ``salience: null`` and ``link_counts_by_type: {}`` rather than a
+    false ``0.0``, and sorts after every scored row under ``sort=salience``.
+    See PR #1987 review B2.
+    """
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    qp = request.query_params
+    sort = qp.get("sort", "recency")
+    if sort not in ("recency", "salience"):
+        raise UnprocessableEntity(f"invalid sort: {sort!r}", code="memory.invalid_query")
+    # max(1, ...) closes #1987/B3: limit=0 made next_offset==offset (infinite
+    # client-side pagination loop) and limit<0 dropped the last row via
+    # negative-index slicing (kept[0:-1]).
+    limit = max(1, min(_int_param(qp, "limit", 20), 200))
+    offset = max(_int_param(qp, "offset", 0), 0)
+
+    type_values = [t for t in (qp.get("type") or "").split(",") if t]
+    if any(t not in _VALID_FACT_TYPES for t in type_values):
+        raise UnprocessableEntity(f"invalid type: {qp.get('type')!r}", code="memory.invalid_query")
+    types = set(type_values)
+
+    # NOTE: build upstream params explicitly, one at a time — the generic
+    # forward's dict(request.query_params) collapses repeated params to the
+    # last value. All params here are single-valued so that's moot today, but
+    # if 0.8.5+ ever lands multi-value tag forwarding, that must use
+    # request.query_params.multi_items() + an httpx list-of-tuples, not a
+    # comma-join into a single string like the hal0-side `tags` filter below.
+    src_params: dict[str, str] = {k: qp[k] for k in ("q", "state", "document_id") if qp.get(k)}
+    if len(type_values) == 1:
+        # exactly one type: upstream's exact-equality `type` still applies.
+        src_params["type"] = type_values[0]
+    # 2+ types: do NOT forward `type` — upstream can't OR them (0.8.4 single-
+    # value exact match; a comma-joined value silently matches nothing). Pull
+    # the unfiltered slab instead and OR them hal0-side below.
+    src_params["limit"] = "2000"
+    listing = await _forward(
+        client, "GET", f"/v1/default/banks/{bank_id}/memories/list", params=src_params
+    )
+    rows = listing.get("items") if isinstance(listing, dict) else listing
+    if not isinstance(rows, list):
+        raise MemoryEngineShape("memories/list returned no item list")
+    # B2: the src_params slab is capped at limit=2000 above — surface that
+    # cap instead of letting total_matched/next_offset silently describe only
+    # the slab. Mirrors bank_subgraph's own ``truncated`` (line ~313).
+    truncated = len(rows) >= 2000
+
+    tags = {t for t in (qp.get("tags") or "").split(",") if t}
+    lo, hi = qp.get("from"), qp.get("to")
+    kept = [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and (len(types) <= 1 or r.get("fact_type") in types)  # multi-type OR, hal0-side
+        and (not tags or tags & set(r.get("tags") or ()))
+        and (not (lo or hi) or _unit_ts(r) != "")  # window given: undated rows drop
+        and (not lo or _unit_ts(r) >= lo)
+        and (not hi or _unit_ts(r)[: len(hi)] <= hi)
+    ]
+
+    # Salience + per-type link counts from the cached bank graph (45s TTL).
+    #
+    # Deliberately UNFILTERED — no `type`/`q` forwarded to `/graph`, always,
+    # regardless of this request's listing filters. Two independent reasons,
+    # both footguns, so do not "fix" this by threading qp['type']/qp['q']
+    # through again:
+    #   1. Same upstream single-value exact-equality trap as `/memories/list`
+    #      — a comma-joined `type` would silently fetch an empty graph.
+    #   2. Even a single valid `type` would be wrong here: upstream's edge
+    #      query only returns an edge when BOTH endpoints are in the filtered
+    #      node set, so cross-type edges (e.g. an `experience` fact linked to
+    #      a `world` fact) vanish and every node's degree is understated.
+    # Cache key is therefore constant per bank (no type/q component) so this
+    # slab is shared across every /units call and with bank_subgraph's
+    # unfiltered fetches.
+    #
+    # Also note: upstream caps this endpoint at ~10k edges (max_edges) and
+    # silently truncates dense banks past that — no behavior change here,
+    # just a known ceiling on the salience/link-count accuracy for very
+    # large/dense banks.
+    cache_key = f"{bank_id}:memories::"
+    graph = _GRAPH_CACHE.peek(cache_key)
+    if graph is None:
+        graph = await _forward(
+            client, "GET", f"/v1/default/banks/{bank_id}/graph", params={"limit": "2000"}
+        )
+        _GRAPH_CACHE.put(cache_key, graph)
+    adj = _sg.adjacency(graph)
+    salience_by_node = _sg.degree_by_node(graph)
+    # The slab is capped at the 2000 most-recent units — a row outside it has
+    # genuinely unknown connectivity, not zero. Score it null (never a false
+    # 0) and mark it out-of-slab in link_counts_by_type too.
+    graph_node_ids = {(n.get("data") or n).get("id") for n in graph.get("nodes", [])}
+    for r in kept:
+        rid = r.get("id")
+        if rid not in graph_node_ids:
+            r["link_counts_by_type"] = {}
+            r["salience"] = None
+            continue
+        nbrs = adj.get(rid, [])
+        counts: dict[str, int] = {}
+        for _t, link_type, _w in nbrs:
+            counts[link_type] = counts.get(link_type, 0) + 1
+        r["link_counts_by_type"] = counts
+        r["salience"] = salience_by_node.get(rid, (0, 0.0))[1]
+
+    if sort == "salience":
+        # Scored rows first (highest salience first, ties newest-first);
+        # unscored (out-of-slab, salience is None) rows after, also
+        # newest-first among themselves rather than an arbitrary/false
+        # ranking. final-review M2: the scored half used to tie-break
+        # oldest-first (`_unit_ts(r)` ascending, unnegated) while the
+        # unscored half two lines down used `reverse=True` — the two
+        # disagreed with each other and with this docstring. `_unit_ts`
+        # returns an ISO string, which can't be negated for a single-key
+        # sort, so tie-break via two stable sorts instead: sort newest-first
+        # by timestamp, then a second stable sort by -salience preserves
+        # that newest-first order among any rows tied on salience.
+        scored = [r for r in kept if r["salience"] is not None]
+        unscored = [r for r in kept if r["salience"] is None]
+        scored.sort(key=_unit_ts, reverse=True)
+        scored.sort(key=lambda r: -r["salience"])
+        unscored.sort(key=_unit_ts, reverse=True)
+        kept = scored + unscored
+    else:
+        kept.sort(key=_unit_ts, reverse=True)
+    page = kept[offset : offset + limit]
+    nxt = offset + limit if offset + limit < len(kept) else None
+    return {
+        "items": page,
+        "total_matched": len(kept),
+        "next_offset": nxt,
+        "truncated": truncated,
+    }
 
 
 # ── DELETE /banks/{bank_id} — guarded (NOT a passthrough) ──────────────────────
@@ -586,6 +787,14 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/memories/{memory_id}/history",
         "/v1/default/banks/{bank_id}/memories/{memory_id}/history",
     ),
+    # memory_curate (MCP parity): edit text/context/fact_type/entities or
+    # invalidate a unit (state="invalidated", reason). Reversible → no
+    # _DELETE_ACTIONS entry, no approval gate.
+    (
+        "PATCH",
+        "/banks/{bank_id}/memories/{memory_id}",
+        "/v1/default/banks/{bank_id}/memories/{memory_id}",
+    ),
     # documents + chunks + tags
     ("GET", "/banks/{bank_id}/documents", "/v1/default/banks/{bank_id}/documents"),
     (
@@ -740,10 +949,28 @@ _DELETE_ACTIONS: dict[str, str] = {
     "/v1/default/banks/{bank_id}/mental-models/{model_id}": "memory.mental_model.delete",
 }
 
+#: #1987/M7: curate (memory_curate MCP parity) is a soft-delete-capable edit
+#: (state="invalidated" invalidates a unit) but rode _FORWARDS with no audit
+#: trail at all — unlike every DELETE above. It stays out of
+#: DESTRUCTIVE_MEMORY_ROUTES / CONFIRM_GUARDED_MEMORY_ROUTES (reversible, no
+#: confirm gate needed) but still gets a record_action row so "who
+#: invalidated this, when" is answerable.
+_CURATE_TEMPLATE = ("PATCH", "/v1/default/banks/{bank_id}/memories/{memory_id}")
+_CURATE_AUDIT_ACTION = "memory.memory.curate"
+
+#: #1987/M5: forwards whose bank-scoped _GRAPH_CACHE slab (salience,
+#: link_counts_by_type) goes stale the moment they succeed. Cleared
+#: post-forward so a curate → units/subgraph GET within the 45s TTL never
+#: serves the pre-mutation slab.
+_CACHE_CLEARING_FORWARDS: set[tuple[str, str]] = {_CURATE_TEMPLATE}
+
 
 def _make_handler(method: str, template: str):
     guard = _SHAPE_GUARDS.get((method, template))
     audit_action = _DELETE_ACTIONS.get(template) if method == "DELETE" else None
+    if (method, template) == _CURATE_TEMPLATE:
+        audit_action = _CURATE_AUDIT_ACTION
+    clears_cache = (method, template) in _CACHE_CLEARING_FORWARDS
 
     async def handler(request: Request) -> Any:
         client = _client(request)
@@ -757,8 +984,13 @@ def _make_handler(method: str, template: str):
             async with record_action(
                 request, category="memory", action=audit_action, target=upstream
             ):
-                return await _forward(client, method, upstream, params=params, json_body=body)
-        result = await _forward(client, method, upstream, params=params, json_body=body)
+                result = await _forward(client, method, upstream, params=params, json_body=body)
+        else:
+            result = await _forward(client, method, upstream, params=params, json_body=body)
+        if clears_cache:
+            bank_id = segments.get("bank_id")
+            if bank_id:
+                _GRAPH_CACHE.clear_bank(bank_id)
         if guard is not None:
             guard(result)
         return result

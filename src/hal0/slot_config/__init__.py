@@ -261,10 +261,25 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 #:   - ``default_voice`` / ``default_language`` — TTS engine extras written by
 #:     the dashboard voice settings (PUT /api/slots/tts/config).
 #:   - ``slot``           — the nested on-disk [slot] table shape (hoisted on load).
+#:   - ``output_sanity``  — per-slot opt-out for the llm output-sanity gate
+#:     (#1922, ``hal0.slots.output_sanity.SANITY_CFG_KEY``). The gate's own
+#:     failure message tells the operator to set it, so the write boundary has
+#:     to accept it: an escape hatch reachable only by hand-editing the TOML is
+#:     not one.
 TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
     # image_pin and binary are declared SlotConfig fields but the running backend may
     # predate them — tolerate so the drawer Save always works.
-    {"type", "default", "lru", "default_voice", "default_language", "slot", "image_pin", "binary"}
+    {
+        "type",
+        "default",
+        "lru",
+        "default_voice",
+        "default_language",
+        "slot",
+        "image_pin",
+        "binary",
+        "output_sanity",
+    }
 )
 
 # ── model-owned slot-write partition (spec-hw-slot-ownership §1) ─────────────

@@ -6,6 +6,11 @@ description: Running LLM inference benchmarks on hal0 / Strix Halo. Use when ask
 
 # hal0 benchmarking
 
+> **Requires the terminal tool.** hal0 ships Hermes with no terminal tool unless the
+> operator opted in (`hal0 agent install hermes --terminal-tool`). Without it this skill
+> cannot run its commands — say so plainly instead of improvising.
+
+
 Benchmarks llama.cpp inference on this box across **both runtimes (ROCm and Vulkan)**
 using the official `llama-bench`, and records structured results for hal0 tracking.
 

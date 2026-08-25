@@ -36,9 +36,22 @@ from hal0.cli._shared import (
     follow_sse_logs,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 app = typer.Typer(help="Manage inference slots.")
 console = Console()
+
+# The server-side state machine blocks the HTTP response until the slot
+# converges, so api_post's default 10s read timeout makes every mutating
+# lifecycle verb raise ReadTimeout and exit 1 on an operation that in fact
+# succeeded server-side (#1832). These budgets are DERIVED from the server's
+# own bounds (health poll + the terminates each verb performs, including the
+# sequential pre-load evictions inside load) — a hardcoded number is what let
+# #1832 come back at 220s against a 210s floor. See hal0.slot_lifecycle_budget.
+SLOT_LOAD_TIMEOUT_S = slot_lifecycle_timeout_s(loads=1, unloads=0)
+SLOT_UNLOAD_TIMEOUT_S = slot_lifecycle_timeout_s(loads=0, unloads=1)
+#: restart and swap are unload-then-load, so they carry both halves.
+SLOT_LIFECYCLE_TIMEOUT_S = slot_lifecycle_timeout_s(loads=1, unloads=1)
 
 
 class SlotProvider(StrEnum):
@@ -107,30 +120,55 @@ _HARDWARE_TO_DEVICE: dict[str, str] = {
 def _detect_default_hardware() -> str:
     """Pick a sane default hardware backend from /etc/hal0/hardware.json.
 
-    Falls back to ``"vulkan"`` when the probe file is missing or
-    unreadable — that's the broadest match for AMD/NVIDIA/Intel GPUs and
-    preserves the historical hardcoded default for users without a probe.
+    Falls back to ``"rocm"`` when the probe file is missing or unreadable.
+    That used to be ``"vulkan"`` ("broadest match"), but the Vulkan backend of
+    the runner image llama.cpp slots actually launch emits invalid tokens for
+    every model (#1888) — so the broad default was a broadly-wrong one. ROCm
+    is hal0's reference (AMD) lane, and a box that cannot run it gets a loud
+    refusal at slot load instead of garbage output.
+
+    Same ladder as :func:`hal0.install.profile_derive.derive_device` and
+    :func:`hal0.hardware.recommend._backend_for`, and deliberately the same
+    THREE questions in the same order (review N2 — these had drifted into two
+    different conventions): is ROCm compute reachable → is there a Vulkan
+    device → can the pinned runner image serve the Vulkan lane. Before this,
+    the ``vulkan_capable`` question was skipped here entirely, so an AMD box
+    with neither compute nor a render node got ``device=gpu-vulkan`` written
+    by a bare ``hal0 slot create`` — guaranteed to be refused at load.
     """
     try:
         from hal0.config import paths as _paths
     except ImportError:
-        return "vulkan"
+        return "rocm"
     try:
         raw = _paths.hardware_json().read_text()
     except OSError:
-        return "vulkan"
+        return "rocm"
     try:
         data = jsonlib.loads(raw)
     except ValueError:
-        return "vulkan"
+        return "rocm"
     gpus = data.get("gpus") or []
     if not gpus:
         return "cpu"
     g = gpus[0] if isinstance(gpus[0], dict) else {}
     vendor = (g.get("vendor") or "").lower()
-    if vendor == "amd" and g.get("compute_capable"):
-        return "rocm"
-    if g.get("vulkan_capable") or vendor in ("amd", "nvidia", "intel"):
+    # AMD: ROCm where the box can run it, else Vulkan where that lane is real,
+    # else CPU. #1923 made AMD default to ROCm UNCONDITIONALLY because the
+    # pinned runner's Vulkan backend emitted invalid tokens for every model
+    # (#1888), so a kfd-less box got a loud refusal rather than a
+    # silently-garbage lane. #1948 fixed the image, so the fallback is a lane
+    # again — but only when the pinned runner can actually serve it, or this
+    # would just be writing a device the load-time gate refuses.
+    if vendor == "amd":
+        if g.get("compute_capable"):
+            return "rocm"
+        from hal0.providers._gpu import default_image_serves_vulkan_lane
+
+        if g.get("vulkan_capable") and default_image_serves_vulkan_lane():
+            return "vulkan"
+        return "cpu"
+    if g.get("vulkan_capable") or vendor in ("nvidia", "intel"):
         return "vulkan"
     return "cpu"
 
@@ -260,7 +298,7 @@ def slot_load(
         raise typer.Exit(1)
     try:
         body = {"model_id": model} if model else {}
-        snap = api_post(f"/api/slots/{name}/load", json=body)
+        snap = api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LOAD_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -278,7 +316,7 @@ def slot_unload(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/unload")
+        snap = api_post(f"/api/slots/{name}/unload", timeout=SLOT_UNLOAD_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -294,7 +332,7 @@ def slot_restart(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/restart")
+        snap = api_post(f"/api/slots/{name}/restart", timeout=SLOT_LIFECYCLE_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -348,7 +386,9 @@ def slot_swap(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        snap = api_post(f"/api/slots/{name}/swap", json={"model_id": model})
+        snap = api_post(
+            f"/api/slots/{name}/swap", json={"model_id": model}, timeout=SLOT_LIFECYCLE_TIMEOUT_S
+        )
     except CliApiError as exc:
         die(str(exc))
         return
@@ -392,7 +432,9 @@ def slot_logs(
         except CliApiError as exc:
             die(str(exc))
             return
-        console.print(data.get("logs") or "[dim]no logs[/dim]")
+        # #1905: an empty-logs response may carry the only explanation in
+        # ``hint`` (synthetic composite, journalctl missing, never started).
+        console.print(data.get("logs") or f"[dim]{data.get('hint') or 'no logs'}[/dim]")
         return
 
     # Stream SSE — line-buffered passthrough.
@@ -427,7 +469,7 @@ def slot_create(
         "--hardware",
         help=(
             "Hardware backend: vulkan | rocm | cpu. "
-            "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe). "
+            "Default: auto-detected from /etc/hal0/hardware.json (rocm if no probe). "
             "The `device` field is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
         ),
         case_sensitive=False,
@@ -457,6 +499,17 @@ def slot_create(
         max=65535,
     ),
     ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Runtime profile (flag bundle + engine). Default: inferred from "
+            "--type/--hardware — embedding → embedding (--embedding), "
+            "reranking → reranking (--reranking), tts/transcription → the "
+            "engine hal0 ships for that device (none is inferred where it "
+            "ships none). llm and image slots infer none."
+        ),
+    ),
 ) -> None:
     """Create a new slot config (POST /api/slots)."""
     url = _api_base()
@@ -493,6 +546,12 @@ def slot_create(
         "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
     }
+    # Absent = let the create chokepoint infer the capability profile from
+    # type/device (#1830); an explicit name always wins. Never send an empty
+    # placeholder — that reads as a deliberate operator choice and suppresses
+    # the inference.
+    if profile:
+        body["profile"] = profile
     if port is not None:
         body["port"] = port
     else:
@@ -531,6 +590,15 @@ def slot_edit(
         case_sensitive=False,
         help="Change the slot's hardware backend (vulkan | rocm | cpu).",
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Change the slot's runtime profile (flag bundle + engine) — e.g. "
+            "'embedding' / 'reranking' to repair a profile-less capability slot "
+            "created before the profile was inferred (#1830)."
+        ),
+    ),
     # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
@@ -566,10 +634,12 @@ def slot_edit(
         and ctx_size is None
         and provider is None
         and hardware is None
+        and profile is None
     ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
-            "Pass at least one of --model, --port, --ctx-size, --provider, --hardware."
+            "Pass at least one of --model, --port, --ctx-size, --provider, "
+            "--hardware, --profile."
         )
         raise typer.Exit(code=2)
 
@@ -578,6 +648,8 @@ def slot_edit(
         payload["port"] = port
     if provider is not None:
         payload["provider"] = str(provider)
+    if profile is not None:
+        payload["profile"] = profile
     if hardware is not None:
         payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
     if model is not None or ctx_size is not None:
@@ -622,7 +694,13 @@ def slot_delete(
         )
     try:
         # ``force`` also bypasses the server-side seeded-slot guard.
-        api_delete(f"/api/slots/{name}", params={"force": "true"} if force else None)
+        # SlotManager.delete unloads a running slot first, so this blocks on
+        # the state machine like the other lifecycle verbs (#1832).
+        api_delete(
+            f"/api/slots/{name}",
+            params={"force": "true"} if force else None,
+            timeout=SLOT_UNLOAD_TIMEOUT_S,
+        )
     except CliApiError as exc:
         die(str(exc))
         return
@@ -655,6 +733,9 @@ def slot_add(
         model=model,
         port=port,
         ctx_size=ctx_size,
+        # Explicit: a direct Python call gets typer's OptionInfo sentinel for
+        # any omitted parameter, which would then be POSTed as the profile.
+        profile=None,
     )
 
 

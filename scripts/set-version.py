@@ -109,7 +109,7 @@ def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _write_json(path: Path, data: dict[str, object]) -> None:
     """Write *data* as pretty-printed JSON to *path*."""
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def _update_uv_lock_version(lock_text: str, new_version_pep440: str) -> str:
@@ -201,7 +201,7 @@ def set_version(root: Path, version: str) -> None:
     if "version" not in ui_pkg:
         raise ValueError(f"{ui_pkg_path} has no 'version' field")
     ui_pkg["version"] = version
-    candidates.append((ui_pkg_path, json.dumps(ui_pkg, indent=2) + "\n"))
+    candidates.append((ui_pkg_path, json.dumps(ui_pkg, indent=2, ensure_ascii=False) + "\n"))
 
     # ui/package-lock.json
     ui_lock_path = root / "ui" / "package-lock.json"
@@ -215,7 +215,7 @@ def set_version(root: Path, version: str) -> None:
             root_pkg = packages[""]
             if isinstance(root_pkg, dict):
                 root_pkg["version"] = version
-        candidates.append((ui_lock_path, json.dumps(ui_lock, indent=2) + "\n"))
+        candidates.append((ui_lock_path, json.dumps(ui_lock, indent=2, ensure_ascii=False) + "\n"))
 
     # manifest.json
     manifest_path = root / "manifest.json"
@@ -224,7 +224,7 @@ def set_version(root: Path, version: str) -> None:
         raise ValueError(f"{manifest_path} has no 'version' field")
     manifest["version"] = version
     manifest["channel"] = channel
-    candidates.append((manifest_path, json.dumps(manifest, indent=2) + "\n"))
+    candidates.append((manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"))
 
     # uv.lock — hal0ai package
     lock_path = root / "uv.lock"

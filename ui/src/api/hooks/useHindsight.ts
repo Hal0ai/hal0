@@ -5,8 +5,14 @@
 // One hook per resource; mutations invalidate the bank-scoped keys so
 // cards/panels refresh without manual plumbing.
 
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../client'
+import {
+  keepPreviousData,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── types (mirror Hindsight 0.7.x response shapes we consume) ───────────────
@@ -307,7 +313,13 @@ export function useBankSubgraph(
     kind?: 'memories' | 'entities'
     mode?: 'ego' | 'top'
     node?: string
-    depth?: 1 | 2
+    // Widened from the original FU2 `1 | 2` cap for task C4's ego focus
+    // view, which needs the full 1–10 depth slider the Global Constraints
+    // require. The server already honours depth <= 10 (task A2, merged);
+    // the only existing caller (memory-graph.jsx's Direction-C ego slice)
+    // passes a hardcoded `depth: 1`, so this widening is backward
+    // compatible — nothing depended on the old 2-cap.
+    depth?: number
     top_k?: number
     by?: 'degree' | 'recency'
     limit?: number
@@ -368,12 +380,23 @@ export function useRecall() {
   })
 }
 
+// Post-smoke fix (curl-verified against the live install, 2026-08-21):
+// upstream Hindsight 0.8.4's reflect route requires `query` in the request
+// body — `text` (the field this hook sent before this fix, on the mistaken
+// assumption it matched the passthrough's other verbatim fields) 422s with
+// `{"loc":["body","query"],"msg":"Field required"}`. The RESPONSE shape is
+// unaffected — it still carries `text` (the answer) + `based_on`, typed
+// below exactly as before; only the request field name changes.
+export interface ReflectBody {
+  query: string
+}
+
 export function useReflect() {
   return useMutation({
-    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+    mutationFn: ({ bank, body }: { bank: string; body: ReflectBody }) =>
       apiPost<{ text: string; based_on?: Record<string, number> }>(
         ENDPOINTS.memoryBankReflect(bank),
-        body,
+        body as unknown as Record<string, unknown>,
       ),
   })
 }
@@ -539,5 +562,201 @@ export function useDirectiveDelete() {
     onSuccess: (_d, vars) => {
       void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'directives'] })
     },
+  })
+}
+
+// ── Memory v2 (Bank workspace UI) — tags, curatable unit list, curate,
+// history ───────────────────────────────────────────────────────────────
+// Data plumbing for the new Bank workspace: the tag-usage sidebar, the
+// paged/filterable unit list, the curate mutation (invalidate = reversible,
+// no approval gate — delete stays on the existing gated directive-style
+// routes), and per-unit audit history. Response shapes per the backend
+// team's Interfaces spec (task A1/A3).
+
+export interface BankTag {
+  tag: string
+  count: number
+}
+
+export function useBankTags(bank: string | null) {
+  return useQuery<{ items: BankTag[] }>({
+    queryKey: ['memory', 'banks', bank, 'tags'],
+    queryFn: () => apiGet<{ items: BankTag[] }>(ENDPOINTS.memoryBankTags(bank as string)),
+    enabled: !!bank,
+    staleTime: 30_000,
+  })
+}
+
+export interface BankUnitsParams {
+  q?: string
+  tags?: string[]
+  type?: string
+  from?: string
+  to?: string
+  documentId?: string
+  // Forwarded verbatim (no transform) — upstream (hindsight-api 0.8.4)
+  // archives invalidated facts out of the default /units listing; the
+  // curation inspector's revert flow passes `state=invalidated` to list
+  // them back in.
+  state?: string
+  // Server (memory_admin.bank_units) only accepts these two — anything else
+  // 422s with memory.invalid_query. See PR #1987 review M10.
+  sort?: 'recency' | 'salience'
+  limit?: number
+  offset?: number
+}
+
+// Pure query-string serializer, exported so it's unit-testable without
+// mounting the hook (useHindsight.ts has no existing hook-level tests).
+// camelCase `documentId` -> snake_case `document_id` to match the backend
+// query param; every other key round-trips as-is. Falsy-but-meaningful
+// values (`offset: 0`, `limit: 0`) are kept — only `undefined`/empty
+// string/empty array are omitted.
+export function serializeBankUnitsParams(params: BankUnitsParams = {}): string {
+  const sp = new URLSearchParams()
+  if (params.q) sp.set('q', params.q)
+  if (params.tags && params.tags.length) sp.set('tags', params.tags.join(','))
+  if (params.type) sp.set('type', params.type)
+  if (params.from) sp.set('from', params.from)
+  if (params.to) sp.set('to', params.to)
+  if (params.documentId) sp.set('document_id', params.documentId)
+  if (params.state) sp.set('state', params.state)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit !== undefined) sp.set('limit', String(params.limit))
+  if (params.offset !== undefined) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export interface BankUnitRow {
+  id: string
+  text: string
+  context?: string | null
+  occurred_start: string
+  occurred_end?: string | null
+  fact_type: 'world' | 'experience' | 'observation' | string
+  entities: string[]
+  tags?: string[]
+  document_id?: string | null
+  state: 'valid' | 'invalidated' | string
+  // task C7 (backend A3b): null for a unit that fell outside the
+  // salience-scored slab (e.g. a large bank's capped graph) — no ranking
+  // to offer, not a zero score.
+  salience: number | null
+  link_counts_by_type: Record<string, number>
+}
+
+export interface BankUnitsPage {
+  items: BankUnitRow[]
+  total_matched: number
+  next_offset: number | null
+  // True when the server's 2000-row upstream slab clipped the match set —
+  // total_matched/paging are only accurate within that slab, and under
+  // sort=salience the ranking is against a partial graph too. See PR #1987
+  // review B2.
+  truncated: boolean
+}
+
+// final-review M6: `options.enabled` lets a caller skip the network
+// round-trip (e.g. the Bank workspace's "0 of 3 type toggles active" state,
+// which always discards the result client-side) without making the hook
+// call itself conditional — React's rules of hooks require every render to
+// call the same hooks in the same order, so the `enabled` query option (not
+// an `if` around the call) is the correct lever. Defaults to `true` so
+// every pre-existing caller is unaffected.
+export function useBankUnits(
+  bank: string | null,
+  params: BankUnitsParams = {},
+  options?: { enabled?: boolean },
+) {
+  return useQuery<BankUnitsPage>({
+    queryKey: ['memory', 'banks', bank, 'units', params],
+    queryFn: () =>
+      apiGet<BankUnitsPage>(
+        `${ENDPOINTS.memoryBankUnits(bank as string)}${serializeBankUnitsParams(params)}`,
+      ),
+    enabled: !!bank && (options?.enabled ?? true),
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
+  })
+}
+
+export interface UnitCurateBody {
+  text?: string
+  context?: string
+  occurred_start?: string
+  occurred_end?: string
+  fact_type?: string
+  entities?: string[]
+  state?: 'invalidated' | 'valid'
+  reason?: string
+}
+
+// Curate is reversible (invalidate/edit) and carries no approval gate,
+// unlike delete — see the Global Constraints in the task brief.
+export function useUnitCurate(bank: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: UnitCurateBody }) =>
+      apiPatch<BankUnitRow>(ENDPOINTS.memoryUnit(bank, id), body as Record<string, unknown>),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', bank] })
+    },
+  })
+}
+
+export interface UnitHistoryEvent {
+  state?: string
+  at?: string | null
+  reason?: string | null
+  [key: string]: unknown
+}
+
+export interface UnitHistory {
+  events: UnitHistoryEvent[]
+}
+
+// Upstream (hindsight-api 0.8.4) returns a bare JSON ARRAY of history
+// events for /memories/:id/history, not a `{events:[...]}` dict — normalize
+// both shapes (plus null/undefined/anything-else) to `{events: [...]}` so
+// callers never have to branch on the wire shape. Exported so it's
+// unit-testable without mounting the hook.
+export function normalizeUnitHistory(raw: unknown): UnitHistory {
+  if (Array.isArray(raw)) return { events: raw as UnitHistoryEvent[] }
+  if (raw && typeof raw === 'object') {
+    const events = (raw as { events?: unknown }).events
+    return { events: Array.isArray(events) ? (events as UnitHistoryEvent[]) : [] }
+  }
+  return { events: [] }
+}
+
+// Upstream 404s /memories/:id/history for non-observation facts (it only
+// tracks history for observation-type facts) — that is "no history yet",
+// not a fetch failure, so the drawer shouldn't render an error state for
+// it. Any other error rethrows so react-query's isError path still fires.
+// Exported so the 404-tolerance is unit-testable without mounting the hook.
+export function unitHistoryOrEmptyOn404(err: unknown): UnitHistory {
+  if (err instanceof Hal0Error && err.status === 404) return { events: [] }
+  throw err
+}
+
+export function useUnitHistory(
+  bank: string | null,
+  id: string | null,
+  opts: { enabled?: boolean } = {},
+) {
+  const enabled = (opts.enabled ?? true) && !!bank && !!id
+  return useQuery<UnitHistory>({
+    queryKey: ['memory', 'banks', bank, 'unit', id, 'history'],
+    queryFn: async () => {
+      try {
+        const raw = await apiGet<unknown>(ENDPOINTS.memoryUnitHistory(bank as string, id as string))
+        return normalizeUnitHistory(raw)
+      } catch (err) {
+        return unitHistoryOrEmptyOn404(err)
+      }
+    },
+    enabled,
+    staleTime: 30_000,
   })
 }

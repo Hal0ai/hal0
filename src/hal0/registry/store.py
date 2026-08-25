@@ -48,6 +48,7 @@ import tomli_w
 
 from hal0.config import paths
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir
 from hal0.registry.model import Model
 
 try:  # POSIX advisory file locking. Absent on Windows; repo targets Linux.
@@ -119,7 +120,7 @@ def registry_write_lock(registry_dir: str | Path) -> Iterator[None]:
     if fcntl is None:  # pragma: no cover - non-POSIX fallback
         yield
         return
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(lock_dir)  # 2775, umask-proof (#1896)
     lock_path = lock_dir / _PROCESS_LOCK_FILENAME
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
@@ -309,7 +310,7 @@ class TomlModelRegistry:
         the original file is left intact.
         """
         target = self.registry_file
-        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_dir(target.parent)  # 2775, umask-proof (#1896)
 
         payload = {"models": {mid: _model_to_toml(m) for mid, m in sorted(models.items())}}
 

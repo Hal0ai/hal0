@@ -1228,6 +1228,23 @@
 :is(.infer-pane, .npu-pane) .sctrl.scard-model-edit {
   flex: 0 0 auto;
 }
+/* Device + profile pill's own row, directly under the model control — pulled
+   out of .scard-foot so a long custom profile name never eats into the
+   lifecycle-controls' space and forces them onto a cramped wrapped line. */
+:is(.infer-pane, .npu-pane) .scard-profile-row {
+  display: flex;
+  min-width: 0;
+}
+:is(.infer-pane, .npu-pane) .scard-profile-row .prov {
+  min-width: 0;
+  max-width: 100%;
+}
+:is(.infer-pane, .npu-pane) .scard-profile-row .profile-pill {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 
 /* expanded-body status line — right-aligned mono */
 :is(.infer-pane, .npu-pane) .body-status {

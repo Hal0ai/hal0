@@ -63,15 +63,23 @@ def profile_name_for_fit(capability: str, device: str, provider: str = "") -> st
         return None
     if device == "npu":
         return DEVICE_DEFAULT_PROFILES.get("npu")
-    if capability == "embed" and device in {"gpu-rocm", "gpu-vulkan"}:
-        # Dedicated GPU embed lane (llama-server --embedding), backend-coherent:
-        # gpu-rocm→embed, gpu-vulkan→vulkan-embed. Both non-MTP, so this honours
-        # the resolver's "never force MTP" contract. The base chat profile never
-        # emits --embedding, so embed must not fall through to it.
+    if capability == "embed":
+        # Dedicated embed lane (llama-server --embedding). Non-MTP, so this
+        # honours the resolver's "never force MTP" contract. The base chat
+        # profile never emits --embedding, so embed must not fall through to it.
+        #
+        # NOT device-gated (#1830): the 1.0 seed ``embedding`` profile is a
+        # device-agnostic logical tune (no ``device_class``, no ``backend``) —
+        # the old ``device in {gpu-rocm, gpu-vulkan}`` gate is a leftover from
+        # the retired per-backend ``embed``/``vulkan-embed`` seeds. On a
+        # CPU-only box it made this rule answer "no opinion", so an embed slot
+        # took a chat profile, launched with no ``--embedding``, reported
+        # ``state=ready`` and 501'd every ``/v1/embeddings`` call.
         return "embedding"
-    if capability == "rerank" and device in {"gpu-rocm", "gpu-vulkan"}:
-        # Dedicated GPU rerank lane (llama-server --reranking → /v1/rerank),
-        # backend-coherent: gpu-rocm→rerank, gpu-vulkan→vulkan-rerank.
+    if capability == "rerank":
+        # Dedicated rerank lane (llama-server --reranking → /v1/rerank); MUST
+        # stay a separate instance from embed. Device-agnostic for the same
+        # reason as embed above (#1830).
         return "reranking"
     if device in {"gpu-rocm", "gpu-vulkan"}:
         return DEVICE_DEFAULT_PROFILES.get(device)

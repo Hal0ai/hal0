@@ -15,39 +15,133 @@ hostname = "hal0-rc2-fresh-2604"
 ip = "10.0.1.151"
 os = "ubuntu 26.04"
 privileged = false
-gpu = false
+gpu = true          # dev0 /dev/dri/renderD128 (Strix Halo iGPU) + dev3 /dev/accel/accel0 (XDNA NPU), both gid=991
 cores = 8
 ram_gb = 16
-snapshot = "pristine"
+snapshot = "pristine"    # the "rc6-installed" convenience snapshot NO LONGER EXISTS (stale fact
+                         # found by rc.7 preflight, corrected 2026-08-22): `pct listsnapshot 151`
+                         # shows only `pristine` (2026-08-08, pre-install) and `current`. Whoever
+                         # provisioned the rc.7 run rolled back to `pristine` and ran a real
+                         # installer, which is the better fresh-install test anyway — just do not
+                         # attempt `pct rollback 151 rc6-installed`, it will fail.
 api = "http://10.0.1.151:8080"
 auth_required = false
+status = "PREFERRED fresh box as of 2026-08-22 — rc.7 verified via a genuine fresh install from pristine"
 notes = """
-Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor.
+Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor, THEN run the installer
+fresh — this is now the ONLY reset point (corrected 2026-08-22: the `rc6-installed` /
+`rc5-installed` convenience post-install snapshots this file used to document are GONE;
+`pct listsnapshot 151` shows only `pristine` (2026-08-08) and `current`). Do not attempt
+`pct rollback 151 rc6-installed` or any named post-install snapshot — it will fail. Every prior
+"two reset points" convenience this file described no longer applies; budget the full installer
+run (~30 min) into any reset of this box. Do NOT assert "no models on a fresh install" — the
+installer pulls the brain model, so a post-install fresh box always has exactly one model
+present and serving/erroring depending on hardware (see the seeded-anchor-slot finding below).
+The only fresh box in the fleet — ct152-cpu-fresh was destroyed 2026-08-21 and there is no other
+CPU-only fresh box to fall back to.
+
+GPU PASSTHROUGH since the rc.5 era, NO /dev/kfd (render node only: dev0 /dev/dri/renderD128
++ dev3 /dev/accel/accel0). As of the rc.7 Vulkan-restoration fold (#1948, landed as #1954 +
+#1973 + #1959), this is once again ct151's PRIMARY Vulkan LLM lane box: the release pin moved
+to `ghcr.io/hal0ai/hal0-combined:0822` (`VULKAN_FIXED_IMAGE` in config/schema.py — correct
+Vulkan output, MiniCPM5 parser restored), and `gpu-vulkan` llama.cpp slots on this kfd-less AMD
+render node are gated on an EXPLICIT ALLOWLIST, not a version/tag comparison:
+`require_kfd_for_gpu_slot`'s `gpu-vulkan` branch (`providers/_gpu.py`) checks the slot's
+resolved image against `VULKAN_CAPABLE_IMAGE_REFS` and the render node's openability by the
+runner identity (uid 0) — `/dev/kfd` is never consulted on this path. Any image not in the
+allowlist (the outgoing `ade07ba` pin, still the concrete case) is refused loudly, naming
+#1888 and `VULKAN_FIXED_IMAGE` — see `lanes/stateful/slots.md` 8c/8d. #1922's output-sanity
+readiness gate (merged, PR #1962, live on main) is the permanent net under this: any slot that
+reaches `ready` on this box, on any backend, has already passed a temp-0 "Paris" probe. Run the
+coherence canary (_shared.md) anyway before trusting generated text — the gate proves
+readiness, not that every later request stays sane. `gpu-rocm` llama.cpp slots still refuse
+here (no /dev/kfd, no ROCm compute node — that gate is untouched and unrelated to the image
+allowlist). Non-llama GPU runtimes (TTS/whisper/ComfyUI) continue to use Vulkan as before.
+Seeded slots still derive `gpu-rocm` wherever `/dev/kfd` is usable and fall to `gpu-vulkan`
+only when it is not (operator ruling — ROCm stays the default despite Vulkan measuring faster
+in #1948's §3-C matrix); on this box, with no `/dev/kfd`, seeded chat/coder/embed slots derive
+`gpu-vulkan` directly. `ENV_ALLOW_VULKAN_FALLBACK` (`HAL0_ALLOW_VULKAN_FALLBACK`) is STILL a
+finding if set: post-fold it downgrades BOTH correctness refusals to a warning — missing
+`/dev/kfd` on the ROCm path, and an unvalidated image on this box's Vulkan path — never the
+render-node check. Its presence on any box is itself a finding, and if found, the #1922 gate
+must be the thing that catches the resulting garbage (never a silent `ready`) — see
+`lanes/stateful/slots.md` check 8e.
+
 GOTCHAS, in order:
   1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
      Tailscale 100.100.100.100. Fix it before anything else or the install fails opaquely.
-  2. No GPU passthrough: the install needs HAL0_ALLOW_CPU_ONLY=1.
+  2. (stale, retired) The install no longer needs HAL0_ALLOW_CPU_ONLY=1 — GPU passthrough
+     exists.
   3. No NFS mount. Test models must be rsynced to /mnt/ai-models; workstation ggufs are often
-     symlinks into huggingface/hub, so use `rsync -L`.
-  4. An unprivileged LXC sees the host's sysfs with no /dev/dri — hardware probes that key on
-     AMD DRM sysfs alone will misreport (root cause of #1790).
+     symlinks into huggingface/hub, so use `rsync -L` — and /mnt/ai-models is NOT in hal0's
+     model roots, so a staged gguf is invisible until `hal0 model add`.
+  4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
+     `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
+  5. (stale, retired 2026-08-22 — no post-install convenience snapshot exists any more, so this
+     no longer applies) After a rollback to a named post-install snapshot, services would not
+     come back on their own — `systemctl start hal0.target` (hermes unit
+     `hermes-gateway.service`). A genuinely fresh installer run (the only reset path now)
+     starts both units itself; no manual start has been needed on the last two runs.
 """
+
+# ct152-cpu-fresh (the CPU-only fresh box, no GPU passthrough) was DESTROYED 2026-08-21. There
+# is no other CPU-only fresh box in the fleet — ct151 is now the ONLY fresh-install box, and it
+# has GPU passthrough (no /dev/kfd). A CPU-only fresh install cannot currently be exercised at
+# all; note this explicitly in any report rather than silently dropping that coverage.
 
 [boxes.ct150-update]
 role = "update"
 ctid = 150
 hostname = "halo"
 ip = "10.0.1.150"
-os = "ubuntu"
-gpu = false
+os = "ubuntu 24.04"
+privileged = true    # /proc/1/uid_map = full map; 32 cores / 107 GiB — prod-class, unlike every fresh box
+gpu = true           # AMD iGPU passthrough + /dev/kfd; slot TOMLs say device=gpu-vulkan but
+                      # llama.cpp actually executes on ROCm here (ROCm wins whenever /dev/kfd
+                      # is visible) — the vulkan label is a seed lie, not the real backend
 api = "http://10.0.1.150:8080"
 auth_required = false
 notes = """
 In-place upgrade lane. Left on the PREVIOUS release; the run upgrades it to the RC under test.
-HAL0_RELEASES_URL is a file:// stage at /var/lib/hal0/rc2/preview.json (directory name is
-historical, not a version claim) — restage the new manifest + bundle there, or point it at the
-GitHub asset URL (works end-to-end since rc.3). No snapshot reset: its value is accumulated
-upgrade history, so record the exact from-version in CONTEXT.md before upgrading.
+HAL0_RELEASES_URL now points at the GitHub release asset URL (works end-to-end; the historical
+file:// stage /var/lib/hal0/rc2/ still exists on disk but holds a stale rc.5 manifest — residue,
+not the active source). No snapshot reset: its value is accumulated upgrade history, so record
+the exact from-version in CONTEXT.md before upgrading.
+UPGRADED rc.5 -> rc.6 on 2026-08-15 and converged; it now sits on 1.0.0-rc.6, so the NEXT run's
+from-version is rc.6. Box history: 0.9.8 -> nightly -> rc.1 -> rc.2 -> rc.3 -> rc.5 -> rc.6;
+every old tree still under /usr/lib/hal0/.
+Carries hermes-agent 0.19.0 from a hand-installed PyPI wheel (DOES ship `hermes_cli/web_dist`),
+so it cannot reproduce the fresh-install hermes packaging defects (#1829) — record such checks
+as known/skipped with that reason.
+KNOWN, do not re-file: #1844 — /usr/local/bin/hal0 is a stale rc.3 wrapper; use
+/usr/lib/hal0/venv/bin/hal0 for a truthful CLI, or you will "reproduce" pre-fix behaviour and
+misread it as a regression (this happened in rc.6). #1845 (convergence panel remediation).
+Seed drift is expected box state, NOT a defect: agent.toml pins context_size = 4096 from an old
+seed — upgrades never reconcile slot seeds, which is why Hermes fails here for a DIFFERENT
+reason than on a fresh box (see #1827/#1867).
+
+rc.7 UPDATE-LANE ADDITION (#1959 B1, landed in the repin commit `8f23afba`): this box's slot
+TOMLs are the right place to prove the retag migration is not just fixed on paper. Before
+upgrading, record every slot's image pin under BOTH the legacy top-level/`[slot]` `image` key
+AND the newer `image_pin` key (`grep -n 'image_pin\\|^image' /var/lib/hal0/slots/*.toml`, plus
+any custom profile in `profiles.toml`) — `hal0 slot migrate-hw --apply` folds an old `image` pin
+into `image_pin` and drops the bare key, so a box that ran that migration carries `image_pin`
+only. `retag_stale_slot_images` (updater.py) now checks BOTH keys and, on a slot carrying both,
+binds `image_pin` FIRST — matching `_resolve_image_ref`'s own precedence, which no longer reads
+the bare key at all (the B1 fix's own review found and fixed a precedence mismatch here: the
+sweep originally judged the bare key while the resolver serves `image_pin`, so it could clear
+the WRONG value and leave the served pin stale behind the release replacing it). After the
+rc.6 -> rc.7 upgrade, every slot whose SERVED pin (image_pin if present, else image) exactly
+equalled a known former default must read the new `:0822` ref, and `image_pin` specifically
+(not just `image`) is the field to check first. Any pin that was NOT a stale former default (a
+deliberate operator override, a debug build) must be untouched under either key — the escape
+hatch is not a bug. See `regressions.yaml: updater-image-pin-retag-blind-spot`.
+
+rc.7 PERF-ROW REFERENCE: the #1948 §3-C matrix on this box (kfd present) measured the restored
+Vulkan lane FASTER than ROCm on both metrics — +13.96% prefill, +20.45% decode. This REPLACES
+the old ade07ba-era expectation ("Vulkan ~-10% decode vs ROCm") that earlier kit versions
+carried; do not flag a Vulkan-ahead-of-ROCm result as a regression, and treat the new numbers as
+the reference envelope for a >20% variance check on future releases.
 """
 
 [boxes.ct163-cpu-fresh]
@@ -58,11 +152,25 @@ ip = "10.0.1.163"
 os = "ubuntu 24.04"
 privileged = true
 gpu = false
+cores = 8            # added 2026-08-22 (was missing, unlike ct151/ct150) — nproc
+ram_gb = 16           # added 2026-08-22 — free -h total
 snapshot = "pristine"
+api = "http://10.0.1.163:8080"    # added 2026-08-22, for consistency with ct151/ct150
+auth_required = false             # added 2026-08-22 — open, unauthenticated /api/models = 200
 notes = """
 Second fresh-install box: privileged, older Ubuntu. Not in the default matrix — enable it when
-a finding smells privilege- or distro-specific. AppArmor blocks podman until remediated
-(#1563 ordering bug; workaround: containers.conf.d apparmor_profile="unconfined").
+a finding smells privilege- or distro-specific. This is currently the ONLY box in the fleet with
+ZERO GPU device passthrough at all (no /dev/dri, no /dev/kfd, no /dev/accel) — the only place to
+get genuine CPU-only fresh-install coverage since ct152-cpu-fresh was destroyed 2026-08-21. The
+installer still seeds the primary `brain` anchor slot at `device=gpu-rocm` here despite there
+being no GPU at all, so it crash-loops from t=0 with no CPU fallback offered — see regression
+`seeded-anchor-slots-rocm-on-kfd-less-box`. AppArmor blocks podman until remediated
+(#1563 ordering bug; workaround: containers.conf.d apparmor_profile="unconfined") — status is
+AMBIGUOUS, not clearly stale or clearly true: `apparmor.service` shows failed but podman is
+demonstrably functional for at least the openwebui image without the documented workaround
+applied; the one image that failed to pull (hal0-combined:0822) failed for an unrelated
+pre-container-launch guard reason, so this box has not yet exercised the actual "podman launches
+a hal0 slot container under AppArmor" path the gotcha warns about.
 """
 
 [boxes.ct105-prod]
@@ -78,9 +186,51 @@ PRODUCTION. READ-ONLY, always — no slot loads, no config writes, no service re
 in a validation run is to answer "is this finding an artifact of the CPU-only test box?" on
 real GPU hardware. Anonymous /api/* returns 401; run `hal0 ...` on the box instead of curl
 from the workstation. Not part of the default matrix; opt in per run.
+
+Was running 1.0.0rc5 during the rc.5 validation, which made it an unusually good cross-check —
+but it is an UPGRADED box with months of operator tuning, so "prod is fine" is weak evidence
+about a fresh install. Specifics found the hard way in rc.5:
+  * its venv carries an ORPHANED hermes_cli/web_dist from an older hermes (present in no
+    dist-info RECORD), so the fresh-install board-token defect (#1829) cannot be seen here;
+  * its brain model carries an operator-set defaults.context_size and its hermes config points
+    at a cloud model, so the 64K-floor blocker (#1827) cannot be seen here either;
+  * its slots and capability bindings are hand-tuned, so a seeded-default finding will not
+    reproduce.
+Use it to answer "is this CPU-only or hardware-independent?", never "does a fresh GPU install
+work?".
 """
 
-# No GPU fresh-install box exists today. Every fresh-install finding that touches backend
-# selection, profile flags, hardware probing, or native tool-calling therefore carries an
-# explicit "would a GPU box hit this?" judgement (read-only cross-check on ct105-prod) rather
-# than a measurement. Standing gap — worth closing before GA.
+# Fleet coverage note (updated 2026-08-21 for the rc.7 Vulkan-restoration fold, #1948, landed as
+# #1954 + #1973 + #1959): ct151 has iGPU+NPU passthrough but NO /dev/kfd, and it is once again
+# the fleet's PRIMARY Vulkan LLM lane box on a fresh install — it is also now the ONLY fresh
+# box in the fleet: ct152-cpu-fresh (the CPU-only fresh box) was DESTROYED 2026-08-21, so a
+# CPU-only fresh install cannot be exercised at all this release; say so plainly rather than
+# treating ct151 as interchangeable with it. `gpu-vulkan` llama.cpp slots on ct151's kfd-less AMD
+# render node are gated on an EXPLICIT ALLOWLIST, not a version/tag comparison and not retired
+# outright: `VULKAN_CAPABLE_IMAGE_REFS` (config/schema.py) names the specific image refs whose
+# Vulkan backend passed the #1948 §3-C matrix (currently just `VULKAN_FIXED_IMAGE`, the signed
+# `:0822` pin) — deliberately not "the pin or later", because Vulkan correctness was NOT
+# monotonic in build recency during the bisect (an older tree was correct, a newer one broken).
+# `require_kfd_for_gpu_slot`'s `gpu-vulkan` branch (providers/_gpu.py) checks this allowlist plus
+# render-node openability; it does not touch `/dev/kfd` at all on this path. Any image not in the
+# allowlist still REFUSES, loudly, naming #1888 — exactly as it did under #1923's retire-only
+# posture, just keyed on the image now instead of the device. `gpu-rocm` llama.cpp slots still
+# refuse everywhere without /dev/kfd — that gate is untouched by the fold. The remaining coverage
+# gap is a GPU fresh-install box WITH /dev/kfd: ct150/ct105 both have /dev/kfd but are not fresh
+# installs (update/prod) — no box in the fleet is both freshly installed and representative of a
+# bare-metal AMD host with amdkfd loaded, so ct151 (render-node-only) and ct150/ct105
+# (kfd-visible, ROCm-serving) remain the only two Vulkan-adjacent cross-checks available; use
+# ct150/ct105 to answer "does ROCm still work", never "does a fresh Vulkan-only install work".
+# Also: only prod (ct105) has host rocm-smi, so compute_capable=true exists on exactly one box —
+# capability-flag findings need that cross-check. #1922's output-sanity readiness gate (merged,
+# PR #1962, live on main) is the permanent net regardless of image or backend: no slot reaches
+# `ready` without passing the temp-0 "Paris" probe first, so a stale/broken image reaching this
+# box's Vulkan lane is a terminal `error`, never a silent `ready`. `ENV_ALLOW_VULKAN_FALLBACK`
+# (`HAL0_ALLOW_VULKAN_FALLBACK`) remains a finding wherever it is set: it downgrades BOTH
+# correctness refusals to a warning — missing `/dev/kfd` on the ROCm path, and an unvalidated
+# image on the restored Vulkan path — never the render-node check, which no env var can change.
+# Seeded slots still derive `gpu-rocm` first wherever `/dev/kfd` is usable (operator ruling —
+# ROCm stays the default despite the §3-C matrix measuring Vulkan faster, +13.96% prefill /
+# +20.45% decode); a seeded slot landing on `gpu-vulkan` on a kfd-PRESENT box is a finding, not a
+# pass. Record what a box's slots actually execute (podman exec <slot ctr> ls /dev/kfd; and, for
+# gpu-vulkan slots, the resolved runner image ref) in every preflight.

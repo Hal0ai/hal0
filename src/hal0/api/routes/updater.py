@@ -47,6 +47,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
+from hal0.install.perms import ensure_shared_dir
 from hal0.release.policy import ReleaseKind
 from hal0.updater import (
     Updater,
@@ -236,7 +237,10 @@ def _persist_job(job: dict[str, Any]) -> None:
         return
     path = _job_file(str(job_id))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # update-jobs/ is declared 2775; a bare mkdir under the daemon's
+        # UMask=0022 births 2755 and re-drifts `doctor perms` after every
+        # update job (#1896 class, precedent: registry/pull.py persist_pull_job).
+        ensure_shared_dir(path.parent)
         fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path = Path(tmp_str)
         try:
@@ -348,7 +352,7 @@ async def _run_apply_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         await updater.apply(version)
     except Exception as exc:
         job["state"] = "failed"
@@ -406,7 +410,7 @@ async def _run_prepare_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         result = await updater.prepare(version)
     except Exception as exc:
         job["state"] = "failed"
@@ -415,7 +419,6 @@ async def _run_prepare_job(
     else:
         job["resolved_version"] = result.get("version")
         job["notes"] = result.get("notes")
-        job["cosign_skipped"] = result.get("cosign_skipped")
         # Read-only gate snapshot for the one-shot profile-catalog reset.
         # commit() runs in this daemon, which has no TTY, so the CLI has to be
         # told *here* whether a prompt is owed and what it would destroy.
@@ -454,13 +457,24 @@ async def _run_commit_job(
     job["updated_at"] = time.time()
     _persist_job(job)
     try:
-        updater = Updater(channel=channel)
+        updater = Updater(channel=channel, job_id=job_id)
         result = await updater.commit(version, reset_profiles=reset_profiles)
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
         job["error_code"] = type(exc).__name__
     else:
+        # Convergence must land on the job BEFORE the terminal-state persist
+        # below, not after the restart the way it read before (#1960 B3):
+        # the restart a few lines down is the exact #1540 mechanism — it
+        # shells out from inside hal0-api's own cgroup and can SIGTERM this
+        # very process while it's in flight — so anything set only
+        # afterwards may never reach disk. A red (unconverged) post-swap
+        # migration failure has to survive that race, or a CLI that
+        # re-attaches after the restart reads `convergence: None` and
+        # _print_convergence reports a clean success for a run that wasn't.
+        job["convergence"] = (result or {}).get("convergence")
+
         # Terminal state first, then the restart - see the long note in
         # _run_apply_job. commit() is the path #1540 was reported against:
         # the restart kills this process, so "applied" has to already be on
@@ -474,7 +488,6 @@ async def _run_commit_job(
         restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
         job["restarted"] = restarted
         job["restart_error"] = restart_error
-        job["convergence"] = (result or {}).get("convergence")
     finally:
         job["updated_at"] = time.time()
         _persist_job(job)

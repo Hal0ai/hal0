@@ -21,6 +21,8 @@ import {
   useBankDocuments,
   useBankGraph,
   useBankSubgraph,
+  useBankTags,
+  useBankUnits,
   useDirectiveCreate,
   useDirectiveDelete,
   useDirectives,
@@ -43,6 +45,8 @@ import {
   useMemoryEngine,
   useOperationCancel,
   useOperationRetry,
+  useUnitCurate,
+  useUnitHistory,
   summarizeBankOperations,
 } from '@/api/hooks/useHindsight'
 // ADR-0023 graph-extraction gate hooks — the Memory Overview drives its
@@ -50,6 +54,8 @@ import {
 // Memory tab; bridged here too so #memory doesn't depend on that tab's
 // bridge load order).
 import {
+  useMemoryAdd,
+  useMemoryDelete,
   useMemoryGraphStatus,
   useRetryFailedExtractions,
   useUpdateMemoryGraph,
@@ -87,6 +93,12 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseDirectiveCreate: useDirectiveCreate,
   __hal0UseDirectiveUpdate: useDirectiveUpdate,
   __hal0UseDirectiveDelete: useDirectiveDelete,
+  __hal0UseBankTags: useBankTags,
+  __hal0UseBankUnits: useBankUnits,
+  __hal0UseUnitCurate: useUnitCurate,
+  __hal0UseUnitHistory: useUnitHistory,
+  __hal0UseMemoryAdd: useMemoryAdd,
+  __hal0UseMemoryDelete: useMemoryDelete,
   // d3-force layout primitives for the graph explorer (no-ES-imports .jsx).
   __hal0D3Force: { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY },
 })

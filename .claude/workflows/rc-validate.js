@@ -33,6 +33,7 @@ const KIT = `${REPO}/tests/release-validation`
 const RUN = `/mnt/mintdev/artifacts/hal0-release-validation/${VERSION}`
 
 // Box id -> role. Mirrors tests/release-validation/boxes.toml.
+// ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) — there is no CPU-only fresh box left.
 const BOX_ROLES = {
   'ct151-cpu-fresh': 'fresh',
   'ct163-cpu-fresh': 'fresh-alt',
@@ -226,7 +227,7 @@ own CONTEXT file.
    Write it for an agent that knows nothing about this fleet. Every later agent depends on it.
 
 Return the schema. Set ready=false only for something that genuinely invalidates the run.
-`, { label: `preflight:${boxId}`, phase: 'Preflight', schema: PREFLIGHT })))
+`, { label: `preflight:${boxId}`, phase: 'Preflight', schema: PREFLIGHT, model: 'sonnet' })))
 
 const ok = preflights.filter(Boolean)
 const blocked = ok.filter((p) => !p.ready)
@@ -246,13 +247,27 @@ phase('Sweep')
 const freshBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'fresh' || BOX_ROLES[b] === 'fresh-alt')
 const updateBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'update')
 
+// A box id that is missing from BOX_ROLES resolves to no role, which used to make the whole
+// Sweep phase spawn zero agents in silence — triage then "succeeded" off the preflight
+// CONTEXT.md alone and the run looked complete. Abort instead: an unknown box is a kit bug.
+const unroled = BOX_IDS.filter((b) => !BOX_ROLES[b])
+if (unroled.length) {
+  throw new Error(
+    `unknown box id(s): ${unroled.join(', ')} — add them to BOX_ROLES in this script AND to ` +
+    `tests/release-validation/boxes.toml. Known ids: ${Object.keys(BOX_ROLES).join(', ')}`,
+  )
+}
+if (!freshBox && !updateBox) {
+  throw new Error(`no box with role fresh/fresh-alt/update in ${BOX_IDS.join(', ')} — nothing to sweep`)
+}
+
 function laneAgent(kind, key, box, extra, opts) {
   return agent(`${BASE}
 YOUR LANE: ${key} (${kind}) on box ${box}
 YOUR BRIEF: ${briefPath(kind, key)} — read it now and work through it.
 ${extra || ''}
 Write your raw notes to ${RUN}/lanes/${box}-${key}.md as you go, then return the schema.
-Set box="${box}" and lane="${key}".`, Object.assign({ label: `${kind}:${key}`, phase: 'Sweep', schema: LANE_RESULT }, opts || {}))
+Set box="${box}" and lane="${key}".`, Object.assign({ label: `${kind}:${key}`, phase: 'Sweep', schema: LANE_RESULT, model: 'sonnet' }, opts || {}))
 }
 
 // serialised chain: each stage is handed the previous stage's box_state_on_exit verbatim
@@ -287,7 +302,7 @@ if (updateBox) {
 // intent judgement stays on the workhorse tier.
 const REG_BATCHES = [
   { tier: 'mechanical', model: 'fable', desc: 'entries with tier: mechanical' },
-  { tier: 'judgment', desc: 'entries with tier: judgment' },  // no model override: inherit session tier
+  { tier: 'judgment', model: 'sonnet', desc: 'entries with tier: judgment' },  // kit.toml regression_judgment tier
 ]
 if (freshBox && wanted('regressions')) {
   for (const b of REG_BATCHES) {
@@ -306,6 +321,12 @@ tests and CI, not against a fresh end-to-end install — proving they are actual
 box is the entire point of this phase.
 
 Rules:
+  - SKIP any entry whose \`lane\` is "${LANES.update.join('" or "')}" — those belong to the
+    update box and are probed separately, against ${updateBox || '(no update box this run)'}.
+  - SKIP any entry whose \`serialize: true\` is set. Those run separately, after this parallel
+    sweep finishes, because their repro mutates box-wide shared state (e.g. restarting hal0-api)
+    that would poison the concurrently-running read-only/stateful lanes and sibling regression
+    batches. Do not run them here even if you have time.
   - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
   - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
   - "partial" needs you to say exactly which part of \`expect\` held and which did not.
@@ -319,10 +340,64 @@ Rules:
 Return one result object per entry you ran.`, regOpts))
   }
 }
+if (updateBox && wanted('regressions')) {
+  for (const b of REG_BATCHES) {
+    const regOpts = Object.assign(
+      { label: `regressions:${b.tier}:update`, phase: 'Sweep', schema: REGRESSION_RESULT },
+      b.model ? { model: b.model } : {},
+    )
+    work.push(() => agent(`${BASE}
+YOU RUN THE REGRESSION PROBES (${b.desc}) on box ${updateBox}.
+
+Read ${KIT}/regressions.yaml. Take EVERY entry whose tier is "${b.tier}" AND whose \`lane\` is
+"${LANES.update.join('" or "')}" — these entries evidence lives in the update box's journal
+and cache, not the fresh box — and run its \`repro\` against this box, comparing what you
+observe to its \`expect\`. Do not run any entry whose \`lane\` is not in that set; those are
+covered by the fresh-box regression batch running concurrently.
+
+Rules:
+  - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
+  - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
+  - "partial" needs you to say exactly which part of \`expect\` held and which did not.
+  - The update lane is running on this same box concurrently — read state before mutating,
+    never interrupt an in-flight upgrade.
+  - If an entry's repro no longer matches the current CLI or API surface, say so — a stale
+    regression entry is itself a finding worth reporting to the curation phase.
+
+Return one result object per entry you ran.`, regOpts))
+  }
+}
 
 const swept = await parallel(work)
+
+// Serialized regression probes: entries whose repro mutates box-wide shared state (e.g.
+// restarting hal0-api) run here, sequentially, AFTER every parallel lane and regression batch
+// has finished — never alongside them, or the mutation poisons sibling lanes mid-run.
+let serializedRegressionResults = []
+if (freshBox && wanted('regressions')) {
+  const serialResult = await agent(`${BASE}
+YOU RUN THE SERIALIZED REGRESSION PROBES on box ${freshBox}. The parallel sweep (read-only
+lanes, the stateful chain, and the non-serialized regression batches) has now finished, so
+nothing else is running concurrently on this box.
+
+Read ${KIT}/regressions.yaml. Take EVERY entry with \`serialize: true\` and run its \`repro\`
+against this box, comparing what you observe to its \`expect\`.
+
+Rules:
+  - Use the result vocabulary defined in the file: fixed | regressed | partial | blocked.
+  - "blocked" is honest and useful. Reporting a probe you could not run as "fixed" is not.
+  - "partial" needs you to say exactly which part of \`expect\` held and which did not.
+  - You may restart services or otherwise disrupt the box for the duration of a single repro —
+    that is exactly why these entries are serialized — but leave the box in a working state
+    when you finish (services back up, nothing left crashed).
+  - If an entry's repro no longer matches the current CLI or API surface, say so.
+
+Return one result object per entry you ran.`,
+    { label: 'regressions:serialized', phase: 'Sweep', schema: REGRESSION_RESULT, model: 'sonnet' })
+  serializedRegressionResults = (serialResult && serialResult.results) || []
+}
 const laneResults = swept.filter(Boolean).flatMap((r) => (Array.isArray(r) ? r : (r.results ? [] : [r])))
-const regressionResults = swept.filter(Boolean).filter((r) => !Array.isArray(r) && r.results).flatMap((r) => r.results)
+const regressionResults = swept.filter(Boolean).filter((r) => !Array.isArray(r) && r.results).flatMap((r) => r.results).concat(serializedRegressionResults)
 
 const totalChecks = laneResults.reduce((n, r) => n + (r.tested ? r.tested.length : 0), 0)
 const rawFindings = laneResults.flatMap((r) => (r.findings || []).map((f) => Object.assign({}, f, { lane: r.lane, box: r.box })))
@@ -403,10 +478,17 @@ the \`still_report_if\` clause that should go into known-issues.yaml, so no futu
 relitigates it.
 
 Also judge \`other_hardware_applicability\`: would a GPU box, a privileged container, or an
-upgraded (rather than freshly installed) box hit this? There is no GPU fresh-install box in the
-fleet, so a read-only cross-check against the production box is the best available evidence —
-use it when the finding touches backend selection, profile flags, hardware probing, or native
-tool calling.
+upgraded (rather than freshly installed) box hit this? No box in the fleet is BOTH a fresh
+install AND has /dev/kfd visible (the fresh boxes lack /dev/kfd, so their gpu-rocm LLM slots
+REFUSE to start — no ROCm compute node, no CPU fallback for a gpu-device slot). As of the rc.7
+Vulkan-restoration fold (#1948), that is no longer the whole story for the Vulkan LLM lane: a
+fresh box WITHOUT /dev/kfd (ct151) now DOES run gpu-vulkan LLM slots, gated on the runner image
+being at or after the signed :0822 pin rather than refused outright — so a fresh-install
+Vulkan-lane finding CAN be reproduced fleet-side, on ct151, and does not automatically need the
+production cross-check. gpu-rocm LLM slots remain fresh-install-untestable (still no fresh box
+with /dev/kfd) — use the production box or the update box (both have /dev/kfd but are not
+fresh installs) for anything that is specifically about the ROCm lane, backend selection,
+profile flags, hardware probing, or native tool calling on a kfd-visible box.
 
 Non-destructive repro only. If you load a slot, restore what you found. Set key="${c.key}".`,
   { label: `verify:${c.key}`, phase: 'Verify', schema: VERDICT, model: 'opus', effort: 'high' })))).filter(Boolean)
@@ -448,7 +530,8 @@ Requirements:
     them — that reasoning is what stops the next run rediscovering them.
   - Record kit_version from ${KIT}/kit.toml and the exact box configurations.
   - Be honest about coverage: which lanes were skipped, which checks were skipped, what the
-    fleet cannot test at all (there is no GPU fresh-install box).
+    fleet cannot test at all (no box is both a fresh install and has /dev/kfd visible — see
+    ${KIT}/boxes.toml's fleet coverage note).
 
 Return the path you wrote plus a 10-line summary suitable for pasting into a release thread.`,
   { label: 'report', phase: 'Report', model: 'opus' })
@@ -517,7 +600,7 @@ written. Moving work out of this kit and into CI is a success, not a loss.
 
 Return a summary of every file you changed and what you changed in it, plus the promotion list.
 Do not commit — the operator reviews the diff.`,
-  { label: 'curate', phase: 'Curate' })
+  { label: 'curate', phase: 'Curate', model: 'sonnet' })
 
 return {
   version: VERSION,

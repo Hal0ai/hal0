@@ -279,8 +279,9 @@ def test_lifecycle_and_query_halves_agree_on_one_token(tmp_path: Path) -> None:
         provider.unload_sync(cfg)  # lifecycle half
 
     # The probe and the teardown target the SAME unit — that is the whole
-    # point of routing every artefact name through one token.
-    assert units == [_UNIT, _UNIT], units
+    # point of routing every artefact name through one token. Teardown now
+    # emits two unit-bearing calls (stop + reset-failed), both on the token.
+    assert units == [_UNIT] * 3, units
 
 
 if __name__ == "__main__":  # pragma: no cover

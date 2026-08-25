@@ -69,7 +69,9 @@ __all__ = [
     "SlotViewAggregator",
     "config_enrichment",
     "container_enrichment",
+    "image_status_for",
     "loaded_model_names_from_slots",
+    "resolve_ctx_max",
     "serialize_slot",
     "synthesize_upstream_entries",
 ]
@@ -429,7 +431,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return out
 
 
-def _resolve_ctx_max(
+def resolve_ctx_max(
     raw_ctx_max: int | None,
     model_registry: Any,
     model_id: str,
@@ -441,13 +443,15 @@ def _resolve_ctx_max(
     TOML — the raw hardware ceiling, not what llama-server actually runs
     with now that the MODEL owns context size (v1.0 ownership split; see
     :func:`hal0.providers.container._resolve_context_size`). The aggregator
-    calls this after merging ``config_enrichment``'s output so the
-    "ctx used / max" pane reports the same number the launch path resolved,
-    using the model registry the aggregator already carries.
+    (and, per #1835, the ``GET /api/slots/{name}`` detail route) calls this
+    after merging ``config_enrichment``'s output so the "ctx used / max"
+    pane and the per-slot detail body both report the same number the
+    launch path resolved, using the model registry the caller already
+    carries.
 
     Imported lazily (heavy neighbour, see module docstring) and never
     raises: a resolution failure degrades to the raw TOML ceiling — the
-    pre-fix behavior — rather than breaking the slots list.
+    pre-fix behavior — rather than breaking the caller.
     """
     try:
         from hal0.providers.container import resolve_effective_context_size
@@ -496,18 +500,44 @@ _PROBE_CONCURRENCY = 8
 #: pays 3 inspects per TTL window instead of 20 per poll. Kept short enough
 #: that a just-finished pull flips missing→present within one refresh.
 _IMAGE_PRESENT_TTL_S = 15.0
-_image_present_cache: dict[str, tuple[float, bool]] = {}
+_image_present_cache: dict[str, tuple[float, bool | None]] = {}
 
 
-def _image_present_cached(cp: Any, image: str) -> bool:
-    """TTL-cached ``cp.image_present`` (subprocess-backed, executor-called)."""
+def _image_present_cached(cp: Any, image: str) -> bool | None:
+    """TTL-cached ``cp.image_present`` (subprocess-backed, executor-called).
+
+    Tri-state since #1939: ``None`` is "the image store could not be asked",
+    and it is cached exactly like a real answer — a box with a broken seam
+    would otherwise pay a sudo round-trip per image per poll to be told the
+    same thing. Note the deliberate absence of a ``bool()`` here: coercing on
+    the way in (or out) of the cache would restore the collapse this issue is
+    about one poll later, silently.
+    """
     now = time.monotonic()
     hit = _image_present_cache.get(image)
     if hit is not None and now - hit[0] < _IMAGE_PRESENT_TTL_S:
         return hit[1]
-    present = bool(cp.image_present(image))
+    answer = cp.image_present(image)
+    present = None if answer is None else bool(answer)
     _image_present_cache[image] = (time.monotonic(), present)
     return present
+
+
+def image_status_for(present: bool | None) -> str:
+    """Project a tri-state presence answer onto the ``image_status`` payload.
+
+    The single place the mapping lives, so the aggregator, the pull-status
+    route and the tests cannot disagree about what ``None`` means.
+
+    ``unknown`` is the whole point (#1939): ``missing`` is a claim that podman
+    was asked and the image is not there, which is what makes ``missing`` on a
+    ``running`` slot a meaningful defect signal (regression
+    ``image-status-wrong-podman-store``). Reporting an unanswerable probe as
+    ``missing`` both lies and blunts that signal.
+    """
+    if present is None:
+        return "unknown"
+    return "present" if present else "missing"
 
 
 async def container_enrichment(
@@ -525,9 +555,11 @@ async def container_enrichment(
 
     plus image facts: ``actual_image`` (podman inspect, #663),
     ``image_mismatch`` against the declared profile image, and
-    ``image_status`` (present | pulling | missing | not-configured — an
-    in-flight job in ``pull_jobs`` wins without an inspect syscall;
-    ``not-configured`` marks a slot with no declared profile/image, #1226).
+    ``image_status`` (present | pulling | missing | unknown | not-configured —
+    an in-flight job in ``pull_jobs`` wins without an inspect syscall;
+    ``not-configured`` marks a slot with no declared profile/image, #1226;
+    ``unknown`` marks a probe that could not be MADE, #1939, which is a
+    different claim from ``missing``).
 
     ``provider`` is injectable for unit tests; ``None`` resolves the real
     ContainerProvider lazily so route-level patches on the class keep
@@ -712,7 +744,7 @@ async def container_enrichment(
             if image:
                 entry["image_mismatch"] = _image_mismatch(running_image, image)
 
-        # image_status: present | pulling | missing | not-configured
+        # image_status: present | pulling | missing | unknown | not-configured
         # Check the pull-jobs registry first so an in-flight pull
         # surfaces as "pulling" without an extra inspect syscall.
         active_job = jobs.get(name)
@@ -722,9 +754,26 @@ async def container_enrichment(
             try:
                 cp = _resolve_container_provider(provider)
                 present = await loop.run_in_executor(None, _image_present_cached, cp, image)
-                entry["image_status"] = "present" if present else "missing"
-            except Exception:
-                entry["image_status"] = "missing"
+                entry["image_status"] = image_status_for(present)
+            except Exception as exc:
+                # #1939: this branch used to answer "missing". Whatever went
+                # wrong here — resolving the provider, the executor, the probe
+                # itself — the one thing we did NOT learn is whether the image
+                # is on disk, so that is what we say.
+                #
+                # And we say WHY in the journal. The payload deliberately
+                # carries no reason field, so an `unknown` with no log line
+                # behind it would be undiagnosable — the failure family this
+                # whole issue is about. `image_present` logs its own seam
+                # reasons; this covers every unknown that never reached it.
+                log.warning(
+                    "slot_view.image_probe_failed slot=%s image=%s reason=probe-error "
+                    "error=%s — reporting image_status=unknown",
+                    name,
+                    image,
+                    exc,
+                )
+                entry["image_status"] = "unknown"
         else:
             # No profile/image declared — the slot runs on the default toolbox.
             # "No expected image" is NOT a missing-image fault (#1226): report
@@ -742,14 +791,38 @@ async def container_enrichment(
                 return await asyncio.wait_for(_one(name, cfg), timeout=_PROBE_TIMEOUT_S)
             except TimeoutError:
                 log.warning("slot_view.container_probe_timeout slot=%s", name)
+                profile_name = str(cfg.get("profile") or "")
+                if profile_name:
+                    # This is the third way to reach image_status="unknown",
+                    # and it needs the same reason-bearing line as the other
+                    # two: the release-validation kit tells operators that
+                    # every `unknown` has one behind it and that an `unknown`
+                    # with none is itself a finding. A timeout is a legitimate
+                    # unknown, so it must be diagnosable through the documented
+                    # route rather than only via the generic timeout line above.
+                    log.warning(
+                        "slot_view.image_probe_failed slot=%s profile=%s reason=probe-timeout — "
+                        "the slot probe exceeded %ss before the image store was read; "
+                        "reporting image_status=unknown",
+                        name,
+                        profile_name,
+                        _PROBE_TIMEOUT_S,
+                    )
                 return name, {
                     "container_status": "stopped",
                     "container_health": False,
                     "runtime": "container",
-                    "profile": str(cfg.get("profile") or ""),
+                    "profile": profile_name,
                     "image": None,
                     "resolved_command": None,
-                    "image_status": "not-configured",
+                    # #1939. A PROFILELESS slot declares no image at all
+                    # (#1226) — that is knowable from ``cfg`` alone, needs no
+                    # probe, and the timeout does not make it any less true, so
+                    # it stays "not-configured". A slot WITH a profile does
+                    # have a declared image and we simply never got far enough
+                    # to look at the store: reporting that as "not-configured"
+                    # was a claim about config from a probe that read none.
+                    "image_status": "unknown" if profile_name else "not-configured",
                 }
 
     out: dict[str, dict[str, Any]] = {}
@@ -786,6 +859,33 @@ async def container_enrichment(
 
 
 # ── synthetic upstream entries ───────────────────────────────────────────────
+
+
+def _synthetic_reason(u: Any) -> str:
+    """Human-readable reason a synthetic entry exists, per upstream.
+
+    #1905 review nit: the composite string belongs to the reserved
+    ``hal0`` upstream by NAME, not to every ``kind="slot"`` upstream —
+    each loaded container slot registers a same-name slot-kind upstream
+    (``SlotManager._register_container_upstream``), and real-slot-wins
+    only masks that on the happy path (the synthetic fall-throughs in
+    ``get_slot`` and ``/api/status`` can still surface these entries).
+    The composite string must stay verbatim in sync with the UI's copy
+    (``ui/src/dash/data.jsx``). The reserved name alone isn't enough
+    either: an operator may define an explicit ``hal0`` entry in
+    ``upstreams.toml`` with ``kind="remote"`` — that one is genuinely
+    remote-backed, so require the local slot-kind stand-in too.
+    """
+    from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
+
+    if u.name == RESERVED_UPSTREAM_NAME and u.kind == "slot":
+        return "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot."
+    if u.kind == "slot":
+        return (
+            f"Registered upstream for container slot {getattr(u, 'slot_name', None) or u.name!r}; "
+            "the real slot entry is authoritative."
+        )
+    return "Backed by remote upstream; install a local slot of the same name to take over."
 
 
 def synthesize_upstream_entries(
@@ -856,9 +956,7 @@ def synthesize_upstream_entries(
                 "advertised_models": len(models),
                 "last_used_model": last_used_model.get(u.name) or None,
                 "_synthetic": True,
-                "_synthetic_reason": (
-                    "Backed by remote upstream; install a local slot of the same name to take over."
-                ),
+                "_synthetic_reason": _synthetic_reason(u),
             }
         )
     return out
@@ -961,7 +1059,7 @@ class SlotViewAggregator:
             raw_ctx_max = payload.get("ctx_max")
             model_id = str(payload.get("model_default") or "")
             if model_id or isinstance(raw_ctx_max, int):
-                payload["ctx_max"] = _resolve_ctx_max(
+                payload["ctx_max"] = resolve_ctx_max(
                     raw_ctx_max if isinstance(raw_ctx_max, int) else None,
                     self._registry,
                     model_id,

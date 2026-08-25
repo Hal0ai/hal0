@@ -1,0 +1,24 @@
+---
+title: Run agents
+description: Install and manage the bundled Hermes agent with the hal0 agent CLI — provisioning, personas, gated-action approvals, and per-persona spending budgets.
+sidebar:
+  order: 60
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 can run a **bundled agent** — Hermes — provisioned into a
+hal0-managed virtualenv and driven through the `hal0 agent` CLI. The agent
+gets a persona (system prompt + tool gating), an approvals queue for
+gated/destructive actions, and an optional per-persona spending budget.
+
+![The dashboard Agents view — the agent library as collectible cards](/screenshots/agents-overview.png)
+
+<Aside type="note">
+Only one bundled agent is active at a time (single-pick). `hal0 agent`
+lifecycle commands are thin clients over the API; provisioning Hermes runs
+locally in the foreground because the venv build can't fit in one HTTP
+request.
+</Aside>
+
+## Install Hermes

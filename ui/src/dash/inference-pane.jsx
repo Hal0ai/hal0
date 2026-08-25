@@ -38,7 +38,8 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
-import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
+import { SlotBreakerChip } from './breaker-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -221,6 +222,37 @@ function DevCell({ s, onProfile }) {
         {s.profile || 'default'}
         <Ic name="chev" size={10} />
       </button>
+    </span>
+  )
+}
+
+// Indeterminate container-image chip (#1939). Renders ONLY for
+// `image_status: "unknown"` — the backend saying it could not read the
+// container image store (rootful hal0-podman-ro seam rc 66, missing sudoers
+// grant, probe timeout), which is a different claim from "missing" (podman
+// was asked and said no).
+//
+// Neutral and dashed on purpose: this card's colour vocabulary is RED =
+// error, AMBER = transitional/degraded, GREY = not loaded. An unreadable
+// image store is none of those, and painting it as one would restate in CSS
+// exactly the confident-lie the tri-state was added to end. The classifier
+// itself lives in slot-status.js so this component and the (retired) grid
+// card cannot drift.
+export function SlotImageUnknownChip({ s }) {
+  const chip = imageStatusChip(s)
+  if (!chip) return null
+  return (
+    <span
+      className={chip.cls}
+      data-testid="slot-image-unknown"
+      title={chip.tooltip}
+      style={{
+        color: 'var(--fg-3)',
+        borderStyle: 'dashed',
+        borderColor: 'var(--fg-3)',
+      }}
+    >
+      {chip.label}
     </span>
   )
 }
@@ -464,6 +496,18 @@ export function SlotScard({
         ) : (
           modelNode
         )}
+        {/* Device + profile pill gets its OWN row, directly under the model
+            control, instead of sharing the bottom action bar. It's a long,
+            variable-length control (custom profile names can run well past
+            "vulkan"/"rocm") and packing it into .scard-foot alongside the
+            image/mem chips and the lifecycle buttons was squeezing the
+            buttons onto a cramped wrapped line on any card with a longer
+            profile name or an image-unknown chip present. Giving it a row of
+            its own means .scard-foot only ever holds short, fixed-width
+            chips + controls, so the controls stop competing for space. */}
+        <div className="scard-profile-row">
+          <DevCell s={s} onProfile={onEdit} />
+        </div>
         {full && (
           <div className="scard-meta">
             <div className="m">
@@ -483,8 +527,11 @@ export function SlotScard({
           </div>
         )}
         <div className={'scard-foot' + (full ? '' : ' bare')}>
-          <DevCell s={s} onProfile={onEdit} />
+          {/* #2038: breaker first — when the slot is deliberately refusing
+              loads, that is the most actionable thing on the card. */}
+          <SlotBreakerChip s={s} />
           <BackendMismatch s={s} onEdit={onEdit} />
+          <SlotImageUnknownChip s={s} />
           {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
           <span className="grow" />
           {controls}
@@ -584,6 +631,12 @@ function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
+        {/* #1939 follow-up: the utility tier runs the same container images
+            as the headline tier, so it can hit the same unreadable image
+            store. Rendering the chip only on SlotScard made the seam failure
+            invisible for every embed / rerank / stt / tts slot — the tiers
+            differ in density, not in what they are allowed to hide. */}
+        <SlotImageUnknownChip s={s} />
       </div>
       <div className="mcard-b">
         <span className="smodel" title={s.model || ''}>
@@ -683,9 +736,15 @@ export function InferencePane() {
     return k === 'rocm' || k === 'vulkan'
   }).length
 
-  // GTT headroom for the slots status line (the memory map's frame).
+  // Free-memory headroom for the slots status line — MUST share the memory
+  // ruler's basis (telemetry-header.jsx ThRuler) so the two numbers on the
+  // same screen agree. `mm.self.modelUsedGb` is the reconciled per-slot sum
+  // (real mem_mb when the backend reports it) the ruler's "free" is derived
+  // from; `mm.self.gttUsedGb` is a raw host-wide GTT stat that (a) is zeroed
+  // outright on a box with no rocm-smi and (b) counts non-hal0 GPU users the
+  // ruler never counts — either way it disagreed with the ruler (#1900).
   const gttCapGb = mm.pool?.totalGb || 0
-  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.gttUsedGb || 0)))
+  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.modelUsedGb || 0)))
 
   // Fire-and-forget lifecycle action (mirrors SlotsView/PR #781): fire the
   // mutation, toast immediately, and let the slots poll reflect the phase.

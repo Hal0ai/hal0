@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from hal0.install.perms import ensure_shared_dir
 from hal0.slot_config import write_slot_toml
 from hal0.slots.identity import SlotIdentityStore
 
@@ -189,7 +190,7 @@ def _toml_id(raw: dict[str, Any]) -> int | None:
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(path.parent)  # 2775, umask-proof (#1896)
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
     fd, tmp = tempfile.mkstemp(prefix=".hal0-state-", suffix=".tmp", dir=path.parent)
     try:

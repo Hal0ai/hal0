@@ -46,7 +46,13 @@ export default defineConfig({
   // file here is a `.spec.ts`, so pin that explicitly (#1399).
   testMatch: '**/*.spec.ts',
   timeout: LIVE ? 180_000 : 30_000,
-  globalTimeout: LIVE ? 30 * 60_000 : 12 * 60_000,
+  // 12 minutes was set when the suite was ~8 min and 400-odd specs. At 686 specs
+  // it runs 8-12 min on the CI runners, i.e. up to 100% of its own budget, and a
+  // run that lands on the wrong side finishes with every executed spec passing,
+  // a double-digit "did not run" count and a red check that says nothing about
+  // the diff (#2032). 20 minutes restores headroom without hiding a real hang —
+  // the per-test `timeout` above is what catches those.
+  globalTimeout: LIVE ? 30 * 60_000 : 20 * 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

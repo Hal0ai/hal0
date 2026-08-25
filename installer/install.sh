@@ -114,8 +114,13 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
                       Omit it and the installer asks on an interactive terminal;
                       a piped (\`curl … | bash\`) or headless run takes the default.
 
-Interactive prompts (models dir, HuggingFace token) only run when stdin is a
-terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env values everywhere.
+Interactive prompts (models dir, HuggingFace token, Hermes terminal tool) only
+run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env
+values everywhere.
+
+HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
+it run commands as the hal0 user (root-equivalent on this box). It is OFF by
+default and a non-interactive install never enables it.
 EOF
             exit 0
             ;;
@@ -356,6 +361,10 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 #     inside this container (the #1 broken-install shape). HARD STOP with the
 #     dev0 remedy preflight_gpu just printed; the operator fixes the host dev0
 #     line and re-runs.
+#   HAL0_GPU_RC_NO_KFD     → AMD GPU visible but /dev/kfd (the ROCm compute
+#     node) missing. llama.cpp silently falls back to the runner image's Vulkan
+#     backend, which emits invalid tokens for every model while every health
+#     surface reads green (#1888). Same EXPLICIT CPU-only opt-in as below.
 #   HAL0_GPU_RC_NO_DEVICE  → no GPU devices inside an LXC. Allow an EXPLICIT
 #     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
 #     otherwise stop with the passthrough remedy.
@@ -428,6 +437,60 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
         exit 1
+    elif (( gpu_rc == HAL0_GPU_RC_NO_KFD )); then
+        # AMD GPU with NO usable GPU lane at all. preflight_gpu only returns
+        # this code once it has established BOTH that /dev/kfd is missing (no
+        # ROCm lane) and that Vulkan is not an option either — because there
+        # is no render node, or because this install's runner image is not
+        # validated for the Vulkan lane, whose backend emits invalid tokens
+        # for every model on the ade07ba lineage (#1888).
+        #
+        # A kfd-less box WITH a render node and a validated runner no longer
+        # reaches here at all: that is a supported Vulkan-lane install and
+        # preflight reports it as one (#1948). So the messages below can
+        # honestly say "no GPU lane" — the derivation ladders agree, and will
+        # write device=cpu for every seeded slot on exactly this box.
+        if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
+        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
+        else
+            err "No usable GPU lane inside this container."
+            err "  ROCm needs /dev/kfd, which is not present (remedy above)."
+            err "  Vulkan needs a render node AND a runner image validated for that lane (#1888/#1948);"
+            err "  this box has neither combination available."
+            err "Forward /dev/kfd, or update to a runner whose Vulkan backend is validated, then re-run install.sh."
+            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            exit 1
+        fi
+    elif (( gpu_rc == HAL0_GPU_RC_KFD_GID )); then
+        # #1953: /dev/kfd IS forwarded, its group is just wrong. We are root
+        # here, so repair it in place rather than making the operator do it —
+        # and rather than the old behaviour of sending them to re-forward a
+        # device that is already present. The gid comes from the render node
+        # (never from `getent group render`; see preflight_gpu for why).
+        _kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
+        _render_node="$(compgen -G '/dev/dri/renderD*' 2>/dev/null | head -1)"
+        _render_gid="$(stat -c '%g' "${_render_node}" 2>/dev/null || true)"
+        if [[ -n "${_render_gid}" ]] \
+            && chgrp "${_render_gid}" "${_kfd_path}" 2>/dev/null \
+            && chmod 0660 "${_kfd_path}" 2>/dev/null; then
+            info "gpu: aligned ${_kfd_path} to gid ${_render_gid} (matches ${_render_node})"
+        else
+            # Unprivileged LXC: the node's ownership is host-mapped, so chgrp
+            # is EPERM and the only real fix is on the host's dev entry.
+            #
+            # WARN, never block. Since the slot containers run rootful, they
+            # open a root:root compute node perfectly well — a mismatched gid
+            # costs hal0-user probes and diagnostics their GPU visibility, not
+            # inference. Hard-stopping here would newly refuse installation on
+            # every unprivileged LXC for a condition that no longer breaks
+            # serving (the identity fix in #1953 is what changed this).
+            warn "gpu: ${_kfd_path} has a different group (${_render_gid:-?} expected) and could not be changed from inside this container."
+            warn "  GPU slots still work — they run rootful — but hal0-user probes and diagnostics cannot read the compute node."
+            warn "  To fix, set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
+            warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
+        fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
@@ -481,6 +544,59 @@ if _interactive; then
         HF_TOKEN_VAL="${_hf_answer}"
         unset _hf_answer
     fi
+fi
+
+# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
+# The bundled agent can be given a terminal tool. Its only viable backend on
+# this box is `local`, which runs commands as the hal0 service user — and that
+# user is root-equivalent here (rootful podman + the hal0-systemctl /
+# hal0-agentenv sudo wrappers). The agent also reads untrusted content (web
+# pages, stored memories, MCP output), so this is asked out loud instead of
+# being switched on silently.
+#
+# Non-interactive / piped / CI installs never reach this prompt and therefore
+# default OFF. HAL0_HERMES_TERMINAL=1 in the environment is the unattended
+# opt-in; the value is exported so `hal0 agent install hermes` (and the
+# privilege-dropped provisioning under it) sees the same answer.
+#
+# Not asked on an upgrade (the hermes venv already exists): that box already
+# has a recorded answer, and the provisioner preserves it. Re-asking would let
+# a distracted Enter silently disable a working agent.
+#
+# Also not asked when this run will not provision Hermes at all (--dev,
+# --no-start — the provisioning block lives inside the service-start branch —
+# or HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
+# asking for consent we would then drop on the floor is worse than not asking —
+# the operator answers again on the deferred `hal0 agent install hermes
+# --terminal-tool`.
+_ht_answer=""
+if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
+   && [[ "${DEV_MODE}" -eq 0 ]] \
+   && [[ "${NO_START}" -eq 0 ]] \
+   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
+   && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
+   && _interactive; then
+    printf '\n' >/dev/tty 2>/dev/null || true
+    info "Hermes can be given a terminal tool. If you enable it, the agent will be able to run"
+    info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
+    info "effectively gives the agent full control of the machine, including anything it is"
+    info "talked into running by a web page or a stored memory. There is no sandboxed option:"
+    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune,"
+    info "hal0-quantize) need the real host, so a container would break them by design."
+    info "Leave it off unless you want that; you can turn it on later with"
+    info "  hal0 agent install hermes --terminal-tool"
+    _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
+    if [[ "${_ht_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        export HAL0_HERMES_TERMINAL=1
+        warn "Hermes terminal tool ENABLED at your request — the agent can run root-equivalent commands."
+    else
+        export HAL0_HERMES_TERMINAL=0
+        info "Hermes terminal tool disabled (default)."
+    fi
+    unset _ht_answer
+elif [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
+    export HAL0_HERMES_TERMINAL
+    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
 fi
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "model store must be an absolute path (got: ${MODELS_DIR})"
@@ -1154,7 +1270,15 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # an explicit rotate signal); with no token set, any existing file here is
     # left untouched — never deleted just because the env var was omitted on
     # a later run.
-    mkdir -p "${SECRETS_DIR}"
+    # -o/-g dropped from this `install -d`: in --dev this runs as an ordinary
+    # user (dev mode never elevates), so `install -o root -g root` would fail
+    # under `set -euo pipefail` and abort the install whenever HF_TOKEN /
+    # HUGGING_FACE_HUB_TOKEN is exported — the prod-only twin at the
+    # "hal0 system user" follow-up below stays root:root because it sits in
+    # the DEV_MODE=0 branch. Tolerant chown mirrors the HF_SECRETS_TMP idiom
+    # a few lines down: best-effort in --dev, real in a root prod install.
+    install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
+    chown root:root "${SECRETS_DIR}" 2>/dev/null || true
     HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
     cat > "${HF_SECRETS_TMP}" <<EOF
 # HuggingFace token for gated / large model pulls — gathered at install time
@@ -1234,12 +1358,17 @@ cat > "${API_UNIT}" <<EOF
 [Unit]
 Description=hal0 API daemon
 Documentation=https://github.com/hal0ai/hal0
-# hindsight-api ordering (#1613): a cold engine start outlasts hal0-api's
-# boot probe, degrading memory to the pgvector fallback. After= narrows the
-# boot-time window (the runtime self-heal re-probe covers the rest); both
-# directives are no-ops on a box without the engine unit.
-After=network-online.target hindsight-api.service
-Wants=network-online.target hindsight-api.service
+# hindsight-api ordering: deliberately NO After=/Wants= on hindsight-api.
+# The engine unit already carries a soft After=hal0-api.service (its
+# extraction LLM fronts through hal0-api), so pointing back at it from here
+# — as #1613 once did — created a bidirectional ordering cycle that systemd
+# resolved by dropping a unit from the cold-boot transaction, failing the
+# boot outright (observed on CT105, 2026-08-21). The #1613 concern (cold
+# engine start outlasting the boot probe) is covered by the runtime
+# self-heal re-probe alone; memory degrades to pgvector briefly instead of
+# the box failing to boot.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -1297,6 +1426,45 @@ if [[ -f "${TARGET_UNIT_SRC}" ]]; then
     info "wrote ${TARGET_UNIT_DST}"
 else
     warn "${TARGET_UNIT_SRC} not found — hal0.target not installed; slots will not autostart after reboot"
+fi
+
+# GPU device permissions (#1953). /dev/kfd is recreated every boot, so the
+# install/update-time converge is undone by the next reboot unless the host's
+# LXC `dev` entry carries gid=. This oneshot re-derives the target gid FROM THE
+# RENDER NODE and re-applies it before hal0.target — deliberately a service
+# rather than a tmpfiles.d/udev rule, both of which would have to name a gid,
+# and a baked gid is not portable across hosts (see preflight_gpu).
+GPU_PERMS_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-gpu-perms.service"
+GPU_PERMS_UNIT_DST="${UNIT_DIR}/hal0-gpu-perms.service"
+if [[ -f "${GPU_PERMS_UNIT_SRC}" ]]; then
+    install -m 0644 "${GPU_PERMS_UNIT_SRC}" "${GPU_PERMS_UNIT_DST}"
+    # A non-default HAL0_PREFIX moves the venv, and the shipped unit hardcodes
+    # the FHS path — without this rewrite ExecStart points at a nonexistent
+    # interpreter and the unit dies 203/EXEC, so the compute node is never
+    # converged after a reboot. Same treatment the bench units get; done in
+    # Python, not sed, so a prefix containing sed metacharacters is safe.
+    if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
+        "${PY}" - "${GPU_PERMS_UNIT_DST}" "${VENV_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+dst, venv = Path(sys.argv[1]), sys.argv[2]
+dst.write_text(
+    dst.read_text(encoding="utf-8").replace("/usr/lib/hal0/venv", venv),
+    encoding="utf-8",
+)
+PYEOF
+    fi
+    info "wrote ${GPU_PERMS_UNIT_DST}"
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        # WantedBy=hal0.target. Enabling is safe on a non-AMD box: the unit
+        # carries ConditionPathExists=/dev/kfd and the module no-ops without
+        # amdgpu bound.
+        systemctl enable hal0-gpu-perms.service >/dev/null 2>&1 \
+            || warn "could not enable hal0-gpu-perms.service"
+    fi
+else
+    warn "${GPU_PERMS_UNIT_SRC} not found — /dev/kfd group will not be re-applied after a reboot"
 fi
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
@@ -1656,11 +1824,14 @@ PYEOF
         fi
     fi
 
-    # Privileged seam #5 (O12): hal0-podman-ro covers READ-ONLY podman
-    # introspection (image presence today) against ROOT's podman store — the
-    # store slots actually populate via Quadlet, NOT hal0-api's own rootless
-    # store. Narrow + hardcoded (no shell, no wildcards, no operator-supplied
-    # podman flags) — see the wrapper source.
+    # Privileged seam #5 (O12, extended in #1889): hal0-podman-ro covers
+    # READ-ONLY podman introspection — the local repo set, per-image presence,
+    # and a running slot container's image + argv — against ROOT's podman
+    # store, the store slots actually populate via Quadlet, NOT hal0-api's own
+    # rootless store. Narrow + hardcoded (no shell, no wildcards, no
+    # operator-supplied podman flags or --format); the three verbs that take
+    # an argument validate it root-side against a closed regex before exec.
+    # See the wrapper source for the full argument doctrine.
     PODMAN_RO_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-ro"
     if [[ -f "${PODMAN_RO_SRC}" ]]; then
         install -d "${LIB_DIR}/bin"
@@ -2338,22 +2509,27 @@ if status["due"]:
 PYEOF
 fi
 
-# ── post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args) ─
+# ── post-activation migrations (schema + seed-profile/mtp/vulkan/image-pin/extra-args) ─
 # One shared sequence with Updater.commit()'s self-update path (GH #1475):
 # hal0.toml schema migrations, profiles.toml virtual-seed pruning (seeds live
 # in code and are overlaid on every load — an older install that materialised
 # them into profiles.toml froze stale definitions; this prunes them so the
 # code definition wins again), stale mtp=true slot-override clearing (a
 # force-on pointing at a model with no MTP heads crashes llama-server at load
-# once the unit re-renders under post-separation code), stale runner-image
-# pin retagging, and defaults.extra_args sanitizing. Every pass after the
-# schema migration is independently best-effort — a single pass failing never
-# aborts the others. Previously this block ran only the seed-profile and
-# stale-MTP passes directly, so a box upgraded by re-running install.sh (the
-# documented repair/upgrade path) kept a stale meta.schema_version, stale
-# runner-image pins, and unsanitised defaults.extra_args that `hal0 update`
-# would have fixed — two boxes on the same version with different on-disk
-# state. Operator edits and non-seed profiles are always left untouched.
+# once the unit re-renders under post-separation code), retired
+# device="gpu-vulkan" slot relabeling (#1924 — llama.cpp-backed GPU slots
+# left over from before #1923 retired the Vulkan LLM lane now refuse to load
+# under the new /dev/kfd preflight guard; relabeled to gpu-rocm/cpu, AMD
+# hosts only, non-llama runtimes like Kokoro/ComfyUI left untouched), stale
+# runner-image pin retagging, and defaults.extra_args sanitizing. Every pass
+# after the schema migration is independently best-effort — a single pass
+# failing never aborts the others. Previously this block ran only the
+# seed-profile and stale-MTP passes directly, so a box upgraded by
+# re-running install.sh (the documented repair/upgrade path) kept a stale
+# meta.schema_version, stale runner-image pins, and unsanitised
+# defaults.extra_args that `hal0 update` would have fixed — two boxes on the
+# same version with different on-disk state. Operator edits and non-seed
+# profiles are always left untouched.
 #
 # Ran through hal0_migration_step (not a bare heredoc): the schema migration
 # used to be able to abort this whole script under set -euo pipefail before
@@ -2366,7 +2542,7 @@ fi
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping post-activation migrations (no system writes)"
 else
-    info "running post-activation migrations (schema + seed-profile/mtp/image-pin/extra-args)"
+    info "running post-activation migrations (schema + seed-profile/mtp/vulkan-slot/image-pin/extra-args)"
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
 from hal0.updater.updater import run_post_activation_migrations
@@ -2380,7 +2556,7 @@ if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
     print(f"  hal0.toml schema already at {target}")
-print("  seed-profile / stale-MTP / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
+print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
 
@@ -2619,7 +2795,14 @@ else
     # whole /etc/hal0 + /var/lib/hal0 tree to an unprivileged service user so a
     # dropped hal0-api could rewrite config — was removed. hal0-api runs as root,
     # so it writes config/state, applies updates, and restarts services directly.
-    mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
+    mkdir -p "${ETC_DIR}/agents"
+    # secrets/ + secrets/agents are born 0700 root:root, matching BOTH the
+    # ownership table (hal0.install.perms) and the hal0-agentenv seam's
+    # `install -d -m 0700`. A plain `mkdir -p` here births them 0755 under the
+    # installer's umask, which the `doctor perms --fix` backstop then had to
+    # tighten on every run — cosmetic drift the audit reported as a defect
+    # (#1896). Explicit mode = born correct, nothing to reconcile.
+    install -d -m 0700 -o root -g root "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents"
 
 fi
 

@@ -152,6 +152,28 @@ def test_bundle_diagnostics_section_writes_expected_files(
     assert models == {"_unavailable": "/api/models"}  # API is down in this test
 
 
+def test_bundle_profile_repair_is_device_aware(tmp_hal0_home: str, tmp_path: Path) -> None:
+    """The bundle's profiles.json must recommend the same repair doctor does.
+
+    #1830: a profile-less capability slot is drift, and the repair is
+    device-keyed — an ``npu`` embedding slot runs the FLM runtime, so telling
+    the operator to write llama-server's ``embedding`` profile would move it
+    onto the wrong runtime family. The bundle path built its rows without the
+    slot devices while the interactive path passed them.
+    """
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "npu-embed.toml").write_text(
+        'name = "npu-embed"\ntype = "embedding"\ndevice = "npu"\nport = 8099\n'
+    )
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    profiles = jsonlib.dumps(jsonlib.loads((out / "diagnostics" / "profiles.json").read_text()))
+    assert "hal0 slot edit npu-embed --profile flm" in profiles
+
+
 def test_bundle_no_logs_flag_skips_logs_dir(tmp_hal0_home: str, tmp_path: Path) -> None:
     out = tmp_path / "bundle"
     build_bundle(out, include_rocm_smi=False, include_logs=False)

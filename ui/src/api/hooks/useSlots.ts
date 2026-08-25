@@ -46,6 +46,13 @@ export interface SlotMetrics {
   res?: string
 }
 
+/** #2012 crash-loop breaker snapshot view — see Slot.metadata.breaker. */
+export interface SlotBreaker {
+  state: 'backoff' | 'parked' | 'half-open'
+  failures: number
+  retry_after_s: number
+}
+
 export interface Slot {
   name: string
   type: string
@@ -101,6 +108,16 @@ export interface Slot {
    *  used / max". Absent when the slot configures no context window —
    *  the UI shows an em-dash, never a fabricated number. */
   ctx_max?: number
+  /** Crash-loop breaker view (#2012), stamped into slot metadata by the
+   *  manager whenever the breaker is non-closed and ABSENT otherwise —
+   *  presence of `metadata.breaker` is the render signal. `retry_after_s`
+   *  is computed at snapshot time; the UI counts down from fetch. Prefer
+   *  this over the older `metadata.parked` extra, which is stamped only on
+   *  ERROR transitions and goes stale. */
+  metadata?: {
+    breaker?: SlotBreaker
+    [key: string]: unknown
+  }
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the
@@ -134,10 +151,24 @@ export interface Slot {
   /** Container image ref (from the resolved profile). E.g.
    *  "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server". */
   image?: string | null
-  /** Container image availability: "present" | "pulling" | "missing" |
-   *  "not-configured" (no profile/image declared — runs on the default
-   *  toolbox, #1226). Populated by the backend when image_status is tracked. */
-  image_status?: 'present' | 'pulling' | 'missing' | 'not-configured' | null
+  /** Container image availability. Populated by the backend when image_status
+   *  is tracked.
+   *
+   *    present         podman was asked and the image is in the store slots use
+   *    pulling         a layer pull is in flight (SlotImagePullBar renders)
+   *    missing         podman was asked and the image is NOT there — a real,
+   *                    authoritative absence, and a defect when the slot is
+   *                    running (regression `image-status-wrong-podman-store`)
+   *    unknown         #1939 — the store could not be READ at all: the rootful
+   *                    hal0-podman-ro seam failed (wrapper rc 66), its sudoers
+   *                    grant is absent, or the probe timed out. NOT a claim
+   *                    that the image is absent; render it as indeterminate
+   *                    (see imageStatusChip in dash/slot-status.js), never as
+   *                    a fault and never as `missing`.
+   *    not-configured  no profile/image declared — the slot runs on the
+   *                    default toolbox (#1226)
+   */
+  image_status?: 'present' | 'pulling' | 'missing' | 'unknown' | 'not-configured' | null
   /** ACTUAL running container image ref, read from ``podman inspect`` by
    *  _container_state_enrichment (#663). Omitted/null when the container is
    *  not running or inspect fails — treat absence as "unknown". */
@@ -326,6 +357,9 @@ function normalizeSlot(s: any): Slot {
     // profile image). Coerce the flag to a boolean.
     actual_image: s?.actual_image ?? null,
     image_mismatch: !!s?.image_mismatch,
+    // metadata rides the spread above; restated so the pass-through is a
+    // documented contract (breaker chip, #2038) rather than an accident.
+    metadata: s?.metadata,
     // container_status / container_health are set by _container_state_enrichment.
     container_status: s?.container_status ?? null,
     container_health: s?.container_health ?? null,
@@ -701,7 +735,16 @@ export function useSlotResolved(
 
 // ─── useSlotImagePull ─────────────────────────────────────────────────────────
 
-export type ImagePullState = 'idle' | 'pulling' | 'completed' | 'failed' | 'present' | 'missing'
+export type ImagePullState =
+  | 'idle'
+  | 'pulling'
+  | 'completed'
+  | 'failed'
+  | 'present'
+  | 'missing'
+  /** #1939 — the image store could not be read, so presence is undetermined.
+   *  Terminal: there is no pull in flight to keep waiting on. */
+  | 'unknown'
 
 export interface ImagePullSnapshot {
   slotName: string | null
@@ -716,7 +759,16 @@ export interface ImagePullSnapshot {
   reset: () => void
 }
 
-const IMAGE_PULL_TERMINAL = new Set<ImagePullState>(['completed', 'failed', 'present', 'missing'])
+// `unknown` is terminal (#1939): the backend has told us it cannot determine
+// presence, which is a final answer to this poll — leaving it out would hold
+// the EventSource open forever waiting for a pull that was never started.
+const IMAGE_PULL_TERMINAL = new Set<ImagePullState>([
+  'completed',
+  'failed',
+  'present',
+  'missing',
+  'unknown',
+])
 
 /**
  * Container image-pull composable — mirrors the model `usePullJob` pattern.

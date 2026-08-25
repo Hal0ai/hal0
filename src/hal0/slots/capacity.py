@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any
 # silently diverging again (container.py is owned by another workstream, so
 # the constants cannot be moved to a neutral module from here).
 from hal0.providers.container import _CTX_DENSE_CAP
+from hal0.slots.metrics_collect import systemd_props
+from hal0.slots.naming import slot_unit_name
 from hal0.slots.state import SlotError
 
 if TYPE_CHECKING:
@@ -116,6 +118,11 @@ _DEFAULT_CTX_TOKENS = _CTX_DENSE_CAP
 # without claiming false precision. The model file size dominates the total.
 _KV_MIB_PER_1K_TOKENS = 0.5
 
+# systemd renders an unset/absent numeric property as UINT64_MAX on some
+# versions. Treat anything at or above 2^63 as "not a measurement" — no real
+# cgroup on a machine that exists reports 8 EiB resident.
+_MEM_SENTINEL_FLOOR = 1 << 63
+
 
 def _kv_estimate_mb(ctx_tokens: int) -> float:
     """Best-effort KV-cache size in MiB for a given context window."""
@@ -163,6 +170,44 @@ def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
 
 
 async def _container_cgroup_mem_bytes(slot_name: str) -> int:
+    """Cgroup-wide ``memory.current`` for the container/unit backing *slot_name*.
+
+    Two probes, tried in order:
+
+      1. :func:`_runtime_inspect_mem_bytes` — ``<runtime> inspect`` the
+         podman/docker container directly (highest fidelity: reads the
+         *container's* cgroup, not the systemd unit's).
+      2. :func:`_systemd_unit_mem_bytes` — the slot's own
+         ``hal0-slot@<name>.service`` unit's ``MemoryCurrent`` property,
+         read via ``systemctl show``.
+
+    Why two: on a standard install ``hal0-api`` runs unprivileged
+    (``User=hal0``, P3-perms) while slot containers are ROOTFUL podman
+    (Quadlet-launched, root's container store). ``podman inspect`` issued
+    from the API process is therefore permission-denied against root's
+    store and probe 1 silently returns 0 on *every* standard install, not
+    just when the container is absent (#1839). ``systemctl show`` has no
+    such problem — systemd (running as root) tracks each unit's cgroup
+    memory accounting as a property that any user can read, which is also
+    why ``/api/slots/metrics`` (:func:`hal0.slots.metrics_collect.collect_local`,
+    which already leans on this exact fallback) reports accurate RSS while
+    this probe used to silently under-report.
+
+    Returns 0 only when BOTH probes come up empty (container absent AND
+    the unit itself isn't loaded / has no cgroup) — not exceptional, it
+    just means the slot isn't backed by a live container/unit.
+
+    The returned value includes model weights + KV-cache + runtime
+    overhead as measured by the cgroup; callers MUST NOT add an
+    additional KV estimate on top.
+    """
+    mem_bytes = await _runtime_inspect_mem_bytes(slot_name)
+    if mem_bytes > 0:
+        return mem_bytes
+    return await _systemd_unit_mem_bytes(slot_name)
+
+
+async def _runtime_inspect_mem_bytes(slot_name: str) -> int:
     """Cgroup-wide ``memory.current`` for the podman/docker container backing *slot_name*.
 
     Container name convention: ``hal0-slot-<slot_name>`` (matches the
@@ -176,13 +221,10 @@ async def _container_cgroup_mem_bytes(slot_name: str) -> int:
       3. Read ``/proc/<pid>/cgroup`` for the cgroupv2 unified path.
       4. Read ``/sys/fs/cgroup/<path>/memory.current``.
 
-    Returns 0 on any error so the caller can fall back gracefully —
-    a missing/stopped container is not exceptional; it just means the
-    slot is not backed by a container runtime.
-
-    The returned value includes model weights + KV-cache + runtime
-    overhead as measured by the cgroup; callers MUST NOT add an
-    additional KV estimate on top.
+    Returns 0 on any error (including permission denied — a rootless
+    caller inspecting a rootful container) so the caller
+    (:func:`_container_cgroup_mem_bytes`) can fall back to the systemd
+    unit's own ``MemoryCurrent``.
     """
     import shutil
 
@@ -235,11 +277,114 @@ async def _container_cgroup_mem_bytes(slot_name: str) -> int:
         return 0
 
 
+async def _systemd_unit_mem_bytes(slot_name: str) -> int:
+    """``MemoryCurrent`` of the slot's own ``hal0-slot@<name>.service`` unit.
+
+    Read via ``systemctl show -p MemoryCurrent`` (:func:`hal0.slots.metrics_collect.systemd_props`)
+    — a plain systemd property query, not a container-runtime inspect, so it
+    needs no elevated privilege even when the container itself is ROOTFUL
+    podman (#1839). Quadlet places the container's workload cgroup under the
+    generated unit, so ``MemoryCurrent`` tracks the same memory the runtime
+    probe above tries (and often fails) to read directly.
+
+    Returns 0 when the unit isn't loaded, accounting is disabled
+    (``MemoryCurrent=[not set]``), or ``systemctl`` itself is unavailable —
+    same fail-soft contract as :func:`_runtime_inspect_mem_bytes`.
+
+    Sentinel guard: some systemd versions render an unset / no-cgroup
+    ``MemoryCurrent`` as ``18446744073709551615`` (UINT64_MAX) instead of
+    ``[not set]``. That parses cleanly, and because the caller takes
+    ``max(cgroup_mb, estimate_mb)`` it would render ~16 EiB of resident
+    memory. Anything at or above 2^63 is a sentinel, not a measurement.
+    """
+    unit = slot_unit_name(slot_name)
+    props = await systemd_props(unit, "MemoryCurrent")
+    try:
+        mem = int(props.get("MemoryCurrent", "") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if mem >= _MEM_SENTINEL_FLOOR:
+        return 0
+    return mem if mem > 0 else 0
+
+
+def _artefact_token(slot: Any) -> str:
+    """The token a slot's on-disk artefacts are actually named after.
+
+    ``hal0-slot-<token>`` (container) / ``hal0-slot@<token>.service`` (unit)
+    are named after the slot's *display name* on every install, and after the
+    durable ``slot_id`` only on a box the operator has explicitly migrated
+    with ``hal0 slot migrate-id-keying``.
+
+    ``slot.slot_id`` alone is NOT that signal (#1839 follow-up):
+    :meth:`hal0.slots.manager.SlotManager.fold_identity` runs on every boot
+    and stamps an identity row — hence a ``slot_id`` — on every slot WITHOUT
+    renaming a single artefact or unit, and ``_stamp_id`` then copies it onto
+    every ``Slot`` returned by ``list()``/``status()``. Keying the cgroup
+    probe off ``slot_id`` alone therefore probes ``hal0-slot-1`` /
+    ``hal0-slot@1.service`` on a standard install where the real artefacts are
+    ``hal0-slot-brain`` / ``hal0-slot@brain.service``: both probes miss, the
+    cgroup read collapses to 0, and the resident figure silently degrades to
+    the coarse file-size estimate.
+
+    The authoritative predicate is the physical marker used by
+    :meth:`SlotManager._slot_id_if_id_keyed` — an ``<id>.toml`` in the slot
+    config dir, which only the migration writes. Mirrored here (as a plain
+    filesystem check) because capacity has no manager handle. Any error
+    reading the config dir degrades to the name, which is the pre-migration
+    shape and the overwhelmingly common one.
+    """
+    name = str(getattr(slot, "name", "") or "")
+    raw_id = getattr(slot, "slot_id", None)
+    try:
+        slot_id = int(raw_id) if raw_id is not None else 0
+    except (TypeError, ValueError):
+        return name
+    # Slot ids are SQLite AUTOINCREMENT (start at 1); <1 is a surrogate.
+    if slot_id < 1:
+        return name
+    try:
+        from hal0.config import paths
+
+        if (paths.slots_config_dir() / f"{slot_id}.toml").exists():
+            return str(slot_id)
+    except Exception:  # pragma: no cover - defensive
+        return name
+    return name
+
+
+def _host_has_capable_gpu() -> bool:
+    """True if the hardware probe found at least one usable GPU on this box.
+
+    "Usable" means Vulkan- or compute- (ROCm/CUDA) capable — the same
+    ``vulkan_capable`` / ``compute_capable`` signal #1799 added to
+    :class:`~hal0.config.schema.GPUInfo` and that :mod:`hal0.hardware.recommend`
+    already gates device recommendations on. Reads the cached
+    ``/etc/hal0/hardware.json`` written by ``hal0 probe`` via
+    :func:`hal0.config.loader.load_hardware_info` — cheap (one small JSON
+    file, no re-probe) and honest: an absent file / no probed GPU degrades
+    to ``HardwareInfo(gpus=[])``, which correctly reads as "no capable GPU"
+    rather than raising.
+
+    Never raises: any error probing/loading hardware state degrades to
+    ``False`` (the conservative choice — books memory as RAM rather than
+    risking phantom VRAM on a box we couldn't positively confirm has one).
+    """
+    try:
+        from hal0.config.loader import load_hardware_info
+
+        info = load_hardware_info()
+    except Exception:
+        return False
+    return any(g.vulkan_capable or g.compute_capable for g in info.gpus)
+
+
 async def build_per_slot(
     slots: list[Any],
     *,
     registry: Any | None = None,
     flm_catalog: dict[str, dict[str, Any]] | None = None,
+    gpu_capable: bool | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the ``per_slot`` memory map for loaded slots.
 
@@ -277,7 +422,22 @@ async def build_per_slot(
     ``flm_catalog`` (``{tag: entry}``) may be supplied by the caller to
     avoid re-probing FLM; when omitted it is built lazily on first NPU
     slot encountered.
+
+    ``gpu_capable`` (#1839) gates the VRAM/RAM split: even a slot
+    *configured* for a GPU backend (``vulkan``/``rocm``/``cuda``) has no
+    discrete VRAM pool to charge on a box with no usable GPU — the shipped
+    static seeds hardcode ``device = "gpu-vulkan"`` regardless of
+    hardware, so a GPU-less install (``HAL0_ALLOW_CPU_ONLY=1``) would
+    otherwise book resident memory as VRAM purely from the configured
+    token, never consulting whether a GPU actually exists. When ``None``
+    (the default) this is resolved once via :func:`_host_has_capable_gpu`,
+    which reads the cached hardware probe (``vulkan_capable`` /
+    ``compute_capable`` on any detected GPU, #1799's signal). Callers that
+    already have a fresher :class:`~hal0.config.schema.HardwareInfo` may
+    pass the resolved bool directly to skip the re-read.
     """
+    if gpu_capable is None:
+        gpu_capable = _host_has_capable_gpu()
     out: dict[str, dict[str, Any]] = {}
     for s in slots:
         state = str(getattr(s, "state", "") or "").lower()
@@ -340,11 +500,19 @@ async def build_per_slot(
         # MAX of the cgroup and the registry estimate:
         #   • cgroup accurately includes weights → cgroup ≥ estimate → wins.
         #   • GTT not charged (cgroup too low)   → estimate wins → no under-report.
-        cgroup_bytes = await _container_cgroup_mem_bytes(s.name)
+        #
+        # Probe by the token the artefacts are ACTUALLY named after — the
+        # display name on every standard install, the durable id only on a
+        # box migrated with ``hal0 slot migrate-id-keying``. See
+        # :func:`_artefact_token`: a set ``slot_id`` is not that signal,
+        # because ``fold_identity()`` stamps one on every boot without
+        # renaming anything.
+        artefact_token = _artefact_token(s)
+        cgroup_bytes = await _container_cgroup_mem_bytes(artefact_token)
         cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
         resident_mb = max(cgroup_mb, estimate_mb)
 
-        # ── VRAM vs. RAM attribution (#1796) ────────────────────────────
+        # ── VRAM vs. RAM attribution (#1796, #1839) ─────────────────────
         # ``backend`` here is the normalized effective-backend token from
         # ``_cfg_effective_backend`` ("rocm" | "vulkan" | "cuda" | "cpu" |
         # "flm"), NOT the raw slot.backend passed straight through — it is
@@ -355,7 +523,21 @@ async def build_per_slot(
         # nonzero VRAM MB). Attribute to ram_mb instead; every GPU backend
         # (and the flm/NPU fallback above, which shares this UMA-style
         # accounting) keeps the historical vram_mb attribution.
-        if backend == "cpu":
+        #
+        # #1839: ``backend`` is the *configured* device token — it says
+        # nothing about whether a usable GPU actually exists. The shipped
+        # static seeds hardcode ``device = "gpu-vulkan"`` regardless of
+        # hardware, so a GPU-declared slot on a GPU-less box (no
+        # vulkan/compute-capable GPU probed) must ALSO book to ram_mb —
+        # otherwise a CPU-only install shows phantom VRAM usage even
+        # though ``backend`` never says "cpu". ``is_npu`` slots are
+        # EXCLUDED from this gate: an FLM slot that fell through to this
+        # common path (catalog miss / zero ``footprint_gb``) still uses the
+        # NPU's own UMA-style vram_mb accounting regardless of classic GPU
+        # capability — an NPU-only host has ``gpu_capable=False`` but its
+        # NPU slots never held phantom *GPU* VRAM in the first place, so
+        # the #1839 gate does not apply to them.
+        if backend == "cpu" or (not is_npu and not gpu_capable):
             vram_mb, ram_mb = 0.0, resident_mb
         else:
             vram_mb, ram_mb = resident_mb, 0.0
@@ -509,6 +691,7 @@ __all__ = [
     "CapacityProbeError",
     "CapacitySnapshot",
     "_container_cgroup_mem_bytes",
+    "_host_has_capable_gpu",
     "build_per_slot",
     "estimate_file_size_kv_mb",
 ]

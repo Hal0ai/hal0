@@ -182,6 +182,15 @@ export const ENDPOINTS = {
     `/api/agent/approvals/${encodeURIComponent(id)}/approve`,
   agentApprovalDeny: (id: string) =>
     `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
+  // Add a memory item — routes/memory.py's memory_add. Body:
+  // {text, dataset?, tags?, metadata?, document_id?}. `dataset` is the bank
+  // to write into; `source` is REJECTED by the server (stamped from the
+  // X-hal0-Agent header instead, so callers can't impersonate).
+  memoryAdd: '/api/memory/add',
+  // Audited, gated delete — routes/memory.py's memory_delete. Body:
+  // {ids: [...], dataset?}; a per-fact id is accepted as an alias for its
+  // owning document.
+  memoryDelete: '/api/memory/delete',
   // ── Hindsight engine admin surface (memory_admin routes) ─────────
   // Fail-soft engine card + allowlisted bank-scoped passthrough.
   memoryEngine: '/api/memory/engine',
@@ -218,6 +227,18 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/operations/${encodeURIComponent(id)}/retry`,
   memoryBankConsolidate: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/consolidate`,
+  // Memory v2 (Bank workspace UI) — tags in use + the curatable unit list,
+  // plus the single-unit resource (curate PATCH / delete) and its audit
+  // trail. Units live at .../memories/:id (NOT .../units/:id) — /units is
+  // the list-only collection endpoint.
+  memoryBankTags: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/tags`,
+  memoryBankUnits: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/units`,
+  memoryUnit: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/memories/${encodeURIComponent(id)}`,
+  memoryUnitHistory: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/memories/${encodeURIComponent(id)}/history`,
   // Per-agent memory stats — parameterised by agent id. Previously a
   // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
   agentMemoryStats: (id: string) =>

@@ -1,8 +1,8 @@
 # Contributing to hal0
 
-hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.8.2b3** — the
-container-runtime line (one podman container per slot). The contribution model is still
-being decided.
+hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v1.0.0-rc.6**, closing
+in on the 1.0 stable release. The runtime model is one podman container per
+slot. The contribution model is still being decided.
 <!-- TODO(human): flip the next line to open the external-PR merge window
      when ready (audit Q6.3 / #630). Timing is the maintainer's call. -->
 External PRs aren't being merged yet; please open issues for discussion.

@@ -121,6 +121,15 @@ class ComfyUIProvider(Provider):
 
     name = "comfyui"
 
+    #: The kyuz0 Strix Halo image is a PyTorch-**ROCm** build (see the module
+    #: docstring's "Backend default: rocm", ``RUNNER_IMAGES["comfyui"]
+    #: .supported_backends == ("rocm",)``, and ``container_spec`` forwarding
+    #: ``resolve_gpu_device_paths()`` — which includes ``/dev/kfd``). The
+    #: catalog labels img slots ``gpu-vulkan``, but that is the picker's GPU
+    #: row, not the image's backend: without the compute node this slot has no
+    #: GPU at all (#1941).
+    gpu_runtime_needs_rocm = True
+
     # ── Env / argv ─────────────────────────────────────────────────────────────
 
     def build_env(

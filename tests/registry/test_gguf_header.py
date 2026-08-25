@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 
 from hal0.registry.gguf_header import (
+    _GGUF_TYPE_BOOL,
     _GGUF_TYPE_FLOAT32,
     _GGUF_TYPE_STRING,
     _GGUF_TYPE_UINT32,
@@ -111,6 +112,41 @@ class TestArchitectureAndContextLength:
         assert out is not None
         assert out["pooling_type"] == 2
         assert out["context_length"] == 512
+
+    def test_attention_causal_promoted_when_arch_comes_first(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("jina-bert-v2")),
+            ("jina-bert-v2.attention.causal", _GGUF_TYPE_BOOL, struct.pack("<B", 0)),
+        ]
+        p = _write_fixture(tmp_path, "jina.gguf", _build_gguf(3, kvs))
+        out = read_gguf_header(p)
+        assert out is not None
+        assert out["attention_causal"] is False
+
+    def test_attention_causal_promoted_when_arch_comes_after(self, tmp_path: Path) -> None:
+        """#1838 (codex review): GGUF doesn't guarantee KV ordering — a
+        header whose <arch>.attention.causal entry precedes
+        general.architecture must still get promoted, the same way
+        <arch>.context_length already does via the speculative capture."""
+        kvs = [
+            ("jina-bert-v2.attention.causal", _GGUF_TYPE_BOOL, struct.pack("<B", 0)),
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("jina-bert-v2")),
+        ]
+        p = _write_fixture(tmp_path, "jina-reordered.gguf", _build_gguf(3, kvs))
+        out = read_gguf_header(p)
+        assert out is not None
+        assert out["attention_causal"] is False
+
+    def test_pooling_type_promoted_when_arch_comes_after(self, tmp_path: Path) -> None:
+        """Same ordering gap as attention.causal, for pooling_type."""
+        kvs = [
+            ("bert.pooling_type", _GGUF_TYPE_UINT32, struct.pack("<I", 4)),
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("bert")),
+        ]
+        p = _write_fixture(tmp_path, "reranker-reordered.gguf", _build_gguf(3, kvs))
+        out = read_gguf_header(p)
+        assert out is not None
+        assert out["pooling_type"] == 4
 
 
 class TestSkipping:

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir
 
 # ── Enum ─────────────────────────────────────────────────────────────────────
 
@@ -237,6 +238,25 @@ class SlotHealthFailed(SlotError):
     status = 503
 
 
+class SlotOutputSanityFailed(SlotError):
+    """The slot serves HTTP but does not produce coherent language (#1922).
+
+    Raised by the one-shot output-sanity gate at the warm→ready promotion:
+    ``/health`` is green, the port answers, tokens stream — and the model
+    emits ``)))))``/empty/off-topic text instead of the known answer (see
+    :mod:`hal0.slots.output_sanity`). Deliberately NOT ``SlotHealthFailed``:
+    the health probe passed, and conflating the two is what let a garbage box
+    read green on every surface for two hours (#1888).
+
+    Terminal for this load, not retryable in place — the caller's ERROR
+    transition + crash-loop breaker govern re-loading, so a broken backend
+    fails loudly once instead of burning the GPU in a retry loop.
+    """
+
+    code = "slot.output_sanity_failed"
+    status = 500
+
+
 class SlotCrashLooping(SlotError):
     """Load refused by the crash-loop breaker (issue i4).
 
@@ -381,7 +401,9 @@ def write_state_atomic(path: Path | str, record: SlotStateRecord) -> None:
     truncated state.json.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 2775, umask-proof: the slots/ row declares the per-slot dir setgid +
+    # group-writable, and a bare mkdir under UMask=0022 births 2755 (#1896).
+    ensure_shared_dir(path.parent)
     payload = json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n"
 
     tmp_path: Path | None = None
@@ -441,6 +463,7 @@ __all__ = [
     "SlotHealthFailed",
     "SlotNotFound",
     "SlotNotReady",
+    "SlotOutputSanityFailed",
     "SlotPinned",
     "SlotSpawnFailed",
     "SlotState",

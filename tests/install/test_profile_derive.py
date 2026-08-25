@@ -40,10 +40,43 @@ def test_chat_on_rocm_box_picks_rocm():
     assert derive_profile("chat", "gpu-rocm") == "chat"
 
 
-def test_chat_on_vulkan_only_box_picks_vulkan():
+def test_chat_on_amd_box_without_rocm_picks_the_vulkan_lane(monkeypatch):
+    """#1948: an AMD GPU with no ROCm compute IS a Vulkan lane again.
+
+    #1888 sent this box to CPU: llama.cpp slots ran one runner image on every
+    AMD GPU device and that image's Vulkan backend emitted invalid tokens, so
+    deriving ``gpu-vulkan`` seeded a fresh unprivileged install with slots
+    that served garbage while reading green. With a Vulkan-fixed image the
+    honest answer flips back — this is the ct151 shape, where Vulkan is the
+    only lane the box has. A box still carrying an unvalidated runner image
+    gets a named refusal at slot load, not silent garbage.
+    """
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
     hw = _hw(compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
-    assert derive_profile("chat", "gpu-vulkan") == "chat"
+    assert derive_profile("chat", "cpu") == "cpu-chat"
+
+
+def test_chat_on_amd_box_without_rocm_picks_cpu_when_the_image_cannot_serve_vulkan(
+    monkeypatch,
+):
+    """Review B2: deriving a lane the load-time gate then refuses is worse
+    than deriving CPU — it turns "slow but working" into "no loadable slot"."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: False
+    )
+    assert derive_device("chat", _hw(compute=False, vulkan=True), npu_opt_in=False) == "cpu"
+
+
+def test_chat_on_amd_box_with_neither_rocm_nor_vulkan_still_picks_cpu(monkeypatch):
+    """The CPU fallback survives — it just needs a real reason now."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    hw = _hw(compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 def test_embed_on_rocm_box_uses_embed_profile():
@@ -140,10 +173,26 @@ def test_tts_is_cpu_kokoro():
     assert derive_profile("tts", "cpu") == "kokoro"
 
 
-def test_strix_platform_forces_rocm_even_if_compute_flag_missing():
-    # platform=strix-halo is the canonical FP4 signal.
+def test_strix_platform_forces_rocm_when_the_compute_node_is_there(monkeypatch):
+    """platform=strix-halo is the canonical FP4 signal — but since #1888 it is
+    necessary, not sufficient: /dev/kfd must actually be reachable."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
+
+
+def test_strix_platform_without_kfd_derives_vulkan_not_rocm(monkeypatch):
+    """A Strix Halo box whose amdkfd node was never forwarded is the exact
+    fresh-LXC shape #1888 was found on. Deriving ``gpu-rocm`` there would
+    still hand every seeded slot a load-time refusal — the ROCm gate is
+    untouched by #1948. What changed is the alternative: ``gpu-vulkan``
+    rather than ``cpu``, because the box does have a usable GPU."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
+    )
+    hw = _hw(platform="strix-halo", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
 
 
 # ── CPU-only host fixes (#834) ─────────────────────────────────────────────────
@@ -183,9 +232,22 @@ def test_cpu_host_coder_derives_cpu_llm_profile():
     assert derive_profile("coder", "cpu") == "cpu-chat"
 
 
-def test_cpu_host_embed_derives_cpu_llm_profile():
-    """embed capability on a CPU host must derive to 'cpu-llm', not 'vulkan'."""
-    assert derive_profile("embed", "cpu") == "cpu-chat"
+def test_cpu_host_embed_derives_the_embedding_lane():
+    """embed on a CPU host derives the ``embedding`` lane, never a GPU profile.
+
+    #1830: this used to assert ``cpu-chat`` — a chat profile that emits no
+    ``--embedding``, so a CPU-only box's embed slot loaded ``ready`` and 501'd
+    ``/v1/embeddings``. The ``embedding`` seed is device-agnostic (backend and
+    device_class both None), so the #807/#834 coherence property the original
+    test protected — never a GPU-pinned profile on a CPU device — still holds.
+    """
+    from hal0.config.schema import SEED_PROFILES
+
+    assert derive_profile("embed", "cpu") == "embedding"
+    assert derive_profile("rerank", "cpu") == "reranking"
+    for name in ("embedding", "reranking"):
+        assert SEED_PROFILES[name].get("backend") is None
+        assert SEED_PROFILES[name].get("device_class") is None
 
 
 def test_cpu_host_tts_still_derives_tts_profile():

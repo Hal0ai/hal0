@@ -188,6 +188,9 @@ def test_openwebui_unreachable_up_false(svc_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
+        # Unit state deliberately "unknown" — an unprovable stop keeps the
+        # honest probe detail and stays down (never fabricated "stopped").
+        patch(f"{_BASE}._unit_active_state", new_callable=AsyncMock, return_value="unknown"),
         patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=conn_err),
     ):
         r = svc_client.get("/api/services/health")
@@ -195,6 +198,7 @@ def test_openwebui_unreachable_up_false(svc_client: TestClient) -> None:
     assert r.status_code == 200
     ow = _services_by_id(r.json())["openwebui"]
     assert ow["up"] is False
+    assert ow["state"] == "down"
     assert "unreachable" in ow["detail"]
 
 
@@ -218,4 +222,97 @@ def test_openwebui_non_2xx_up_false(svc_client: TestClient) -> None:
     assert r.status_code == 200
     ow = _services_by_id(r.json())["openwebui"]
     assert ow["up"] is False
+    # HTTP-level failure = something IS listening — never softened to
+    # "stopped", the honest status-code detail survives.
+    assert ow["state"] == "down"
     assert "503" in ow["detail"]
+
+
+# ── stopped-vs-crashed split (state field) ────────────────────────────────────
+# A deliberately stopped service (unit `inactive`) renders grey, not red;
+# only a `failed` unit reads as crashed. #1974-era operator report: every
+# cleanly-stopped slot/service pip was painted red.
+
+
+def _patch_probes_all_down():
+    return (
+        patch(
+            f"{_BASE}._probe_comfyui",
+            new_callable=AsyncMock,
+            return_value=(False, "unreachable", None, None),
+        ),
+        patch(
+            f"{_BASE}._probe_hermes",
+            new_callable=AsyncMock,
+            return_value=(False, "systemd unit inactive or absent"),
+        ),
+        patch(
+            f"{_BASE}._probe_openwebui",
+            new_callable=AsyncMock,
+            return_value=(False, "unreachable (ConnectError)"),
+        ),
+    )
+
+
+def test_inactive_units_report_stopped(svc_client: TestClient) -> None:
+    p1, p2, p3 = _patch_probes_all_down()
+    with (
+        p1,
+        p2,
+        p3,
+        patch(f"{_BASE}._unit_active_state", new_callable=AsyncMock, return_value="inactive"),
+    ):
+        r = svc_client.get("/api/services/health")
+
+    assert r.status_code == 200
+    for svc in r.json()["services"]:
+        assert svc["up"] is False
+        assert svc["state"] == "stopped"
+        assert svc["detail"] == "stopped — starts on demand"
+
+
+def test_failed_units_report_down_crashed(svc_client: TestClient) -> None:
+    p1, p2, p3 = _patch_probes_all_down()
+    with (
+        p1,
+        p2,
+        p3,
+        patch(f"{_BASE}._unit_active_state", new_callable=AsyncMock, return_value="failed"),
+    ):
+        r = svc_client.get("/api/services/health")
+
+    assert r.status_code == 200
+    for svc in r.json()["services"]:
+        assert svc["up"] is False
+        assert svc["state"] == "down"
+        assert svc["detail"] == "crashed — systemd unit failed"
+
+
+def test_up_services_report_state_up(svc_client: TestClient) -> None:
+    with (
+        patch(
+            f"{_BASE}._probe_comfyui",
+            new_callable=AsyncMock,
+            return_value=(
+                True,
+                "running — 0 job(s) active",
+                {"label": "jobs", "value": "0/0"},
+                None,
+            ),
+        ),
+        patch(
+            f"{_BASE}._probe_hermes",
+            new_callable=AsyncMock,
+            return_value=(True, "systemd unit active"),
+        ),
+        patch(
+            f"{_BASE}._probe_openwebui",
+            new_callable=AsyncMock,
+            return_value=(True, "reachable — /health ok"),
+        ),
+    ):
+        r = svc_client.get("/api/services/health")
+
+    assert r.status_code == 200
+    for svc in r.json()["services"]:
+        assert svc["state"] == "up"

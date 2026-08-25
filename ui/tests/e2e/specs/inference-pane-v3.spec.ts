@@ -71,6 +71,26 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await expect(pill).toContainText('rocm')
   })
 
+  test('device/profile pill has its own row, out of the bottom action bar (#squished-controls fix)', async ({ page }) => {
+    // Regression: the [ device | PROFILE ] pill used to share .scard-foot with
+    // the image/mem chips AND the lifecycle controls — a long custom profile
+    // name (or the #1939 image-unknown chip) could squeeze the Stop/Restart/
+    // Logs/Edit buttons onto a cramped wrapped line. The pill now lives in its
+    // own .scard-profile-row directly under the model control, so .scard-foot
+    // only ever holds short fixed-width chips + the controls.
+    await page.goto('/#slots')
+    const card = body(page).getByTestId('infer-slot-primary')
+    const profileRow = card.locator('.scard-profile-row')
+    await expect(profileRow).toBeVisible()
+    await expect(profileRow.locator('.prov')).toBeVisible()
+    await expect(profileRow.getByTestId('infer-profile-primary')).toBeVisible()
+    // .scard-foot must NOT contain the provider/profile pill any more.
+    await expect(card.locator('.scard-foot .prov')).toHaveCount(0)
+    await expect(card.locator('.scard-foot [data-testid="infer-profile-primary"]')).toHaveCount(0)
+    // the lifecycle controls still render, undisturbed, inside .scard-foot.
+    await expect(card.locator('.scard-foot .slot-ctrls')).toBeVisible()
+  })
+
   test('NPU/FLM slots are cordoned off to the NPU pane', async ({ page }) => {
     await page.goto('/#slots')
     await expect(pane(page)).toBeVisible()

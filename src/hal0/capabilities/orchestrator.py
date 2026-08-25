@@ -37,7 +37,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.capabilities.catalog import models_for_capability, tts_profile_for_device
+from hal0.capabilities.catalog import models_for_capability
 from hal0.capabilities.config import (
     CapabilityConfig,
     CapabilitySelection,
@@ -58,6 +58,7 @@ from hal0.registry.store import ModelRegistry
 from hal0.slot_config import SlotConfigStore, SlotSelection
 from hal0.slots.layout import resolve_slot_stem
 from hal0.slots.manager import SlotManager
+from hal0.slots.profile_adopt import type_implied_profile
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +83,27 @@ _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
 # ── Trio dispatch discriminator: capability child → slot ``type`` ─────────────
 # The FLM trio (one ``flm serve`` process serving chat + embed + asr) is gated
 # in v1._is_npu_trio_request on the slot record's ``type`` field. Only the two
-# trio modalities carry a type; rerank/tts/img are NOT trio members and
-# get no ``type`` key (their auto-created slots are plain llama-server/dedicated
-# providers). Mirrors providers/flm._classify_flm_model emitting "embed"/"stt".
+# trio modalities are trio members — rerank/tts/img carry their own types via
+# ``_NON_TRIO_CHILD_TO_SLOT_TYPE`` below, and must NOT be added here.
+# Mirrors providers/flm._classify_flm_model emitting "embed"/"stt".
 _CHILD_TO_SLOT_TYPE: dict[str, str] = {
     "embed": "embedding",
     "stt": "transcription",
+}
+
+# child → slot ``type`` for the NON-trio children. Deliberately a SECOND map:
+# the trio discriminator above must keep exactly its two members (it also
+# answers "is this an NPU modality?"), but an auto-created slot still needs the
+# ``type`` its shipped seed carries — ``SlotManager.create``'s type-implied
+# profile inference (#1830), ``providers/container._spec_provider_for``'s
+# dispatch and ``hal0 doctor profiles``' profile-less capability check all key
+# on it. Without it a re-created ``rerank`` slot landed profile-less, launched
+# llama-server with no ``--reranking``, reported ``state=ready`` and 501'd
+# ``/v1/rerank``. Values match installer/etc-hal0/slots/{rerank,tts,img}.toml.
+_NON_TRIO_CHILD_TO_SLOT_TYPE: dict[str, str] = {
+    "rerank": "reranking",
+    "tts": "tts",
+    "img": "image",
 }
 
 # The legal capability/child surface — used by HTTP validation.
@@ -741,34 +757,40 @@ class CapabilityOrchestrator:
             # grey/unconfigured slot the dashboard renders as a picker.
             "model": {"default": selection.model or ""},
         }
-        # Stamp the trio dispatch discriminator for embed/stt children so
-        # v1._is_npu_trio_request can gate on it. Non-trio children
-        # (rerank/tts/img) get no ``type`` key.
+        # Stamp the slot ``type`` — the trio dispatch discriminator for the
+        # embed/stt children (so v1._is_npu_trio_request can gate on it), and
+        # the seed-matching type for the non-trio ones. rerank/img used to get
+        # NO ``type`` key here, which left a re-created rerank slot with no
+        # type for SlotManager.create's profile inference (#1830) to key on:
+        # it launched llama-server without ``--reranking``, reported ready and
+        # 501'd /v1/rerank.
         _, child = _SLOT_TO_CHILD.get(slot_name, (None, None))
-        slot_type = _CHILD_TO_SLOT_TYPE.get(child) if child else None
+        slot_type = (
+            _CHILD_TO_SLOT_TYPE.get(child) or _NON_TRIO_CHILD_TO_SLOT_TYPE.get(child)
+            if child
+            else None
+        )
         if slot_type:
             cfg_dict["type"] = slot_type
         # voice.tts engine switch (follow-up to #972): a (re)created tts slot
-        # must carry the engine's runtime profile + type so the spawn routes to
-        # the right provider (cpu→Kokoro, gpu→Qwen3). The builtin tts.toml
-        # normally exists so this path is the deleted-slot fallback.
+        # runs a dedicated container image. The builtin tts.toml normally
+        # exists so this path is the deleted-slot fallback.
         if child == "tts":
-            cfg_dict["type"] = "tts"
             cfg_dict["runtime"] = "container"
-            cfg_dict["profile"] = tts_profile_for_device(selection.device)
-        # voice.stt engine switch (moonshine reinstatement): a (re)created cpu
-        # stt slot carries the Moonshine profile explicitly, mirroring the tts
-        # mechanism above, rather than relying on MoonshineProvider's own
-        # profile-less default (belt-and-suspenders — the slot's on-disk shape
-        # then already matches what a reconciled EXISTING slot would carry via
-        # SlotConfigStore._engine_profile_for). The npu case never reaches
-        # here (`_apply_npu_trio_modality` / `_ensure_slot_exists_npu` handle
-        # it); ``profile_name_for_fit`` returns ``None`` for any device this
-        # branch could see beyond cpu, so the stamp only ever fires there.
-        elif child == "stt":
-            stt_profile = profile_name_for_fit("stt", selection.device, selection.provider or "")
-            if stt_profile is not None:
-                cfg_dict["profile"] = stt_profile
+        # tts/stt engine profile: stamped explicitly so the slot's on-disk
+        # shape already matches what a reconciled EXISTING slot would carry via
+        # SlotConfigStore._engine_profile_for, rather than relying on the
+        # provider's own profile-less default (belt-and-suspenders). It comes
+        # from the SHARED type-implied rule, which vetoes both a profile that
+        # does not fit the slot and a runtime family with no runner for this
+        # device — a Vulkan box must not be pinned to the ROCm-only qwen3tts
+        # image, and an unknown STT engine must not inherit Moonshine's
+        # profile. The npu case never reaches here (`_apply_npu_trio_modality`
+        # / `_ensure_slot_exists_npu` handle it).
+        if child in ("tts", "stt"):
+            engine_profile = type_implied_profile(cfg_dict)
+            if engine_profile is not None:
+                cfg_dict["profile"] = engine_profile
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:

@@ -230,6 +230,25 @@ def test_reflect_post_forwards(client: TestClient, recorder: _Recorder) -> None:
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/reflect"
 
 
+def test_memory_curate_patch_forwards(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "PATCH",
+        "/v1/default/banks/shared/memories/fact-1",
+        200,
+        {"id": "fact-1", "text": "edited", "state": "invalidated"},
+    )
+    r = client.patch(
+        "/api/memory/banks/shared/memories/fact-1",
+        json={"text": "edited", "state": "invalidated", "reason": "stale"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "invalidated"
+    fwd = recorder.requests[-1]
+    assert fwd["method"] == "PATCH"
+    assert fwd["path"] == "/v1/default/banks/shared/memories/fact-1"
+    assert '"reason": "stale"' in fwd["body"] or '"reason":"stale"' in fwd["body"]
+
+
 # ── #1026: response-shape guards on the cognition consoles ──────────────────────
 
 
@@ -397,6 +416,70 @@ def test_destructive_ops_land_audit_rows(recorder: _Recorder, tmp_path: Any) -> 
     assert doc_rows, "expected a memory.document.delete audit row"
     assert doc_rows[0]["actor"] == "dashboard"
     assert doc_rows[0]["target"] == "/v1/default/banks/scratch/documents/doc-1"
+
+
+def test_curate_patch_lands_audit_row(recorder: _Recorder, tmp_path: Any) -> None:
+    """PR #1987 review M7: curate PATCH used to ride _FORWARDS unaudited —
+
+    a soft-delete (state="invalidated") is reversible, so it correctly stays
+    out of DESTRUCTIVE_MEMORY_ROUTES/CONFIRM_GUARDED_MEMORY_ROUTES, but it
+    still needs a record_action row so "who invalidated this, when" is
+    answerable, the same way every DELETE forward already is.
+    """
+    audit = AuditStore(tmp_path / "audit.db")
+    audit.init_schema()
+    recorder.respond(
+        "PATCH",
+        "/v1/default/banks/shared/memories/fact-1",
+        200,
+        {"id": "fact-1", "state": "invalidated"},
+    )
+    transport = httpx.MockTransport(recorder.handler)
+    http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177")
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    app = _build_app_with_audit(_HindsightStubProvider(rest), audit)
+
+    with TestClient(app) as c:
+        r = c.patch(
+            "/api/memory/banks/shared/memories/fact-1",
+            json={"state": "invalidated", "reason": "stale"},
+            headers={"X-hal0-Agent": "hermes"},
+        )
+        assert r.status_code == 200
+
+    rows = audit.query(action="memory.memory.curate")
+    assert rows, "expected a memory.memory.curate audit row"
+    assert rows[0]["outcome"] == "ok"
+    assert rows[0]["actor"] == "mcp:hermes"
+    assert rows[0]["target"] == "/v1/default/banks/shared/memories/fact-1"
+
+
+def test_curate_patch_clears_bank_graph_cache(client: TestClient, recorder: _Recorder) -> None:
+    """PR #1987 review M5: a curate PATCH must invalidate the bank's cached
+
+    graph slab immediately — otherwise a units/subgraph GET within the 45s
+    TTL keeps serving pre-mutation salience/link_counts_by_type.
+    """
+    from hal0.api.routes import _memory_subgraph as sg
+
+    memory_admin._GRAPH_CACHE = sg.GraphCache()
+    memory_admin._GRAPH_CACHE.put("shared:memories::", {"nodes": [], "edges": []})
+    memory_admin._GRAPH_CACHE.put("other-bank:memories::", {"nodes": [], "edges": []})
+
+    recorder.respond(
+        "PATCH",
+        "/v1/default/banks/shared/memories/fact-1",
+        200,
+        {"id": "fact-1", "state": "invalidated"},
+    )
+    r = client.patch(
+        "/api/memory/banks/shared/memories/fact-1",
+        json={"state": "invalidated"},
+    )
+    assert r.status_code == 200
+    assert memory_admin._GRAPH_CACHE.peek("shared:memories::") is None
+    # a differently-prefixed bank's slab is untouched.
+    assert memory_admin._GRAPH_CACHE.peek("other-bank:memories::") is not None
 
 
 # ── upstream error mapping ─────────────────────────────────────────────────────

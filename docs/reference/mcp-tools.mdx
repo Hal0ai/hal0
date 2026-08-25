@@ -25,13 +25,20 @@ truth if this table ever drifts.
 
 Return shape for every admin tool is `dict[str, Any]`:
 - **success (autonomous)**: the raw REST JSON response — `slot_list`, `provider_list`,
-  and `upstream_list` wrap their bare-list REST response as `{"<key>": [...], "count": N}`.
+  `upstream_list`, `runner_image_pulls`, and `backend_list` wrap their bare-list REST
+  response as `{"<key>": [...], "count": N}` (`_LIST_TOOL_WRAP_KEY` in source is the
+  authoritative list).
 - **pending approval (gated)**: `{"status": "pending_approval", "approval_id": "...", "detail": "..."}`.
 - **error**: `{"status": "error", "error": {"code": ..., ...}}`.
 
 Tools fall into three gating tiers. Treat the frozensets in source
 (`AUTONOMOUS_READ_TOOLS`, `AUTONOMOUS_WRITE_TOOLS`, `GATED_TOOLS`) as ground truth if
 this table drifts.
+
+Full argument schemas are not reproduced per tool here — the REST route each
+tool passes through documents its own body/query shape; hand-authored
+overrides for the handful that don't map 1:1 onto their route live in
+`TOOL_PARAM_HINTS` in source.
 
 ### Autonomous — read (no approval)
 
@@ -45,7 +52,6 @@ this table drifts.
 | `slot_by_id` | `GET /api/slots/by-id/{slot_id}` |
 | `slot_resolved` | `GET /api/slots/{name}/resolved` |
 | `slot_state` | `GET /api/slots/{name}/state` |
-| `port_list` | `GET /api/ports` |
 | `model_list` | `GET /api/models` |
 | `model_show` | `GET /api/models/{model_id}` |
 | `model_scan_preview` | `POST /api/models/scan/preview` |
@@ -53,16 +59,15 @@ this table drifts.
 | `model_update_check` | `GET /api/models/updates/check` |
 | `model_pulls_list` | `GET /api/models/pulls` |
 | `model_pull_status` | `GET /api/models/{model_id}/pull/status` |
-| `model_inspect` | `POST /api/models/inspect` — args: `hf_repo` (`org/name`) or `hf_url` |
+| `model_inspect` | `POST /api/models/inspect` |
 | `model_store` | `GET /api/settings/models/store` |
 | `hardware_probe` | `GET /api/stats/hardware` |
 | `system_info` | `GET /api/system-info` |
+| `port_list` | `GET /api/ports` |
 | `capability_list` | `GET /api/capabilities` |
 | `provider_list` | `GET /api/providers` |
 | `version_info` | `GET /api/status` |
 | `upstream_list` | `GET /api/upstreams` |
-| `upstream_get` | `GET /api/upstreams/{name}` |
-| `upstream_test` | `POST /api/upstreams/{name}/test` |
 | `stack_list` | `GET /api/stacks` |
 | `stack_status` | `GET /api/stacks/{slug}` |
 | `profile_list` | `GET /api/profiles` |
@@ -78,64 +83,135 @@ this table drifts.
 | `npu_status` | in-process host probe |
 | `env_report` | in-process host probe |
 | `model_store_probe` | in-process host probe — arg: `path` (required) |
-| `memory_search`, `memory_list`, `memory_recall` | delegate to `hal0-memory` — see below |
+| `upstream_get` | `GET /api/upstreams/{name}` |
+| `upstream_test` | `POST /api/upstreams/{name}/test` |
+| `service_list` | `GET /api/services` |
+| `service_health` | `GET /api/services/health` |
+| `comfyui_status` | `GET /api/comfyui/status` |
+| `comfyui_workflows` | `GET /api/comfyui/workflows` |
+| `updater_state` | `GET /api/updates/state` |
+| `updater_check` | `GET /api/updates/check` |
+| `updater_channel_get` | `GET /api/updates/channel` |
+| `updater_slot_drift` | `GET /api/updates/slot-drift` |
+| `updater_job_status` | `GET /api/updates/status/{job_id}` |
+| `doctor_report` | `GET /api/doctor` |
+| `health_system` | `GET /api/health/system` |
+| `feature_list` | `GET /api/features` |
+| `metrics_snapshot` | `GET /api/metrics` |
+| `hardware_snapshot` | `GET /api/hardware` |
+| `slot_stats` | `GET /api/stats/slots` |
+| `stats_overview` | `GET /api/stats` |
+| `request_metrics` | `GET /api/stats/requests` |
+| `system_stats` | `GET /api/system-stats` |
+| `power_stats` | `GET /api/stats/power` |
+| `throughput_history` | `GET /api/stats/throughput/history` |
+| `npu_occupancy` | `GET /api/npu/occupancy` |
+| `npu_swap_status` | `GET /api/npu/swap-status` |
+| `model_health_check` | `GET /api/models/health` |
+| `slot_config` | `GET /api/slots/{name}/config` |
+| `slot_voices` | `GET /api/slots/{name}/voices` |
+| `flm_model_list` | `GET /api/slots/flm/models` |
+| `slot_pull_status` | `GET /api/slots/{name}/pull/status` |
+| `model_validate` | `POST /api/models/validate` |
+| `hf_search` | `GET /api/hf/search` |
+| `model_config_read` | `GET /api/config/models` |
+| `bench_roster` | `GET /api/benchmarks/roster` |
+| `bench_plan` | `GET /api/benchmarks/plan` |
+| `bench_cells` | `GET /api/benchmarks/cells` |
+| `bench_history` | `GET /api/benchmarks/history` |
+| `bench_evals` | `GET /api/benchmarks/evals` |
+| `journal_snapshot` | `GET /api/journal` |
+| `activity_list` | `GET /api/activity` |
+| `activity_export` | `GET /api/activity/export` |
+| `approval_list` | `GET /api/agent/approvals` |
+| `runner_image_list` | `GET /api/runner-images` |
+| `runner_image_downloaded` | `GET /api/runner-images/downloaded` |
+| `runner_image_pulls` | `GET /api/runner-images/pulls/list` |
+| `backend_list` | `GET /api/backends` |
+| `backend_detail` | `GET /api/backends/{backend_id}` |
+| `mcp_server_list` | `GET /api/mcp/servers` |
+| `mcp_client_list` | `GET /api/mcp/clients` |
+| `mcp_catalog` | `GET /api/mcp/catalog` |
+| `profile_generate` | `POST /api/profiles/generate` |
+| `memory_search`, `memory_list`, `memory_recall`, `memory_reflect`, `memory_history`, `memory_mental_model_list`, `memory_mental_model_get`, `memory_directive_list`, `memory_directive_get`, `memory_operation_list`, `memory_operation_get`, `memory_tags_list`, `memory_bank_stats` | delegate to `hal0-memory` — see below |
 
 ### Autonomous — write (no approval; reversible, low blast radius)
 
-| Tool | REST route | Args |
-|---|---|---|
-| `model_swap` | `POST /api/slots/{name}/swap` | `name` (path), `model_id` (required) |
-| `model_assign` | `PUT /api/slots/{name}/config` | `name` (path), `model` (required) |
-| `model_edit` | `PUT /api/models/{model_id}` | — |
-| `model_scan` | `POST /api/models/scan` | `prune` (optional bool) |
-| `model_pull_cancel` | `POST /api/models/{model_id}/pull/cancel` | — |
-| `model_pull_delete` | `DELETE /api/models/pulls/{model_id}` | — |
-| `model_set_default` | `POST /api/models/{model_id}/default` | `model_id`, `default` (bool, default `true`) |
-| `slot_load` | `POST /api/slots/{name}/load` | — |
-| `slot_unload` | `POST /api/slots/{name}/unload` | — |
-| `slot_edit` | `PUT /api/slots/{name}/config` | — |
-| `slot_set_defaults` | `PATCH /api/slots/{name}/defaults` | — |
-| `settings_reload` | `POST /api/settings/reload` | — |
-| `memory_add` | delegates to `hal0-memory` | — |
-| `memory_delete` | delegates to `hal0-memory` — gates itself when deleting more than one id, or a foreign/list dataset | — |
+| Tool | REST route |
+|---|---|
+| `model_swap` | `POST /api/slots/{name}/swap` |
+| `model_assign` | `PUT /api/slots/{name}/config` |
+| `model_edit` | `PUT /api/models/{model_id}` |
+| `model_scan` | `POST /api/models/scan` |
+| `model_pull_cancel` | `POST /api/models/{model_id}/pull/cancel` |
+| `model_pull_delete` | `DELETE /api/models/pulls/{model_id}` |
+| `model_set_default` | `POST /api/models/{model_id}/default` |
+| `slot_load` | `POST /api/slots/{name}/load` |
+| `slot_unload` | `POST /api/slots/{name}/unload` |
+| `slot_edit` | `PUT /api/slots/{name}/config` |
+| `slot_set_defaults` | `PATCH /api/slots/{name}/defaults` |
+| `settings_reload` | `POST /api/settings/reload` |
+| `hardware_reprobe` | `POST /api/hardware/probe` |
+| `memory_add`, `memory_curate`, `memory_mental_model_create`, `memory_mental_model_update`, `memory_mental_model_refresh`, `memory_directive_create`, `memory_directive_update`, `memory_operation_cancel`, `memory_operation_retry`, `memory_bank_consolidate` | delegate to `hal0-memory` — see below |
+| `memory_delete` | delegates to `hal0-memory` — gates itself when deleting more than one id, or a foreign/list dataset |
 
 ### Gated (destructive — require operator approval)
 
-| Tool | REST route | Args |
-|---|---|---|
-| `model_pull` | `POST /api/models/{model_id}/pull` | `model_id` (local, no slashes), `hf_repo`, `hf_filename`, `mmproj_filename` |
-| `model_delete` | `DELETE /api/models/{model_id}` | — |
-| `model_register` | `POST /api/models` | — |
-| `model_add` | `POST /api/models/add-from-path` | — |
-| `model_store_set` | `POST /api/settings/models/store` | — |
-| `model_store_migrate` | `POST /api/settings/models/store/migrate` | — |
-| `model_update` | `POST /api/models/{model_id}/update` | — |
-| `slot_create` | `POST /api/slots` | `name`, `model` (required), `type`, `port`, `image`, `runtime` |
-| `slot_delete` | `DELETE /api/slots/{name}` | — |
-| `slot_restart` | `POST /api/slots/{name}/restart` | — |
-| `slot_rename` | `POST /api/slots/{name}/rename` | `name` (current), `new_name` (required) |
-| `capability_set` | `POST /api/capabilities/{slot}/{child}` | — |
-| `config_write` | `PUT /api/settings` | — |
-| `provider_credential_write` | `POST /api/providers/{name}/credentials` | — |
-| `stack_create` | `POST /api/stacks` | — |
-| `stack_update` | `PUT /api/stacks/{slug}` | — |
-| `stack_apply` | `POST /api/stacks/{slug}/apply` | — |
-| `stack_import` | `POST /api/stacks/import` | — |
-| `stack_export` | `POST /api/stacks/{slug}/export` | — |
-| `stack_snapshot` | `POST /api/stacks/snapshot` | — |
-| `stack_delete` | `DELETE /api/stacks/{slug}` | — |
-| `profile_create` | `POST /api/profiles` | — |
-| `profile_update` | `PUT /api/profiles/{name}` | — |
-| `profile_import` | `POST /api/profiles/import` | — |
-| `profile_delete` | `DELETE /api/profiles/{name}` | — |
-| `bench_enqueue` | `POST /api/benchmarks/queue` | — |
-| `bench_control` | `POST /api/benchmarks/control` | — |
-| `bench_queue_delete` | `DELETE /api/benchmarks/queue/{item_id}` | — |
-| `logs_tail` | `GET /api/logs` | output is secret-redacted |
-| `slot_logs` | `GET /api/slots/{name}/logs` | output is secret-redacted |
-| `upstream_create` | `POST /api/upstreams` | `name` (required), `catalog_id`, `url`, `auth_value_env` |
-| `upstream_update` | `PATCH /api/upstreams/{name}` | `name`, `enabled`, `advertise_models`, `model_filters` |
-| `upstream_delete` | `DELETE /api/upstreams/{name}` | — |
+| Tool | REST route |
+|---|---|
+| `model_pull` | `POST /api/models/{model_id}/pull` |
+| `model_delete` | `DELETE /api/models/{model_id}` |
+| `model_register` | `POST /api/models` |
+| `model_add` | `POST /api/models/add-from-path` |
+| `model_store_set` | `POST /api/settings/models/store` |
+| `model_store_migrate` | `POST /api/settings/models/store/migrate` |
+| `model_update` | `POST /api/models/{model_id}/update` |
+| `slot_create` | `POST /api/slots` |
+| `slot_delete` | `DELETE /api/slots/{name}` |
+| `slot_restart` | `POST /api/slots/{name}/restart` |
+| `slot_rename` | `POST /api/slots/{name}/rename` |
+| `capability_set` | `POST /api/capabilities/{slot}/{child}` |
+| `config_write` | `PUT /api/settings` |
+| `provider_credential_write` | `POST /api/providers/{name}/credentials` |
+| `stack_create` | `POST /api/stacks` |
+| `stack_update` | `PUT /api/stacks/{slug}` |
+| `stack_apply` | `POST /api/stacks/{slug}/apply` |
+| `stack_import` | `POST /api/stacks/import` |
+| `stack_export` | `POST /api/stacks/{slug}/export` |
+| `stack_snapshot` | `POST /api/stacks/snapshot` |
+| `stack_delete` | `DELETE /api/stacks/{slug}` |
+| `profile_create` | `POST /api/profiles` |
+| `profile_update` | `PUT /api/profiles/{name}` |
+| `profile_import` | `POST /api/profiles/import` |
+| `profile_delete` | `DELETE /api/profiles/{name}` |
+| `bench_enqueue` | `POST /api/benchmarks/queue` |
+| `bench_control` | `POST /api/benchmarks/control` |
+| `bench_queue_delete` | `DELETE /api/benchmarks/queue/{item_id}` |
+| `logs_tail` | `GET /api/logs` — output is secret-redacted |
+| `slot_logs` | `GET /api/slots/{name}/logs` — output is secret-redacted |
+| `upstream_create` | `POST /api/upstreams` |
+| `upstream_update` | `PATCH /api/upstreams/{name}` |
+| `upstream_delete` | `DELETE /api/upstreams/{name}` |
+| `service_action` | `POST /api/services/{service_id}/action` |
+| `comfyui_switchover` | `POST /api/comfyui/switchover` |
+| `comfyui_pin` | `POST /api/comfyui/pin` |
+| `comfyui_models_fetch` | `POST /api/comfyui/models/fetch` |
+| `comfyui_render_cancel` | `POST /api/comfyui/render/cancel` |
+| `comfyui_restart` | `POST /api/comfyui/restart` |
+| `comfyui_workflow_launch` | `POST /api/comfyui/workflows/{name}/launch` |
+| `comfyui_logs` | `GET /api/comfyui/logs` — output is secret-redacted |
+| `slot_pull_image` | `POST /api/slots/{name}/pull` |
+| `model_config_write` | `PUT /api/config/models` |
+| `bench_run` | `POST /api/benchmarks/run` |
+| `runner_image_sync` | `POST /api/runner-images/sync` |
+| `npu_backend_load` | `POST /api/backends/npu/load` |
+| `npu_backend_unload` | `POST /api/backends/npu/unload` |
+| `mcp_server_install` | `POST /api/mcp/install` |
+| `mcp_server_uninstall` | `DELETE /api/mcp/{server_id}` |
+| `mcp_server_config_write` | `PATCH /api/mcp/{server_id}/config` |
+| `mcp_server_action` | `POST /api/mcp/{server_id}/{action}` |
+| `mcp_server_logs` | `GET /api/mcp/{server_id}/logs` |
+| `memory_mental_model_delete`, `memory_directive_delete` | delegate to `hal0-memory` — destructive, always gated |
 
 ### Deliberately excluded
 
@@ -148,13 +224,52 @@ surface (each with a documented reason in source) — not gaps, policy.
 Unlike `hal0-admin`, each tool here registers with a real typed signature, so
 `tools/list` returns real per-field schemas, not an opaque `args` blob.
 
-| Tool | Signature | Required | Returns |
-|---|---|---|---|
-| `memory_add` | `text, dataset?, tags?, metadata?, document_id?` | `text` (non-empty) | `{id, timestamp, operation_id?}` |
-| `memory_search` | `query, limit=10, dataset?, tags?, before?, after?` | `query` | `{results: [{id, text, score, timestamp, dataset, tags, source, metadata}]}` |
-| `memory_list` | `dataset?, cursor?, limit=50` | none | `{items: [...], next_cursor}` |
-| `memory_delete` | `ids, dataset?` | `ids` (non-empty list) | `{deleted: int}`; bulk deletes (>1 id) return `{status: "pending_approval", approval_id, detail}` |
-| `memory_recall` | `query, max_tokens=4096, types?, dataset?, tags?, tags_match?` | `query` | `{results: [...]}` |
+hal0-memory registers 26 tools total. Gating tier is classified the same way as
+the admin tools above — via `AUTONOMOUS_READ_TOOLS` / `AUTONOMOUS_WRITE_TOOLS`
+/ `GATED_TOOLS` in `hal0.mcp.admin` (the standalone mount additionally
+hard-gates its two delete tools through its own local list, checked first —
+same verdict, belt and braces).
+
+**Autonomous — read**
+
+| Tool | Required | Returns |
+|---|---|---|
+| `memory_search` | `query` | `{results: [{id, text, score, timestamp, dataset, tags, source, metadata}]}` |
+| `memory_list` | none | `{items: [...], next_cursor}` |
+| `memory_recall` | `query` | token-budgeted, consolidated memory — `{results: [...]}` |
+| `memory_reflect` | `query` | LLM-backed synthesis grounded in recalled facts; `{status: "unsupported"}` on engines without this capability |
+| `memory_history` | `id` | curation history for one memory unit |
+| `memory_mental_model_list` | none | a bank's mental models (stored `memory_reflect` answers kept refreshed) |
+| `memory_mental_model_get` | `id` | one mental model |
+| `memory_directive_list` | none | a bank's directives (standing instructions injected into prompts) |
+| `memory_directive_get` | `id` | one directive |
+| `memory_operation_list` | none | async operations (retain, consolidation, refresh, ...) |
+| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate` |
+| `memory_tags_list` | none | tags in use in a bank, with usage counts |
+| `memory_bank_stats` | none | node/link/observation/operation counts for a bank |
+
+**Autonomous — write** (reversible, low blast radius)
+
+| Tool | Required | Returns |
+|---|---|---|
+| `memory_add` | `text` (non-empty) | `{id, timestamp, operation_id?}` |
+| `memory_delete` | `ids` (non-empty list) | `{deleted: int}`; bulk deletes (>1 id) or a foreign/list dataset instead return `{status: "pending_approval", approval_id, detail}` |
+| `memory_curate` | `id`, plus at least one field to change (`text`, `context`, `occurred_start`, `occurred_end`, `fact_type`, `entities`, or `state`) | edits a memory unit's text/context/occurred-range/fact_type/entities, or soft-invalidates it via `state` — the non-destructive correction path; `id` alone returns `mcp.memory_schema` |
+| `memory_mental_model_create` | `name`, `source_query` | `{mental_model_id, operation_id}` — initial content generation runs as an async refresh |
+| `memory_mental_model_update` | `id` | updates name/source_query/max_tokens/tags/trigger |
+| `memory_mental_model_refresh` | `id` | triggers a mental model refresh (async) — `{operation_id, ...}` |
+| `memory_directive_create` | `name`, `content` | creates a directive |
+| `memory_directive_update` | `id` | updates name/content/priority/is_active/tags |
+| `memory_operation_cancel` | `id` | aborts pending/processing work |
+| `memory_operation_retry` | `id` | re-queues a failed operation |
+| `memory_bank_consolidate` | none | triggers the engine's world/experience → observation consolidation pass early — `{operation_id, deduplicated}` |
+
+**Gated** (destructive — require operator approval)
+
+| Tool | Required | Returns |
+|---|---|---|
+| `memory_mental_model_delete` | `id` | deletes a mental model |
+| `memory_directive_delete` | `id` | deletes a directive |
 
 Validation errors return `{"status": "error", "error": {"code": "mcp.memory_schema", "detail": ...}}`.
 

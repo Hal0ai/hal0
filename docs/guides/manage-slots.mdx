@@ -53,7 +53,7 @@ memory extraction); a custom slot is reachable only by its own name.
 hal0 slot create embed \
   --type embedding \
   --model nomic-embed-text-v1.5-q8_0 \
-  --hardware vulkan \
+  --hardware rocm \
   --ctx-size 8192
 ```
 
@@ -67,9 +67,18 @@ hal0 slot create embed \
 
 3. **`--model` / `-m`** (required) — the initial model ref to assign.
 
-4. **`--hardware`** — the compute backend: `vulkan`, `rocm`, or `cpu`.
-   When omitted it reads the cached hardware probe: `vulkan` if no probe
-   has run yet, `cpu` if the probe found no GPU. This sets the slot's
+4. **`--hardware`** — the compute backend: `rocm`, `vulkan`, or `cpu`.
+   When omitted it reads the cached hardware probe: `rocm` on an AMD GPU with
+   ROCm compute reachable (and if no probe has run yet), `vulkan` on an AMD or
+   Intel GPU without it, `cpu` if neither lane is available. `rocm` is the
+   lane hal0 seeds on AMD and requires the `/dev/kfd` compute node. `vulkan`
+   needs only a render node, which makes it the lane for a box where
+   `/dev/kfd` was never forwarded; an LLM slot on it must also resolve a
+   Vulkan-validated runner image, or slot load refuses it by name. Either way
+   the refusal is loud and immediate rather than a slot that serves nonsense.
+   On Strix Halo the Vulkan lane currently *measures faster* than ROCm — see
+   [Switching a slot to the Vulkan lane](#switching-a-slot-to-the-vulkan-lane).
+   This sets the slot's
    `device` field directly (`vulkan → gpu-vulkan`, `rocm → gpu-rocm`,
    `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
    (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the
@@ -80,6 +89,24 @@ hal0 slot create embed \
    the next free port.
 
 6. **`--ctx-size`** — context window in tokens (default `4096`).
+
+7. **`--profile`** — the runtime profile (flag bundle + engine). Omit it
+   and hal0 infers the profile the slot's `--type` implies: `embedding` →
+   `embedding` (`--embedding`), `reranking` → `reranking`
+   (`--reranking`), `tts`/`transcription` → the engine hal0 ships for the
+   chosen device (Kokoro on CPU, Qwen3-TTS on ROCm, Moonshine for CPU
+   speech-to-text). Nothing is inferred where hal0 has no engine for that
+   pairing — a `tts` slot on a Vulkan device, for instance, keeps the CPU
+   Kokoro runtime rather than being pinned to the ROCm-only Qwen3 image.
+   An `image` slot also infers nothing: pass `--profile comfyui`
+   explicitly (the shipped `img` slot already carries it). That inference
+   is what makes a capability
+   slot actually serve its endpoint — an `embedding` slot with no
+   `--embedding` flag loads to `ready` and returns HTTP 501 from
+   `/v1/embeddings`. An `llm` slot infers nothing: no mode flag is at
+   stake, so its tune stays the model's (or yours). Change a slot's
+   profile later with `hal0 slot edit <name> --profile <profile>` or the
+   slot drawer.
 
 </Steps>
 
@@ -180,11 +207,76 @@ setting one) is how you take a slot out of rotation without deleting it.
 ```sh
 hal0 slot edit agent --ctx-size 32768
 hal0 slot edit embed --hardware rocm
+hal0 slot edit rerank --profile reranking
 ```
 
 Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
-`--hardware`. At least one is required. Changes the container baked in
-(port, hardware grid) take effect on the next `restart`.
+`--hardware`, `--profile`. At least one is required. Changes the container
+baked in (port, hardware grid) take effect on the next `restart`.
+
+<Aside type="tip" title="Repairing a profile-less capability slot">
+Capability slots created before v1.0 could land on disk with no `profile`
+key — they load to `ready` but return HTTP 501 from their own endpoint,
+because the profile is what carries llama-server's `--embedding` /
+`--reranking` mode flag. Check with
+`grep profile /etc/hal0/slots/<name>.toml`; repair with
+`hal0 slot edit <name> --profile embedding` (or `reranking`) followed by
+`hal0 slot restart <name>`. Newly created slots infer it automatically.
+</Aside>
+
+## Switching a slot to the Vulkan lane
+
+On AMD, an LLM slot runs one of two GPU lanes and always names it explicitly —
+`gpu-rocm` or `gpu-vulkan`. Moving between them is a normal, supported
+operation:
+
+```sh
+hal0 slot edit agent --hardware vulkan     # gpu-rocm -> gpu-vulkan
+hal0 slot restart agent
+
+hal0 slot edit agent --hardware rocm       # and back
+```
+
+In the dashboard, open the slot's drawer and change **Device** — same effect,
+same checks.
+
+### Why you might
+
+On Strix Halo, the Vulkan lane currently measures **faster than ROCm on both
+metrics** on the validated runner image: **+13.96% prefill** and **+20.45%
+decode**, with noticeably tighter run-to-run variance
+([the numbers](/docs/reference/hardware-matrix)). It also needs only a render
+node, so it is the only GPU lane available on a box where `/dev/kfd` was never
+forwarded — an unprivileged LXC, typically.
+
+hal0 still *seeds* `gpu-rocm` where the box can run it. That is a maturity
+preference, not a performance one: the ROCm lane carries hal0's release
+validation history, and MTP / speculative-decode profiles are tuned against
+it. A slot leaning on speculative decode may well do better staying put. The
+seeded default is revisited at GA against a broader matrix.
+
+### What has to pass before it serves
+
+Two gates, and both are the point:
+
+1. **Preflight.** The target lane's devices must be present — `/dev/kfd` for
+   ROCm, `/dev/dri/renderD*` for Vulkan — and, for Vulkan, the slot's runner
+   image must be one whose Vulkan backend has been validated. Older runner
+   images (the `ade07ba` lineage) emitted invalid tokens for every model on
+   Vulkan while every health surface read green, so they are refused by name
+   with the reason. If you see that refusal, update hal0 rather than working
+   around it.
+2. **Output sanity.** After preflight, the slot must answer a fixed prompt
+   correctly before it is marked ready. A lane that emits nonsense fails in
+   about a second instead of serving it for hours.
+
+<Aside type="caution" title="`HAL0_ALLOW_VULKAN_FALLBACK`">
+This environment variable downgrades the preflight refusals above to a warning.
+It exists so a broken box can be *inspected*, not run: on an unvalidated runner
+image it will let a slot start on a Vulkan backend that can emit invalid tokens
+for every model. There is no supported configuration in which it is the right
+answer.
+</Aside>
 
 ## Dashboard: the inline model-edit pencil
 

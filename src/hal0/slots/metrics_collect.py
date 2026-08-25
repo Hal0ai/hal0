@@ -60,6 +60,15 @@ def tps_from_events(events: Any, window_s: float = 5.0) -> float:
     than ``tokens / window_s`` so short bursts read at their real rate
     instead of being smeared across the full lookback. Decays to 0 once
     all events age out.
+
+    A single in-window event still yields a rate (smeared across the
+    window). Non-streaming completions land as ONE event carrying the
+    whole ``usage.completion_tokens`` count, so the old ``< 2 → 0.0``
+    guard meant a slot doing steady non-streaming work (graph
+    extraction, embeddings callers, curl scripts) read 0 tok/s forever
+    while /api/stats/throughput/history — which buckets the same store
+    — showed real throughput. Smearing matches the history endpoint's
+    tokens-per-bucket semantics.
     """
     import time
 
@@ -67,8 +76,10 @@ def tps_from_events(events: Any, window_s: float = 5.0) -> float:
         return 0.0
     now = time.monotonic()
     in_window = [(ts, tok) for ts, tok in events if now - ts <= window_s]
-    if len(in_window) < 2:
+    if not in_window:
         return 0.0
+    if len(in_window) == 1:
+        return in_window[0][1] / window_s
     total_tokens = sum(tok for _, tok in in_window)
     span = in_window[-1][0] - in_window[0][0]
     # Bias slightly toward the window so a stale-but-recent burst still
@@ -242,18 +253,17 @@ async def llama_metrics(port: int) -> dict[str, Any]:
             except (ValueError, TypeError):
                 continue
 
-    # --- /slots: KV-cache % via max(n_prompt_tokens)/n_ctx. -------------
+    # --- /slots: context occupancy + synthesised KV-cache %. -------------
     #
     # Newer llama-server (post-server.cpp refactor, b9000-ish onward)
     # exposes ``n_prompt_tokens`` per parallel sub-slot when busy, plus
     # ``n_ctx`` always. Older builds only return id/n_ctx/is_processing,
-    # in which case the max is 0 and we skip the synthesised gauge so
-    # the UI renders '—' rather than a misleading 0%.
-    if (
-        "kv_cache_usage" not in out
-        and not isinstance(slots_resp, BaseException)
-        and getattr(slots_resp, "status_code", 0) == 200
-    ):
+    # in which case the max is 0 and we skip both derived values so the
+    # UI renders '—' rather than a misleading 0. Parsed unconditionally
+    # (not only as a kv fallback): ``ctx`` — the fullest sub-slot's used
+    # tokens — feeds the card's "used / max" context readout, which sat
+    # permanently at '—' because nothing ever produced the key.
+    if not isinstance(slots_resp, BaseException) and getattr(slots_resp, "status_code", 0) == 200:
         try:
             payload = slots_resp.json()
         except (ValueError, TypeError):
@@ -286,7 +296,9 @@ async def llama_metrics(port: int) -> dict[str, Any]:
                         used = iv
                 if used > max_used:
                     max_used = used
-            if n_ctx > 0 and max_used > 0:
+            if max_used > 0:
+                out["ctx"] = max_used
+            if n_ctx > 0 and max_used > 0 and "kv_cache_usage" not in out:
                 ratio = max_used / float(n_ctx)
                 # Clamp — n_prompt_tokens can briefly exceed n_ctx during
                 # shift; surfacing >1.0 would look broken in the UI.
@@ -420,6 +432,8 @@ async def collect_local(sm: Any) -> dict[str, dict[str, Any]]:
                 out["requests_deferred"] = int(llm_metrics["requests_deferred"])
             if "kv_cache_usage" in llm_metrics:
                 out["kv_cache_usage"] = float(llm_metrics["kv_cache_usage"])
+            if "ctx" in llm_metrics:
+                out["ctx"] = int(llm_metrics["ctx"])
         return slot.name, out
 
     pairs = await asyncio.gather(*(_one(s) for s in slots), return_exceptions=True)

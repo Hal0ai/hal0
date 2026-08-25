@@ -276,7 +276,8 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
 #               AddCapability= PodmanArgs= Volume= Environment= PublishPort=
 #               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
 #               HealthTimeout= Exec=
-#   [Service]   Restart= RestartSec= SyslogIdentifier= StandardOutput=
+#   [Service]   Restart= RestartSec= RestartSteps= RestartMaxDelaySec=
+#               RestartPreventExitStatus= SyslogIdentifier= StandardOutput=
 #               StandardError=
 #   [Install]   WantedBy=hal0.target        (omitted when autoload = false)
 #
@@ -398,7 +399,11 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
     # Charset-pinned, not semantics-pinned — see the HONEST BOUNDARY note.
     'Container|Image')          [[ "$value" =~ $_QRE_IMAGE ]]    || _quadlet_die "bad Image: $value" ;;
     'Container|ContainerName')  [[ "$value" =~ $_QRE_CTRNAME ]]  || _quadlet_die "bad ContainerName: $value" ;;
-    'Container|LogDriver')      [[ "$value" == "none" ]]         || _quadlet_die "bad LogDriver: $value" ;;
+    # passthrough is what the renderer emits now (unit-journaled, single
+    # copy); none is accepted for the skew window where an older venv
+    # renders through a newer wrapper.
+    'Container|LogDriver')      [[ "$value" == "passthrough" || "$value" == "none" ]] \
+                                                                 || _quadlet_die "bad LogDriver: $value" ;;
     'Container|Network')        [[ "$value" =~ $_QRE_NETWORK ]]  || _quadlet_die "bad Network: $value" ;;
     'Container|AddDevice')
       [[ "$value" =~ $_QRE_DEVICE ]] || _quadlet_die "bad AddDevice: $value"
@@ -425,11 +430,16 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
 
     # ── [Service] ───────────────────────────────────────────────────────
     # Copied VERBATIM into the generated system unit by podman's quadlet
-    # generator — i.e. host-side root. Exactly the five the renderer emits;
+    # generator — i.e. host-side root. Exactly the eight the renderer emits;
     # every Exec*=, User=, Group=, WorkingDirectory=, … lands in the default
-    # arm below and dies.
+    # arm below and dies. RestartPreventExitStatus= (#2037) is pinned to a
+    # single uint — the renderer emits exactly `64`; signal names, lists and
+    # ranges systemd would also accept are refused here.
     'Service|Restart')           [[ "$value" =~ $_QRE_RESTART ]] || _quadlet_die "bad Restart: $value" ;;
     'Service|RestartSec')        [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSec: $value" ;;
+    'Service|RestartSteps')      [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSteps: $value" ;;
+    'Service|RestartMaxDelaySec') [[ "$value" =~ $_QRE_UINT ]]   || _quadlet_die "bad RestartMaxDelaySec: $value" ;;
+    'Service|RestartPreventExitStatus') [[ "$value" =~ $_QRE_UINT ]] || _quadlet_die "bad RestartPreventExitStatus: $value" ;;
     'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;
     'Service|StandardOutput')    [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardOutput: $value" ;;
     'Service|StandardError')     [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardError: $value" ;;
@@ -788,6 +798,16 @@ case "$cmd" in
     exec systemctl restart "${AGENT_UNIT_PREFIX}${id}.service"
     ;;
 
+  # try-restart-agent (#1882): restart the unit ONLY if it is already running.
+  # The Hermes terminal-tool posture change refreshes a live agent, and it runs
+  # from every provisioning entry point — including ones the operator drove
+  # with the agent deliberately stopped. `restart` would resurrect it; this
+  # verb is a no-op on an inactive unit. Strictly narrower than restart-agent.
+  try-restart-agent)          # try-restart-agent <agent-id> -> systemctl try-restart hal0-agent@<id>.service
+    id="${1:-}"; validate_agent_id "$id"
+    exec systemctl try-restart "${AGENT_UNIT_PREFIX}${id}.service"
+    ;;
+
   enable-agent)               # enable-agent <agent-id> -> systemctl enable hal0-agent@<id>.service
     id="${1:-}"; validate_agent_id "$id"
     exec systemctl enable "${AGENT_UNIT_PREFIX}${id}.service"
@@ -796,11 +816,17 @@ case "$cmd" in
   # Companion-service units (#1590). A CLOSED name->unit map — the caller
   # supplies a service key, never a unit string, so this family can only ever
   # reach the units enumerated here. Growing the map is a reviewable diff.
-  svc-start|svc-stop|svc-restart|svc-enable|svc-disable)
+  svc-start|svc-stop|svc-restart|svc-try-restart|svc-enable|svc-disable)
     key="${1:-}"
     case "$key" in
       openwebui)  unit="hal0-openwebui.service" ;;
       hindsight)  unit="hindsight-api.service" ;;
+      # #1863: the Hermes terminal-tool posture only reaches the model once the
+      # process re-reads its config, and the gateway is a second consumer of it.
+      # Reached via svc-try-restart in practice (#1882 — a posture refresh must
+      # not start a gateway the operator stopped), but the svc-* family shares
+      # one map.
+      hermes-gateway) unit="hermes-gateway.service" ;;
       *) die "bad service key: ${key:-<missing>}" ;;
     esac
     exec systemctl "${cmd#svc-}" "$unit"
@@ -835,8 +861,10 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   disable-agent <agent-id>         systemctl disable ${AGENT_UNIT_PREFIX}<id>.service
   start-agent <agent-id>           systemctl start ${AGENT_UNIT_PREFIX}<id>.service
   restart-agent <agent-id>         systemctl restart ${AGENT_UNIT_PREFIX}<id>.service
+  try-restart-agent <agent-id>     systemctl try-restart ${AGENT_UNIT_PREFIX}<id>.service (no-op if stopped)
   enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
-  svc-<verb> <openwebui|hindsight> systemctl <verb> on the mapped companion unit
+  svc-<verb> <openwebui|hindsight|hermes-gateway>
+                                   systemctl <verb> on the mapped companion unit
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;

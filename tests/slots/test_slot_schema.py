@@ -18,16 +18,21 @@ SLOTS_DIR = Path(__file__).resolve().parents[2] / "installer/etc-hal0/slots"
 
 EXPECTED_MAPPING = {
     # slot name: (port, device, profile)
-    "brain": (8089, "gpu-vulkan", "brain"),
-    "agent": (8081, "gpu-vulkan", "chadrock-moe"),
-    "utility": (8090, "gpu-vulkan", "chat"),
+    #
+    # #1888: every llama.cpp seed is gpu-ROCM, never gpu-vulkan. Both GPU
+    # devices launch the same unified ROCmFPX runner image, whose Vulkan
+    # backend emits invalid tokens for every model — so the six seeds a fresh
+    # install actually receives named a lane no slot could validly run.
+    "brain": (8089, "gpu-rocm", "brain"),
+    "agent": (8081, "gpu-rocm", "chadrock-moe"),
+    "utility": (8090, "gpu-rocm", "chat"),
     "flm": (8088, "npu", "flm"),
     "img": (8188, "gpu-rocm", "comfyui"),
     "qwen3tts": (8095, "gpu-rocm", "qwen3-tts"),
     "tts": (8085, "cpu", "kokoro"),  # port drift fix (was 8084)
-    "rerank": (8086, "gpu-vulkan", "reranking"),  # port drift fix (was 8083)
-    "coder": (8082, "gpu-vulkan", "coding"),  # NEW static seed (Task 5)
-    "embed": (8083, "gpu-vulkan", "embedding"),  # NEW static seed (Task 5)
+    "rerank": (8086, "gpu-rocm", "reranking"),  # port drift fix (was 8083)
+    "coder": (8082, "gpu-rocm", "coding"),  # NEW static seed (Task 5)
+    "embed": (8083, "gpu-rocm", "embedding"),  # NEW static seed (Task 5)
 }
 
 

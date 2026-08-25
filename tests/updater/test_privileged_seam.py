@@ -178,6 +178,142 @@ def test_seam_surfaces_the_root_helpers_stderr_on_failure() -> None:
     assert "cosign verify-blob failed" in exc.value.details["stderr"]
 
 
+def test_successful_stage_relays_the_childs_breadcrumbs_into_the_journal() -> None:
+    """#1901 gap 2: on success the root helper's stderr (its structured log)
+    was captured by ``subprocess.run`` and silently discarded — no
+    ``sha256_ok`` / ``cosign_verify_ok`` / ``prepare_ok`` breadcrumb ever
+    reached the parent's journal. Each captured line must now be replayed
+    into the parent's own log, tagged with the seam's job_id.
+    """
+    from structlog.testing import capture_logs
+
+    child_stderr = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+        "2026-08-17T00:00:02Z [info] updater.prepare_ok job_id=None version=1.0.0\n"
+    )
+    run = FakeRun(stdout=_envelope({"version": "1.0.0"}), stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs:
+        result = asyncio.run(seam.stage("stable", "1.0.0"))
+
+    assert result["version"] == "1.0.0"
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert len(relayed) == 3
+    assert all(e["job_id"] == "job-abc123" for e in relayed)
+    assert all(e["verb"] == "stage" for e in relayed)
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+    assert any("prepare_ok" in e["line"] for e in relayed)
+
+
+def test_successful_stage_relay_survives_a_long_cleanup_tail() -> None:
+    """Codex review on #1901: ``_invoke`` used to truncate stderr to its last
+    4000 chars BEFORE deciding what to relay. A successful extraction can log
+    one cleanup line per stale quarantine/staging directory (see
+    ``_reap_stale_quarantines`` / ``_reap_stale_staging_dirs``) AFTER the
+    sha256/cosign breadcrumbs, so a long enough cleanup tail pushed those
+    breadcrumbs out of the relayed data — reopening the exact audit gap this
+    fix exists to close. The relay must see the full, untruncated stderr.
+    """
+    from structlog.testing import capture_logs
+
+    breadcrumbs = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+    )
+    # Pad well past the old 4000-char truncation window with cleanup noise.
+    cleanup_tail = "".join(
+        f"2026-08-17T00:00:{i:02d}Z [info] updater.quarantine_reaped path=/x/{i}\n"
+        for i in range(2, 400)
+    )
+    child_stderr = breadcrumbs + cleanup_tail
+    assert len(child_stderr) > 4000
+
+    run = FakeRun(stdout=_envelope({"version": "1.0.0"}), stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs:
+        result = asyncio.run(seam.stage("stable", "1.0.0"))
+
+    assert result["version"] == "1.0.0"
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+
+
+def test_failed_stage_also_relays_full_stderr_to_the_journal() -> None:
+    """#1940: the failure path used to relay nothing, keeping only
+    ``full_stderr[-4000:]`` in the raised error's details — a diagnostic
+    breadcrumb, not the durable audit trail. Relaying to the journal and
+    folding a bounded tail into the error are different sinks, not a double
+    record of the same thing, so the failure path must do both: the full
+    stderr reaches the journal via ``_relay_child_log`` AND the raised
+    error still carries its own bounded tail for quick triage.
+    """
+    from structlog.testing import capture_logs
+
+    run = FakeRun(returncode=1, stderr="hal0-update: cosign verify-blob failed")
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    with capture_logs() as logs, pytest.raises(UpdateError) as exc:
+        seam.discard("hal0-1.0.0")
+
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert len(relayed) == 1
+    assert relayed[0]["job_id"] == "job-abc123"
+    assert relayed[0]["verb"] == "discard"
+    assert "cosign verify-blob failed" in relayed[0]["line"]
+    assert "cosign verify-blob failed" in exc.value.details["stderr"]
+
+
+def test_failed_activate_relay_survives_a_long_cleanup_tail_after_cosign() -> None:
+    """#1940: a failure occurring AFTER cosign passed (e.g. during activate)
+    with a long reaping tail must not push the sha256_ok/cosign_verify_ok
+    breadcrumbs out of the retained evidence — this is the run where that
+    evidence matters most. The bounded 4000-char tail kept in the raised
+    error's details can legitimately drop the early breadcrumbs; the journal
+    relay must not, because it sees the full, untruncated stderr.
+    """
+    from structlog.testing import capture_logs
+
+    breadcrumbs = (
+        "2026-08-17T00:00:00Z [info] updater.sha256_ok job_id=None digest=abc123\n"
+        "2026-08-17T00:00:01Z [info] updater.cosign_verify_ok job_id=None\n"
+    )
+    # Pad well past the old 4000-char truncation window with cleanup noise
+    # that runs AFTER the breadcrumbs and before the eventual failure.
+    cleanup_tail = "".join(
+        f"2026-08-17T00:00:{i:02d}Z [info] updater.quarantine_reaped path=/x/{i}\n"
+        for i in range(2, 400)
+    )
+    failure_line = "2026-08-17T00:07:00Z [error] updater.activate_failed reason=disk_full\n"
+    child_stderr = breadcrumbs + cleanup_tail + failure_line
+    assert len(child_stderr) > 4000
+    assert "sha256_ok" not in child_stderr[-4000:]
+
+    run = FakeRun(returncode=1, stderr=child_stderr)
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True, job_id="job-abc123")
+
+    import asyncio
+
+    with capture_logs() as logs, pytest.raises(UpdateError) as exc:
+        asyncio.run(seam.activate("hal0-1.0.0"))
+
+    relayed = [e for e in logs if e.get("event") == "updater.privileged_child_log"]
+    assert any("sha256_ok" in e["line"] for e in relayed)
+    assert any("cosign_verify_ok" in e["line"] for e in relayed)
+    # The bounded error detail is allowed to have lost the early breadcrumbs
+    # — that's exactly why the full relay above is the fix.
+    assert "sha256_ok" not in exc.value.details["stderr"]
+    assert "activate_failed" in exc.value.details["stderr"]
+
+
 # ── preflight: fail fast, with remediation, before any download ────────────────
 
 

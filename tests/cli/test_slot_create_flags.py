@@ -163,12 +163,19 @@ def test_default_hardware_reads_probe_json(monkeypatch: pytest.MonkeyPatch, tmp_
     assert slot_commands._detect_default_hardware() == "rocm"
 
 
-def test_default_hardware_vulkan_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Missing probe → vulkan (safe default that works on most GPUs)."""
+def test_default_hardware_rocm_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Missing probe → rocm (#1888).
+
+    This used to be ``vulkan`` ("safe default that works on most GPUs"), but
+    llama.cpp slots launch the unified ROCmFPX runner image on both GPU
+    devices and that image's Vulkan backend emits invalid tokens for every
+    model — so the broad default was a broadly-wrong one. A box that cannot
+    run ROCm gets a loud refusal at slot load, not silent garbage.
+    """
     from hal0.config import paths as _paths
 
     monkeypatch.setattr(_paths, "hardware_json", lambda: tmp_path / "missing.json")
-    assert slot_commands._detect_default_hardware() == "vulkan"
+    assert slot_commands._detect_default_hardware() == "rocm"
 
 
 def test_default_hardware_cpu_when_no_gpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -210,19 +217,28 @@ def test_invalid_hardware_value_rejected_by_typer(
     assert "body" not in captured_post
 
 
-def test_bare_create_on_strix_halo_resolves_to_vulkan(
+def test_bare_create_on_a_compute_less_strix_halo_resolves_to_vulkan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A bare ``slot create primary`` on a Strix Halo fixture auto-resolves
-    ``--hardware vulkan``.
+    """A bare ``slot create primary`` on a Strix Halo fixture whose probe did
+    NOT flag ``compute_capable`` auto-resolves ``--hardware vulkan``.
 
-    Strix Halo presents as an AMD iGPU (vendor=amd) that is Vulkan-capable
-    but typically not flagged compute_capable in the probe output — the
-    iGPU runs llama.cpp via Vulkan, not ROCm. The auto-detect path must
-    pick ``vulkan`` so the user doesn't need to know about hardware flags
-    on the platform that hal0 v1 most cares about.
+    This assertion has been both values. Originally ``vulkan``; #1888 forced
+    ``rocm`` for every AMD GPU because the runner image's Vulkan backend
+    emitted invalid tokens for every model, making a loud load-time refusal
+    strictly better than a silently-garbage lane. #1948 fixed the image, so a
+    box with no ROCm compute goes back to the lane it can actually run —
+    and if its runner image is not Vulkan-validated, slot load says so by
+    name rather than serving nonsense.
+
+    ``compute_capable: true`` still resolves ``rocm``; see the sibling test.
+    The image half is forced ON here (review B2): whether this ladder reaches
+    ``vulkan`` at all depends on the pinned runner, and a test that does not
+    say which pin it means is testing a moving target. The other direction is
+    pinned in ``tests/providers/test_vulkan_lane_perimeter.py``.
     """
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
     probe = tmp_path / "hardware.json"
     probe.write_text(
         json.dumps(
@@ -267,6 +283,137 @@ def test_bare_create_on_strix_halo_resolves_to_vulkan(
     )
     assert result.exit_code == 0, result.output
     # Bare invocation → provider defaults to llama-server, hardware
-    # auto-resolves to vulkan from the Strix Halo fixture.
+    # auto-resolves from the fixture: no ROCm compute → the Vulkan lane.
     assert captured["body"]["provider"] == "llama-server"
     assert captured["body"]["device"] == "gpu-vulkan"
+
+
+@pytest.mark.parametrize(
+    ("compute_capable", "expected"),
+    [(True, "rocm"), (False, "vulkan")],
+)
+def test_detect_default_hardware_prefers_rocm_when_compute_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    compute_capable: bool,
+    expected: str,
+) -> None:
+    """ROCm stays the PREFERRED AMD lane wherever the box can run it — #1948
+    restores Vulkan as a fallback, it does not demote ROCm."""
+    from hal0.cli.slot_commands import _detect_default_hardware
+    from hal0.config import paths as _paths
+
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Strix Halo",
+                        "vram_mb": 512,
+                        "compute_capable": compute_capable,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    # See the note above: the Vulkan branch is gated on the pinned image, so
+    # the pin is stated rather than inherited from the checkout.
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
+    assert _detect_default_hardware() == expected
+
+
+def test_detect_default_hardware_falls_to_cpu_when_the_vulkan_lane_is_not_real(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review B2: an AMD box with no ROCm compute and an unvalidated runner
+    image has no GPU lane — writing ``vulkan`` there would create a slot the
+    load-time gate refuses."""
+    from hal0.cli.slot_commands import _detect_default_hardware
+    from hal0.config import paths as _paths
+
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Strix Halo",
+                        "vram_mb": 512,
+                        "compute_capable": False,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: False)
+    assert _detect_default_hardware() == "cpu"
+
+
+# ── --profile (#1830) ────────────────────────────────────────────────────────
+
+
+def test_profile_flag_is_forwarded(captured_post: dict[str, Any]) -> None:
+    """``slot create --profile`` pins the profile instead of inferring one."""
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "rr", "--type", "reranking", "--model", "demo", "--profile", "reranking"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_post["body"]["profile"] == "reranking"
+
+
+def test_deprecated_add_alias_sends_no_profile(captured_post: dict[str, Any]) -> None:
+    """``slot add`` calls ``slot_create`` in-process — no OptionInfo leak.
+
+    A direct Python call to a Typer command binds the ``typer.Option(...)``
+    sentinel for every omitted parameter, so a new parameter that the alias
+    forgets to pass gets POSTed as that sentinel object.
+    """
+    result = runner.invoke(
+        slot_commands.app,
+        ["add", "rr", "--type", "reranking", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "profile" not in captured_post["body"]
+
+
+def test_profile_omitted_leaves_the_key_absent(captured_post: dict[str, Any]) -> None:
+    """No ``--profile`` → no ``profile`` key at all.
+
+    An empty-string placeholder would look like an explicit operator choice at
+    the create chokepoint and defeat the type-implied inference (#1830).
+    """
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "rr", "--type", "reranking", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "profile" not in captured_post["body"]
+
+
+def test_edit_profile_flag_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``slot edit --profile`` PUTs it — the repair path for an existing slot."""
+    captured: dict[str, Any] = {}
+
+    def fake_put(path: str, *, json: dict[str, Any] | None = None, **_kw: Any) -> dict[str, Any]:
+        captured["path"] = path
+        captured["payload"] = json or {}
+        return {"state": "stopped"}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(slot_commands, "api_put", fake_put)
+
+    result = runner.invoke(slot_commands.app, ["edit", "rr", "--profile", "reranking"])
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/slots/rr/config"
+    assert captured["payload"] == {"profile": "reranking"}

@@ -39,6 +39,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
+from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 console = Console()
 
@@ -350,6 +351,18 @@ def _maybe_converge_profiles(status: dict | None, *, yes: bool) -> bool:
     return True
 
 
+#: Human labels for the non-fatal per-pass failure events
+#: run_post_activation_migrations can log (#1960 B2) — keys must match
+#: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
+_MIGRATION_PASS_LABELS: dict[str, str] = {
+    "updater.seed_profiles_prune_failed": "seed-profile cleanup",
+    "updater.mtp_migration_failed": "mtp override cleanup",
+    "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",
+    "updater.image_retag_failed": "runner image retag",
+    "updater.extra_args_sanitize_failed": "managed extra_args sanitisation",
+}
+
+
 def _print_convergence(convergence: dict | None) -> bool:
     """Report how far the updated box is from the v1.0 on-disk shape.
 
@@ -382,6 +395,39 @@ def _print_convergence(convergence: dict | None) -> bool:
         )
     elif outcome == "error":
         console.print(f"[yellow]![/yellow] profile catalog reset failed: {reset.get('error')}")
+
+    # #1960: post-activation migrations (schema + slot/registry cleanup
+    # sweeps) now run in a subprocess AFTER the symlink swap, so a failure
+    # there does NOT abort the update — the release is already active. It
+    # still has to be reported, loudly, or "hal0 update" would silently hand
+    # back a box whose on-disk data still reflects the previous release.
+    post_migrations = convergence.get("post_activation_migrations") or {}
+    if post_migrations.get("ok"):
+        src, dst = post_migrations.get("from"), post_migrations.get("to")
+        if src is not None and dst is not None and src != dst:
+            console.print(f"[green]✓[/green] on-disk schema migrated v{src} → v{dst}")
+        # A pass that swallowed its own exception into a warning is still
+        # non-fatal by design (see run_post_activation_migrations) — this
+        # does not flip `ok`/`converged` — but it must not be invisible
+        # outside journalctl either (#1960 B2).
+        for event in post_migrations.get("pass_warnings") or []:
+            label = _MIGRATION_PASS_LABELS.get(event, event)
+            console.print(
+                f"[yellow]![/yellow] {label} logged a warning — see journalctl for hal0-api"
+            )
+    elif post_migrations:
+        console.print(
+            Panel(
+                "[bold red]Post-update data migrations did not apply.[/bold red]\n"
+                f"{post_migrations.get('error') or 'unknown error'}\n\n"
+                "The new code is installed and running, but on-disk data (slot TOMLs,\n"
+                "hal0.toml schema, registry rows) may still reflect the PREVIOUS release's\n"
+                "shape. hal0-api retries this automatically at its next start — restart the\n"
+                "service now to retry immediately, or wait for the next scheduled restart.",
+                title="Migration incomplete",
+                border_style="red",
+            )
+        )
 
     ownership = convergence.get("ownership_migrations") or {}
     pending = list(ownership.get("pending") or [])
@@ -470,11 +516,30 @@ def _restart_drifted_slots() -> None:
     drifted slots and lists successes + per-slot failures.
     """
     drift = _fetch_slot_drift()
-    if int(drift.get("count") or 0) == 0:
+    count = int(drift.get("count") or 0)
+    if count == 0:
         console.print(Panel("[green]no slots need restart.[/green]", border_style="green"))
         return
+    # restart_drifted_slots loops `await sm.restart(name)` over every drifted
+    # slot inside ONE request, so the client budget scales with the sweep
+    # (#1832). At api_post's generic 10s default this reported failure while
+    # the server went on bouncing every slot unattended.
+    #
+    # Send the slots we counted rather than letting the route recompute drift:
+    # otherwise a slot that drifts between the GET and the POST widens the
+    # server's sweep past the budget derived from that count.
+    names = [
+        str(s.get("slot"))
+        for s in (drift.get("slots") or [])
+        if isinstance(s, dict) and s.get("slot")
+    ]
+    payload = {"slots": names} if names else None
     try:
-        body = api_post("/api/updates/restart-slots")
+        body = api_post(
+            "/api/updates/restart-slots",
+            json=payload,
+            timeout=slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count)),
+        )
     except CliApiError as exc:
         die(str(exc))
         return

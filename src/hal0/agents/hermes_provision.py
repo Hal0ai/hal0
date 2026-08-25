@@ -43,21 +43,46 @@ import pwd
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 
+from hal0.agents.anchor_window import (
+    AnchorWindow,
+    read_hermes_minimum_context,
+    resolve_anchor_window,
+)
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
+from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
+from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
+from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
 from hal0.system import seam as _seam
 
 log = structlog.get_logger(__name__)
+
+#: Per-server MCP client timeout for ``hal0-admin``. The catalog exposes the
+#: blocking slot lifecycle tools (slot_load / slot_restart / model_swap /
+#: npu_backend_load / capability_set / stack_apply), so a 60s client cap aborted
+#: an agent-driven load long before the server gave up — the outer half of
+#: #1832. It must cover the WORST tool in that catalog, not a representative
+#: one: derived from the restart shape, this outer client still truncated
+#: stack_apply, whose fan-out budget is several times larger.
+#: Computed from the same shape ``hal0.mcp.admin`` budgets its widest tool
+#: (stack_apply) with. It is NOT imported from that table: hal0.mcp.admin
+#: imports this module's package, so reaching into it here is a circular
+#: import that silently breaks MCP mounting. ``test_hal0_admin_mcp_timeout_
+#: covers_the_widest_bridge_tool`` pins the two against drift.
+_HAL0_ADMIN_MCP_TIMEOUT_S = (
+    int(slot_lifecycle_timeout_s(loads=1, unloads=1, slots=STACK_APPLY_SLOT_ALLOWANCE)) + 1
+)
 
 # Canonical last-run-report location. Lives outside $HERMES_HOME — Hermes owns
 # its own tree, and the report must survive a `hermes reset`. This is no longer
@@ -1257,8 +1282,10 @@ def _resolve_primary_slot(
     Reads ``/api/slots`` (the canonical source post-embed migration) and selects
     the entry named ``primary`` (or the first ready ``type=='llm'``
     slot when no name matches). Returns the keys the config template
-    needs. Falls back to a safe-but-unwired placeholder when no slot
-    is loaded — self_report surfaces that in the bootstrap summary.
+    needs, plus the selected slot's ``alias``/``backend`` so the STATE.md
+    and HERMES.md renderers consume the SAME selection (one selection,
+    one answer — #1892). Falls back to a safe-but-unwired placeholder when
+    no slot is loaded — self_report surfaces that in the bootstrap summary.
 
     Until v0.2 this read the inference daemon's ``/v1/health`` and looked
     for ``loaded``/``slots`` keys, which post-embed migration are absent
@@ -1274,6 +1301,8 @@ def _resolve_primary_slot(
         "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
         "placeholder": True,
+        "alias": None,
+        "backend": None,
     }
     fetch = slots_fetcher or _fetch_slots
     slots = fetch() or []
@@ -1285,11 +1314,31 @@ def _resolve_primary_slot(
         return kind in {"llm", "chat"}
 
     candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
-    # ADR-0023: the canonical primary is the `agent` slot; accept legacy
-    # `chat`/`primary` names for boxes not yet reseeded.
-    primary = next((s for s in candidates if s.get("name") in ("agent", "chat", "primary")), None)
-    if primary is None:
-        primary = next((s for s in candidates if _is_ready(s)), None)
+    # A candidate only counts as "wired" once it is both dispatchable AND
+    # carries a bound model — an `agent` seed slot that hasn't been loaded
+    # yet is neither (#1892: picking it by name alone, unconditionally,
+    # shadowed genuinely serving llm slots under other names and produced
+    # the "primary" sentinel forever).
+    wired = [s for s in candidates if _is_ready(s) and _slot_model_id(s)]
+    # Display residency is WIDER than request-safe dispatchability: a
+    # `warming` slot with a bound model is resident — the model is loading
+    # right now, and `model_aliases.<slot>` for it is already written by
+    # _collect_chat_slots (the gateway cold-loads/queues on demand). The
+    # #1892 register entry requires the "Chat model:" line to never deny a
+    # resident model for the whole duration of a large load, so warming
+    # slots with a bound model are a second-tier fallback here. Delegation
+    # and the capability rollup keep the strict dispatchable predicate —
+    # residency is a display question, dispatchability a routing one.
+    warming = [s for s in candidates if _slot_state(s) == SlotState.WARMING and _slot_model_id(s)]
+
+    def _pick(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+        # ADR-0023: the canonical primary is the `agent` slot; prefer legacy
+        # `chat`/`primary` names too, but only within a residency tier —
+        # never let the name match override readiness.
+        named = next((s for s in pool if s.get("name") in ("agent", "chat", "primary")), None)
+        return named or next(iter(pool), None)
+
+    primary = _pick(wired) or _pick(warming)
     if primary is None:
         return fallback
 
@@ -1307,7 +1356,19 @@ def _resolve_primary_slot(
         ctx = int(ctx)
     except (TypeError, ValueError):
         ctx = fallback["context_length"]
-    return {"model": model, "base_url": base_url, "context_length": ctx, "placeholder": False}
+    return {
+        "model": model,
+        "base_url": base_url,
+        "context_length": ctx,
+        "placeholder": False,
+        # Renderers must consume the SAME selection: re-deriving the
+        # "primary slot" by bare name match let an unwired `agent` seed
+        # relabel a serving slot's model with an alias that is never
+        # written to `model_aliases` (#1892 review finding 1). One
+        # selection, one answer — alias + backend travel with the model.
+        "alias": _slot_alias(primary),
+        "backend": primary.get("backend"),
+    }
 
 
 def _default_mcp_servers() -> list[dict[str, Any]]:
@@ -1323,7 +1384,7 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
             "url": "http://127.0.0.1:8080/mcp/admin/mcp",
             "type": "http",
             "private": False,
-            "timeout": 60,
+            "timeout": _HAL0_ADMIN_MCP_TIMEOUT_S,
             "usage_hint": (
                 "query/manage hal0 platform state (slots, services, models, hardware). "
                 "Use when the operator asks about system state or wants to inspect a slot."
@@ -1397,6 +1458,321 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 }
 
 
+# ── Terminal tool: explicit opt-in, DEFAULTS OFF (#1863) ────────────────────
+#
+# Hermes' `local` terminal backend executes shell commands as the `hal0`
+# service user, which on a hal0 box is root-equivalent (rootful podman +
+# the hal0-systemctl / hal0-agentenv sudoers wrappers). The agent also
+# ingests untrusted content (web pages, memories, MCP tool output), so
+# shipping command execution ON by default hands a prompt-injectable LLM a
+# root-equivalent shell without ever asking the operator. It is therefore an
+# explicit opt-in now (default OFF).
+#
+# There is no sandboxed middle ground on this appliance: the pinned Hermes'
+# other backends are `docker | singularity | modal | daytona | ssh` — the box
+# ships podman (no docker) and no singularity, modal/daytona are paid cloud
+# services, and a containerised shell could not reach the host or
+# 127.0.0.1:8080, which is precisely what the bundled host-management skills
+# need. So the choice is on/off, not local/sandboxed.
+#
+# HOW "off" IS EXPRESSED (verified against the pinned hermes-agent 0.18.2
+# installed at /var/lib/hal0/venvs/hermes, READ-ONLY): dropping
+# ``terminal.backend`` does NOT disable anything — hermes_cli/config.py
+# _DEFAULTS still carries ``terminal.backend: local`` and bridges it to
+# TERMINAL_ENV. What removes the tool from the model-facing schema is
+# ``agent.disabled_toolsets``: model_tools._compute_tool_definitions applies
+# it as a strict subtraction AFTER toolset resolution, explicitly so that a
+# composite bundle (``toolsets: [hermes-cli]``, the default hal0 runs with)
+# cannot re-add a disabled toolset's tools. ``terminal`` resolves to
+# ``terminal`` + ``process``; ``code_execution`` resolves to ``execute_code``,
+# which runs arbitrary Python as the same user — disabling one without the
+# other would leave the shell reachable by another name.
+HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
+# The two DIRECT execution toolsets, kept named because they are what the
+# ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
+# actually writes and reads back.
+TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
+# What hal0 SUBTRACTS when the terminal is off — the execution pair plus
+# ``delegation`` (#1882 review, finding 3).
+#
+# ``delegate_task`` builds a child agent from the toolsets named in the CALL.
+# The pinned hermes-agent 0.18.2 constructs that child from ``enabled_toolsets``
+# alone and never forwards the parent's ``disabled_toolsets``, and its
+# ``DELEGATE_BLOCKED_TOOLS`` blocks ``execute_code`` but not ``terminal`` or
+# ``process``. So on a terminal-OFF box a prompt-injected agent could call
+# ``delegate_task(toolsets=["terminal"])`` and have the child run the very
+# commands the operator declined — the subtraction would be one hop deep
+# instead of closed. Same reasoning that already bundles ``code_execution``
+# with ``terminal``: a shell reachable under another name is still a shell.
+#
+# ``delegation`` is a plain toolset in hermes' registry (tools: ``delegate_task``,
+# no ``posture`` key, not a ``hermes-*`` bundle), so ``disabled_toolsets``
+# applies the same strict subtraction it already applies to the other two.
+#
+# The cost is parallel fan-out for pure-MCP subagent work; hal0 ships no skill
+# or persona that asks for it (the bundled skills using ``delegate_task`` are
+# all shell workflows that are already off), the kanban board spawns its
+# workers through its own dispatcher rather than ``delegate_task``, and hal0's
+# own cross-slot ``route_to_chat`` delegation is untouched. Opting the terminal
+# IN returns delegation with it.
+#
+# Only the TOOLSET goes. The ``delegation.{model,provider,base_url}`` config
+# block that routes subagents to the ``agent`` role slot is still written, so
+# the posture stays a pure toolset decision.
+TERMINAL_OFF_TOOLSETS: list[str] = [*TERMINAL_TOOLSETS, "delegation"]
+# hal0's own record of the decision. It exists because config.yaml alone cannot
+# tell "the operator opted in before this change" from "hermes config migrate
+# just materialised its own terminal.backend default on a half-finished fresh
+# provision" — and getting that wrong the permissive way would hand out a
+# root-equivalent shell nobody asked for.
+#
+# It lives in /etc/hal0/agents/ (root:root 0755 — verified on a live box), NOT
+# under $HERMES_HOME: that tree is owned by the same `hal0` user the agent runs
+# as and is a ReadWritePath of the agent unit, so a marker there would be
+# agent-writable and a prompt-injected agent could launder its own "1" into
+# operator consent at the next re-provision. Root writes it (the CLI's root
+# prelude, before the §7.4 privilege drop); the unprivileged provisioner only
+# reads it.
+#
+# NOT a containment boundary against an already-compromised agent — one with
+# write_file can edit its own config.yaml directly and get the tools back at the
+# next restart. What this closes is the laundering path: agent-controlled state
+# can never present itself to a later provision as the operator's decision.
+TERMINAL_STATE_PATH = Path("/etc/hal0/agents/hermes-terminal-tool")
+
+# Hermes' OWN default ``terminal.cwd``, as materialised by `hermes config
+# migrate`. A config carrying only this is upstream's default, never hal0's
+# overlay, so it can never be read as operator consent.
+HERMES_DEFAULT_TERMINAL_CWDS: frozenset[str] = frozenset({".", "./"})
+# Every literal ``terminal.cwd`` hal0 itself has written in a released tag, from
+# `git log -S'terminal.cwd' -- src/hal0/agents/hermes_provision.py`:
+#
+#   ce4f9ded (v0.7.3-nightly.20260621 … v0.9.8) → "/etc/hal0"
+#   cda957c3 (v0.9.8-nightly.20260720084155 …)  → "$HERMES_HOME/scratch"
+#
+# The scratch shape is $HERMES_HOME-relative and so is matched dynamically in
+# _existing_terminal_choice; only the fixed literals live here. Boxes carrying
+# either shape have a working terminal today and keep it across an update.
+HAL0_WRITTEN_TERMINAL_CWDS: frozenset[str] = frozenset({"/etc/hal0"})
+_TRUTHY = {"1", "true", "yes", "on", "y"}
+_FALSEY = {"0", "false", "no", "off", "n"}
+
+
+def _parse_yaml_config(config_text: str | None) -> dict[str, Any] | None:
+    """Parse a config.yaml body, or ``None`` if absent/unusable."""
+    if not config_text:
+        return None
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:  # pragma: no cover — PyYAML is a hard dep of hal0
+        return None
+    try:
+        data = yaml.safe_load(config_text) or {}
+    except Exception:  # a corrupt config must never decide the security posture
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _disabled_toolsets(data: dict[str, Any] | None) -> list[str]:
+    """``agent.disabled_toolsets`` as a list of strings (empty when unset)."""
+    agent = (data or {}).get("agent")
+    raw = agent.get("disabled_toolsets") if isinstance(agent, dict) else None
+    return [str(t) for t in raw] if isinstance(raw, list) else []
+
+
+def terminal_enabled_in_config(config_text: str | None) -> bool:
+    """Whether a config body as written leaves command execution reachable.
+
+    The EFFECTIVE reading — what hermes will actually load — so it stays correct
+    after ``overrides.yaml`` has merged on top. The question it answers is "can
+    this agent still reach command execution?", so EVERY route must be gone
+    (:data:`TERMINAL_OFF_TOOLSETS`) before it reports off:
+
+    * ``execute_code`` alone still runs arbitrary Python as the same
+      root-equivalent user — a shell under another name;
+    * ``delegate_task`` alone still builds a child agent from toolsets named at
+      call time, which the pinned build grants without inheriting this config's
+      subtraction — a shell one hop away.
+
+    An ``overrides.yaml`` handing either of them back is the reachable way to
+    land in that shape, and calling it a clean "off" would be exactly the
+    mistake the execution pair already refuses to make.
+    """
+    disabled = set(_disabled_toolsets(_parse_yaml_config(config_text)))
+    return not set(TERMINAL_OFF_TOOLSETS).issubset(disabled)
+
+
+def _terminal_backend_in_config(config_text: str | None) -> str | None:
+    """The configured ``terminal.backend``, or ``None`` when unset."""
+    terminal = (_parse_yaml_config(config_text) or {}).get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    backend = str(terminal.get("backend") or "").strip()
+    return backend or None
+
+
+def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) -> bool | None:
+    """Read an EXISTING ``config.yaml``'s terminal posture, or ``None``.
+
+    ``None`` means "the file says nothing that can be read as an operator
+    decision" — the fresh-install case, which defaults OFF.
+
+    Two shapes count as an operator decision:
+
+    * any backend OTHER than ``local`` — hermes' own default is ``local``, so a
+      docker/ssh/modal value cannot have been materialised by a migration and
+      is necessarily someone's choice, whatever ``cwd`` it carries;
+    * ``local`` together with ANY ``terminal.cwd`` that is not hermes' own
+      default (:data:`HERMES_DEFAULT_TERMINAL_CWDS` — ``"."`` or unset).
+
+    The cwd evidence on the ``local`` branch is load-bearing: ``hermes config
+    migrate`` materialises ``terminal.backend: local``, so "a backend is set" on
+    its own would read a half-provisioned FRESH box as consent. Consent is never
+    inferred from a file hal0 has not finished writing.
+
+    Any non-default cwd counts, rather than only today's
+    ``$HERMES_HOME/scratch``, because hal0 has written more than one shape over
+    its releases (:data:`HAL0_WRITTEN_TERMINAL_CWDS`) and an operator may have
+    pointed it somewhere of their own. Every one of those boxes has a working
+    shell right now, and matching only the newest shape would silently disable
+    it on update (#1882 review, finding 1).
+    """
+    data = _parse_yaml_config(config_text)
+    if data is None:
+        return None
+    if "terminal" in _disabled_toolsets(data):
+        return False
+    terminal = data.get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+    backend = str(terminal.get("backend") or "").strip()
+    if not backend:
+        return None
+    if backend != "local":
+        return True
+    cwd = str(terminal.get("cwd") or "").strip()
+    if cwd in HAL0_WRITTEN_TERMINAL_CWDS or cwd == str(Path(hermes_home) / "scratch"):
+        return True
+    if not cwd or cwd in HERMES_DEFAULT_TERMINAL_CWDS:
+        return None
+    return True
+
+
+def read_terminal_state() -> bool | None:
+    """hal0's recorded terminal decision for this box, or ``None`` if unrecorded."""
+    try:
+        raw = TERMINAL_STATE_PATH.read_text(encoding="utf-8").strip().lower()
+    except (OSError, UnicodeDecodeError):
+        # Unreadable OR undecodable both mean "no usable record" — a corrupt
+        # marker must degrade to the default-off/explicit-answer path, never
+        # abort provisioning and leave the operator unable to repair it.
+        return None
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSEY:
+        return False
+    return None
+
+
+def write_terminal_state(enabled: bool) -> bool:
+    """Record the decision; return whether it landed.
+
+    Only root can write :data:`TERMINAL_STATE_PATH` (that is the point), so this
+    is a no-op-with-False under the unprivileged provisioner. The caller decides
+    what an unrecordable decision means; a FRESH opt-in fails closed rather than
+    being honoured unrecorded, while an already-working box is left alone.
+    """
+    try:
+        TERMINAL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(TERMINAL_STATE_PATH, "1\n" if enabled else "0\n")
+        # Explicit 0644: _atomic_write inherits the process umask, and a root
+        # umask of 077 would leave the marker 0600 — unreadable to the `hal0`
+        # user the provisioner drops to, which would then see no record and
+        # fail an operator's opt-in closed. The value is a posture, not a
+        # secret; root-owned + world-readable is exactly right.
+        TERMINAL_STATE_PATH.chmod(0o644)
+        return True
+    except OSError as exc:
+        log.warning("hermes_provision.terminal_state_write_failed", error=str(exc))
+        return False
+
+
+def persist_terminal_decision(
+    hermes_home: Path | str, *, env: Mapping[str, str] | None = None
+) -> tuple[bool, str, bool]:
+    """Resolve the posture and record it. Returns ``(enabled, why, recorded)``.
+
+    Called from the CLI's ROOT prelude — the one point in the flow that can
+    write :data:`TERMINAL_STATE_PATH` — so that a fresh answer and a box whose
+    pre-#1863 configuration already enabled the tool both end up recorded once,
+    out of the agent's reach, before provisioning drops to the ``hal0`` user.
+    """
+    config_path = Path(hermes_home) / "config.yaml"
+    try:
+        config_text: str | None = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        config_text = None
+    enabled, why = terminal_tool_enabled(
+        config_text=config_text,
+        recorded=read_terminal_state(),
+        hermes_home=hermes_home,
+        env=env,
+    )
+    return enabled, why, write_terminal_state(enabled)
+
+
+def terminal_tool_enabled(
+    *,
+    config_text: str | None = None,
+    recorded: bool | None = None,
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Decide whether Hermes gets the terminal tool. Returns ``(enabled, why)``.
+
+    Precedence:
+
+    1. ``HAL0_HERMES_TERMINAL`` — the explicit operator answer, set by the
+       installer prompt / ``hal0 agent install hermes --terminal-tool``.
+    2. hal0's recorded decision for this box (:data:`TERMINAL_STATE_FILE`).
+    3. A pre-#1863 hal0-provisioned ``config.yaml`` that already enables it.
+    4. OFF — the default, including every non-interactive/silent install.
+    """
+    environ = os.environ if env is None else env
+    raw = str(environ.get(HERMES_TERMINAL_ENV) or "").strip().lower()
+    if raw in _TRUTHY:
+        return True, "opt-in"
+    if raw in _FALSEY:
+        return False, "opt-out"
+    if recorded is not None:
+        return recorded, "recorded"
+    existing = _existing_terminal_choice(config_text, hermes_home)
+    if existing is not None:
+        return existing, "existing-config"
+    return False, "default-off"
+
+
+def _config_list_keys(
+    *, terminal_enabled: bool, existing_disabled: list[str] | None = None
+) -> dict[str, Any]:
+    """The list-valued overlay, with the terminal posture folded in.
+
+    ``agent.disabled_toolsets`` is written in BOTH directions so the posture is
+    convergent: opting in later clears the subtraction instead of leaving a
+    stale one behind. Only hal0's OWN entries (:data:`TERMINAL_OFF_TOOLSETS`)
+    are added/removed — anything else the operator disabled (``browser``,
+    ``cronjob``, …) is preserved in place, since a list value replaces rather
+    than merges (:func:`_deep_merge`). ``overrides.yaml`` still deep-merges on
+    top last, so a hand override wins.
+    """
+    keys = {k: dict(v) for k, v in HAL0_CONFIG_LIST_KEYS.items()}
+    disabled = [t for t in (existing_disabled or []) if t not in TERMINAL_OFF_TOOLSETS]
+    if not terminal_enabled:
+        disabled += TERMINAL_OFF_TOOLSETS
+    keys["agent"] = {"disabled_toolsets": disabled}
+    return keys
+
+
 def _hermes_bin(venv: Path) -> Path:
     """Path to the ``hermes`` console script in the managed venv."""
     return _venv_python(venv).parent / "hermes"
@@ -1427,6 +1803,8 @@ def _build_config_overlay(
     personality_name: str,
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
+    terminal_enabled: bool = False,
+    terminal_backend: str | None = None,
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
@@ -1547,10 +1925,18 @@ def _build_config_overlay(
     # bearing tree — dropping an interactive shell there both fails writes and
     # sits the operator on top of tokens.toml/auth.toml. Point it at a scratch
     # dir under HERMES_HOME (a ReadWritePath, born hal0:hal0, created by
-    # home_init) so shells land in a writable, secret-free sandbox. The backend
-    # stays `local` (decided) — only the cwd moves.
-    terminal_scratch = str(Path(hermes_home) / "scratch")
-    pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
+    # home_init) so shells land in a writable, secret-free sandbox.
+    #
+    # Written ONLY when the operator opted in (#1863 — see TERMINAL_TOOLSETS).
+    # With the tool off there is no backend to configure, so hal0 writes no
+    # ``terminal.*`` key at all and subtracts the toolsets in _config_list_keys.
+    # Also skipped when the operator has moved the backend off `local` by hand
+    # (docker/ssh/…): that is a narrower execution boundary than hal0's default,
+    # and re-asserting `local` on top of it would silently widen it back to
+    # root-equivalent host execution.
+    if terminal_enabled and terminal_backend in (None, "", "local"):
+        terminal_scratch = str(Path(hermes_home) / "scratch")
+        pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
     if system_prompt:
         pairs.append(("agent.system_prompt_prelude", system_prompt))
@@ -1809,6 +2195,61 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             config_before = config_path.read_text(encoding="utf-8")
         with contextlib.suppress(OSError):
             shutil.copy2(config_path, config_path.with_name("config.yaml.bak"))
+    # Terminal-tool posture (#1863). Decided from hal0's recorded state plus the
+    # PRE-migrate content — `hermes config migrate` materialises hermes' own
+    # ``terminal.backend`` default, so reading after it would make a fresh box
+    # look like an existing opt-in. Recorded BEFORE the migrate so a run that
+    # dies mid-provision still leaves the decision on disk rather than letting
+    # the next run re-derive it from hermes' own defaults. See
+    # terminal_tool_enabled.
+    recorded = read_terminal_state()
+    terminal_enabled, terminal_reason = terminal_tool_enabled(
+        config_text=config_before,
+        recorded=recorded,
+        hermes_home=hermes_home,
+    )
+    # Persist when the record does not already say this (root-only path — the
+    # CLI's root prelude normally got there first; this covers dev/root runs of
+    # the pipeline itself). Fail closed on a FRESH opt-in that cannot be
+    # recorded: an unrecorded "on" is the state a later run could re-derive
+    # permissively. A box that is already working (`existing-config`) is left
+    # alone — refusing to record must not disable something already in use.
+    terminal_state_stale = False
+    if recorded != terminal_enabled and not write_terminal_state(terminal_enabled):
+        if terminal_enabled and terminal_reason == "opt-in":
+            # A FRESH opt-in only. An unrecorded "on" that nothing else on disk
+            # attests to is what a later run could re-derive permissively —
+            # refuse it outright.
+            terminal_enabled, terminal_reason = False, "state-unwritable"
+        elif terminal_enabled:
+            # `existing-config`: the box is already working, and the marker is
+            # root-only, so a provisioning path that legitimately runs
+            # unprivileged (`hal0 agent reprovision hermes` as a non-root user,
+            # which has no root prelude) simply cannot write it. Disabling here
+            # would take a shell away from an operator who asked for nothing of
+            # the sort — and the evidence is on disk in config.yaml, so the next
+            # run re-derives the same answer rather than a permissive one.
+            # Applied and warned, never silently accepted.
+            terminal_state_stale = True
+            terminal_reason = f"{terminal_reason}+state-stale"
+            log.warning(
+                "hermes_provision.terminal_enable_not_recorded",
+                marker=str(TERMINAL_STATE_PATH),
+            )
+        elif recorded is True:
+            # The inverse, and quieter: this run disables the tools, but the
+            # marker still says "on", so the NEXT unflagged provision would put
+            # them back. Applied anyway (off now is better than on now) and
+            # surfaced as a warn — silently accepting a posture that cannot
+            # survive the next run is exactly what must not happen here.
+            terminal_state_stale = True
+            terminal_reason = f"{terminal_reason}+state-stale"
+            log.warning(
+                "hermes_provision.terminal_optout_not_recorded",
+                marker=str(TERMINAL_STATE_PATH),
+            )
+    # An operator who moved the backend off `local` by hand keeps that backend.
+    terminal_backend = _terminal_backend_in_config(config_before)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
 
     primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
@@ -1869,12 +2310,22 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
+        terminal_enabled=terminal_enabled,
+        terminal_backend=terminal_backend,
     )
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )
+    # Toolsets the operator disabled by hand survive: hal0 only ever adds or
+    # removes its own two terminal entries (a list value replaces on merge).
+    pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     list_merge_changed = _merge_config_yaml_layers(
-        config_path, list_keys=HAL0_CONFIG_LIST_KEYS, overrides_path=OVERRIDES_PATH
+        config_path,
+        list_keys=_config_list_keys(
+            terminal_enabled=terminal_enabled,
+            existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+        ),
+        overrides_path=OVERRIDES_PATH,
     )
 
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
@@ -1890,10 +2341,23 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
     status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
+    # Both stale cases point the opposite way from each other, so the line the
+    # operator reads has to name the direction rather than assume opt-out.
+    stale_reason = (
+        f"terminal-tool posture ({'on' if terminal_enabled else 'off'}) could not be "
+        f"recorded at {TERMINAL_STATE_PATH} — it was applied to the config, but the "
+        "marker still disagrees; re-run as root"
+    )
+    if status == PhaseStatus.OK and terminal_state_stale:
+        status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
         hash=new_hash,
-        reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
+        reason=(
+            "; ".join(errors[:3])
+            if status == PhaseStatus.FAIL
+            else (stale_reason if terminal_state_stale else None)
+        ),
         details={
             "config_path": str(config_path),
             "changed": changed,
@@ -1908,6 +2372,14 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
             "memory_provider": "hal0-memory",
+            # EFFECTIVE posture, read back off the final merged file — an
+            # operator's overrides.yaml wins over hal0's disabled_toolsets, so
+            # reporting the decision alone could claim "off" on a box where the
+            # tool is in fact loaded. The decision is reported alongside it.
+            "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
+            "terminal_tool_decision": "on" if terminal_enabled else "off",
+            "terminal_tool_reason": terminal_reason,
+            "terminal_state_stale": terminal_state_stale,
             "honcho_json_changed": honcho_json_changed,
             "config_set_errors": errors,
             "fallbacks": fallbacks,
@@ -2253,6 +2725,15 @@ ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
 # provision time as root.
 RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
 
+#: Mode for the runtime snapshots rendered into RUNTIME_SNAPSHOT_DIR. This is
+#: the SAME value the ownership table declares for STATE.md
+#: (``hal0.install.perms.ownership_table``); the two are asserted equal by
+#: ``tests/install/test_perms_converge.py`` so they can never drift apart
+#: again (#1896). Group-writable because the file is written by the hal0
+#: daemon AND by a root-run ``hal0 hermes render-context``, and read by the
+#: session-start hook — one shared group, no owner-dependent access.
+RUNTIME_SNAPSHOT_MODE = 0o664
+
 
 def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
     """Load the env snapshot env_probe wrote (stable ``env.json``, or a legacy
@@ -2283,16 +2764,36 @@ def _render_template(name: str, **vars_: Any) -> str:
     return env.get_template(name).render(**vars_)
 
 
-def _atomic_write(path: Path, content: str) -> str:
-    """Tmp-write + rename for atomicity. Returns the sha256 of content."""
+def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
+    """Tmp-write + rename for atomicity. Returns the sha256 of content.
+
+    The replacement file inherits ``mode`` when given, else the mode of the
+    file it replaces, else the process umask (#1896). A tmp-write + ``rename``
+    otherwise silently RE-MODES its target: the new inode is born at the
+    umask, so the daemon's ``UMask=0022`` rewrote ``STATE.md`` back to ``0644``
+    after every render, discarding the ``0664`` the ownership table declares
+    and ``hal0 doctor perms --fix`` had just applied. That made the self-audit
+    unable to converge — a rewrite is a content change, not a posture change.
+
+    The chmod happens on the TMP file, before the rename, so the target is
+    never observable at the wrong mode.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        with contextlib.suppress(OSError):
+            mode = stat.S_IMODE(path.stat().st_mode)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
+    if mode is not None:
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, mode)
     os.replace(tmp, path)
     return content_hash(content)
 
 
-def _atomic_write_if_changed(path: Path, content: str) -> tuple[str, bool]:
+def _atomic_write_if_changed(
+    path: Path, content: str, *, mode: int | None = None
+) -> tuple[str, bool]:
     """Atomic write that skips a byte-identical file. Returns ``(sha256, wrote)``.
 
     The convergence signal for the rendered context files: a re-render that
@@ -2304,7 +2805,7 @@ def _atomic_write_if_changed(path: Path, content: str) -> tuple[str, bool]:
                 return content_hash(content), False
         except OSError:
             pass
-    return _atomic_write(path, content), True
+    return _atomic_write(path, content, mode=mode), True
 
 
 def _safe_symlink(target: Path, link: Path) -> bool:
@@ -2352,17 +2853,35 @@ def _relink_managed(target: Path, link: Path) -> bool:
     return True
 
 
-def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], list[str]]:
+class SkillMirror(NamedTuple):
+    """What one ``_mirror_bundled_skills`` pass did.
+
+    ``failed`` is the subset of ``warnings`` that are real per-skill link
+    FAILURES (#1828) — a bundled skill that exists on disk and could not be
+    mirrored, so the agent comes up without it. The absent-source warning is
+    deliberately NOT in here: a dev install ships no /usr/share/hal0/skills at
+    all, and "nothing to mirror" is not a partial failure. Only ``failed``
+    drives the phase status.
+    """
+
+    linked: list[str]
+    warnings: list[str]
+    failed: list[str]
+
+
+def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> SkillMirror:
     """Symlink every immediate child of ``src_root`` into ``dst_root``.
 
-    Returns ``(linked, warnings)``. Missing src is a warning, not a
-    failure — bundled skills are optional in a dev install.
+    Missing src is a warning, not a failure — bundled skills are optional in a
+    dev install. A skill that IS present and fails to link is a failure and is
+    reported as one (see :class:`SkillMirror`).
     """
     linked: list[str] = []
     warnings: list[str] = []
+    failed: list[str] = []
     if not src_root.exists():
         warnings.append(f"hal0-bundled skills source {src_root} not present; nothing to mirror")
-        return linked, warnings
+        return SkillMirror(linked, warnings, failed)
     dst_root.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src_root.iterdir()):
         link = dst_root / entry.name
@@ -2370,8 +2889,10 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], l
             if _safe_symlink(entry, link):
                 linked.append(entry.name)
         except OSError as exc:
-            warnings.append(f"symlink {entry.name}: {exc}")
-    return linked, warnings
+            msg = f"symlink {entry.name}: {exc}"
+            warnings.append(msg)
+            failed.append(msg)
+    return SkillMirror(linked, warnings, failed)
 
 
 def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
@@ -2405,23 +2926,14 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
     primary_for_template: dict[str, Any] | None = None
-    primary_alias = "agent"  # ADR-0023 canonical default anchor
-    primary_slot = next(
-        (
-            s
-            for s in slots_all
-            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
-        ),
-        None,
-    )
-    if primary_slot:
-        primary_alias = _slot_alias(primary_slot)
-    # primary_raw["model"] is a real model_id when a slot is live, or
-    # the placeholder string (slot name) when nothing is loaded — treat
-    # the placeholder as "no primary" for template purposes.
-    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
+    # One selection, one answer (#1892 review): the alias comes from the SAME
+    # slot _resolve_primary_slot picked — re-deriving it here by bare name
+    # match let an unwired `agent` seed relabel a serving slot's model with
+    # an alias `model_aliases` never contains. `placeholder` is the explicit
+    # "nothing wired" signal (#702).
+    if not primary_raw.get("placeholder"):
         primary_for_template = {
-            "alias": primary_alias,
+            "alias": primary_raw.get("alias") or "agent",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
         }
@@ -2557,13 +3069,29 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
             warnings.append(f"MCP-CLIENTS.md write to /etc/hal0: {exc}")
 
     # Mirror bundled skills last so a failure here doesn't block context files.
-    linked, skill_warnings = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)
+    mirror = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)
+    linked = mirror.linked
     details["bundled_skills_linked"] = linked
-    warnings.extend(skill_warnings)
+    warnings.extend(mirror.warnings)
     details["warnings"] = warnings
     details["changed"] = changed or bool(details["links"]) or bool(linked)
 
-    return PhaseResult(status=PhaseStatus.OK, details=details)
+    # #1828: a phase whose skill mirror failed must not report ``ok``. Each
+    # failed link means the agent comes up without that skill — the five EACCES
+    # symlinks (root-owned mirror + the §7.4 privilege drop) read as a clean
+    # install in both `hal0 agent status` and provision.json, and the only
+    # signal was a warnings list nobody reads on a green phase.
+    #
+    # This is the partial-failure precedent for provisioning phases: a step
+    # that converged but could not do part of its declared job reports WARN,
+    # which is non-fatal by construction (``InstallReport.ok`` only looks at
+    # ``fail``, and #1793 already set this shape for smoke_tests). Only real
+    # link failures are status-bearing: an absent bundled-skill source (dev
+    # install) stays a plain warning, and the render/HERMES.md warnings above
+    # keep their existing status because those paths have declared fallbacks
+    # (#244) — the skill mirror has none.
+    status = PhaseStatus.WARN if mirror.failed else PhaseStatus.OK
+    return PhaseResult(status=status, details=details)
 
 
 # ── Phase H: namespace_register ─────────────────────────────────────────────
@@ -3122,7 +3650,7 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
             "type": "http",
             "url": "http://127.0.0.1:8080/mcp/admin/mcp",
             "headers": admin_headers,
-            "timeout": 60,
+            "timeout": _HAL0_ADMIN_MCP_TIMEOUT_S,
         },
         "hal0-memory": {
             "type": "http",
@@ -3256,6 +3784,152 @@ def _fetch_model_contexts() -> dict[str, int]:
     return out
 
 
+def _fetch_anchor_models(
+    model_id: str, base_url: str = "", gateway_url: str = ""
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """``(by-id row, catalog rows)`` for ``model_id`` on the endpoint that serves it.
+
+    The by-id row is the authoritative window: ``GET /v1/models/{id}`` resolves
+    the routing fallback chain exactly as chat dispatch does and returns the
+    RESOLVED model's row (``api/routes/v1.py::_resolve_virtual_model_entry``),
+    so its ``context_length`` is the window Hermes will really be handed. The
+    list route cannot answer this — it deliberately never advertises the
+    canonical virtuals (#1153), and on a box whose agent slot is offline it
+    carries no row spelled like the anchor at all.
+
+    ``base_url`` is hermes' ``model.base_url``, so under
+    ``HAL0_HERMES_LIVE_RESOLVE=0`` the question goes to the pinned
+    llama-server the turns actually reach rather than to a gateway catalog
+    that deliberately suppresses that id (#1831's lesson, applied here).
+
+    Never raises: an unreachable endpoint yields ``(None, [])``, which the
+    caller must report as "cannot see", not as a pass.
+    """
+    base = (base_url or f"{(gateway_url or HAL0_API_URL).rstrip('/')}/v1").rstrip("/")
+    _status, entry = _http_status_json(f"{base}/models/{_quote_model_id(model_id)}")
+    row = entry if isinstance(entry, dict) and entry.get("id") else None
+    _listed_status, payload = _http_status_json(f"{base}/models")
+    entries = (payload or {}).get("data")
+    catalog = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    if row is None:
+        # No by-id route (llama-server has none): the list route may still carry
+        # the id verbatim, which for a pinned physical id is the same evidence.
+        row = next((e for e in catalog if str(e.get("id")) == model_id), None)
+    return (row, catalog)
+
+
+def _fetch_model_route_ready(model_id: str, base_url: str = "") -> bool | None:
+    """Is ``model_id`` routable **on the endpoint the caller will dispatch to**?
+
+    Three-valued on purpose:
+
+    * ``True``  — the endpoint says the id resolves.
+    * ``False`` — the endpoint authoritatively says it does not.
+    * ``None``  — inconclusive; the endpoint's answer does not settle it.
+
+    ``base_url`` is hermes' ``model.base_url`` (empty → the hal0 gateway),
+    i.e. the same origin :func:`_smoke_chat_completions` POSTs
+    ``/chat/completions`` to. Asking a *different* server is how #1831
+    happened: under ``HAL0_HERMES_LIVE_RESOLVE=0`` the config pins a chat
+    slot's own llama-server plus that slot's RAW physical model id, and the
+    gateway catalog deliberately suppresses that id in favour of the slot's
+    alias row (``hal0_chat_slot_model_ids``) while its by-id route only
+    resolves ``hal0/*`` virtuals — so the gateway 404s an id that routes
+    perfectly well where the probe actually sends it.
+
+    Resolution order, cheapest first:
+
+    1. ``GET {base_url}/models/{id}`` — the by-id route. hal0's gateway
+       resolves the canonical virtuals (``hal0/agent`` …) here via the
+       LiveSlotResolver (``_resolve_virtual_model_entry``); the list route
+       deliberately never advertises them (#1153).
+    2. On 404, ``GET {base_url}/models`` — llama-server and friends have no
+       by-id route at all but do list the model they have loaded.
+    3. Still nothing: only a **canonical virtual name asked of the hal0
+       gateway** is conclusively absent — that pair is exactly what the by-id
+       route resolves. Elsewhere the ``hal0/`` prefix carries no routing
+       meaning, and any other id could simply be folded into an alias row, so
+       report ``None`` and let the caller run the real probe rather than skip
+       on a guess.
+
+    Never raises: every transport failure is inconclusive, not "not ready" —
+    an unreachable endpoint is a fact the chat probe should report, not one
+    the preflight should hide behind a skip.
+    """
+    gateway = f"{HAL0_API_URL}/v1"
+    base = (base_url or gateway).rstrip("/")
+    status = _http_status_json(f"{base}/models/{_quote_model_id(model_id)}")[0]
+    if status is not None and 200 <= status < 300:
+        return True
+    if status != 404:
+        return None  # 5xx / auth / unreachable — no evidence either way
+    listed_status, payload = _http_status_json(f"{base}/models")
+    if listed_status is None or not (200 <= listed_status < 300):
+        return None
+    entries = (payload or {}).get("data")
+    if not isinstance(entries, list):
+        # 2xx with a body we could not parse into a catalog is not evidence of
+        # an EMPTY catalog — it is no evidence at all. An empty ``data`` list
+        # is a real answer; a missing or malformed one is not.
+        return None
+    ids = {str(entry.get("id")) for entry in entries if isinstance(entry, dict) and entry.get("id")}
+    if model_id in ids:
+        return True
+    if base == gateway.rstrip("/") and _is_canonical_virtual(model_id):
+        # A CANONICAL virtual asked of the GATEWAY is the one conclusive
+        # negative available: that pair is exactly what the by-id route
+        # resolves, so a 404 plus a valid catalog means no slot backs it.
+        # Neither half generalises — on a pinned backend the ``hal0/`` prefix
+        # is just characters in a model id, and a physical registry id may
+        # legitimately carry the prefix while chat dispatch still resolves it
+        # by exact match.
+        return False
+    return None
+
+
+def _is_canonical_virtual(model_id: str) -> bool:
+    """Is ``model_id`` one of hal0's advertised virtual names?
+
+    Read from the resolver's own table rather than re-deriving it from the
+    ``hal0/`` prefix, which is deliberately broader (ADR-0023 §2: any enabled
+    llm slot is addressable as ``hal0/<slot>``).
+    """
+    try:
+        from hal0.normalize.resolver import DEFAULT_CHAINS
+    except Exception:  # pragma: no cover — defensive
+        return False
+    return model_id in DEFAULT_CHAINS
+
+
+def _quote_model_id(model_id: str) -> str:
+    from urllib.parse import quote
+
+    return quote(model_id, safe="/")
+
+
+def _http_status_json(url: str) -> tuple[int | None, dict[str, Any] | None]:
+    """``GET url`` → ``(status, decoded_json)``; ``(None, None)`` if unreachable.
+
+    An HTTP error still carries a status (that is the evidence callers need
+    to tell "the server said no" from "the server said nothing").
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    req = Request(url, headers={"Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=3.0) as resp:
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                body = None
+            return (resp.status, body if isinstance(body, dict) else None)
+    except HTTPError as exc:
+        return (exc.code, None)
+    except (URLError, OSError, TimeoutError):
+        return (None, None)
+
+
 def _slot_kind(slot: dict[str, Any]) -> str:
     """Best-effort capability classifier — handles a few schema variants.
 
@@ -3298,10 +3972,39 @@ def _slot_backend_url(slot: dict[str, Any]) -> str:
 _DEFAULT_PRIMARY_BACKEND_URL = f"{HAL0_API_URL}/v1"
 
 
+def _slot_state(slot: dict[str, Any]) -> str:
+    """Normalised wire state string for a slot dict (``state`` before ``status``)."""
+    return str(slot.get("state") or slot.get("status") or "").lower()
+
+
 def _is_ready(slot: dict[str, Any]) -> bool:
-    """True iff the slot reports a live/ready state."""
-    state = slot.get("state") or slot.get("status") or ""
-    return str(state).lower() in {"ready", "running", "loaded", "ok", "online"}
+    """True iff the slot reports a dispatchable (request-safe) state.
+
+    Delegates to :func:`hal0.slots.state.is_dispatchable_state`, the ONE
+    canonical definition of "safe to route to" (finding DR-8). Before #1892
+    this re-declared its own vocabulary (``ready``/``running``/``loaded``/
+    ``ok``/``online``) that never matched the real ``SlotState`` wire values
+    (``ready``/``serving``/``idle``) — a serving slot always read as
+    not-ready here.
+    """
+    return is_dispatchable_state(_slot_state(slot))
+
+
+def _slot_missing_required_model(slot: dict[str, Any]) -> bool:
+    """True when this slot's provider needs a bound model but none is bound.
+
+    ``idle`` is in the dispatchable ready-set, but it is ALSO the state
+    SlotManager coerces a model-requiring slot into when it reaches READY
+    with no model (``slot.modelless_ready_blocked``, slots/manager.py) —
+    such a slot cannot fulfil a request, so consumers that advertise or
+    wire capabilities must skip it. Self-managed providers (kokoro,
+    moonshine, …) bake their model in and legitimately report no
+    ``model_id``; this mirrors the manager's own semantics exactly:
+    reject only when the provider is KNOWN and requires a model —
+    permissive when the provider can't be determined.
+    """
+    provider = slot.get("provider") or slot.get("backend")
+    return bool(provider) and provider_requires_model(str(provider)) and not _slot_model_id(slot)
 
 
 def _slot_context_length(slot: dict[str, Any]) -> int | None:
@@ -3347,6 +4050,13 @@ def _collect_capability_rollup(slots: list[dict[str, Any]]) -> list[dict[str, An
         if not label:
             continue
         if not _is_ready(s):
+            continue
+        # `idle` is dispatchable, but a model-requiring slot parked idle by
+        # the modelless_ready_blocked guard has nothing loaded — advertising
+        # it would put `model_id: None` in the very STATE.md line #1892 is
+        # about. Self-managed providers (kokoro, …) pass: their model is
+        # baked in.
+        if _slot_missing_required_model(s):
             continue
         out.append(
             {
@@ -3431,23 +4141,36 @@ def render_live_context(
     chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
-    primary_slot = next(
-        (
-            s
-            for s in slots_all
-            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
-        ),
-        None,
-    )
+    # One selection, one answer (#1892 review): alias + backend come from the
+    # SAME slot _resolve_primary_slot picked. Re-deriving "the primary slot"
+    # here by bare name match let an unwired `agent` seed relabel a serving
+    # slot's model with `model_aliases.agent` — an alias _collect_chat_slots
+    # (which skips model-less slots) never writes.
     primary_for_template: dict[str, Any] | None = None
-    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
+    if not primary_raw.get("placeholder"):
         primary_for_template = {
-            "alias": _slot_alias(primary_slot) if primary_slot else "agent",
+            "alias": primary_raw.get("alias") or "agent",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
-            "backend": (primary_slot or {}).get("backend"),
+            "backend": primary_raw.get("backend"),
         }
+    # Remediation must name a command valid for the box's actual state
+    # (#1892 register `expect`): when an llm slot already exists but has no
+    # model bound, `hal0 slot create` would collide with it — the right
+    # move is loading a model into the existing slot.
+    unwired_llm_slot: str | None = None
+    if primary_for_template is None:
+        unwired_llm_slot = next(
+            (
+                str(s["name"])
+                for s in slots_all
+                if isinstance(s, dict)
+                and str(s.get("type") or s.get("kind") or "").lower() in {"llm", "chat"}
+                and s.get("name")
+            ),
+            None,
+        )
 
     capabilities = _collect_capability_rollup(slots_all)
 
@@ -3468,6 +4191,7 @@ def render_live_context(
 
     state_vars = {
         "primary": primary_for_template,
+        "unwired_llm_slot": unwired_llm_slot,
         "capabilities": capabilities,
         "npu": npu,
         "igpu_sclk_mhz": _igpu_sclk_mhz(),
@@ -3492,7 +4216,7 @@ def render_live_context(
     # STATE.md — content-hash gated (ignore the as_of line). Written under the
     # hal0-owned RUNTIME_SNAPSHOT_DIR so render-context works under the User=hal0
     # / ProtectSystem=strict hermes sandbox (#473).
-    RUNTIME_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_shared_dir(RUNTIME_SNAPSHOT_DIR)
     state_path = RUNTIME_SNAPSHOT_DIR / "STATE.md"
     existing = ""
     if state_path.exists():
@@ -3506,7 +4230,7 @@ def render_live_context(
         return out  # state_written=False, hermes_written=False, degraded=True
 
     if _state_body_minus_timestamp(existing) != _state_body_minus_timestamp(new_state):
-        _atomic_write(state_path, new_state)
+        _atomic_write(state_path, new_state, mode=RUNTIME_SNAPSHOT_MODE)
         out["state_written"] = True
     elif reachable:
         # Content unchanged, but we just confirmed it current against a
@@ -3543,7 +4267,7 @@ def render_live_context(
         hpath = RUNTIME_SNAPSHOT_DIR / "HERMES.md"
         out["hermes_path"] = str(hpath)
         if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
-            _atomic_write(hpath, hermes_md)
+            _atomic_write(hpath, hermes_md, mode=RUNTIME_SNAPSHOT_MODE)
             out["hermes_written"] = True
     except Exception as exc:  # best-effort; STATE.md already written
         log.warning("hermes_provision.render_live_context_hermes_failed", error=str(exc))
@@ -4039,7 +4763,12 @@ def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     accept = _STT_SLOT_TYPES if kind == "stt" else frozenset({kind})
     for s in slots:
         slot_type = (s.get("type") or s.get("capability") or "").lower()
-        if slot_type in accept and _is_ready(s):
+        # Reject model-requiring slots with nothing bound (the
+        # modelless_ready_blocked `idle` shape) — wiring STT/TTS env vars
+        # at a backend that cannot serve trades #1892 for a worse bug.
+        # Self-managed providers (kokoro, moonshine, …) pass without a
+        # model_id.
+        if slot_type in accept and _is_ready(s) and not _slot_missing_required_model(s):
             return s
     # STT special case: the NPU-trio transcription facade (type=transcription,
     # served_by=<anchor>) always reports state=offline — it has no unit of its
@@ -4047,7 +4776,11 @@ def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     # stamps served_by on these shadows. Accept the facade when its anchor is
     # ready so voice_wire auto-provisions STT_OPENAI_BASE_URL.
     if kind == "stt":
-        ready_names = {str(s.get("name")) for s in slots if _is_ready(s) and s.get("name")}
+        ready_names = {
+            str(s.get("name"))
+            for s in slots
+            if _is_ready(s) and not _slot_missing_required_model(s) and s.get("name")
+        }
         for s in slots:
             slot_type = (s.get("type") or s.get("capability") or "").lower()
             anchor = s.get("served_by")
@@ -4089,7 +4822,16 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 
     import contextlib
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # #1942 review finding 3: a bare `path.parent.mkdir(parents=True,
+    # exist_ok=True)` births an absent parent at the process umask (0755
+    # under UMask=0022) — the sole caller is HERMES_SECRETS_ENV
+    # (secrets/agents/hermes.env), so an absent parent means a fresh box
+    # provisioning before install.sh (or a lost/never-created secrets/agents)
+    # would reintroduce the exact #1896 drift class this PR closed.
+    # `ensure_shared_dir` is umask-proof and only chmod's the components it
+    # creates, so a pre-existing parent (the common case — install.sh seeds
+    # it first) is left untouched.
+    ensure_shared_dir(path.parent, mode=SECRETS_DIR_MODE)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     os.replace(tmp, path)
@@ -4516,7 +5258,8 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 
 # ── Phase K: smoke_tests ────────────────────────────────────────────────────
 #
-# Six non-fatal probes per plan §14 + #246. Each surface check writes a
+# Seven non-fatal probes per plan §14 + #246 (the seventh, anchor_context_window,
+# is #1867's window preflight). Each surface check writes a
 # `passed: bool` row into PhaseResult.details["results"]; failures
 # also carry a remediation hint operators can paste at the user.
 #
@@ -4527,12 +5270,14 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # burying it in the Detail column. self_report surfaces the same rollup in
 # the bootstrap-completion memory item.
 #
-# chat_completions and memory_roundtrip both need a routable chat model to
-# mean anything; at install time — before any model has ever been loaded —
-# that's structurally impossible, so a preflight (`_chat_model_ready`)
-# decides ONCE whether the route is live and both probes report
-# `skipped: no chat model loaded` instead of burning their timeout on a
-# doomed request that then gets recorded as an opaque failure.
+# chat_completions needs a routable chat model to mean anything; at install
+# time — before any model has ever been loaded — that's structurally
+# impossible, so a preflight (`_chat_model_ready`) decides ONCE whether the
+# route is live and the probe reports `skipped: no chat model loaded`
+# instead of burning its timeout on a doomed request that then gets
+# recorded as an opaque failure. memory_roundtrip has no chat dependency
+# whatsoever (it drives the MCP memory_add/memory_search tools directly) and
+# always runs (#1831).
 
 
 def _wrapper_bin() -> Path:
@@ -4640,6 +5385,88 @@ def _smoke_memory_roundtrip(state: BootstrapState, io: InstallIO) -> tuple[bool,
     return (False, "memory_search returned no items for just-written marker")
 
 
+def _anchor_window(state: BootstrapState, io: InstallIO) -> AnchorWindow | str:
+    """Resolve the anchor slot's effective window, or a reason it can't be (#1867).
+
+    Reads ``model.default`` from the live config.yaml (the id Hermes actually
+    dispatches with), asks the installed Hermes for its own
+    ``MINIMUM_CONTEXT_LENGTH`` rather than trusting a second hardcoded 64,000,
+    and pairs the gateway's advertised window with the slot's on-disk ceiling.
+
+    Returns a plain string when the question could not even be asked (no
+    config.yaml, no ``model.default``) — that is a config problem, not a window
+    verdict.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if not config_path.exists():
+        return "config.yaml missing — bootstrap incomplete"
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return f"config parse: {exc}"
+    model_cfg = cfg.get("model") or {}
+    model_name = str(model_cfg.get("default") or "").strip()
+    if not model_name:
+        return "model.default unset in config.yaml"
+    base_url = str(model_cfg.get("base_url", "") or "")
+    floor, floor_source = read_hermes_minimum_context(_venv_python(Path(state.venv)))
+    try:
+        entry, catalog = io.fetch_anchor_models(model_name, base_url)
+    except Exception as exc:  # a preflight must never raise
+        return f"could not read advertised windows ({exc})"
+    return resolve_anchor_window(
+        model_name,
+        entry=entry,
+        catalog=catalog,
+        floor=floor,
+        floor_source=floor_source,
+        slots_dir=ETC_HAL0_DIR / "slots",
+        endpoint=base_url or f"{HAL0_API_URL}/v1",
+    )
+
+
+def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[bool | None, str]:
+    """Is the anchor's window at or above Hermes' hard floor? (#1867)
+
+    Hermes raises below ``MINIMUM_CONTEXT_LENGTH`` instead of degrading, so a
+    box whose anchor slot resolves under it refuses EVERY turn — and used to do
+    so as an opaque upstream error ~1.6s in, naming neither the slot nor the
+    ceiling that caused it. The classic shape is an upgraded box: the model
+    declares 96000, the agent slot's own ``[model].context_size`` is still the
+    4096 an older release seeded, and ``min()`` of the two is what Hermes sees.
+
+    Fails with both numbers, the slot, its ceiling, and the exact repair
+    command. An anchor whose window cannot be read (nothing loaded, endpoint
+    unreachable, a backend that advertises no ``context_length``) is
+    ``unknown`` — reported as ``None``/SKIPPED, never as a pass. A preflight
+    that cannot see the value has to say so: passing on no evidence is how a
+    box that refuses every turn read green (#1831, and the ct152 shape that
+    #1867's own first cut still reported clean).
+    """
+    window = _anchor_window(state, io)
+    if isinstance(window, str):
+        return (False, window)
+    if window.verdict == "unknown":
+        return (None, window.message())
+    if window.verdict == "below_floor":
+        log.warning(
+            "hermes.anchor_window_below_floor",
+            extra={
+                "model": window.model,
+                "slot": window.slot,
+                "effective": window.effective,
+                "slot_ceiling": window.ceiling,
+                "floor": window.floor,
+                "floor_source": window.floor_source,
+                "fix": window.fix_command,
+            },
+        )
+        return (False, window.message())
+    return (True, window.message())
+
+
 def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     probe = io.probe_mcp_server(
         "http://127.0.0.1:8080/mcp/admin",
@@ -4711,20 +5538,49 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 #: Probes that only mean something once a chat-capable model is actually
 #: routable. Gated behind :func:`_chat_model_ready` so an install-time smoke
 #: run (no model has ever been loaded yet) reports `skipped`, not a timeout.
-_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "memory_roundtrip"})
+#: memory_roundtrip does NOT belong here — it exercises the MCP
+#: memory_add/memory_search tools directly and has no chat dependency
+#: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
+#: when memory itself was fully working.
+#: ``anchor_context_window`` joins it for the same reason (#1867): with no chat
+#: model routable there is no advertised window to compare against Hermes'
+#: floor, so the honest report is ``skipped``, not a manufactured verdict.
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "anchor_context_window"})
+
+#: Why each model-dependent probe skipped — a skip is a claim (#1793), so it
+#: has to state the claim that probe is actually making, not a borrowed one.
+_SKIP_REASONS = {
+    "chat_completions": "no chat model loaded",
+    "anchor_context_window": "no routable anchor to measure a window on",
+}
 
 
 def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     """Cheap preflight: is a chat-capable model actually routable right now?
 
-    Reads ``model.default`` from config.yaml — the exact field
-    :func:`_smoke_chat_completions` targets — and cross-checks it against the
-    live gateway model list via ``io.fetch_model_contexts`` (the same
-    ``/v1/models`` seam ``model_automap`` already uses), instead of paying a
-    full chat-completion round trip just to find out nothing is loaded. This
-    is what lets smoke_tests tell "the route is genuinely broken" (a real
-    failure) apart from "no chat model exists yet" (#1793) — never raises;
-    any config/parse/network problem reports not-ready with the reason.
+    Reads ``model.default`` AND ``model.base_url`` from config.yaml — the two
+    fields :func:`_smoke_chat_completions` dispatches with — and asks *that
+    endpoint* whether the id routes (``io.fetch_model_route_ready``), instead
+    of paying a full chat-completion round trip just to find out nothing is
+    loaded.
+
+    Two rules keep this honest, both learned from #1831:
+
+    * **Ask the endpoint the probe will use.** Consulting the hal0 gateway's
+      catalog is answering a routability question with a discovery answer.
+      Under ``HAL0_HERMES_LIVE_RESOLVE=0`` the probe POSTs straight at a chat
+      slot's llama-server using that slot's raw physical model id, which the
+      gateway catalog suppresses in favour of the slot's alias row and whose
+      by-id route only resolves ``hal0/*`` virtuals — a guaranteed 404 for a
+      route that works.
+    * **Skip only on affirmative evidence.** ``fetch_model_route_ready``
+      returns ``None`` when the endpoint's answer settles nothing; then the
+      probe RUNS and reports what really happens. A skip is a claim ("no
+      chat model exists yet", #1793) and must be earned, because a wrong
+      skip is invisible — it reads as a clean install.
+
+    Never raises: any config/parse/probe problem resolves to a decision plus
+    the reason behind it.
     """
     import yaml  # type: ignore[import-untyped]
 
@@ -4735,20 +5591,26 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
         cfg = yaml.safe_load(config_path.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
         return False, f"config parse: {exc}"
-    model_name = (cfg.get("model") or {}).get("default", "")
+    model_cfg = cfg.get("model") or {}
+    model_name = model_cfg.get("default", "")
     if not model_name:
         return False, "model.default unset in config.yaml"
+    base_url = str(model_cfg.get("base_url", "") or "")
     try:
-        contexts = io.fetch_model_contexts()
+        routable = io.fetch_model_route_ready(model_name, base_url)
     except Exception as exc:  # preflight must never raise
-        return False, f"gateway probe failed: {exc}"
-    if model_name not in contexts:
-        return False, f"'{model_name}' not loaded on the gateway"
+        # Inconclusive, not negative: let the probe report the real state.
+        return True, f"route probe errored ({exc}); probing anyway"
+    endpoint = base_url or f"{HAL0_API_URL}/v1"
+    if routable is None:
+        return True, f"'{model_name}' unverifiable at {endpoint}; probing anyway"
+    if not routable:
+        return False, f"'{model_name}' has no route at {endpoint}"
     return True, "ready"
 
 
 def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
-    """Run six diagnostic probes; collect results into the checkpoint.
+    """Run the diagnostic probes; collect results into the checkpoint.
 
     ``status`` is ``warn`` (not ``ok``) when any probe genuinely fails — a
     phase that recorded failures must say so, not report a clean ``ok`` with
@@ -4757,9 +5619,10 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     """
     state = ctx.state
     chat_ready, chat_reason = _chat_model_ready(state, ctx.io)
-    probes = [
+    probes: list[tuple[str, Callable[[BootstrapState, InstallIO], tuple[bool | None, str]]]] = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
+        ("anchor_context_window", _smoke_anchor_context_window),
         ("chat_completions", _smoke_chat_completions),
         ("memory_roundtrip", _smoke_memory_roundtrip),
         ("admin_tools_list", _smoke_admin_tools_list),
@@ -4770,7 +5633,7 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     skipped: list[str] = []
     for name, fn in probes:
         if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
-            detail = f"skipped: no chat model loaded ({chat_reason})"
+            detail = f"skipped: {_SKIP_REASONS[name]} ({chat_reason})"
             results[name] = {"passed": None, "skipped": True, "detail": detail}
             skipped.append(f"{name}: {detail}")
             continue
@@ -4778,6 +5641,13 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
             passed, detail = fn(state, ctx.io)
         except Exception as exc:
             passed, detail = (False, f"{type(exc).__name__}: {exc}")
+        if passed is None:
+            # A probe that ran and could not reach a verdict reports SKIPPED,
+            # never a pass — the roll-up must not read clean off no evidence.
+            detail = f"skipped: {detail}"
+            results[name] = {"passed": None, "skipped": True, "detail": detail}
+            skipped.append(f"{name}: {detail}")
+            continue
         results[name] = {"passed": passed, "detail": detail}
         if not passed:
             failures.append(f"{name}: {detail}")
@@ -5029,11 +5899,40 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
         if unchanged:
             # Re-tighten perms even on a no-op content match — self-heals a
             # file written 0644 by an older build now that it may carry a
-            # secret. geteuid()==0 only; the seam path re-asserts 0600 on
-            # every write regardless (see installer/wrappers/hal0-agentenv).
+            # secret.
+            #
+            # Both privilege levels must heal here (issue #1876). Provisioning
+            # normally runs as `hal0`, NOT root (§7.4 F.7), so a root-only
+            # chmod healed exactly nothing on the population that needs it:
+            # an UPGRADED box hits `unchanged=True` on every reprovision and
+            # returned early with the stale 0644 intact, while a fresh install
+            # always takes the content-changing branch below (which pins 0600)
+            # and so looked fine. Unprivileged we cannot chmod a root:root
+            # file, so we re-drive the same `write-driver-env` seam verb with
+            # byte-identical content — the seam writes atomically (tmp + mv)
+            # and pins 0600 root:root, so the mode converges with no window in
+            # which the unit's EnvironmentFile is missing or partial.
+            #
+            # Reusing the existing verb rather than adding a `tighten-*` one is
+            # deliberate: it needs no new sudoers surface and it works against
+            # the hal0-agentenv wrapper already deployed on the old boxes that
+            # carry this defect.
             if os.geteuid() == 0:
                 with contextlib.suppress(OSError):
                     path.chmod(0o600)
+                return path, False
+            try:
+                mode = path.stat().st_mode & 0o777
+            except OSError:
+                mode = None
+            if mode == 0o600:
+                return path, False
+            log.info(
+                "hermes_provision.driver_env_perms_tightening",
+                path=str(path),
+                mode=None if mode is None else f"{mode:04o}",
+            )
+            _privileged_env_write("write-driver-env", body)
             return path, False
     if os.geteuid() == 0:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -5196,6 +6095,10 @@ class InstallIO:
     http_get: Callable[..., int] = _http_get
     fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
+    fetch_model_route_ready: Callable[[str, str], bool | None] = _fetch_model_route_ready
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] = (
+        _fetch_anchor_models
+    )
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
     install_venv: Callable[..., None] = _install_venv

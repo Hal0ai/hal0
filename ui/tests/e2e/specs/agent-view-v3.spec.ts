@@ -17,7 +17,9 @@
  *   - the locked roadmap cards render behind the coming-soon mask
  *   - Overview · Memory · MCP tabs are present; the long-removed surfaces
  *     (chat / personas / skills / plugins / inbox / peers) stay ABSENT
- *   - the header carries the `hermes chat` terminal hint
+ *   - the header no longer carries the `hermes chat` terminal hint (copy-only
+ *     removal, 2026-08-22 — web chat is still replaced by the TUI; only the
+ *     visible reminder string was dropped, not the underlying behavior)
  *   - hash routes #agent/memory + legacy #peers land on the Memory tab
  */
 import { test, expect, json } from '../fixtures/apiMock'
@@ -104,12 +106,13 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     await expect(card.locator('[data-testid="agent-action-logs"]')).toHaveCount(0)
   })
 
-  test('header carries the `hermes chat` terminal hint (web chat replaced by TUI)', async ({
+  test('header no longer carries the `hermes chat` terminal hint (copy-only removal)', async ({
     page,
   }) => {
     await page.goto('/#agent')
-    await expect(page.locator('.view .vh')).toContainText('hermes chat', { timeout: FIVE_S })
     await expect(page.locator('.view .vh h1')).toHaveText('Agents')
+    await expect(page.locator('.view .vh')).not.toContainText('hermes chat')
+    await expect(page.locator('.view .vh .hint')).toHaveCount(0)
   })
 
   test('#agent/memory hash routes to the Memory tab', async ({ page }) => {

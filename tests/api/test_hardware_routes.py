@@ -591,3 +591,60 @@ class TestStatsHardwareGpuSample:
         assert "_amd_drm_device" not in src
         assert "_read_sysfs_mb" not in src
         assert "from hal0.hardware.probe import" not in src
+
+
+class TestLiveUptime:
+    """#1905: uptime_s was frozen at the last ``hal0 probe`` write — a box
+    that never re-probes since an upgrade reports a stale value forever."""
+
+    def test_get_hardware_reports_live_uptime_not_cached_value(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from hal0.config import paths
+        from hal0.config.loader import save_hardware_info
+        from hal0.config.schema import HardwareInfo
+
+        # A hardware.json written long ago with a wildly stale uptime.
+        save_hardware_info(HardwareInfo(hostname="ct150", uptime_s=4110))
+        assert paths.hardware_json().exists()
+
+        monkeypatch.setattr(hw_mod, "read_uptime_s", lambda: 326305)
+
+        resp = client.get("/api/hardware")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["uptime_s"] == 326305
+
+    def test_stats_hardware_also_reports_live_uptime(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from hal0.config.loader import save_hardware_info
+        from hal0.config.schema import HardwareInfo
+
+        save_hardware_info(HardwareInfo(hostname="ct150", uptime_s=4110))
+        monkeypatch.setattr(hw_mod, "read_uptime_s", lambda: 326305)
+
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["uptime_s"] == 326305
+
+    def test_unreadable_proc_uptime_keeps_cached_value(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1905 review nit: read_uptime_s() returns 0 when /proc/uptime is
+        unreadable — a stale-but-plausible cached value degrades better
+        than clobbering it with a hard 0."""
+        from hal0.config.loader import save_hardware_info
+        from hal0.config.schema import HardwareInfo
+
+        save_hardware_info(HardwareInfo(hostname="ct150", uptime_s=4110))
+        monkeypatch.setattr(hw_mod, "read_uptime_s", lambda: 0)
+
+        resp = client.get("/api/hardware")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["uptime_s"] == 4110

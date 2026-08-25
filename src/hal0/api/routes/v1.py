@@ -131,10 +131,16 @@ def _instrument_streaming_throughput(
     async def _counting() -> Any:
         nonlocal ttft_pending
         async for chunk in original:
+            # The dispatcher's stall-guard terminal frame (#1893) is synthetic
+            # — it carries a "delta": but no generated token ever crossed the
+            # wire.  It is always yielded as its own chunk, so a per-chunk
+            # marker check keeps it out of throughput and (crucially) TTFT:
+            # for a silent upstream it would otherwise record a bogus
+            # ~idle-timeout-sized TTFT sample.
             if isinstance(chunk, (bytes, bytearray)):
-                tokens = chunk.count(b'"delta":')
+                tokens = 0 if b'"x_hal0_stall"' in chunk else chunk.count(b'"delta":')
             elif isinstance(chunk, str):
-                tokens = chunk.count('"delta":')
+                tokens = 0 if '"x_hal0_stall"' in chunk else chunk.count('"delta":')
             else:
                 tokens = 0
             if tokens > 0:
@@ -901,12 +907,33 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
     # chat-capable slot's model id, aggregated straight from slot config
     # (see hal0.api._fetch_hal0_composite_models). No pseudo-upstream is
     # registered in the routing table for this, so there's nothing to fetch
-    # over HTTP here; ``model_cache["hal0"]`` is refreshed on startup,
-    # slot-state events, and the dispatcher passthrough path. Skipped when
-    # an operator has defined a real "hal0" upstream in upstreams.toml —
-    # that entry is picked up by the loop below like any other remote.
+    # over HTTP here. Skipped when an operator has defined a real "hal0"
+    # upstream in upstreams.toml — that entry is picked up by the loop
+    # below like any other remote.
+    #
+    # #1837: re-read it here rather than trusting ``model_cache["hal0"]``
+    # alone. The bucket is maintained by edges (startup, slot-ready,
+    # slot mutations); anything that misses an edge — or a mutation that
+    # landed while one slot's TOML momentarily wouldn't parse — leaves the
+    # bucket wrong with nothing to correct it. The read is served from a
+    # 5s TTL cache, so this stays cheap, and it makes the catalogue
+    # self-healing instead of event-perfect. A DEGRADED read (enumeration
+    # raised, or a slot was skipped) is not authoritative and falls back
+    # to the bucket; a complete one refreshes it for the dashboard's
+    # synthetic ``hal0`` tile too.
+    composite_models = model_cache.get("hal0", [])
+    if upstreams.get("hal0") is None and slot_manager is not None:
+        from hal0.api import _fetch_hal0_composite_models_detailed
+
+        try:
+            fresh, degraded = await _fetch_hal0_composite_models_detailed(slot_manager)
+        except Exception:
+            fresh, degraded = [], True
+        if not degraded:
+            composite_models = fresh
+            model_cache["hal0"] = list(fresh)
     if upstreams.get("hal0") is None:
-        for mid in model_cache.get("hal0", []):
+        for mid in composite_models:
             if mid in seen or mid in chat_model_ids:
                 continue
             row = _catalog_row(mid, "hal0")

@@ -21,6 +21,9 @@ export interface ServiceEntry {
   id: string
   name: string
   up: boolean
+  /** 'stopped' = deliberate (unit inactive, grey) vs 'down' = failed (red).
+   *  Absent on older backends — consumers fall back to `up`. */
+  state?: 'up' | 'stopped' | 'down'
   detail: string
   url: string | null
   stat: ServiceStat | null

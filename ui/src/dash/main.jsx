@@ -53,7 +53,10 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services", "benchmarks"];
+// runner-catalogue-v2: "profiles" is no longer a route of its own — the
+// redirects below rewrite legacy #profiles / #slots/profiles deep-links to
+// the Models ▸ Profiles tab before the ROUTES lookup runs.
+const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services", "benchmarks"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -75,12 +78,15 @@ function parseRoute() {
     head = "slots";
     rest = ["endpoints"];
   }
-  // v0.5 nav: Profiles moved into a Slots tab. Redirect old #profiles links.
-  if (head === "profiles") {
-    if (typeof window !== "undefined" && window.location.hash !== "#slots/profiles") {
-      window.location.hash = "#slots/profiles";
+  // runner-catalogue-v2 nav: Profiles now lives under Models (it templates
+  // model-serving containers, not slot lifecycle). Redirect both legacy
+  // shapes — the v0.4 top-level #profiles and the v0.5 #slots/profiles tab —
+  // to the Models ▸ Profiles tab.
+  if (head === "profiles" || (head === "slots" && rest[0] === "profiles")) {
+    if (typeof window !== "undefined" && window.location.hash !== "#models/profiles") {
+      window.location.hash = "#models/profiles";
     }
-    head = "slots";
+    head = "models";
     rest = ["profiles"];
   }
   // v0.3 PR-8: legacy #peers route redirects to the Peer memory
@@ -330,7 +336,9 @@ function App() {
             onGo={go}
           />
         );
-      case "models":   return <ModelsView />;
+      // modelParam drives the Models tabs the same way slotParam drives the
+      // Slots tabs — #models/profiles deep-links the Profiles tab.
+      case "models":   return <ModelsView modelParam={param} />;
       case "logs":     return <LogsView />;
       // v0.5 nav: Agent is a tabbed shell hosting Memory + MCP. #memory and
       // #mcp are kept as routes that resolve to their tab inside AgentView (so

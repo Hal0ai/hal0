@@ -22,18 +22,50 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 ## Checks
 
 1. Protocol handshake completes; session id is honoured.
-2. Tool counts match what the docs and `hal0 mcp` claim, per server. A drift in count between
-   releases is worth reporting even if nothing is broken — it usually means a tool was added or
-   lost unintentionally.
+2. **Tool counts, four surfaces — and the docs by NAME SET, not count.** Compare `tools/list`,
+   `hal0 mcp list`, `GET /api/mcp/servers`, and the shipped docs. A mismatch between the REST
+   view and the MCP view means the registry and the served surface have diverged. For the docs,
+   regex the backticked tool names out of `docs/reference/mcp-tools.mdx`'s table rows and `comm`
+   them against the served set — a raw count hides an 89-tool gap (rc.6: the page claimed "every
+   tool" while naming 91 of 180, including 21 undocumented GATED/destructive tools). Also verify
+   the connect guide's URLs are directly usable: every URL in `connect-mcp.mdx`'s Connect
+   section must end in `/mcp` and answer an initialize POST with 200 on loopback (regression
+   `mcp-docs-connect-url-and-tool-tables`).
 3. Tool schemas are structurally valid (name, description, non-empty inputSchema).
-4. Call 1–2 clearly read-only tools per server (a status/list/recall tool — nothing that
+4. **Annotations.** Every tool in `tools/list` must carry `annotations`, and `destructiveHint`
+   must be `true` for the delete family (`model_delete`, `slot_delete`, …) and `false` for
+   load/unload. Agents route safety decisions off these hints, so a lost or flipped annotation
+   is silently dangerous. rc.5 baseline: admin 180/180 annotated, 106 `readOnlyHint: true`,
+   13 `destructiveHint: true`.
+5. **Declared capabilities are implemented.** For each capability advertised in the initialize
+   response (prompts, resources), call the matching list method and require a real result rather
+   than `-32601 Method not found`.
+6. **Session scoping.** Replay a session id obtained from `/mcp/admin/mcp` against
+   `/mcp/memory/mcp` and require rejection (rc.5 correctly returns `-32600 Session not found`).
+   A cross-mount session leak is a security finding. Also send a `tools/list` with NO session id
+   at all and require rejection (`-32600 Missing session ID`).
+7. Call 1–2 clearly read-only tools per server (a status/list/recall tool — nothing that
    creates, mutates, or deletes) and judge the result.
-5. **Error protocol.** Call a tool with a deliberately wrong argument. The JSON-RPC response
-   must carry `isError: true` — rc.4 returned `isError: false` on argument errors, which makes
-   every client treat a failure as a success.
-6. `serverInfo` reports the hal0 version, not the FastMCP library version (rc.4 reported
+8. **Error protocol.** Call a tool with (a) a missing required arg, (b) a wrong-typed
+   required value, and (c) **unwrapped arguments** — the tool's fields passed flat with no inner
+   `args` object. All three must return `isError: true`; (c) pins the required args-wrapper
+   contract, which confused this lane's own first probe in rc.6. Then call one with an
+   **unknown extra key** and record what happens: the inner `args` object is deliberately open
+   (`known-issues.yaml: mcp-args-additional-properties-open`), so an ignored unknown key is
+   expected — read that entry's `still_report_if` before filing anything.
+9. `serverInfo` reports the hal0 version, not the FastMCP library version (rc.4 reported
    FastMCP 1.28.1).
-7. Latency: note anything that takes more than a couple of seconds for a list call.
+10. Latency: note anything that takes more than a couple of seconds for a list call.
+11. **isError vs REST parity, specifically on a resource in a NON-healthy lifecycle state** —
+    regression `mcp-status-tools-iserror-on-error-state-resource`. Find (or induce) a slot in
+    `state: error`, then call `slot_status`/`slot_by_name`/`slot_by_id` (or the equivalent
+    status/show tool for any resource) against it and compare `isError` to the matching REST
+    route's HTTP status for the SAME resource (`GET /api/slots/<n>` etc). `isError: true` for a
+    resource read that the REST surface answers 200 for is a lying tool result, even though the
+    JSON body inside is correct — it hides real data behind a false failure flag. This is a
+    standing check now, not a one-off: the collision is keyed to a literal top-level `status`
+    field name colliding with the wrapper's own error sentinel, so re-run it on whichever
+    status/show tools exist each release, not just the ones this run happened to catch.
 
 ## Carry-forward
 

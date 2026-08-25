@@ -4,6 +4,14 @@ Covers :func:`hal0.slots.capacity._container_cgroup_mem_bytes` — the
 function that reads live ``memory.current`` for a podman/docker container
 named ``hal0-slot-<name>``.  All subprocess and file I/O is mocked so
 these tests run without a real container runtime.
+
+Every test in ``TestContainerCgroupMemBytes`` that exercises a
+*runtime-probe* failure path (no runtime, container not found, timeout,
+cgroupv1, unreadable memory.current) also patches ``systemd_props`` — since
+#1839, ``_container_cgroup_mem_bytes`` falls back to the slot's systemd
+unit's own ``MemoryCurrent`` when the runtime probe fails, and that
+fallback must stay mocked here too or these tests would shell out to a
+real (nonexistent, in CI) ``systemctl`` binary.
 """
 
 from __future__ import annotations
@@ -59,17 +67,22 @@ class TestContainerCgroupMemBytes:
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_no_runtime(self):
-        """No podman or docker binary → 0."""
-        with patch("shutil.which", return_value=None):
+        """No podman or docker binary → 0 (both probes come up empty)."""
+        with (
+            patch("shutil.which", return_value=None),
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
+        ):
             result = await _container_cgroup_mem_bytes("primary")
         assert result == 0
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_container_not_found(self):
-        """Container inspect returns non-zero (container doesn't exist) → 0."""
+        """Container inspect returns non-zero (container doesn't exist) → 0
+        when the systemd-unit fallback also comes up empty."""
         with (
             patch("shutil.which", return_value="/usr/bin/podman"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
         ):
             mock_exec.return_value = _make_proc(returncode=1, stdout=b"")
             result = await _container_cgroup_mem_bytes("primary")
@@ -77,10 +90,12 @@ class TestContainerCgroupMemBytes:
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_pid_is_zero(self):
-        """Inspect returns PID 0 (stopped container) → 0."""
+        """Inspect returns PID 0 (stopped container) → 0 when the systemd
+        fallback also comes up empty."""
         with (
             patch("shutil.which", return_value="/usr/bin/podman"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
         ):
             mock_exec.return_value = _make_proc(returncode=0, stdout=b"0\n")
             result = await _container_cgroup_mem_bytes("primary")
@@ -88,11 +103,13 @@ class TestContainerCgroupMemBytes:
 
     @pytest.mark.asyncio
     async def test_returns_zero_on_inspect_timeout(self):
-        """asyncio.wait_for timeout during inspect → 0."""
+        """asyncio.wait_for timeout during inspect → 0 when the systemd
+        fallback also comes up empty."""
         with (
             patch("shutil.which", return_value="/usr/bin/podman"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("asyncio.wait_for", side_effect=TimeoutError),
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
         ):
             mock_exec.return_value = _make_proc(returncode=0, stdout=b"12\n")
             result = await _container_cgroup_mem_bytes("primary")
@@ -100,7 +117,8 @@ class TestContainerCgroupMemBytes:
 
     @pytest.mark.asyncio
     async def test_returns_zero_on_cgroup_v1(self):
-        """cgroupv1 line lacks '::' → probe cannot walk path → 0."""
+        """cgroupv1 line lacks '::' → probe cannot walk path → 0 when the
+        systemd fallback also comes up empty."""
         cg_line = "1:cpu,cpuacct:/system.slice/podman-abc.scope\n"
 
         def _open_side_effect(path, *args, **kwargs):
@@ -112,6 +130,7 @@ class TestContainerCgroupMemBytes:
             patch("shutil.which", return_value="/usr/bin/podman"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("builtins.open", side_effect=_open_side_effect),
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
         ):
             mock_exec.return_value = _make_proc(returncode=0, stdout=b"99\n")
             result = await _container_cgroup_mem_bytes("primary")
@@ -119,7 +138,8 @@ class TestContainerCgroupMemBytes:
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_memory_current_unreadable(self):
-        """memory.current read fails (OSError) → 0."""
+        """memory.current read fails (OSError) → 0 when the systemd
+        fallback also comes up empty."""
         cg_line = "0::/system.slice/libpod-abc.scope\n"
 
         def _open_side_effect(path, *args, **kwargs):
@@ -131,6 +151,7 @@ class TestContainerCgroupMemBytes:
             patch("shutil.which", return_value="/usr/bin/podman"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("builtins.open", side_effect=_open_side_effect),
+            patch("hal0.slots.capacity.systemd_props", new_callable=AsyncMock, return_value={}),
         ):
             mock_exec.return_value = _make_proc(returncode=0, stdout=b"42\n")
             result = await _container_cgroup_mem_bytes("primary")
@@ -174,12 +195,13 @@ class TestBuildPerSlotContainerPath:
     """Verify build_per_slot uses cgroup bytes for container slots
     and falls back to file-size estimate when the cgroup probe is empty."""
 
-    def _make_slot(self, name, state="ready", model_id="mymodel", backend="rocm"):
+    def _make_slot(self, name, state="ready", model_id="mymodel", backend="rocm", slot_id=None):
         slot = MagicMock()
         slot.name = name
         slot.state = state
         slot.model_id = model_id
         slot.backend = backend
+        slot.slot_id = slot_id
         slot.metadata = {"provider": "llama-server", "backend": backend}
         return slot
 
@@ -194,7 +216,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=cgroup_bytes,
         ):
-            result = await build_per_slot([slot])
+            result = await build_per_slot([slot], gpu_capable=True)
 
         assert "primary" in result
         row = result["primary"]
@@ -225,7 +247,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=small_cgroup,
         ):
-            result = await build_per_slot([slot], registry=registry)
+            result = await build_per_slot([slot], registry=registry, gpu_capable=True)
 
         row = result["primary-container"]
         cgroup_mb = small_cgroup / (1024.0 * 1024.0)
@@ -251,7 +273,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=big_cgroup,
         ):
-            result = await build_per_slot([slot], registry=registry)
+            result = await build_per_slot([slot], registry=registry, gpu_capable=True)
 
         row = result["primary-container"]
         expected_mb = round(big_cgroup / (1024.0 * 1024.0), 1)
@@ -273,7 +295,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=0,
         ):
-            result = await build_per_slot([slot], registry=registry)
+            result = await build_per_slot([slot], registry=registry, gpu_capable=True)
 
         assert "primary" in result
         row = result["primary"]
@@ -297,7 +319,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=99999,  # should never be called
         ) as mock_probe:
-            result = await build_per_slot([slot], flm_catalog=flm_catalog)
+            result = await build_per_slot([slot], flm_catalog=flm_catalog, gpu_capable=True)
 
         mock_probe.assert_not_called()
         assert "npu-chat" in result
@@ -315,7 +337,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=4 * 1024 * 1024 * 1024,  # 4 GiB
         ):
-            result = await build_per_slot([slot])
+            result = await build_per_slot([slot], gpu_capable=True)
 
         row = result["cpu-primary"]
         assert row["vram_mb"] == 0.0
@@ -332,7 +354,7 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=4 * 1024 * 1024 * 1024,
         ):
-            result = await build_per_slot([slot])
+            result = await build_per_slot([slot], gpu_capable=True)
 
         row = result["gpu-primary"]
         assert row["ram_mb"] == 0.0
@@ -347,5 +369,5 @@ class TestBuildPerSlotContainerPath:
             new_callable=AsyncMock,
             return_value=0,
         ):
-            result = await build_per_slot([slot])
+            result = await build_per_slot([slot], gpu_capable=True)
         assert result == {}

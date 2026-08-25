@@ -67,17 +67,43 @@ def _final(text: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
 
 
-class _FakeKanban:
-    def __init__(self, *, board_result: Any = None, raise_on: str | None = None) -> None:
-        self.board_result = board_result if board_result is not None else {"columns": []}
-        self.raise_on = raise_on
-        self.calls: list[tuple[str, str]] = []
+class _FakeStore:
+    """A BoardStore stand-in for the steward's board tools (#1829).
 
-    async def request_json(self, method: str, path: str, **kw: Any) -> Any:
-        self.calls.append((method, path))
-        if self.raise_on and self.raise_on in path:
-            raise RuntimeError("kanban backend exploded")
-        return self.board_result if path == "/board" else {"ok": True}
+    ``raise_on`` names the store method that blows up, so the loop's
+    "a tool raised" paths can be driven without a real board.
+    """
+
+    def __init__(self, *, board_result: Any = None, raise_on: str | None = None) -> None:
+        self.board_result = board_result if board_result is not None else {"lanes": {}}
+        self.raise_on = raise_on
+        self.calls: list[str] = []
+        self.initialized = True
+
+    def _hit(self, name: str) -> None:
+        self.calls.append(name)
+        if self.raise_on == name:
+            raise RuntimeError("board store exploded")
+
+    def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
+        self._hit("get_board")
+        return self.board_result
+
+    def get_task(self, task_id: str, **kw: Any) -> Any:
+        self._hit("get_task")
+        return {"id": task_id}
+
+    def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
+        self._hit("list_assignees")
+        return []
+
+    def get_orchestration(self) -> Any:
+        self._hit("get_orchestration")
+        return {}
+
+    def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
+        self._hit("update_task")
+        return {"ok": True, "id": task_id}
 
 
 class _RestRecorder:
@@ -92,13 +118,14 @@ class _RestRecorder:
 def _fake_request(
     stub: _StubLLM,
     *,
-    kanban: _FakeKanban | None = None,
+    store: _FakeStore | None = None,
     queue: ApprovalQueue | None = None,
     persona_root: Path | None = None,
 ) -> Any:
     state = SimpleNamespace(
         board_chat_llm=stub,
-        hermes_kanban=kanban if kanban is not None else _FakeKanban(),
+        board_store=store if store is not None else _FakeStore(),
+        hermes_kanban=None,
         approval_queue=queue if queue is not None else ApprovalQueue(),
         self_api_base_url="http://testserver",
         brain_persona_root=persona_root or Path("/nonexistent-personas-root"),
@@ -151,9 +178,9 @@ def test_undecided_gate_times_out_without_executing(monkeypatch) -> None:
 def test_tool_loop_survives_a_tool_raising() -> None:
     """A read that raises becomes an {"error": ...} tool result; the turn
     continues to a normal completion instead of crashing the stream."""
-    kanban = _FakeKanban(raise_on="/board")  # get_board will raise
+    store = _FakeStore(raise_on="get_board")  # the board read will raise
     stub = _StubLLM([_tool_call("get_board", {}, "c1"), _final("recovered")])
-    request = _fake_request(stub, kanban=kanban)
+    request = _fake_request(stub, store=store)
 
     events = _run(_collect(request))
     result = next(e for e in events if e["type"] == "tool_result")
@@ -168,11 +195,11 @@ def test_tool_loop_survives_a_tool_raising() -> None:
 def test_mutation_raising_is_caught_and_audited_as_error() -> None:
     """A mutation that raises inside dispatch is surfaced as an error tool
     result (not an unhandled exception)."""
-    kanban = _FakeKanban(raise_on="/tasks/")  # move_task PATCH will raise
+    store = _FakeStore(raise_on="update_task")  # move_task's store write will raise
     stub = _StubLLM(
         [_tool_call("move_task", {"task_id": "t1", "status": "done"}, "c1"), _final("noted")]
     )
-    request = _fake_request(stub, kanban=kanban)
+    request = _fake_request(stub, store=store)
 
     events = _run(_collect(request))
     result = next(e for e in events if e["type"] == "tool_result")
@@ -214,14 +241,16 @@ def test_brain_slot_transport_failure_surfaces_error_and_done() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_errors_when_board_backend_missing() -> None:
-    """No hermes_kanban wired at all -> a clean error + done, never a crash."""
-    state = SimpleNamespace(
-        hermes_kanban=None,
-        hal0_config=Hal0Config(brain_chat=BrainChatConfig()),
-    )
-    request = SimpleNamespace(app=SimpleNamespace(state=state), headers={})
+async def test_chat_stream_serves_without_a_hermes_client() -> None:
+    """No hermes_kanban wired at all -> the turn still runs and the board read
+    answers from the local store (hal0 owns the board — KB-4/#1829). The old
+    "operator board backend not configured" precondition is gone."""
+    store = _FakeStore(board_result={"lanes": {"todo": [{"id": "t1", "title": "local"}]}})
+    stub = _StubLLM([_tool_call("get_board", {}, "c1"), _final("all clear")])
+    request = _fake_request(stub, store=store)
+    assert request.app.state.hermes_kanban is None
     frames = [_parse(f) async for f in bc._chat_stream(request, {"messages": []})]
-    assert frames[0]["type"] == "error"
-    assert "not configured" in frames[0]["message"]
+    assert [f for f in frames if f["type"] == "error"] == []
+    result = next(f for f in frames if f["type"] == "tool_result")
+    assert result["result"] == {"tasks": [{"id": "t1", "title": "local"}]}
     assert frames[-1] == {"type": "done"}

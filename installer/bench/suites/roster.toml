@@ -16,7 +16,7 @@ installed   = true               # only models present under /mnt/ai-models
 # explicit include/exclude lists also supported
 
 [matrix]                          # the axes; identity fields not listed are pinned to model defaults
-lanes    = ["default"]           # "default" = the model's preferred profile lane; or ["rocm","vulkan_radv"]
+lanes    = ["default"]           # "default" = the model's preferred profile lane; or explicit ["rocm","vulkan_radv"]
 depths   = [2048]                # roster is the uniform 2k board; tune suites use [2048,32768,131072]
 samplers = ["greedy"]
 reps     = 3

@@ -126,6 +126,17 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   // actually keeps their real POST traffic from ever being substituted.
   { re: /^\/api\/memory\/banks\/([^/]+)\/recall$/, key: 'bankRecall' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/reflect$/, key: 'bankReflect' },
+  // ── Memory v2 (Bank workspace UI, #B1) — tags + curatable unit list +
+  // per-unit history. The unit resource itself (GET/PATCH/DELETE
+  // .../memories/:id) is NOT allowlisted here: curate/delete are mutations
+  // and mockFetch is GET-only substitution (see header comment) — Phase C
+  // e2e specs drive those responses themselves via page.route. ORDER
+  // MATTERS: .../memories/:id/history is more specific than a bare
+  // .../memories/:id route, but since no such route exists in this table
+  // yet, placement here is purely organizational.
+  { re: /^\/api\/memory\/banks\/([^/]+)\/tags$/, key: 'bankTags' },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/units$/, key: 'bankUnits' },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/memories\/([^/]+)\/history$/, key: 'unitHistory' },
 ])
 
 function parsePath(url: string | URL | Request): string | null {

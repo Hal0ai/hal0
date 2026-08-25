@@ -1,10 +1,11 @@
 """First-class hal0-brain chat engine — the ``POST /api/brain/chat`` core.
 
 SPEC §G / R4: the brain is a FIRST-CLASS module that consumes the shared
-tool-loop engine (:mod:`hal0.toolloop.engine`) and works WITHOUT the board
-backend or any agent plugin — it has ZERO import dependency on Hermes. The
-board's operator-board client and the platform self-API are reached only
-through ``app.state`` handles injected at runtime; nothing here imports them.
+tool-loop engine (:mod:`hal0.toolloop.engine`) and works WITHOUT any agent
+plugin — it has ZERO import dependency on Hermes. The platform self-API is
+reached through ``app.state`` handles injected at runtime, and the hal0-owned
+board store is imported lazily inside :func:`_board_store`; nothing
+Hermes-shaped is imported here at all.
 
 The brain is the resident platform steward: a hal0-NATIVE conversational agent
 that administers the whole instance, not just the board. It embodies the
@@ -17,21 +18,22 @@ OpenAI tool-calling loop whose LLM is the hal0 ``brain`` slot, falling back to
 ``/api/brain/chat`` is the PRIMARY route; ``/api/board/chat`` is a thin
 back-compat alias (see :mod:`hal0.api.routes.board_chat`). Three tool families:
 
-* **Board reads** (unaudited, via the injected operator-board client
-  ``app.state.hermes_kanban`` — mirrors the REST proxy's allowlisted GET
-  rows): get_board · get_task · get_assignees · get_orchestration. When no
-  board backend is wired the chat surfaces a "not configured" notice; the
-  brain module itself imports nothing board-specific.
+* **Board reads** (unaudited, against the hal0-owned ``BoardStore`` — the
+  SAME store ``/api/board/*`` answers from, resolved through
+  :func:`hal0.board.store.resolve_store`): get_board · get_task ·
+  get_assignees · get_orchestration. hal0 owns the board (KB-4), so these
+  serve with Hermes absent; the store is imported lazily, so the brain module
+  still has no board import at module scope.
 * **Board mutations** (each an AUDITED ``board.chat.turn`` row through the
-  same client the REST handlers use): move/assign · create · comment ·
+  same store methods the REST handlers call): move/assign · create · comment ·
   dep add/remove · block · specify · decompose · nudge · orchestration update.
 * **Platform tools** (hal0-api's OWN surface, self-HTTP against
   ``app.state.self_api_base_url``): slots list/get/load/unload/restart,
   models, hardware stats, installed agents. Reads unaudited; slot mutations
   write ``platform.chat.turn`` rows.
 
-A chat-driven board mutation surfaces on the board LIVE via the kanban events
-WS — chat is NOT the board transport.
+A chat-driven board mutation surfaces on the board LIVE via the store's
+``/events`` feed — chat is NOT the board transport.
 
 Transport contract (kept stable so the LLM backend can later swap to a
 different agent backend via chat_proxy WITHOUT any UI change):
@@ -696,24 +698,41 @@ async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]
     )
 
 
-# ── read tools (allowlisted GETs — mirror the UNAUDITED REST read rows) ─────
+# ── board reads (the hal0-owned store — mirror the UNAUDITED REST read rows) ─
+#
+# KB-4 (e18c25ab) moved /api/board/* off the Hermes-kanban proxy onto the local
+# BoardStore but left the steward's board tools forwarding to Hermes; #1829
+# finishes that rewire. Both surfaces now resolve THE SAME store through
+# hal0.board.store.resolve_store, so the steward can never answer from a
+# different board than GET /api/board/board, `hal0 board list`, the board page
+# and the /events WS show — and the board tools keep working with Hermes
+# absent, unreachable or (as on every fresh rc.5 box) unauthenticated.
+
+#: Board READ tools — unaudited, mirroring the unaudited GET rows in the REST
+#: router (:mod:`hal0.api.routes.board`).
+_BOARD_READS = frozenset({"get_board", "get_task", "get_assignees", "get_orchestration"})
 
 
-def _resolve_read_tool(name: str, args: dict[str, Any]) -> tuple[str | None, str]:
-    """Map a read tool → (method, upstream sub-path); (None, "") if not a read.
+async def _board_store(request: Request) -> Any:
+    """THE per-process board store — the same one ``/api/board/*`` answers from.
 
-    These hit the same allowlisted GET paths the table-driven REST proxy
-    forwards, and like those reads they write NO audit rows.
+    Imported lazily so the brain module still has no board import at module
+    scope (it stays loadable, and Hermes-free, on its own).
     """
+    from hal0.board.store import resolve_store
+
+    return await resolve_store(request.app)
+
+
+def _dispatch_board_read(store: Any, name: str, args: dict[str, Any], board: str | None) -> Any:
+    """Run one board READ against the store — 1:1 with the REST GET handlers."""
     if name == "get_board":
-        return "GET", "/board"
+        return _compact_board(store.get_board(board=board))
     if name == "get_task":
-        return "GET", f"/tasks/{args.get('task_id', '')}"
+        return store.get_task(str(args.get("task_id") or ""))
     if name == "get_assignees":
-        return "GET", "/assignees"
-    if name == "get_orchestration":
-        return "GET", "/orchestration"
-    return None, ""
+        return store.list_assignees(board=board)
+    return store.get_orchestration()
 
 
 # Fields kept when compacting a board row for the tool result. Full rows carry
@@ -852,57 +871,55 @@ async def _dispatch_platform_tool(
 
 
 def _resolve_tool(
-    name: str, args: dict[str, Any]
-) -> tuple[str | None, str, dict[str, Any], Any, str | None]:
-    """Map a tool name + args → (method, upstream path, query params, body, target).
+    name: str, args: dict[str, Any], board: str | None = None
+) -> tuple[Callable[[Any], Any] | None, str | None]:
+    """Map a board MUTATION tool + args → (store operation, audit target).
 
-    Query params and body mirror the REST handlers / upstream contract exactly:
-    ``DELETE /links`` and ``POST /dispatch?max=N`` take their args as QUERY
-    params upstream; everything else takes a JSON body.
+    The operation is a callable taking the :class:`~hal0.board.store.BoardStore`
+    and returning the store result — the SAME method the matching
+    ``/api/board/*`` handler calls with the same payload, so chat writes and
+    REST writes are indistinguishable on the board. ``(None, None)`` when
+    ``name`` is not a board mutation.
     """
+    tid = str(args.get("task_id") or "")
     if name == "move_task":
-        tid = args.get("task_id", "")
-        return "PATCH", f"/tasks/{tid}", {}, {"status": args.get("status")}, tid
+        return (lambda s: s.update_task(tid, {"status": args.get("status")})), tid
     if name == "assign_task":
-        tid = args.get("task_id", "")
-        return "PATCH", f"/tasks/{tid}", {}, {"assignee": args.get("assignee")}, tid
+        return (lambda s: s.update_task(tid, {"assignee": args.get("assignee")})), tid
     if name == "create_task":
         body = {k: v for k, v in args.items() if v is not None}
-        return "POST", "/tasks", {}, body, None
+        return (lambda s: s.create_task(body, board=board)), None
     if name == "comment_task":
-        tid = args.get("task_id", "")
-        return "POST", f"/tasks/{tid}/comments", {}, {"body": args.get("body")}, tid
+        return (lambda s: s.comment_task(tid, {"body": args.get("body")})), tid
     if name == "add_dependency":
-        body = {"parent_id": args.get("parent_id"), "child_id": args.get("child_id")}
-        return "POST", "/links", {}, body, f"{body['parent_id']}->{body['child_id']}"
+        link = {"parent_id": args.get("parent_id"), "child_id": args.get("child_id")}
+        return (lambda s: s.add_link(link)), f"{link['parent_id']}->{link['child_id']}"
     if name == "remove_dependency":
-        # DELETE /links takes parent_id/child_id as QUERY params upstream
-        # (SPEC §4) — matches the REST handler.
-        params = {"parent_id": args.get("parent_id"), "child_id": args.get("child_id")}
-        return "DELETE", "/links", params, None, f"{params['parent_id']}->{params['child_id']}"
+        parent, child = str(args.get("parent_id") or ""), str(args.get("child_id") or "")
+        return (lambda s: s.remove_link(parent, child)), f"{parent}->{child}"
     if name == "block_task":
-        tid = args.get("task_id", "")
         patch: dict[str, Any] = {"status": "blocked"}
         if args.get("block_reason"):
             patch["block_reason"] = args["block_reason"]
-        return "PATCH", f"/tasks/{tid}", {}, patch, tid
+        return (lambda s: s.update_task(tid, patch)), tid
     if name == "specify_task":
-        tid = args.get("task_id", "")
-        return "POST", f"/tasks/{tid}/specify", {}, {}, tid
+        return (lambda s: s.specify(tid, {})), tid
     if name == "decompose_task":
-        tid = args.get("task_id", "")
-        return "POST", f"/tasks/{tid}/decompose", {}, {}, tid
+        return (lambda s: s.decompose(tid, {})), tid
     if name == "nudge_dispatcher":
-        # POST /dispatch?max=N — max is a QUERY param upstream (SPEC §4).
-        params = {}
-        if args.get("max") is not None:
-            params["max"] = args["max"]
-        return "POST", "/dispatch", params, {}, None
+        # Board-GLOBAL, exactly like ``POST /api/board/dispatch``: the store's
+        # ready-card query is not board-filtered, so neither surface can scope a
+        # nudge. Scoping it is a store change that must move both together.
+        try:
+            max_dispatch: int | None = int(args.get("max"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            max_dispatch = None
+        return (lambda s: s.dispatch_nudge(max_dispatch=max_dispatch)), None
     if name == "update_orchestration":
-        # PUT /orchestration — partial update, only the knobs passed.
-        body = {k: v for k, v in args.items() if v is not None}
-        return "PUT", "/orchestration", {}, body, None
-    return None, "", {}, None, None
+        # Partial update — only the knobs passed (mirrors PUT /orchestration).
+        knobs = {k: v for k, v in args.items() if v is not None}
+        return (lambda s: s.update_orchestration(knobs)), None
+    return None, None
 
 
 def _completion_budget(requested: Any) -> int:
@@ -956,18 +973,17 @@ def _is_read_tool(name: str, args: dict[str, Any]) -> bool:
     """True when ``name`` only READS state (safe under read-only mode).
 
     Mirrors the branch order of :func:`_dispatch_tool`: board reads, then
-    non-mutating platform tools, then GET-method local tools, then the admin
+    non-mutating platform tools, then board mutations, then the admin
     catalog's autonomous-read set. An unknown tool is treated as NOT a read,
     so read-only fails closed.
     """
-    if _resolve_read_tool(name, args)[0] is not None:
+    if name in _BOARD_READS:
         return True
     p_method, _p_path, p_mutating = _resolve_platform_tool(name, args)
     if p_method is not None:
         return not p_mutating
-    method, _path, _tool_params, _body, _target = _resolve_tool(name, args)
-    if method is not None:
-        return method.upper() == "GET"
+    if _resolve_tool(name, args)[0] is not None:
+        return False  # every board tool _resolve_tool knows is a MUTATION
     if name in _admin_tool_names():
         try:
             from hal0.mcp.admin import AUTONOMOUS_READ_TOOLS
@@ -979,7 +995,6 @@ def _is_read_tool(name: str, args: dict[str, Any]) -> bool:
 
 async def _dispatch_tool(
     request: Request,
-    client: Any,
     name: str,
     args: dict[str, Any],
     *,
@@ -987,10 +1002,12 @@ async def _dispatch_tool(
 ) -> Any:
     """Run one board tool: reads pass straight through, mutations are audited.
 
-    Returns the upstream JSON result (or an ``{"error": ...}`` envelope the
-    loop can keep stepping against). Each MUTATION writes a ``board.chat.turn``
-    audit row with ``rec.after`` = result; reads write none — matching the
-    REST proxy's audited-mutations / unaudited-reads split.
+    Returns the store/upstream JSON result (or an ``{"error": ...}`` envelope
+    the loop can keep stepping against). Each MUTATION writes a
+    ``board.chat.turn`` audit row with ``rec.after`` = result; reads write
+    none — matching the REST router's audited-mutations / unaudited-reads
+    split. Board tools run against the hal0-owned store, NOT a Hermes forward
+    (#1829).
     """
     # Persona surface filter applies to LOCAL tools too — the admin path
     # enforces it inside admin.dispatch, but a narrowed tools_allowed
@@ -1011,16 +1028,9 @@ async def _dispatch_tool(
             )
         }
 
-    read_method, read_path = _resolve_read_tool(name, args)
-    if read_method is not None:
-        params = {"board": board} if board else None
-        result = await client.request_json(
-            read_method,
-            read_path,
-            params=params,
-            agent_id=request.headers.get("X-hal0-Agent"),
-        )
-        return _compact_board(result) if name == "get_board" else result
+    if name in _BOARD_READS:
+        store = await _board_store(request)
+        return _dispatch_board_read(store, name, args, board)
 
     p_method, p_path, p_mutating = _resolve_platform_tool(name, args)
     if p_method is not None:
@@ -1028,8 +1038,8 @@ async def _dispatch_tool(
             request, name, args, method=p_method, path=p_path, mutating=p_mutating
         )
 
-    method, path, tool_params, body, target = _resolve_tool(name, args)
-    if method is None:
+    op, target = _resolve_tool(name, args, board)
+    if op is None:
         # Not a local tool — the rest of the surface is the admin-MCP
         # catalog, dispatched through the same gating/audit core as
         # /mcp/admin (gated tools return ``pending_approval``).
@@ -1037,14 +1047,13 @@ async def _dispatch_tool(
             return await _dispatch_admin_tool(request, name, args)
         return {"error": f"unknown tool: {name}"}
 
-    # Merge the board scope with any tool-specific query params (e.g.
-    # DELETE /links parent_id/child_id, POST /dispatch max=N — these ride as
-    # QUERY upstream, matching the REST handlers).
-    params: dict[str, Any] = dict(tool_params)
-    if board:
-        params["board"] = board
-    params = params or None  # type: ignore[assignment]
-    agent = request.headers.get("X-hal0-Agent")
+    # The store call is SYNCHRONOUS inside this async handler — deliberately
+    # the same shape the /api/board/* mutation handlers use, so chat writes and
+    # REST writes have identical execution and blocking characteristics. If the
+    # executor seam behind ``dispatch_nudge`` ever needs to come off the event
+    # loop, both surfaces move together (it is a store/route-layer decision, not
+    # a chat one).
+    store = await _board_store(request)
     async with record_action(
         request,
         category="board",
@@ -1053,9 +1062,7 @@ async def _dispatch_tool(
         message=f"chat:{name}",
     ) as rec:
         try:
-            result = await client.request_json(
-                method, path, params=params, json_body=body, agent_id=agent
-            )
+            result = op(store)
         except Exception as exc:
             # Surface as a tool_result the LLM can react to; still recorded as
             # an error audit row (record_action re-raises, so set after first
@@ -1883,13 +1890,11 @@ def _surfaced_tool_names(request: Request) -> frozenset[str]:
 
 
 async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterator[str]:
-    """Run the tool-calling loop, yielding SSE frames."""
-    client = getattr(request.app.state, "hermes_kanban", None)
-    if client is None:
-        yield _sse({"type": "error", "message": "operator board backend not configured"})
-        yield _sse({"type": "done"})
-        return
+    """Run the tool-calling loop, yielding SSE frames.
 
+    No board-backend precondition: hal0 OWNS the board (KB-4), so the steward
+    serves with Hermes absent exactly as ``/api/board/*`` does (#1829).
+    """
     cfg = _brain_chat_config(request)
     if not cfg.enabled:
         yield _sse(
@@ -1999,7 +2004,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
             }
         )
 
-    dispatch_fn = functools.partial(_dispatch_round, request, client, board)
+    dispatch_fn = functools.partial(_dispatch_round, request, board)
     try:
         async for event in run_tool_loop(
             llm,
@@ -2020,7 +2025,6 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
 
 async def _dispatch_round(
     request: Request,
-    client: Any,
     board: str | None,
     tool_calls: list[dict[str, Any]],
 ) -> AsyncIterator[dict[str, Any]]:
@@ -2039,7 +2043,7 @@ async def _dispatch_round(
             "arguments": tc["arguments"],
         }
         try:
-            result = await _dispatch_tool(request, client, tc["name"], tc["arguments"], board=board)
+            result = await _dispatch_tool(request, tc["name"], tc["arguments"], board=board)
         except Exception as exc:  # mutation failed — audited as error
             result = {"error": str(exc)}
         yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
@@ -2147,12 +2151,14 @@ __all__ = [
     "_assistant_message",
     "_assistant_text",
     "_assistant_thinking",
+    "_board_store",
     "_brain_chat_config",
     "_brain_tool_policy",
     "_chat_stream",
     "_compact_board",
     "_completion_budget",
     "_dispatch_admin_tool",
+    "_dispatch_board_read",
     "_dispatch_platform_tool",
     "_dispatch_tool",
     "_extract_tool_calls",
@@ -2161,7 +2167,6 @@ __all__ = [
     "_is_read_tool",
     "_parse_text_tool_calls",
     "_resolve_platform_tool",
-    "_resolve_read_tool",
     "_resolve_tool",
     "_split_thinking",
     "_surfaced_tool_names",

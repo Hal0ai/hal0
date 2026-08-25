@@ -222,6 +222,9 @@ class TestLoadSyncNpuBranch:
 
         with (
             patch("hal0.providers.container._resolve_profile", return_value=profile),
+            # #1888 guard: this test exercises UNIT RENDERING, not host GPU
+            # validity — the box running the suite has no /dev/kfd.
+            patch("hal0.providers.container.require_kfd_for_gpu_slot"),
             patch(
                 "hal0.providers.container.resolve_gpu_device_paths",
                 return_value=["/dev/kfd", "/dev/dri/renderD128"],
@@ -289,6 +292,32 @@ async def test_health_connect_refused_stays_unhealthy() -> None:
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
         raise httpx.ConnectError("Connection refused")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = fake_get
+
+    with patch("hal0.providers.container.httpx.AsyncClient", return_value=mock_client):
+        result = await provider.health(8088)
+
+    assert result["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_health_read_error_stays_unhealthy() -> None:
+    """A mid-read RST (httpx.ReadError, str()=="") must not escape health() as
+    an unhandled exception (#1898). A runner that binds its port and then
+    dies mid-read raises ReadError, which sat outside the narrow
+    (ConnectError, TimeoutException) catch — that unhandled exception
+    aborted the caller's poll loop instead of reporting "unhealthy" for the
+    next retry."""
+    import httpx
+
+    provider = ContainerProvider()
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        raise httpx.ReadError("")
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)

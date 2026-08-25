@@ -75,7 +75,7 @@ class ConfigParseError(ConfigError):
 # ── Atomic TOML write ─────────────────────────────────────────────────────────
 
 
-def write_toml_atomic(path: Path | str, data: dict[str, Any]) -> None:
+def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | None = None) -> None:
     """Write a TOML file atomically.
 
     Mirrors hal0.config.env.write_env_atomic but for TOML payloads:
@@ -86,6 +86,11 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any]) -> None:
     Args:
         path: Destination path for the TOML file.
         data: Mapping that tomli_w.dump understands.
+        mode: Optional explicit mode for the result. ``tempfile.mkstemp``
+            creates the replacement 0600 and ``os.replace`` carries that mode
+            onto the destination, so a file whose canonical mode is anything
+            else drifts on every rewrite until ``doctor perms --fix`` runs.
+            Callers with a canonical mode pass it here.
 
     Raises:
         OSError: If the directory cannot be created, disk full, or the
@@ -105,6 +110,12 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any]) -> None:
         tmp_path = Path(tmp_str)
         try:
             with os.fdopen(fd, "wb") as f:
+                # fchmod, not chmod: the mode is applied to the descriptor we
+                # already own, before the rename — so there is never a moment
+                # where the destination carries the wrong mode, and no second
+                # path lookup that a swapped tempfile could ride in on.
+                if mode is not None:
+                    os.fchmod(f.fileno(), mode)
                 tomli_w.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())
@@ -735,7 +746,11 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
     unaffected: any field omitted on write is re-defaulted on read.
     """
     target = path if path is not None else paths.etc() / "upstreams.toml"
-    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
+    write_toml_atomic(
+        target,
+        cfg.model_dump(mode="python", exclude_none=True),
+        mode=paths.UPSTREAMS_TOML_MODE,
+    )
 
 
 # ── profiles.toml ─────────────────────────────────────────────────────────────
@@ -889,11 +904,24 @@ def load_stacks_config(path: Path | None = None) -> StacksConfig:
 
     Raises:
         ConfigParseError: If the TOML is malformed or fails validation.
+        StacksStateUnreadable: If the file exists but cannot be read
+            (permissions) — a root-written 0600 stacks.toml must surface as an
+            actionable typed error, not a raw ``PermissionError`` (ct105).
     """
     target = path if path is not None else paths.stacks_toml()
     if not Path(target).exists():
         return StacksConfig.model_validate({"stack": SEED_STACKS})
-    raw = _read_toml(Path(target))
+    try:
+        raw = _read_toml(Path(target))
+    except PermissionError as exc:
+        # Lazy import: hal0.stacks.__init__ imports this module, so a
+        # module-level import here would be circular.
+        from hal0.stacks.state import StacksStateUnreadable
+
+        raise StacksStateUnreadable(
+            f"stacks.toml unreadable at {target}: {exc}; fix: chgrp hal0 && chmod 664",
+            details={"path": str(target)},
+        ) from exc
     try:
         return StacksConfig.model_validate(raw)
     except Exception as exc:

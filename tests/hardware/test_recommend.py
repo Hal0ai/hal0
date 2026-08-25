@@ -20,8 +20,14 @@ from hal0.hardware.recommend import (
 from hal0.registry.curated import CURATED_BY_ID
 
 
-def _amd_uma_host(unified_gb: int) -> HardwareInfo:
-    """A Strix-Halo-class AMD UMA host with ``unified_gb`` of unified RAM."""
+def _amd_uma_host(unified_gb: int, *, compute_capable: bool = True) -> HardwareInfo:
+    """A Strix-Halo-class AMD UMA host with ``unified_gb`` of unified RAM.
+
+    ``compute_capable`` defaults True: since #1888 the ROCm compute path is the
+    only supported AMD LLM lane, so the representative Strix Halo host is one
+    where ROCm is reachable. Pass False for the no-``/dev/kfd`` box the blocker
+    was found on.
+    """
     mb = unified_gb * 1024
     return HardwareInfo(
         ram_mb=mb,
@@ -33,6 +39,7 @@ def _amd_uma_host(unified_gb: int) -> HardwareInfo:
                 name="Strix Halo",
                 vram_mb=512,  # UMA: no discrete carve-out
                 vulkan_capable=True,
+                compute_capable=compute_capable,
             )
         ],
     )
@@ -174,9 +181,55 @@ def test_cpu_only_host_seeds_chat_capable_profile(tmp_path) -> None:
 def test_seeded_slot_carries_container_runtime_and_profile() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["runtime"] == "container"
-    # Strix-Halo-class AMD UMA → vulkan device → chat profile (device-agnostic).
-    assert rec["device"] == "gpu-vulkan"
+    # Strix-Halo-class AMD UMA with ROCm reachable → ROCm device (#1888: never
+    # gpu-vulkan — the runner image's Vulkan backend emits invalid tokens).
+    assert rec["device"] == "gpu-rocm"
     assert rec["profile"] == "chat"
+
+
+# ── #1888: the Vulkan lane is never recommended on AMD ───────────────────────
+
+
+def test_amd_uma_recommends_rocm_not_vulkan() -> None:
+    """A ROCm-capable Strix Halo box lands on gpu-rocm.
+
+    Regression for #1888: ``_backend_for`` used to return ``vulkan`` for the
+    whole "AMD UMA / Strix Halo class" branch, which labelled slots with a
+    backend they never executed on (with /dev/kfd) or executed on and emitted
+    garbage from (without it).
+    """
+    rec = recommend_primary_slot(_amd_uma_host(96))
+    assert rec["device"] == "gpu-rocm"
+    assert "vulkan" not in str(rec.get("backend", "")).lower()
+
+
+def test_amd_without_rocm_falls_back_by_whether_the_vulkan_lane_is_real(monkeypatch) -> None:
+    """No ROCm compute node → Vulkan if the pinned runner can serve it, else
+    CPU (#1948, review B2).
+
+    #1888 sent this box to CPU unconditionally, because the pinned runner's
+    Vulkan backend emitted invalid tokens; that answer strands a working GPU
+    once the image is fixed. But deriving ``gpu-vulkan`` on an install whose
+    runner CANNOT serve the lane is worse than CPU — every seeded slot would
+    be refused at load. So the ladder asks, and this test asserts both
+    branches rather than a constant.
+    """
+    monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: False)
+
+    monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: True)
+    assert recommend_primary_slot(_amd_uma_host(96, compute_capable=False))["device"] == (
+        "gpu-vulkan"
+    )
+
+    monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: False)
+    assert recommend_primary_slot(_amd_uma_host(96, compute_capable=False))["device"] == "cpu"
+
+
+def test_amd_without_rocm_smi_but_with_kfd_is_rocm(monkeypatch) -> None:
+    """/dev/kfd alone is enough to call the box ROCm-capable (#1888)."""
+    monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: True)
+    rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
+    assert rec["device"] == "gpu-rocm"
 
 
 def test_seeded_slot_profile_is_a_known_seed_profile() -> None:

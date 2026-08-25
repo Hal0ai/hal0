@@ -44,6 +44,7 @@ from hal0.slot_view import (
     config_enrichment,
     container_enrichment,
     loaded_model_names_from_slots,
+    resolve_ctx_max,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -54,6 +55,7 @@ from hal0.slots import metrics_collect as _metrics_collect
 from hal0.slots import port_alloc as _port_alloc
 from hal0.slots import voices as _voices
 from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.state import SlotNotFound
 
 log = structlog.get_logger(__name__)
 
@@ -914,7 +916,11 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
     from hal0.api.routes.hardware import stats_slots
 
     merged = await stats_slots(request)
-    for name, tps in _per_slot_local_tps(request).items():
+    # 30s lookback (not the 5s streaming default): non-streaming callers
+    # land one event per completed request, often tens of seconds apart —
+    # a 5s window made their tok/s flash briefly then read 0 between
+    # requests even while the slot was visibly working.
+    for name, tps in _per_slot_local_tps(request, window_s=30.0).items():
         if tps <= 0:
             continue
         entry = merged.get(name)
@@ -1040,6 +1046,21 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         if c_extra:
             for k, v in c_extra.items():
                 out.setdefault(k, v)
+
+        # #1835: config_enrichment above lifts ctx_max verbatim off the slot
+        # TOML (the raw hardware ceiling) — #1788/#1802 re-resolved this to
+        # the EFFECTIVE window on the list route only, leaving this detail
+        # route to advertise a number that can contradict its own
+        # ``resolved_command``. Mirror the list route's re-resolution here.
+        raw_ctx_max = out.get("ctx_max")
+        model_id = str(out.get("model_default") or "")
+        if model_id or isinstance(raw_ctx_max, int):
+            out["ctx_max"] = resolve_ctx_max(
+                raw_ctx_max if isinstance(raw_ctx_max, int) else None,
+                getattr(request.app.state, "model_registry", None),
+                model_id,
+                name,
+            )
         return out
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
@@ -1066,6 +1087,34 @@ async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
         return None
 
 
+async def _refresh_composite_catalogue(
+    request: Request, before: dict[str, Any] | None = None
+) -> None:
+    """Re-derive ``model_cache["hal0"]`` after a catalogue-changing write.
+
+    #1837: deleting a slot, or rebinding its ``model.default``, changes
+    which model ids ``/v1/models`` (and the dashboard's synthetic ``hal0``
+    tile) should advertise — but emits no ``slot.state`` ``ready`` event,
+    which is the only thing the runtime re-prime listens to. So the old id
+    stayed advertised, hard-404ing on dispatch, until an unrelated slot
+    went ready or hal0-api restarted.
+
+    ``before`` is the pre-write config: everything it used to contribute to
+    the catalogue is passed as a known eviction so those ids disappear even
+    if the fresh slot-config read comes back degraded (one unrelated
+    malformed TOML must not keep them alive). That is the slot's own model
+    id AND any FLM multiplex tag it opted into — an FLM slot serves
+    ``embed-gemma:300m`` / ``whisper-v3:turbo`` from the same process, and
+    deleting it takes those with it. Ids another slot still binds are
+    spared by the refresh itself.
+    """
+    from hal0.api import _flm_multiplex_tags, _slot_model_id, hal0_refresh_composite_models
+
+    cfg = before or {}
+    stale = [mid for mid in (_slot_model_id(cfg), *_flm_multiplex_tags(cfg)) if mid]
+    await hal0_refresh_composite_models(request.app, evict=stale)
+
+
 @router.delete("/{name}")
 @_invalidates_snapshot
 async def delete_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
@@ -1077,8 +1126,17 @@ async def delete_slot(name: str, request: Request, force: bool = False) -> dict[
     install/update reconcile may re-seed it later).
     """
     sm = _get_slot_manager(request)
+    # Snapshot before the delete so the composite refresh below knows which
+    # id just went away even if the post-delete read comes back degraded.
+    before = await _safe_config(sm, name)
     async with record_action(request, category="slot", action="slot.delete", target=name):
         await sm.delete(name, force=force)
+    # #1837: deleting a slot unloads it (ready -> offline) and emits no
+    # ``ready`` event, so the composite-catalogue re-prime that rides on
+    # slot-ready never fires — the dead slot's model id kept being
+    # advertised by /v1/models (hard-404ing on dispatch) until an
+    # unrelated slot went ready or hal0-api restarted. Evict here.
+    await _refresh_composite_catalogue(request, before)
     return {"name": name, "deleted": True, "forced": force}
 
 
@@ -1177,6 +1235,11 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
                 slot=name,
                 error=str(exc),
             )
+    # #1837: a config write can rebind ``model.default`` (or flip the slot's
+    # type), which changes the composite catalogue without producing a
+    # ``ready`` event. Re-derive it now rather than advertising the old id
+    # until some unrelated slot happens to go ready.
+    await _refresh_composite_catalogue(request, before)
     # NOTE (#1369): this route is a PURE config write — no lifecycle side
     # effect. It used to unload a running slot on an ``enabled: false`` body
     # (so the faded card matched reality); with the field gone, config edits
@@ -1236,6 +1299,9 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     ) as _rec:
         snap = await sm.update_config(name, {"model": body})
         _rec.after = {"model": body}
+    # ``default`` is a ModelConfig field, so this route can rebind the slot's
+    # model id just like PUT /config — same #1837 eviction applies.
+    await _refresh_composite_catalogue(request, before)
     return _slot_to_dict(snap, request)
 
 
@@ -1412,6 +1478,32 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
 # the ``StreamingResponse``.
 
 
+def _find_synthetic_entry(request: Request, name: str) -> dict[str, Any] | None:
+    """Return the synthetic upstream-backed entry for ``name``, if any."""
+    for entry in _synthesize_slots_from_upstreams(request):
+        if entry["name"] == name:
+            return entry
+    return None
+
+
+def _synthetic_logs_hint(entry: dict[str, Any]) -> str:
+    """Explain why a synthetic entry has no journal, worded per entry.
+
+    #1905 asked about the ``hal0`` composite, but remote upstreams and
+    (in stale-registry states) ordinary container-slot registrations
+    reach this path too — calling those a "composite" would be wrong, so
+    mirror the classification ``slot_view._synthetic_reason`` makes: the
+    composite hint needs BOTH the reserved name and ``kind="slot"``.
+    """
+    from hal0.upstreams.registry import RESERVED_UPSTREAM_NAME
+
+    if entry.get("kind") == "slot":
+        if entry.get("name") == RESERVED_UPSTREAM_NAME:
+            return "synthetic composite slot has no journal of its own"
+        return "upstream registration without a configured slot; no journal to read"
+    return "backed by a remote upstream; no local journal to read"
+
+
 @router.get("/{name}/logs")
 async def slot_logs(
     name: str, request: Request, lines: int = 200, quiet: bool = True
@@ -1424,11 +1516,33 @@ async def slot_logs(
     never started, returns an empty string with a hint. The UI tolerates
     that (renders "No logs available") rather than treating it as an error.
     The journalctl tail lives in :func:`hal0.slots.logs.read_tail`.
+
+    #1905: a synthetic upstream entry (e.g. the ``hal0`` composite) isn't
+    a real slot and has no ``hal0-slot@{name}.service`` journal of its
+    own, but it also isn't "not found" — it's a legitimate, listable
+    entry. Distinguish the two: a genuinely unknown name still 404s with
+    the typed ``slot.not_found`` envelope, but a synthetic entry gets a
+    200 with an explanatory hint instead, mirroring how :func:`get_slot`
+    already falls through for its detail view.
     """
     sm = _get_slot_manager(request)
     # Validate slot exists so unknown names get the typed slot.not_found
-    # envelope instead of an empty 200.
-    await sm.status(name)
+    # envelope instead of an empty 200. Catch ONLY SlotNotFound: every
+    # loaded container slot registers a same-name ``kind="slot"`` upstream
+    # (SlotManager._register_container_upstream), so a broad except here
+    # would convert a real slot's operational failure (e.g. SlotConfigError
+    # from a corrupt state.json) into a fake synthetic 200.
+    try:
+        await sm.status(name)
+    except SlotNotFound:
+        entry = _find_synthetic_entry(request, name)
+        if entry is not None:
+            return {
+                "name": name,
+                "logs": "",
+                "hint": _synthetic_logs_hint(entry),
+            }
+        raise
 
     text, hint = await _logs.read_tail(f"hal0-slot@{name}.service", lines, quiet)
     if hint is not None:
@@ -1463,7 +1577,42 @@ async def slot_logs_stream(
     import shutil
 
     sm = _get_slot_manager(request)
-    await sm.status(name)  # 404 fast if unknown
+    try:
+        await sm.status(name)  # 404 fast if unknown
+    except SlotNotFound:
+        # #1905: same synthetic fall-through as the one-shot ``/logs`` route
+        # above — the dashboard log viewer and ``hal0 slot logs --follow``
+        # both drive THIS route, so fixing only the one-shot twin left the
+        # user-facing flow 404ing (EventSource.onerror → endless reconnect
+        # loop). Emit a terminal 'degraded' frame with the hint instead; the
+        # client already listens for 'degraded' (see B13 below). Only
+        # SlotNotFound falls through — other failures on a real slot must
+        # keep surfacing as errors.
+        entry = _find_synthetic_entry(request, name)
+        if entry is None:
+            raise
+
+        async def synthetic_source() -> Any:
+            yield (
+                "event: degraded\ndata: "
+                + json.dumps({"message": _synthetic_logs_hint(entry)})
+                + "\n\n"
+            )
+            # Hold the stream open after the degraded frame: the client's
+            # degraded listener only records the message, while its onerror
+            # closes and RECONNECTS (ui/src/api/hooks/useLogs.ts) — so a
+            # stream that ends here would put the viewer in a silent retry
+            # loop against this endpoint forever. Keepalive cadence matches
+            # the journal streams (#1472) so proxy idle timeouts are covered.
+            while True:
+                await asyncio.sleep(15)
+                yield ": keepalive\n\n"
+
+        return StreamingResponse(
+            synthetic_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
@@ -1642,7 +1791,8 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
         data: {"slot_name": "...", "image": "...", "state": "pulling",
                "layer": N, "total_layers": M}
 
-    Terminal states: ``completed`` | ``failed`` | ``present`` | ``missing``.
+    Terminal states: ``completed`` | ``failed`` | ``present`` | ``missing`` |
+    ``unknown`` (#1939 — the image store could not be read).
     """
 
     async def _gen() -> Any:
@@ -1650,7 +1800,8 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
         job = slot_pull_jobs.get(name)
 
         if job is None:
-            # No active pull — inspect the image to surface present|missing.
+            # No active pull — inspect the image to surface
+            # present|missing|unknown.
             sm = _get_slot_manager(request)
             image = await _image_pull.resolve_slot_image(sm, name)
             state = await _image_pull.inspect_image_state(image)
@@ -1683,8 +1834,9 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
     one-shot poll equivalent for clients that can't hold an EventSource
     open. Returns the in-flight job snapshot when a pull is active,
     otherwise inspects the slot's image and reports ``present`` |
-    ``missing`` — the same terminal vocabulary the stream's no-job branch
-    emits, so a poller and a streamer converge on the same states.
+    ``missing`` | ``unknown`` — the same terminal vocabulary the stream's
+    no-job branch emits, so a poller and a streamer converge on the same
+    states.
 
     Frame shape::
 
@@ -1692,7 +1844,8 @@ async def pull_slot_image_status(name: str, request: Request) -> dict[str, objec
          "layer": N, "total_layers": M, "error": null}
 
     States: ``pulling`` | ``completed`` | ``failed`` | ``present`` |
-    ``missing``.
+    ``missing`` | ``unknown`` (#1939 — the image store could not be read; NOT
+    a report that the image is absent).
     """
     slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
     job = slot_pull_jobs.get(name)

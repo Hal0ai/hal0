@@ -1704,22 +1704,99 @@ def doctor_migrations(
 # check 2 (image-present) is advisory.
 
 
+#: Slot types where a MISSING profile is a proven silent failure, mapped to the
+#: fallback repair profile (#1830). ``tts`` / ``transcription`` / ``image`` are
+#: deliberately absent: their providers carry their own profile-less defaults,
+#: so an empty profile there is not (yet) a demonstrated 501.
+#:
+#: The fallback is only used when the create-time rule
+#: (:func:`hal0.slots.profile_adopt.type_implied_profile`) cannot answer for
+#: this slot's (type, device) — that rule is the authority, so doctor's repair
+#: names the SAME profile a freshly created slot would get (an ``npu``
+#: embedding slot wants ``flm``, not llama-server's ``embedding``).
+_PROFILELESS_CAPABILITY_REPAIR: dict[str, str] = {
+    "embedding": "embedding",
+    "reranking": "reranking",
+}
+
+
+def _profileless_repair_for(slot_type: str, device: str, valid_names: set[str]) -> str | None:
+    """The profile that repairs a profile-less capability slot, or ``None``.
+
+    ``None`` means "this box has no profile that repairs it" — either the type
+    is not one where a missing profile is a proven 501, or the answer names a
+    profile the installed catalog does not have (a removed/renamed seed).
+    Never recommend a dangling reference: writing it would turn a slot that
+    starts-but-501s into one that cannot start at all.
+    """
+    if slot_type not in _PROFILELESS_CAPABILITY_REPAIR:
+        return None
+    try:
+        from hal0.slots.profile_adopt import type_implied_profile
+
+        inferred = type_implied_profile({"type": slot_type, "device": device})
+    except Exception:  # unreadable catalog — fall back to the static answer
+        inferred = None
+    repair = inferred or _PROFILELESS_CAPABILITY_REPAIR[slot_type]
+    return repair if repair in valid_names else None
+
+
 def check_slot_profile_refs(
     slot_profiles: list[tuple[str, str | None]],
     valid_names: set[str],
+    slot_types: dict[str, str] | None = None,
+    slot_devices: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Flag slots whose ``profile = "..."`` names a profile not in the catalog.
 
     ``resolve_slot_profile`` raises ``KeyError`` for a missing name only when the
     slot starts — so a renamed/deleted profile is a latent slot-start failure.
-    A slot with ``profile = None`` (base-image resolution) is legal and skipped.
     Returns one row per slot: ``ok`` when the reference resolves, ``drift`` when
     it dangles.
+
+    A profile-less slot is legal for ``llm`` (base-image resolution) and skipped.
+    For a CAPABILITY slot it is drift (#1830): the profile carries the mode flag
+    (``--embedding`` / ``--reranking``) or selects the engine, so without one the
+    slot loads to ``state=ready`` and returns 501 from its own endpoint —
+    silent, and nothing else in hal0 warns about it. New slots infer the profile
+    at create time, but no seed loop back-fills an existing TOML, so an upgraded
+    box keeps whatever profile-less slots its operator created historically.
+    ``slot_types`` maps slot name → slot type; callers that cannot supply it get
+    the old skip-everything-profile-less behaviour. ``slot_devices`` maps slot
+    name → device and only sharpens the suggested repair (the create-time rule
+    is device-keyed: ``npu`` embeddings run on FLM, not llama-server).
     """
+    types = slot_types or {}
+    devices = slot_devices or {}
     rows: list[dict[str, str]] = []
     for slot, profile in slot_profiles:
         if not profile:
-            continue  # base-image slot — no profile to resolve
+            slot_type = str(types.get(slot) or "")
+            if slot_type not in _PROFILELESS_CAPABILITY_REPAIR:
+                continue  # llm / unknown type — no profile to resolve
+            implied = _profileless_repair_for(slot_type, str(devices.get(slot) or ""), valid_names)
+            repair = (
+                f"Repair: hal0 slot edit {slot} --profile {implied} && hal0 slot restart {slot}."
+                if implied
+                else (
+                    "No profile in this catalog serves that type/device — the seed it "
+                    "needs was removed or renamed. Restore the seed profiles before "
+                    "repairing the slot (pointing it at a missing profile would stop "
+                    "it starting at all)."
+                )
+            )
+            rows.append(
+                {
+                    "label": slot,
+                    "status": "drift",
+                    "detail": (
+                        f"{slot_type} slot with NO profile — it will load "
+                        f"'ready' and answer 501 on its own endpoint (the profile "
+                        f"carries the mode flag). {repair}"
+                    ),
+                },
+            )
+            continue
         if profile in valid_names:
             rows.append(
                 {"label": slot, "status": "ok", "detail": f"→ {profile}"},
@@ -1937,6 +2014,8 @@ def doctor_profiles(
     # always cfg.name — the real display name a bilingual TOML embeds
     # regardless of which stem it lives under.
     slot_profiles: list[tuple[str, str | None]] = []
+    slot_types: dict[str, str] = {}
+    slot_devices: dict[str, str] = {}
     for slot_name in list_slots():
         try:
             cfg = load_slot_config(slot_name)
@@ -1946,8 +2025,12 @@ def doctor_profiles(
             )
             continue
         slot_profiles.append((cfg.name, cfg.profile))
+        # Type + device feed the profile-less capability check (#1830): the
+        # type decides whether it is drift, the device which profile repairs it.
+        slot_types[cfg.name] = str(getattr(cfg, "type", "") or "")
+        slot_devices[cfg.name] = str(getattr(cfg, "device", "") or "")
 
-    ref_rows = check_slot_profile_refs(slot_profiles, valid_names)
+    ref_rows = check_slot_profile_refs(slot_profiles, valid_names, slot_types, slot_devices)
     img_rows = check_profile_images_present(profiles, _local_image_repos())
 
     broken = [r for r in ref_rows if r["status"] == "drift"]
@@ -1961,8 +2044,9 @@ def doctor_profiles(
 
     if broken:
         console.print(
-            f"\n[red]✗[/red]  {len(broken)} slot(s) reference a missing profile — "
-            "fix before those slots can start."
+            f"\n[red]✗[/red]  {len(broken)} slot(s) have a broken profile reference "
+            "or none at all — a dangling reference stops the slot from starting; "
+            "a missing one lets it start and answer 501. See each row for the repair."
         )
         raise typer.Exit(1)
     console.print("\n[green]✓[/green]  every slot resolves to a real profile.")

@@ -121,6 +121,56 @@ async def test_one_wedged_slot_cannot_hold_the_list(
     assert out["s3"]["container_status"] == "stopped"
     assert out["s3"]["container_health"] is False
     assert out["s2"]["container_status"] == "running"
+    # #1939: these configs are PROFILELESS, and "no profile → no declared
+    # image" is knowable from the config alone — the timeout does not make it
+    # any less true. So this case stays "not-configured" (#1226); see the
+    # profiled case below for the one the timeout really cannot answer.
+    assert out["s3"]["image_status"] == "not-configured"
+
+
+async def test_a_wedged_profiled_slot_reports_unknown_not_not_configured(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1939: a slot that DOES declare an image, whose probe timed out.
+
+    The old fallback answered "not-configured" here — a statement about this
+    slot's configuration, made by a probe that never read its configuration,
+    about a slot that is in fact configured. The honest answer is that we did
+    not get to look.
+    """
+    monkeypatch.setattr(sv_mod, "_PROBE_TIMEOUT_S", 0.4)
+    provider = SlowProvider(delay=0.01, wedged={"s1"})
+    configs = _configs(3)
+    for cfg in configs:
+        cfg["profile"] = "rocm-mtp"
+
+    with caplog.at_level("WARNING"):
+        out = await container_enrichment(configs, provider=provider)
+
+    assert out["s1"]["image_status"] == "unknown"
+    assert out["s1"]["profile"] == "rocm-mtp", "the fallback still reports the declared profile"
+    # …and it is diagnosable through the route the validation kit documents:
+    # every `unknown` carries a reason-bearing line, this one included.
+    assert "slot_view.image_probe_failed" in caplog.text
+    assert "reason=probe-timeout" in caplog.text
+    assert "slot=s1" in caplog.text
+
+
+async def test_a_wedged_profileless_slot_logs_no_image_probe_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The converse: a profileless timeout reports "not-configured", which is
+    a definitive answer, so it must NOT emit the unknown-diagnostic line — an
+    operator grepping for it would otherwise chase a seam that is fine."""
+    monkeypatch.setattr(sv_mod, "_PROBE_TIMEOUT_S", 0.4)
+    provider = SlowProvider(delay=0.01, wedged={"s1"})
+
+    with caplog.at_level("WARNING"):
+        out = await container_enrichment(_configs(3), provider=provider)
+
+    assert out["s1"]["image_status"] == "not-configured"
+    assert "slot_view.container_probe_timeout" in caplog.text
+    assert "image_probe_failed" not in caplog.text
 
 
 # ── the whole GET /api/slots path ────────────────────────────────────────────

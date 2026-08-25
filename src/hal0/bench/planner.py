@@ -158,7 +158,21 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 # hal0 /api/models backend token -> benchlab lane token. The registry reports a
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
 # "rocm" (the lane names harness.lane_specs() defines).
-_BACKEND_TO_LANE = {"vulkan": "vulkan_radv", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
+#
+# #1888 redirected the registry's bare "vulkan" hint to the **rocm** lane, and
+# #1948 LEAVES IT THERE deliberately, for a reason that outlived the defect:
+# the hint is a MODEL label ("this GGUF runs on llama.cpp"), not a statement
+# about which device a slot was created on. Every AMD GPU lane shares one
+# runner image, so that label is satisfied by either lane — and rocm is the
+# lane with the long trend history, so it is the right thing to bench when
+# nothing more specific was asked for. NOT a speed claim: the §3-C matrix
+# measures Vulkan ahead on both metrics (+13.96% prefill, +20.45% decode).
+# Continuity of an existing series is the reason.
+#
+# An explicit "vulkan_radv" resolves to itself and is a supported lane again
+# whenever the pinned runner image can serve it (``harness.lane_is_supported``),
+# so a suite that wants the Vulkan numbers simply names it.
+_BACKEND_TO_LANE = {"vulkan": "rocm", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 
 def _model_caps(m: dict[str, Any]) -> set[str]:
@@ -301,6 +315,39 @@ def _select_models(suite: Suite, registry_models: list[dict[str, Any]]) -> list[
                 continue
         chosen.append(m)
     return chosen
+
+
+def _lane_is_plannable(
+    lane: str,
+    *,
+    suite_id: str,
+    warned: set[str] | None = None,
+) -> bool:
+    """May cells be planned for ``lane``? Explains itself on stderr if not.
+
+    Split out of :func:`plan_cells` so the skip decision and its explanation
+    live together and can be tested directly, without standing up a whole
+    suite plus a model roster to observe one branch.
+
+    ``warned`` de-dupes the message to once per lane per plan; pass ``None``
+    for a one-shot check that always explains.
+    """
+    if harness.lane_is_supported(lane):
+        return True
+    if warned is None or lane not in warned:
+        if warned is not None:
+            warned.add(lane)
+        print(
+            f"WARNING: suite {suite_id!r} names the lane {lane!r}, which this install "
+            "cannot produce trustworthy numbers for — SKIPPING those cells. "
+            "The pinned runner image's Vulkan backend is not validated: on the "
+            "ade07ba lineage it emits invalid tokens for every model (#1888), and "
+            "llama-bench counts tokens without reading them, so the sweep would "
+            "publish throughput for output that is not language. Repin the runner "
+            "to a Vulkan-validated image to enable this lane.",
+            file=sys.stderr,
+        )
+    return False
 
 
 def _resolve_lane(model: dict[str, Any], lane: str) -> str:
@@ -526,10 +573,21 @@ def plan(
             )
 
     stale: list[Cell] = []
+    warned_unsupported: set[str] = set()
     for model in selected_models:
         tokenizer = _resolve_tokenizer(model) or ""
         for lane_token in suite.matrix.lanes:
             lane = _resolve_lane(model, lane_token)
+            # An unsupported lane is SKIPPED, loudly (review B1). It used to be
+            # warn-and-plan, which was defensible while the only unsupported
+            # lane was permanently retired and no shipped suite named it — the
+            # warning was for a deliberate `--backends` opt-in. Neither holds
+            # now: `lane-matrix.toml` names `vulkan_radv` outright, and
+            # unsupported is a property of the pinned image rather than of the
+            # lane, so warn-and-plan would mean shipping a suite that produces
+            # garbage records on any install still carrying a broken runner.
+            if not _lane_is_plannable(lane, suite_id=suite.id, warned=warned_unsupported):
+                continue
             for kind in suite.cells.kinds:
                 if kind in _TIER_A_KINDS and lane not in known_lanes:
                     # Fail fast at plan time, not with a bare KeyError out of

@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from hal0 import slot_view as sv_mod
 from hal0.config.schema import ProfileConfig
 from hal0.profiles import ProfileCatalog
 from hal0.slot_view import (
@@ -65,7 +66,7 @@ class FakeContainerProvider:
         active: bool = True,
         healthy: bool = True,
         running_image: str | None = None,
-        present: bool = True,
+        present: bool | None = True,
         raise_exc: bool = False,
     ) -> None:
         self._active = active
@@ -85,7 +86,8 @@ class FakeContainerProvider:
     def running_image(self, slot: Any) -> str | None:
         return self._running_image
 
-    def image_present(self, image: str) -> bool:
+    def image_present(self, image: str) -> bool | None:
+        # Tri-state since #1939: None == "the image store could not be asked".
         return self._present
 
 
@@ -561,6 +563,12 @@ class TestLoadedModelNamesFromSlots:
 # ── concern 3: container probe ──────────────────────────────────────────────
 
 
+#: A slot-owned pinned image ref (spec-hw-slot-ownership §3) — the shortest
+#: way to give a test slot a declared ``image`` so the image_status branch is
+#: reachable at all.
+_PINNED_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-server"
+
+
 def _container_cfg(name: str = "gpu-chat", **over: Any) -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "name": name,
@@ -695,6 +703,78 @@ class TestContainerEnrichment:
             provider=FakeContainerProvider(active=False),
         )
         assert out["gpu-chat"]["image_status"] == "not-configured"
+
+    # ── #1939: the four-state block is a five-state block ──────────────────
+    #
+    # `missing` is reserved for "podman was asked and said no". Every way of
+    # NOT getting an answer — the seam is unusable, the provider raised, the
+    # whole probe timed out — is `unknown`. Each of these three assertions
+    # pins one site that used to answer with a confident lie.
+
+    async def test_unanswerable_image_probe_reports_unknown_not_missing(
+        self, tmp_hal0_home: str
+    ) -> None:
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+        out = await container_enrichment(
+            [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False, present=None),
+        )
+        e = out["gpu-chat"]
+        assert e["image"] == _PINNED_IMAGE
+        assert e["image_status"] == "unknown"
+
+    async def test_declared_image_still_reports_present_and_missing(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """The tri-state must not swallow the two definitive answers — in
+        particular ``missing`` has to stay reachable, or the #1937 regression
+        check (``image_status: missing`` on a running slot is a defect) would
+        be pinning a state nothing can ever emit."""
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+        cfg = _container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)
+
+        present = await container_enrichment(
+            [cfg], pull_jobs={}, provider=FakeContainerProvider(active=False, present=True)
+        )
+        # The TTL cache is keyed by image ref and lives for 15 s, so the second
+        # probe would otherwise be served the first one's answer.
+        sv_mod._image_present_cache.clear()
+        missing = await container_enrichment(
+            [cfg], pull_jobs={}, provider=FakeContainerProvider(active=False, present=False)
+        )
+
+        assert present["gpu-chat"]["image_status"] == "present"
+        assert missing["gpu-chat"]["image_status"] == "missing"
+
+    async def test_probe_exception_reports_unknown_not_missing(
+        self, tmp_hal0_home: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The except-branch around the image probe defaulted to ``missing``,
+        so a provider that blew up looked exactly like an absent image.
+
+        It also has to LOG. The payload carries no reason field by design, so
+        an ``unknown`` with nothing behind it in the journal would be
+        undiagnosable — which is the failure family this issue is about. The
+        seam's own unknowns are logged by ``image_present``; this branch
+        covers every unknown that never reached it.
+        """
+        ProfileCatalog().create("imgprof", ProfileConfig(flags=""))
+
+        class _Exploding(FakeContainerProvider):
+            def image_present(self, image: str) -> bool:
+                raise RuntimeError("podman store is on fire")
+
+        with caplog.at_level("WARNING"):
+            out = await container_enrichment(
+                [_container_cfg(profile="imgprof", image_pin=_PINNED_IMAGE)],
+                pull_jobs={},
+                provider=_Exploding(active=False),
+            )
+        assert out["gpu-chat"]["image_status"] == "unknown"
+        assert "slot_view.image_probe_failed" in caplog.text
+        assert "gpu-chat" in caplog.text
+        assert "podman store is on fire" in caplog.text
 
     async def test_npu_table_surfaced(self) -> None:
         out = await container_enrichment(
@@ -1046,6 +1126,47 @@ class TestSyntheticEntries:
         assert e["kind"] == "remote"
         assert e["model"] == "m-1"
         assert e["_synthetic"] is True
+
+    def test_synthetic_reason_differs_by_kind(self) -> None:
+        """#1905: the local ``hal0`` composite isn't "backed by a remote
+        upstream" — that reason string was copy-pasted onto every synthetic
+        entry regardless of kind, so the hal0 tile lied about why it's
+        synthetic. Only genuinely remote-backed entries get the "install a
+        local slot" reason; the local composite gets its own copy."""
+        upstreams = FakeUpstreams(
+            [
+                SimpleNamespace(name="hal0", kind="slot", url="http://l"),
+                SimpleNamespace(name="haloai", kind="remote", url="http://r"),
+                # Every loaded container slot registers a same-name
+                # kind="slot" upstream — it must NOT claim to be the
+                # composite (review nit: the composite string belongs to
+                # the reserved name, not the kind).
+                SimpleNamespace(name="chat", kind="slot", url="http://c"),
+            ]
+        )
+        entries = synthesize_upstream_entries(
+            upstreams,
+            model_cache={},
+            last_used_model={},
+            loaded_models=set(),
+        )
+        by_name = {e["name"]: e for e in entries}
+        assert "remote upstream" not in by_name["hal0"]["_synthetic_reason"]
+        assert "composite" in by_name["hal0"]["_synthetic_reason"].lower()
+        assert "remote upstream" in by_name["haloai"]["_synthetic_reason"]
+        assert "composite" not in by_name["chat"]["_synthetic_reason"].lower()
+        assert "remote upstream" not in by_name["chat"]["_synthetic_reason"]
+
+    def test_synthetic_reason_explicit_remote_hal0_classified_by_kind(self) -> None:
+        """An operator may define an explicit ``hal0`` upstream with
+        ``kind="remote"`` in upstreams.toml — that entry is genuinely
+        remote-backed, so the reserved name alone must not earn it the
+        local-composite explanation."""
+        from hal0.slot_view import _synthetic_reason
+
+        reason = _synthetic_reason(SimpleNamespace(name="hal0", kind="remote"))
+        assert "remote upstream" in reason
+        assert "composite" not in reason.lower()
 
 
 class TestSnapshotComposition:

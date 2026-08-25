@@ -240,6 +240,112 @@ def test_list_real_wins_on_name_collision(
     assert primaries[0].get("_synthetic") is not True
 
 
+def test_logs_synthetic_hal0_composite_returns_hint_not_404(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1905: ``GET /api/slots/hal0/logs`` 404'd with the typed
+    ``slot.not_found`` envelope — identical to a genuinely nonexistent slot
+    name — even though ``hal0`` is a legitimate, listable synthetic
+    composite entry (see ``_UpstreamsWithHal0Composite``). It has no
+    journal of its own, so it should 200 with an explanatory hint instead
+    of looking indistinguishable from a typo.
+    """
+    r = isolated_client.get("/api/slots/hal0/logs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "hal0"
+    assert body.get("hint")
+
+    # A genuinely unknown slot name must still 404 with the typed envelope.
+    r2 = isolated_client.get("/api/slots/definitely-not-a-slot/logs")
+    assert r2.status_code == 404
+    assert r2.json()["error"]["code"] == "slot.not_found"
+
+
+def test_logs_real_slot_config_error_not_masked_as_synthetic(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """#1905 review (Codex, confirmed): the synthetic fall-through must catch
+    ONLY SlotNotFound. Every loaded container slot registers a same-name
+    ``kind="slot"`` upstream, so a broad ``except Exception`` converted a
+    real slot's SlotConfigError (corrupt state.json) into a fake synthetic
+    200 with "composite has no journal" — hiding a precise, actionable
+    config error from the operator.
+    """
+    from hal0.config import paths
+
+    # The same-name upstream _register_container_upstream would create.
+    isolated_app.state.upstreams.upsert(
+        Upstream(
+            name="chat",
+            kind="slot",
+            url="http://127.0.0.1:8081/v1",
+            auth_style="none",
+            slot_name="chat",
+        )
+    )
+    # Corrupt the slot's state.json so sm.status raises SlotConfigError.
+    state_file = paths.slot_data_dir("chat") / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text("{'not': json}", encoding="utf-8")
+
+    r = isolated_client.get("/api/slots/chat/logs")
+    assert r.status_code != 200, (
+        f"config error must surface, not turn into a synthetic 200: {r.text}"
+    )
+    assert r.json()["error"]["code"] == "slot.config_error", r.text
+
+
+async def test_logs_stream_synthetic_hal0_composite_emits_degraded_frame(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+) -> None:
+    """#1905 review (Codex, confirmed): the dashboard log viewer and
+    ``hal0 slot logs --follow`` drive the STREAM route, which still 404'd
+    for the synthetic ``hal0`` composite after the one-shot route was
+    fixed. It must 200 with a terminal ``event: degraded`` frame (the
+    client already listens for 'degraded' — see B13) instead of feeding
+    EventSource.onerror an endless reconnect loop.
+    """
+    # The degraded stream stays OPEN after the frame (keepalives) so the
+    # browser's EventSource doesn't treat stream-end as an error and
+    # reconnect-loop — so consume the generator directly (same pattern as
+    # test_state_stream_emits_transition_event) instead of buffering the
+    # whole response.
+    with TestClient(isolated_app) as client:
+        from hal0.api.routes.slots import slot_logs_stream
+
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+
+            app = _AppShim()
+
+        response = await slot_logs_stream("hal0", _ReqShim())  # type: ignore[arg-type]
+        assert response.status_code == 200
+        agen = response.body_iterator
+        frame = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
+        if isinstance(frame, bytes):
+            frame = frame.decode("utf-8")
+        await agen.aclose()
+
+        assert frame.startswith("event: degraded\n"), f"bad SSE prefix: {frame!r}"
+        assert "journal" in frame  # the explanatory hint payload
+
+        # A genuinely unknown slot name must still 404, typed envelope.
+        r2 = client.get("/api/slots/definitely-not-a-slot/logs/stream")
+        assert r2.status_code == 404
+        assert r2.json()["error"]["code"] == "slot.not_found"
+
+
 # ── lifespan auto-register ─────────────────────────────────────────────────
 
 
@@ -636,6 +742,195 @@ def test_delete_forwards_force_query_param(
     assert body["forced"] is True
     # The config is gone; a follow-up GET 404s.
     assert isolated_client.get("/api/slots/chat/config").status_code == 404
+
+
+def test_delete_evicts_the_slots_model_id_from_the_composite_catalogue(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """#1837: DELETE must un-advertise the slot's model id immediately.
+
+    ``SlotManager.delete`` unloads the slot (ready -> offline) and emits no
+    ``ready`` event, so the event-driven composite re-prime never fires for
+    it. Before the fix the id stayed in ``model_cache["hal0"]`` — which is
+    what ``/v1/models`` and the dashboard's synthetic ``hal0`` tile read —
+    until some UNRELATED slot went ready or hal0-api restarted, and it
+    hard-404s on dispatch the whole time (no slot, no registry entry).
+    """
+    app, client = isolated_app_client
+    cache = app.state.upstream_models
+    assert "qwen3-4b-q4_k_m" in cache.get("hal0", []), "precondition: id is advertised"
+
+    r = client.delete("/api/slots/chat")
+    assert r.status_code == 200, r.text
+
+    assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+
+def test_config_write_rebinding_the_model_default_evicts_the_old_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """#1837, same shape via the other mutation: PUT /config that rebinds
+    ``model.default`` emits no ``ready`` event either, so the old id has to
+    be evicted (and the new one advertised) on the write itself."""
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    r = client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b-q4_k_m"}})
+    assert r.status_code == 200, r.text
+
+    bucket = app.state.upstream_models.get("hal0", [])
+    assert "qwen3-4b-q4_k_m" not in bucket
+    assert "qwen3-8b-q4_k_m" in bucket
+
+
+def test_patch_defaults_rebinding_the_model_default_evicts_the_old_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """PATCH /defaults writes through ``update_config(name, {"model": …})``
+    and ``default`` is a ModelConfig field, so it can rebind the model id
+    exactly like PUT /config — and must evict the old id the same way."""
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    r = client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b-q4_k_m"})
+    assert r.status_code == 200, r.text
+
+    bucket = app.state.upstream_models.get("hal0", [])
+    assert "qwen3-4b-q4_k_m" not in bucket
+    assert "qwen3-8b-q4_k_m" in bucket
+
+
+def test_delete_evicts_even_when_an_unrelated_slot_toml_is_malformed(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """A degraded enumeration keeps the bucket — but not the id the caller
+    just deleted.
+
+    The partial-read guard must not resurrect the #1837 ghost: with one
+    unrelated malformed slot TOML on disk, the post-delete read comes back
+    degraded, so the bucket is preserved wholesale — yet the deleted
+    slot's model id is KNOWN dead and has to go.
+    """
+    app, client = isolated_app_client
+    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+    (slot_root / "wrecked.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+
+    r = client.delete("/api/slots/chat")
+    assert r.status_code == 200, r.text
+
+    assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+
+def test_a_degraded_eviction_self_heals_once_the_catalogue_reads_clean(
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+) -> None:
+    """Two slots can share a model id, and the degraded path can't tell.
+
+    If the SIBLING that still binds the id is the slot whose TOML was
+    skipped, the known-eviction drops an id that is still served. That
+    window has to close on its own: ``/v1/models`` re-reads the catalogue
+    behind its 5s TTL, so the first clean read restores the id without
+    waiting for a slot-ready event or a restart.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "twin",
+        [
+            'name = "twin"',
+            "port = 8198",
+            'type = "llm"',
+            'provider = "llama-server"',
+            "[model]",
+            'default = "qwen3-4b-q4_k_m"',  # same id as the `chat` slot
+        ],
+    )
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+        # `twin` is the slot that goes unreadable, so the post-delete read
+        # can't see that it still binds the shared id.
+        (slot_root / "twin.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+        assert client.delete("/api/slots/chat").status_code == 200
+        assert "qwen3-4b-q4_k_m" not in app.state.upstream_models.get("hal0", [])
+
+        # Operator fixes the TOML. No slot event, no restart — the next
+        # /v1/models re-read is what has to bring the id back.
+        _seed_slot_toml(
+            tmp_hal0_home,
+            "twin",
+            [
+                'name = "twin"',
+                "port = 8198",
+                'type = "llm"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+            ],
+        )
+        from hal0.api import _hal0_model_cache_clear
+
+        _hal0_model_cache_clear()  # skip the 5s TTL rather than sleeping
+
+        assert client.get("/v1/models").status_code == 200
+        assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
+
+
+def test_delete_of_an_flm_slot_evicts_its_multiplex_tags_on_a_degraded_read(
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+) -> None:
+    """An FLM slot serves its multiplex tags from the same process, so
+    deleting it takes ``embed-gemma:300m`` / ``whisper-v3:turbo`` with it.
+
+    On a degraded read the bucket is preserved wholesale, so those tags
+    have to be named as known evictions alongside the slot's own model id
+    — otherwise they keep being advertised and hard-fail on dispatch.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "flmx",
+        [
+            'name = "flmx"',
+            "port = 8199",
+            'type = "llm"',
+            'device = "npu"',
+            'backend = "flm"',
+            "[npu]",
+            "embed = true",
+            "asr = true",
+            "[model]",
+            'default = "gemma3-1b"',
+        ],
+    )
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        bucket = app.state.upstream_models.get("hal0", [])
+        assert "embed-gemma:300m" in bucket and "whisper-v3:turbo" in bucket
+
+        (slot_root / "wrecked.toml").write_text("name = = broken\n[model\n", encoding="utf-8")
+
+        r = client.delete("/api/slots/flmx")
+        assert r.status_code == 200, r.text
+
+        after = app.state.upstream_models.get("hal0", [])
+        assert "gemma3-1b" not in after
+        assert "embed-gemma:300m" not in after
+        assert "whisper-v3:turbo" not in after
+        # The unrelated healthy slot's model survives the degraded read.
+        assert "qwen3-4b-q4_k_m" in after
 
 
 # ── §21.10 operator pin: route guards + payload exposure (#1367) ────────────
@@ -1249,6 +1544,72 @@ async def test_scrape_llama_metrics_clamps_overrun(
 
 
 @pytest.mark.asyncio
+async def test_scrape_llama_metrics_surfaces_ctx_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fullest sub-slot's used tokens surface as ``ctx`` so the card's
+    "used / max" context readout gets a live numerator (it read '—'
+    forever because nothing produced the key)."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 1\n"
+    slots_json = [
+        {"id": 0, "n_ctx": 4096, "n_prompt_tokens": 512},
+        {"id": 1, "n_ctx": 4096, "n_prompt_tokens": 2048},
+    ]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out["ctx"] == 2048
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_omits_ctx_when_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle /slots payload leaves ``ctx`` absent — the UI renders '—',
+    not a fabricated 0."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 0\n"
+    slots_json = [{"id": 0, "n_ctx": 4096, "is_processing": False}]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert "ctx" not in out
+
+
+def test_tps_from_events_single_event_smears_over_window() -> None:
+    """One in-window event (a non-streaming completion's whole token count)
+    yields tokens/window_s instead of 0 — steady non-streaming traffic
+    used to read 0 tok/s forever while the history endpoint showed real
+    throughput from the same store."""
+    import time
+
+    from hal0.slots.metrics_collect import tps_from_events
+
+    now = time.monotonic()
+    assert tps_from_events([(now - 1.0, 600)], window_s=30.0) == pytest.approx(20.0)
+
+
+def test_tps_from_events_all_aged_out_decays_to_zero() -> None:
+    import time
+
+    from hal0.slots.metrics_collect import tps_from_events
+
+    now = time.monotonic()
+    assert tps_from_events([(now - 120.0, 600)], window_s=30.0) == 0.0
+
+
+@pytest.mark.asyncio
 async def test_scrape_llama_metrics_501_returns_empty_and_warns_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1826,6 +2187,68 @@ def test_get_slot_includes_config_enrichment(
     assert body["coresident_group"] == "npu-flm-trio"
     assert body["type"] == "llm"
     assert body["model_default"] == "gemma3-1b"
+
+
+class _FakeCtxDefaults:
+    def __init__(self, context_size: int | None) -> None:
+        self.context_size = context_size
+
+
+class _FakeCtxModel:
+    def __init__(self, context_size: int | None) -> None:
+        self.defaults = _FakeCtxDefaults(context_size)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+
+
+class _FakeCtxRegistry:
+    def __init__(self, models: dict[str, Any]) -> None:
+        self._models = models
+
+    def get(self, model_id: str) -> Any:
+        if model_id not in self._models:
+            raise KeyError(model_id)
+        return self._models[model_id]
+
+
+def test_get_slot_resolves_ctx_max_to_effective_window(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1835: GET /api/slots/{name} must re-resolve ``ctx_max`` to the
+    EFFECTIVE window (#1788/#1802's fix), not echo the raw slot-TOML
+    ceiling verbatim. #1802 fixed ``GET /api/slots`` (list) only; this is
+    the detail-route regression that survived it.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "vulkan-radv"',
+            "[model]",
+            'default = "qwen3-4b"',
+            "context_size = 65536",
+        ],
+    )
+    # The registered model's declared window (8000) is smaller than the
+    # slot's raw TOML ceiling (65536) — the EFFECTIVE window must win.
+    isolated_app.state.model_registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(8000)})
+
+    r = isolated_client.get("/api/slots/chat")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ctx_max"] == 8000, (
+        f"detail route must report the effective window, not the raw TOML "
+        f"ceiling; got {body['ctx_max']!r}"
+    )
 
 
 def test_get_slot_includes_config_drift_when_requested(

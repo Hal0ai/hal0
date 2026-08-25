@@ -912,10 +912,30 @@ preflight_podman_forward() {
 # like 'clock' instead of 'render') because getent still resolved a name.
 # Test seams (only consulted here, never set in production): HAL0_GPU_DRI_GLOB,
 # HAL0_GPU_CONTAINER_OVERRIDE, HAL0_GPU_RENDER_GID_OVERRIDE,
-# HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE.
+# HAL0_GPU_RENDER_GROUP_OVERRIDE, HAL0_GPU_USER_OVERRIDE, HAL0_GPU_KFD_PATH,
+# HAL0_GPU_AMD_OVERRIDE.
 # See docs/getting-started/proxmox.mdx for the full walkthrough.
 HAL0_GPU_RC_BROKEN_GID=3
 HAL0_GPU_RC_NO_DEVICE=4
+#       HAL0_GPU_RC_NO_KFD(5)     → an AMD GPU render node is visible but
+#                                    /dev/kfd is NOT: the ROCm compute node is
+#                                    missing, so llama.cpp silently falls back
+#                                    to the runner image's Vulkan backend,
+#                                    which emits INVALID TOKENS for every
+#                                    model while every health surface reads
+#                                    green (#1888). Caller allows an explicit
+#                                    CPU-only opt-in, same as NO_DEVICE.
+HAL0_GPU_RC_NO_KFD=5
+#       HAL0_GPU_RC_KFD_GID(6)    → /dev/kfd IS forwarded, but its owning gid
+#                                    differs from the render node's, so the
+#                                    hal0 user cannot open it even though the
+#                                    rootful slot containers can (#1953). A
+#                                    plain LXC dev passthrough produces exactly
+#                                    this: renderD128 lands root:render while
+#                                    the compute node lands root:root. Fixable
+#                                    IN PLACE — never tell the operator to
+#                                    re-forward a device that is already there.
+HAL0_GPU_RC_KFD_GID=6
 preflight_gpu() {
     local gate="${HAL0_GPU_GATE:-0}"
 
@@ -928,15 +948,16 @@ preflight_gpu() {
     [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
 
     local dri_glob="${HAL0_GPU_DRI_GLOB:-/dev/dri/renderD*}"
+    local kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
     local have_render="" have_kfd="" have_accel=""
     compgen -G "${dri_glob}" >/dev/null 2>&1 && have_render=1
-    [[ -e /dev/kfd ]] && have_kfd=1
+    [[ -e "${kfd_path}" ]] && have_kfd=1
     [[ -e /dev/accel/accel0 ]] && have_accel=1
 
     if [[ -n "${have_render}" ]]; then
         info "gpu: $(compgen -G "${dri_glob}" 2>/dev/null | tr '\n' ' ')present"
     fi
-    [[ -n "${have_kfd}"   ]] && info "gpu: /dev/kfd present (ROCm compute)"
+    [[ -n "${have_kfd}"   ]] && info "gpu: ${kfd_path} present (ROCm compute)"
     [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
 
     if [[ -z "${have_render}" ]]; then
@@ -944,7 +965,7 @@ preflight_gpu() {
             warn "gpu: no /dev/dri/renderD* inside this container — GPU slots will run CPU-only"
             warn "  Forward the devices from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf, PVE 8.2+):"
             warn "    dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>"
-            warn "    dev1: /dev/kfd                    # ROCm compute (optional)"
+            warn "    dev1: /dev/kfd                    # ROCm compute — REQUIRED for GPU LLM slots (#1888)"
             warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
             warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: https://hal0.dev/docs/getting-started/proxmox/"
             # Gated install: no devices in an LXC is the opt-in CPU-only case.
@@ -1023,7 +1044,166 @@ preflight_gpu() {
             fi
         fi
     fi
+
+    # ── AMD GPU lane availability (#1888 / #1948) ────────────────────────
+    # No /dev/kfd means no ROCm lane. Whether that is fatal depends entirely
+    # on whether the OTHER AMD GPU lane is real on this install.
+    #
+    # Under #1923 it never was: the pinned runner was one HIP+Vulkan build
+    # whose Vulkan backend emitted invalid tokens for every model, at full
+    # nominal speed, while HTTP 200, container health, `hal0 doctor` and the
+    # SSE done frame all read green — so a kfd-less AMD box had no lane that
+    # produced language, and the gate refused the install outright.
+    #
+    # #1948 fixed the image. A runner whose Vulkan backend is validated serves
+    # this box correctly on the render node alone — proven on the very box the
+    # defect was found on — so refusing here would now be refusing a working
+    # configuration. The gate therefore asks the same question the slot-load
+    # guard and the three device-derivation ladders ask, via the shell mirror
+    # above, and only refuses when the answer is no.
+    #
+    # AMD-only: the defect is characterised on the AMD/HIP build, and a
+    # non-AMD GPU has no /dev/kfd to forward in the first place.
+    local is_amd="${HAL0_GPU_AMD_OVERRIDE:-}"
+    if [[ -z "${is_amd}" ]]; then
+        [[ -d /sys/module/amdgpu ]] && is_amd=1
+    fi
+    if [[ -n "${is_amd}" && "${is_amd}" != "0" && -z "${have_kfd}" ]]; then
+        if [[ -n "${have_render}" ]] && _hal0_vulkan_lane_serves_default_image; then
+            # Vulkan is this box's GPU lane. Not a warning about a broken
+            # install — a description of a supported one.
+            info "gpu: no /dev/kfd (no ROCm compute node) — LLM slots will use the Vulkan lane"
+            info "  This install's runner image is validated for that lane (#1948), and every"
+            info "  slot must still pass the output-sanity readiness probe before serving (#1922)."
+            if [[ "${in_container}" == "lxc" ]]; then
+                info "  To ALSO enable the ROCm lane, forward it from the Proxmox HOST"
+                info "  (/etc/pve/lxc/<CTID>.conf):  dev1: /dev/kfd   then pct stop/start."
+            fi
+        else
+            warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
+            if [[ -z "${have_render}" ]]; then
+                warn "  and no render node either, so there is no Vulkan lane to fall back to."
+            else
+                warn "  and this install's runner image is not validated for the Vulkan lane,"
+                warn "  whose backend emits INVALID TOKENS for every model on the ade07ba"
+                warn "  lineage while all health checks read green (#1888)."
+            fi
+            warn "  Every GPU LLM slot would therefore refuse to start."
+            if [[ "${in_container}" == "lxc" ]]; then
+                warn "  Forward it from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf):"
+                warn "    dev1: /dev/kfd"
+                warn "  then: pct stop <CTID> && pct start <CTID>"
+            else
+                warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
+            fi
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_KFD}"
+        fi
+    fi
+
+    # ── ROCm compute-node group wiring (#1953) ───────────────────────────
+    # The node above exists — but a plain LXC `dev` passthrough hands it over
+    # as root:root 0660 while /dev/dri/renderD128 lands root:render 0660. The
+    # rootful slot containers open it regardless, so ROCm genuinely WORKS; the
+    # hal0 service user does not, so every hal0-user GPU probe reports the box
+    # unusable and #1923's guard then refuses every AMD GPU slot.
+    #
+    # The target gid comes from the RENDER NODE, never from `getent group
+    # render`: the kernel gates on the integer and the name for that integer is
+    # not portable (a halo143-class box has renderD128 owned by a gid whose
+    # /etc/group name is 'clock', while 'render' resolves to a different,
+    # useless gid). Same authority resolve_gpu_group_ids() already follows for
+    # --group-add, so the two devices cannot disagree.
+    if [[ -n "${have_kfd}" && -n "${node}" ]]; then
+        local kfd_path kfd_gid render_gid
+        kfd_path="${HAL0_GPU_KFD_PATH:-/dev/kfd}"
+        # Both gids come from the real nodes. Deliberately NOT
+        # HAL0_GPU_RENDER_GID_OVERRIDE: that override fakes the group-NAME
+        # mapping check above, and reusing it here would compare a claimed gid
+        # against a real one. HAL0_GPU_KFD_GID_OVERRIDE is this check's own
+        # seam, so divergence can be forced without needing two real groups.
+        kfd_gid="${HAL0_GPU_KFD_GID_OVERRIDE:-$(stat -c '%g' "${kfd_path}" 2>/dev/null || true)}"
+        render_gid="$(stat -c '%g' "${node}" 2>/dev/null || true)"
+        # Gate on the INACCESSIBLE shape, not on gid inequality. A differing gid
+        # is not itself a fault: a valid box can put /dev/kfd on `video` and the
+        # render nodes on `render`, and install.sh adds hal0 to BOTH; world bits
+        # or an ACL can grant access independently too. Rewriting those to the
+        # render group would remove access from video-only users and, on an
+        # unprivileged LXC, abort a fresh install over a working config.
+        #
+        # The shape that actually breaks is the plain-passthrough default:
+        # root-owned with no group the service user can ever be in (gid 0) and
+        # no world access. Only that is repaired.
+        local kfd_mode kfd_world_rw=0
+        kfd_mode="$(stat -c '%a' "${kfd_path}" 2>/dev/null || echo 000)"
+        case "${kfd_mode}" in *[67]) kfd_world_rw=1 ;; esac
+        if [[ -n "${kfd_gid}" && -n "${render_gid}" \
+            && "${kfd_gid}" != "${render_gid}" \
+            && "${kfd_gid}" == "0" \
+            && "${kfd_world_rw}" == "0" ]]; then
+            warn "gpu: ${kfd_path} is root-owned (gid ${kfd_gid}, mode ${kfd_mode}) while ${node} uses gid ${render_gid}"
+            warn "  The compute node is forwarded and the rootful slot containers can use it,"
+            warn "  but the hal0 service user cannot — so GPU slots get refused on a working box (#1953)."
+            warn "  Fix IN PLACE (no re-forward, no reboot):"
+            warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
+            warn "  Unprivileged LXC (chgrp returns EPERM): set it on the Proxmox host instead:"
+            warn "    dev1: ${kfd_path},gid=${render_gid}   (the gid INSIDE the container)"
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_KFD_GID}"
+        fi
+    fi
     return 0
+}
+
+# -- Vulkan-lane image gate (shell mirror of providers/_gpu, #1948) ---------
+# Answers the SAME question `default_image_serves_vulkan_lane()` answers in
+# Python: can this install's default runner image serve the Vulkan LLM lane?
+#
+# Why a mirror and not a call: preflight_gpu runs in Stage 1, BEFORE hal0 is
+# pip-installed, so `python3 -c "from hal0.config.schema import ..."` is not
+# available yet -- but the source tree it is about to install IS on disk next
+# to this script. So the two literals are read straight out of schema.py.
+#
+# CONSERVATIVE BY CONSTRUCTION, and blind in three specific ways. It reads the
+# two literals out of schema.py, so it sees neither the HAL0_TOOLBOX_IMAGE_*
+# env overrides nor the release manifest's digest pin that
+# resolve_runner_image() consults ahead of them, and it has no notion of the
+# runner IDENTITY that render_node_present() now evaluates (#1981) -- it only
+# asks whether a render node exists at all. Every one of those blindnesses
+# errs the same way: toward answering "no" or toward accepting a box the
+# load-time guard will re-examine anyway with better information. A false "no"
+# costs an operator a CPU-only install they could have avoided; a false "yes"
+# would ship a box that serves invalid tokens (#1888), and the real gate still
+# stands behind this one. That asymmetry is why the mirror is allowed to be
+# this crude rather than growing a uid model in bash -- the least testable
+# layer in the system is the wrong place to re-derive logic that already has a
+# tested implementation twenty seconds later in the install.
+#
+# It recognises only the single-member shape of VULKAN_CAPABLE_IMAGE_REFS (a
+# default equal to VULKAN_FIXED_IMAGE) and answers "no" to everything else,
+# including anything it cannot parse. tests/installer/test_preflight_gpu_gate.py
+# pins agreement with the Python predicate, and trips if the capable set ever
+# grows past one member without this mirror being taught about it.
+#
+# Test seams: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright),
+# HAL0_SCHEMA_PY_OVERRIDE (path to the schema.py to read).
+_hal0_vulkan_lane_serves_default_image() {
+    local override="${HAL0_GPU_VULKAN_LANE_OVERRIDE:-}"
+    if [[ -n "${override}" ]]; then
+        [[ "${override}" != "0" ]]
+        return
+    fi
+
+    local schema="${HAL0_SCHEMA_PY_OVERRIDE:-}"
+    if [[ -z "${schema}" ]]; then
+        local here
+        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+        schema="${here}/../../src/hal0/config/schema.py"
+    fi
+    [[ -r "${schema}" ]] || return 1
+
+    local default_ref fixed_ref
+    default_ref="$(sed -n 's/^DEFAULT_ROCMFPX_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
+    fixed_ref="$(sed -n 's/^VULKAN_FIXED_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
+    [[ -n "${default_ref}" && -n "${fixed_ref}" && "${default_ref}" == "${fixed_ref}" ]]
 }
 
 # ── Bootstrap-prereq parity (#1098) ────────────────────────────────────────
@@ -1299,6 +1479,14 @@ _hal0_seam_probe() {
     case "$1" in
         hal0-systemctl) printf 'help\n' ;;
         hal0-update)    printf 'check\n' ;;
+        # #1889: podman-ro is now the only source of truth for a running
+        # slot's image_status/actual_image, so a silently-missing grant stops
+        # being cosmetic. NOT `help` — the pre-#1889 wrapper implements that
+        # too, so a failed wrapper refresh would probe green while every new
+        # verb was rejected. `check-slot-token` is release-specific and
+        # side-effect-free (validates, prints the name it would build, never
+        # calls podman). Keep in lock-step with src/hal0/system/seam_check.py.
+        hal0-podman-ro) printf 'check-slot-token hal0probe\n' ;;
         *)              return 1 ;;
     esac
 }
@@ -1338,11 +1526,17 @@ _preflight_seam() {
 
     local probe
     if probe="$(_hal0_seam_probe "${name}")" && (( rc == 0 )); then
+        # Probes are hardcoded above, never caller input, so splitting the
+        # line into argv words is safe — and #1889 needs a probe that takes an
+        # argument (a verb-only probe cannot tell a stale wrapper from a
+        # current one).
+        local -a probe_argv=()
+        read -r -a probe_argv <<< "${probe}"
         # The grant is written for the hal0 user, so the only honest test runs
         # AS that user. -n keeps it non-interactive: a missing grant fails
         # immediately instead of prompting.
-        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe}" >/dev/null 2>&1; then
-            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply"
+        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe_argv[@]}" >/dev/null 2>&1; then
+            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply, or the wrapper is stale"
             rc=1
         fi
     fi
