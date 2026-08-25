@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
 from hal0.slots.manager import _CONFIG_DRIFT_KEYS, SlotManager, _argv_values
 from tests.slots.conftest import FakeContainerProvider
 
@@ -333,7 +334,7 @@ async def test_stale_image_surfaces_as_drift_even_with_matching_argv(
         {
             "key": "image",
             "running": "ghcr.io/hal0ai/hal0-toolbox-cpu:retired",
-            "rendered": "ghcr.io/hal0ai/hal0-combined:0822",
+            "rendered": DEFAULT_ROCMFPX_IMAGE,
         }
     ]
 
@@ -346,7 +347,7 @@ async def test_matching_image_is_not_drift(
     matching_argv = ["--model", "/mnt/ai-models/qwen.gguf"]
     container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
     container_stub.running_argv_by_slot["chat"] = list(matching_argv)
-    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-combined:0822"
+    container_stub.running_image_by_slot["chat"] = DEFAULT_ROCMFPX_IMAGE
 
     sm = SlotManager()
     await sm.load("chat")
