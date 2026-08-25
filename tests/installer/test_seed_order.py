@@ -38,3 +38,31 @@ def test_seed_copy_loop_runs_before_hal0_setup_auto() -> None:
         "profile, brain's brain profile, embed's 4096 context, ...) never "
         "reach a fresh box. The seed-copy loop must run first."
     )
+
+
+def test_seed_device_derivation_runs_after_copy_loop_and_before_setup() -> None:
+    """GH #2023: the copy loop is verbatim by design (curated seeds), so a
+    derivation pass over the freshly seeded slots must follow it — routed
+    through hal0.install.static_seeds so bash and the api-lifespan closer share
+    one implementation — and it must land BEFORE `hal0 setup --auto`, which
+    treats an existing file as operator intent and never touches it again."""
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+
+    seed_loop_marker = (
+        "for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do"
+    )
+    derive_marker = "-m hal0.install.static_seeds"
+    setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
+
+    assert derive_marker in text, (
+        "install.sh never routes the freshly copied slot seeds through "
+        "hal0.install.static_seeds device derivation — every llama.cpp seed "
+        "ships device = gpu-rocm verbatim and a kfd-less fresh install has "
+        "zero loadable LLM slots (#2023)."
+    )
+    assert (
+        text.index(seed_loop_marker) < text.index(derive_marker) < text.index(setup_call_marker)
+    ), (
+        "the seed device derivation pass must run after the verbatim copy "
+        "loop and before hal0 setup --auto (#2023)"
+    )

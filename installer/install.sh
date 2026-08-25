@@ -2014,6 +2014,33 @@ for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
     fi
 done
 
+# ── Seed device derivation (#2023) ───────────────────────────────────────
+# The loop above copies VERBATIM on purpose (curated profiles/ports must land
+# byte-for-byte), but every llama.cpp seed ships device = "gpu-rocm" — the
+# reference platform. On a box without /dev/kfd the load-time gate
+# (_gpu.require_kfd_for_gpu_slot) refuses that device by name, so a fresh
+# kfd-less install shipped ZERO loadable LLM slots and the autoload:true
+# brain anchor sat in state=error from t=0 — while the preflight above
+# printed "LLM slots will use the Vulkan lane". Route the freshly copied
+# seeds through the SAME derivation `hal0 setup --auto` uses
+# (hal0.install.profile_derive.derive_device): usable kfd keeps gpu-rocm
+# (operator ruling — ROCm stays the default where the compute node works),
+# a render-node box with a Vulkan-capable runner image derives gpu-vulkan,
+# a no-GPU box derives cpu. Non-llama seeds (flm/tts/img/qwen3tts) have
+# their own device logic and stay verbatim; slots that already existed (or
+# are tombstoned) never entered SEEDED_NEW_SLOTS and are never touched.
+# Must run BEFORE `hal0 setup --auto` below: setup treats an existing slot
+# file as operator intent and will never relabel it. Fail-soft: a failed
+# derivation keeps the shipped labels (the load-time refusal is loud and
+# names its remedy) and never fails the install.
+if (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
+    if ! "${VENV_DIR}/bin/python" -m hal0.install.static_seeds \
+            --slots-dir "${ETC_DIR}/slots" "${SEEDED_NEW_SLOTS[@]}"; then
+        warn "seed device derivation failed — freshly seeded slots keep their shipped device labels;"
+        warn "  on a box without /dev/kfd fix per slot with: hal0 slot edit <slot> --hardware vulkan (or cpu)"
+    fi
+fi
+
 # EXPECTED, NOT A BUG: the loop above closes gaps, so upgrading a box that
 # predates a curated slot ADDS it (most often `utility`, added after the
 # original seed set). A parallel boot-time closer does the same thing —
