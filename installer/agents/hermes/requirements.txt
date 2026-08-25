@@ -13,4 +13,12 @@
 # unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST
 # + HERMES_DASHBOARD_TUI in the unit drop-in). Without it the unit
 # crash-loops on `No module named 'fastapi'`.
-hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@9de9c25f620ff7f1ce0fd5457d596052d5159596
+#
+# The `mcp` extra pulls the MCP client (`mcp==...`), which upstream gates
+# behind this extra. Without it the venv has NO `mcp` package: both MCP
+# servers hal0 provisions into config.yaml (hal0-admin, hal0-memory) are
+# dead while `hermes mcp list` still prints ✓ (#2021,
+# `hermes-venv-missing-mcp-extra`). The provisioning `mcp_wire` phase now
+# hard-fails when the venv client cannot import/connect — do not drop this
+# extra.
+hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@9de9c25f620ff7f1ce0fd5457d596052d5159596

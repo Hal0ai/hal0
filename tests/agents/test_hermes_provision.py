@@ -1445,7 +1445,8 @@ def test_mcp_wire_phase_returns_ok_with_tools_when_servers_respond(
 ) -> None:
     state = hp.BootstrapState()
     io = hp.InstallIO(
-        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1", "t2"], "error": None}
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1", "t2"], "error": None},
+        probe_mcp_client=_client_probe_ok,
     )
     monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
     out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
@@ -1472,7 +1473,7 @@ def test_mcp_wire_phase_probes_mount_root_not_double_mcp_suffixed(
         return {"ok": True, "tools": ["t1"], "error": None}
 
     state = hp.BootstrapState()
-    io = hp.InstallIO(probe_mcp_server=_fake_probe)
+    io = hp.InstallIO(probe_mcp_server=_fake_probe, probe_mcp_client=_client_probe_ok)
     monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
     hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
 
@@ -1492,7 +1493,8 @@ def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
             "ok": False,
             "tools": [],
             "error": "connection refused",
-        }
+        },
+        probe_mcp_client=_client_probe_ok,
     )
     monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
     out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
@@ -1500,6 +1502,166 @@ def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
     assert out.status == hp.PhaseStatus.OK
     assert out.details["servers"]["hal0-admin"]["status"] == "degraded"
     assert "connection refused" in out.details["warnings"][0]
+
+
+# ── #2021 — mcp_wire must verify the hermes CLIENT, not just the server ──────
+#
+# rc.7 shipped a hermes venv with NO ``mcp`` package at all
+# (``hermes-agent[web]`` without the ``mcp`` extra) and mcp_wire still
+# reported ``status: ok, mcp_server_count: 2`` — every probe went through the
+# bootstrap's own stdlib HTTP client, never through the client hermes actually
+# uses. These tests pin the honest contract: a hermes venv whose MCP client
+# cannot import or cannot connect to a provably-live server is a hard phase
+# FAIL, typed in the details, never a green checkpoint.
+
+
+def _client_probe_ok(_python: object, url: object, **_kw: object) -> dict[str, object]:
+    """A hermes-venv client probe that imports and connects."""
+    if url is None:
+        return {"ok": True, "stage": "import", "tools": [], "error": None}
+    return {"ok": True, "stage": "connected", "tools": ["t1", "t2"], "error": None}
+
+
+def test_mcp_wire_phase_fails_when_hermes_client_cannot_import_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``mcp`` package in the hermes venv → FAIL, not ok (#2021)."""
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+        probe_mcp_client=lambda _python, _url, **_kw: {
+            "ok": False,
+            "stage": "import",
+            "tools": [],
+            "error": "ModuleNotFoundError: No module named 'mcp'",
+        },
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    client = out.details["mcp_client"]
+    assert client["ok"] is False
+    assert client["stage"] == "import"
+    assert "No module named 'mcp'" in (out.reason or "")
+
+
+def test_mcp_wire_phase_fails_when_client_cannot_connect_to_live_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server answers the raw HTTP probe but the hermes client cannot connect
+    → the client is the defect and the phase must FAIL, not warn (#2021)."""
+
+    def _client_probe(_python: object, url: object, **_kw: object) -> dict[str, object]:
+        if url is None:
+            return {"ok": True, "stage": "import", "tools": [], "error": None}
+        return {
+            "ok": False,
+            "stage": "connect",
+            "tools": [],
+            "error": "mcp.client.streamable_http is not available",
+        }
+
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+        probe_mcp_client=_client_probe,
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.details["servers"]["hal0-admin"]["client"]["status"] == "failed"
+    assert "streamable_http" in (out.reason or "")
+
+
+def test_mcp_wire_phase_probes_client_with_venv_python_and_transport_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client probe runs the HERMES VENV interpreter against the FULL
+    transport URL (the exact url config.yaml hands hermes) — probing any
+    other interpreter or endpoint re-opens the #2021 blind spot."""
+    seen: list[tuple[str, object]] = []
+
+    def _client_probe(python: object, url: object, **_kw: object) -> dict[str, object]:
+        seen.append((str(python), url))
+        return _client_probe_ok(python, url)
+
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+        probe_mcp_client=_client_probe,
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    venv_python = str(hp._venv_python(Path(state.venv)))
+    assert (venv_python, None) in seen  # the standalone import assertion
+    assert (venv_python, "http://127.0.0.1:8080/mcp/admin/mcp") in seen
+    assert (venv_python, "http://127.0.0.1:8080/mcp/memory/mcp") in seen
+    assert out.details["mcp_client"]["ok"] is True
+    assert out.details["servers"]["hal0-admin"]["client"]["status"] == "ok"
+
+
+def test_mcp_wire_phase_degraded_server_stays_warning_when_client_imports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that fails BOTH probes is still the ADR-0013 warm-up warning —
+    the client cannot be blamed for a server that is provably down."""
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_server=lambda url, **_kw: {
+            "ok": False,
+            "tools": [],
+            "error": "connection refused",
+        },
+        probe_mcp_client=lambda _python, url, **_kw: (
+            {"ok": True, "stage": "import", "tools": [], "error": None}
+            if url is None
+            else {"ok": False, "stage": "connect", "tools": [], "error": "connection refused"}
+        ),
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["servers"]["hal0-admin"]["status"] == "degraded"
+
+
+def test_smoke_admin_tools_list_probes_through_hermes_client() -> None:
+    """The admin_tools_list smoke goes THROUGH the hermes venv's own MCP
+    client — probing the server with the bootstrap's stdlib HTTP client is
+    exactly the blind spot that let #2021 read green over a dead client."""
+    seen: list[tuple[str, object]] = []
+
+    def _client_probe(python: object, url: object, **_kw: object) -> dict[str, object]:
+        seen.append((str(python), url))
+        return {
+            "ok": True,
+            "stage": "connected",
+            "tools": ["a", "b", "c", "d", "e", "f"],
+            "error": None,
+        }
+
+    state = hp.BootstrapState()
+    io = hp.InstallIO(probe_mcp_client=_client_probe)
+    passed, detail = hp._smoke_admin_tools_list(state, io)
+    assert passed is True
+    assert seen == [(str(hp._venv_python(Path(state.venv))), "http://127.0.0.1:8080/mcp/admin/mcp")]
+    assert "6 tools" in detail
+
+
+def test_smoke_admin_tools_list_fails_when_hermes_client_cannot_import() -> None:
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_client=lambda _python, _url, **_kw: {
+            "ok": False,
+            "stage": "import",
+            "tools": [],
+            "error": "ModuleNotFoundError: No module named 'mcp'",
+        }
+    )
+    passed, detail = hp._smoke_admin_tools_list(state, io)
+    assert passed is False
+    assert "import" in detail
+    assert "No module named 'mcp'" in detail
 
 
 # ── #243 phase impl — namespace_register + identity card schema ─────────────
@@ -1708,7 +1870,8 @@ def test_mcp_wire_phase_skips_server_not_in_allowlist(
         lambda *_a, **_kw: {"hal0-admin": {"builtin": True}},
     )
     io = hp.InstallIO(
-        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None}
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+        probe_mcp_client=_client_probe_ok,
     )
     out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.OK

@@ -358,9 +358,23 @@ def test_installer_pins_reviewed_official_commit() -> None:
     requirements = (_REPO_ROOT / "installer/agents/hermes/requirements.txt").read_text()
 
     assert (
-        "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
+        "hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@"
         f"{HERMES_COMMIT}" in requirements
     )
+
+
+def test_installer_requests_the_mcp_extra() -> None:
+    """Upstream gates its MCP client behind the ``mcp`` extra. Shipping
+    ``hermes-agent[web]`` alone builds a venv with NO ``mcp`` package — both
+    hal0-provisioned MCP servers dead while every self-check read green
+    (#2021, ``hermes-venv-missing-mcp-extra``). The active requirement line
+    must always request it."""
+    from hal0.agents.hermes_provision import _hermes_requirement_line
+
+    requirements = (_REPO_ROOT / "installer/agents/hermes/requirements.txt").read_text()
+    line = _hermes_requirement_line(requirements)
+    extras = line.split("[", 1)[1].split("]", 1)[0].split(",")
+    assert "mcp" in [e.strip() for e in extras], line
 
 
 def _upstream_pin() -> dict:

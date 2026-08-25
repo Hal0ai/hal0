@@ -259,6 +259,14 @@ def install_io(hp, *, record: list[list[str]] | None = None, slots=None):
             "tools": ["t1", "t2", "t3", "t4", "t5"],
             "error": None,
         },
+        # The hermes-venv client probe (#2021): a healthy fake box imports
+        # and connects — mcp_wire / admin_tools_list now hard-require it.
+        probe_mcp_client=lambda _python, url, **k: {
+            "ok": True,
+            "stage": "import" if url is None else "connected",
+            "tools": [] if url is None else ["t1", "t2", "t3", "t4", "t5"],
+            "error": None,
+        },
         mcp_memory_call=_memory,
         install_venv=_install_venv,
         read_env_probe=lambda: {
