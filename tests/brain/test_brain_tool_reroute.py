@@ -248,21 +248,29 @@ def test_a_reply_that_merely_mentions_a_tool_is_not_rerouted() -> None:
     Names a surfaced tool, in call form, in the reasoning — but `content` is
     non-empty, so the turn produced an actual answer and there is nothing to
     recover.
+
+    The prompt is deliberately a CONCEPTUAL one. A live-state question answered
+    with prose and no tool call is a different failure (#2022) with a different
+    remedy — it reroutes on the grounding rule, see
+    tests/brain/test_brain_live_state_grounding.py — and would confound what
+    this test is about.
     """
     stub = _StubLLM(
         [
             _leaked(
-                "You can see them on the Slots page.",
-                reasoning="I could call list_slots() but the operator only asked where.",
+                "A slot is a named inference unit; you can see yours on the Slots page.",
+                reasoning="I could call list_slots() but the operator only asked what one is.",
             )
         ]
     )
     request = _fake_request(stub, model="hal0/brain", tool_model="hal0/agent")
 
-    events = _run(_collect(request))
+    events = _run(_collect(request, {"messages": [{"role": "user", "content": "What is a slot?"}]}))
 
     assert stub.models == ["hal0/brain"]
-    assert _tokens(events) == "You can see them on the Slots page."
+    assert (
+        _tokens(events) == "A slot is a named inference unit; you can see yours on the Slots page."
+    )
 
 
 def test_a_usable_brain_tool_call_is_not_re_run() -> None:
@@ -868,7 +876,11 @@ def test_a_tool_format_reject_is_learned_and_the_round_is_salvaged() -> None:
     """The runtime half of the gate. "Assume capable" is only safe because a
     runner that turns out NOT to be teaches the gate on its first failure:
     THIS round retries tools-less (no 500 reaches the operator) and every
-    later turn on that image goes out tools-less from the start."""
+    later turn on that image goes out tools-less from the start.
+
+    Plain-chat prompt on purpose: a live-state question would additionally
+    reroute the salvaged round on the #2022 grounding rule, which is asserted
+    in tests/brain/test_brain_live_state_grounding.py, not here."""
     _clear_learned()
     try:
         stub = _StubLLM([{"error": _PEG_FORMAT_ERROR}, _final("Plain answer.")])
@@ -878,7 +890,7 @@ def test_a_tool_format_reject_is_learned_and_the_round_is_salvaged() -> None:
             model="hal0/brain",
         )
 
-        events = _run(_collect(request))
+        events = _run(_collect(request, {"messages": [{"role": "user", "content": "say hello"}]}))
 
         assert stub.calls[0].get("tools"), "first attempt should try the native fast path"
         assert not stub.calls[1].get("tools"), "the retry must drop tools"

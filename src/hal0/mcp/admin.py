@@ -2537,7 +2537,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "model_list": "Aggregate models from local registry + upstreams.",
     "model_show": "Show a single model's full metadata (registry + upstream).",
     "model_scan_preview": "Preview what a model scan would register (dry run).",
-    "model_catalogue": "List the curated catalogue of blessed models.",
+    "model_catalogue": (
+        "List the curated REMOTE catalogue of blessed models available to "
+        "download. This is what COULD be pulled, not what is installed or "
+        "registered on this box — use model_list for that."
+    ),
     "model_update_check": "Check which HF-backed models have updates available.",
     "model_pulls_list": "List all pull jobs (in-flight + terminal).",
     "model_pull_status": "Get one model's pull-job progress (state, %, speed, ETA).",

@@ -227,15 +227,31 @@ Tool surfaces:
   panel — when that happens, say what you queued and why, then wait.
 
 Rules:
-- You cannot see state unless you look. Call the matching read tool first and
-  resolve exact task ids / slot names before mutating. Never guess ids.
+- GROUND EVERY CLAIM ABOUT THIS BOX IN A TOOL RESULT. You cannot see state
+  unless you look. Any question about live state — which slots exist, what is
+  loaded, which port something is on, how many models are registered, hardware
+  numbers, what is on the board — is answered by CALLING the matching read tool
+  first and reporting what it returned. Never state a port, count, name, path,
+  size or status you have not just read from a tool result in this turn. If you
+  cannot call the tool, say so plainly: an admitted gap beats a confident guess.
+- BREVITY NEVER CANCELS A TOOL CALL. "Answer in one short sentence", "quickly",
+  "just tell me" constrain the WORDING of your reply, never whether you look it
+  up. Call the tool, then answer in one sentence.
+- MATCH THE TOOL TO THE SUBJECT OF THE QUESTION. Slots, ports, what is running
+  or loaded -> list_slots / get_slot. What is installed or registered HERE ->
+  list_models. What could be downloaded from upstream -> model_catalogue (that
+  is the remote catalogue; it says nothing about this box). Hardware/VRAM ->
+  hardware_stats. Tasks and lanes -> get_board. The board is tasks ONLY: it
+  never answers a slot, model, port or hardware question.
+- Resolve exact task ids / slot names before mutating. Never guess ids.
 - Board mutations are audited and land on the live board immediately.
 - Slot load/unload/restart are DISRUPTIVE (they can evict models and drop
   in-flight requests): do them only when the operator explicitly asks, and
   state what you did.
 - For multi-step work (create a slot, set up a model, run a benchmark) lay
   out the short plan first, then execute step by step, reporting progress.
-- Prefer a clarifying question over a destructive guess. Keep replies short.
+- Prefer a clarifying question over a destructive guess. Keep replies short —
+  short AFTER you have looked, never instead of looking.
 """
 
 
@@ -321,8 +337,10 @@ def _tool_schemas() -> list[dict[str, Any]]:
     return [
         _fn(
             "get_board",
-            "Read the whole board: every task's id/title/status/assignee/"
-            "priority. Call this FIRST to resolve task ids before mutating.",
+            "Read the whole TASK board (kanban): every task's id/title/status/"
+            "assignee/priority. Tasks only — it says nothing about slots, "
+            "models, ports or hardware. Call this first to resolve task ids "
+            "before mutating a task.",
             {},
             [],
         ),
@@ -358,14 +376,17 @@ def _tool_schemas() -> list[dict[str, Any]]:
         ),
         _fn(
             "list_slots",
-            "List the inference slots: name, state (serving/ready/warming/idle/"
-            "offline/error), model, backend, throughput.",
+            "List this box's inference slots: name, state (serving/ready/"
+            "warming/idle/offline/error), model, backend, PORT and throughput. "
+            "Use for any question about what is running or loaded right now, "
+            "or which port a slot is bound to.",
             {},
             [],
         ),
         _fn(
             "get_slot",
-            "Read one inference slot in detail.",
+            "Read one of this box's inference slots in detail: state, bound "
+            "model, backend, port, context length.",
             {"name": {"type": "string"}},
             ["name"],
         ),
@@ -391,7 +412,10 @@ def _tool_schemas() -> list[dict[str, Any]]:
         ),
         _fn(
             "list_models",
-            "List the model library (installed + known models).",
+            "List the models REGISTERED ON THIS BOX (the local model library: "
+            "installed artefacts plus registry entries). Use for 'how many "
+            "models do I have', 'which models are registered/installed here'. "
+            "This is NOT the remote downloadable catalogue (model_catalogue).",
             {},
             [],
         ),
@@ -1356,6 +1380,105 @@ def _tool_intent_artefact(response: dict[str, Any], known_tool_names: frozenset[
     return matches[0] if matches else None
 
 
+# ── live-state grounding (#2022) ────────────────────────────────────────────
+#
+# `_tool_intent_artefact` above only catches a round where the small brain model
+# TRIED to call a tool and produced garbage. rc.7 validation found the other
+# half of the same defect: on the shipped ~1.1B `hal0-brain-sft` anchor the
+# model frequently does not try AT ALL — it answers "what port is the brain slot
+# running on?" with a confident, invented port and ZERO tool frames. Measured
+# 2/2 both directions: appending "Answer in one short sentence." to an otherwise
+# correctly-tool-grounded question is enough to suppress the tool round, because
+# a 1B reads a brevity instruction as permission to skip the lookup (and the
+# steward system prompt's own "Keep replies short" agreed with it).
+#
+# Nothing downstream can tell an invented port from a real one, so grounding
+# cannot be left to the model's discretion on this model class. The question
+# itself is the signal available BEFORE the answer exists: when the operator
+# asks about live box state and the chat round comes back with no tool call and
+# no artefact, that round is treated exactly like a garbled one — discarded and
+# re-run on `tool_model`, the same capable model an artefact reroutes to. It
+# costs one extra completion only on a turn that asked about live state and got
+# an ungrounded answer, and it is a no-op wherever there is nothing to reroute
+# to (`tool_model` off, or equal to the chat model) — those turns keep their
+# existing behaviour, backed by the `_tools_unavailable_notice` honesty layer
+# and the system prompt's grounding rules.
+
+#: Subjects only the live box can answer for. Broad on purpose — the cost of a
+#: false positive is one extra completion on the tool-capable model, while the
+#: cost of a false negative is a fabricated port number presented as fact.
+_LIVE_STATE_SUBJECT_RE = re.compile(
+    r"\b("
+    r"slots?|ports?|models?|gguf|runners?|backends?|"
+    r"vram|gtt|ram|gpu|npu|hardware|utili[sz]ation|temperature|"
+    r"benchmarks?|agents?|profiles?|stacks?|approvals?|"
+    r"board|tasks?|lanes?|queue|dispatcher|orchestration|"
+    r"logs?|uptime|disk|storage|settings?|version|install(?:er|ation)?s?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+#: Interrogative / imperative shapes. A statement that merely mentions a slot is
+#: not a live-state question.
+_LIVE_STATE_ASK_RE = re.compile(
+    r"\?|\b("
+    r"list|show|check|tell me|give me|what|which|where|when|who|how many|how much|"
+    r"do i|are there|is there|any|status|state|right now|currently|"
+    r"running|loaded|bound|registered|installed|enabled|available|serving"
+    r")\b",
+    re.IGNORECASE,
+)
+
+#: Conceptual / how-to phrasings that ask about hal0 as a SYSTEM rather than
+#: about this box's current state. ``what is a slot`` is documentation; ``what
+#: is the port of the brain slot`` is live state — hence the indefinite article.
+_CONCEPTUAL_RE = re.compile(
+    r"\bwhat(?:'s| is| are)\s+(?:a|an)\b|\bwhat does\b.*\bmean\b|"
+    r"\bhow do(?:es)? (?:i|you|it|they)\b|\bexplain\b|\bdifference between\b|"
+    r"\bshould i\b|\bwhy (?:do|does|is|are)\b",
+    re.IGNORECASE,
+)
+
+
+def _message_text(message: Any) -> str:
+    """The text of one chat message, flattening the OpenAI content-parts shape."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str)
+        )
+    return ""
+
+
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    """The most recent user turn's text (the question this turn must answer)."""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            return _message_text(message)
+    return ""
+
+
+def _asks_for_live_state(text: str) -> bool:
+    """Whether ``text`` asks something only a tool call can answer truthfully.
+
+    Deliberately a QUESTION-side check, not an answer-side one: by the time the
+    reply exists, an invented port and a real one are the same string. Requires
+    a live-state subject AND an interrogative/imperative shape, and excludes
+    conceptual "what is a slot" / "how do I ..." phrasings that the steward's
+    own system prompt can answer without looking anything up.
+    """
+    probe = (text or "").strip()
+    if not probe:
+        return False
+    if _CONCEPTUAL_RE.search(probe):
+        return False
+    return bool(_LIVE_STATE_SUBJECT_RE.search(probe)) and bool(_LIVE_STATE_ASK_RE.search(probe))
+
+
 def _tool_reroute_unavailable_message(tool_model: str, error: str) -> str:
     """What the steward SAYS when the reroute target has no model behind it.
 
@@ -1539,6 +1662,7 @@ def _tool_routing_llm(
     known_tool_names: frozenset[str],
     chat_model_native_tools: bool = True,
     chat_model_image: str | None = None,
+    grounding_required: bool = False,
 ) -> LlmFn:
     """Wrap ``llm`` so TOOL rounds run on ``tool_model`` and chat stays on the brain.
 
@@ -1570,6 +1694,14 @@ def _tool_routing_llm(
     the turn and (b) remember the image for every later turn (#1789 — the gate
     is capability-based now, so "assume capable" needs a runtime correction
     path). ``None`` keeps the old behaviour: no learning, no retry.
+
+    ``grounding_required`` (#2022, see :func:`_asks_for_live_state`) says the
+    operator asked about LIVE box state on this turn. A chat round that answers
+    such a question with neither a tool call nor a tool-call artefact is an
+    UNGROUNDED answer — on the shipped 1.1B anchor, reliably a fabricated one —
+    so it is discarded and re-run on ``tool_model`` exactly as a garbled round
+    is. It can fire at most once per turn (the reroute puts the turn in a tool
+    chain), and never on the no-reroute path, which has nowhere to send it.
 
     See the module comment above this function for the full routing semantics
     and why the tool-capable model — not the 1B — finishes a tool chain.
@@ -1662,18 +1794,30 @@ def _tool_routing_llm(
             return response
 
         wanted = _tool_intent_artefact(response, known_tool_names)
-        if wanted is None:
+        if wanted is None and not grounding_required:
             return response  # plain chat — the steward's own reply stands.
 
-        # The brain tried and produced garbage. Discard it and re-run THIS
-        # round on the tool-capable model. This is one extra completion inside
-        # one engine round, so `[brain_chat] max_rounds` still bounds the turn.
-        log.info(
-            "hal0.brain_chat.tool_round_rerouted",
-            tool=wanted,
-            chat_model=chat_model,
-            tool_model=tool_model,
-        )
+        if wanted is None:
+            # #2022: a live-state question answered with no tool call at all.
+            # The 1B did not garble a call, it skipped one — which on this
+            # model class means the answer is invented. Same remedy: discard
+            # and hand the round to the tool-capable model.
+            log.info(
+                "hal0.brain_chat.ungrounded_round_rerouted",
+                chat_model=chat_model,
+                tool_model=tool_model,
+            )
+        else:
+            # The brain tried and produced garbage. Discard it and re-run THIS
+            # round on the tool-capable model. This is one extra completion
+            # inside one engine round, so `[brain_chat] max_rounds` still
+            # bounds the turn.
+            log.info(
+                "hal0.brain_chat.tool_round_rerouted",
+                tool=wanted,
+                chat_model=chat_model,
+                tool_model=tool_model,
+            )
         in_tool_chain = True
         body["model"] = tool_model
         return await _degrade(await llm(body))
@@ -1939,6 +2083,12 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     # answered False for every CPU-only/CUDA box and muted tools there.)
     chat_model_image = await _resolved_slot_image(request, model)
     chat_model_native_tools = _image_native_tools(chat_model_image)
+    # GROUNDING (#2022). Did the operator ask about live box state? If so, a
+    # chat round that comes back with no tool call is an answer the brain
+    # cannot have known — reroute it to the tool model rather than stream a
+    # fabricated port/count to the operator. Question-side, because after the
+    # fact an invented value is indistinguishable from a read one.
+    grounding_required = bool(tools) and _asks_for_live_state(_last_user_text(messages))
     llm = _tool_routing_llm(
         llm,
         chat_model=model,
@@ -1946,6 +2096,7 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
         known_tool_names=known_tool_names,
         chat_model_native_tools=chat_model_native_tools,
         chat_model_image=chat_model_image,
+        grounding_required=grounding_required,
     )
 
     # HONESTY (#1789). Tools surfaced in the prompt but no round can actually
@@ -2148,6 +2299,7 @@ __all__ = [
     "PRIMARY_SLOT_MODEL",
     "_admin_tool_names",
     "_admin_tool_schemas",
+    "_asks_for_live_state",
     "_assistant_message",
     "_assistant_text",
     "_assistant_thinking",
@@ -2165,6 +2317,7 @@ __all__ = [
     "_frame_messages",
     "_is_admin_tool_excluded",
     "_is_read_tool",
+    "_last_user_text",
     "_parse_text_tool_calls",
     "_resolve_platform_tool",
     "_resolve_tool",
