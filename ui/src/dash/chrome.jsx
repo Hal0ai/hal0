@@ -409,7 +409,9 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
     connections: ["Network", "Connections"],
-    profiles:  ["iGPU Slots", "Profiles"],
+    // (runner-catalogue-v2: the legacy top-level "profiles" route is gone —
+    // #profiles now redirects to the Models ▸ Profiles tab in main.jsx, so
+    // the Models labels apply.)
     board:     ["Orchestration", "Board"],
     benchmarks: ["Performance", "Benchmarks"],
     services:  ["Companions", "Services"],
@@ -489,13 +491,19 @@ function useNavItems() {
   return [
     { id: "dashboard", label: "Overview", icon: Icons.dashboard },
     // v0.5 nav: Slots hosts Endpoints (local OpenAI endpoints, from the old
-    // Connections page) and Profiles (container-slot templates, #658) as tabs.
+    // Connections page) as a tab; runner-catalogue-v2 adds Runner Images (the
+    // container images slots run on — a lifecycle concern, so it lives here,
+    // not under the model catalog) and moves Profiles under Models.
     { id: "slots", label: "Slots", icon: Icons.slots, cnt: slotCount, children: [
-      { id: "slots/endpoints", label: "Endpoints" },
-      { id: "slots/profiles",  label: "Profiles" },
-      { id: "slots/stacks",    label: "Stacks" },
+      { id: "slots/endpoints",     label: "Endpoints" },
+      { id: "slots/runner-images", label: "Runner Images" },
+      { id: "slots/stacks",        label: "Stacks" },
     ] },
-    { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
+    // Profiles (container-slot templates, #658) template what a slot SERVES —
+    // model-catalog territory — so runner-catalogue-v2 files them under Models.
+    { id: "models", label: "Models", icon: Icons.models, cnt: modelCount, children: [
+      { id: "models/profiles", label: "Profiles" },
+    ] },
     // The Operator Board (#board) is no longer a top-level nav row — it lives
     // in the sidebar Services zone (ServiceLinks) as the "Kanban" option, and
     // stays reachable via ⌘B.

@@ -17,6 +17,7 @@ import {
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
+import { RunnerImagesView } from '@/dash/runner-images.jsx'
 import { ActivityLog } from './activity-log.jsx'
 import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
@@ -620,7 +621,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
   // tab instead of a SlotCard in the Image group.
   const [tab, setTab] = useStateS(
-    slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks" || slotParam === "image"
+    slotParam === "endpoints" || slotParam === "runner-images" || slotParam === "stacks" || slotParam === "image"
       ? slotParam
       : "inference",
   );
@@ -671,13 +672,15 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     }
   }, [slotParam, slots]);
 
-  // v0.5 nav: sidebar sub-links #slots/endpoints and #slots/profiles select the
-  // matching tab; #slots/image deep-links the ComfyUI pane (AI Capabilities →
-  // Image generation links here); navigating back to bare #slots (or a
-  // slot-name param) drops out of a sub-tab back to Inference.
+  // v0.5 nav: sidebar sub-links #slots/endpoints and #slots/runner-images
+  // select the matching tab (runner-catalogue-v2: Profiles moved to Models ▸
+  // Profiles — main.jsx redirects the legacy #slots/profiles deep-links);
+  // #slots/image deep-links the ComfyUI pane (AI Capabilities → Image
+  // generation links here); navigating back to bare #slots (or a slot-name
+  // param) drops out of a sub-tab back to Inference.
   React.useEffect(() => {
-    if (slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks" || slotParam === "image") setTab(slotParam);
-    else setTab((t) => (t === "endpoints" || t === "profiles" || t === "stacks" ? "inference" : t));
+    if (slotParam === "endpoints" || slotParam === "runner-images" || slotParam === "stacks" || slotParam === "image") setTab(slotParam);
+    else setTab((t) => (t === "endpoints" || t === "runner-images" || t === "stacks" ? "inference" : t));
   }, [slotParam]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
@@ -856,12 +859,13 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     );
   }
 
-  // Sub-tabs (Endpoints / Profiles / Stacks) are slot-independent surfaces —
-  // they must stay reachable even while /api/slots is loading or has resolved
-  // empty (a fresh box with no slots is exactly when you want to apply a Stack
-  // or pick a Profile). Only the slot-centric Inference/Image tabs fall through
-  // to the loading skeleton / empty state below.
-  const onSubTab = tab === "endpoints" || tab === "profiles" || tab === "stacks";
+  // Sub-tabs (Endpoints / Runner Images / Stacks) are slot-independent
+  // surfaces — they must stay reachable even while /api/slots is loading or
+  // has resolved empty (a fresh box with no slots is exactly when you want to
+  // apply a Stack or pull a runner image). Only the slot-centric
+  // Inference/Image tabs fall through to the loading skeleton / empty state
+  // below.
+  const onSubTab = tab === "endpoints" || tab === "runner-images" || tab === "stacks";
 
   // Loading skeleton — shown while /api/slots is still resolving so no
   // fake/stub slot cards flash before real data arrives.
@@ -1024,11 +1028,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         </button>
         <button
           role="tab"
-          aria-selected={tab === "profiles"}
-          className={"slot-tab" + (tab === "profiles" ? " on" : "")}
-          onClick={() => { window.location.hash = "#slots/profiles"; }}
+          aria-selected={tab === "runner-images"}
+          className={"slot-tab" + (tab === "runner-images" ? " on" : "")}
+          onClick={() => { window.location.hash = "#slots/runner-images"; }}
         >
-          <span>Profiles</span>
+          <span>Runner Images</span>
         </button>
         <button
           role="tab"
@@ -1045,8 +1049,8 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           {window.LocalEndpointsPanel ? <window.LocalEndpointsPanel /> : null}
           {window.UpstreamProvidersPanel ? <window.UpstreamProvidersPanel /> : null}
         </div>
-      ) : tab === "profiles" ? (
-        window.ProfilesView ? <window.ProfilesView /> : null
+      ) : tab === "runner-images" ? (
+        <RunnerImagesView />
       ) : tab === "stacks" ? (
         window.StacksView ? <window.StacksView /> : null
       ) : (

@@ -51,10 +51,12 @@ _SCALAR_FIELDS = (
 def _row_to_runner_image(row: sqlite3.Row) -> RunnerImage:
     build_raw = row["build_json"]
     extra_raw = row["extra"]
+    tags_raw = row["available_tags_json"]
     return RunnerImage(
         **{k: row[k] for k in _SCALAR_FIELDS},
         build=json.loads(build_raw) if build_raw else None,
         extra=json.loads(extra_raw) if extra_raw else {},
+        available_tags=json.loads(tags_raw) if tags_raw else [],
     )
 
 
@@ -65,6 +67,7 @@ def _runner_image_to_row(image: RunnerImage, *, discovered_at: str | None = None
     row["updated_at"] = now
     row["build_json"] = json.dumps(image.build) if image.build is not None else None
     row["extra"] = json.dumps(image.extra) if image.extra else None
+    row["available_tags_json"] = json.dumps(image.available_tags) if image.available_tags else None
     return row
 
 

@@ -79,7 +79,9 @@ test.describe('Profiles page (#658)', () => {
     await page.route('**/api/profiles', (route) =>
       json(route, MOCK_DATA.profiles),
     )
-    await page.goto('/#profiles')
+    // runner-catalogue-v2 IA: Profiles is the Models ▸ Profiles tab now
+    // (legacy #profiles / #slots/profiles redirect here — models-v3 covers it).
+    await page.goto('/#models/profiles')
     await page.waitForFunction(
       () => typeof (window as any).ProfilesView === 'function',
     )

@@ -605,6 +605,64 @@ class TestLoadSyncThreadsTheResolvedImage:
         )
         assert written == ["utility"]
 
+    @staticmethod
+    def _override(monkeypatch, family: str, ref: str) -> None:
+        """Install a [slots].default_images override the REAL chain will read.
+
+        Patches ``hal0.config.loader.load_hal0_config`` (what
+        ``container._slot_default_images`` calls fresh on every resolve) —
+        NOT the resolution tier itself — so the test exercises the whole
+        override→resolve→preflight path, not a stub of it.
+        """
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "hal0.config.loader.load_hal0_config",
+            lambda: SimpleNamespace(slots=SimpleNamespace(default_images={family: ref})),
+        )
+
+    def test_a_broken_family_override_is_refused_through_load_sync(self, monkeypatch) -> None:
+        """Spec §1 Safety (runner-image-catalogue v2): "the Vulkan-lane gate
+        (VULKAN_CAPABLE_IMAGE_REFS) still applies at slot-load preflight — an
+        override cannot silently re-arm #1888."
+
+        A ``gpu-vulkan`` slot with NO pin resolves through the new
+        ``[slots].default_images`` tier; when the operator points the
+        ``vulkanfpx`` family at the ade07ba lineage, ``load_sync``'s
+        preflight must see THAT ref (it passes the raw ``_resolve_image_ref``
+        result to ``require_kfd_for_gpu_slot``) and refuse with the typed
+        error — never launch-and-emit-garbage. Verified red by reverting the
+        override tier: the preflight then sees the capable baked default and
+        admits the slot.
+        """
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        self._stub_unit_write(monkeypatch)
+        self._override(monkeypatch, "vulkanfpx", ADE07BA_REF)
+
+        with pytest.raises(GpuPreflightError) as exc:
+            container_mod.ContainerProvider().load_sync(
+                {"name": "utility", "device": "gpu-vulkan", "port": 8082},
+                {},
+            )
+        assert "1888" in str(exc.value)
+        assert ADE07BA_REF in str(exc.value)  # the refusal names the OVERRIDE ref
+
+    def test_a_capable_family_override_loads_on_a_kfd_less_box(self, monkeypatch) -> None:
+        """The positive twin: a validated override passes the same gate."""
+        from hal0.providers import container as container_mod
+
+        self._amd_box_without_kfd(monkeypatch)
+        written = self._stub_unit_write(monkeypatch)
+        self._override(monkeypatch, "vulkanfpx", VULKAN_FIXED_IMAGE)
+
+        container_mod.ContainerProvider().load_sync(
+            {"name": "utility", "device": "gpu-vulkan", "port": 8082},
+            {},
+        )
+        assert written == ["utility"]
+
 
 class TestPreflightDoesNotDisplaceTheSanityGate:
     """#1922 composition. Preflight is a *cheap, static* admission check; it

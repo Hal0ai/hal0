@@ -11,7 +11,7 @@
 
 [image]
 #: The tag this recipe produces. Keep in lockstep with DEFAULT_ROCMFPX_IMAGE.
-tag = "ghcr.io/hal0ai/hal0-combined:0822"
+tag = "ghcr.io/hal0ai/hal0-combined:0824"
 
 [base]
 #: Runtime layer. A Kyuz0 amd-strix-halo-toolboxes derivative; the ROCm

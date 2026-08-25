@@ -33,6 +33,7 @@ from hal0.slots.state import (
     SlotState,
 )
 from hal0.stacks.state import (
+    StacksStateUnreadable,
     StackStateRecord,
     read_stack_state,
     stack_content_hash,
@@ -393,7 +394,17 @@ class StackApplyEngine:
         ``modified`` — a slot was hand-edited since apply.  ``catalog`` is a
         ``StacksCatalog`` (duck-typed: needs ``.resolve(slug)``).
         """
-        record = read_stack_state(paths.stacks_state_path())
+        try:
+            record = read_stack_state(paths.stacks_state_path())
+        except StacksStateUnreadable as exc:
+            # A cosmetic status read must never raise (module philosophy).
+            # Degrade to the no-record shape; loud operator visibility is
+            # preserved by the stacks list path, where load_stacks_config
+            # still raises the typed error.
+            log.warning(
+                "stacks.state_unreadable_for_drift path=%s: %s", exc.details.get("path"), exc
+            )
+            return {"active": None, "status": "none"}
         if record is None:
             return {"active": None, "status": "none"}
         try:
