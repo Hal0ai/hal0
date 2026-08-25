@@ -2690,6 +2690,29 @@ def _probe_mcp_client(
     }
 
 
+#: Provisioning-side ceiling for hermes-client probes. Server entries carry
+#: their own RUNTIME timeouts (hal0-memory's 900s covers agentic
+#: memory_reflect calls; hal0-admin's is slot-lifecycle-sized) and those are
+#: the budget hermes itself renders into config.yaml — but a provisioning
+#: probe only performs ``initialize`` + ``tools/list``, and bootstrap must
+#: stay bounded: a server that cannot answer tools/list inside two minutes
+#: is not slow, it is not answering. ``min(entry timeout, this)`` keeps a
+#: slow-but-legitimate server from false-FAILing the honest gate without
+#: letting one server hang provisioning for 15 minutes (#2053 review).
+_MCP_CLIENT_PROBE_CEILING_S = 120.0
+
+
+def _mcp_client_probe_timeout(entry_timeout: Any) -> float:
+    """Bounded per-server timeout for a provisioning-time client probe."""
+    try:
+        t = float(entry_timeout)
+    except (TypeError, ValueError):
+        return 40.0
+    if t <= 0:
+        return 40.0
+    return min(t, _MCP_CLIENT_PROBE_CEILING_S)
+
+
 def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Verify the two hal0-bundled MCP servers respond + record their tool list.
 
@@ -2779,7 +2802,11 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         # config.yaml hands hermes (#2021). A failure here is client-side
         # by construction, so it fails the phase.
         client_probe = ctx.io.probe_mcp_client(
-            venv_python, entry["url"], agent_id=state.agent_id, private=entry["private"]
+            venv_python,
+            entry["url"],
+            agent_id=state.agent_id,
+            private=entry["private"],
+            timeout=_mcp_client_probe_timeout(entry.get("timeout")),
         )
         if not client_probe.get("ok"):
             failure = f"{name}: {client_probe.get('stage')}: {client_probe.get('error')}"
@@ -5670,15 +5697,21 @@ def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool,
     #2021: this smoke used to POST at the server with the bootstrap's own
     stdlib client and passed green while the hermes venv had no ``mcp``
     package at all. It now runs :func:`_probe_mcp_client` — the venv's own
-    interpreter and MCP client stack, against the exact transport URL
-    config.yaml wires — so a dead client fails the smoke the same way it
-    fails the agent.
+    interpreter and MCP client stack, against the hal0-admin entry from
+    :func:`_default_mcp_servers` (the same inventory config_write renders,
+    so the smoke cannot drift from the transport URL config.yaml actually
+    wires) — and a dead client fails the smoke the same way it fails the
+    agent.
     """
+    entry = next((e for e in _default_mcp_servers() if e["name"] == "hal0-admin"), None)
+    if entry is None:
+        return (False, "hal0-admin missing from the builtin MCP server inventory")
     probe = io.probe_mcp_client(
         _venv_python(Path(state.venv)),
-        "http://127.0.0.1:8080/mcp/admin/mcp",
+        entry["url"],
         agent_id=state.agent_id,
-        private=False,
+        private=bool(entry.get("private")),
+        timeout=_mcp_client_probe_timeout(entry.get("timeout")),
     )
     if not probe.get("ok"):
         stage = probe.get("stage") or "probe"

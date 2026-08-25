@@ -1664,6 +1664,117 @@ def test_smoke_admin_tools_list_fails_when_hermes_client_cannot_import() -> None
     assert "No module named 'mcp'" in detail
 
 
+def test_mcp_wire_phase_threads_entry_timeout_to_client_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each server entry carries its own RUNTIME timeout (hal0-memory: 900s
+    for agentic memory_reflect; hal0-admin: slot-lifecycle-sized). A probe
+    capped at a hardcoded 40s false-FAILs a slow-but-legitimate server —
+    but provisioning must stay bounded too, so the probe gets
+    ``min(entry timeout, _MCP_CLIENT_PROBE_CEILING_S)``."""
+    seen: dict[str, object] = {}
+
+    def _client_probe(_python: object, url: object, **kw: object) -> dict[str, object]:
+        if url is not None:
+            seen[str(url)] = kw.get("timeout")
+        return _client_probe_ok(_python, url)
+
+    state = hp.BootstrapState()
+    io = hp.InstallIO(
+        probe_mcp_server=lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+        probe_mcp_client=_client_probe,
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    for entry in hp._default_mcp_servers():
+        expected = min(float(entry["timeout"]), hp._MCP_CLIENT_PROBE_CEILING_S)
+        assert seen[entry["url"]] == expected, entry["name"]
+    # hal0-memory's 900s runtime budget MUST be capped for provisioning.
+    assert seen["http://127.0.0.1:8080/mcp/memory/mcp"] == hp._MCP_CLIENT_PROBE_CEILING_S
+
+
+def test_probe_mcp_client_runs_interpreter_with_probe_script_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real ``_probe_mcp_client`` path, against a fake interpreter that
+    dumps its argv + env: pins the subprocess argv shape (``-c`` + the
+    embedded probe script) and the env plumbing (URL + headers travel via
+    env, never argv — the bearer must not show up in the process list)."""
+    fake = tmp_path / "fake-python"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print(json.dumps({\n"
+        "    'ok': True, 'stage': 'connected', 'tools': [], 'error': None,\n"
+        "    'argv': sys.argv[1:],\n"
+        "    'url_env': os.environ.get('HAL0_MCP_PROBE_URL'),\n"
+        "    'headers_env': os.environ.get('HAL0_MCP_PROBE_HEADERS'),\n"
+        "}))\n"
+    )
+    fake.chmod(0o755)
+    import hal0.service_identity as si
+
+    monkeypatch.setattr(si, "service_key", lambda **_kw: "tok-123")
+    res = hp._probe_mcp_client(
+        fake, "http://127.0.0.1:8080/mcp/admin/mcp", agent_id="hermes-agent", private=True
+    )
+    assert res["ok"] is True
+    assert res["argv"] == ["-c", hp._MCP_CLIENT_PROBE_SCRIPT]
+    assert res["url_env"] == "http://127.0.0.1:8080/mcp/admin/mcp"
+    headers = json.loads(res["headers_env"])
+    assert headers["X-hal0-Agent"] == "hermes-agent"
+    assert headers["Authorization"] == "Bearer tok-123"
+    assert headers["X-hal0-Private"] == "1"
+
+
+def test_probe_mcp_client_script_emits_verdict_on_real_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embedded probe script must be valid Python that always prints a
+    typed JSON verdict — the ``exec`` no-verdict fallback firing on a healthy
+    interpreter would be a probe bug misreported as a client defect."""
+    import hal0.service_identity as si
+
+    monkeypatch.setattr(si, "service_key", lambda **_kw: None)
+    res = hp._probe_mcp_client(Path(sys.executable), None, agent_id="hermes-agent")
+    # url=None is the import-only assertion; whichever way ``import mcp``
+    # resolves on THIS interpreter, the verdict must come from the script.
+    assert res["stage"] == "import"
+    assert set(res) >= {"ok", "stage", "tools", "error"}
+
+
+def test_smoke_admin_tools_list_url_follows_server_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The smoke reads the hal0-admin URL from ``_default_mcp_servers()`` —
+    the same inventory config_write renders — so it cannot drift from what
+    config.yaml actually wires."""
+    seen: list[object] = []
+
+    def _client_probe(_python: object, url: object, **_kw: object) -> dict[str, object]:
+        seen.append(url)
+        return {"ok": True, "stage": "connected", "tools": ["a", "b", "c", "d", "e"], "error": None}
+
+    monkeypatch.setattr(
+        hp,
+        "_default_mcp_servers",
+        lambda: [
+            {
+                "name": "hal0-admin",
+                "url": "http://10.9.8.7:1234/mcp/admin/mcp",
+                "private": False,
+                "timeout": 7,
+            }
+        ],
+    )
+    state = hp.BootstrapState()
+    io = hp.InstallIO(probe_mcp_client=_client_probe)
+    passed, _detail = hp._smoke_admin_tools_list(state, io)
+    assert passed is True
+    assert seen == ["http://10.9.8.7:1234/mcp/admin/mcp"]
+
+
 # ── #243 phase impl — namespace_register + identity card schema ─────────────
 
 
