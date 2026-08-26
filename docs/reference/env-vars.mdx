@@ -35,7 +35,7 @@ by name at a specific call site. Most have a hardcoded fallback if unset.
 |---|---|---|
 | `HAL0_PORT` | `8080` | API port. Also read by `hal0 serve --port`. |
 | `HAL0_BIND_HOST` | `0.0.0.0` | API bind host. Also read by `hal0 serve --host`. |
-| `HAL0_HOSTNAME` | `socket.gethostname()` | Canonical hostname override. |
+| `HAL0_HOSTNAME` | `socket.gethostname()` | Canonical hostname override — feeds the dashboard URLs, the WS-origin allowlist, and the mDNS announcement. At install time (`HAL0_HOSTNAME=jarvis sudo -E bash install.sh` — the env path only; `network.hostname` in the answer file is consumed by the separate `hal0 setup --answers` process and does **not** reach the installer's avahi sync yet, a known follow-up) the installer also pins avahi's announced name via `host-name=` under `[server]` in `/etc/avahi/avahi-daemon.conf`, so `http://jarvis.local:8080` resolves on the LAN without renaming the box (no `hostnamectl`). Re-running with a different name updates the announcement; running without one withdraws only the installer-managed line and reverts to the machine hostname. Caveat: if an operator had hand-written their own `host-name=` before pinning, the pin replaces it (with a warning) and a later no-override run does not restore it. Wrinkle: a renamed box stops answering to the `hal0.local` alias (avahi cannot cleanly publish CNAMEs) — the alias stays in the origin allowlist, which is harmless. |
 | `HAL0_PUBLIC_URL` | unset | Public URL announced by the installer/mDNS. |
 | `HAL0_LAN_IPS` | `""` | — |
 | `HAL0_SELF_BASE_URL` | `http://127.0.0.1:8080` | Self-referential base URL used by the realtime backend and internal API calls. |
