@@ -442,6 +442,43 @@ CURATED_MODELS: list[CuratedModel] = [
         architecture="llama",
         backend="llamacpp",
     ),
+    # ── LFM2.5 — the default brain pick (rc.10) ────────────────────────────
+    # Replaces hal0-brain-sft-q8-rocmfpx as the id ``install.brain_model``
+    # pulls by default. Plain Q8_0 GGUF (no custom tensor types), so ONE
+    # variant loads on the FPX runner and stock llama.cpp alike — the
+    # hardware split above no longer applies to the default; the sft
+    # variants stay as explicit HAL0_BRAIN_MODEL overrides.
+    CuratedModel(
+        id="lfm2.5-2.6b",
+        display_name="LFM2.5 2.6B",
+        description=(
+            "The default hal0 platform steward (brain): RL-trained thinker "
+            "with native tool calling and validated structured output."
+        ),
+        family="lfm",
+        size_gb=2.87,
+        vram_gb_min=4.0,
+        license="LFM-Open-1.0",
+        license_url="https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/blob/main/LICENSE",
+        hf_repo="LiquidAI/LFM2.5-2.6B-GGUF",
+        hf_file="LFM2.5-2.6B-Q8_0.gguf",
+        context_length=131072,
+        tool_calling=True,
+        recommended_slot="chat",
+        tags=["chat", "brain", "steward", "tools", "reasoning"],
+        notes=(
+            "Q8_0, 2.87 GB — the pull layer verifies the HF LFS sha256. Emits "
+            "<think> from weights (enable_thinking=false does NOT suppress "
+            "it); profile.brain leaves reasoning-format at the runner default "
+            "so think text extracts into reasoning_content. Native tool "
+            "calls (<|tool_call_start|> dialect) verified on the "
+            "hal0-combined:0826 runner — do not flip the brain default to "
+            "this id on images older than that pin (#2073)."
+        ),
+        capability="chat",
+        architecture="lfm2",
+        backend="llamacpp",
+    ),
     # ── Kept-in-featured legacy picks (explicit user ask): qwen3-4b for
     # mid-tier Vulkan hosts, phi3-mini for the MIT-licensed pick.  Slot
     # below the 2026-05 refresh — wizard still surfaces them in the main

@@ -28,6 +28,7 @@ import pytest
 from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.install.brain_model import (
     BRAIN_HF_REPO,
+    BRAIN_MODEL_DEFAULT,
     BRAIN_MODEL_IDS,
     BRAIN_MODEL_PORTABLE,
     BRAIN_MODEL_ROCMFPX,
@@ -48,34 +49,30 @@ def _hw(*, platform: str = "generic", gpus: list[GPUInfo] | None = None) -> Hard
     return HardwareInfo(platform=platform, gpus=gpus or [])
 
 
-def test_cpu_only_box_gets_the_portable_f16_build() -> None:
-    """No GPU → the ONLY variant a stock llama.cpp image can load.
-
-    This is the regression that matters most: the Q8 build is half the size and
-    the obvious "default", but its custom tensor type 103 makes it unloadable
-    here, so a box with no ROCm/Vulkan device must get F16.
+def test_cpu_only_box_gets_the_default_lfm_build() -> None:
+    """No GPU → still the LFM default: plain Q8_0 GGUF, no custom tensor
+    types, so a stock llama.cpp image loads it fine. (Under the sft lineage
+    this box HAD to divert to F16 — that split is now override-only.)
     """
     hw = _hw()
     assert rocmfpx_capable(hw) is False
-    assert brain_model_for_hardware(hw) == BRAIN_MODEL_PORTABLE
+    assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
-def test_strix_halo_box_gets_the_rocmfpx_agent_preset() -> None:
+def test_strix_halo_box_gets_the_default_lfm_build() -> None:
     hw = _hw(platform="strix-halo")
     assert rocmfpx_capable(hw) is True
-    assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+    assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
-def test_compute_capable_gpu_box_gets_the_rocmfpx_agent_preset() -> None:
+def test_compute_capable_gpu_box_gets_the_default_lfm_build() -> None:
     hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=True)])
-    assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+    assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
-def test_vulkan_only_gpu_box_still_gets_the_rocmfpx_agent_preset() -> None:
-    """``gpu-vulkan`` resolves to the ``vulkanfpx`` runner row, whose image is
-    the same ``DEFAULT_ROCMFPX_IMAGE`` — so Vulkan-only is ROCmFPX-capable."""
+def test_vulkan_only_gpu_box_gets_the_default_lfm_build() -> None:
     hw = _hw(gpus=[GPUInfo(vendor="amd", vulkan_capable=True)])
-    assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+    assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
 def test_override_selects_a_known_variant() -> None:
@@ -88,42 +85,44 @@ def test_override_selects_a_known_variant() -> None:
 
 
 class TestHardwareDecisionMatrix:
-    """The full selection matrix hal0#1790 asked for: gpu-rocm / gpu-vulkan /
-    cpu-only, each driven through :func:`brain_model_for_hardware` exactly as
-    ``hal0.install.brain_model.main`` calls it (hardware first, no override).
+    """The selection matrix from hal0#1790, updated for the LFM default:
+    gpu-rocm / gpu-vulkan / cpu-only all land on ``BRAIN_MODEL_DEFAULT`` —
+    plain Q8_0 GGUF loads on the FPX runner and stock llama.cpp alike, so
+    hardware no longer forks the pick. ``rocmfpx_capable`` assertions stay:
+    other callers (``install.agent_model``) still fork on it.
     """
 
-    def test_gpu_rocm_box_selects_rocmfpx(self) -> None:
+    def test_gpu_rocm_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=True, vulkan_capable=False)])
         assert rocmfpx_capable(hw) is True
-        assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
-    def test_gpu_vulkan_box_selects_rocmfpx(self) -> None:
+    def test_gpu_vulkan_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=True)])
         assert rocmfpx_capable(hw) is True
-        assert brain_model_for_hardware(hw) == BRAIN_MODEL_ROCMFPX
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
-    def test_cpu_only_box_selects_portable_f16(self) -> None:
-        """No compute, no Vulkan, no strix-halo platform — the F16 build."""
+    def test_cpu_only_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[])
         assert rocmfpx_capable(hw) is False
-        assert brain_model_for_hardware(hw) == BRAIN_MODEL_PORTABLE
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
-    def test_gpu_present_but_neither_compute_nor_vulkan_capable_selects_f16(self) -> None:
-        """hal0#1790's exact shape one layer up: an AMD GPU row IS present in
-        ``hw.gpus`` (sysfs saw it) but both capability flags are False — this
-        is what ``hal0.hardware.probe._amd_gpu_info`` now produces for a
-        GPU-less LXC once its render-node gate is in place. Before that fix
-        this GPUInfo would have carried ``vulkan_capable=True`` unconditionally
-        and this test would have asserted BRAIN_MODEL_ROCMFPX instead — the
-        regression this matrix exists to pin.
+    def test_gpu_present_but_neither_compute_nor_vulkan_capable_selects_the_default(
+        self,
+    ) -> None:
+        """hal0#1790's exact shape: an AMD GPU row IS present in ``hw.gpus``
+        (sysfs saw it) but both capability flags are False — the GPU-less LXC
+        case. Under the sft lineage the capability split decided F16 vs Q8
+        here; with the LFM default the answer is the same id either way, and
+        this test pins that the capability probe still returns False (the
+        agent-model chooser depends on it).
         """
         hw = _hw(
             platform="lxc",
             gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=False)],
         )
         assert rocmfpx_capable(hw) is False
-        assert brain_model_for_hardware(hw) == BRAIN_MODEL_PORTABLE
+        assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
 def test_unknown_override_falls_back_instead_of_404ing() -> None:
@@ -136,7 +135,7 @@ def test_unknown_override_falls_back_instead_of_404ing() -> None:
     """
     hw = _hw()
     assert brain_model_for_hardware(hw, override="MiniCPM5-1B-Agentic-Tooluse") == (
-        BRAIN_MODEL_PORTABLE
+        BRAIN_MODEL_DEFAULT
     )
 
 
@@ -144,18 +143,22 @@ def test_unknown_override_falls_back_instead_of_404ing() -> None:
 
 
 @pytest.mark.parametrize("model_id", BRAIN_MODEL_IDS)
-def test_every_brain_variant_is_pullable_from_the_public_repo(model_id: str) -> None:
-    """Each declared variant must resolve to real HF coordinates in the PUBLIC
-    GGUF repo. The base repo (``Hal0ai/hal0-brain-sft``) is private and
-    safetensors-only, and no chat runner consumes safetensors."""
+def test_every_brain_variant_is_pullable_from_a_public_repo(model_id: str) -> None:
+    """Each declared variant must resolve to real HF coordinates in a PUBLIC
+    repo: the LFM default from LiquidAI's GGUF repo, the sft overrides from
+    ``BRAIN_HF_REPO`` (the ``Hal0ai/hal0-brain-sft`` base repo is private and
+    safetensors-only — no chat runner consumes safetensors)."""
     curated = get_curated(model_id)
     assert curated is not None, f"{model_id!r} missing from CURATED_MODELS"
-    assert curated.hf_repo == BRAIN_HF_REPO
+    if model_id == BRAIN_MODEL_DEFAULT:
+        assert curated.hf_repo == "LiquidAI/LFM2.5-2.6B-GGUF"
+    else:
+        assert curated.hf_repo == BRAIN_HF_REPO
     assert curated.hf_file.endswith(".gguf")
     assert curated.capability == "chat"
 
 
-def test_the_three_variants_are_distinct_files() -> None:
+def test_every_variant_is_a_distinct_file() -> None:
     files = {get_curated(m).hf_file for m in BRAIN_MODEL_IDS}  # type: ignore[union-attr]
     assert len(files) == len(BRAIN_MODEL_IDS)
 
@@ -205,9 +208,9 @@ def test_successful_pull_binds_the_model_to_the_brain_slot(
     landed = asyncio.run(
         provision_brain_model(hw=_hw(platform="strix-halo"), slot_manager=sm, registry=reg)
     )
-    assert landed == BRAIN_MODEL_ROCMFPX
-    assert reg.ensured == [BRAIN_MODEL_ROCMFPX]
-    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_ROCMFPX}})]
+    assert landed == BRAIN_MODEL_DEFAULT
+    assert reg.ensured == [BRAIN_MODEL_DEFAULT]
+    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_DEFAULT}})]
 
 
 def test_failed_pull_leaves_the_slot_model_less_and_marked(
@@ -384,18 +387,18 @@ def test_provisioning_reuses_an_existing_pull_without_downloading(
         raise AssertionError("run_pull must not be called when the file is already on disk")
 
     monkeypatch.setattr(pull_mod, "run_pull", _explode)
-    _place(store, BRAIN_MODEL_PORTABLE)
+    _place(store, BRAIN_MODEL_DEFAULT)
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
-    assert landed == BRAIN_MODEL_PORTABLE
-    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_PORTABLE}})]
+    assert landed == BRAIN_MODEL_DEFAULT
+    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_DEFAULT}})]
 
 
 def test_provisioning_still_pulls_when_the_prior_file_is_untrustworthy(
     store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_run_pull(monkeypatch, state="completed")
-    _place(store, BRAIN_MODEL_PORTABLE, meta=False)  # type: ignore[arg-type]
+    _place(store, BRAIN_MODEL_DEFAULT, meta=False)  # type: ignore[arg-type]
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
-    assert landed == BRAIN_MODEL_PORTABLE
+    assert landed == BRAIN_MODEL_DEFAULT

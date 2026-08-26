@@ -2103,7 +2103,9 @@ fi
 # migrations below: bare invocation, `|| warn`, never `set -e`-fatal.
 #
 # HAL0_SKIP_BRAIN_MODEL=1 skips it entirely; HAL0_BRAIN_MODEL=<curated-id>
-# forces a specific quant instead of the hardware-derived pick.
+# forces a specific variant instead of the default (lfm2.5-2.6b — 2.87 GB,
+# plain GGUF, every runner class; the hal0-brain-sft ids are the override
+# set, and their Q8/Q4 quants are ROCmFPX-runner-only).
 #
 # The AGENT anchor offer below shares this step (no extra ui_step banner, so
 # UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
