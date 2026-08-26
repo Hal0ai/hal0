@@ -52,10 +52,11 @@ def _drive(tmp_path: Path, hostname_arg: str, *, avahi_bin: bool = True) -> str:
     elif fake_avahi.exists():
         fake_avahi.unlink()
 
+    warn_log = tmp_path / "warn.calls"
     script = tmp_path / "drive.sh"
     script.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        "info() { :; }\nwarn() { :; }\n"
+        f'info() {{ :; }}\nwarn() {{ echo "$@" >> "{warn_log}"; }}\n'
         f"export HAL0_AVAHI_CONF={tmp_path / 'avahi-daemon.conf'}\n"
         f"{_extract_func()}\n"
         f'sync_avahi_hostname "{hostname_arg}"\n',
@@ -87,8 +88,7 @@ def test_custom_hostname_pins_avahi_host_name(tmp_path: Path) -> None:
 def test_existing_conf_settings_survive(tmp_path: Path) -> None:
     """Edit is surgical: other sections/keys and commented examples stay."""
     _conf(tmp_path).write_text(
-        "[server]\nuse-ipv4=yes\n#host-name=example\n\n"
-        "[wide-area]\nenable-wide-area=yes\n",
+        "[server]\nuse-ipv4=yes\n#host-name=example\n\n[wide-area]\nenable-wide-area=yes\n",
         encoding="utf-8",
     )
     _drive(tmp_path, "jarvis")
@@ -135,6 +135,22 @@ def test_operator_own_host_name_is_left_alone_without_override(tmp_path: Path) -
     text = _conf(tmp_path).read_text(encoding="utf-8")
     assert "host-name=operator-choice" in text
     assert calls == ""
+
+
+def test_pinning_over_operator_host_name_replaces_it_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    """Two host-name lines would be invalid conf, so the pin must replace an
+    operator's own active host-name= — but it has to say so out loud, because
+    a later no-override run withdraws only the managed pair (the operator's
+    earlier value is not restored)."""
+    _conf(tmp_path).write_text("[server]\nhost-name=operator-choice\n", encoding="utf-8")
+    _drive(tmp_path, "jarvis")
+    text = _conf(tmp_path).read_text(encoding="utf-8")
+    assert "host-name=jarvis\n" in text
+    assert "operator-choice" not in text
+    warns = (tmp_path / "warn.calls").read_text(encoding="utf-8")
+    assert "replacing an existing host-name=" in warns
 
 
 def test_machine_hostname_or_dotted_name_writes_nothing(tmp_path: Path) -> None:
