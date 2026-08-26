@@ -111,9 +111,9 @@ class TestAutoInstall:
             bin_dir / "apt-get",
             "#!/usr/bin/env bash\n"
             'case " $* " in\n'
-            "*\" install \"*)\n"
-            f'    for t in curl jq; do\n'
-            f'        printf \'#!/usr/bin/env bash\\nexit 0\\n\' > "{bin_dir}/$t"\n'
+            '*" install "*)\n'
+            f"    for t in curl jq; do\n"
+            f"        printf '#!/usr/bin/env bash\\nexit 0\\n' > \"{bin_dir}/$t\"\n"
             f'        /bin/chmod +x "{bin_dir}/$t"\n'
             "    done ;;\n"
             "esac\n"

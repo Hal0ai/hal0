@@ -171,7 +171,8 @@ dep_package() {
 
 # The one-liner an operator runs to install PKG… with the detected manager.
 # Mirrors distro.sh's pkg_install_cmd, including the apt DPkg lock timeout
-# (#1584: unattended-upgrades commonly holds the lock on fresh Ubuntu boots).
+# that #1733 added there for #1584 (unattended-upgrades commonly holds the
+# lock on fresh Ubuntu boots) — keep the two copies in step if either changes.
 pkg_install_hint() {
     local IFS=' '   # global IFS is \n\t; the hint must stay a one-liner
     local pm="$1"; shift
