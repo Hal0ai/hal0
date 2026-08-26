@@ -218,3 +218,82 @@ def test_apply_derived_seed_devices_ignores_missing_files(
     dest.mkdir()
     rewritten = apply_derived_seed_devices(("agent",), slots_dir=dest, hw=hw)
     assert rewritten == {}
+
+
+# ── #2067 — the non-llama gpu-rocm seeds' first-use contract ─────────────────
+#
+# ``img`` (ComfyUI) and ``qwen3tts`` ship ``device = "gpu-rocm"`` verbatim on
+# every host — including a kfd-less one — and that is a CONTRACT, not a #2054
+# leftover: both runner images are ROCm-only builds, so there is no CPU or
+# Vulkan lane a derivation ladder could pick instead. What seeding owes the
+# operator instead is an honest first use: the load-time gate must refuse in
+# the ``rocm`` lane, plainly naming the absent ``/dev/kfd`` and how to forward
+# it — and must not offer a remedy the runtime cannot honour.
+
+
+def _non_llama_gpu_rocm_seed_cfgs() -> dict[str, dict]:
+    """The shipped non-llama seeds whose TOML carries ``device = "gpu-rocm"``."""
+    cfgs: dict[str, dict] = {}
+    for name in STATIC_SEED_SLOTS:
+        if name in LLAMA_SEED_CAPABILITIES:
+            continue
+        cfg = tomllib.loads((_SEED_SRC_DIR / f"{name}.toml").read_text(encoding="utf-8"))
+        if cfg.get("device") == "gpu-rocm":
+            cfgs[name] = cfg
+    return cfgs
+
+
+def test_the_gpu_rocm_non_llama_seeds_are_rocm_only_runtimes() -> None:
+    """Why derivation deliberately skips them: each resolves to a provider on
+    the ``rocm`` lane whose registered runner image supports NO other backend
+    — a kfd-less box has nothing to derive, so verbatim ``gpu-rocm`` is the
+    honest label. A new non-llama gpu-rocm seed, or a runner growing a second
+    backend, breaks this pin and must revisit the contract."""
+    from hal0.providers._gpu import runtime_lane_for_provider
+    from hal0.providers.container import _spec_provider_for
+    from hal0.runners import RUNNER_IMAGES
+
+    cfgs = _non_llama_gpu_rocm_seed_cfgs()
+    assert set(cfgs) == {"img", "qwen3tts"}
+    for name, cfg in cfgs.items():
+        provider = _spec_provider_for(cfg)
+        assert provider is not None, name
+        assert runtime_lane_for_provider(provider) == "rocm", name
+        assert RUNNER_IMAGES[provider.name].supported_backends == ("rocm",), name
+
+
+def test_kfd_less_first_use_refusal_is_plain_and_honourable(tmp_path: Path) -> None:
+    """The #2067 acceptance pin: first use of a seeded img / qwen3tts slot on
+    a kfd-less box states plainly that the seeded device's node is absent and
+    how to forward it — without llama.cpp's #1888 story (not this runtime's
+    defect) and without offering ``device='cpu'`` (these images have no CPU
+    lane to move to)."""
+    from hal0.providers._gpu import (
+        GpuPreflightError,
+        require_kfd_for_gpu_slot,
+        runtime_lane_for_provider,
+    )
+    from hal0.providers.container import _spec_provider_for
+
+    for name, cfg in _non_llama_gpu_rocm_seed_cfgs().items():
+        lane = runtime_lane_for_provider(_spec_provider_for(cfg))
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                name,
+                device=str(cfg["device"]),
+                runtime_lane=lane,
+                kfd_path=str(tmp_path / "kfd"),
+                env={},
+                amd_host=True,
+            )
+        msg = str(exc.value)
+        # Plainly names the slot, the seeded device, and the missing node…
+        assert f"slot {name!r}" in msg
+        assert "device=gpu-rocm" in msg
+        assert "/kfd" in msg
+        # …with the forward remedy…
+        assert "dev1:" in msg
+        # …no llama-lane blame…
+        assert "1888" not in msg
+        # …and no lane the runtime does not have.
+        assert "device='cpu'" not in msg, msg

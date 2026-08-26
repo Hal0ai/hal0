@@ -717,7 +717,9 @@ def require_kfd_for_gpu_slot(
       ROCmFPX runner. Gated, with #1888's silent-garbage explanation.
     * ``"rocm"`` — a non-llama runtime whose image resolves ROCm/HIP.
       Gated, but the refusal does not blame llama.cpp's fallback: quoting
-      #1888 at a ComfyUI operator sends them chasing the wrong defect.
+      #1888 at a ComfyUI operator sends them chasing the wrong defect. Its
+      missing-node remedy also never suggests ``device='cpu'`` (#2067):
+      these images are ROCm-only, so forwarding the node is the only fix.
     * ``"no-rocm"`` — a runtime that never touches HIP (Kokoro / Moonshine,
       and any genuinely-Vulkan image). Its ``gpu-vulkan`` slots are NOT
       gated; this is the class #1941 was filed for.
@@ -859,8 +861,18 @@ def require_kfd_for_gpu_slot(
         remedy = (
             "It is not visible here. Forward the device from the host (Proxmox "
             f"LXC: add 'dev1: {kfd_path}' to /etc/pve/lxc/<CTID>.conf, then pct "
-            "stop/start), or move this slot to device='cpu'."
+            "stop/start)"
         )
+        if runtime_lane == "rocm":
+            # #2067: the rocm lane means a ROCm-only image (ComfyUI /
+            # Qwen3-TTS — ``RUNNER_IMAGES[...].supported_backends ==
+            # ("rocm",)``). There is no CPU or Vulkan lane to move the slot
+            # to, so the other lanes' device='cpu' suggestion would be a
+            # remedy this runtime cannot honour; forwarding the node is the
+            # only fix, and the refusal says so.
+            remedy += ". This runtime's image is ROCm-only — no other device can serve it."
+        else:
+            remedy += ", or move this slot to device='cpu'."
     raise GpuPreflightError(preamble + remedy)
 
 

@@ -10,6 +10,12 @@
 # triggers a surprise download or a crash-loop.
 name = "qwen3tts"
 type = "tts"
+# gpu-rocm is a contract, not a preference (#2067): the Qwen3-TTS image is a
+# ROCm-only build (RUNNER_IMAGES["qwen3tts"].supported_backends == ("rocm",)),
+# so seeding never derives another device — there is no CPU or Vulkan lane to
+# derive; the cpu `tts`/kokoro sibling above IS the CPU speech lane. On a
+# kfd-less box this seeds as an inactive tile and first use refuses loudly,
+# naming the absent /dev/kfd and how to forward it.
 device = "gpu-rocm"
 runtime = "container"
 profile = "qwen3-tts"
