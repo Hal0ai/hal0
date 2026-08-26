@@ -1010,13 +1010,24 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
 #: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
 #: drop ``image`` from SEED_PROFILES entirely.
-#: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe — same pinned
-#: ROCmFPX source ref, same three patches, same base digest — rebuilt via
-#: packaging/runner/rocmfpx/build.sh for exactly one delta: the #2037
-#: fail-fast entrypoint (supervises llama-server, translates a non-signal
-#: death before /health ever answered 200 into exit 64 so the template's
-#: RestartPreventExitStatus=64 can park a doomed model immediately).
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
+#: 0826 lineage (2026-08-26): the 0824 recipe — same pinned ROCmFPX source
+#: ref, same base digest, same #2037 fail-fast entrypoint — rebuilt via
+#: packaging/runner/rocmfpx/build.sh for two chat-parser deltas (#2056):
+#: patch 0002's reasoning branch now consumes an optional closed <think>
+#: block even with reasoning extraction off (without it, the brain-sft
+#: template's pre-closed think block in the generation prompt made
+#: common_sampler_init's non-lazy grammar prefill throw, hard-400ing EVERY
+#: structured-output request against the seeded model — which took all
+#: Hindsight fact extraction down with it on fresh installs); and new patch
+#: 0004 fixes the LFM2.5 parser's response_format grammar (it was built
+#: lazy with no trigger rules — an empty root — so generation ran
+#: unconstrained and every JSON-mode request 500'd at the parse; reproduced
+#: on prod's live LFM slot).
+#: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe rebuilt for the
+#: #2037 fail-fast entrypoint (supervises llama-server, translates a
+#: non-signal death before /health ever answered 200 into exit 64 so the
+#: template's RestartPreventExitStatus=64 can park a doomed model).
+DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
@@ -1046,9 +1057,13 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
 #: control-token pieces are stripped before the parser sees them).
 STALE_ROCMFPX_IMAGE_REFS = frozenset(
     {
-        # Former default (rc.7). Same recipe lineage as the current 0824 pin
-        # but with the pre-#2037 exec-only entrypoint, so a slot still pinned
-        # here never fail-fasts a doomed model — creation-time debris, retag.
+        # Former default (rc.9). Same lineage as the current 0826 pin but
+        # with the pre-#2056 parser, so every response_format request against
+        # the seeded brain model 400s at sampler init — creation-time debris,
+        # retag.
+        "ghcr.io/hal0ai/hal0-combined:0824",
+        # Former default (rc.7). Pre-#2037 exec-only entrypoint (never
+        # fail-fasts a doomed model) and pre-#2056 parser — retag.
         "ghcr.io/hal0ai/hal0-combined:0822",
         # Former default (rc.6). Its Vulkan backend emits invalid tokens for
         # every model (#1888) — a slot still pinned here is debris from an
@@ -1080,13 +1095,17 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
 #: ``tool_calls`` on the shipped brain, and a readable diagnostic instead of
 #: a SIGSEGV with zero devices mapped (#1936).
 #:
-#: ``:0824`` re-earned membership per the rule below rather than inheriting
-#: it: same pinned source/patches/base as ``:0822`` (only the #2037 entrypoint
-#: differs), but the builder stage's dnf toolchain is unpinned, so "same
-#: recipe" does not prove same binaries. Probed 2026-08-24 on ct105
-#: (kfd present) and ct151 (kfd ABSENT): temp-0 Paris probe on the Vulkan
-#: lane, ≥256-token clean tail, and the #1936 device-less diagnostic.
-VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0824"
+#: ``:0826`` re-earned membership per the rule below rather than inheriting
+#: it (the builder stage's dnf toolchain is unpinned, so "same recipe" does
+#: not prove same binaries): probed 2026-08-26 on ct150 (kfd present) and
+#: ct151 (kfd ABSENT) — temp-0 Paris probe, ≥256-token clean tail, the #1936
+#: device-less diagnostic, and (new with #2056) response_format json_object
+#: and json_schema returning 200 on the seeded brain model with the thinking
+#: kwarg absent, true, and false. The structured-output rows exist because
+#: ``:0822``/``:0824`` passed every earlier probe while 400-ing every
+#: structured-output request against the seeded model — the exact class the
+#: old matrix could not see.
+VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 
 #: Runner images allowed to serve the ``gpu-vulkan`` llama.cpp lane on an AMD
 #: host. Consulted by :func:`hal0.providers._gpu.image_serves_vulkan_lane`,
