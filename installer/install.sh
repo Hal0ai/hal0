@@ -1247,6 +1247,94 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
+# ── avahi mDNS host-name sync (#2060) ───────────────────────────────────────
+# The HAL0_HOSTNAME choice (env / answer-file network.hostname) already
+# reaches api.env, the mDNS URL building (services/mdns.py) and the WS
+# origin allowlist above — but avahi announces the MACHINE hostname from
+# /etc/hostname, so `HAL0_HOSTNAME=jarvis` produced jarvis.local URLs that
+# never resolved on the LAN (it only worked on boxes literally named hal0).
+# Close the last hop: when the resolved hostname differs from the machine's,
+# pin avahi's announced name with host-name= under [server] in
+# avahi-daemon.conf. Scoped to mDNS only — the box itself is NOT renamed
+# (no hostnamectl). The managed line is tagged with a marker comment so a
+# re-run with a new HAL0_HOSTNAME updates it and a run without an override
+# withdraws it again; every other line in the conf (including an operator's
+# own host-name=) survives untouched. Behavior wrinkle, documented in
+# docs/reference/env-vars.mdx: a renamed box stops answering to the
+# hal0.local alias — avahi has no clean CNAME publishing — while the alias
+# stays in HAL0_ALLOWED_ORIGINS, which is harmless.
+sync_avahi_hostname() {
+    local conf="${HAL0_AVAHI_CONF:-/etc/avahi/avahi-daemon.conf}"
+    local marker="# managed by hal0 install.sh — HAL0_HOSTNAME sync (#2060)"
+    local wanted="${1%.local}" machine
+    machine="$(hostname 2>/dev/null || true)"
+    # No avahi on the box → nothing to announce through (fail-soft, the
+    # same posture as services/mdns.py).
+    if [[ ! -f "${conf}" ]] && ! command -v avahi-daemon >/dev/null 2>&1; then
+        return 0
+    fi
+    # Only a single-label name is mDNS-announceable — a dotted override is
+    # a reverse-proxy FQDN, not avahi's business — and the machine's own
+    # name means "no override in effect".
+    if [[ "${wanted}" == *.* || "${wanted}" == "${machine%%.*}" ]]; then
+        wanted=""
+    fi
+    local tmp src
+    if [[ -n "${wanted}" ]]; then
+        tmp="$(mktemp "${conf}.XXXXXX" 2>/dev/null)" || return 0
+        src="${conf}"
+        [[ -f "${src}" ]] || src=/dev/null
+        # Drop any prior marker + active host-name under [server], then
+        # re-insert the managed pair right after the [server] header
+        # (creating the section when the conf lacks one or is absent).
+        # Commented #host-name= examples are documentation — left alone.
+        awk -v host="${wanted}" -v marker="${marker}" '
+            $0 == marker { next }
+            /^\[/ { section = $0 }
+            section == "[server]" && /^[ \t]*host-name[ \t]*=/ { next }
+            { print }
+            $0 == "[server]" && !managed { print marker; print "host-name=" host; managed = 1 }
+            END { if (!managed) { print "[server]"; print marker; print "host-name=" host } }
+        ' "${src}" > "${tmp}" || { rm -f "${tmp}"; return 0; }
+    else
+        # No override in effect: withdraw a previously-managed host-name
+        # (the marker + the line after it). An operator's own host-name=
+        # or a box we never touched is left completely alone.
+        [[ -f "${conf}" ]] || return 0
+        grep -qxF "${marker}" "${conf}" || return 0
+        tmp="$(mktemp "${conf}.XXXXXX" 2>/dev/null)" || return 0
+        awk -v marker="${marker}" '
+            $0 == marker { drop = 1; next }
+            drop && /^[ \t]*host-name[ \t]*=/ { drop = 0; next }
+            { drop = 0; print }
+        ' "${conf}" > "${tmp}" || { rm -f "${tmp}"; return 0; }
+    fi
+    if [[ -f "${conf}" ]] && cmp -s "${tmp}" "${conf}"; then
+        rm -f "${tmp}"  # already converged — idempotent re-run, no bounce
+        return 0
+    fi
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${conf}"
+    if [[ -n "${wanted}" ]]; then
+        info "avahi: announcing ${wanted}.local (host-name= in ${conf})"
+    else
+        info "avahi: reverting to the machine hostname announcement"
+    fi
+    # A conf change needs a daemon restart — reload/SIGHUP only re-reads
+    # /etc/avahi/services, not avahi-daemon.conf. try-restart is a no-op
+    # when avahi-daemon isn't running, and a missing systemd is tolerated.
+    systemctl try-restart avahi-daemon.service 2>/dev/null || true
+}
+
+# The resolved hostname is whatever HAL0_HOSTNAME line the derivation above
+# just wrote into api.env (empty when the derivation degraded to the bare
+# bind fallback — the sync then treats it as "no override"). Prod only:
+# --dev never elevates and must not touch /etc/avahi.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_MDNS_NAME="$(printf '%s\n' "${NETWORK_ENV_LINES}" | sed -n 's/^HAL0_HOSTNAME=//p' | head -n1)"
+    sync_avahi_hostname "${HAL0_MDNS_NAME}"
+fi
+
 # ── HF_TOKEN validate + persist (WS-D, #1106) ───────────────────────────────
 # HF_TOKEN_VAL was GATHERED in the "Operator input" block near the top: the
 # env (HF_TOKEN, falling back to HUGGING_FACE_HUB_TOKEN — the same precedence
