@@ -547,6 +547,16 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
+def _agent_home() -> str:
+    """The hal0 service user's home dir (``/var/lib/hal0`` fallback)."""
+    import pwd as _pwd
+
+    try:
+        return _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_dir or "/var/lib/hal0"
+    except KeyError:
+        return "/var/lib/hal0"
+
+
 def _run_as_hal0(
     argv: list[str], *, stdin: int | None = None, extra_env: dict[str, str] | None = None
 ) -> int:
@@ -568,14 +578,10 @@ def _run_as_hal0(
     three tools — the ``sudo`` fallback resets the environment, and relying on
     inheritance would silently lose it there (see HAL0_HERMES_TERMINAL).
     """
-    import pwd as _pwd
     import shutil as _shutil
     import subprocess as _subprocess
 
-    try:
-        home = _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_dir or "/var/lib/hal0"
-    except KeyError:
-        home = "/var/lib/hal0"
+    home = _agent_home()
     assignments = [f"{k}={v}" for k, v in sorted((extra_env or {}).items())]
     env_argv = ["env", "-u", "HERMES_HOME", f"HOME={home}", *assignments, *argv]
     if _shutil.which("runuser"):
@@ -787,31 +793,31 @@ def _install_hermes_gateway() -> None:
     # HERMES_HOME is unset so the generator bakes the hal0 default
     # (~/.hermes) rather than a value inherited from the invoking shell.
     #
-    # m1 fix: "the hal0 default (~/.hermes)" is only actually hal0's home
-    # when THIS process is already running as hal0. `hal0 agent install
-    # hermes` (and installer/install.sh's equivalent inline block) run as
-    # root, so unqualified `~` resolved to /root — writing a stray
-    # root-owned /root/.hermes (the exact "split-brain" ownership drift
-    # `hal0 doctor perms` flags via check_hermes_ownership's stray_home
-    # check, and installer/lib/run-as-hal0.sh's own docstring calls out
-    # by name as the "root-clobber regression" #843). Drop to hal0 first,
-    # same seam `_provision_hermes` already uses, so this subprocess never
-    # runs as root in the first place.
+    # #2061 fix (reverts the m1 drop-to-hal0): `hermes gateway install
+    # --system` checks os.geteuid() == 0 INTERNALLY and refuses a non-root
+    # caller ("System gateway install requires root. Re-run with sudo."),
+    # so routing the root path through `_run_as_hal0` made the bridge
+    # sub-install fail on every root install — the same regression PR
+    # #1337 already fixed once in installer/install.sh's inline block.
+    # Run AS ROOT directly, exactly like install.sh: the #843 stray
+    # /root/.hermes safeguard is satisfied by env alone — HOME pinned to
+    # hal0's home + HERMES_HOME unset — so `~/.hermes` resolves under
+    # /var/lib/hal0, never /root. `--run-as-user hal0` only names the
+    # runtime user baked into the unit; it is not a privilege drop.
     gateway_argv = [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"]
     # `hermes gateway install` prompts interactively with no bypass flag;
     # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
     # defaults (install + enable on boot + start now) instead of blocking.
+    env = dict(_os.environ)
+    env.pop("HERMES_HOME", None)
     if _os.geteuid() == 0:
-        rc = _run_as_hal0(gateway_argv, stdin=_subprocess.DEVNULL)
-    else:
-        env = dict(_os.environ)
-        env.pop("HERMES_HOME", None)
-        rc = _subprocess.run(  # nosec B603 — fixed argv, known path
-            gateway_argv,
-            stdin=_subprocess.DEVNULL,
-            env=env,
-            check=False,
-        ).returncode
+        env["HOME"] = _agent_home()
+    rc = _subprocess.run(  # nosec B603 — fixed argv, known path
+        gateway_argv,
+        stdin=_subprocess.DEVNULL,
+        env=env,
+        check=False,
+    ).returncode
     if rc != 0:
         console.print(
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
@@ -822,7 +828,7 @@ def _install_hermes_gateway() -> None:
         console.print(
             f"[yellow]hermes-gateway unit not installed ({_HERMES_GATEWAY_UNIT} missing) — "
             "Telegram/Discord bridge unavailable.[/yellow]\n"
-            "[dim]retry with: sudo -u hal0 env -u HERMES_HOME "
+            f"[dim]retry with: sudo env -u HERMES_HOME HOME={_agent_home()} "
             f"{_HERMES_BIN} gateway install --system --run-as-user hal0 </dev/null[/dim]"
         )
         return
