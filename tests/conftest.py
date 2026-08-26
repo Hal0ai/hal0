@@ -306,11 +306,15 @@ def tmp_hal0_home(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPa
     """Set HAL0_HOME to a temporary directory for filesystem isolation.
 
     Also opts the systemd-override renderer into the HAL0_HOME branch so
-    unit-template tests write under tmp_path instead of /etc/systemd/system.
+    unit-template tests write under tmp_path instead of /etc/systemd/system,
+    and points the avahi services dir under the same tree so the ownership
+    table's /etc/avahi/services row (#2059) never observes — or drifts
+    against — the host's real avahi install.
     """
     home = str(tmp_path)
     monkeypatch.setenv("HAL0_HOME", home)
     monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
+    monkeypatch.setenv("HAL0_AVAHI_SERVICES_DIR", str(tmp_path / "etc" / "avahi" / "services"))
     return home
 
 

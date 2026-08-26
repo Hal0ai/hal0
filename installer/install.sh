@@ -756,6 +756,25 @@ if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
     chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
 fi
 
+# mDNS addon advertisements (#2059): services/mdns.py (hal0-api, User=hal0)
+# writes /etc/avahi/services/hal0-addon-<id>.service via tmp+rename, which
+# needs *directory* write — the distro ships the dir root:root 0755, so every
+# dashboard advertise/withdraw died EACCES since the root-to-unprivileged
+# switch. Group-write grant (root:hal0, g+w) mirrors the OwnershipStore row in
+# src/hal0/install/perms.py (the `doctor perms --fix` backstop heals the same
+# values); done here too so the dir is correct before the daemon's first
+# touch. The chgrp of pre-existing hal0-addon-*.service files is the upgrade
+# path: root-era installs wrote them as root, and handing them to the hal0
+# group keeps the daemon's own advertisement surface consistently
+# group-readable. avahi-daemon inotify-watches the dir — no reload needed.
+# Guarded on avahi actually being present; idempotent on re-run.
+if [[ "${DEV_MODE}" -eq 0 && -d /etc/avahi/services ]] \
+    && getent group hal0 >/dev/null 2>&1; then
+    chgrp hal0 /etc/avahi/services 2>/dev/null || true
+    chmod g+w /etc/avahi/services 2>/dev/null || true
+    chgrp hal0 /etc/avahi/services/hal0-addon-*.service 2>/dev/null || true
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.
