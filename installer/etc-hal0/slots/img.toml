@@ -15,6 +15,11 @@
 name = "img"
 type = "image"
 provider = "comfyui"
+# gpu-rocm is a contract, not a preference (#2067): the pinned ComfyUI image
+# is a ROCm-only build (RUNNER_IMAGES["comfyui"].supported_backends ==
+# ("rocm",)), so seeding never derives another device — there is no CPU or
+# Vulkan lane to derive. On a kfd-less box this seeds as an inactive tile and
+# first use refuses loudly, naming the absent /dev/kfd and how to forward it.
 device = "gpu-rocm"
 runtime = "container"
 profile = "comfyui"

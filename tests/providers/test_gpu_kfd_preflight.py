@@ -775,6 +775,36 @@ class TestGuardRemedyText:
             require_kfd_for_gpu_slot("brain", device="gpu-rocm", kfd_path=str(tmp_path / "nope"))
         assert "dev1:" in str(err.value)
 
+    def test_the_llama_lane_missing_remedy_still_offers_the_cpu_lane(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """llama-server genuinely runs on CPU, so 'move this slot to
+        device=cpu' stays a real remedy for the llama lane."""
+        monkeypatch.setattr("hal0.providers._gpu.kfd_status", lambda *a, **k: KFD_MISSING)
+        with pytest.raises(GpuPreflightError) as err:
+            require_kfd_for_gpu_slot("brain", device="gpu-rocm", kfd_path=str(tmp_path / "nope"))
+        assert "device='cpu'" in str(err.value)
+
+    def test_the_rocm_lane_missing_remedy_does_not_offer_a_cpu_lane(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """#2067: the rocm lane means a ROCm-only image (ComfyUI / Qwen3-TTS —
+        ``RUNNER_IMAGES[...].supported_backends == ("rocm",)``). There is no
+        CPU lane to move the slot to, so suggesting ``device='cpu'`` is a
+        remedy the runtime cannot honour — the refusal must say so instead."""
+        monkeypatch.setattr("hal0.providers._gpu.kfd_status", lambda *a, **k: KFD_MISSING)
+        with pytest.raises(GpuPreflightError) as err:
+            require_kfd_for_gpu_slot(
+                "img",
+                device="gpu-rocm",
+                runtime_lane="rocm",
+                kfd_path=str(tmp_path / "nope"),
+            )
+        msg = str(err.value)
+        assert "device='cpu'" not in msg
+        assert "ROCm-only" in msg
+        assert "dev1:" in msg  # the forward remedy is still the fix
+
 
 class TestConvergeAgainstRealPermissionDenial:
     """#1953 gap 2 — exercise a GENUINE chgrp refusal, not a monkeypatched one.
