@@ -1622,3 +1622,31 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     preflight_all
     exit $?
 fi
+
+# ── cosign persistence for the updater (#2052) ─────────────────────────────
+# bootstrap.sh verifies the release with a digest-pinned cosign fetched into
+# its throwaway work directory, but nothing used to leave a cosign on the
+# installed system — so the FIRST `hal0 update` of every fresh install
+# hard-failed its signature gate ("cosign is not installed"). The updater's
+# requirement is correct; the dependency belongs to the platform. Persist
+# the exact binary bootstrap already verified (sha256 pinned in
+# bootstrap.sh, handed over via HAL0_BOOTSTRAP_COSIGN). Never overwrite a
+# system cosign; warn honestly — never die — when there is nothing to
+# persist (e.g. a tarball-direct install), because the install itself is
+# fine and only the first update is affected.
+persist_bootstrap_cosign() {
+    local dest_dir="${1:-/usr/local/bin}"
+    if command -v cosign >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${HAL0_BOOTSTRAP_COSIGN:-}" && -x "${HAL0_BOOTSTRAP_COSIGN}" ]]; then
+        if install -m 0755 "${HAL0_BOOTSTRAP_COSIGN}" "${dest_dir}/cosign"; then
+            ok "cosign: persisted bootstrap's pinned build to ${dest_dir}/cosign (hal0 update requires it)"
+        else
+            warn "could not persist cosign to ${dest_dir}/cosign — the first 'hal0 update' will fail its signature check until cosign is installed (https://docs.sigstore.dev/cosign/installation/)"
+        fi
+        return 0
+    fi
+    warn "cosign is not installed and this run has no bootstrap-verified binary to persist — the first 'hal0 update' will fail its signature check until cosign is installed (https://docs.sigstore.dev/cosign/installation/)"
+    return 0
+}

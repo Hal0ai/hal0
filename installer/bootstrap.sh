@@ -182,8 +182,10 @@ cosign_manual_install_hint() {
 # Resolve _COSIGN_BIN. Prefers a distro-packaged cosign (it rides the
 # distro's own update track and needs no pin from us); otherwise downloads
 # the pinned official build into the trap-guarded work dir, verifies its
-# sha256 against the constant above, and uses it from there. Nothing is
-# installed anywhere persistent.
+# sha256 against the constant above, and uses it from there. This script
+# installs nothing persistent itself, but a fetched binary is handed to
+# install.sh via HAL0_BOOTSTRAP_COSIGN so the installer can persist it for
+# the updater (#2052).
 ensure_cosign() {
     local work="$1"
 
@@ -231,6 +233,11 @@ $(cosign_manual_install_hint)"
 $(cosign_manual_install_hint)"
     fi
     _COSIGN_BIN="${out}"
+    # Hand the verified binary to install.sh so it can persist a cosign
+    # for the updater (#2052) — the work directory does not survive the
+    # install, and a fresh box otherwise has no cosign for its first
+    # `hal0 update`.
+    export HAL0_BOOTSTRAP_COSIGN="${out}"
     ok "pinned cosign ${_COSIGN_VERSION} sha256 OK (${actual:0:12}…)"
 }
 
