@@ -130,17 +130,122 @@ banner() {
 }
 
 # ── preflight ──────────────────────────────────────────────────────────────
+# Missing deps are collected, not fatal one-by-one (#2062): a minimal host
+# lacking curl AND jq should learn about both in a single run instead of
+# paying one retry cycle per tool. preflight() then either auto-installs
+# the whole batch via the host's package manager or fails once with a
+# single copy-pasteable install command covering everything.
+_MISSING_DEPS=()
 need() {
-    command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1 — install it and re-run"
+    command -v "$1" >/dev/null 2>&1 || _MISSING_DEPS+=("$1")
+}
+
+# Package-manager detection. Inline — NOT sourced from installer/lib/distro.sh
+# — because this script runs standalone via curl|bash before any repo file
+# exists on disk. Mirrors distro.sh's pkg_mgr(): command presence beats
+# os-release IDs for derivatives (CachyOS ships pacman, PikaOS ships apt),
+# first match in preference order wins.
+detect_pkg_mgr() {
+    local m
+    for m in apt-get dnf yum zypper pacman apk; do
+        if command -v "${m}" >/dev/null 2>&1; then
+            printf '%s\n' "${m}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Command name → package name for the detected manager. sha256sum ships in
+# coreutils everywhere; Arch names its Python package "python".
+dep_package() {
+    local pm="$1" dep="$2"
+    case "${dep}" in
+        sha256sum) printf 'coreutils\n' ;;
+        python3)
+            if [[ "${pm}" == "pacman" ]]; then printf 'python\n'; else printf 'python3\n'; fi
+            ;;
+        *) printf '%s\n' "${dep}" ;;
+    esac
+}
+
+# The one-liner an operator runs to install PKG… with the detected manager.
+# Mirrors distro.sh's pkg_install_cmd, including the apt DPkg lock timeout
+# (#1584: unattended-upgrades commonly holds the lock on fresh Ubuntu boots).
+pkg_install_hint() {
+    local IFS=' '   # global IFS is \n\t; the hint must stay a one-liner
+    local pm="$1"; shift
+    case "${pm}" in
+        apt-get) printf 'sudo apt-get -o DPkg::Lock::Timeout=120 install -y %s\n' "$*" ;;
+        dnf)     printf 'sudo dnf install -y %s\n' "$*" ;;
+        yum)     printf 'sudo yum install -y %s\n' "$*" ;;
+        zypper)  printf 'sudo zypper install -y %s\n' "$*" ;;
+        pacman)  printf 'sudo pacman -S --noconfirm %s\n' "$*" ;;
+        apk)     printf 'sudo apk add %s\n' "$*" ;;
+    esac
+}
+
+# Batch-resolve everything need() collected — the install-or-fail pattern of
+# install.sh's preflight_venv / preflight_container_runtime. One package-
+# manager transaction for the whole batch, then a re-check; anything still
+# missing (install failed, ran unprivileged, no recognised manager) fails
+# ONCE, listing every dep plus the exact command that installs them all.
+install_missing_deps() {
+    local IFS=' '   # global IFS is \n\t; keep "${arr[*]}" messages one-line
+    local pm="" dep pkgs=()
+    pm="$(detect_pkg_mgr)" || pm=""
+
+    if [[ -n "${pm}" ]]; then
+        for dep in "${_MISSING_DEPS[@]}"; do
+            pkgs+=("$(dep_package "${pm}" "${dep}")")
+        done
+        info "installing missing dependencies (${_MISSING_DEPS[*]}) via ${pm}"
+        case "${pm}" in
+            apt-get)
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq || true
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q "${pkgs[@]}" || true
+                ;;
+            dnf | yum) "${pm}" install -y "${pkgs[@]}" || true ;;
+            zypper)    zypper install -y "${pkgs[@]}" || true ;;
+            pacman)    pacman -S --noconfirm "${pkgs[@]}" || true ;;
+            apk)       apk add "${pkgs[@]}" || true ;;
+        esac
+
+        # The re-check, not the package manager's exit code, decides.
+        local still=()
+        for dep in "${_MISSING_DEPS[@]}"; do
+            command -v "${dep}" >/dev/null 2>&1 || still+=("${dep}")
+        done
+        if [[ ${#still[@]} -eq 0 ]]; then
+            ok "installed missing dependencies: ${_MISSING_DEPS[*]}"
+            _MISSING_DEPS=()
+            return 0
+        fi
+        _MISSING_DEPS=("${still[@]}")
+    fi
+
+    for dep in "${_MISSING_DEPS[@]}"; do
+        err "missing dependency: ${dep}"
+    done
+    if [[ -n "${pm}" ]]; then
+        pkgs=()
+        for dep in "${_MISSING_DEPS[@]}"; do
+            pkgs+=("$(dep_package "${pm}" "${dep}")")
+        done
+        die "install everything above and re-run: $(pkg_install_hint "${pm}" "${pkgs[@]}")"
+    fi
+    die "no supported package manager detected (apt-get/dnf/yum/zypper/pacman/apk) — install the dependencies above and re-run"
 }
 
 preflight() {
     [[ "$(uname -s)" == "Linux" ]] || die "hal0 only supports Linux right now (got $(uname -s))"
+    _MISSING_DEPS=()
     need curl
     need tar
     need sha256sum
     need jq
     need python3
+    [[ ${#_MISSING_DEPS[@]} -eq 0 ]] || install_missing_deps
 }
 
 validate_channel() {
