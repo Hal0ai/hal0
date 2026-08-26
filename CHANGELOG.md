@@ -22,6 +22,59 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [Unreleased]
+
+The rc.9 validation sweep's fresh-install lane (ct151, minimal Ubuntu 26.04)
+surfaced a batch of install-process defects — several of them silent for
+multiple RCs. This wave closes all nine, plus the runner-side structured-output
+repair that preceded it (#2056/#2073).
+
+### Fixed
+
+- **mDNS advertise/withdraw worked only on root-era installs** — the API
+  writes `/etc/avahi/services/hal0-addon-*.service` as the unprivileged
+  service user, but nothing ever granted it write access. The installer now
+  grants root:hal0 g+w on the directory (upgrade path fixes root-era addon
+  files), and a matching PermRow lets `hal0 doctor perms` heal drift
+  (#2059, #2071).
+- **Hermes gateway Telegram/Discord bridge silently skipped on every
+  install** — the bridge sub-install demanded sudo under an already-root
+  installer; the root path now runs the system gateway install correctly
+  (#2061, #2077).
+- **Bootstrap leaked its ~150 MB work dir on every successful install** —
+  the EXIT trap died at the exec into install.sh. install.sh now removes the
+  handed-off tree as its last step (after the cosign persist from #2058;
+  `HAL0_BOOTSTRAP_KEEP_TMP` and failed installs still keep it) (#2065, #2069).
+- **Missing-dep preflight failed one dependency at a time** — a minimal box
+  lacking curl and jq cost one full retry per dep. Bootstrap now batch-reports
+  all missing deps and auto-installs them via the detected package manager,
+  falling back to a single copy-pasteable install command (#2062, #2075).
+- **`hermes mcp list/test` as root read `~root/.hermes`** and reported "No
+  MCP servers configured" on healthy installs; root runs now resolve the
+  hal0 service home and always print which config tree they read
+  (#2063, #2070).
+- **Non-llama seeds (ComfyUI img, qwen3tts) on a kfd-less box** now refuse
+  load honestly: their runner images are ROCm-only, so the remedy hint no
+  longer suggests a `device='cpu'` that cannot exist for them (#2067, #2072).
+
+### Added
+
+- **Post-install smoke now proves output, not just transport, for the two
+  paths that shipped broken through three RCs**: a gateway structured-output
+  probe (`response_format: json_object`, kwarg-absent body — the shape that
+  caught #2056) and a `hal0 update --check` dry-run (the gap that let #2052
+  through). Both fail loudly in the install summary without aborting the
+  install (#2066, #2074).
+- **Custom hostname reaches avahi**: installing with `HAL0_HOSTNAME=<name>`
+  now pins `host-name=<name>` in avahi-daemon.conf (idempotent, warns before
+  replacing an operator's own setting), so `http://<name>.local:8080` resolves
+  on the LAN. A renamed box stops answering to the `hal0.local` alias
+  (#2060, #2078).
+- **rc-validate kit**: ct151 pristine-rollback gotchas documented — the
+  snapshot predates the dev0/dev3 passthrough entries, DNS must be set via
+  `pct set --nameserver`, and minimal Ubuntu 26.04 needs curl+jq before
+  bootstrap (#2064, #2068).
+
 ## [1.0.0-rc.7] — 2026-08-17
 
 The rc.6 validation sweep ran the fleet again — fresh installs, in-place
