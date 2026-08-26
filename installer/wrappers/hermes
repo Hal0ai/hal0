@@ -67,6 +67,44 @@ case "${1:-}" in
     --hal0-ready) exit 0 ;;
 esac
 
+# root-home fallback (#2063): reaching this point as root means the guard
+# above could NOT drop privileges — the guard lib is missing/unreadable
+# (partial or dev install) or the hal0 user is absent — or the operator
+# forced root via HAL0_ALLOW_ROOT. Upstream hermes resolves its state dir
+# from $HOME (`~/.hermes`; the CLI-side euid-aware fix belongs upstream),
+# so an unguarded root run silently reads /root/.hermes — a tree the hal0
+# service never writes — and `hermes mcp list` falsely reports "No MCP
+# servers configured" on a healthy install. Point HOME at the hal0 service
+# home instead (and strip any inherited HERMES_HOME, matching the guard's
+# `env -u` posture), and ALWAYS name the tree this invocation resolves so
+# an empty result is diagnosable rather than a false "broken install".
+# HAL0_SERVICE_HOME bypasses the getent lookup (tests / nonstandard
+# service accounts; set-but-empty means "no service user resolvable").
+# HAL0_RUNAS_TEST_UID is the guard's documented test-only euid seam.
+_hal0_euid="${HAL0_RUNAS_TEST_UID:-$(id -u 2>/dev/null || echo 0)}"
+if [ "$_hal0_euid" = "0" ]; then
+    case "${HAL0_ALLOW_ROOT:-}" in
+        1 | true | yes | TRUE | YES)
+            # Deliberate root debug: env left alone, resolved path named.
+            printf 'hermes: HAL0_ALLOW_ROOT set — reading %s/.hermes (root debug; NOT the hal0 service home)\n' \
+                "${HOME:-/root}" >&2
+            ;;
+        *)
+            _hal0_svc_home="${HAL0_SERVICE_HOME-$(getent passwd hal0 2>/dev/null | cut -d: -f6)}"
+            if [ -n "$_hal0_svc_home" ]; then
+                HOME="$_hal0_svc_home"
+                export HOME
+                unset HERMES_HOME
+                printf 'hermes: running as root without the run-as-hal0 guard — reading %s/.hermes (hal0 service home)\n' \
+                    "$_hal0_svc_home" >&2
+            else
+                printf 'hermes: running as root and no hal0 service user found — reading %s/.hermes\n' \
+                    "${HOME:-/root}" >&2
+            fi
+            ;;
+    esac
+fi
+
 if [ ! -x "$HAL0_HERMES_BIN" ]; then
     printf 'hermes: venv binary missing at %s\n' "$HAL0_HERMES_BIN" >&2
     printf '  Run `hal0 agent bootstrap hermes` to provision.\n' >&2
