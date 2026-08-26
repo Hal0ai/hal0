@@ -28,9 +28,9 @@ def test_ct151_notes_say_rollback_deletes_dev_passthrough() -> None:
         "ct151 notes lost the fact that `pct rollback 151 pristine` deletes "
         "the dev0/dev3 passthrough entries (not just gid drift)"
     )
-    assert "pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991" in notes, (
-        "ct151 notes lost the exact re-add command for the dev0/dev3 passthrough entries"
-    )
+    assert (
+        "pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991" in notes
+    ), "ct151 notes lost the exact re-add command for the dev0/dev3 passthrough entries"
 
 
 def test_ct151_notes_prescribe_pct_level_nameserver_fix() -> None:
