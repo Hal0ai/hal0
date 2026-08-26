@@ -199,9 +199,7 @@ esac
 
 
 class TestBootstrapHandsOffWorkdir:
-    def test_export_reaches_install_sh_and_points_at_live_work_dir(
-        self, tmp_path: Path
-    ) -> None:
+    def test_export_reaches_install_sh_and_points_at_live_work_dir(self, tmp_path: Path) -> None:
         env, install_log = _success_fixture_env(tmp_path)
 
         proc = _run_bootstrap(env)
