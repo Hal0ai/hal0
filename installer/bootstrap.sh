@@ -505,6 +505,19 @@ main() {
     # HAL0_INSTALL_SKIP_VERIFY opt-out.
     export HAL0_BOOTSTRAP_VERIFIED=1
 
+    # The EXIT trap armed above dies at the exec below (exec replaces this
+    # process), so nothing bootstrap-side can delete the work dir after a
+    # successful hand-off — it used to leak ~150 MB per install (#2065).
+    # Hand the path to install.sh, which removes it as the very last step
+    # of a successful run — strictly after persist_bootstrap_cosign has
+    # copied the fetched cosign out of the tree (#2052). Deliberately left
+    # unset under HAL0_BOOTSTRAP_KEEP_TMP=1 so the debug knob keeps the
+    # tree, and a failed install exits before install.sh's cleanup — the
+    # tree stays for debugging either way.
+    if [[ "${HAL0_BOOTSTRAP_KEEP_TMP:-0}" != "1" ]]; then
+        export HAL0_BOOTSTRAP_WORK="${work}"
+    fi
+
     # Pass through stdin so install.sh's interactive prompts work when
     # the user invoked us as `sudo bash install.sh`. When invoked via
     # curl|bash, stdin is closed and install.sh falls back to defaults.

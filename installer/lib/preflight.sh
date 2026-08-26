@@ -1650,3 +1650,35 @@ persist_bootstrap_cosign() {
     warn "cosign is not installed and this run has no bootstrap-verified binary to persist — the first 'hal0 update' will fail its signature check until cosign is installed (https://docs.sigstore.dev/cosign/installation/)"
     return 0
 }
+
+# ── bootstrap work-dir cleanup (#2065) ─────────────────────────────────────
+# bootstrap.sh arms an EXIT trap to delete its /tmp/hal0-install-* work dir
+# (release tarball + unpacked tree, ~150 MB), but that trap dies at the
+# `exec` into install.sh — so every successful install used to leak the
+# whole tree. Bootstrap hands the path over via HAL0_BOOTSTRAP_WORK (left
+# unset under HAL0_BOOTSTRAP_KEEP_TMP=1, though the knob is honored here
+# again as defense in depth). install.sh calls this as its very last step:
+# that is strictly after persist_bootstrap_cosign above has copied
+# bootstrap's cosign out of the tree (#2052/#2058 ordering), and a failed
+# install never reaches it — the tree stays for debugging. Deleting the
+# tree install.sh itself runs from is safe: bash holds an open fd on the
+# script, which the kernel keeps readable after the unlink. The name check
+# keeps a stray or mangled value from ever aiming rm -rf at anything that
+# is not a bootstrap work dir. Never fatal — a leftover tmp dir must not
+# fail an otherwise complete install.
+cleanup_bootstrap_workdir() {
+    local work="${HAL0_BOOTSTRAP_WORK:-}"
+    [[ -n "${work}" ]] || return 0
+    if [[ "${HAL0_BOOTSTRAP_KEEP_TMP:-0}" == "1" ]]; then
+        info "HAL0_BOOTSTRAP_KEEP_TMP=1 — leaving bootstrap work dir ${work}"
+        return 0
+    fi
+    if [[ "${work##*/}" != hal0-install-* ]]; then
+        warn "not removing unexpected bootstrap work dir path: ${work}"
+        return 0
+    fi
+    [[ -d "${work}" ]] || return 0
+    rm -rf -- "${work}" || return 0
+    info "removed bootstrap work dir ${work}"
+    return 0
+}
