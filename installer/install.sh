@@ -295,6 +295,14 @@ info "system: $(uname -srm)"
 # bare "command not found" deep in the install.
 preflight_bootstrap_prereqs || die "missing base prereqs — see above (installer/bootstrap.sh's one-liner preflight requires the same tools)"
 
+# Persist bootstrap's digest-pinned cosign so the updater's signature
+# gate works on the very first `hal0 update` (#2052). Soft: warns and
+# continues when there is nothing to persist. Dev installs manage their
+# own tools.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    persist_bootstrap_cosign
+fi
+
 # Architecture is a hard requirement in every mode — all shipped binaries
 # (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"

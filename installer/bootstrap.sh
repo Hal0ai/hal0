@@ -231,6 +231,11 @@ $(cosign_manual_install_hint)"
 $(cosign_manual_install_hint)"
     fi
     _COSIGN_BIN="${out}"
+    # Hand the verified binary to install.sh so it can persist a cosign
+    # for the updater (#2052) — the work directory does not survive the
+    # install, and a fresh box otherwise has no cosign for its first
+    # `hal0 update`.
+    export HAL0_BOOTSTRAP_COSIGN="${out}"
     ok "pinned cosign ${_COSIGN_VERSION} sha256 OK (${actual:0:12}…)"
 }
 
