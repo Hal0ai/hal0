@@ -3682,5 +3682,14 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 # install is picking models per slot, which is a dashboard job — see the
 # "Next steps" box above. Do NOT reintroduce a post-install CLI wizard here.
 
+# Bootstrap hand-off cleanup (#2065): remove the /tmp/hal0-install-* work
+# dir this tree was unpacked into — bootstrap.sh's own EXIT trap died at
+# its exec into us, so the removal is ours. No-op for git-checkout / --dev
+# / tarball-direct installs (HAL0_BOOTSTRAP_WORK unset) and under
+# HAL0_BOOTSTRAP_KEEP_TMP=1. Dead-last on purpose: a failed install never
+# gets here (the tree stays for debugging), and persist_bootstrap_cosign
+# already salvaged bootstrap's cosign out of the tree in pre-flight.
+cleanup_bootstrap_workdir
+
 # Restore the caller's umask (see the save near the top of the file).
 umask "${_HAL0_ORIG_UMASK}"
