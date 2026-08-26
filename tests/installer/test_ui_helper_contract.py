@@ -62,6 +62,5 @@ def test_no_reporter_shaped_call_without_a_definition():
                 offenders.append(f"{f.relative_to(REPO)}:{n}: {line.strip()}")
     assert not offenders, (
         "reporter-shaped call to a helper no installer source defines "
-        "(#2081 class — this dies with 127 under set -e at runtime):\n"
-        + "\n".join(offenders)
+        "(#2081 class — this dies with 127 under set -e at runtime):\n" + "\n".join(offenders)
     )
