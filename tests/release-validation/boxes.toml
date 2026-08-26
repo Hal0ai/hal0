@@ -28,8 +28,9 @@ api = "http://10.0.1.151:8080"
 auth_required = false
 status = "PREFERRED fresh box as of 2026-08-22 — rc.7 verified via a genuine fresh install from pristine"
 notes = """
-Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor, THEN run the installer
-fresh — this is now the ONLY reset point (corrected 2026-08-22: the `rc6-installed` /
+Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor, THEN the
+POST-ROLLBACK CHECKLIST below (re-add dev0/dev3 passthrough, `pct set --nameserver`,
+`apt install -y curl jq`), THEN run the installer fresh — this is now the ONLY reset point (corrected 2026-08-22: the `rc6-installed` /
 `rc5-installed` convenience post-install snapshots this file used to document are GONE;
 `pct listsnapshot 151` shows only `pristine` (2026-08-08) and `current`). Do not attempt
 `pct rollback 151 rc6-installed` or any named post-install snapshot — it will fail. Every prior
@@ -69,19 +70,39 @@ must be the thing that catches the resulting garbage (never a silent `ready`) �
 
 GOTCHAS, in order:
   1. The pristine snapshot has broken DNS — /etc/resolv.conf points at an unreachable
-     Tailscale 100.100.100.100. Fix it before anything else or the install fails opaquely.
+     Tailscale 100.100.100.100. Fix it on the HYPERVISOR with `pct set 151 --nameserver <ip>`
+     (corrected 2026-08-25, rc.9): editing /etc/resolv.conf inside the container does NOT
+     stick — PVE regenerates it on every boot, so an in-container edit silently reverts at the
+     next restart and the install fails opaquely again. Fix it before anything else.
   2. (stale, retired) The install no longer needs HAL0_ALLOW_CPU_ONLY=1 — GPU passthrough
      exists.
   3. No NFS mount. Test models must be rsynced to /mnt/ai-models; workstation ggufs are often
      symlinks into huggingface/hub, so use `rsync -L` — and /mnt/ai-models is NOT in hal0's
      model roots, so a staged gguf is invisible until `hal0 model add`.
-  4. (stale, retired) "/dev/dri absent in sysfs" predates the dev0/dev3 passthrough. After any
-     `pct rollback 151`, confirm dev0/dev3 keep gid=991 or the installer's GPU preflight aborts.
+  4. (upgraded from a perms check to a hard re-add, 2026-08-25, rc.9) `pct rollback 151
+     pristine` DELETES the dev0/dev3 passthrough entries from the CT config outright — the
+     pristine snapshot (2026-08-08) predates them, so this is not gid drift: the device
+     entries are GONE after every rollback. Re-add them on the hypervisor before installing
+     (`pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991`), then
+     confirm gid=991 stuck on both, or the installer's GPU preflight aborts. The earlier
+     "/dev/dri absent in sysfs" note predates the passthrough entirely and stays retired.
   5. (stale, retired 2026-08-22 — no post-install convenience snapshot exists any more, so this
      no longer applies) After a rollback to a named post-install snapshot, services would not
      come back on their own — `systemctl start hal0.target` (hermes unit
      `hermes-gateway.service`). A genuinely fresh installer run (the only reset path now)
      starts both units itself; no manual start has been needed on the last two runs.
+  6. (added 2026-08-25, rc.9) The pristine minimal Ubuntu 26.04 image ships with NEITHER curl
+     NOR jq — `apt install -y curl jq` up front, before the bootstrap/installer fetch, or the
+     fresh-install lane dies at its very first command. A product-side bootstrap preflight is
+     tracked separately; the kit lane must not depend on it landing.
+
+POST-ROLLBACK CHECKLIST (every `pct rollback 151 pristine`, in order — gotchas 4, 1, 6):
+  1. `pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991`, then
+     confirm gid=991 on both entries (rollback deleted them — gotcha 4).
+  2. `pct set 151 --nameserver <ip>` on the hypervisor (gotcha 1 — never edit resolv.conf
+     inside the container).
+  3. Boot the CT, `apt install -y curl jq` (gotcha 6).
+  4. Only then run the installer/bootstrap.
 """
 
 # ct152-cpu-fresh (the CPU-only fresh box, no GPU passthrough) was DESTROYED 2026-08-21. There
