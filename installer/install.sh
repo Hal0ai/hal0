@@ -2971,6 +2971,77 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
+# ── Post-install smoke probes (#2066) ──────────────────────────────────────
+# Two blind spots the v1.0 RC cycle proved expensive:
+#   1. Structured output — a plain chat probe passes while every json_object
+#      consumer is broken (extraction silently dead since the :0820 lineage).
+#   2. The updater — #2052 shipped through three RCs because nothing ever
+#      dry-ran `hal0 update --check`; the breakage only surfaced at the NEXT
+#      release.
+# Both probes are fail-soft like the rest of the verify step: warn loudly and
+# repeat the failure inside the summary box (via SMOKE_FAILED), never abort a
+# finished install. Defined at top level so tests/installer/
+# test_install_smoke_probes.py can extract and drive them through fakes.
+SMOKE_FAILED=()
+
+smoke_structured_output() {
+    # Probe shape is load-bearing (live-verified on ct151, rc.9 validation):
+    #   * via the GATEWAY (:${HAL0_PORT}/v1), never direct-to-slot — a
+    #     direct-to-slot 200 masks gateway-path failures (rc.7's #2020);
+    #   * kwarg-ABSENT body — model + messages + response_format ONLY.
+    #     Extra kwargs (temperature, max_tokens, …) mask template-branch
+    #     differences between slot backends.
+    # hal0/utility is the canonical virtual alias (normalize/resolver.py):
+    # it routes to the cheap helper slot and falls back to the anchor, so
+    # the probe works on any box with at least one loaded model.
+    local body resp
+    body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
+    # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
+    # a fresh open-LAN box has no api.env and needs no header.
+    local -a auth=()
+    local key
+    if [[ -f /etc/hal0/api.env ]]; then
+        key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
+        [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
+    fi
+    resp="$(curl -fsS -m 120 -X POST "http://127.0.0.1:${HAL0_PORT}/v1/chat/completions" \
+        -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
+        -d "${body}" 2>/dev/null)" || return 1
+    # The assertion: the CONTENT of the reply parses as JSON — an HTTP 200
+    # carrying prose ("Paris") is exactly the failure this probe exists for.
+    printf '%s' "${resp}" | "${PY}" -c 'import json, sys
+try:
+    reply = json.load(sys.stdin)
+    json.loads(reply["choices"][0]["message"]["content"])
+except Exception:
+    sys.exit(1)' 2>/dev/null
+}
+
+smoke_update_check() {
+    # Dry-run the updater end to end (manifest fetch + cosign path via the
+    # daemon's /api/updates/check); --check applies nothing. A clean exit is
+    # the whole assertion — a #2052-class gap surfaces HERE, not at the next
+    # release.
+    "${HAL0_BIN}" update --check >/dev/null 2>&1
+}
+
+run_post_install_smoke() {
+    if smoke_structured_output; then
+        info "structured-output probe ok (gateway /v1, json_object)"
+    else
+        SMOKE_FAILED+=("structured-output")
+        warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
+        warn "  extraction/structured-output consumers are likely broken even if plain chat works — check 'hal0 status' for a loaded model, then 'journalctl -u hal0-api -n 40'"
+    fi
+    if smoke_update_check; then
+        info "update-check probe ok ('hal0 update --check' exits cleanly)"
+    else
+        SMOKE_FAILED+=("update-check")
+        warn "'${HAL0_BIN} update --check' FAILED — the update path is broken and the next release will not install"
+        warn "  re-run '${HAL0_BIN} update --check' to see why (daemon reachability / manifest fetch / cosign verify)"
+    fi
+}
+
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
@@ -3354,6 +3425,12 @@ else
         info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
     fi
 
+    # Last verify action before the summary (#2066): everything the probes
+    # depend on — hal0-api, slots, the steward/agent model pulls — is as up
+    # as this install will get it. Fail-soft by construction (see the probe
+    # definitions above the Service start branch).
+    run_post_install_smoke
+
 fi
 
 # Real LAN IPv4 addresses — filtered to skip container / virtual bridge
@@ -3452,6 +3529,20 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && ${#REACH_LINES[@]} -gt 0 ]];
         label="${entry%%$'\t'*}"
         url="${entry##*$'\t'}"
         SUMMARY_LINES+=("$(printf '  %s%-12s%s %s%s%s' "${DIM}" "${label}" "${RST}" "${BLU}" "${url}" "${RST}")")
+    done
+fi
+
+# Post-install smoke failures (#2066) — repeated INSIDE the summary box so an
+# rc-validate run (or a human skimming it) can't miss them among the
+# scrolled-away warns above. The probes themselves are fail-soft; this is the
+# loud part of that contract.
+if [[ ${#SMOKE_FAILED[@]} -gt 0 ]]; then
+    SUMMARY_LINES+=(
+        ""
+        "$(printf '%s%sVerify FAILED:%s' "${BOLD}" "${RED}" "${RST}")"
+    )
+    for probe in "${SMOKE_FAILED[@]}"; do
+        SUMMARY_LINES+=("$(printf '  %s%s%s probe failed — see the warnings above' "${RED}" "${probe}" "${RST}")")
     done
 fi
 
