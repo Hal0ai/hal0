@@ -1641,7 +1641,7 @@ persist_bootstrap_cosign() {
     fi
     if [[ -n "${HAL0_BOOTSTRAP_COSIGN:-}" && -x "${HAL0_BOOTSTRAP_COSIGN}" ]]; then
         if install -m 0755 "${HAL0_BOOTSTRAP_COSIGN}" "${dest_dir}/cosign"; then
-            ok "cosign: persisted bootstrap's pinned build to ${dest_dir}/cosign (hal0 update requires it)"
+            info "cosign: persisted bootstrap's pinned build to ${dest_dir}/cosign (hal0 update requires it)"
         else
             warn "could not persist cosign to ${dest_dir}/cosign — the first 'hal0 update' will fail its signature check until cosign is installed (https://docs.sigstore.dev/cosign/installation/)"
         fi
