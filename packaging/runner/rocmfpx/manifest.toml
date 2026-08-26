@@ -11,7 +11,7 @@
 
 [image]
 #: The tag this recipe produces. Keep in lockstep with DEFAULT_ROCMFPX_IMAGE.
-tag = "ghcr.io/hal0ai/hal0-combined:0824"
+tag = "ghcr.io/hal0ai/hal0-combined:0826"
 
 [base]
 #: Runtime layer. A Kyuz0 amd-strix-halo-toolboxes derivative; the ROCm
@@ -131,6 +131,15 @@ deepseek_v3_2 parser, which uses the same <param name=> shape.
 Includes an explicit grammar_triggers entry: this tree's PEG API does not
 auto-derive triggers from trigger_rule, so a lazy grammar without one rejects
 every tools request with "no triggers set for lazy grammar!".
+
+:0826 revision (#2056): the reasoning branch consumes an optional closed
+<think>...</think> block even when reasoning extraction is off. The brain-sft
+template emits a pre-closed think block in its generation prompt whenever
+thinking is disabled, and common_sampler_init prefill-feeds that prompt into
+non-lazy grammars (response_format / forced tool choice); with the old
+`p.eps()` branch the grammar had no rule for the block, so the prefill token
+hit a grammar expecting `{` and every structured-output request died with
+"Failed to initialize samplers: std::exception".
 """
 
 [[patches]]
@@ -144,6 +153,21 @@ cause of #1888 — that was ruled out by test — but cheap insurance on a build
 whose output is a signed pin.
 """
 
+[[patches]]
+file = "0004-chat-lfm25-response-format-grammar.patch"
+why = """
+LFM2.5 response_format produced an EMPTY grammar: the parser set grammar_lazy
+from tool_choice alone (default AUTO), and a lazy grammar generates its root
+from trigger rules only — a request with no tools has none, so generation ran
+unconstrained and every response_format request 500'd at the parse
+(hal0 #2056 follow-up; found validating LFM2.5-2.6B as a default-brain
+candidate; reproduced on prod's live LFM slot). Non-lazy now whenever
+response_format is present, matching every sibling parser. Also consumes a
+weight-emitted or prompt-tail think block (plus trailing whitespace) when
+reasoning extraction is off — the same prefill/parse hole patch 0002 closed
+for MiniCPM5 — and tolerates trailing whitespace after the JSON body.
+"""
+
 [verification]
 #: What this image was proven against before the pin moved. Full matrix and
 #: evidence: https://github.com/Hal0ai/hal0/issues/1948
@@ -153,4 +177,6 @@ probes = [
     ">=256-token generation terminates with no )-repetition wedge",
     "native MiniCPM5 tool_calls on the Vulkan lane of a kfd-less box",
     "zero devices mapped -> readable diagnostic, exit 78, no SIGSEGV (#1936)",
+    "response_format json_object AND json_schema -> 200 on the seeded brain model, thinking kwarg absent/true/false (#2056)",
+    "doomed model with devices present -> exit 64 fail-fast (#2037)",
 ]
