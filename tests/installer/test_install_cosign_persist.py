@@ -37,12 +37,16 @@ _BOOTSTRAP = _REPO_ROOT / "installer" / "bootstrap.sh"
 _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 
 # ui.sh helpers the function calls; stubbed so output is capturable and the
-# restricted environment needs no extra sourcing.
+# restricted environment needs no extra sourcing. Stub ONLY the reporters
+# ui.sh actually defines (info/warn/err/die) — #2081 shipped because an
+# earlier version of this stub set also defined an `ok()` that exists
+# nowhere in the installer, masking the undefined-helper 127 that killed
+# every real cosign-less fresh install at pre-flight.
 _STUBS = """
 info() { printf 'INFO:%s\\n' "$*"; }
-ok()   { printf 'OK:%s\\n' "$*"; }
 warn() { printf 'WARN:%s\\n' "$*" >&2; }
 err()  { printf 'ERR:%s\\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
 """
 
 
@@ -97,7 +101,7 @@ class TestPersistBootstrapCosign:
         assert installed.read_bytes() == src.read_bytes()
         mode = stat.S_IMODE(installed.stat().st_mode)
         assert mode & stat.S_IXUSR, f"not executable: {oct(mode)}"
-        assert "OK:" in proc.stdout
+        assert "INFO:" in proc.stdout
 
     def test_never_overwrites_a_system_cosign(self, tmp_path: Path) -> None:
         src = _make_bootstrap_binary(tmp_path)
