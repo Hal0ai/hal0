@@ -181,7 +181,7 @@ class TestValidTomlVariants:
     def test_section_followed_by_list_valued_table_is_not_spliced(self, tmp_path: Path) -> None:
         toml = tmp_path / "hal0.toml"
         toml.write_text(
-            "[telemetry]\nenabled = false\n\n[models]\nroots = [\"/x\", \"/y\"]\n",
+            '[telemetry]\nenabled = false\n\n[models]\nroots = ["/x", "/y"]\n',
             encoding="utf-8",
         )
         proc = _run_persist(toml, channel="preview")
@@ -240,7 +240,6 @@ class TestStableDefault:
         assert proc.returncode == 0, proc.stderr
         assert _telemetry_channel(toml) == "stable"
         assert "WARN:" in proc.stderr
-
 
 
 class TestWiring:
