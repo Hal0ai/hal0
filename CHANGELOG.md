@@ -24,6 +24,106 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.0.0-rc.11] — 2026-08-28
+
+The default steward changes model, and the fresh-install path closes the last
+three defects the rc.10 validation lane surfaced — two of them introduced by
+the rc.10 fix wave itself, and reproducible only on the exact end-user shape
+(a fresh box with no system cosign; a fresh box installed from the preview
+channel).
+
+### Highlights
+
+- **LFM2.5-2.6B is the default brain model.** One plain-GGUF pick on every box
+  (Q8_0, 2.87 GB) replaces the hardware-forked `hal0-brain-sft` variants, whose
+  Q8/Q4 builds carry custom GGML tensor type ids that stock llama.cpp rejects.
+  The new default is a native tool-caller on the `hal0-combined:0826` runner and
+  an RL-trained thinker: `profile.brain` now leaves reasoning-format at the
+  runner default, so its `<think>` text is extracted into `reasoning_content`
+  instead of leaking into `message.content`. The sft variants remain available
+  through `HAL0_BRAIN_MODEL`.
+- **A fresh install completes, and can then update itself.** rc.10 could do
+  neither on a box without a system cosign: pre-flight died on an undefined
+  reporter helper, and the channel the box was installed from was never
+  persisted, so its updater fell back to `stable` and every `hal0 update
+  --check` failed.
+
+### Fixed
+
+- **Every cosign-less fresh install died at pre-flight step 1/16.** The cosign
+  persistence added in rc.10 reported success through an `ok` helper that no
+  installer source defines — `ui.sh` provides `info`/`warn`/`err`/`die`, and
+  only `bootstrap.sh` carries a private `ok()`. Under `set -euo pipefail` the
+  resulting 127 killed the install immediately after the cosign had been
+  written successfully. Hosts with a system cosign return early past that line,
+  which is why CI and every dev box missed it (#2081). The regression guard
+  added alongside the fix now resolves helper definitions per sourcing scope
+  rather than globally: as first written it counted `bootstrap.sh`'s private
+  `ok()` as a definition for every file, and stayed green over the very bug it
+  was added to pin (#2086).
+- **The bootstrap channel was never persisted.** A preview-channel install
+  installed correctly but left the updater resolving `stable`, whose pointer
+  still serves 0.9.8, so rc boxes could not self-update to the next rc and the
+  install-time update-check probe failed. The installer now writes
+  `telemetry.channel` into `hal0.toml` through a validated locked
+  read-modify-write, mirroring the cosign handoff. An explicit differing value
+  is never overwritten, and the schema default is deliberately not persisted so
+  that re-bootstrapping can still recover a preview box (#2083).
+- **Hermes ran with zero memory tools on every fresh install.** `hermes config
+  set` coerced the `X-hal0-Private` header to a YAML integer, and the integer
+  form wedges hermes' MCP client immediately after `initialize`: `hal0-admin`
+  connected normally while `hal0-memory` hung for 40 s and died with a
+  `CancelledError`, silently costing the agent all 26 memory tools. The header
+  is now rendered as a quoted string through the merge layer, with post-merge
+  coercion so an overrides file cannot re-poison it (#2085).
+
+### Audience
+
+Operators running a preview-channel box, and anyone doing a fresh install from
+`hal0.dev/install.sh`. Fresh installs gain the most: all three fixes above are
+fresh-install-shaped. Existing rc.10 boxes are unaffected by #2081 and #2083
+(both are install-time), but do pick up the hermes memory-MCP fix.
+
+### Known issues
+
+- The live `hal0.dev/install.sh` still lags the in-tree installer: the
+  `mirror-bootstrap` workflow is gated on a signed stable manifest, and the
+  stable pointer still serves 0.9.8, so the mirror has not published since
+  2026-08-09 (#2057, #1530). Installing from the one-liner may fetch an older
+  bootstrap than this release ships. Both are resolved together on the GA cut.
+- `scripts/release-test.sh`'s γ rows still target the retired v0.1 slot CLI, so
+  release-check gate 5 cannot pass and is waived for this cut (#2050). The
+  rc-validate kit is the effective release gate.
+- The brain steward can still answer live-platform questions from its prelude
+  without a tool round on small models (#2022); the LFM2.5 default is the
+  intended mitigation and is re-evaluated in this release's validation lane.
+- The python 3.14 CI leg remains allowed-fail (container-provider fixtures).
+
+### Supported upgrades
+
+`hal0 update` from 1.0.0-rc.9 or 1.0.0-rc.10 on the preview channel. Boxes
+installed fresh from rc.10 or earlier and never re-pointed may have no channel
+persisted — set it once with `hal0 update --channel preview` before checking
+for this release; installs from this release onward persist it themselves.
+
+### Operator migrations
+
+None required. The brain model default changes for NEW installs only: an
+existing box keeps whatever model its brain slot is already bound to, and
+nothing re-pulls or re-binds on upgrade. To adopt LFM2.5-2.6B on an existing
+box, pull it and rebind the brain slot deliberately. Slot image pins are
+unchanged from rc.10 (`hal0-combined:0826`).
+
+### Rollback
+
+`hal0 update --rollback` restores the previously installed tree, as usual. No
+schema or on-disk state changes ship in this release, so a rollback to rc.10
+needs no data migration. The one persisted value this release introduces
+(`telemetry.channel` in `hal0.toml`) is read by newer updaters and ignored by
+older ones, so it is safe to leave in place across a rollback.
+
+## [1.0.0-rc.10] — 2026-08-26
+
 The rc.9 validation sweep's fresh-install lane (ct151, minimal Ubuntu 26.04)
 surfaced a batch of install-process defects — several of them silent for
 multiple RCs. This wave closes all nine, plus the runner-side structured-output
