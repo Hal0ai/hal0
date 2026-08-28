@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 from scripts.docs_discourse_sync.discourse_client import DiscourseClient
 from scripts.docs_discourse_sync.discovery import Doc
-from scripts.docs_discourse_sync.sync import sync_docs
+from scripts.docs_discourse_sync.sync import prettified_title, sync_docs, title_matches
 
 
 def _doc(key: str, title: str, body_md: str, *, order: float = 10.0) -> Doc:
@@ -427,3 +427,56 @@ def test_a_site_json_failure_does_not_fail_the_sync() -> None:
     with _client(forum) as client:
         sync_docs([_doc("guides/a", "A", "body a")], client=client, category_id=11)
     assert forum.topics["hal0-docs--guides--a"]["category_id"] == 11
+
+
+# --- title_prettify round-trip ----------------------------------------------
+#
+# forum.hal0.dev runs with `title_prettify` on, so Discourse rewrites a title
+# when it saves it. Comparing titles verbatim made the sync see those topics
+# as changed on every run, rewrite them, and see them changed again -- seven
+# topics stuck in that loop against a rate-limited forum.
+
+
+def test_prettified_title_matches_discourses_own_rules() -> None:
+    # capitalize the first letter, but only when the whole first word is
+    # lowercase -- which is what keeps "CLI" intact
+    assert prettified_title("hal0 docs: Start here") == "Hal0 docs: Start here"
+    assert prettified_title("hal0 CLI reference") == "Hal0 CLI reference"
+    assert prettified_title("Install hal0") == "Install hal0"
+    # all-caps is downcased whole, then first-letter capitalized
+    assert prettified_title("ALL CAPS TITLE") == "All caps title"
+    # trailing periods and doubled punctuation go
+    assert prettified_title("trailing period.") == "Trailing period"
+    assert prettified_title("really?!!!") == "Really?!"
+    # whitespace is tidied
+    assert prettified_title("  spaced   out  ") == "Spaced out"
+
+
+def test_title_matches_accepts_the_servers_prettified_form() -> None:
+    assert title_matches("Hal0 docs: Start here", "hal0 docs: Start here")
+    assert title_matches("Install hal0", "Install hal0")
+
+
+def test_title_matches_still_sees_a_real_rename() -> None:
+    assert not title_matches("Hal0 docs: Start here", "hal0 docs: Getting going")
+    assert not title_matches("Install hal0", "Install hal0 on Proxmox")
+
+
+def test_a_prettified_title_does_not_trigger_an_update_every_run() -> None:
+    """The regression itself: sync, let the server prettify the title, sync
+    again -- the second run must report no change."""
+    forum = FakeForum()
+    docs = [_doc("guides/a", "hal0 guide to a", "body a")]
+    with _client(forum) as client:
+        sync_docs(docs, client=client, category_id=11)
+
+    # Discourse capitalizes on save; emulate that on the stored state.
+    stored = forum.topics["hal0-docs--guides--a"]
+    stored["title"] = "Hal0 guide to a"
+
+    with _client(forum) as client:
+        report = sync_docs(docs, client=client, category_id=11)
+
+    assert report.count("update") == 0, "a prettified title must not look changed"
+    assert report.count("noop") == 1
+    assert forum.topics["hal0-docs--guides--a"]["title"] == "Hal0 guide to a"
