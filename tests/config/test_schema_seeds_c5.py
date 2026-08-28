@@ -159,8 +159,7 @@ def test_brain_seed_defers_its_model_to_the_installer() -> None:
 
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / "brain.toml")
     assert slot.model.default == "", (
-        "brain.toml must not pin a model: the installer binds the model "
-        "after its bytes land"
+        "brain.toml must not pin a model: the installer binds the model after its bytes land"
     )
     # The auto-selected default must resolve to real HF pull coordinates.
     default = get_curated(BRAIN_MODEL_DEFAULT)

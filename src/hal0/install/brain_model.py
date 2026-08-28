@@ -295,7 +295,11 @@ def main(argv: list[str] | None = None) -> int:
 
         entry = _get_curated(chosen)
         size = f", {entry.size_gb:g} GB download" if entry is not None else ""
-        why = "override" if override and chosen == override else "default — loads on every runner class"
+        why = (
+            "override"
+            if override and chosen == override
+            else "default — loads on every runner class"
+        )
         print(f"  brain model: {chosen} ({why}{size})")
         if already_pulled(chosen) is not None:
             print("  already on disk from an earlier run — binding it, no download")
