@@ -152,27 +152,31 @@ def test_brain_seed_defers_its_model_to_the_installer() -> None:
     either hardware class the installer can land on.
     """
     from hal0.install.brain_model import (
+        BRAIN_MODEL_DEFAULT,
         BRAIN_MODEL_IDS,
-        BRAIN_MODEL_PORTABLE,
-        BRAIN_MODEL_ROCMFPX,
     )
     from hal0.registry.curated import get_curated
 
     slot = _load_seed_slot(_SEEDED_SLOTS_DIR / "brain.toml")
     assert slot.model.default == "", (
-        "brain.toml must not pin a model: the installer binds the "
-        "hardware-appropriate variant after its bytes land"
+        "brain.toml must not pin a model: the installer binds the model after its bytes land"
     )
-    # Both auto-selectable variants must resolve to real HF pull coordinates.
-    for model_id in (BRAIN_MODEL_ROCMFPX, BRAIN_MODEL_PORTABLE):
-        curated = get_curated(model_id)
-        assert curated is not None, f"{model_id!r} has no curated catalogue entry"
-        assert curated.hf_repo and curated.hf_file
-    # Every declared variant lives in the one PUBLIC repo. The base repo
-    # (Hal0ai/hal0-brain-sft) is private and safetensors-only — no chat runner
-    # consumes safetensors, so the installer must never point at it.
+    # The auto-selected default must resolve to real HF pull coordinates.
+    default = get_curated(BRAIN_MODEL_DEFAULT)
+    assert default is not None, f"{BRAIN_MODEL_DEFAULT!r} has no curated catalogue entry"
+    assert default.hf_repo and default.hf_file
+    # Every declared variant lives in a PUBLIC repo: the LFM default in
+    # LiquidAI's GGUF repo, the sft overrides in the one public sft repo.
+    # The base repo (Hal0ai/hal0-brain-sft) is private and safetensors-only —
+    # no chat runner consumes safetensors, so the installer must never point
+    # at it.
     for model_id in BRAIN_MODEL_IDS:
         curated = get_curated(model_id)
         assert curated is not None
-        assert curated.hf_repo == "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
+        expected_repo = (
+            "LiquidAI/LFM2.5-2.6B-GGUF"
+            if model_id == BRAIN_MODEL_DEFAULT
+            else "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
+        )
+        assert curated.hf_repo == expected_repo
         assert curated.hf_file.endswith(".gguf")

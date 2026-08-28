@@ -14,12 +14,15 @@ warning and leaves the brain slot MODEL-LESS. The install still succeeds. This
 mirrors the absent-``HF_TOKEN`` posture in install.sh: an optional model pull
 must not be able to fail a platform install.
 
-**Hardware-aware quant choice.** The Q8/Q4 files in the brain repo carry custom
-GGML tensor type ids (103 / 100) that **stock llama.cpp rejects at load**; they
-only run on the ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``). The F16 file is
-plain GGUF. So a ROCm/Vulkan box gets the small, fast Q8 agent preset and a
-CPU-only box gets the portable F16 — never the other way round, which would
-download a gigabyte only to crash-loop the container.
+**One default, hardware-blind (rc.10).** The default is
+:data:`BRAIN_MODEL_DEFAULT` (LFM2.5-2.6B Q8_0) on every box: plain GGUF, no
+custom tensor types, loadable by the FPX runner and stock llama.cpp alike.
+The hardware fork only survives for ``HAL0_BRAIN_MODEL`` overrides naming an
+sft build — the sft Q8/Q4 files carry custom GGML tensor type ids (103 / 100)
+that **stock llama.cpp rejects at load** (ROCmFPX runner only,
+``DEFAULT_ROCMFPX_IMAGE``); the sft F16 is the plain-GGUF one. An operator
+forcing an FPX-only quant onto a CPU box gets the crash-loop they asked for —
+the default can no longer produce it.
 
 **Reuses the existing activation gate.** The pull runs through
 :func:`~hal0.install.orchestrate.run_pull_and_activate`, which stamps
@@ -51,17 +54,26 @@ log = logging.getLogger(__name__)
 #: ``installer/etc-hal0/slots/brain.toml``).
 BRAIN_SLOT_NAME = "brain"
 
-#: Public GGUF repo holding every brain variant. The ``Hal0ai/hal0-brain-sft``
-#: BASE repo is private AND safetensors-only — no chat runner consumes
-#: safetensors, so the installer must never reach for it.
+#: Public GGUF repo holding the hal0-brain-sft variants. The
+#: ``Hal0ai/hal0-brain-sft`` BASE repo is private AND safetensors-only — no
+#: chat runner consumes safetensors, so the installer must never reach for it.
 BRAIN_HF_REPO = "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
 
-#: Curated id pulled on a box with a ROCm/Vulkan device: the Q8_0 agent/tool-use
-#: preset. Custom GGML tensor type 103 — ROCmFPX runner ONLY.
+#: The default brain on EVERY box (rc.10): LFM2.5-2.6B Q8_0. Plain GGUF —
+#: no custom tensor types — so the FPX runner and stock llama.cpp both load
+#: it and the hardware split below no longer forks the default. 2.87 GB
+#: (disclosed at the install.sh "Brain model" step; up from the 1.1 GB sft
+#: Q8). Requires the hal0-combined:0826+ runner for native tool-call
+#: parsing and think-extraction (#2073) — do not roll this default onto
+#: older image pins.
+BRAIN_MODEL_DEFAULT = "lfm2.5-2.6b"
+
+#: hal0-brain-sft Q8_0 agent/tool-use preset — the pre-rc.10 GPU default,
+#: kept as an override. Custom GGML tensor type 103 — ROCmFPX runner ONLY.
 BRAIN_MODEL_ROCMFPX = "hal0-brain-sft-q8-rocmfpx"
 
-#: Curated id pulled on a box with no usable GPU: plain F16 GGUF, loadable by a
-#: stock llama.cpp image. Bigger, but it actually starts.
+#: hal0-brain-sft plain F16 GGUF — the pre-rc.10 CPU default, kept as an
+#: override. Loadable by a stock llama.cpp image.
 BRAIN_MODEL_PORTABLE = "hal0-brain-sft-f16"
 
 #: Smallest variant. Custom GGML tensor type 100 — ROCmFPX runner ONLY. NOT
@@ -69,7 +81,12 @@ BRAIN_MODEL_PORTABLE = "hal0-brain-sft-f16"
 BRAIN_MODEL_SMALL = "hal0-brain-sft-q4-rocmfp4"
 
 #: Every brain variant, for callers that want to validate an override.
-BRAIN_MODEL_IDS = (BRAIN_MODEL_ROCMFPX, BRAIN_MODEL_SMALL, BRAIN_MODEL_PORTABLE)
+BRAIN_MODEL_IDS = (
+    BRAIN_MODEL_DEFAULT,
+    BRAIN_MODEL_ROCMFPX,
+    BRAIN_MODEL_SMALL,
+    BRAIN_MODEL_PORTABLE,
+)
 
 
 def rocmfpx_capable(hw: HardwareInfo) -> bool:
@@ -93,10 +110,18 @@ def brain_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
     """Return the curated brain model id to pull on this box.
 
     *override* (``HAL0_BRAIN_MODEL`` at the install.sh call site) wins when it
-    names a known variant, so an operator can force the Q4 build or pin F16 on
-    a GPU box. An unrecognised override is ignored with a warning rather than
-    honoured — a typo must not turn into a 404 pull.
+    names a known variant, so an operator can force an sft build (mind the
+    ROCmFPX-only quants on a CPU box). An unrecognised override is ignored
+    with a warning rather than honoured — a typo must not turn into a 404
+    pull.
+
+    ``hw`` no longer forks the default: :data:`BRAIN_MODEL_DEFAULT` is plain
+    Q8_0 GGUF that every runner class loads, so hardware only matters to
+    override users now. The parameter stays — dropping it would ripple
+    through every call site for no behavioural gain, and a future
+    memory-tiered default would need it right back.
     """
+    del hw  # retained for call-site stability; see docstring
     if override:
         override = override.strip()
         if override in BRAIN_MODEL_IDS:
@@ -104,7 +129,7 @@ def brain_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
         log.warning(
             "install.brain_model_override_unknown id=%s known=%s", override, BRAIN_MODEL_IDS
         )
-    return BRAIN_MODEL_ROCMFPX if rocmfpx_capable(hw) else BRAIN_MODEL_PORTABLE
+    return BRAIN_MODEL_DEFAULT
 
 
 def already_pulled(model_id: str, *, capability: str = "chat") -> Path | None:
@@ -266,12 +291,16 @@ def main(argv: list[str] | None = None) -> int:
 
         hw = _load_hardware()
         chosen = brain_model_for_hardware(hw, override=override)
+        from hal0.registry.curated import get_curated as _get_curated
+
+        entry = _get_curated(chosen)
+        size = f", {entry.size_gb:g} GB download" if entry is not None else ""
         why = (
-            "ROCm/Vulkan device present — ROCmFPX runner can load the custom tensor types"
-            if rocmfpx_capable(hw)
-            else "no ROCm/Vulkan device — using the portable F16 build (stock llama.cpp)"
+            "override"
+            if override and chosen == override
+            else "default — loads on every runner class"
         )
-        print(f"  brain model: {chosen} ({why})")
+        print(f"  brain model: {chosen} ({why}{size})")
         if already_pulled(chosen) is not None:
             print("  already on disk from an earlier run — binding it, no download")
         slot_manager, registry = _build_offline_deps()
