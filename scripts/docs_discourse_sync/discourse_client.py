@@ -64,6 +64,12 @@ class Topic:
         return f"{base_url.rstrip('/')}/t/{self.slug}/{self.topic_id}"
 
 
+# What to wait after a 429 that carries neither ``extras.wait_seconds`` nor
+# a Retry-After header. Discourse's buckets are minute-shaped, so a value well
+# under a minute keeps the retry cheap while still yielding real time back.
+_DEFAULT_RATE_LIMIT_WAIT_S = 10.0
+
+
 class RateLimiter:
     """Sliding min-interval throttle: never issue two requests less than
     ``60 / requests_per_minute`` seconds apart. Simple and sufficient at
@@ -110,10 +116,14 @@ class DiscourseClient:
         requests_per_minute: int = 60,
         transport: httpx.BaseTransport | None = None,
         rate_limiter: RateLimiter | None = None,
+        max_rate_limit_retries: int = 5,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
         self._rate_limiter = rate_limiter or RateLimiter(requests_per_minute)
+        self._max_rate_limit_retries = max_rate_limit_retries
+        self._sleeper = sleeper
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=_DEFAULT_TIMEOUT_S,
@@ -134,9 +144,55 @@ class DiscourseClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float:
+        """How long Discourse wants us to wait after a 429.
+
+        A throttled Discourse answers with
+        ``{"extras": {"wait_seconds": 10}, ...}`` and usually a
+        ``Retry-After`` header too. Prefer the body -- that is the number
+        the server actually enforces -- fall back to the header, and
+        finally to a fixed pause if a rate-limit response carries neither.
+        """
+        try:
+            wait = response.json().get("extras", {}).get("wait_seconds")
+            if wait is not None:
+                return float(wait)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                return float(header)
+            except ValueError:
+                pass
+        return _DEFAULT_RATE_LIMIT_WAIT_S
+
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        self._rate_limiter.wait()
-        return self._client.request(method, path, **kwargs)
+        """One request, retried while Discourse says we are going too fast.
+
+        The client's own RateLimiter paces steady-state traffic, but it
+        cannot know about the other buckets Discourse enforces (per-user,
+        per-IP, admin-API), so meeting a 429 mid-run is normal rather than
+        exceptional. Before this retry existed a single 429 aborted the
+        whole docs sync -- which is how the workflow failed from
+        2026-08-22 onward, part-way through resolving topics.
+
+        Only 429 is retried. Every other status, 5xx included, is returned
+        unchanged: this loop is for backpressure, not for papering over a
+        broken forum.
+        """
+        for attempt in range(self._max_rate_limit_retries + 1):
+            self._rate_limiter.wait()
+            response = self._client.request(method, path, **kwargs)
+            if response.status_code != 429 or attempt == self._max_rate_limit_retries:
+                return response
+            # wait_seconds counts down from when the bucket filled, so the
+            # reported value can elapse a hair before the server agrees;
+            # the extra second keeps the retry from landing on the same
+            # 429 and burning an attempt.
+            self._sleeper(self._retry_after_seconds(response) + 1.0)
+        raise AssertionError("unreachable: the loop returns or exhausts its attempts")
 
     def resolve_topic(self, external_id: str) -> Topic | None:
         """``GET /t/external_id/{id}.json?include_raw=true``.
