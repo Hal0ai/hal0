@@ -275,3 +275,98 @@ def test_rate_limiter_sleeps_to_maintain_min_interval() -> None:
 def test_rate_limiter_rejects_non_positive_rpm() -> None:
     with pytest.raises(ValueError):
         RateLimiter(0)
+
+
+# --- 429 backpressure -------------------------------------------------------
+#
+# Discourse throttles per-user, per-IP and per-API-key on buckets the client's
+# own RateLimiter knows nothing about, so a 429 arrives mid-run as a matter of
+# course. It used to abort the whole sync: the sync-docs-discourse workflow
+# failed exactly this way from 2026-08-22 onward, on a topic lookup.
+
+
+def _resolving_handler(responses: list[httpx.Response], calls: dict[str, int]):
+    """Handler that answers the external_id lookup from ``responses`` in
+    order (the last one repeats), then serves the canonical topic hop."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/t/external_id/hal0-docs--getting-started--install.json":
+            calls["n"] += 1
+            return responses[min(calls["n"] - 1, len(responses) - 1)]
+        if request.url.path == "/t/install-hal0/55.json":
+            return httpx.Response(200, json=_resolve_topic_json())
+        raise AssertionError(f"unexpected request: {request.url.path}")
+
+    return handler
+
+
+_REDIRECT = httpx.Response(301, headers={"Location": "/t/install-hal0/55.json?include_raw=true"})
+
+
+def test_rate_limited_request_is_retried_after_the_wait_the_server_asks_for() -> None:
+    slept: list[float] = []
+    calls = {"n": 0}
+    throttled = httpx.Response(
+        429,
+        json={
+            "errors": ["You've performed this action too many times."],
+            "error_type": "rate_limit",
+            "extras": {"wait_seconds": 10},
+        },
+    )
+
+    with _client(_resolving_handler([throttled, _REDIRECT], calls), sleeper=slept.append) as client:
+        topic = client.resolve_topic("hal0-docs--getting-started--install")
+
+    assert topic is not None
+    assert calls["n"] == 2, "the throttled lookup is retried once"
+    assert slept == [11.0], "waits the server's wait_seconds plus a second of slack"
+
+
+def test_rate_limit_retry_falls_back_to_the_retry_after_header() -> None:
+    slept: list[float] = []
+    calls = {"n": 0}
+    throttled = httpx.Response(429, headers={"Retry-After": "4"}, text="slow down")
+
+    with _client(_resolving_handler([throttled, _REDIRECT], calls), sleeper=slept.append) as client:
+        assert client.resolve_topic("hal0-docs--getting-started--install") is not None
+
+    assert slept == [5.0]
+
+
+def test_rate_limit_retries_are_bounded_and_then_the_error_surfaces() -> None:
+    """A forum that never lets up must still fail the run, not spin forever."""
+    slept: list[float] = []
+    calls = {"n": 0}
+    throttled = httpx.Response(429, json={"extras": {"wait_seconds": 1}})
+
+    with (
+        _client(
+            _resolving_handler([throttled], calls),
+            sleeper=slept.append,
+            max_rate_limit_retries=2,
+        ) as client,
+        pytest.raises(DiscourseAPIError) as excinfo,
+    ):
+        client.resolve_topic("hal0-docs--getting-started--install")
+
+    assert calls["n"] == 3, "the first attempt plus max_rate_limit_retries"
+    assert len(slept) == 2, "no sleep after the final attempt"
+    assert "429" in str(excinfo.value)
+
+
+def test_server_errors_are_not_retried() -> None:
+    """Only 429 is backpressure; a 500 is a broken forum and must surface."""
+    slept: list[float] = []
+    calls = {"n": 0}
+
+    with (
+        _client(
+            _resolving_handler([httpx.Response(500, text="boom")], calls), sleeper=slept.append
+        ) as client,
+        pytest.raises(DiscourseAPIError),
+    ):
+        client.resolve_topic("hal0-docs--getting-started--install")
+
+    assert calls["n"] == 1
+    assert slept == []
