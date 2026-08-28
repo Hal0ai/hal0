@@ -2068,6 +2068,19 @@ def _merge_config_yaml_layers(
     if overrides_path.exists():
         overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
         merged = _deep_merge(merged, overlay)
+    # #2085 hardening: X-hal0-Private must be a string wherever it ends up.
+    # An operator overrides.yaml copied from a pre-fix config.yaml carries
+    # the unquoted int 1 (overrides win by design), and that exact value
+    # hard-hangs hermes' MCP client post-initialize with zero diagnostics —
+    # so the known-poisonous leaf is normalized after the final merge, no
+    # matter which layer supplied it.
+    for _srv in (merged.get("mcp_servers") or {}).values():
+        if isinstance(_srv, dict):
+            _hdrs = _srv.get("headers")
+            if isinstance(_hdrs, dict) and "X-hal0-Private" in _hdrs:
+                _val = _hdrs["X-hal0-Private"]
+                if not isinstance(_val, str):
+                    _hdrs["X-hal0-Private"] = str(_val).lower() if isinstance(_val, bool) else str(_val)
     out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
     if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
         return False

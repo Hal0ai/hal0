@@ -1284,6 +1284,12 @@ def test_config_write_phase_writes_yaml_idempotently(
     assert out1.status == hp.PhaseStatus.OK
     cfg = Path(out1.details["config_path"])
     assert cfg.exists()
+    # #2085 phase-level wiring: the file the PHASE writes must carry the
+    # private header as a quoted string for hal0-memory. This is the only
+    # guard on the mcp_servers= kwarg into _config_list_keys — without it,
+    # dropping that kwarg keeps every unit test green while fresh installs
+    # ship no private header at all (memory writes silently land shared).
+    assert "X-hal0-Private: '1'" in cfg.read_text(encoding="utf-8")
     first_hash = out1.hash
     # Re-run is idempotent: config set re-writes the same values + the YAML
     # merge is a no-op, so the on-disk file (and its hash) is unchanged.

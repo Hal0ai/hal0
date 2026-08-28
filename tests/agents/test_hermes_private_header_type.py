@@ -123,7 +123,34 @@ def test_merge_repairs_an_int_poisoned_config(tmp_path) -> None:
     # The sibling header written by config set must survive the merge.
     assert data["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes"
     # And the on-disk YAML must carry the quoted form hermes' client needs.
-    assert "'1'" in config.read_text(encoding="utf-8")
+    assert "X-hal0-Private: '1'" in config.read_text(encoding="utf-8")
+
+
+def test_overrides_cannot_repoison_the_private_header(tmp_path) -> None:
+    """overrides.yaml copied from a pre-fix config.yaml carries the int 1
+    (and overrides merge LAST, by design) — the known-poisonous leaf must
+    still come out a string, or the #2085 wedge comes back silently."""
+    config = tmp_path / "config.yaml"
+    config.write_text("mcp_servers: {}\n", encoding="utf-8")
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text(
+        yaml.safe_dump(
+            {"mcp_servers": {"hal0-memory": {"headers": {"X-hal0-Private": 1}}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    hp._merge_config_yaml_layers(
+        config,
+        list_keys=hp._config_list_keys(
+            terminal_enabled=False, existing_disabled=[], mcp_servers=_MCP_SERVERS
+        ),
+        overrides_path=overrides,
+    )
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    hdr = data["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"]
+    assert hdr == "1"
+    assert isinstance(hdr, str)
 
 
 def test_brain_profile_private_header_is_a_string() -> None:
