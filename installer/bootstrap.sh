@@ -254,6 +254,11 @@ validate_channel() {
         stable|preview|nightly) ;;
         *) die "HAL0_CHANNEL must be one of: stable, preview, nightly (got ${HAL0_CHANNEL})" ;;
     esac
+    # The admitted channel must survive the exec into install.sh so the
+    # installed updater starts on the channel this install was actually
+    # verified against (persist_bootstrap_channel -> telemetry.channel,
+    # #2083) - same hand-off shape as HAL0_BOOTSTRAP_COSIGN (#2058).
+    export HAL0_CHANNEL
 }
 
 # ── cosign acquisition ─────────────────────────────────────────────────────
