@@ -24,6 +24,86 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.0.0-rc.12] — 2026-08-28
+
+A repair release for the existing fleet. rc.11 fixed the hermes memory-MCP
+outage for fresh installs; this one reaches the boxes that were already
+installed — which, on a platform heading to 1.0, is all of them.
+
+### Highlights
+
+- **Upgrading now heals hermes' memory tools by itself.** rc.11's fix lived in
+  the config write path, which only runs when hermes is provisioned, so an
+  upgrade left the poisoned `X-hal0-Private` int in place and the agent
+  holding zero memory tools. The repair now runs as part of the migration
+  sequence `hal0 update` and `install.sh` both converge on, so an ordinary
+  update fixes it with no operator step.
+
+### Fixed
+
+- **Every box provisioned before rc.11 kept a broken hermes memory client
+  through any number of upgrades.** The unquoted YAML `1` in
+  `mcp_servers.hal0-memory.headers.X-hal0-Private` wedges hermes' MCP client
+  immediately after `initialize` — a 40 s hang ending in `CancelledError` —
+  and the agent runs on with no memory tools at all. Nothing keyed on
+  `provision.json` notices, because its `mcp_wire` counts the **server's**
+  tools, not the client's. Measured on identical rc.11 code: a fresh install
+  connected in 51 ms with 26 tools while an upgraded box and production both
+  failed at ~41 s. The new migration pass coerces every MCP header value to a
+  string, preserves the file's mode and ownership (it runs as root), and
+  bounces `hermes-gateway` only when it actually changed something (#2090).
+- **`hal0 agent reprovision` could silently run a different hal0 than the one
+  invoked.** The privilege-drop re-exec resolved its target from `PATH`, so on
+  a box carrying a stale wrapper at `/usr/local/bin/hal0` (#1844) running the
+  current binary as root re-exec'd the older one — which then resolved its
+  installer root relative to its own package and failed with a path present in
+  no release, while the command still exited 0. It now re-execs the console
+  script belonging to the running interpreter (#2092).
+
+### Audience
+
+Every operator with an existing install — this is the release that repairs
+them. Fresh rc.11 installs are already correct and gain nothing here beyond
+the reprovision fix. After updating, hermes should report its memory tools
+again; verify with `hermes mcp test hal0-memory` (expect a connect in
+milliseconds and 26 tools, not a 40 s timeout).
+
+### Known issues
+
+- The live `hal0.dev/install.sh` still lags the in-tree installer: the mirror
+  workflow is gated on a signed stable manifest, and the stable pointer still
+  serves 0.9.8, so it has not published since 2026-08-09 (#2057, #1530). Both
+  are resolved together on the GA cut.
+- `scripts/release-test.sh`'s γ rows still target the retired v0.1 slot CLI, so
+  release-check gate 5 is waived for this cut (#2050); the rc-validate kit is
+  the effective gate.
+- A box carrying rc.3-era residue (a stale `/usr/local/bin/hal0`, a
+  system-python `hal0` in dist-packages) still has that residue after this
+  release. The re-exec fix means the right code runs; the stray files remain
+  for an operator to clean up.
+- The python 3.14 CI leg remains allowed-fail (container-provider fixtures).
+
+### Supported upgrades
+
+`hal0 update` from 1.0.0-rc.9, rc.10 or rc.11 on the preview channel. The
+hermes repair runs automatically as part of the update; no `hal0 agent
+reprovision hermes` step is needed, and on boxes where that command previously
+appeared to succeed while failing, it is no longer the mechanism being relied
+on.
+
+### Operator migrations
+
+None required. The brain model default is unchanged from rc.11 and applies to
+new installs only — an existing box keeps whatever model its brain slot is
+bound to, and nothing re-pulls or re-binds on upgrade.
+
+### Rollback
+
+`hal0 update --rollback` restores the previous tree. No schema or on-disk state
+changes ship here. The one file this release rewrites — hermes' `config.yaml`,
+to quote a header — is valid for older releases too, so it is safe to leave in
+place across a rollback.
+
 ## [1.0.0-rc.11] — 2026-08-28
 
 The default steward changes model, and the fresh-install path closes the last
