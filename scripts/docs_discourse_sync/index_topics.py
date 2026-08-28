@@ -23,6 +23,12 @@ class IndexTopic:
     external_id: str
     title: str
     body_md: str
+    # Which docs section this indexes. Carried so the sync can publish the
+    # topic into that section's subcategory, where the doc-categories
+    # plugin can bind it as the subcategory's index and Discourse can
+    # feature it on the section's card. ``None`` would mean an index that
+    # spans sections (the master index), which this builder does not emit.
+    section: str
 
 
 def _subsection_heading(name: str) -> str:
@@ -64,6 +70,7 @@ def build_index_topics(docs: list[Doc], url_map: dict[str, str]) -> list[IndexTo
                 external_id=make_external_id("index", section),
                 title=f"hal0 docs: {SECTION_TITLES[section]}",
                 body_md="\n".join(lines).strip("\n") + "\n",
+                section=section,
             )
         )
     return topics
