@@ -2080,7 +2080,9 @@ def _merge_config_yaml_layers(
             if isinstance(_hdrs, dict) and "X-hal0-Private" in _hdrs:
                 _val = _hdrs["X-hal0-Private"]
                 if not isinstance(_val, str):
-                    _hdrs["X-hal0-Private"] = str(_val).lower() if isinstance(_val, bool) else str(_val)
+                    _hdrs["X-hal0-Private"] = (
+                        str(_val).lower() if isinstance(_val, bool) else str(_val)
+                    )
     out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
     if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
         return False
