@@ -756,6 +756,25 @@ if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
     chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
 fi
 
+# mDNS addon advertisements (#2059): services/mdns.py (hal0-api, User=hal0)
+# writes /etc/avahi/services/hal0-addon-<id>.service via tmp+rename, which
+# needs *directory* write — the distro ships the dir root:root 0755, so every
+# dashboard advertise/withdraw died EACCES since the root-to-unprivileged
+# switch. Group-write grant (root:hal0, g+w) mirrors the OwnershipStore row in
+# src/hal0/install/perms.py (the `doctor perms --fix` backstop heals the same
+# values); done here too so the dir is correct before the daemon's first
+# touch. The chgrp of pre-existing hal0-addon-*.service files is the upgrade
+# path: root-era installs wrote them as root, and handing them to the hal0
+# group keeps the daemon's own advertisement surface consistently
+# group-readable. avahi-daemon inotify-watches the dir — no reload needed.
+# Guarded on avahi actually being present; idempotent on re-run.
+if [[ "${DEV_MODE}" -eq 0 && -d /etc/avahi/services ]] \
+    && getent group hal0 >/dev/null 2>&1; then
+    chgrp hal0 /etc/avahi/services 2>/dev/null || true
+    chmod g+w /etc/avahi/services 2>/dev/null || true
+    chgrp hal0 /etc/avahi/services/hal0-addon-*.service 2>/dev/null || true
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.
@@ -1135,6 +1154,13 @@ fi
 chmod 0755 "${ETC_DIR}" 2>/dev/null || true
 chmod 0644 "${HAL0_TOML}" 2>/dev/null || true
 
+# Persist the channel this install was admitted from (bootstrap hand-off,
+# #2083) so the first `hal0 update --check` - including the update-check
+# smoke probe below - runs against it instead of the stable default (404
+# until GA, #1530). Must run before the hal0-api (re)start: the daemon
+# caches hal0.toml at startup.
+persist_bootstrap_channel "${HAL0_TOML}"
+
 # Pin the dashboard's built assets. Prod installs hal0 NON-editable, so the
 # package's __file__ lives in the venv site-packages and the walk-up that
 # finds ui/dist in a checkout no longer reaches it — point HAL0_UI_DIST at
@@ -1245,6 +1271,117 @@ else
     chmod 0600 "${API_ENV_TMP}"
     mv -f "${API_ENV_TMP}" "${API_ENV}"
     info "refreshed network vars in ${API_ENV} (0600)"
+fi
+
+# ── avahi mDNS host-name sync (#2060) ───────────────────────────────────────
+# The HAL0_HOSTNAME choice (env / answer-file network.hostname) already
+# reaches api.env, the mDNS URL building (services/mdns.py) and the WS
+# origin allowlist above — but avahi announces the MACHINE hostname from
+# /etc/hostname, so `HAL0_HOSTNAME=jarvis` produced jarvis.local URLs that
+# never resolved on the LAN (it only worked on boxes literally named hal0).
+# Close the last hop: when the resolved hostname differs from the machine's,
+# pin avahi's announced name with host-name= under [server] in
+# avahi-daemon.conf. Scoped to mDNS only — the box itself is NOT renamed
+# (no hostnamectl). The managed line is tagged with a marker comment so a
+# re-run with a new HAL0_HOSTNAME updates it and a run without an override
+# withdraws it again; every other line in the conf survives untouched.
+# Exception: while an override is in effect an operator's own active
+# host-name= under [server] must be replaced (two host-name lines would be
+# invalid conf) — that clobber is warned about, and a later no-override run
+# withdraws only the managed pair, so the operator's earlier value is not
+# restored. Behavior wrinkle, documented in
+# docs/reference/env-vars.mdx: a renamed box stops answering to the
+# hal0.local alias — avahi has no clean CNAME publishing — while the alias
+# stays in HAL0_ALLOWED_ORIGINS, which is harmless.
+sync_avahi_hostname() {
+    local conf="${HAL0_AVAHI_CONF:-/etc/avahi/avahi-daemon.conf}"
+    local marker="# managed by hal0 install.sh — HAL0_HOSTNAME sync (#2060)"
+    local wanted="${1%.local}" machine
+    machine="$(hostname 2>/dev/null || true)"
+    # No avahi on the box → nothing to announce through (fail-soft, the
+    # same posture as services/mdns.py).
+    if [[ ! -f "${conf}" ]] && ! command -v avahi-daemon >/dev/null 2>&1; then
+        return 0
+    fi
+    # Only a single-label name is mDNS-announceable — a dotted override is
+    # a reverse-proxy FQDN, not avahi's business — and the machine's own
+    # name means "no override in effect".
+    if [[ "${wanted}" == *.* || "${wanted}" == "${machine%%.*}" ]]; then
+        wanted=""
+    fi
+    local tmp src
+    if [[ -n "${wanted}" ]]; then
+        # Pinning replaces any active host-name= under [server] — two lines
+        # would be invalid conf. When that line is the operator's own (not
+        # our marker-managed one), say so out loud: a later no-override run
+        # withdraws only the managed pair, so their value is not restored.
+        if [[ -f "${conf}" ]] && awk -v marker="${marker}" '
+            /^\[/ { section = $0 }
+            section == "[server]" && /^[ \t]*host-name[ \t]*=/ && prev != marker { found = 1 }
+            { prev = $0 }
+            END { exit found ? 0 : 1 }
+        ' "${conf}" 2>/dev/null; then
+            warn "avahi: replacing an existing host-name= in ${conf} with ${wanted} (HAL0_HOSTNAME override); the previous value will not be restored by a later no-override re-run"
+        fi
+        tmp="$(mktemp "${conf}.XXXXXX" 2>/dev/null)" || return 0
+        src="${conf}"
+        [[ -f "${src}" ]] || src=/dev/null
+        # Drop any prior marker + active host-name under [server], then
+        # re-insert the managed pair right after the [server] header
+        # (creating the section when the conf lacks one or is absent).
+        # Commented #host-name= examples are documentation — left alone.
+        awk -v host="${wanted}" -v marker="${marker}" '
+            $0 == marker { next }
+            /^\[/ { section = $0 }
+            section == "[server]" && /^[ \t]*host-name[ \t]*=/ { next }
+            { print }
+            $0 == "[server]" && !managed { print marker; print "host-name=" host; managed = 1 }
+            END { if (!managed) { print "[server]"; print marker; print "host-name=" host } }
+        ' "${src}" > "${tmp}" || { rm -f "${tmp}"; return 0; }
+    else
+        # No override in effect: withdraw a previously-managed host-name
+        # (the marker + the line after it). An operator's own host-name=
+        # or a box we never touched is left completely alone.
+        [[ -f "${conf}" ]] || return 0
+        grep -qxF "${marker}" "${conf}" || return 0
+        tmp="$(mktemp "${conf}.XXXXXX" 2>/dev/null)" || return 0
+        awk -v marker="${marker}" '
+            $0 == marker { drop = 1; next }
+            drop && /^[ \t]*host-name[ \t]*=/ { drop = 0; next }
+            { drop = 0; print }
+        ' "${conf}" > "${tmp}" || { rm -f "${tmp}"; return 0; }
+    fi
+    if [[ -f "${conf}" ]] && cmp -s "${tmp}" "${conf}"; then
+        rm -f "${tmp}"  # already converged — idempotent re-run, no bounce
+        return 0
+    fi
+    # Fail-soft to the end: an unwritable conf (immutable flag, RO mount —
+    # mktemp in the same dir can still have succeeded) must degrade to a
+    # no-op, not abort the install under set -e.
+    chmod 0644 "${tmp}" 2>/dev/null || true
+    mv -f "${tmp}" "${conf}" 2>/dev/null || {
+        rm -f "${tmp}"
+        warn "avahi: could not update ${conf}; skipping hostname announcement sync"
+        return 0
+    }
+    if [[ -n "${wanted}" ]]; then
+        info "avahi: announcing ${wanted}.local (host-name= in ${conf})"
+    else
+        info "avahi: reverting to the machine hostname announcement"
+    fi
+    # A conf change needs a daemon restart — reload/SIGHUP only re-reads
+    # /etc/avahi/services, not avahi-daemon.conf. try-restart is a no-op
+    # when avahi-daemon isn't running, and a missing systemd is tolerated.
+    systemctl try-restart avahi-daemon.service 2>/dev/null || true
+}
+
+# The resolved hostname is whatever HAL0_HOSTNAME line the derivation above
+# just wrote into api.env (empty when the derivation degraded to the bare
+# bind fallback — the sync then treats it as "no override"). Prod only:
+# --dev never elevates and must not touch /etc/avahi.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_MDNS_NAME="$(printf '%s\n' "${NETWORK_ENV_LINES}" | sed -n 's/^HAL0_HOSTNAME=//p' | head -n1)"
+    sync_avahi_hostname "${HAL0_MDNS_NAME}"
 fi
 
 # ── HF_TOKEN validate + persist (WS-D, #1106) ───────────────────────────────
@@ -2954,6 +3091,77 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
+# ── Post-install smoke probes (#2066) ──────────────────────────────────────
+# Two blind spots the v1.0 RC cycle proved expensive:
+#   1. Structured output — a plain chat probe passes while every json_object
+#      consumer is broken (extraction silently dead since the :0820 lineage).
+#   2. The updater — #2052 shipped through three RCs because nothing ever
+#      dry-ran `hal0 update --check`; the breakage only surfaced at the NEXT
+#      release.
+# Both probes are fail-soft like the rest of the verify step: warn loudly and
+# repeat the failure inside the summary box (via SMOKE_FAILED), never abort a
+# finished install. Defined at top level so tests/installer/
+# test_install_smoke_probes.py can extract and drive them through fakes.
+SMOKE_FAILED=()
+
+smoke_structured_output() {
+    # Probe shape is load-bearing (live-verified on ct151, rc.9 validation):
+    #   * via the GATEWAY (:${HAL0_PORT}/v1), never direct-to-slot — a
+    #     direct-to-slot 200 masks gateway-path failures (rc.7's #2020);
+    #   * kwarg-ABSENT body — model + messages + response_format ONLY.
+    #     Extra kwargs (temperature, max_tokens, …) mask template-branch
+    #     differences between slot backends.
+    # hal0/utility is the canonical virtual alias (normalize/resolver.py):
+    # it routes to the cheap helper slot and falls back to the anchor, so
+    # the probe works on any box with at least one loaded model.
+    local body resp
+    body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
+    # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
+    # a fresh open-LAN box has no api.env and needs no header.
+    local -a auth=()
+    local key
+    if [[ -f /etc/hal0/api.env ]]; then
+        key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
+        [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
+    fi
+    resp="$(curl -fsS -m 120 -X POST "http://127.0.0.1:${HAL0_PORT}/v1/chat/completions" \
+        -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
+        -d "${body}" 2>/dev/null)" || return 1
+    # The assertion: the CONTENT of the reply parses as JSON — an HTTP 200
+    # carrying prose ("Paris") is exactly the failure this probe exists for.
+    printf '%s' "${resp}" | "${PY}" -c 'import json, sys
+try:
+    reply = json.load(sys.stdin)
+    json.loads(reply["choices"][0]["message"]["content"])
+except Exception:
+    sys.exit(1)' 2>/dev/null
+}
+
+smoke_update_check() {
+    # Dry-run the updater end to end (manifest fetch + cosign path via the
+    # daemon's /api/updates/check); --check applies nothing. A clean exit is
+    # the whole assertion — a #2052-class gap surfaces HERE, not at the next
+    # release.
+    "${HAL0_BIN}" update --check >/dev/null 2>&1
+}
+
+run_post_install_smoke() {
+    if smoke_structured_output; then
+        info "structured-output probe ok (gateway /v1, json_object)"
+    else
+        SMOKE_FAILED+=("structured-output")
+        warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
+        warn "  extraction/structured-output consumers are likely broken even if plain chat works — check 'hal0 status' for a loaded model, then 'journalctl -u hal0-api -n 40'"
+    fi
+    if smoke_update_check; then
+        info "update-check probe ok ('hal0 update --check' exits cleanly)"
+    else
+        SMOKE_FAILED+=("update-check")
+        warn "'${HAL0_BIN} update --check' FAILED — the update path is broken and the next release will not install"
+        warn "  re-run '${HAL0_BIN} update --check' to see why (daemon reachability / manifest fetch / cosign verify)"
+    fi
+}
+
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
@@ -3337,6 +3545,12 @@ else
         info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
     fi
 
+    # Last verify action before the summary (#2066): everything the probes
+    # depend on — hal0-api, slots, the steward/agent model pulls — is as up
+    # as this install will get it. Fail-soft by construction (see the probe
+    # definitions above the Service start branch).
+    run_post_install_smoke
+
 fi
 
 # Real LAN IPv4 addresses — filtered to skip container / virtual bridge
@@ -3438,6 +3652,20 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && ${#REACH_LINES[@]} -gt 0 ]];
     done
 fi
 
+# Post-install smoke failures (#2066) — repeated INSIDE the summary box so an
+# rc-validate run (or a human skimming it) can't miss them among the
+# scrolled-away warns above. The probes themselves are fail-soft; this is the
+# loud part of that contract.
+if [[ ${#SMOKE_FAILED[@]} -gt 0 ]]; then
+    SUMMARY_LINES+=(
+        ""
+        "$(printf '%s%sVerify FAILED:%s' "${BOLD}" "${RED}" "${RST}")"
+    )
+    for probe in "${SMOKE_FAILED[@]}"; do
+        SUMMARY_LINES+=("$(printf '  %s%s%s probe failed — see the warnings above' "${RED}" "${probe}" "${RST}")")
+    done
+fi
+
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
@@ -3462,6 +3690,15 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 # re-derived what had just been derived. What is genuinely left after an
 # install is picking models per slot, which is a dashboard job — see the
 # "Next steps" box above. Do NOT reintroduce a post-install CLI wizard here.
+
+# Bootstrap hand-off cleanup (#2065): remove the /tmp/hal0-install-* work
+# dir this tree was unpacked into — bootstrap.sh's own EXIT trap died at
+# its exec into us, so the removal is ours. No-op for git-checkout / --dev
+# / tarball-direct installs (HAL0_BOOTSTRAP_WORK unset) and under
+# HAL0_BOOTSTRAP_KEEP_TMP=1. Dead-last on purpose: a failed install never
+# gets here (the tree stays for debugging), and persist_bootstrap_cosign
+# already salvaged bootstrap's cosign out of the tree in pre-flight.
+cleanup_bootstrap_workdir
 
 # Restore the caller's umask (see the save near the top of the file).
 umask "${_HAL0_ORIG_UMASK}"

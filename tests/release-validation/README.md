@@ -34,7 +34,11 @@ not content: each agent reads its own brief, `CONTEXT.md`, `known-issues.yaml`, 
 
 ```sh
 # 1. Reset and install the RC on the target boxes (operator, out of band):
-#    ct151-cpu-fresh  -> pct rollback 151 pristine, fix resolv.conf, fresh install
+#    ct151-cpu-fresh  -> pct rollback 151 pristine, then the POST-ROLLBACK CHECKLIST in
+#                        boxes.toml (rollback DELETES the dev0/dev3 passthrough entries —
+#                        re-add + confirm gid=991; `pct set 151 --nameserver`, never an
+#                        in-container resolv.conf edit; `apt install -y curl jq`), then
+#                        fresh install
 #    ct150-update     -> stage the new preview manifest, leave it on the PREVIOUS release
 #
 # 2. Then, from a Claude Code session in the hal0 repo:
@@ -130,6 +134,17 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 `kit_version` it ran under, so an old report can always be read against the rules it ran with.
 
 ### Kit changelog
+
+* **10** (2026-08-25) — ct151 reset facts relearned the hard way during the rc.9 fresh lane
+  (#2064). `boxes.toml` `[boxes.ct151-cpu-fresh]`: gotcha 4 upgraded from a gid-drift check to
+  a hard re-add — `pct rollback 151 pristine` DELETES the dev0/dev3 passthrough entries from
+  the CT config outright (the pristine snapshot predates them); gotcha 1's DNS fix corrected to
+  `pct set 151 --nameserver` on the hypervisor (an in-container resolv.conf edit is regenerated
+  away by PVE on every boot); new gotcha 6 — the pristine minimal Ubuntu 26.04 image ships with
+  neither curl nor jq, so `apt install -y curl jq` precedes the bootstrap. The notes now carry
+  an explicit POST-ROLLBACK CHECKLIST (re-add passthrough + confirm gid=991, `--nameserver`,
+  curl+jq, then install) and the README reset step points at it. Pinned by
+  `tests/release/test_kit_ct151_reset_gotchas.py` so a curation pass cannot drop them.
 
 * **9** (2026-08-22) — Curation from the v1.0.0-rc.7 skeptic/verify pass (10 candidate findings
   adversarially re-checked, 10 ended up split between real-new-defect and adjudicated-by-design).

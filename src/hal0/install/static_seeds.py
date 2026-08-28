@@ -64,7 +64,14 @@ STATIC_SEED_SLOTS: tuple[str, ...] = (
 #:
 #: Deliberately absent: ``flm`` (npu), ``tts`` (kokoro/cpu), ``img``
 #: (ComfyUI) and ``qwen3tts`` — non-llama runtimes with their own device
-#: logic. Their seed device ships verbatim, whatever the host.
+#: logic. Their seed device ships verbatim, whatever the host. For the two
+#: that ship ``gpu-rocm`` (``img``, ``qwen3tts``) verbatim is a CONTRACT, not
+#: an omission (#2067): both runner images are ROCm-only builds
+#: (``RUNNER_IMAGES[...].supported_backends == ("rocm",)``), so a kfd-less box
+#: has no CPU or Vulkan lane to derive instead. The seed lands as an inactive
+#: tile (no ``[model].default`` pin, #1369 — nothing autoloads), and first use
+#: refuses loudly via ``_gpu.require_kfd_for_gpu_slot``'s ``rocm`` lane,
+#: naming the absent ``/dev/kfd`` and how to forward it.
 LLAMA_SEED_CAPABILITIES: dict[str, str] = {
     "agent": "chat",
     "brain": "chat",

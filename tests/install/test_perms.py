@@ -171,7 +171,9 @@ def test_ownership_table_builds_under_hal0_home(tmp_hal0_home: str) -> None:
     assert table, "table must not be empty"
     assert all(isinstance(r, perms.PermRow) for r in table)
     home = Path(tmp_hal0_home)
-    # every declared path lives under the isolated HAL0_HOME tree
+    # every declared path lives under the isolated HAL0_HOME tree (the avahi
+    # services row (#2059) included — tmp_hal0_home points
+    # HAL0_AVAHI_SERVICES_DIR under the same tree)
     for row in table:
         assert home in row.target.parents or row.target == home, row.target
     # the config root + slots dir are non-optional anchors
@@ -273,6 +275,48 @@ def test_agent_skills_mirror_is_service_writable(tmp_hal0_home: str) -> None:
     root_rows = _by_target(perms.ownership_table(service_user="root"))
     root_mirror = root_rows[paths.etc() / "agent-skills"]
     assert (root_mirror.owner, root_mirror.group, root_mirror.mode) == ("root", "root", 0o755)
+
+
+def test_avahi_services_dir_is_group_writable_under_flip(tmp_hal0_home: str) -> None:
+    """#2059: /etc/avahi/services must be group-writable by the service account.
+
+    ``services/mdns.py`` (hal0-api, ``User=hal0``) writes/removes
+    ``hal0-addon-*.service`` files via tmp + rename, which needs *directory*
+    write — the distro ships the dir ``root:root 0755``, so every dashboard
+    advertise/withdraw died EACCES since the root-to-unprivileged switch.
+    Group-write on the dir (owner stays root — it is avahi's dir, not hal0's)
+    is the minimal grant; like agent-skills/ the row is dir-only, no
+    glob/recursion into the addon files themselves.
+    """
+    from hal0.services.mdns import services_dir
+
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    avahi = rows[services_dir()]
+    assert (avahi.owner, avahi.group, avahi.mode) == ("root", "hal0", 0o775)
+    assert avahi.glob is None
+    assert avahi.recursive is False
+    # Optional is the avahi-presence guard: a box without avahi never has the
+    # dir, so plan() reports it absent and commit() writes nothing.
+    assert avahi.optional is True
+    # The root-era table keeps the distro-default root:root 0755 byte-for-byte
+    # (that era ran the API as root, so it never needed the grant).
+    root_rows = _by_target(perms.ownership_table(service_user="root"))
+    root_avahi = root_rows[services_dir()]
+    assert (root_avahi.owner, root_avahi.group, root_avahi.mode) == ("root", "root", 0o755)
+
+
+def test_avahi_services_dir_absent_is_never_drift(tmp_hal0_home: str) -> None:
+    """A box without avahi (dir absent) must plan clean — the presence guard."""
+    from hal0.services.mdns import services_dir
+
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    avahi = rows[services_dir()]
+    absent = perms.PermObservation(
+        path=avahi.target, exists=False, owner=None, group=None, mode=None
+    )
+    pl = perms.plan([avahi], observe_fn=lambda p: absent)
+    assert pl.changed is False
+    assert pl.drifted == ()
 
 
 def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:

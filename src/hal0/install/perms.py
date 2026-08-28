@@ -191,6 +191,20 @@ def _shared_dir_roots() -> tuple[Path, ...]:
 # ── the declarative table ─────────────────────────────────────────────────────
 
 
+def _avahi_services_dir() -> Path:
+    """The avahi services dir the mDNS row declares (#2059).
+
+    Delegates to :func:`hal0.services.mdns.services_dir` — the writer's own
+    path authority, honoring its ``HAL0_AVAHI_SERVICES_DIR`` override — so the
+    table and the writer can never disagree about which dir the grant covers.
+    Imported lazily to keep this module free of the services layer at import
+    time.
+    """
+    from hal0.services.mdns import services_dir
+
+    return services_dir()
+
+
 @dataclass(frozen=True)
 class PermRow:
     """One path's declared ownership + mode.
@@ -838,6 +852,32 @@ def ownership_table(
         ),
         # ── /var/log/hal0 ─────────────────────────────────────────────────────
         PermRow(var_log, "hal0", "hal0", 0o755, role="/var/log/hal0"),
+        # ── /etc/avahi/services — mDNS addon advertisements (#2059) ────────────
+        # services/mdns.py (hal0-api, User=hal0) writes/removes
+        # ``hal0-addon-*.service`` files via tmp + rename, which needs
+        # *directory* write. The distro ships the dir root:root 0755, so every
+        # dashboard advertise/withdraw died EACCES since the root-to-
+        # unprivileged switch — the feature only ever worked in the root era.
+        # Group-write is the minimal grant: the OWNER stays root (this is
+        # avahi's dir, not hal0's — the one deliberately-foreign root in this
+        # table, resolved via mdns.services_dir() so the
+        # HAL0_AVAHI_SERVICES_DIR override keeps tests isolated). Like the
+        # agent-skills/ row above, dir-only on purpose: no glob into the addon
+        # files — a fresh advertise births them hal0-owned and rewrites/prunes
+        # need only dir write, so declaring a single owner for them would
+        # fight one era's files or the other's (install.sh chgrp's root-era
+        # leftovers once, on upgrade). ``optional`` is the avahi-presence
+        # guard: no avahi, no dir, no drift. No setgid: avahi-daemon
+        # inotify-watches the dir and reads the files as root either way.
+        # Root-era keeps the distro-default root:root 0755 byte-for-byte —
+        # that era ran the API as root and never needed the grant.
+        PermRow(
+            _avahi_services_dir(),
+            "root",
+            service_group if flipped else "root",
+            0o775 if flipped else 0o755,
+            role="/etc/avahi/services (mDNS addon advertisements)",
+        ),
     ]
 
 

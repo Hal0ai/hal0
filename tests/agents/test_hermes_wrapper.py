@@ -648,6 +648,136 @@ def test_hal0_hermes_wrapper_defaults_home_when_unset(tmp_path: Path) -> None:
     assert "HERMES_HOME=/var/lib/hal0/agents/hermes" not in out.stdout
 
 
+# ── #2063 — root runs must resolve the hal0 service home, and say so ─────────
+#
+# `hermes mcp list`/`test` as root used to silently read /root/.hermes and
+# report "No MCP servers configured" on a healthy install. The run-as-hal0
+# guard already fixes the normal installed-box case by dropping to the hal0
+# user, but when the guard lib is absent (partial/dev install) the wrapper
+# proceeded as root unguarded. These tests drive the wrapper's fallback:
+# still-root after the guard block → point HOME at the service home (or at
+# minimum print WHICH ~/.hermes tree this invocation resolves).
+#
+# Seams (test-only, mirroring tests/agents/test_run_as_hal0_guard.py):
+#   HAL0_RUNAS_TEST_UID  — fake the euid (we can't become root in CI)
+#   HAL0_GUARD_LIB       — point at a nonexistent path = guard not installed
+#   HAL0_SERVICE_HOME    — bypass the getent lookup; SET-BUT-EMPTY means
+#                          "no hal0 service user resolvable"
+
+
+def _run_wrapper(tmp_path: Path, extra_env: dict[str, str]) -> _subprocess.CompletedProcess[str]:
+    """Run the canonical wrapper against an env-dumping probe binary."""
+    probe = tmp_path / "probe.sh"
+    probe.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    probe.chmod(0o755)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HAL0_HERMES_BIN": str(probe),
+        "HAL0_HERMES_SECRETS": "/nonexistent/secrets.env",
+        "HAL0_GUARD_LIB": "/nonexistent/run-as-hal0.sh",
+    }
+    env.update(extra_env)
+    return _subprocess.run(
+        ["/bin/sh", str(_HERMES_WRAPPER), "noop"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_wrapper_root_without_guard_points_home_at_service_home(tmp_path: Path) -> None:
+    """THE #2063 regression: unguarded root must NOT resolve ~/.hermes to
+    root's home. The wrapper points HOME at the hal0 service home so the
+    upstream CLI reads the same config the running agent uses."""
+    svc_home = tmp_path / "var-lib-hal0"
+    result = _run_wrapper(
+        tmp_path,
+        {
+            "HAL0_RUNAS_TEST_UID": "0",
+            "HAL0_SERVICE_HOME": str(svc_home),
+            "HOME": "/root",
+        },
+    )
+    assert result.returncode == 0
+    assert f"HOME={svc_home}" in result.stdout
+    assert "HOME=/root" not in result.stdout
+    # Diagnosability (#2063 option 3): the wrapper names the tree it resolved.
+    assert f"{svc_home}/.hermes" in result.stderr
+
+
+def test_wrapper_root_without_guard_strips_inherited_hermes_home(tmp_path: Path) -> None:
+    """An inherited HERMES_HOME (e.g. root's shell exporting a stale pin)
+    would override the corrected HOME inside upstream hermes — the fallback
+    must strip it, matching the guard's `env -u HERMES_HOME` posture."""
+    svc_home = tmp_path / "var-lib-hal0"
+    result = _run_wrapper(
+        tmp_path,
+        {
+            "HAL0_RUNAS_TEST_UID": "0",
+            "HAL0_SERVICE_HOME": str(svc_home),
+            "HOME": "/root",
+            "HERMES_HOME": "/root/.hermes",
+        },
+    )
+    assert result.returncode == 0
+    assert "HERMES_HOME=" not in result.stdout
+
+
+def test_wrapper_root_without_service_user_warns_with_resolved_path(tmp_path: Path) -> None:
+    """No hal0 user on the box (true dev shell): behavior is unchanged —
+    root's own home applies — but the wrapper must still name the config
+    tree so an empty `mcp list` is diagnosable, never silent."""
+    rootish = tmp_path / "rootish"
+    result = _run_wrapper(
+        tmp_path,
+        {
+            "HAL0_RUNAS_TEST_UID": "0",
+            "HAL0_SERVICE_HOME": "",  # set-but-empty = user not resolvable
+            "HOME": str(rootish),
+        },
+    )
+    assert result.returncode == 0
+    assert f"HOME={rootish}" in result.stdout
+    assert f"{rootish}/.hermes" in result.stderr
+
+
+def test_wrapper_allow_root_keeps_root_env_but_names_the_path(tmp_path: Path) -> None:
+    """HAL0_ALLOW_ROOT is the deliberate root-debug escape hatch: env stays
+    untouched, but the wrapper says which ~/.hermes it resolves so the
+    operator can't mistake root's empty tree for a broken install."""
+    rootish = tmp_path / "rootish"
+    result = _run_wrapper(
+        tmp_path,
+        {
+            "HAL0_RUNAS_TEST_UID": "0",
+            "HAL0_ALLOW_ROOT": "1",
+            "HAL0_SERVICE_HOME": str(tmp_path / "var-lib-hal0"),
+            "HOME": str(rootish),
+        },
+    )
+    assert result.returncode == 0
+    assert f"HOME={rootish}" in result.stdout
+    assert f"{rootish}/.hermes" in result.stderr
+
+
+def test_wrapper_non_root_stays_silent_and_untouched(tmp_path: Path) -> None:
+    """Acceptance guard: behavior as the service user (any non-root user)
+    is unchanged — no HOME override, no stderr chatter."""
+    user_home = tmp_path / "user-home"
+    result = _run_wrapper(
+        tmp_path,
+        {
+            "HAL0_RUNAS_TEST_UID": "1000",
+            "HAL0_SERVICE_HOME": str(tmp_path / "var-lib-hal0"),
+            "HOME": str(user_home),
+        },
+    )
+    assert result.returncode == 0
+    assert f"HOME={user_home}" in result.stdout
+    assert ".hermes" not in result.stderr
+
+
 # ── uninstall teardown: privilege seam + failure surfacing (#453) ────────────
 #
 # `_stop_services` had two defects beyond the test-isolation one #1357 fixed:

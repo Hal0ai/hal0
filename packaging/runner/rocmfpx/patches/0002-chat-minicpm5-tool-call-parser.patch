@@ -52,13 +52,13 @@ index 58a193f..83cc09a 100644
 +        auto reasoning = p.eps();
 +        if (extract_reasoning && inputs.enable_thinking) {
 +            reasoning = p.optional(THINK_START + p.reasoning(p.until(THINK_END)) + THINK_END);
-+        } else if (extract_reasoning) {
-+            reasoning = p.optional(p.literal(THINK_START) + p.until(THINK_END) + p.literal(THINK_END));
++        } else {
++            reasoning = p.optional(p.literal(THINK_START) + p.until(THINK_END) + p.literal(THINK_END) + p.space());
 +        }
 +
 +        if (has_response_format) {
 +            return generation_prompt + reasoning +
-+                   p.content(p.schema(p.json(), "response-format", inputs.json_schema)) + end;
++                   p.content(p.schema(p.json(), "response-format", inputs.json_schema)) + p.space() + end;
 +        }
 +
 +        if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {

@@ -185,6 +185,22 @@ Default uninstall tears down the agent's private memory namespace too;
 </TabItem>
 </Tabs>
 
+## Running `hermes` as root
+
+Upstream `hermes` resolves its state from `~/.hermes`, so a bare root
+invocation would read `/root/.hermes` — an empty tree the agent never
+uses — and commands like `hermes mcp list` would falsely report
+"No MCP servers configured" on a healthy install. hal0's `hermes`
+wrapper prevents that: run as root, it re-executes as the `hal0`
+service user (via the run-as-hal0 guard), so you see the same config
+the running agent uses. If the guard can't drop privileges, the
+wrapper points `HOME` at the service home instead and prints which
+`~/.hermes` tree it resolved on stderr. `HAL0_ALLOW_ROOT=1` opts out
+for deliberate root debugging — the wrapper then leaves root's
+environment alone but still names the tree it is reading. The
+euid-aware fix inside the hermes CLI itself is an upstream
+(NousResearch/hermes-agent) matter; the wrapper is hal0's seam.
+
 ## Personas
 
 A persona is a TOML file pairing a system prompt with tool gating:

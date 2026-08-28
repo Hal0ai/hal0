@@ -369,12 +369,14 @@ def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path)
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
 
 
-def test_install_hermes_gateway_drops_to_hal0_when_root(monkeypatch, tmp_path) -> None:
-    """m1: as root, `hermes gateway install` must run via ``_run_as_hal0``, not
-    a bare ``subprocess.run`` — a bare root invocation resolves ``~/.hermes``
-    to ``/root/.hermes``, the exact "split-brain" tree ``hal0 doctor perms``
-    flags as Hermes ownership drift (check_hermes_ownership's stray_home
-    check / installer/lib/run-as-hal0.sh's docstring, both naming #843).
+def test_install_hermes_gateway_runs_as_root_directly(monkeypatch, tmp_path) -> None:
+    """#2061: as root, `hermes gateway install --system` must run AS ROOT —
+    hermes checks ``os.geteuid() == 0`` internally and refuses a non-root
+    caller ("System gateway install requires root. Re-run with sudo."), so
+    routing the root path through ``_run_as_hal0`` skipped the bridge on
+    every root install. The #843 stray-/root/.hermes safeguard is preserved
+    by env alone: ``HOME`` pinned to hal0's home + ``HERMES_HOME`` unset,
+    exactly like installer/install.sh's inline gateway block (PR #1337).
     """
     gateway_unit = tmp_path / "hermes-gateway.service"
     monkeypatch.setattr("os.geteuid", lambda: 0)
@@ -383,29 +385,33 @@ def test_install_hermes_gateway_drops_to_hal0_when_root(monkeypatch, tmp_path) -
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
     monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
+    # Deterministic hal0 home regardless of the host's passwd database.
+    monkeypatch.setattr(ac, "_agent_home", lambda: "/var/lib/hal0")
+    # A leaked HERMES_HOME must not survive into the hermes subprocess.
+    monkeypatch.setenv("HERMES_HOME", "/root/.hermes-leaked")
 
     captured: dict[str, Any] = {}
 
-    def _fake_run_as_hal0(argv: list[str], *, stdin: Any = None) -> int:
-        captured["argv"] = argv
-        captured["stdin"] = stdin
-        gateway_unit.write_text("[Unit]\n")
-        return 0
-
-    monkeypatch.setattr(ac, "_run_as_hal0", _fake_run_as_hal0)
-
-    # A bare subprocess.run call for the gateway-install argv would mean the
-    # fix regressed — root path must route through _run_as_hal0 instead.
-    def _boom(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+    def _fake_run(argv, *_a, **kwargs):  # type: ignore[no-untyped-def]
         if argv and argv[0] == ac._HERMES_BIN:
-            raise AssertionError("gateway install ran unprivileged-dropped as root")
+            captured["argv"] = list(argv)
+            captured["stdin"] = kwargs.get("stdin")
+            captured["env"] = kwargs.get("env")
+            gateway_unit.write_text("[Unit]\n")
 
         class _Done:
             returncode = 0
 
         return _Done()
 
-    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    # Dropping to hal0 would make hermes' internal root check refuse the
+    # --system install — the exact #2061 regression.
+    def _boom(argv: list[str], *, stdin: Any = None, extra_env: Any = None) -> int:
+        raise AssertionError("gateway install must not drop to hal0 when root (#2061)")
+
+    monkeypatch.setattr(ac, "_run_as_hal0", _boom)
 
     ac._install_hermes_gateway()
 
@@ -418,6 +424,9 @@ def test_install_hermes_gateway_drops_to_hal0_when_root(monkeypatch, tmp_path) -
         "hal0",
     ]
     assert captured["stdin"] == subprocess.DEVNULL
+    assert captured["env"] is not None
+    assert "HERMES_HOME" not in captured["env"]
+    assert captured["env"]["HOME"] == "/var/lib/hal0"
 
 
 def test_install_hermes_gateway_writes_dropin_before_gateway_install(monkeypatch, tmp_path) -> None:

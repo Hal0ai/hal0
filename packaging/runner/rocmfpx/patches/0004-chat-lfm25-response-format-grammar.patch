@@ -1,0 +1,40 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index a63baf4..365ae6b 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1590,12 +1590,20 @@ static common_chat_params common_chat_params_init_lfm2_5(const common_chat_templ
+         auto reasoning = p.eps();
+         if (extract_reasoning) {
+             reasoning = p.optional(THINK_START + p.reasoning(p.until(THINK_END)) + THINK_END);
++        } else {
++            // Not extracting reasoning does not stop the model (or the
++            // template's generation prompt) from emitting a think block —
++            // LFM2.5 thinks from its weights. Consume it as plain text, plus
++            // any trailing whitespace, or a non-lazy response_format grammar
++            // dies in sampler-init prefill and the parse rejects honest
++            // output (hal0 #2056 class).
++            reasoning = p.optional(p.literal(THINK_START) + p.until(THINK_END) + p.literal(THINK_END) + p.space());
+         }
+ 
+         if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
+             if (has_response_format) {
+                 auto response_format = p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema));
+-                return generation_prompt + reasoning + response_format + end;
++                return generation_prompt + reasoning + response_format + p.space() + end;
+             }
+             return generation_prompt + reasoning + p.content(p.rest()) + end;
+         }
+@@ -1615,7 +1623,12 @@ static common_chat_params common_chat_params_init_lfm2_5(const common_chat_templ
+     data.parser = parser.save();
+ 
+     if (include_grammar) {
+-        data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
++        // response_format must produce an eager grammar: a lazy grammar's
++        // root is generated from trigger rules only, and a request with no
++        // tools has none — the grammar came out empty (root ::= <nothing>),
++        // generation ran unconstrained, and every response_format request
++        // 500'd at the parse instead. Matches the sibling parsers' shape.
++        data.grammar_lazy = !has_response_format && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
+         data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
+             foreach_function(inputs.tools, [&](const json & tool) {
+                 const auto & function = tool.at("function");

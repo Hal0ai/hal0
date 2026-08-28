@@ -106,7 +106,7 @@ def test_brain_profile_servers_carry_bearer(
     assert servers["hal0-memory"]["headers"]["Authorization"] == "Bearer brain-admin-key"
     # Identity + private-mode headers are untouched by the bearer addition.
     assert servers["hal0-admin"]["headers"]["X-hal0-Agent"] == BRAIN_PROFILE_AGENT_ID
-    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == 1
+    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == "1"  # str, not int (#2085)
 
 
 def test_brain_profile_servers_omit_bearer_when_no_key(
