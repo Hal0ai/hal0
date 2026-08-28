@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shutil
+import stat as stat_mod
 import subprocess
 import sys
 import tarfile
@@ -56,6 +57,7 @@ from typing import Any, BinaryIO, Literal
 from urllib.parse import urlparse
 
 import structlog
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import hal0
@@ -1615,6 +1617,123 @@ def _run_config_migrations_locked(
     return (source, new_version)
 
 
+#: Where hermes' merged config lands. Mirrors ``HermesTarget.hermes_home``'s
+#: default in :mod:`hal0.agents.hermes_provision` — kept as a module constant
+#: rather than imported so this pass stays usable from the post-swap
+#: subprocess without dragging the provisioning module in.
+HERMES_CONFIG_PATH = Path("/var/lib/hal0/.hermes/config.yaml")
+
+
+def repair_hermes_mcp_headers(
+    *,
+    job_id: str | None = None,
+    config_path: Path | None = None,
+    restart_gateway: bool = True,
+) -> bool:
+    """Coerce every hermes MCP header to a string — heals pre-#2088 boxes (#2090).
+
+    #2088 made ``X-hal0-Private`` reach ``config.yaml`` as the string ``"1"``:
+    the unquoted YAML int wedges hermes' MCP client immediately after
+    ``initialize`` (a 40 s hang ending in ``CancelledError``), leaving the
+    agent holding zero memory tools while every server-side probe reports
+    healthy — ``provision.json``'s ``mcp_wire`` counts the SERVER's tools, not
+    the client's, so nothing keyed on it notices.
+
+    That fix lives in the config WRITE path, which only runs when hermes is
+    provisioned. ``hal0 update`` never re-provisions, so it reached fresh
+    installs only: measured on the fleet, a box upgraded rc.10 → rc.11 still
+    failed its live client at 41.6 s and prod on rc.9 at 40.7 s, while a fresh
+    rc.11 install connected in 51 ms with 26 tools. Hence this pass, in the one
+    sequence both upgrade paths already converge on.
+
+    Every header value is coerced, not just the known-poisonous key: HTTP
+    header values are strings by definition, so any YAML scalar that survives
+    as a non-string is the same latent wedge.
+
+    Idempotent by construction — a converged box parses the file, finds nothing
+    to change, and returns ``False`` without writing or bouncing anything.
+    Failure modes (absent file, unreadable YAML) are quiet no-ops: a box with
+    no hermes install, or one whose config an operator hand-edited into
+    something unparseable, must not have its update aborted by a repair pass.
+    """
+    path = config_path or HERMES_CONFIG_PATH
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.debug("updater.hermes_header_repair_unreadable", job_id=job_id, error=str(exc))
+        return False
+
+    try:
+        doc = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        log.warning("updater.hermes_header_repair_unparseable", job_id=job_id, error=str(exc))
+        return False
+
+    if not isinstance(doc, dict):
+        return False
+    servers = doc.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return False
+
+    repaired: list[str] = []
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            continue
+        headers = server.get("headers")
+        if not isinstance(headers, dict):
+            continue
+        for key, value in list(headers.items()):
+            if isinstance(value, str):
+                continue
+            # Match the write path's coercion exactly (hermes_provision):
+            # bool renders lowercase so a YAML `true` does not become "True".
+            headers[key] = str(value).lower() if isinstance(value, bool) else str(value)
+            repaired.append(f"{name}.{key}")
+
+    if not repaired:
+        return False
+
+    rendered = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    try:
+        # Preserve mode AND ownership: this pass runs as root from the
+        # post-swap subprocess, and a plain tmp-write + rename would hand
+        # hermes' own config back to it root-owned, breaking the born-owned
+        # contract $HERMES_HOME writes are held to (and hermes' later writes).
+        st = path.stat()
+        tmp = path.with_suffix(path.suffix + ".2090.tmp")
+        tmp.write_text(rendered, encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, stat_mod.S_IMODE(st.st_mode))
+        with contextlib.suppress(OSError, PermissionError):
+            os.chown(tmp, st.st_uid, st.st_gid)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("updater.hermes_header_repair_write_failed", job_id=job_id, error=str(exc))
+        with contextlib.suppress(OSError):
+            path.with_suffix(path.suffix + ".2090.tmp").unlink()
+        return False
+
+    log.info("updater.hermes_header_repaired", job_id=job_id, headers=repaired)
+
+    if restart_gateway:
+        # Hermes reads config.yaml at start, so the repair only reaches the
+        # running agent after a bounce. Best-effort: the post-swap migration
+        # subprocess runs as root and can do it, while the boot-time safety
+        # net runs as the hal0 user and cannot — there the rewritten file
+        # still takes effect at the gateway's next restart.
+        try:
+            subprocess.run(
+                ["systemctl", "restart", "hermes-gateway.service"],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("updater.hermes_gateway_bounce_failed", job_id=job_id, error=str(exc))
+
+    return True
+
+
 def run_post_activation_migrations(
     min_data_version: int = 1,
     *,
@@ -1697,6 +1816,14 @@ def run_post_activation_migrations(
         log.warning("updater.mtp_migration_failed", job_id=job_id, error=str(exc))
         # Non-fatal: the affected slot simply fails to load until the
         # operator flips MTP to Auto/Off in the drawer.
+
+    try:
+        repair_hermes_mcp_headers(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.hermes_header_repair_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: hermes keeps its pre-#2088 header and the agent stays
+        # without memory tools until the next provision — no worse than
+        # before this pass existed, and never a reason to fail an update.
 
     try:
         relabel_stale_vulkan_slots(job_id=job_id)
