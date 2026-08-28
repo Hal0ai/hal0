@@ -363,11 +363,11 @@ def test_each_doc_lands_in_its_section_subcategory() -> None:
 
     assert forum.topics["hal0-docs--guides--a"]["category_id"] == 21
     assert forum.topics["hal0-docs--concepts--b"]["category_id"] == 22
-    # Index topics span sections and drive the doc-categories sidebar, so
-    # they stay in the parent.
-    index_ids = {k: t["category_id"] for k, t in forum.topics.items() if "--index--" in k}
-    assert index_ids, "expected index topics to be generated"
-    assert set(index_ids.values()) == {11}
+    # A section index topic follows its section: that is what the
+    # doc-categories plugin binds as the subcategory index, and what
+    # Discourse features on the section card.
+    assert forum.topics["hal0-docs--index--guides"]["category_id"] == 21
+    assert forum.topics["hal0-docs--index--concepts"]["category_id"] == 22
 
 
 def test_a_bare_section_slug_is_accepted_too() -> None:

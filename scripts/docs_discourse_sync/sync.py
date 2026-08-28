@@ -169,9 +169,7 @@ def sync_docs(
     report = SyncReport()
 
     # Docs land in their section's subcategory when the forum has one, and
-    # in the parent category when it does not. Index topics always stay in
-    # the parent: they span sections and are what the doc-categories
-    # plugin builds its sidebar from.
+    # in the parent category when it does not.
     section_categories = resolve_section_categories(
         client, parent_id=category_id, sections=sorted({doc.section for doc in docs})
     )
@@ -262,14 +260,20 @@ def sync_docs(
         else:
             report.log("noop", doc.external_id, "no change")
 
-    # Per-section index topics, built from the same URL map.
+    # Per-section index topics, built from the same URL map. Each one goes
+    # into its own section's subcategory rather than the parent: that is
+    # what lets the doc-categories plugin bind it as the subcategory's
+    # index topic, and lets Discourse feature it on the section's card
+    # (`boxes_with_featured_topics` excludes a category's About topic, so
+    # the index is what a reader sees on the box). It falls back to the
+    # parent with everything else while no subcategories exist.
     for index_topic in index_topics.build_index_topics(docs, url_map):
         _sync_one(
             client,
             external_id=index_topic.external_id,
             title=index_topic.title,
             raw=index_topic.body_md,
-            category_id=category_id,
+            category_id=section_categories.get(index_topic.section, category_id),
             report=report,
             create_kind="index-create",
             update_kind="index-update",
