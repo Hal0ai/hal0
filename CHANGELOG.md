@@ -264,6 +264,78 @@ repair that preceded it (#2056/#2073).
   `pct set --nameserver`, and minimal Ubuntu 26.04 needs curl+jq before
   bootstrap (#2064, #2068).
 
+## [1.0.0-rc.9] — 2026-08-25
+
+_Written after the fact: this release was tagged without a changelog section,
+so its published notes fell back to a raw commit list. Reconstructed from the
+merged PRs in the rc.8…rc.9 range._
+
+A correctness pass across the paths that report state — hermes' MCP health, a
+slot spawn failure, the config-drift comparator, and the brain answering
+questions about the running box.
+
+### Fixed
+
+- **`hermes` reported ok over a dead MCP client**, and shipped without the
+  `mcp` extra it needs to have a live one (#2053).
+- **Seeded llama.cpp slots picked their device by hand instead of via
+  `derive_device`**, so an install could seed a slot the box could not run
+  (#2023, #2054).
+- **A failed slot spawn surfaced as a raw `CalledProcessError`** rather than
+  the typed `SlotSpawnFailed` the callers handle (#1424, #2047).
+- **The config-drift comparator ignored the runner image**, so a slot whose
+  image had moved read as in-sync (#2035).
+- **`enable_thinking: false` was injected into grammar-constrained chat
+  bodies**, which is exactly where it must not go (#2036).
+- **The brain answered live-state questions from the model's own guesswork**
+  instead of grounding them in the box's actual state (#2034).
+
+### Added
+
+- **Per-tag runner-image pull** — route and job now accept a catalogued tag
+  (#2048).
+- **Typed registry capability fields fold into `_model_caps`** for bench
+  (#1826).
+- **ADR-0003 — ONNX text-gen via XDNA2 NPU: defer with triggers** (PROPOSAL)
+  (#1951).
+
+## [1.0.0-rc.8] — 2026-08-24
+
+_Written after the fact, same as rc.9 above: reconstructed from the merged PRs
+in the rc.7…rc.8 range._
+
+Runner images become a thing you can see and choose, and two failure modes
+that used to be quiet — a doomed model load and an unreadable stack state —
+now announce themselves.
+
+### Added
+
+- **A tag-tracked runner-image catalogue**, with a `default_images` override
+  and row enrichment that reports what is actually there (#2044) — surfaced in
+  the UI as runner images under Slots and profiles under Models, with a
+  defaults strip and a tag picker (#2043).
+- **The crash-loop breaker renders on slot cards and in the slot drawer**, so
+  a slot that keeps dying says so where you are already looking (#2038,
+  #2040).
+
+### Fixed
+
+- **A doomed model load ran to its full timeout** — the runner entrypoint now
+  exits 64 so the load fails fast instead of burning the budget (#2037,
+  #2039).
+- **Root-written stack state was left unreadable by the service**, and the
+  resulting error was untyped (#2042).
+
+### Changed
+
+- **The default runner pin rolls to `hal0-combined:0824`**, which carries the
+  #2037 fail-fast entrypoint (#2041).
+- `cosign-installer` is pinned to v4.1.2 — upstream ships no floating v4 alias
+  (#2046).
+- The γ-suite gets CI headroom over its own `globalTimeout` (#2033).
+- Docs: runner-image catalogue v2 spec and implementation plan (#2045), and
+  the rc.7 fleet validation report with kit v9 curation (#2031).
+
 ## [1.0.0-rc.7] — 2026-08-17
 
 The rc.6 validation sweep ran the fleet again — fresh installs, in-place
