@@ -1651,6 +1651,140 @@ persist_bootstrap_cosign() {
     return 0
 }
 
+# ── bootstrap channel persistence (#2083) ──────────────────────────────────
+# bootstrap.sh admits and cosign-verifies the release against HAL0_CHANNEL,
+# then execs into install.sh — but nothing used to write that channel
+# anywhere durable, so the installed updater started life on its `stable`
+# default, whose manifest pointer is 404 until GA (#1530). Every preview/
+# nightly fresh install then failed the #2066 install-time update-check
+# probe with a false "the update path is broken" alarm, and an rc box could
+# never see the next rc via `hal0 update` without a manual channel flip.
+# Same hand-off shape as persist_bootstrap_cosign above: act only when the
+# env var came across the exec, never overwrite an explicit differing value
+# (warn instead), never die — the install itself is fine either way.
+# Writes telemetry.channel in hal0.toml: the exact key PUT
+# /api/updates/channel persists and the updater's _current_channel() reads.
+# Locked read-modify-write via system python3 with the same hal0.toml.lock
+# fcntl + O_NOFOLLOW discipline as install.sh's [models].store seeding —
+# this can run against a live daemon serving config writes, and /etc/hal0
+# is service-writable while we run as root.
+persist_bootstrap_channel() {
+    local toml="$1"
+    local channel="${HAL0_CHANNEL:-}"
+    [[ -n "${channel}" ]] || return 0
+    case "${channel}" in
+        stable|preview|nightly) ;;
+        *)
+            warn "HAL0_CHANNEL='${channel}' is not one of stable|preview|nightly — not persisting an update channel"
+            return 0
+            ;;
+    esac
+    if [[ ! -f "${toml}" ]]; then
+        warn "no ${toml} to persist update channel '${channel}' into — 'hal0 update' will use the stable default"
+        return 0
+    fi
+    local out
+    if out="$(python3 - "${toml}" "${channel}" <<'PYEOF'
+import fcntl, os, pathlib, re, stat, sys, tempfile
+path = pathlib.Path(sys.argv[1])
+channel = sys.argv[2]
+
+# Same lock file, same O_NOFOLLOW discipline as hal0.config.locking.file_lock
+# (and install.sh's [models].store seeding): /etc/hal0 is service-writable
+# while this runs as root, so following a symlink here would be a privilege
+# hole.
+lock_path = pathlib.Path(f"{path}.lock")
+created = False
+try:
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o664)
+    created = True
+except FileExistsError:
+    fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(f"lock path is not a regular file: {lock_path}")
+    if created:
+        os.fchmod(fd, 0o664)
+        try:
+            st_src = path.stat()
+            if (st_src.st_uid, st_src.st_gid) != (0, 0):
+                os.fchown(fd, st_src.st_uid, st_src.st_gid)
+        except OSError:
+            pass
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    if path.is_symlink():
+        raise SystemExit(f"refusing to write through a symlinked config: {path}")
+    tfd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(tfd).st_mode):
+            raise SystemExit(f"config is not a regular file: {path}")
+        with os.fdopen(tfd, "r", encoding="utf-8") as fh:
+            tfd = -1
+            text = fh.read()
+    finally:
+        if tfd >= 0:
+            os.close(tfd)
+
+    # Section body = every following line that does not START with '[' —
+    # NOT `[^\[]*`, which would stop at the '[' of a list value and splice
+    # the table in half (the [models].store patcher bug class).
+    m = re.search(r"^\[telemetry\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
+    if m:
+        block = m.group(0)
+        km = re.search(r"^\s*channel\s*=\s*\"?([^\"\n]*?)\"?\s*$", block, flags=re.MULTILINE)
+        if km:
+            existing = km.group(1)
+            print("same" if existing == channel else f"differs:{existing}")
+            raise SystemExit(0)
+        new_block = block if block.endswith("\n") else block + "\n"
+        new_block += f'channel = "{channel}"\n'
+        text = text[: m.start()] + new_block + text[m.end() :]
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += f'\n[telemetry]\nchannel = "{channel}"\n'
+
+    st = path.stat()
+    fd_tmp, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    print("wrote")
+finally:
+    os.close(fd)
+PYEOF
+    )"; then
+        case "${out}" in
+            wrote) info "update channel: persisted '${channel}' to ${toml} (telemetry.channel)" ;;
+            same)  info "update channel: ${toml} already set to '${channel}'" ;;
+            differs:*)
+                warn "hal0.toml already sets telemetry.channel='${out#differs:}' — leaving it, though this install was admitted from '${channel}'"
+                warn "  switch with: hal0 update --channel ${channel}"
+                ;;
+            *) warn "unexpected result persisting update channel '${channel}' to ${toml}: ${out}" ;;
+        esac
+    else
+        warn "could not persist update channel '${channel}' to ${toml} — 'hal0 update' will use the stable default until 'hal0 update --channel ${channel}'"
+    fi
+    return 0
+}
+
 # ── bootstrap work-dir cleanup (#2065) ─────────────────────────────────────
 # bootstrap.sh arms an EXIT trap to delete its /tmp/hal0-install-* work dir
 # (release tarball + unpacked tree, ~150 MB), but that trap dies at the

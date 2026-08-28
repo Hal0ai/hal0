@@ -1154,6 +1154,13 @@ fi
 chmod 0755 "${ETC_DIR}" 2>/dev/null || true
 chmod 0644 "${HAL0_TOML}" 2>/dev/null || true
 
+# Persist the channel this install was admitted from (bootstrap hand-off,
+# #2083) so the first `hal0 update --check` - including the update-check
+# smoke probe below - runs against it instead of the stable default (404
+# until GA, #1530). Must run before the hal0-api (re)start: the daemon
+# caches hal0.toml at startup.
+persist_bootstrap_channel "${HAL0_TOML}"
+
 # Pin the dashboard's built assets. Prod installs hal0 NON-editable, so the
 # package's __file__ lives in the venv site-packages and the walk-up that
 # finds ui/dist in a checkout no longer reaches it — point HAL0_UI_DIST at
