@@ -1685,7 +1685,7 @@ persist_bootstrap_channel() {
     fi
     local out
     if out="$(python3 - "${toml}" "${channel}" <<'PYEOF'
-import fcntl, os, pathlib, re, stat, sys, tempfile
+import fcntl, os, pathlib, re, stat, sys, tempfile, tomllib
 path = pathlib.Path(sys.argv[1])
 channel = sys.argv[2]
 
@@ -1726,17 +1726,34 @@ try:
         if tfd >= 0:
             os.close(tfd)
 
+    # Detect the existing value with a REAL parser, not a regex: inline
+    # comments (`channel = "x"  # set by ops`), single-quoted strings and
+    # every other valid-TOML spelling must be seen — a missed match here
+    # would append a duplicate key, and duplicate keys are a hard tomllib
+    # parse error that takes the daemon down with the config.
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"existing config does not parse, leaving it alone: {exc}")
+    existing = data.get("telemetry", {}).get("channel")
+    if existing is not None:
+        print("same" if str(existing) == channel else f"differs:{existing}")
+        raise SystemExit(0)
+    if channel == "stable":
+        # No key on disk and the admitted channel IS the schema default:
+        # persisting it would be behavior-identical for the updater today
+        # but would poison the never-overwrite rule above — a later
+        # deliberate `HAL0_CHANNEL=preview` re-bootstrap must still be able
+        # to persist cleanly onto a box that only ever ran defaults.
+        print("default")
+        raise SystemExit(0)
     # Section body = every following line that does not START with '[' —
     # NOT `[^\[]*`, which would stop at the '[' of a list value and splice
-    # the table in half (the [models].store patcher bug class).
-    m = re.search(r"^\[telemetry\][ \t]*\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
+    # the table in half (the [models].store patcher bug class). The header
+    # match tolerates a trailing inline comment.
+    m = re.search(r"^\[telemetry\][ \t]*(?:#.*)?\n(?:(?!\[).*\n?)*", text, flags=re.MULTILINE)
     if m:
         block = m.group(0)
-        km = re.search(r"^\s*channel\s*=\s*\"?([^\"\n]*?)\"?\s*$", block, flags=re.MULTILINE)
-        if km:
-            existing = km.group(1)
-            print("same" if existing == channel else f"differs:{existing}")
-            raise SystemExit(0)
         new_block = block if block.endswith("\n") else block + "\n"
         new_block += f'channel = "{channel}"\n'
         text = text[: m.start()] + new_block + text[m.end() :]
@@ -1744,6 +1761,15 @@ try:
         if text and not text.endswith("\n"):
             text += "\n"
         text += f'\n[telemetry]\nchannel = "{channel}"\n'
+    # Belt and braces: whatever the splice produced must itself parse and
+    # carry the value — any blind spot degrades to warn-and-leave-alone,
+    # never to an unloadable config.
+    try:
+        patched = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"patched config would not parse, leaving it alone: {exc}")
+    if patched.get("telemetry", {}).get("channel") != channel:
+        raise SystemExit("patched config did not take the channel, leaving it alone")
 
     st = path.stat()
     fd_tmp, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -1773,6 +1799,7 @@ PYEOF
         case "${out}" in
             wrote) info "update channel: persisted '${channel}' to ${toml} (telemetry.channel)" ;;
             same)  info "update channel: ${toml} already set to '${channel}'" ;;
+            default) info "update channel: '${channel}' is the built-in default — nothing to persist" ;;
             differs:*)
                 warn "hal0.toml already sets telemetry.channel='${out#differs:}' — leaving it, though this install was admitted from '${channel}'"
                 warn "  switch with: hal0 update --channel ${channel}"

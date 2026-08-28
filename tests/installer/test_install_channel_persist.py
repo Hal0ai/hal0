@@ -146,6 +146,103 @@ class TestPersistBootstrapChannel:
         assert "WARN:" in proc.stderr
 
 
+class TestValidTomlVariants:
+    """Review findings on PR #2087: regex blind spots must degrade to
+    no-op/warn, never to a duplicate-key config the daemon cannot parse."""
+
+    def test_inline_comment_on_existing_channel_is_seen(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML + 'channel = "preview"  # set by ops\n', encoding="utf-8")
+        before = toml.read_text(encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        # Same value: no duplicate key appended, no warn.
+        assert toml.read_text(encoding="utf-8") == before
+        assert "WARN:" not in proc.stderr
+        _telemetry_channel(toml)  # must still parse
+
+    def test_inline_comment_differing_channel_warns_not_duplicates(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML + 'channel = "nightly"  # set by ops\n', encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        assert _telemetry_channel(toml) == "nightly"
+        assert "WARN:" in proc.stderr
+
+    def test_single_quoted_existing_value_is_seen_as_equal(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML + "channel = 'preview'\n", encoding="utf-8")
+        before = toml.read_text(encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        assert toml.read_text(encoding="utf-8") == before
+        assert "WARN:" not in proc.stderr
+
+    def test_section_followed_by_list_valued_table_is_not_spliced(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(
+            "[telemetry]\nenabled = false\n\n[models]\nroots = [\"/x\", \"/y\"]\n",
+            encoding="utf-8",
+        )
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        with toml.open("rb") as fh:
+            data = tomllib.load(fh)
+        assert data["telemetry"]["channel"] == "preview"
+        assert data["models"]["roots"] == ["/x", "/y"]
+
+    def test_commented_section_header_never_corrupts(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text("[telemetry]  # hal0-owned\nenabled = false\n", encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        # Whatever happened, the file must still parse...
+        data = tomllib.loads(toml.read_text(encoding="utf-8"))
+        # ...and with the comment-tolerant header match, the key lands.
+        assert data["telemetry"]["channel"] == "preview"
+
+    def test_unparsable_existing_config_is_left_alone(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text("[telemetry\nenabled = ???\n", encoding="utf-8")
+        before = toml.read_text(encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        assert toml.read_text(encoding="utf-8") == before
+        assert "WARN:" in proc.stderr
+
+
+class TestStableDefault:
+    """A silently-persisted default must not poison the never-overwrite rule
+    (review on PR #2087): default bootstrap -> no key; a later deliberate
+    HAL0_CHANNEL=preview re-bootstrap must persist cleanly."""
+
+    def test_stable_with_no_existing_key_is_not_persisted(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML, encoding="utf-8")
+        proc = _run_persist(toml, channel="stable")
+        assert proc.returncode == 0, proc.stderr
+        assert toml.read_text(encoding="utf-8") == _FRESH_TOML
+        assert "WARN:" not in proc.stderr
+
+    def test_default_install_then_preview_rebootstrap_persists(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML, encoding="utf-8")
+        assert _run_persist(toml, channel="stable").returncode == 0
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        assert _telemetry_channel(toml) == "preview"
+        assert "WARN:" not in proc.stderr
+
+    def test_explicit_stable_on_disk_still_respected_over_preview(self, tmp_path: Path) -> None:
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(_FRESH_TOML + 'channel = "stable"\n', encoding="utf-8")
+        proc = _run_persist(toml, channel="preview")
+        assert proc.returncode == 0, proc.stderr
+        assert _telemetry_channel(toml) == "stable"
+        assert "WARN:" in proc.stderr
+
+
+
 class TestWiring:
     def test_bootstrap_exports_the_admitted_channel(self) -> None:
         code = "\n".join(
