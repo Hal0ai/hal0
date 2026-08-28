@@ -519,9 +519,9 @@ export function SlotScard({
               <div className={'v' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</div>
             </div>
             <div className="m">
-              <div className="l">ctx</div>
-              <div className={'v' + (s.ctx_max ? '' : ' muted')} style={{ fontSize: 12 }}>
-                {ctxText(s)}
+              <div className="l">mem</div>
+              <div className={'v' + (memGb != null ? '' : ' muted')} style={{ fontSize: 12 }}>
+                {memGb != null ? memGb + ' GB' : '—'}
               </div>
             </div>
           </div>
@@ -532,7 +532,11 @@ export function SlotScard({
           <SlotBreakerChip s={s} />
           <BackendMismatch s={s} onEdit={onEdit} />
           <SlotImageUnknownChip s={s} />
-          {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
+          {full && typeof s.ctx_max === 'number' && s.ctx_max > 0 && (
+            <span className="tag-chip" title={`ctx used / max · ${ctxText(s)}`}>
+              {kCtx(s.ctx_max)} ctx
+            </span>
+          )}
           <span className="grow" />
           {controls}
         </div>
