@@ -194,6 +194,24 @@ class DiscourseClient:
             self._sleeper(self._retry_after_seconds(response) + 1.0)
         raise AssertionError("unreachable: the loop returns or exhausts its attempts")
 
+    def subcategory_ids(self, parent_id: int) -> dict[str, int]:
+        """``{slug: id}`` for the direct children of *parent_id*.
+
+        Read from ``/site.json`` rather than ``/categories.json`` because
+        the latter omits ``parent_category_id`` on some Discourse
+        versions, and the parent link is the whole point of the call.
+        Read-only, so it runs under ``dry_run`` like ``resolve_topic``.
+        """
+        response = self._request("GET", "/site.json")
+        if response.status_code >= 400:
+            raise DiscourseAPIError("GET", "/site.json", response)
+        categories = response.json().get("categories", [])
+        return {
+            c["slug"]: c["id"]
+            for c in categories
+            if c.get("parent_category_id") == parent_id and c.get("slug")
+        }
+
     def resolve_topic(self, external_id: str) -> Topic | None:
         """``GET /t/external_id/{id}.json?include_raw=true``.
 

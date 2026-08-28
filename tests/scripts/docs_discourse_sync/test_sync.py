@@ -55,6 +55,13 @@ class FakeForum:
         self.topics: dict[str, dict] = {}  # external_id -> topic state
         self._next_id = 100
         self.request_log: list[tuple[str, str]] = []
+        # Category tree as /site.json reports it. Empty by default: a forum
+        # whose Docs category has no subcategories, which is what every
+        # pre-existing test in this file assumes.
+        self.categories: list[dict] = []
+
+    def add_subcategory(self, slug: str, category_id: int, *, parent_id: int) -> None:
+        self.categories.append({"id": category_id, "slug": slug, "parent_category_id": parent_id})
 
     def _alloc(self) -> int:
         self._next_id += 1
@@ -120,6 +127,11 @@ class FakeForum:
                     topic["category_id"] = payload["post"]["category_id"]
                     return httpx.Response(200, json={})
             return httpx.Response(404, json={"error_type": "not_found"})
+
+        if request.method == "GET" and request.url.path == "/site.json":
+            # Only the shape resolve_section_categories reads: a flat
+            # category list carrying parent_category_id.
+            return httpx.Response(200, json={"categories": self.categories})
 
         if request.method == "POST" and request.url.path == "/uploads.json":
             return httpx.Response(200, json={"short_url": "upload://fake-upload"})
@@ -323,3 +335,95 @@ def test_unresolved_image_falls_back_and_is_warned() -> None:
 
     assert "https://hal0.dev/screenshots/missing.png" in forum.topics["hal0-docs--guides--a"]["raw"]
     assert any("missing.png" in w for w in report.warnings)
+
+
+# --- section subcategories --------------------------------------------------
+#
+# The Docs category renders as cards only when its sections exist as real
+# subcategories (that is what the knowledge base does). These cover the
+# routing that puts each doc in its section, and the fallback that keeps a
+# forum without subcategories working exactly as before.
+
+
+def test_docs_go_to_the_parent_when_no_subcategories_exist() -> None:
+    forum = FakeForum()
+    docs = [_doc("guides/a", "A", "body a"), _doc("concepts/b", "B", "body b")]
+    with _client(forum) as client:
+        sync_docs(docs, client=client, category_id=11)
+    assert {t["category_id"] for t in forum.topics.values()} == {11}
+
+
+def test_each_doc_lands_in_its_section_subcategory() -> None:
+    forum = FakeForum()
+    forum.add_subcategory("docs-guides", 21, parent_id=11)
+    forum.add_subcategory("docs-concepts", 22, parent_id=11)
+    docs = [_doc("guides/a", "A", "body a"), _doc("concepts/b", "B", "body b")]
+    with _client(forum) as client:
+        sync_docs(docs, client=client, category_id=11)
+
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 21
+    assert forum.topics["hal0-docs--concepts--b"]["category_id"] == 22
+    # Index topics span sections and drive the doc-categories sidebar, so
+    # they stay in the parent.
+    index_ids = {k: t["category_id"] for k, t in forum.topics.items() if "--index--" in k}
+    assert index_ids, "expected index topics to be generated"
+    assert set(index_ids.values()) == {11}
+
+
+def test_a_bare_section_slug_is_accepted_too() -> None:
+    forum = FakeForum()
+    forum.add_subcategory("guides", 31, parent_id=11)
+    with _client(forum) as client:
+        sync_docs([_doc("guides/a", "A", "body a")], client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 31
+
+
+def test_sections_without_a_subcategory_still_fall_back_to_the_parent() -> None:
+    forum = FakeForum()
+    forum.add_subcategory("docs-guides", 21, parent_id=11)
+    docs = [_doc("guides/a", "A", "body a"), _doc("operate/c", "C", "body c")]
+    with _client(forum) as client:
+        sync_docs(docs, client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 21
+    assert forum.topics["hal0-docs--operate--c"]["category_id"] == 11
+
+
+def test_subcategories_of_other_parents_are_ignored() -> None:
+    forum = FakeForum()
+    forum.add_subcategory("docs-guides", 99, parent_id=12)  # a KB child, not ours
+    with _client(forum) as client:
+        sync_docs([_doc("guides/a", "A", "body a")], client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 11
+
+
+def test_an_existing_topic_is_moved_into_its_new_subcategory() -> None:
+    """The restructure itself: docs already in the parent get pulled into
+    their section the first time the sync runs after the subcategories
+    exist -- the same category-drift correction that would otherwise pull
+    them back out."""
+    forum = FakeForum()
+    docs = [_doc("guides/a", "A", "body a")]
+    with _client(forum) as client:
+        sync_docs(docs, client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 11
+
+    forum.add_subcategory("docs-guides", 21, parent_id=11)
+    with _client(forum) as client:
+        report = sync_docs(docs, client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 21
+    assert report.count("update") == 1
+
+
+def test_a_site_json_failure_does_not_fail_the_sync() -> None:
+    """Grouping is cosmetic; losing the lookup must not stop docs syncing."""
+
+    class Broken(FakeForum):
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/site.json":
+                return httpx.Response(500, text="boom")
+            return super().handler(request)
+
+    forum = Broken()
+    with _client(forum) as client:
+        sync_docs([_doc("guides/a", "A", "body a")], client=client, category_id=11)
+    assert forum.topics["hal0-docs--guides--a"]["category_id"] == 11

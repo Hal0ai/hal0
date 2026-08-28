@@ -21,11 +21,12 @@ doc that links to another doc.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import images, index_topics, links, redirect_map
-from .discourse_client import DiscourseClient, Topic
+from .discourse_client import DiscourseAPIError, DiscourseClient, Topic
 from .discovery import Doc
 
 _DRY_RUN_PENDING_MARKER = "<pending>"
@@ -126,6 +127,37 @@ def _sync_one(
     return existing
 
 
+def resolve_section_categories(
+    client: DiscourseClient, *, parent_id: int, sections: Iterable[str]
+) -> dict[str, int]:
+    """``{section: category_id}`` for sections that have a subcategory.
+
+    A docs section is published into its own subcategory when one exists,
+    which is what lets the Docs category render as cards
+    (``subcategory_list_style: boxes_with_featured_topics``) the way the
+    knowledge base does. Sections with no matching subcategory are simply
+    absent from the map and fall back to the parent category, so this is a
+    no-op on a forum that has not been restructured -- deliberately, so
+    the mapping can land before the subcategories are created.
+
+    Both ``docs-<section>`` and a bare ``<section>`` are accepted as slugs;
+    the forum's own KB tree uses the prefixed form (``kb-hardware``).
+    """
+    try:
+        children = client.subcategory_ids(parent_id)
+    except DiscourseAPIError:
+        # Never fail a docs sync over a cosmetic grouping: without the
+        # lookup every doc keeps going to the parent, exactly as before.
+        return {}
+    resolved: dict[str, int] = {}
+    for section in sections:
+        for slug in (f"docs-{section}", section):
+            if slug in children:
+                resolved[section] = children[slug]
+                break
+    return resolved
+
+
 def sync_docs(
     docs: list[Doc],
     *,
@@ -135,6 +167,19 @@ def sync_docs(
     site_base_url: str = "https://hal0.dev",
 ) -> SyncReport:
     report = SyncReport()
+
+    # Docs land in their section's subcategory when the forum has one, and
+    # in the parent category when it does not. Index topics always stay in
+    # the parent: they span sections and are what the doc-categories
+    # plugin builds its sidebar from.
+    section_categories = resolve_section_categories(
+        client, parent_id=category_id, sections=sorted({doc.section for doc in docs})
+    )
+    for section, cat in sorted(section_categories.items()):
+        report.log("section-category", section, f"-> category {cat}")
+
+    def category_for(doc: Doc) -> int:
+        return section_categories.get(doc.section, category_id)
 
     # Images resolve once per doc, before pass 1, so the raw content a
     # topic is created/updated with already carries upload:// URLs.
@@ -162,7 +207,7 @@ def sync_docs(
                 external_id=doc.external_id,
                 title=doc.title,
                 raw=prepared[doc.external_id],
-                category_id=category_id,
+                category_id=category_for(doc),
             )
             report.log("create", doc.external_id, doc.title)
         else:
@@ -195,7 +240,7 @@ def sync_docs(
                     post_id=topic.first_post_id,
                     title=doc.title,
                     raw=final_raw,
-                    category_id=category_id,
+                    category_id=category_for(doc),
                 )
                 report.log("link-rewrite", doc.external_id, f"{rewrite.changed} link(s) rewritten")
             continue
@@ -204,14 +249,14 @@ def sync_docs(
             existing,
             title=doc.title,
             raw=final_raw,
-            category_id=category_id,
+            category_id=category_for(doc),
             dry_run=client.dry_run,
         ):
             client.update_topic(
                 post_id=existing.first_post_id,
                 title=doc.title,
                 raw=final_raw,
-                category_id=category_id,
+                category_id=category_for(doc),
             )
             report.log("update", doc.external_id, doc.title)
         else:
