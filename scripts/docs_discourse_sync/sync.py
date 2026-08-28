@@ -60,6 +60,51 @@ class SyncReport:
         return sum(1 for a in self.actions if a.kind == kind)
 
 
+# Discourse rewrites a topic title on save when `title_prettify` is on
+# (it is, on forum.hal0.dev). The sync sends "hal0 docs: Start here" and
+# the server stores "Hal0 docs: Start here" -- so a verbatim title
+# comparison finds every such topic "changed" on EVERY run, rewrites it,
+# and finds it changed again next time. Seven docs topics were in that
+# loop, each one bumped and re-PUT on every sync, against a forum that
+# rate-limits (see the 429 backoff in _request).
+#
+# Mirrors lib/text_cleaner.rb's clean_title for the options this forum
+# runs with. Kept deliberately literal, in the same order as the Ruby, so
+# the two can be diffed by eye.
+_TRAILING_PERIODS = re.compile(r"([^.])\.+(\s*)\Z")
+_EXTRANEOUS_SPACE = re.compile(r"\s+([!?]\s*)\Z")
+_INTERIOR_SPACES = re.compile(r"[ \t]{2,}")
+_ZERO_WIDTH = re.compile("[\u200b\u200c\u200d\ufeff]")
+
+
+def prettified_title(title: str) -> str:
+    """*title* as Discourse will store it under ``title_prettify``."""
+    # Stripped up front: Ruby's `split(" ", 2)` is awk-style and ignores
+    # leading whitespace when it picks the first word, so a title with
+    # leading spaces still gets capitalized there. Python's partition does
+    # not, and the result is stripped either way.
+    text = _ZERO_WIDTH.sub("", title).strip()
+    text = re.sub(r"!+", "!", text)
+    text = re.sub(r"\?+", "?", text)
+    # All-caps titles are downcased whole (allow_uppercase_posts is off).
+    if text and text == text.upper():
+        text = text.lower()
+    # Capitalize the first letter -- but only when the whole first word is
+    # already lowercase, which is why "hal0 CLI reference" keeps its CLI.
+    first, _, rest = text.partition(" ")
+    if first and first == first.lower():
+        text = first.capitalize() + (" " + rest if rest else "")
+    text = _TRAILING_PERIODS.sub(r"\1\2", text)
+    text = _EXTRANEOUS_SPACE.sub(r"\1", text)
+    text = _INTERIOR_SPACES.sub(" ", text)
+    return text.strip()
+
+
+def title_matches(existing_title: str, expected_title: str) -> bool:
+    """Whether *existing_title* is *expected_title* as the server keeps it."""
+    return existing_title == expected_title or existing_title == prettified_title(expected_title)
+
+
 def _content_changed(
     existing: Topic, *, title: str, raw: str, category_id: int, dry_run: bool = False
 ) -> bool:
@@ -80,7 +125,7 @@ def _content_changed(
     there the comparison is exact and an actual content-level image swap
     should be caught.
     """
-    if existing.category_id != category_id or existing.title != title:
+    if existing.category_id != category_id or not title_matches(existing.title, title):
         return True
     existing_raw, new_raw = existing.raw.strip(), raw.strip()
     if dry_run:
