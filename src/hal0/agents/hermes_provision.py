@@ -1756,7 +1756,10 @@ def terminal_tool_enabled(
 
 
 def _config_list_keys(
-    *, terminal_enabled: bool, existing_disabled: list[str] | None = None
+    *,
+    terminal_enabled: bool,
+    existing_disabled: list[str] | None = None,
+    mcp_servers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The list-valued overlay, with the terminal posture folded in.
 
@@ -1773,6 +1776,19 @@ def _config_list_keys(
     if not terminal_enabled:
         disabled += TERMINAL_OFF_TOOLSETS
     keys["agent"] = {"disabled_toolsets": disabled}
+    # X-hal0-Private must reach config.yaml as the STRING "1" (#2085): the
+    # config-set path can't express a numeric-looking string (hermes coerces
+    # it to the YAML int 1, which wedges hermes' MCP client post-initialize),
+    # so private servers get their header here, where safe_dump quotes it.
+    # The nested-dict merge preserves the sibling headers config set wrote
+    # (X-hal0-Agent, Authorization) and overlay-wins repairs poisoned boxes.
+    private_headers = {
+        srv["name"]: {"headers": {"X-hal0-Private": "1"}}
+        for srv in (mcp_servers or [])
+        if srv.get("private")
+    }
+    if private_headers:
+        keys["mcp_servers"] = private_headers
     return keys
 
 
@@ -1918,8 +1934,15 @@ def _build_config_overlay(
         ]
         if bearer:
             pairs.append((f"mcp_servers.{name}.headers.Authorization", f"Bearer {bearer}"))
-        if srv.get("private"):
-            pairs.append((f"mcp_servers.{name}.headers.X-hal0-Private", "1"))
+        # X-hal0-Private deliberately does NOT go through `hermes config set`:
+        # hermes coerces bare integers on the way in (see _fmt_config_value),
+        # so "1" lands in config.yaml as the YAML int 1 — and hermes' own MCP
+        # client wedges post-initialize on a non-string header value and dies
+        # with CancelledError at its outer ceiling (#2085: zero memory tools
+        # on every fresh install while hal0-admin connects fine). The header
+        # is layered as a real string by _config_list_keys via the PyYAML
+        # deep-merge, which runs AFTER these config-set writes — so a
+        # re-provision also repairs an already-poisoned config.yaml.
 
     pairs.append(("skills.creation_nudge_interval", 15))
     # terminal.cwd is the working directory Hermes' built-in `local` terminal
@@ -2045,6 +2068,21 @@ def _merge_config_yaml_layers(
     if overrides_path.exists():
         overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
         merged = _deep_merge(merged, overlay)
+    # #2085 hardening: X-hal0-Private must be a string wherever it ends up.
+    # An operator overrides.yaml copied from a pre-fix config.yaml carries
+    # the unquoted int 1 (overrides win by design), and that exact value
+    # hard-hangs hermes' MCP client post-initialize with zero diagnostics —
+    # so the known-poisonous leaf is normalized after the final merge, no
+    # matter which layer supplied it.
+    for _srv in (merged.get("mcp_servers") or {}).values():
+        if isinstance(_srv, dict):
+            _hdrs = _srv.get("headers")
+            if isinstance(_hdrs, dict) and "X-hal0-Private" in _hdrs:
+                _val = _hdrs["X-hal0-Private"]
+                if not isinstance(_val, str):
+                    _hdrs["X-hal0-Private"] = (
+                        str(_val).lower() if isinstance(_val, bool) else str(_val)
+                    )
     out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
     if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
         return False
@@ -2327,6 +2365,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         list_keys=_config_list_keys(
             terminal_enabled=terminal_enabled,
             existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+            mcp_servers=mcp_servers,
         ),
         overrides_path=OVERRIDES_PATH,
     )
@@ -3864,7 +3903,7 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 
     bearer = service_key(prefer="admin")
     admin_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID}
-    memory_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": 1}
+    memory_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": "1"}
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
