@@ -82,7 +82,11 @@ channel).
 Operators running a preview-channel box, and anyone doing a fresh install from
 `hal0.dev/install.sh`. Fresh installs gain the most: all three fixes above are
 fresh-install-shaped. Existing rc.10 boxes are unaffected by #2081 and #2083
-(both are install-time), but do pick up the hermes memory-MCP fix.
+(both are install-time). They do **not** automatically pick up the hermes
+memory-MCP fix either: `hal0 update` never re-renders the hermes agent config,
+so the poisoned header survives the upgrade and the agent stays without memory
+tools (#2090). Run `hal0 agent reprovision hermes` once after upgrading —
+verified on an rc.10 → rc.11 upgrade.
 
 ### Known issues
 
@@ -98,6 +102,11 @@ fresh-install-shaped. Existing rc.10 boxes are unaffected by #2081 and #2083
   without a tool round on small models (#2022); the LFM2.5 default is the
   intended mitigation and is re-evaluated in this release's validation lane.
 - The python 3.14 CI leg remains allowed-fail (container-provider fixtures).
+- #2088's `X-hal0-Private` fix reaches boxes only at hermes provision time, so
+  an upgraded box keeps the pre-fix header and its agent has no memory tools
+  until `hal0 agent reprovision hermes` is run (#2090). Note that
+  `provision.json`'s `mcp_wire` tool counts probe the server, not the hermes
+  client, so they report such a box as healthy.
 
 ### Supported upgrades
 
