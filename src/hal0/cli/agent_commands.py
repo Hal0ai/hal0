@@ -9,8 +9,12 @@ MCP-backend's approval queue at ``/api/agent/approvals``.
 from __future__ import annotations
 
 import json as jsonlib
+import os
+import shutil
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import typer
@@ -557,6 +561,30 @@ def _agent_home() -> str:
         return "/var/lib/hal0"
 
 
+def _running_hal0_bin() -> str:
+    """The ``hal0`` console script belonging to the code that is running.
+
+    #2092: the privilege-drop re-exec used to resolve its target with
+    ``shutil.which("hal0")`` — whatever is first on PATH, which is not
+    necessarily the tree doing the re-exec. On a box carrying a stale wrapper
+    at ``/usr/local/bin/hal0`` (#1844 documents exactly that condition), an
+    operator running the CURRENT ``/usr/lib/hal0/venv/bin/hal0 agent
+    reprovision hermes`` as root had it silently re-exec an rc.3 build, which
+    then resolved its installer root relative to its own package location and
+    failed with a path that exists in no release
+    (``/usr/local/lib/python3.12/installer/...``).
+
+    A venv install puts the console script next to the interpreter, so
+    ``sys.executable``'s sibling names the running tree exactly. Fall back to
+    PATH (dev checkouts invoked as ``python -m`` have no sibling script), then
+    to the bare name so the caller still produces a runnable argv.
+    """
+    sibling = Path(sys.executable).with_name("hal0")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return shutil.which("hal0") or "hal0"
+
+
 def _run_as_hal0(
     argv: list[str], *, stdin: int | None = None, extra_env: dict[str, str] | None = None
 ) -> int:
@@ -625,7 +653,6 @@ def _provision_hermes(
     provisioning that consumes it runs in a re-exec'd, privilege-dropped child.
     """
     import os as _os
-    import shutil as _shutil
 
     from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV, bootstrap_cli
 
@@ -659,7 +686,8 @@ def _provision_hermes(
                     _os.environ[HERMES_TERMINAL_ENV] = previous
     else:
         _hermes_root_prelude(provision_env)
-        hal0_bin = _shutil.which("hal0") or "hal0"
+        # #2092: the running tree, not PATH's — see _running_hal0_bin.
+        hal0_bin = _running_hal0_bin()
         argv = [hal0_bin, "agent", "bootstrap", "hermes"]
         if repair:
             argv.append("--repair")

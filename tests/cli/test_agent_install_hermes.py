@@ -946,9 +946,24 @@ def test_provision_hermes_non_root_runs_in_process(monkeypatch) -> None:
     assert "adopt" not in seen  # retired flag no longer threaded (O14)
 
 
-def test_provision_hermes_root_drops_to_hal0(monkeypatch) -> None:
-    """euid == 0: run the root prelude then re-exec `agent bootstrap hermes` as hal0."""
+def test_provision_hermes_root_drops_to_hal0(monkeypatch, tmp_path) -> None:
+    """euid == 0: run the root prelude then re-exec `agent bootstrap hermes` as hal0.
+
+    Re-baselined for #2092: this used to assert the re-exec target came from
+    ``shutil.which("hal0")``. That is the defect — on a box with a stale
+    wrapper first on PATH (#1844) it silently re-exec'd an older hal0. The
+    contract is now "the console script belonging to the RUNNING interpreter",
+    so ``which`` is still stubbed here, deliberately, to prove it is NOT what
+    gets chosen.
+    """
     monkeypatch.setattr("os.geteuid", lambda: 0)
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    running = venv_bin / "hal0"
+    running.write_text("#!/bin/sh\n", encoding="utf-8")
+    running.chmod(0o755)
+    monkeypatch.setattr("sys.executable", str(venv_bin / "python"))
 
     events: list[str] = []
     monkeypatch.setattr(ac, "_hermes_root_prelude", lambda env=None: events.append("prelude"))
@@ -975,7 +990,8 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch) -> None:
     # Prelude runs BEFORE the drop.
     assert events == ["prelude", "run_as_hal0"]
     argv = captured["argv"]
-    assert argv[:4] == ["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"]
+    assert argv[0] == str(running), "must re-exec the running hal0, not PATH's (#2092)"
+    assert argv[1:4] == ["agent", "bootstrap", "hermes"]
     assert "--repair" in argv and "--verbose" in argv
     assert "--adopt" not in argv  # retired flag never re-exec'd (O14)
     assert argv[argv.index("--skip-phase") + 1] == "mcp_wire"
