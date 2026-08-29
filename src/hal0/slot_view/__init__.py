@@ -162,6 +162,11 @@ def serialize_slot(slot: Any, model_cache: dict[str, Any] | None = None) -> dict
         base["provider"] = meta.get("provider")
     if "config_drift" in meta:
         base["config_drift"] = meta.get("config_drift")
+    # Spec 2026-08-29 (#1946): the specialty guard's verdict rides the same
+    # detail-route enrichment as config_drift (SlotManager.status()'s
+    # include_config_drift branch) — lifted the same way, additive.
+    if "specialty_degraded" in meta:
+        base["specialty_degraded"] = meta.get("specialty_degraded")
     if model_cache is not None:
         loaded = list(model_cache.get(slot.name, []))
         if slot.model_id and slot.model_id in loaded:

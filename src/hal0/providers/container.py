@@ -3291,6 +3291,44 @@ def resolved_argv_detail_for_slot(
     }
 
 
+def specialty_degraded_for_slot(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> dict[str, Any] | None:
+    """The specialty guard's verdict for a slot, for the status route.
+
+    Task 10 (spec 2026-08-29 / #1946): the slot-status payload (``GET
+    /api/slots/{name}`` and friends, the same detail route that already
+    carries the config-drift comparator's output) needs to surface whether
+    the slot's model is a specialty distribution running degraded on its
+    resolved runner — without paying for a full argv render.
+
+    Mirrors :func:`_resolve_slot_argv`'s best-effort resolution (profile +
+    model info via :func:`_best_effort_model_info`, same as the "resolved
+    command" preview) but stops at :func:`_effective_runner` +
+    :func:`_guard_specialty_runner` instead of building the full launch
+    plan — the status route only needs the guard's reason dict, not the
+    rendered command. ``log_degraded=False`` (parity with the preview path,
+    NOT the launch path): a ~2s status poll must never re-log the once-per-
+    launch degraded warning.
+
+    Returns ``None`` — never raises — for a slot with no profile, a model
+    with no specialty, or any resolution failure (best-effort, same
+    fail-open contract as ``_resolve_slot_argv``); the status route treats
+    that as "no degraded reason" (``null`` on the wire).
+    """
+    profile_name = str(slot_cfg.get("profile") or "")
+    if not profile_name:
+        return None
+    try:
+        profile = _resolve_profile_or_base(profile_name, slot_cfg)
+        model_info = _best_effort_model_info(slot_cfg, model_path)
+        runner = _effective_runner(slot_cfg, profile, model_info)
+        return _guard_specialty_runner(model_info, runner, log_degraded=False)
+    except Exception:
+        return None
+
+
 __all__ = [
     "ContainerProvider",
     "_loopback_fence_command",
@@ -3299,6 +3337,7 @@ __all__ = [
     "container_provider",
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
+    "specialty_degraded_for_slot",
 ]
 
 

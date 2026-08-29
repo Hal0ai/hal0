@@ -914,6 +914,13 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
                 "mtp": runner.supports.mtp,
                 "jinja": runner.supports.jinja,
                 "mmproj": runner.supports.mmproj,
+                # Spec 2026-08-29 (#1946): which specialty-distribution kinds
+                # (e.g. "promptforge") this runner image serves ACCELERATED —
+                # see hal0.runners.RunnerSupports.specialties. The model
+                # drawer's runner-override picker uses this to warn before an
+                # operator pins a specialty model onto a runner that would
+                # degrade it to GGUF-only.
+                "specialties": list(runner.supports.specialties),
             },
             "state": _backend_state(image, local_repos),
         }

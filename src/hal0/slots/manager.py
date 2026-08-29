@@ -2231,6 +2231,21 @@ class SlotManager:
             config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
             if config_drift is not None:
                 meta["config_drift"] = config_drift
+            # Spec 2026-08-29 (#1946): thread the specialty guard's verdict
+            # onto the SAME detail payload as config_drift — additive key,
+            # null when the slot has no profile / the model carries no
+            # specialty / resolution fails (fail-open, mirrors the preview
+            # path's contract). Gated behind include_config_drift like
+            # config_drift itself: both are detail-route-only enrichments,
+            # never paid for by the hot GET /api/slots list poll.
+            specialty_degraded = None
+            if cfg:
+                from hal0.providers.container import specialty_degraded_for_slot
+
+                specialty_degraded = await asyncio.get_event_loop().run_in_executor(
+                    None, specialty_degraded_for_slot, cfg
+                )
+            meta["specialty_degraded"] = specialty_degraded
         return self._stamp_id(
             Slot(
                 name=slot_name,
