@@ -18,17 +18,21 @@ a lifecycle the platform manages for you. Slots are what the dispatcher routes
 to, what the GPU arbiter coordinates, and — as of v1.0 — the sole owner of
 *where* a model runs and *how much context it gets*. That last point is a real
 v1.0 behavior change from earlier releases, and it's worth understanding
-precisely: see [The hardware/model write boundary](#the-hardwaremodel-write-boundary)
-below.
+precisely: see The hardware/model write boundary, below.
 
 ## One slot, one container
 
 Each slot is backed by a systemd template unit named
-`hal0-slot@<name>.service` whose `ExecStart` runs `podman run`. That launches
-exactly one container — `hal0-slot-<name>` — serving one model on a loopback
-port. The container runtime defaults to podman; the unit uses `--replace` so a
-restart never trips over a stale container name, and publishes its port on
-`127.0.0.1` only.
+`hal0-slot@<name>.service`, generated as a Podman **Quadlet** unit (a
+`.container` file of typed `[Container]` keys — `Image=`, `AddDevice=`,
+`Volume=`, `PublishPort=`, and so on — rather than a hand-assembled `podman
+run` command line). Podman's systemd generator turns that into the
+`[Unit]`/`[Service]` skeleton and the actual `podman run` invocation.
+Quadlet auto-removes any prior container of the same name on start, so
+there's no more `--replace` / `ExecStartPre rm` dance to guard against a
+stale container name. That launches exactly one container —
+`hal0-slot-<name>` — serving one model on a loopback port, publishing its
+port on `127.0.0.1` only.
 
 **`SlotManager`** owns this. It renders the unit, starts and stops it, tracks
 state, and registers the running container as an internal upstream so the
@@ -38,8 +42,9 @@ for the workload tune; the model itself (and the model's own settings) come
 from the registry.
 
 <Aside type="note">
-The container runtime is podman. A docker fallback exists, but podman is the
-supported path — slot units are generated for it.
+The container runtime is Podman only. Quadlet is Podman's declarative unit
+generator and has no Docker equivalent, so Docker is unsupported — the old
+Docker fallback has been removed.
 </Aside>
 
 ## The hardware/model write boundary
@@ -87,9 +92,17 @@ GGUF-derived native window (dense-capped), else a safe 8192 floor. A slot's
 `[model].context_size` value, if set, is honored only as a **cap** on that
 resolved window (`effective = min(model_window, slot_value)`) — because a
 slot owns hardware, and the installer uses this field to write a VRAM-budget
-clamp. It can never *raise* the effective window above what the model
-resolves to. Leaving it unset (the default for a new slot) means "follow the
+clamp. Leaving it unset (the default for a new slot) means "follow the
 model."
+
+There's one exception: when the model has no explicit
+`defaults.context_size` and its window is instead *derived* from the GGUF's
+native context (the dense-capped path), a slot ceiling replaces that
+blanket dense cap rather than being applied underneath it — so on that path
+the ceiling can raise the effective window above the model's own
+dense-capped default, though it's still bounded by the model's native GGUF
+window. Every case where the ceiling changes the answer is logged
+(`journalctl -u hal0-api`), so the effect is visible rather than silent.
 
 ## Pinning a slot to one GPU
 
@@ -131,7 +144,7 @@ transition, not a systemd snapshot:
 | `pulling` | Model files are downloading or being verified. |
 | `starting` | The unit has started; waiting for the container to come up. |
 | `warming` | Container is up; the model is loading into the GPU/GTT pool. |
-| `ready` | Health probe passed; ready to serve. |
+| `ready` | Health probe passed; ready to serve. For a `type = "llm"` slot, this also requires passing an output-sanity probe — a known-answer completion that catches a backend serving garbage while `/health` reads green. See the [Slot lifecycle reference](/docs/reference/slot-lifecycle) for the gate's mechanics. |
 | `serving` | A request is actively in flight. |
 | `idle` | Up but not serving — either warm-but-quiet, or up with no loadable model. |
 | `unloading` | Graceful shutdown in progress. |
@@ -160,6 +173,18 @@ For a streamed response, the slot stays `serving` until the stream drains. A
 background idle monitor demotes a quiet `ready` slot to `idle` after its idle
 timeout (300 seconds by default), so the dashboard can distinguish "warm and
 working" from "warm but quiet."
+
+### The crash-loop breaker
+
+A slot that keeps failing to load isn't retried at request cadence. After a
+load failure, `SlotManager` throttles further attempts with an exponential
+backoff; once a slot racks up five consecutive failures it is **parked** —
+loads are refused outright until a cooldown elapses, at which point a single
+**half-open** trial load runs. Success closes the breaker; failure re-parks it
+at a longer cooldown. A manual load, restart, or config edit resets the
+breaker immediately regardless of the clock. The dashboard surfaces the live
+state as a chip on the slot card and in the slot drawer; see the [Slot
+lifecycle reference](/docs/reference/slot-lifecycle) for the exact timing.
 
 ## Single-flight dispatch
 
@@ -248,38 +273,39 @@ fails on longer inputs.
 ## MTP: an Auto / On / Off decision, not a switch
 
 Multi-token prediction (speculative decoding against the model's own draft
-heads) is resolved from independent signals, in this order:
+heads) is entirely a **model-owned** decision, resolved from
+`defaults.mtp`: an explicit `true` or `false` wins in either direction;
+left unset (**Auto**), hal0 falls back to the registry's legacy `mtp` tag
+when present. There is no filename- or id-based sniff — an uncurated pull
+with neither the tag nor an explicit `defaults.mtp` is simply not
+MTP-eligible.
 
-1. **Model eligibility** — does the model actually ship MTP heads? hal0 checks
-   the registry's `mtp` tag or an `mtp` marker in the model's id/filename.
-2. **Slot override** — the slot's own `mtp` field is a tri-state: forced
-   **On**, forced **Off**, or **Auto** (the default, shown as the middle
-   position of the dashboard's Auto/On/Off control in the slot drawer). MTP is
-   a model capability, gated by the launching runner's support for it — a
-   profile's `mtp` field is informational only and is never read by the
-   launch path.
-
-An explicit slot override always wins. Left on **Auto**, MTP only turns on
-when the model is actually eligible — so a plain chat model dropped onto a
-slot no longer launches with dead speculative-decoding flags.
+`mtp` is one of the keys The hardware/model write boundary (above) forbids
+on a slot, so there is no slot-level MTP override. The control lives in the
+dashboard's model drawer as an Auto/On/Off toggle — **Auto is the first,
+default position** — not in the slot drawer; see [Choose
+models](/docs/guides/choose-models).
 
 Forcing **On** for a model that turns out to have no MTP heads is a launch
 crash waiting to happen (`context type MTP requested but model doesn't
 contain MTP layers`), so hal0 defuses that specific combination rather than
-letting it recur: swapping a forced-on slot onto an ineligible model clears
-the override back to Auto, and an update sweeps existing slot configs for the
-same stale combination.
+letting it recur: swapping a slot onto an ineligible model with `mtp`
+forced on clears the model's override back to Auto, and an update sweeps
+existing configs for the same stale combination.
 
 ## Seeded slots, roles, and aliases
 
 Every install starts with a set of **seeded slots** so the common capabilities
 have a home before you create anything:
 
-`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, and `agent`.
+`flm`, `tts`, `rerank`, `utility`, `img`, `agent`, `brain`, `qwen3tts`,
+`coder`, and `embed`.
 
-When the NPU runtime (FLM) is present, two more shadow slots are seeded:
-`stt-npu` and `embed-npu` (riding the NPU chat anchor's own `npu` slot).
-Seeded slots are reserved — you can't create a conflicting name or delete them.
+When the NPU runtime (FastFlowLM) is present, two more shadow slots are
+seeded: `flm-stt` and `flm-embed`, riding the NPU chat anchor's own `flm`
+slot. Seeded slots are reserved — you can't create a conflicting name, and
+deleting one requires `--force` (see [Manage slots](/docs/guides/manage-slots)),
+which an install or update reconcile may later re-seed.
 
 The two canonical LLM roles are **`agent`** (the capable default — the
 dispatch fallback anchor every routing chain ends in) and **`utility`** (the
@@ -297,11 +323,13 @@ they're a transparent translation at dispatch time.
 
 Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
 a co-resident model: the name doesn't change when you swap the underlying
-model file. hal0 also advertises three virtual model names that resolve to
-whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
-`hal0/npu` — and generalizes the pattern to any enabled `type: llm` slot: a
-custom slot named `research` is addressable as `hal0/research` even though
-it isn't one of the three advertised names.
+model file. hal0 also resolves `hal0/<slot>`-style virtual model names —
+`hal0/agent`, `hal0/utility`, `hal0/npu`, and the same pattern for any
+custom `type: llm` slot (`hal0/research`, say) — to whichever slot is
+actually loaded. As of v1.0 these canonical names are no longer advertised
+as separate entries in `/v1/models`: each enabled LLM slot's own alias
+already covers its listing, so a `hal0/<slot>` request is resolved on
+demand at dispatch time instead of being double-listed.
 
 ## The NPU trio
 

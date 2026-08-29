@@ -1,0 +1,203 @@
+---
+title: Browse the Bank workspace
+description: The hal0 dashboard's memory v2 UI — the Overview tab's bank table and growth chart, and the Bank workspace's fact list, filters, curation, and graph views.
+sidebar:
+  order: 51
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Once [memory is enabled](/docs/guides/enable-memory), the dashboard's Memory
+view (`#memory`, reachable from the sidebar) gives you two tabs: **Overview**
+and **Bank**. This guide covers both — for what memory *is* (namespaces,
+fact types, directives, mental models), see [Memory](/docs/concepts/memory).
+
+<Aside type="note">
+Every card here fails soft with a "Memory engine unreachable" message and a
+Retry button rather than rendering an empty state, so a Hindsight outage
+never looks like an empty bank.
+</Aside>
+
+## Overview tab
+
+The landing view. A bank picker at the top drives a **Retained** growth
+chart — a stacked bar of world/experience/observation counts per day, with
+1d/7d/30d range tabs and a small triangle marker on any day a consolidation
+operation completed. Below it:
+
+- **Engine panel** — reachability, engine name/version, bank count (and how
+  many are empty), total facts across every bank, and — only while graph
+  extraction is off — lifetime build/error/in-flight counts (once
+  extraction is on, that same information moves into the embedded graph
+  panel instead, so it's never shown twice). When extraction is on, that
+  embedded panel also lists **Active tasks**: one row per bank with
+  in-flight work, a spinner, the operation type(s) (`retain`,
+  `consolidation`, ...) and how many are processing versus queued.
+- **Banks table** — one row per bank: name, a one-line description (or doc
+  count if there isn't one), the world/experience/observation counts on a
+  single line with a proportional bar underneath, total facts and links, and
+  an activity chip (`⟳ N working`, `N pending`, or `idle`). Click a row (or
+  its arrow button) to open that bank in the Bank workspace.
+
+A **+ New bank** button/form sits below the table.
+
+## Bank tab
+
+Selecting (or exploring into) a bank opens the **Bank workspace** — a bank
+identity bar on top, a filterable fact list or graph view on the left, and
+either a filter panel or a fact inspector on the right.
+
+### The bank bar
+
+Across the top: a bank picker, the bank's description, its
+world/experience/observation composition (bar + counts), total facts,
+total links, a 30-day activity spark, and an activity chip — `⟳ N working`,
+`N queued`, or `idle` (the Overview table's equivalent chip reads `N
+pending` for the same state, not `N queued`). `+ Add` opens the add-content
+modal (below); the small refresh icon next to it triggers **consolidate
+now** for this bank.
+
+Below that, two sub-tabs:
+
+<Tabs>
+<TabItem label="Reflect">
+
+A single-question box over this bank's memory, plus two example prompts
+("why is extraction lagging?", "what broke this week?"). While the answer
+is generating it shows "recalling · reranking · composing…"; the answer
+itself is grounded-in a count of facts, documents, and mental models it
+drew on. This calls `memory_reflect` under the hood, scoped to one bank —
+there's no cross-bank reflect.
+
+</TabItem>
+<TabItem label="Rules">
+
+Two columns: **directives** (each with an on/off toggle and a delete
+button — deleting one is destructive and gated for operator approval) and
+**mental models** (each showing a stale badge or its last-refreshed date,
+with a manual refresh button). Both have their own "+ New" button that
+opens the add-content modal on the matching tab.
+
+</TabItem>
+</Tabs>
+
+### Adding content
+
+The `+ Add` modal has four tabs:
+
+- **Fact** — free text, a type picker (`world` or `experience` only —
+  `observation` is derived, never operator-authored), and comma-separated
+  tags.
+- **Document** — lists existing documents in the bank with a **Reprocess**
+  button per document (re-runs extraction over it). There is currently no
+  document upload/ingest endpoint, so the drop-file/paste-URL area and the
+  **Ingest** button are inert placeholders — this tab is view-and-reprocess
+  only for now.
+- **Directive** — a rule text box and an active-immediately toggle.
+- **Mental model** — a name, a standing question, and a refresh-schedule
+  picker (on consolidation / daily / manual). Only the manual trigger
+  (`memory_mental_model_refresh`) is actually wired up server-side today —
+  the schedule choice isn't persisted or acted on.
+
+### Filters
+
+With no fact selected, the right-hand panel is the **Filters** card:
+
+- Free-text search.
+- Fact-type toggles (world/experience/observation) with live counts.
+- A "show invalidated" toggle — the only way to browse or revert a fact
+  that's been soft-invalidated (see Curating a fact below) once you've
+  navigated away from the moment you invalidated it.
+- A **when** density strip: a day-by-day histogram of the last 30 days you
+  can drag to select a date range, plus 24h/7d/30d preset buttons.
+- A **Tag map** — tag names as bubbles sized by usage count (auto-generated
+  UUID-shaped tags, like session/document ids, are filtered out of both the
+  bubble map and the quick-filter chip row below it, since they carry no
+  readable information). Click a bubble or a chip to filter by that tag.
+
+### List, focus, and web views
+
+A view switcher above the fact list toggles between three ways of looking
+at the current filter set:
+
+<Tabs>
+<TabItem label="List">
+
+The default. A **Sources** panel above the fact list shows the bank's
+source documents (id, fact count, ingest date) with a size picker
+(5/15/25/50); clicking a source focuses the list to just facts extracted
+from it. The fact list itself shows each fact's type dot, text, timestamp,
+tags, and a small per-link-type count badge; sort by newest or "most
+connected" (salience). Use ↑/↓ to move the selection and Esc to close the
+inspector. Pagination is exact — "showing X–Y of N matched" always matches
+what's rendered — except that the server only ranks/paginates within its
+first 2000-row slab, flagged in the UI when a filter set is large enough to
+hit it.
+
+</TabItem>
+<TabItem label="Focus">
+
+A radial "ego graph" centered on the selected fact, expandable by a depth
+slider (1–10, server-bounded so it never pulls the whole bank). Click any
+node to re-centre the graph on it. A legend at the bottom maps link colors
+to relationship names and fact-type colors to dots.
+
+</TabItem>
+<TabItem label="Web">
+
+A force-directed graph of the whole filtered bank, capped at 120 facts by
+salience (weighted degree — how connected a fact is) with a warning when
+the cap is active. Nodes cluster by tag; scroll to zoom, drag the canvas to
+pan, drag a node to pin it, click a node to inspect it, and use the **fit**
+button to reset the view. Lens buttons across the top toggle individual
+link types on/off — only the link types actually present in the loaded
+data get a button, so you never see a dead toggle for a relationship type
+this bank doesn't use.
+
+</TabItem>
+</Tabs>
+
+### The inspector
+
+Selecting a fact (in any view) replaces the Filters panel with the
+**Inspector**: the fact's type, its tags, full text, timestamp, unit id,
+linked entities, a salience score (weighted degree, or "—" if the fact
+falls outside the server's scored slab), and a compact depth-1
+neighbourhood graph.
+
+#### Curating a fact
+
+- **Curate** (world/experience only) opens an edit box — saving requires
+  the text to actually differ from the current text (an unchanged save is
+  rejected client-side rather than sent as an empty patch). This creates a
+  new revision; the original is kept.
+- **Invalidate** (world/experience only, and not already invalidated) is
+  reversible and **not** approval-gated: the fact stops being recalled or
+  injected into prompts but stays in the bank, with an optional reason. An
+  invalidated fact shows a banner with a one-click **Revert**.
+- **Delete** is permanent — removed from recall and the graph, with a
+  durable audit row (actor, target, outcome). Prefer Invalidate unless the
+  fact is genuinely wrong, not just currently unhelpful.
+- **History** only appears for `observation` facts (the history endpoint
+  404s for world/experience — hal0 doesn't offer the button where it can't
+  answer) and lists the fact's state-change events with timestamps and
+  reasons.
+
+`observation` facts show neither Curate nor Invalidate — the inspector
+explains why: "observations aren't curatable — derived patterns, not
+operator-editable." Delete still applies to any fact type.
+
+## Deep links
+
+The Bank workspace's URL hash carries state: `#memory/bank?bank=<id>&fact=<id>`
+(or `#agent/memory/bank?...` if you got here from the Agent tab — both
+forms are honoured). Sharing a link with both params opens straight to
+that bank with that fact selected in the inspector. The legacy `#memory/graph`
+and `#memory/tools` routes from the pre-v2 UI redirect here automatically.
+
+## Related
+
+- [Memory](/docs/concepts/memory) — namespaces, fact types, directives,
+  mental models, reranking, and graph extraction.
+- [Enable memory](/docs/guides/enable-memory) — turn memory on, and the CLI
+  equivalents of the engine/graph/reranker settings.

@@ -1,6 +1,6 @@
 ---
 title: Environment variables reference
-description: "Every environment variable hal0 reads, its default, and what it controls — verified by grepping os.environ/os.getenv across src/hal0 in the v1.0 tree."
+description: "Every environment variable hal0 reads, its default, and what it controls — verified by grepping os.environ/os.getenv across src/hal0 and installer/ in the v1.0 tree."
 sidebar:
   order: 30
 ---
@@ -20,7 +20,77 @@ by name at a specific call site. Most have a hardcoded fallback if unset.
 | `HAL0_PREFLIGHT_SH` | unset (auto-discovered) | Explicit override path to `preflight.sh`. |
 | `HAL0_FORCE` | unset | `HAL0_FORCE=1` skips the `hal0 uninstall --purge` confirmation prompt. |
 | `HAL0_ALLOW_ROOT` | unset (false) | `1`/`true`/`yes` allows the `hal0-agent` shim to run as root. |
-| `HAL0_AGENTS_CONF_DIR` | `/etc/hal0/agents` | — |
+| `HAL0_AGENTS_CONF_DIR` | `/etc/hal0/agents` | Directory of per-agent TOML files (`<id>.toml`) the `hal0-agent` shim reads for invocation overrides — type, home, venv, bin, port, host, `serve_args`. |
+
+## Bootstrap (one-line installer)
+
+The `curl -fsSL https://hal0.dev/install.sh | sudo bash` path is `installer/bootstrap.sh`
+(mirrored to `hal0-web:public/install.sh`). It resolves and verifies a release before
+handing off to `install.sh`.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_CHANNEL` | `stable` | Release channel to install: `stable`, `preview`, or `nightly`. Also gates which manifest-signer identity bootstrap will accept. |
+| `HAL0_RELEASES_URL` | unset → `https://releases.hal0.dev/<channel>.json` | Full URL to a `hal0.releases.v1` manifest, overriding the channel default. |
+| `HAL0_BOOTSTRAP_KEEP_TMP` | unset | `1` leaves the downloaded/verified work directory in place on exit instead of deleting it — for inspecting the unpacked tree. |
+
+<Aside type="note">
+`HAL0_RELEASES_URL` is also read at update time by `src/hal0/updater/updater.py`
+(`releases_url()`), with a different append rule there: when the override looks
+URL-shaped (`http://`/`https://`) and the requested channel is not `stable`, the
+channel is appended as a `?channel=` query parameter rather than as part of the
+path. A `file://` or bare-path override is always used verbatim. There is no
+`HAL0_UPDATE_SKIP_COSIGN` (or any other) bypass for `cosign verify-blob` on an
+update — verification is unconditional in the current updater, on every channel.
+</Aside>
+
+## Install-time overrides
+
+Read by `installer/install.sh`. Most exist as documented escape hatches for
+non-interactive/CI installs or unusual hardware; a handful also map to the same
+skip an operator can reach later via `hal0 app install <name>` / `hal0 agent install
+hermes` (see the comment on each).
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_NONINTERACTIVE` | unset | `1` disables every TTY prompt, including the Hermes terminal-tool consent and the CPU-only confirm — both then take their safe default (off / declined) unless separately forced. |
+| `HAL0_ALLOW_CPU_ONLY` | unset (`0`) | `1` proceeds with a CPU-only install (`device = "cpu"` on seeded slots) when no usable GPU lane is detected, instead of failing or prompting. |
+| `HAL0_SKIP_HERMES` | unset (`0`) | `1` skips Hermes provisioning at install time. Deferred install: `hal0 agent install hermes`. |
+| `HAL0_SKIP_OPENWEBUI` | unset (`0`) | `1` skips enabling the bundled OpenWebUI chat UI at install time. Deferred install: `hal0 app install openwebui`. |
+| `HAL0_SKIP_HINDSIGHT` | unset (`0`) | `1` skips standing up the Hindsight memory engine (interpreter resolution and the `hindsight-api` unit) entirely. |
+| `HAL0_HINDSIGHT_PYTHON` | unset (auto-resolved 3.11–3.13) | Pins the interpreter used for the Hindsight venv — needed when the default `python3` is 3.14+ (litellm's `requires-python` gate rejects it) and no compatible one can be auto-installed. |
+| `HAL0_SKIP_SETUP` | unset (`0`) | `1` skips first-run seeding (`hal0 setup --auto`) — no sentinel/wiring, no capability-slot scaffolding, no brain or agent model offer. |
+| `HAL0_NO_PROBE` | unset | Alias for `HAL0_SKIP_SETUP=1` at the hardware-probe step specifically; also re-exported across the sudo re-exec so a re-launched root install keeps the answer. |
+| `HAL0_SKIP_BRAIN_MODEL` | unset (`0`) | `1` skips the brain-model pull offer. |
+| `HAL0_BRAIN_MODEL` | unset (hardware-derived pick) | Forces a specific curated model id for the brain-model pull instead of deriving one from detected hardware. |
+| `HAL0_PULL_AGENT_MODEL` | unset (TTY-prompted) | `1` opts into the (optional, bigger) agent tool-caller model pull non-interactively; `0` forces the skip even on a terminal. |
+| `HAL0_AGENT_MODEL` | unset (hardware-derived pick) | Forces a specific curated model id for the agent-model pull instead of the hardware-derived ladder rung. |
+| `HAL0_SKIP_COMFYUI` | unset (`0`) | `1` skips the ComfyUI model-share setup step. |
+| `HAL0_MODELS_DIR` | unset (TTY-prompted, else `<var_lib>/models`) | Pull destination for `hal0 model pull` and the dashboard's pull buttons, written to `hal0.toml` as `[models].store`. Same as `--models-dir`. |
+| `HAL0_PYTHON` | unset → `python3` | Interpreter install.sh uses to build hal0's own venv. Also the fallback the preflight interpreter checks use when `HAL0_PY` (below) is unset. |
+| `HAL0_RESET_PROFILES` | unset (TTY-prompted only when it would lose operator profiles) | `1` pre-approves a profile-catalog reset non-interactively. |
+| `HAL0_OWUI_TRUSTED_EMAIL_HEADER` | unset | Name of a header an upstream reverse proxy injects with the authenticated user's email. Setting it flips OpenWebUI's `WEBUI_AUTH` on and wires `WEBUI_AUTH_TRUSTED_EMAIL_HEADER` to it — perimeter auth in front of OpenWebUI, since it has no auth of its own on a LAN-default hal0 install. |
+| `HAL0_INSTALL_SKIP_VERIFY` | unset (`0`) | `1` allows `install.sh` to run as root against a release tree that is neither a git checkout nor already verified by bootstrap.sh (i.e. no cosign check happened). Off by default; running unverified code as root is the exact thing this gate exists to refuse. |
+| `HAL0_NO_QR` | unset | Set (any value) to skip rendering the dashboard-URL QR code at the end of a headless install. |
+| `HAL0_TOOLBOX_IMAGE_VULKAN`, `_ROCM`, `_FLM`, `_COMFYUI`, `_KOKORO`, `_MOONSHINE`, `_QWEN3TTS` | unset (release manifest's digest pin, else the bundled default image) | Optional per-backend container image ref overrides, one per runner. Highest-precedence tier of `resolve_runner_image`'s three-tier lookup (env → manifest digest pin → bundled default); shared by every provider that pulls a toolbox image (llama-server's GPU-hardware-gated runners, FLM, ComfyUI, Kokoro, Moonshine, Qwen3-TTS). |
+| `HAL0_SKIP_FLM_SHA` | unset (`0`) | The FLM `.deb`'s pinned SHA-256 is checked before install; if the pin is still the all-zeroes placeholder (never looked up), install.sh normally warns and skips the FLM install rather than trust an unverified download. `HAL0_SKIP_FLM_SHA=1` accepts that placeholder and proceeds anyway — an explicit trust trade-off the operator opts into, not a routine flag. Does not bypass a real SHA-256 *mismatch*, which always refuses the install. |
+
+## Doctor & preflight
+
+Shared by `hal0 doctor` and the install-time preflight checks in
+`installer/lib/preflight.sh`.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_PY` | unset → `HAL0_PYTHON`, else `python3` | Interpreter `preflight_python` (existence + `>=3.12` version check) and the venv-selection helpers resolve to. Takes precedence over `HAL0_PYTHON`, documented in the Install-time overrides section above. |
+| `HAL0_DOCTOR_PORTS` | `"8080 3001"` | Space-separated TCP ports the port-collision check probes. Also settable via `hal0 doctor --ports`. |
+| `HAL0_DOCTOR_PORTS_SOFT` | `0` | `1` downgrades a port-in-use finding to a warning instead of a failure. `hal0 doctor` (the post-install self-check) always sets this itself, since hal0's own `hal0-api`/`hal0-openwebui` units legitimately hold those ports on a healthy box. |
+| `HAL0_DISK_MIN_GB` | `20` | Minimum free space (GB) `preflight_disk` requires, when called with no explicit threshold. |
+| `HAL0_DISK_TARGET` | `/var/lib` | Directory `preflight_disk` checks free space on, when called with no explicit target. |
+| `HAL0_MODELS_DISK_MIN_GB` | `20` | Same check, scoped to the resolved models directory during install. |
+| `HAL0_CONTAINER_DISK_MIN_GB` | `20` | Same check, scoped to the container/podman graph root during install. |
+| `HAL0_CONTAINER_SMOKE_IMAGE` | `quay.io/podman/hello` | Image the container-runtime smoke test pulls and runs. Override for air-gapped installs pointing at a mirrored registry. |
+| `HAL0_NET_PROBE_URL` | `https://github.com` | URL the one-shot connectivity preflight probes with `curl -I`. Soft check (warns, never blocks) — useful to point at a reachable host behind a restrictive proxy/firewall. |
 
 ## Model / storage
 
@@ -37,21 +107,23 @@ by name at a specific call site. Most have a hardcoded fallback if unset.
 | `HAL0_BIND_HOST` | `0.0.0.0` | API bind host. Also read by `hal0 serve --host`. |
 | `HAL0_HOSTNAME` | `socket.gethostname()` | Canonical hostname override — feeds the dashboard URLs, the WS-origin allowlist, and the mDNS announcement. At install time (`HAL0_HOSTNAME=jarvis sudo -E bash install.sh` — the env path only; `network.hostname` in the answer file is consumed by the separate `hal0 setup --answers` process and does **not** reach the installer's avahi sync yet, a known follow-up) the installer also pins avahi's announced name via `host-name=` under `[server]` in `/etc/avahi/avahi-daemon.conf`, so `http://jarvis.local:8080` resolves on the LAN without renaming the box (no `hostnamectl`). Re-running with a different name updates the announcement; running without one withdraws only the installer-managed line and reverts to the machine hostname. Caveat: if an operator had hand-written their own `host-name=` before pinning, the pin replaces it (with a warning) and a later no-override run does not restore it. Wrinkle: a renamed box stops answering to the `hal0.local` alias (avahi cannot cleanly publish CNAMEs) — the alias stays in the origin allowlist, which is harmless. |
 | `HAL0_PUBLIC_URL` | unset | Public URL announced by the installer/mDNS. |
-| `HAL0_LAN_IPS` | `""` | — |
+| `HAL0_LAN_IPS` | `""` | Comma/space-separated list of the box's LAN IPv4 addresses, short-circuiting auto-detection. The installer feeds it `hostname -I` output — Python's own resolver is unreliable inside some containers. |
 | `HAL0_SELF_BASE_URL` | `http://127.0.0.1:8080` | Self-referential base URL used by the realtime backend and internal API calls. |
 | `HAL0_UI_DIST` | `""` (built-in dist dir) | Override the served UI static-asset directory. |
 | `HAL0_REQUIRE_AUTH` | unset | Overrides `[security].require_auth` — wins over the persisted config value. |
 | `HAL0_TRUST_FORWARDED_FOR` | unset | Overrides `[security].trust_forwarded_for` — wins over the persisted config value. |
+| `HAL0_LOGIN_RATELIMIT_MAX` | `10` | Max login attempts per window before the sliding-window rate limiter cuts an IP off. Budget is deliberately loose enough for a fat-fingered operator to retry a few times a minute while capping an automated key-guessing loop at this many tries/minute/IP. |
+| `HAL0_LOGIN_RATELIMIT_WINDOW_S` | `60` | Window (seconds) `HAL0_LOGIN_RATELIMIT_MAX` is measured over. |
 | `HAL0_ALLOWED_ORIGINS` | `""` (falls back to a built-in default set) | Comma-separated CORS allowlist for the agent chat WebSocket. |
-| `HAL0_MCP_ALLOWED_HOSTS` | `""` | — |
-| `HAL0_MCP_ALLOWED_ORIGINS` | `""` | — |
+| `HAL0_MCP_ALLOWED_HOSTS` | `""` (localhost only) | Comma-separated `host` / `host:port` / `host:*` values added to the `/mcp/*` mount's Host-header allowlist (DNS-rebinding protection). The single value `*` disables that protection entirely. |
+| `HAL0_MCP_ALLOWED_ORIGINS` | `""` (derived from `HAL0_MCP_ALLOWED_HOSTS`) | Comma-separated browser Origins allowed to call `/mcp/*`. When unset, `http`/`https` origins are derived from each host in `HAL0_MCP_ALLOWED_HOSTS`. |
 | `HAL0_ADMIN_KEY` | minted on rotation, else read from `api.env` | Admin bearer key for `/api/*`. See `hal0 auth`. |
 | `HAL0_CLIENT_KEY` | minted on rotation, else read from `api.env` | Client bearer key. |
 | `HAL0_OPENROUTER_OAUTH_ENABLED` | unset (disabled) | `1`/`true` enables OpenRouter OAuth. |
-| `HAL0_COMFYUI_PUBLIC_URL` | `""` | — |
-| `HAL0_OPENWEBUI_PUBLIC_URL` | `""` | — |
-| `HAL0_OPENWEBUI_PROBE_URL` | `""` | — |
-| `HAL0_HERMES_PUBLIC_URL` | `""` | — |
+| `HAL0_COMFYUI_PUBLIC_URL` | `""` (falls back to `http://<request-host>:8188`) | Public URL the dashboard uses to open ComfyUI. Set in `/etc/hal0/api.env` when ComfyUI sits behind a reverse proxy with its own HTTPS hostname — otherwise an HTTPS dashboard opening a bare `http://` link is blocked as mixed content. |
+| `HAL0_OPENWEBUI_PUBLIC_URL` | `""` (falls back to `http://<host>:3001`) | Public URL the dashboard advertises for OpenWebUI. Needed for a reverse-proxy deploy: OpenWebUI emits root-absolute asset URLs, so it needs its own (sub)domain, not a path prefix. |
+| `HAL0_OPENWEBUI_PROBE_URL` | `""` → `http://127.0.0.1:3001/health` | Loopback health-check URL for OpenWebUI, independent of the browser-facing public URL. Override for tests or a non-default deployment. |
+| `HAL0_HERMES_PUBLIC_URL` | `""` | Public URL the dashboard advertises for the Hermes agent dashboard. Hermes binds loopback-only (`127.0.0.1:9119`), so — unlike OpenWebUI — there is no host:port fallback; on a stock install the dashboard shows the health row without a link until this is set. |
 | `HAL0_API_URL` | `http://127.0.0.1:8080` (CLI client default) | Base URL the CLI uses to reach `hal0-api`. |
 
 <Aside type="caution">
@@ -65,38 +137,75 @@ rely on the default rather than setting it explicitly, verify which code path ap
 
 | Variable | Default | Controls |
 |---|---|---|
-| `HAL0_SLOT_OUTPUT_SANITY` | unset (gate ON) | `0`/`false`/`no`/`off` disables the [output-sanity gate](/docs/reference/slot-lifecycle/#output-sanity-gate) box-wide, so a `type = "llm"` slot reaches `READY` on the health probe alone. Per-slot equivalent: `output_sanity = false` in the slot TOML. |
+| `HAL0_SLOT_OUTPUT_SANITY` | unset (gate ON) | `0`/`false`/`no`/`off` disables the [output-sanity gate](/docs/reference/slot-lifecycle/) box-wide, so a `type = "llm"` slot reaches `READY` on the health probe alone. Per-slot equivalent: `output_sanity = false` in the slot TOML. |
+
+## Metrics
+
+The OBS-1 metrics core (`src/hal0/metrics/config.py`) is a standalone reader — it
+is not part of the root `Hal0Config` model, so these env vars are the primary way
+to tune it (alongside the optional `[metrics]` table in `hal0.toml`; env wins).
+See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML table.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_METRICS_ENABLED` | `true` | Master on/off. When `false`, every background task (sampler, aggregator, retention) stays unconstructed — near-zero overhead, not a disabled poll loop. |
+| `HAL0_METRICS_SAMPLE_INTERVAL_S` | `5.0` | Seconds between metric samples. |
+| `HAL0_METRICS_AGGREGATE_INTERVAL_S` | `3600.0` | Seconds between rollup aggregation passes. |
+| `HAL0_METRICS_RETENTION_INTERVAL_S` | `21600.0` (6h) | Seconds between retention sweeps. |
+| `HAL0_METRICS_RETENTION_REQUEST_DAYS` | `7` | Days of raw per-request rows kept before pruning. |
+| `HAL0_METRICS_RETENTION_SLOT_SAMPLE_DAYS` | `3` | Days of raw slot-sample rows kept before pruning. |
+| `HAL0_METRICS_RETENTION_ROLLUP_DAYS` | `90` | Days of aggregated rollup rows kept before pruning. |
+| `HAL0_METRICS_QUEUE_MAXSIZE` | `1024` | Bounded depth of the async metrics-writer queue. |
+| `HAL0_METRICS_WRITE_BATCH_SIZE` | `64` | Rows drained per `BEGIN IMMEDIATE` write transaction. |
 
 ## Hermes agent
 
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_HERMES_RUNTIME_JSON` | `/var/lib/hal0/.hermes/runtime.json` | Hermes runtime info file (embed token etc). |
-| `HAL0_HERMES_HOST` | `127.0.0.1` | — |
-| `HAL0_HERMES_PORT` | `9119` | — |
-| `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | — |
-| `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | — |
-| `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/guides/run-agents/#hermes-terminal-tool-off-by-default). |
+| `HAL0_HERMES_HOST` | `127.0.0.1` | Host the chat proxy dials to reach Hermes' own API. |
+| `HAL0_HERMES_PORT` | `9119` | Port the chat proxy dials to reach Hermes' own API. |
+| `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | Pins the interpreter used to run/re-provision the Hermes venv. |
+| `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | `0` opts out of live model-discovery (Hermes' picker polling hal0-api's `/v1/models`) back into single-backend pinning. |
+| `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/docs/guides/run-agents/). |
 | `HAL0_HERMES_OFFLINE` | unset | Set programmatically by `hal0 agent bootstrap --offline`. |
-| `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | — |
-| `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | — |
-| `HAL0_INFERENCE_BASE` | `http://127.0.0.1:8080` | — |
+| `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | Privileged-seam binary hal0-api (running unprivileged) delegates to for writing root:root agent secret/env files. Env-overridable for tests, not a normal operator knob. |
+| `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | Privileged-seam binary hal0-api delegates to for the systemd writes/reloads it cannot do unprivileged. Env-overridable for tests, not a normal operator knob. |
+| `HAL0_INFERENCE_BASE` | `http://127.0.0.1:8080` | Base URL the Hermes provisioner records as hal0's inference endpoint. |
 | `HAL0_AGENT_SECRET_PATH` | `/var/lib/hal0/agents/secret.bin` | HMAC session-cookie secret for the agent chat proxy. |
-| `HAL0_AGENT_ID` | varies by call site (`"hermes"` in board/manifest-proxy code, a module constant elsewhere) | — |
+| `HAL0_AGENT_ID` | `"hermes"` everywhere (default constant + per-call-site fallback) | Identity a plugin/proxy presents as (`X-hal0-Agent` header to Hindsight, board/manifest-proxy routing target, the hal0-provider plugin's own id). Written into the shim's child env by `hal0-agent`; per-request overrides exist above it in some paths. |
 | `HERMES_HOME` | `~/.hermes` | — |
-| `HERMES_SESSION_TOKEN` | unset | — |
-| `HERMES_DASHBOARD_BASE_URL` | module-local default constant (grep `board/hermes_executor.py` for the exact literal) | — |
+| `HERMES_SESSION_TOKEN` | unset (harvested live from the dashboard HTML) | Pins a Hermes session bearer explicitly instead of the per-process token the client otherwise scrapes from the dashboard on each start. Mainly for tests or a non-standard deploy. |
+| `HERMES_DASHBOARD_BASE_URL` | `http://127.0.0.1:9119` | Upstream base URL for the Kanban-board plugin proxy (`/api/plugins/kanban/*` + its `/events` WS) and the manifest proxy — both loopback-only by design. |
 
 ## Hindsight memory
 
 | Variable | Default | Controls |
 |---|---|---|
-| `HAL0_MEMORY_BASE` | module-local default constant | Base URL for the memory-plugin client. |
-| `HAL0_MEMORY_DEFAULT_VISIBILITY` | module-local default constant | — |
-| `HAL0_MEMORY_SPOOL` | unset | — |
+| `HAL0_MEMORY_BASE` | `http://127.0.0.1:8080` | Base URL the Hermes memory plugin uses to reach hal0's memory API (precedence: ctor arg → this env var → `memory.hal0.base_url` in the plugin's own config). |
+| `HAL0_MEMORY_DEFAULT_VISIBILITY` | `shared` | Default visibility for explicit durable writes (`hal0_memory_add`) when the caller doesn't pass one. Raw turn/lifecycle captures are always `private` regardless of this. |
+| `HAL0_MEMORY_SPOOL` | unset | Directory for the memory plugin's retry spool (writes that failed to reach Hindsight get queued here instead of dropped). |
+| `HAL0_MEMORY_REFLECT_TIMEOUT_S` | `900` | Timeout (seconds) for the Hindsight `reflect` call. |
+| `HAL0_MEMORY_REPROBE_INTERVAL_S` | `30` | Minimum interval (seconds) between the API's re-probes of a previously-unreachable Hindsight engine. |
 | `HAL0_HINDSIGHT_URL` | `http://127.0.0.1:9177` | Hindsight engine base URL. |
-| `HAL0_HINDSIGHT_PROBE_TIMEOUT_S` | — | Probe timeout for the Hindsight health check. |
+| `HAL0_HINDSIGHT_PROBE_TIMEOUT_S` | `2.0` | Timeout for the Hindsight reachability health check. |
 | `HINDSIGHT_API_TENANT_API_KEY` | `hal0-local-noauth` | — |
+
+## Observability (Sentry)
+
+Optional error/trace reporting (`src/hal0/observability/sentry.py`). hal0 phones
+home to nobody by default: Sentry stays fully inert — no SDK import, no network
+egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (or
+`uv pip install sentry-sdk`) in addition to setting the DSN.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `HAL0_SENTRY_DSN` | unset (off) | The DSN. This is the **only** switch — there is no separate enable flag to drift out of sync with it. Falls back to the SDK-conventional `SENTRY_DSN` if unset. |
+| `HAL0_SENTRY_ENVIRONMENT` | `development` | Sentry "environment" tag. Deliberately not `production`, so a copied-around DSN doesn't silently pollute a production stream. |
+| `HAL0_SENTRY_SERVER_NAME` | `socket.gethostname()` | Overrides the reported hostname. |
+| `HAL0_SENTRY_TRACES_SAMPLE_RATE` | `0.0` | Float in `[0, 1]`. Transaction tracing is opt-in per install — sampling every transaction on a box serving long-lived streaming requests is expensive. |
+| `HAL0_SENTRY_PROFILES_SAMPLE_RATE` | `0.0` | Float in `[0, 1]`. Same rationale as traces. |
+| `HAL0_SENTRY_DEBUG` | unset (off) | `1`/`true`/`yes` prints the SDK's own transport logging — for diagnosing "why did my event not arrive". |
 
 ## Providers / external services
 
@@ -114,10 +223,12 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | `HAL0_FLM_HOME` | `/var/lib/hal0` | — |
 | `HAL0_FLM_USER` | `hal0` | — |
 | `HAL0_FLM_BINARY` | `{native_flm_root}/bin/flm` | — |
-| `HAL0_QWEN3TTS_CACHE` | module-local default constant | — |
-| `HAL0_AVAHI_SERVICES_DIR` | `""` | — |
-| `HAL0_HOST_RAM_GB` | `""` (auto-probe) | — |
-| `HAL0_BUNDLES_DIR` | `""` | — |
+| `HAL0_QWEN3TTS_CACHE` | `/var/lib/hal0/qwen3tts-cache` | Host cache dir bind-mounted at `/cache` for the Qwen3-TTS (ROCm) provider. |
+| `HAL0_PROVIDER_BASE` | `http://127.0.0.1:8080/v1` | Base URL the Hermes `provider_hal0` plugin uses for hal0's own OpenAI-compatible endpoint. |
+| `HAL0_AVAHI_SERVICES_DIR` | `""` (standard avahi services dir) | Overrides the mDNS service-file directory. Documented as a test/non-standard-init override, not a routine operator knob. |
+| `HAL0_HOST_RAM_GB` | unset (auto-probed from `/proc/meminfo`) | Forces the detected unified-RAM figure used for bundle-tier eligibility, so an operator on a too-small box can pick a larger bundle anyway. Documented escape hatch for the (deferred, see note below) bundle-tier picker — no separate "force install" flag exists. |
+| `HAL0_BUNDLES_DIR` | unset (production manifest dir, else in-tree fallback) | Overrides the bundle-manifest root the (deferred) bundle-tier picker reads. A test hook per its own docstring, not a normal operator knob. |
+| `HAL0_ALLOW_VULKAN_FALLBACK` | unset | `1`/`true`/`yes` is an escape hatch for the ROCm device-node requirement on AMD GPU lanes (#1888). Set it only when you knowingly want a lane whose output may be invalid — there is no supported configuration where this is the right answer; it exists so a box can be inspected, not run. It cannot conjure a missing device node: it applies only to the correctness gates (missing `/dev/kfd`, an unvalidated runner-image Vulkan backend), never to a missing render node. |
 
 ## Activity / metrics / bench
 
@@ -127,6 +238,7 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | `HAL0_BENCH_SUITE_DIR` | unset | — |
 | `HAL0_BENCH_API` | module-local default constant | — |
 | `HAL0_BENCH_STATE` | `/var/lib/hal0-bench` (`$HAL0_HOME/var-lib/hal0-bench` under HAL0_HOME) | — |
+| `HAL0_BENCH_TELEMETRY_ROOT` | module-local default root | Overrides where `hal0 bench` writes its telemetry tree. |
 | `HAL0_BENCH_HOST`, `HAL0_BENCH_PLATFORM`, `HAL0_BENCH_GPU`, `HAL0_BENCH_HAL0_VERSION` | probed values | Override the identity fields `hal0 bench` records with a run. |
 
 ## Misc
@@ -135,6 +247,7 @@ rely on the default rather than setting it explicitly, verify which code path ap
 |---|---|---|
 | `HAL0_SETUP_TIMEOUT_SECS` | `300.0` | Timeout for `hal0 setup`'s non-interactive install steps. |
 | `HAL0_FORCE_INTERACTIVE` | unset | Forces `hal0 setup` into interactive mode even in a non-TTY. |
+| `HAL0_LOG_LEVEL` | code default `WARNING`; the installer's `/etc/hal0/api.env` pins it to `info` | structlog level filter, applied by the CLI's root callback before every command runs — including `hal0 serve`, so it governs `hal0-api.service`'s own log verbosity too, since the unit's `ExecStart` is `hal0 serve`. |
 | `NO_COLOR`, `HAL0_PLAIN` | unset | Disable ANSI color / force ASCII-only output. |
 | `EDITOR`, `VISUAL` | `vi` | Editor used by `hal0 config edit`. |
 | `NOTIFY_SOCKET` | inherited from systemd | sd_notify socket — not hal0-specific. |
@@ -143,4 +256,14 @@ rely on the default rather than setting it explicitly, verify which code path ap
 `.bundle-chosen`-related bundle-tier env vars (`HAL0_HOST_RAM_GB`, `HAL0_BUNDLES_DIR`)
 back a bundle picker that is explicitly unwired/deferred past v1.0 — don't imply it's
 an active operator-facing flow.
+</Aside>
+
+<Aside type="note">
+Excluded from this page: env vars that exist purely as test seams (explicitly
+labelled as such in their own source comments — e.g. the `HAL0_GPU_*_OVERRIDE`
+family and `HAL0_SCHEMA_PY_OVERRIDE` in `installer/lib/preflight.sh`, `HAL0_RUNAS_TEST_UID`,
+`HAL0_APPARMOR_CONF`), and internal wiring one process sets for a child it spawns
+rather than something an operator sets from outside (`HAL0_*_REQUIRED`/`HAL0_*_AUTOINSTALL`
+flags `install.sh` passes into `preflight.sh`'s own functions, `HAL0_MCP_PROBE_URL`/
+`HAL0_MCP_PROBE_HEADERS`, the per-slot `HAL0_SLOT` injected into container envs).
 </Aside>

@@ -16,15 +16,15 @@ tier is rejected before the handler runs.
 <Aside type="caution">
 **Auth ships off by default.** A fresh v1.0 install is trusted-LAN-open —
 every route responds to any caller that can reach the port — until an
-operator explicitly enables enforcement (see [Enabling
-auth](#enabling-auth)). This is a deliberate v1.0 decision: an earlier
+operator explicitly enables enforcement (see the Enabling auth section
+below). This is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
-directory — for that, put a reverse proxy in front (see [TLS still needs a
-proxy](#tls-still-needs-a-proxy)). And if you installed the OpenWebUI
+directory — for that, put a reverse proxy in front (see the TLS still
+needs a proxy section below). And if you installed the OpenWebUI
 companion there is a **second** listener — a full chat UI on `:3001` that
-this auth model does not cover at all; see
-[The second listener](#the-second-listener-openwebui-on-3001).
+this auth model does not cover at all; see the second listener section
+below (OpenWebUI on `:3001`).
 </Aside>
 
 ## Tiers and credential resolution
@@ -284,7 +284,7 @@ server {
 </Tabs>
 
 If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
-(see [Rate limiting](#rate-limiting)) once you've confirmed the proxy itself
+(see the Rate limiting section above) once you've confirmed the proxy itself
 strips any client-supplied value — otherwise treat hal0's own admin-key auth
 as the access control and skip proxy-level basic auth entirely.
 

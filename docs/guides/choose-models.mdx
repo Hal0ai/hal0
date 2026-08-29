@@ -59,6 +59,38 @@ than the per-id model directory — see
 picks span the licensing spectrum on purpose (research-only through
 fully permissive) — read the license before using output commercially.
 
+## Filter and sort the catalog
+
+The Models view's toolbar offers a search box, a row of multi-select
+filter chips (OR semantics — pick several to widen the match, none to show
+everything), and a sort dropdown (name / size / params / added, either
+direction). The filter chips are:
+
+| Chip | Matches |
+|---|---|
+| MTP | `defaults.mtp === true`, or the model carries the legacy `mtp` tag — a plain OR, so the tag still matches even when `defaults.mtp` is explicitly `false` (see "Vision and MTP" below) |
+| MOE | a mixture-of-experts architecture (`qwen3next`, `mixtral`, `deepseek-moe`), or — since no registry row persists `architecture` yet — the `moe`/`a3b`/`mtp` tag or an `a3b` token in the id |
+| DENSE | neither MTP nor MOE |
+| Embed | `type === "embedding"` |
+| Rerank | `type === "reranking"` |
+| Voice | `type === "tts"` or `type === "transcription"` |
+| Vision | `vision` in the model's capabilities |
+
+The backend's own context-sizing heuristic (a local `is_moe` variable
+inside `hal0.hardware.recommend._resolve_primary_ctx`, not an importable
+symbol) uses a narrower signal than the chip above: it prefers a curated
+row's backfilled `architecture` field when present, and otherwise falls
+back to just the `mtp` tag or an `a3b` token in the model id — no `moe`
+tag check. Since no curated row has an `architecture` backfilled yet,
+every row currently falls through to that narrower id/tag heuristic for
+context sizing, which is not quite the same rule as the MOE filter chip
+above.
+
+The **Profiles** tab lives alongside Inference / Image / Upstream at the
+top of the Models view (`#models/profiles`) — that's where you manage the
+runtime-profile templates the model drawer's template picker draws from.
+See [Manage slots](/docs/guides/manage-slots) for what a profile controls.
+
 ## Launch flags now live on the model, not the slot
 
 As of v1.0, tuning knobs that used to be per-slot — `extra_args`, `mtp`,
@@ -69,22 +101,109 @@ model's defaults; the old per-slot fields still round-trip in TOML for
 compatibility but are inert at launch, and a one-shot migrator folds any
 value you had set there into the model.
 
-There's no dedicated `hal0 model edit` CLI verb for these fields yet —
-set them via `PUT /api/models/{model_id}` or, more practically, from the
+There's no dedicated `hal0 model edit` CLI verb for these fields — set
+them via `PUT /api/models/{model_id}` or, more practically, from the
 dashboard's model drawer.
+
+Curated type-tag chips (mtp / coder / reasoning / vision, ticked on the
+old recipe editor) are retired: behavior is now owned by typed fields —
+`defaults.mtp`, `capability_flags.tool_calling`, `defaults.enable_thinking`,
+and the `capabilities` list + `mmproj` path for vision. The old tags still
+exist in the registry as inert, freeform labels; nothing routes on them
+anymore.
 
 ## Edit a model from the dashboard
 
-Every model row in the **Models** view carries a kebab (⋮) menu. Today it
-has one action, **Edit model settings**, which opens the docked model
-drawer for that row directly — independent of whichever row is currently
-selected in the catalogue list, so you can jump straight from any row to
-its settings without first clicking to select it.
+Every model row in the **Models** view carries a kebab (⋮) menu. It has
+**Edit model settings**, which opens the docked model drawer for that row
+directly — independent of whichever row is currently selected in the
+catalogue list, so you can jump straight from any row to its settings
+without first clicking to select it — and, for a row that's installed and
+not an upstream-served model, **Delete model…**, which removes its
+registry entry and bytes (the same confirm-by-typing-the-name flow as the
+detail pane's Delete button). The row's detail pane also has an **Edit
+options** button that opens the same drawer for whichever row is currently
+selected.
 
 The same drawer opens from a slot card's pencil icon (see
-[Manage slots](/docs/guides/manage-slots#dashboard-the-inline-model-edit-pencil))
-for whichever model is currently bound to that slot — same drawer, two
-entry points.
+[Manage slots](/docs/guides/manage-slots), which covers the inline
+model-edit pencil) for whichever model is currently bound to that slot —
+same drawer, two entry points.
+
+The drawer is organized top to bottom as:
+
+- **Display name** — what the dashboard shows; empty keeps the model id.
+- **Default for `<type>`** — a badge plus a Set/Remove toggle for the
+  per-type default marker (see below).
+- **Launch flags** — a hero textarea framed as the resolved launch
+  command, with a profile picker beside it (see "Templates, flags, and
+  divergence" below).
+- **Typed capabilities** — Thinking, MTP, Jinja, and Vision, each an
+  Auto/On/Off toggle, plus an editable Chat template picker (saved as
+  `defaults.chat_template`) and a read-only Modality readout derived from
+  capabilities.
+- **Context size** — tokens; empty means the launcher default. Must be a
+  whole number ≥ 128 if set; the server enforces the same floor
+  (`400 model.context_size_out_of_range`).
+- **Routing** — the Capabilities and Backends chip sets (dispatch/omni
+  eligibility and slot-compat filtering).
+- **Source · re-pull coords** — MMProj sidecar path, HF repo, HF filename.
+
+Saving writes only the fields that changed, plus the full `defaults` block
+(model defaults merge one level deep server-side, so every typed-capability
+key is always sent explicitly — a value, or `null` to clear it). The
+drawer's footer warns that changes require the slot to restart to take
+effect, and the Save button stays disabled until something is actually
+dirty.
+
+### Templates, flags, and divergence
+
+The flags textarea is literally what launches — hal0 computes and rejects
+a short managed-argument set inline before save: `--model`, `--ctx-size` /
+`-c`, `--host`, `--port`, `--n-gpu-layers` / `-ngl`, and `--alias`. Slot
+hardware flags (`-ngl`/`--n-gpu-layers`, `-dev`/`--device`, `-t`/`--threads`)
+are rejected too, with a message pointing at the slot's hardware grid
+instead — the model is device-agnostic and carries no runner or image.
+
+Picking a profile from the dropdown **stamps** its flags into the
+textarea — a one-time copy, not a live link. If your edits would be
+overwritten a confirm dialog asks first. Once stamped, editing the
+textarea further diverges the model from the profile; a "diverged"
+badge appears along with an inline diff (added / changed / removed
+flags) and a "reset to profile" action that re-stamps the profile's
+current text over your edits.
+
+### Vision and MTP
+
+Vision is Auto/On/Off, same as the other typed caps: Auto loads the
+`mmproj` sidecar whenever the model carries one; Off force-suppresses it
+even on a vision-capable model (frees roughly 0.9 GB of resident VRAM).
+Setting `capabilities` to include `vision` with no `mmproj` path blocks
+save with an inline error.
+
+MTP eligibility is a tri-state on `defaults.mtp`: an explicit `true` or
+`false` wins in either direction over the registry's legacy `mtp` tag;
+leaving it at Auto falls back to that tag when present. There is no
+filename-based MTP sniff anymore — an uncurated pull with neither the tag
+nor an explicit `defaults.mtp` is simply not MTP-eligible. That tri-state
+precedence is what the drawer's MTP toggle and the backend launch path
+(`hal0.model_meta.model_is_mtp_eligible`) both use — but the Models list's
+MTP filter **chip** doesn't: it's a plain OR of `defaults.mtp === true`
+and the legacy tag (`ui/src/dash/model-sort.js`), so a model tagged `mtp`
+still shows the MTP chip even when its `defaults.mtp` is explicitly set to
+`false`. The chip and the toggle can disagree on the same row.
+
+### Per-type default
+
+"Default for `<type>`" marks the model that its dispatcher type
+(`llm`/`embedding`/`reranking`/…) falls back to. At most one model per
+type can hold it — promoting one demotes whichever model currently holds
+it. Set or clear it from the drawer, or from the CLI:
+
+```sh
+hal0 model default qwen3.6-27b          # promote (demotes the current holder)
+hal0 model default qwen3.6-27b --clear  # clear — the type is left with no default
+```
 
 ## Preferred profile
 

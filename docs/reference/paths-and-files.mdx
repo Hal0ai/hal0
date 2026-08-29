@@ -111,17 +111,28 @@ hal0 uses a generic sibling-lock pattern (`hal0.config.locking.file_lock()`):
 ## Temp file prefixes (atomic-write pattern)
 
 hal0 writes config and state files via `tempfile.mkstemp` in the same directory,
-`fsync`, then `os.replace` — so readers never see a torn write. Recognizable prefixes:
+`fsync`, then `os.replace` — so readers never see a torn write. Recognizable prefixes;
+every one of these is transient — created, then either unlinked or renamed away,
+never left on disk as a final artifact:
 
 | Prefix | Used by |
 |---|---|
-| `.hal0-writeprobe-{pid}` | Write-permission probe. |
-| `.hal0-managed` | Marker stamped in a claimed `HERMES_HOME`/agent data dir — gates the unmanaged-directory refusal. |
+| `.hal0-writeprobe-{pid}` | Write-permission probe (`hal0.agents.hermes_provision.path_is_writable`) — `touch`ed then immediately unlinked in the same call, to test whether an ancestor directory is actually writable (not just `os.access`-writable, which lies under SELinux/ACLs/NFS root-squash). Never renamed into place. |
 | `.hal0-gpu-arbiter-*.tmp` | GPU arbiter state. |
 | `.hal0-state-*.tmp` | Slot state / ID-keying migration. |
 | `.hal0-stack-state-*.tmp` | Stack state. |
 | `.hal0-env-*.tmp` | Atomic env-file writer (`config/env.py`). |
-| `.hal0-build-stamp` | UI prebuild content-hash stamp under the served dist dir. |
+
+## Persistent markers
+
+These are *not* temp files — each is written once and left in place as the
+final artifact, checked again on a later run. Don't confuse them with the
+atomic-write temp files above.
+
+| Marker | Used by |
+|---|---|
+| `.hal0-managed` | Stamped into a claimed `HERMES_HOME`/agent data dir the moment hal0 takes ownership of it (`hal0.agents.hermes_provision`). It persists for the life of the install: `hal0 agent uninstall` `rmtree`s an agent home only when this marker is present, refusing to touch a directory (e.g. a user's pre-existing `~/.hermes`) that lacks it — see `_safe_to_remove_data_dir` at `src/hal0/agents/manager.py:507` (called from `manager.py:466`). |
+| `.hal0-build-stamp` | Content hash of the `ui/` source tree, written under the served UI dist dir (`${UI_DIST}/.hal0-build-stamp`) right after a successful `npm run build` (`installer/install.sh:1109`). Persists across installs — the installer diffs it against the current tree hash on the next run and skips the rebuild only on an exact match. |
 
 ## Portable export envelope formats
 

@@ -28,10 +28,16 @@ process. Concrete implementations:
 
 Every `Provider` is stateless — no per-slot mutable state lives on the instance.
 Abstract methods: `build_env()`, `start_cmd()`, `health()`, `infer()`,
-`container_spec()`. Every slot dispatches through `ContainerProvider`, which builds a
-`RuntimeLaunchPlan` (frozen dataclass: image, command/argv, env, typed mounts with
-read-only/SELinux flags, devices, cap_add, security_opt, port, network_mode,
-extra_args, optional health check) fed to a single Quadlet renderer.
+`container_spec()`. `_spec_provider_for` dispatches each slot to its family
+provider by `runtime_family` — FLM, Kokoro, Qwen3TTS, Moonshine, ComfyUI each
+build their own `RuntimeLaunchPlan` (frozen dataclass: image, command/argv,
+env, typed mounts with read-only/SELinux flags, devices, cap_add,
+security_opt, port, network_mode, extra_args, optional health check); only
+plain llama-server slots fall through to `ContainerProvider.container_spec`.
+Every plan, whichever provider built it, still lands on the same single
+Quadlet renderer, and `ContainerProvider` owns the container lifecycle
+(start/stop/health) for all of them regardless of which provider built the
+plan.
 
 `SlotConfig.provider` (the string field on a slot) is **deprecated** — every slot runs
 as a podman container now, and this field is a legacy label round-tripped for
@@ -51,7 +57,7 @@ user config lives in `/etc/hal0/upstreams.toml`.
 | `openai` | `https://api.openai.com/v1` | `bearer` | cloud | chat, embed, vision, tools, tts, stt |
 | `anthropic` | `https://api.anthropic.com/v1` | `anthropic` (`x-api-key` + `anthropic-version` header) | cloud | chat, vision, tools |
 | `openrouter` | — | — | cloud | — |
-| `google_ai_studio` | — | — | cloud | — |
+| `google_ai_studio` | `https://generativelanguage.googleapis.com/v1beta/openai` | `bearer` | cloud | chat, vision |
 | `deepseek` | — | — | cloud | — |
 | `minimax` | — | — | cloud | — |
 | `ollama` | `http://localhost:11434/v1` | `none` | local | — |
@@ -59,11 +65,11 @@ user config lives in `/etc/hal0/upstreams.toml`.
 <Aside type="note">
 `anthropic`'s catalog entry speaks the native `/v1/messages` shape only — it needs a
 proxy for OpenAI-shape compatibility. Auth styles overall: `bearer, anthropic,
-google_query, header, none`.
+header, none`.
 </Aside>
 
 Persisted config is a `ProviderEntry` per upstream (see
-[Config schema → providers.toml](/docs/reference/config-schema/#providerstoml)):
+[Config schema → providers.toml](/docs/reference/config-schema/)):
 `catalog_id`, `name`/`base_url` overrides, `auth_value_env` (the **name** of an
 environment variable, never the key itself — the actual secret lives in `api.env`),
 `enabled`, `models`.
@@ -73,7 +79,7 @@ environment variable, never the key itself — the actual secret lives in `api.e
 `upstreams.toml`/`UpstreamEntry` are a **separate schema** from `providers.toml`/
 `ProviderEntry` above — both represent "remote provider" concepts but are distinct
 tables with distinct fields (`UpstreamEntry` adds `kind`, `warmup_strategy`,
-`model_filters`; see [Config schema](/docs/reference/config-schema/#upstreamstoml)).
+`model_filters`; see [Config schema](/docs/reference/config-schema/)).
 Verify which one a given feature actually reads before documenting behavior.
 </Aside>
 
@@ -93,14 +99,12 @@ runtime image reference.
 | `intent` | Dashboard card headline. |
 | `quant` | Display chip only — the runtime reads quant from the model, not the profile. |
 
-<Aside type="caution">
-On the v1.0 branch (Stream C, `fix/profile-tuning-only` — reviewed PASS, not yet
-merged to `main` at time of writing), `device_class`/`backend` are being rewritten to
-**inert match-only fit hints**. The slot's own `device` field (see the device
-taxonomy below) becomes the single authoritative hardware fact; the profile hints are
-retained on-disk only because published `.hal0profile.json` export artifacts carry
-them and their checksums cover the field. Verify this has landed on `main` before
-treating it as unqualified current behavior.
+<Aside type="note">
+As of v1.0, `device_class`/`backend` are **inert match-only fit hints**. The
+slot's own `device` field (see the device taxonomy below) is the single
+authoritative hardware fact; the profile hints are retained on-disk only
+because published `.hal0profile.json` export artifacts carry them and their
+checksums cover the field.
 </Aside>
 
 Profiles carry **no `image` field** — image resolution is slot-owned
@@ -120,16 +124,48 @@ name and `device_class`, not by sniffing an image string), `supported_slot_types
 `used_by` (slot names referencing the profile), and static `tps`/`rtf` numbers from the
 bench table.
 
-The seeded `moonshine` profile (device `cpu`) is the STT sibling of the seeded `kokoro`
+The seeded `moonshine` profile sets no `device_class` at all (neither does the
+seeded `kokoro` profile) — both are classified into their runtime family by
+name, not by device. It's the STT sibling of the seeded `kokoro`
 profile: `runtime_family = "moonshine"`, `supported_slot_types = ("transcription",)`,
 image `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1` (resolved via `RUNNER_IMAGES["moonshine"]`,
 digest pinned in `manifest.json`), and self-managed (operator-staged) weights — see
-[Voice: STT and TTS](/docs/guides/voice-stt-tts/) and
-[ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/).
+[Voice: STT and TTS](/docs/guides/voice-stt-tts/) and ADR-0001, "Reinstate
+Moonshine as the CPU STT engine" (`docs/adr/0001-moonshine-cpu-stt-reinstatement.md`
+in the repository, not published to these docs).
+
+## Runner images
+
+`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can
+launch — `rocmfpx`, `vulkanfpx`, `cuda`, `cpu` (all `llama-server`), plus one
+key per single-purpose runtime: `flm`, `kokoro`, `moonshine`, `qwen3tts`,
+`comfyui`. Each entry pairs a runner key with a bundled default image ref, a
+`runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), and an optional
+`backend` (`rocm`/`vulkan`/`cuda`) — this is the registry `SlotConfig.binary`
+indexes into, and the single place every provider now resolves its launch
+image from (`hal0.runners.resolve_runner_image`), replacing what used to be
+three separate, inconsistent image-resolution chains.
+
+A slot's `binary` field selects a runner key directly; left empty, it derives
+one from the slot's `device` via `hal0.runners.runner_for_backend`. Either
+way, the slot's actual launch image is resolved through
+`hal0.providers.container._resolve_image_ref`: `slot.image_pin` (a per-slot
+escape hatch) outranks `[slots].default_images[<runner key>]` (an operator's
+per-family override, settable from the dashboard), which outranks the
+registry's release-baked default (itself resolvable through an
+`HAL0_TOOLBOX_IMAGE_<KEY>` env override or a release manifest digest pin).
+`rocmfpx` and `vulkanfpx` resolve to the same image today — the shipped
+runner build is Vulkan-portable — so the two keys exist for a future split,
+not because they differ now.
+
+See [Manage runner images](/docs/guides/manage-runner-images/) for the
+catalogue page (Slots → Runner Images), the Vulkan lane's image gate, and
+what pulling/pinning/updating an image does and does not do to a running
+slot.
 
 ## Device taxonomy
 
-See [Hardware matrix](/docs/reference/hardware-matrix/#canonical-device-taxonomy) for
+See [Hardware matrix](/docs/reference/hardware-matrix/) for
 the full table. In short: `hal0.model_meta.CANONICAL_DEVICES` is the single source of
 truth for the 5 valid device ids (`gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu`),
 consumed by `SlotConfig.device`, a profile's (now inert) `device_class`, and every

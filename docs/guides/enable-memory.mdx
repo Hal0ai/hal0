@@ -1,11 +1,11 @@
 ---
 title: Enable memory
-description: hal0's memory subsystem is toggled with hal0 memory enable/disable — Hindsight-backed recall, optional graph extraction, and per-bank management.
+description: hal0's memory subsystem is toggled with hal0 memory enable/disable — Hindsight-backed recall, optional graph extraction, reranking, and per-bank management from the CLI or the dashboard.
 sidebar:
   order: 50
 ---
 
-import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 hal0's memory subsystem gives agents a persistent recall store —
 **Hindsight** — plus an optional knowledge-graph extraction layer. As of
@@ -15,10 +15,10 @@ variable — the old `HAL0_MEMORY_ENABLED` flag is gone.
 <Aside type="note">
 A fresh install turns memory on for you and stands up the local Hindsight
 daemon automatically. The steps below are for the cases the installer
-doesn't cover: re-enabling memory after you turned it off, or a manual
-install. Every downstream caller — the admin MCP tools, the
-`/api/memory/*` routes, the agent memory provider — degrades to a no-op
-or `503` when memory is off.
+doesn't cover: re-enabling memory after you turned it off, a manual
+install, or tuning the engine/graph/reranker after the fact. Every
+downstream caller — the MCP tools, the `/api/memory/*` routes, the agent
+memory provider — degrades to a no-op or `503` when memory is off.
 </Aside>
 
 ## Turn it on or off
@@ -31,11 +31,17 @@ hal0 memory disable
 
 Toggles `[memory].enabled` in `hal0.toml`; enabling requires a
 `hal0-api` restart to actually construct the memory provider.
+`hal0 memory status` also reports the retain pipeline's health once memory
+is on — whether writes are landing, waiting on a chat model to be loaded, or
+failing, plus the engine's own failed/pending/processing operation counts.
 
 When enabled, hal0 builds the memory provider from your config. The
 engine is **Hindsight**; if the Hindsight daemon is unreachable at
 startup, hal0 logs a warning and degrades to an in-memory PgVector
-fallback rather than failing startup.
+fallback rather than failing startup. hal0-api keeps re-probing in the
+background and swaps the durable engine back in on its own once Hindsight
+answers — no restart needed — but any writes accepted while degraded are
+gone; they were never on the durable side.
 
 <Aside type="caution">
 The PgVector fallback is **volatile** — every write is lost on restart.
@@ -46,20 +52,37 @@ Check `GET /api/memory/engine` — `"engine": "hindsight"` and
 </Aside>
 
 <Aside type="caution">
-`[memory].engine` accepts `hindsight` (default), `pgvector`, or `mem0`.
-The legacy `cognee` engine is **retired as of v1.0.0** and now fails
-config validation outright — migrate off it first (see
-[Migrate a legacy store](#migrate-a-legacy-store)) before updating past
-the version that dropped it.
+`[memory].engine` accepts `hindsight` (default), `pgvector`, or `mem0` at
+config validation time, but `mem0` **is not implemented** — selecting it
+just logs a warning and runs Hindsight anyway. The dashboard's engine
+picker only offers `hindsight`/`pgvector` for this reason. The legacy
+`cognee` engine is **retired as of v1.0.0** and fails config validation
+outright. There is no automated migration path off a Cognee-era store —
+Cognee has been dark since v0.4; `hal0 memory migrate unify` (below) folds
+Hindsight banks together and has nothing to do with Cognee.
 </Aside>
 
 ## One shared bank, or per-agent private banks
 
 `[memory].unified_bank` (default `true`) routes all memory into one
 shared Hindsight bank instead of splitting it per agent into private
-banks. This is a config-level policy decision, not something you toggle
-per request — see [MCP servers](/docs/guides/connect-mcp) for how
-`X-hal0-Private` interacts with it at write time.
+banks. When true, a private write still lands in `shared` but is tagged
+`visibility:private` + `agent:<id>` rather than forking a separate bank; set
+it `false` to restore real per-agent `private:<agent>` banks and
+cross-bank fan-out recall. This is a config-level policy decision, not
+something you toggle per request — see [MCP servers](/docs/guides/connect-mcp)
+for how `X-hal0-Private` interacts with it at write time.
+
+## The dashboard's Settings → Memory page
+
+Everything below this section is also available from the dashboard —
+`#settings/memory` — as three panels: **Engine**, **Memory graph
+extraction**, and **Reranker**. Engine and reranker changes save through the
+generic settings API; graph changes go through a dedicated endpoint (see
+below) because it validates the extraction slot against the live slot set
+and propagates the change to `hindsight-api` itself. Changing the engine
+needs a `hal0-api` restart to take effect; graph and reranker changes apply
+live.
 
 ## The graph-extraction gate
 
@@ -70,7 +93,10 @@ on a fresh install.
 Hindsight builds its graph natively from whatever local `llm` slot you
 point it at. That slot is `[memory.graph].extraction_slot` in
 `hal0.toml` (default `"utility"`); changing it repoints Hindsight's
-extraction LLM and restarts `hindsight-api` to apply it.
+extraction LLM and restarts `hindsight-api` to apply it. `[memory.graph].llm_timeout_s`
+(default `300`, 30–3600) sets how long Hindsight will wait on its own
+extraction/consolidation/reflect calls — raise it if a cold slot start
+regularly times out.
 
 ![Memory view showing live graph extraction status and counters](/screenshots/memory-view.png)
 *Live memory and graph-extraction dashboard in hal0.*
@@ -107,11 +133,53 @@ an unknown or non-llm slot before it ever reaches `hal0.toml`.
 hal0 memory graph disable
 ```
 
-Turns extraction off and cancels any in-flight build. Vector recall is
-unaffected either way — this gate only controls the graph layer.
+Turns off the *reporting and routing* gate only. On Hindsight (the only
+shipping engine) extraction runs inside the daemon itself and this flag is
+a hal0-side label — the daemon keeps extracting regardless, which is why
+`memory graph status` keeps reporting rising operation counters after a
+disable. Vector recall is unaffected either way.
 
 </TabItem>
 </Tabs>
+
+If extraction operations are failing (an unreachable or too-small
+extraction slot, for example), the dashboard's graph panel shows a "Retry N
+failed" button that requeues every failed extraction/consolidation
+operation once the underlying problem is fixed. The CLI equivalent is
+`hal0 memory ops retry --all-failed` (below), which covers the same
+operations from the terminal.
+
+<Aside type="note">
+A memory write is refused outright — not silently dropped — if the
+extraction slot's model can't clear an ~8192-token context-window floor
+(a conservative estimate of the extraction prompt's own footprint).
+Override the floor with `HAL0_MEMORY_EXTRACTION_FLOOR` on the hal0-api
+service if it's wrong for your engine. Chat is unaffected; only memory
+writes are gated on this check.
+</Aside>
+
+## Reranking
+
+Recall from more than one bank goes through a second-pass reranker before
+it's returned, configured under `[memory.embedding]`:
+
+```toml
+[memory.embedding]
+rerank_gateway_url = "http://127.0.0.1:8080"
+rerank_model = "builtin.jina-reranker-v1-tiny-en-q8"
+rerank_connect_timeout_s = 1.0
+rerank_read_timeout_s = 8.0
+```
+
+`rerank_model` must resolve to a model the `rerank` capability slot serves.
+The dashboard's Reranker panel gives you a picker instead of free text: the
+schema default labelled "builtin", every model the capabilities catalog
+tags for reranking (with its serving backend), and — if you've saved
+something outside both — that value labelled "(saved)" so you can see and
+move off it. A model id the gateway can't resolve doesn't error; it just
+makes every recall fall back to fused vector ordering, so pick from the
+list. The panel links to Settings → Capabilities, where the underlying
+`rerank` slot itself lives.
 
 ## Manage banks
 
@@ -119,40 +187,66 @@ unaffected either way — this gate only controls the graph layer.
 hal0 memory bank list
 hal0 memory bank stats <bank>
 hal0 memory bank profile get <bank>
-hal0 memory bank profile set <bank> <key> <value>
-hal0 memory bank export <bank>
-hal0 memory bank import <bank> <file>
-hal0 memory bank delete <bank>
-hal0 memory bank consolidate <bank>
+hal0 memory bank profile set <bank> --skepticism 4 --retain-mission "..."
+hal0 memory bank export <bank> [--out <file>]
+hal0 memory bank import <bank> --file <file> [--dry-run]
+hal0 memory bank delete <bank> --confirm <bank>
+hal0 memory bank consolidate <bank> [--scope <tag>]
 ```
 
-Deleting a whole bank requires an explicit confirmation that echoes the
-bank id back — a plain delete with no confirmation is rejected.
+Deleting a whole bank requires `--confirm <bank>` to exactly match the
+target bank id — the CLI refuses before the request even reaches the
+server if it doesn't, and the server enforces the same check independently.
+
+`bank profile set` splits its flags across two different upstream calls:
+`--skepticism`/`--literalism`/`--empathy` (1–5 disposition traits) go
+through a profile PUT; `--retain-mission`/`--observations-mission`/
+`--reflect-mission` go through a bank-config PATCH. Pass any combination —
+only the fields you name are changed.
 
 ## Async operations and mental models
 
 ```sh
-hal0 memory ops list           # in-flight/recent Hindsight ops: retain, consolidation, refresh
-hal0 memory ops retry <id>
-hal0 memory mm list            # mental models Hindsight has built
-hal0 memory mm refresh <id>
-hal0 memory mm history <id>
-hal0 memory recall             # ad-hoc recall from the CLI
+hal0 memory ops list [--bank <bank>] [--failed]
+hal0 memory ops retry --all-failed [--bank <bank>]
+hal0 memory ops retry --bank <bank> --id <operation_id>
+hal0 memory mm list <bank>
+hal0 memory mm refresh <bank> <model_id>
+hal0 memory mm history <bank> <model_id>
+hal0 memory recall <query> [--bank <bank>] [--tags ...] [--types ...]
 ```
 
-## Migrate a legacy store
+`ops list`/`ops retry --all-failed` fan out across every bank when `--bank`
+is omitted — Hindsight's operations API has no cross-bank listing endpoint,
+so hal0 merges the per-bank results itself. `ops retry --id` needs `--bank`
+too, since operation ids are bank-scoped. `mm` (mental model) commands
+always take the bank as the first argument. `hal0 memory recall` hits the
+same namespace-scoped recall path an agent uses at runtime (not the admin
+bank console) — use it to see exactly what an agent would get back for a
+query.
 
-If you previously ran the Cognee-backed memory store, or need to bring
-per-agent private banks together into the unified bank:
+## Fold banks together
 
 ```sh
-hal0 memory migrate unify
+hal0 memory migrate unify --source <bank> [--source <bank> ...] --target <bank> [--apply]
 ```
 
+Folds one or more source banks into a target bank (default target
+`shared`), tagging each migrated document with its provenance
+(`agent:<id>`, `visibility:private` for a former private bank, plus any
+`--add-tag` you pass). Default is `--dry-run` — it reports the plan
+(fact counts, tags to add) without writing anything; pass `--apply` to
+actually run it. Requires the running hindsight-api to advertise the
+document-transfer API (`features.document_export_api`/
+`document_import_api` on `/version`) — the command checks this and refuses
+loudly if it's missing rather than guessing. It never deletes the source
+banks; that's always a separate, explicit `hal0 memory bank delete <bank>
+--confirm <bank>`.
+
 <Aside type="caution">
-Check the command's own `--dry-run` support before running it against
-production data — a migration touching your durable recall store is
-worth previewing first.
+This is a bank-consolidation tool (private banks → one unified bank), not
+a Cognee migration path — there is no CLI command for migrating a
+Cognee-era store. See the engine note above.
 </Aside>
 
 ## Destructive ops are audited
@@ -164,6 +258,10 @@ wipe is attributable after the fact.
 
 ## Related
 
+- [Memory](/docs/concepts/memory) — what the subsystem is, namespaces,
+  fact types, directives, and mental models.
+- [Browse the Bank workspace](/docs/guides/memory-workspace) — the
+  dashboard's fact browser, filters, curation, and graph views.
 - [Run agents](/docs/guides/run-agents) — agents are the main consumer of
   the memory store.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `memory_*` tool

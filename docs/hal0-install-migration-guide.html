@@ -662,7 +662,8 @@ hal0 slot list &amp;&amp; systemctl list-units <span class="str">'hal0-slot@*'</
     <li>The update path works end-to-end on real hosting: manifest fetch follows redirects, the privileged stage honours <code>HAL0_RELEASES_URL</code>, wrappers refresh on every activate.</li>
     <li>Id-keyed boxes are first-class in every lane (capability toggles, NPU trio, config writes).</li>
     <li>Memory surfaces tell the truth: real operations envelope, accurate bank-delete blast radius, per-agent stats scoping, ACL-aware pagination, extraction-slot changes actually reach the daemon.</li>
-    <li>Removed: the experimental standalone browser MCP server (never mounted; Hermes brings its own browser tooling) and the never-read <code>[brain_chat] tool_model</code> key.</li>
+    <li>Removed: the experimental standalone browser MCP server (never mounted; Hermes brings its own browser tooling).</li>
+    <li><code>[brain_chat] tool_model</code> is wired for real: rc.1 deleted the key because nothing read it, and it came back with an implementation behind it. Tool rounds run on <code>tool_model</code> (default <code>hal0/agent</code>) while chat stays on the brain slot; set it to <code>off</code>, <code>none</code> or <code>disabled</code> to route tool turns nowhere.</li>
   </ul>
 </section>
 

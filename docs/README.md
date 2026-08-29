@@ -2,20 +2,32 @@
 
 This directory has two halves:
 
-## Top-level `docs/*.mdx` — user docs
+## The published sections — user docs
 
 The **canonical source** of the documentation published at
-<https://hal0.dev/docs/>. `.github/workflows/mirror-docs.yml` pushes the
-published sections (`getting-started/`, `concepts/`, `guides/`,
-`operate/`, `reference/`) from here into `Hal0ai/hal0-web`
-(`src/content/docs/docs/**`, Starlight/Astro) on every push to `main` —
-the direction was reversed by #1622; `hal0-web` used to be the source and
-mirror into this repo, but is now the generated copy.
+<https://forum.hal0.dev/c/docs/11>. `hal0.dev/docs/*` no longer hosts the
+pages; it 301s to the matching forum topic.
 
-**Edit these files here, in `Hal0ai/hal0`.** Hand-editing the mirrored
-copy in `hal0-web` is pointless: the next push to `hal0/main` touching a
-published section `rsync --delete`s that section on the web side and
-silently discards the change.
+`.github/workflows/sync-docs-discourse.yml` pushes the published sections
+(`getting-started/`, `concepts/`, `guides/`, `operate/`, `reference/`)
+from here into Discourse on every push to `main` that touches them. Each
+doc becomes a topic keyed by a path-derived `external_id`; a section lands
+in its own subcategory when the forum has one, and gets an index topic
+either way. The implementation is `scripts/docs_discourse_sync/`;
+`discovery.py` walks the five section directories with a plain `rglob`, so
+a **new `.mdx` in one of them publishes itself** — there is no manifest and
+no registration step.
+
+Publishing and redirecting are separate, though. The sync run uploads a
+redirect-map artifact, but hal0-web's 301 layer reads a copy committed in
+that repo (`src/content/../docs-redirects.json`), so a newly-added doc is
+live on the forum before any `hal0.dev/docs/<path>` redirect exists for it.
+Only old links need that redirect, so this matters when a doc is **renamed
+or moved**, not when one is added.
+
+**Edit these files here, in `Hal0ai/hal0`.** The forum copy is generated:
+editing a topic by hand is discarded by the next sync run that touches
+that doc.
 
 The `.mdx` extension is preserved verbatim — the files import Starlight
 components (`Card`, `Tabs`, `Steps`, …) that only render inside the

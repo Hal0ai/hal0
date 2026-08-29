@@ -27,8 +27,8 @@ subprocess/sysfs-based and never raises.
 | GPU (AMD) | DRM sysfs scan of `/sys/class/drm/card*/device/mem_info_vram_total`. |
 | Hostname | `/proc/sys/kernel/hostname`. |
 
-The result is validated against the `HardwareInfo` schema — see
-[Config schema → hardware.json](/docs/reference/config-schema/#hardwarejson) for the
+The result is validated against the `HardwareInfo` schema — see the
+`hardware.json` section of [Config schema](/docs/reference/config-schema/) for the
 full field list, including `unified_memory_mb` (the true UMA pool — use this, not
 `ram_mb + vram_mb`, on unified-memory systems like Strix Halo) and `platform`
 (`strix-halo`, `wsl2`, `proxmox-kvm`, `kvm`, `lxc`, `bare-metal-*`, `unknown`).
@@ -100,8 +100,8 @@ maturity, not speed:
 
 **The seeded default is an open question, revisited at GA against a broader
 matrix.** If your workload is plain prefill/decode on Strix Halo, switching is
-a defensible thing to do today — see
-[Switching a slot to the Vulkan lane](/docs/guides/manage-slots#switching-a-slot-to-the-vulkan-lane).
+a defensible thing to do today — see the "Switching a slot to the Vulkan
+lane" section of [Manage slots](/docs/guides/manage-slots).
 
 VRAM budget (`_vram_budget_gb()`): AMD UMA → half of the unified pool; discrete GPU →
 `vram_mb`; CPU-only → half of `ram_available_mb`.

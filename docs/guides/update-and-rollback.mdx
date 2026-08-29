@@ -17,9 +17,8 @@ itself.
 <Aside type="caution" title="Read this before your first v1.0 update">
 If you've hand-edited custom entries into `/etc/hal0/profiles.toml`, the
 first `hal0 update` that crosses the v1.0 schema boundary **wipes and
-reseeds that file**. Skip to
-[The profiles.toml reseed](#the-profilestoml-reseed-a-pre-v10-one-time-wipe)
-before you run it.
+reseeds that file**. Read "The profiles.toml reseed (a pre-v1.0 one-time
+wipe)", further down this page, before you run it.
 </Aside>
 
 ## Check for an update
@@ -92,6 +91,49 @@ hal0 update --channel preview
 
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
+
+### How a channel resolves to a release
+
+A channel is resolved at check time. It is not a pointer file someone
+maintains by hand.
+
+The updater fetches `https://releases.hal0.dev/<channel>.json`. That host
+scans the project's GitHub releases newest-first and serves the manifest
+from the first release that publishes an asset of that name, together with
+its detached `<channel>.json.bundle` signature from the same release. A
+release therefore joins a channel by carrying that channel's manifest
+asset — nothing else promotes it.
+
+Which manifests a release carries follows from its tag:
+
+| Tag shape | Manifests published |
+| --- | --- |
+| `v1.2.3` | `stable.json` and `preview.json` |
+| `v1.2.3-rc.1`, `v1.2.3-alpha.1`, `v1.2.3-beta.1` | `preview.json` |
+| `v1.2.3-nightly.20260829120000` | `nightly.json` |
+
+The separator before the sequence number is a dot, and it is not optional.
+`v1.2.3-rc.1` parses; `v1.2.3-rc1` does not and the release tooling rejects
+it outright rather than publishing nothing quietly. A nightly tag carries a
+14-digit timestamp.
+
+A stable release also enters `preview`, so `preview` is never behind
+`stable`. The reverse does not hold: only a final tag publishes
+`stable.json`, so every preview and nightly cut afterwards pushes the
+current stable release further down the release list. That is why the
+channel host scans more than the first page of releases — a stable release
+that falls off page one must still resolve. If a channel looks stuck, check
+for a release cut without its manifest asset before suspecting the updater.
+
+<Aside type="note">
+The channel host is served by the website, not by this repository, so its
+scan depth is a property of that deployment rather than of the hal0 tree.
+</Aside>
+
+Set `HAL0_RELEASES_URL` to point the updater at a different endpoint. It
+wins over the default; when the override is an `http`/`https` URL and the
+channel is not `stable`, the channel is appended as a `?channel=`
+parameter instead of as a filename.
 
 ## How the atomic update works
 
@@ -185,7 +227,8 @@ Same destination, and it keeps you on the `hal0 update` flow described above.
   (`releases.hal0.dev`) serves manifests directly.
 
 Rolling back afterwards works normally — the 0.9.8 tree is kept, not deleted.
-See [Roll back](#roll-back), and note that config migrations are forward-only:
+See the "Roll back" section below, and note that config migrations are
+forward-only:
 a rolled-back 0.9.8 daemon reads a `hal0.toml` that 1.0 already migrated.
 
 ## The profiles.toml reseed (a pre-v1.0 one-time wipe)

@@ -1,60 +1,196 @@
 ---
 title: REST API index
-description: Index of hal0's HTTP /api/* management surface, router group by router group — verified against src/hal0/api/routes and the tool-to-route map in src/hal0/mcp/admin.py.
+description: Index of hal0's HTTP /api/* management surface, router group by router group — verified against src/hal0/api/routes, src/hal0/api/__init__.py's mount list, and the auth classification table in src/hal0/security/exposure.py.
 sidebar:
   order: 100
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0-api serves an OpenAI-compatible `/v1/*` inference surface plus an `/api/*`
+hal0-api serves an OpenAI-compatible `/v1/*` inference surface (see
+[OpenAI-compatible API reference](/docs/reference/api/openai-compat/)) plus an `/api/*`
 management surface that backs the dashboard and the `hal0-admin` MCP server. This page
-indexes the `/api/*` router groups that could be verified directly against source for
-this pass — for full request/response schemas for a given route, read the OpenAPI spec
-served live at `/api/openapi.json` (interactive docs at `/api/docs`).
+indexes every `/api/*` router group mounted in `src/hal0/api/__init__.py` — for full
+request/response schemas for a given route, read the OpenAPI spec served live at
+`/api/openapi.json` (interactive docs at `/api/docs`).
 
 <Aside type="caution">
 Unlike pre-1.0 docs may claim, auth is **not** unconditionally removed in this tree.
 `[security].require_auth` (overridable via `HAL0_REQUIRE_AUTH`) and the `hal0 auth`
 CLI group (`status`, `rotate`, `require`) are live — see
-[Config schema → [security]](/docs/reference/config-schema/#security) and
-[CLI → hal0 auth](/docs/reference/cli/#hal0-auth--manage-hal0-api-authentication).
+[Config schema](/docs/reference/config-schema/) (`[security]`) and
+[CLI](/docs/reference/cli/) (`hal0 auth`).
 Verify the current default (`require_auth` defaults to `null`, which resolves to off)
 before stating a blanket "no auth" or "auth required" claim.
 </Aside>
 
-## Router groups
+## Auth tiers
 
-| Prefix | Purpose |
-|---|---|
-| `/api/slots` | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance, metrics, capacity. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
-| `/api/models` | Model registry — list, pull, delete, inspect, scan, catalogue, update checks. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
-| `/api/ports` | Port allocation view. |
-| `/api/stats/hardware` | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |
-| `/api/system-info` | Host system info. |
-| `/api/capabilities` | Capability-slot configuration (embed/rerank/stt/tts/vision child slots). |
-| `/api/providers` | Local provider entries (`providers.toml`). See [Providers, profiles & devices](/docs/reference/providers-profiles-devices/). |
-| `/api/upstreams` | Remote/cloud upstream entries (`upstreams.toml`), including credential write and connectivity test. |
-| `/api/stacks` | Stack bundles — list, create, apply, import/export, snapshot. |
-| `/api/profiles` | Backend-tuning profiles — list, create, update, import/export. |
-| `/api/settings` | Root config read/write/reload, JSON schema, apply-plan preview. |
-| `/api/settings/models/store` | Model store path get/set/migrate. |
-| `/api/benchmarks` | Benchmark queue, run status, control. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/#benchmarks). |
-| `/api/logs` | Secret-redacted log tail. |
-| `/api/status` | Version/build info. |
-| `/api/mcp` | MCP server lifecycle/introspection — **not** tool invocation. See [MCP tools → MCP server management REST API](/docs/reference/mcp-tools/#mcp-server-management-rest-api) for the full endpoint table. |
-| `/api/comfyui` | ComfyUI generation-engine status and image-gen slot control. |
-| `/api/install` | First-run wizard endpoints, including `GET /api/install/curated-models`. |
+Every route resolves to one of four classes in `src/hal0/security/exposure.py`
+(`hal0.security.exposure.classify`), evaluated first-match-wins against an explicit
+rule table:
 
-Every prefix in this table is backed by at least one route independently confirmed
-either directly in `src/hal0/api/routes/` or via the `hal0-admin` MCP tool-to-route
-map (`hal0.mcp.admin`) — see [MCP tools](/docs/reference/mcp-tools/) for the exact
-verb + path for every admin-tool-backed route.
+- **OPEN** — no auth ever. A deliberately tiny, enumerated allowlist (the `/v1/models`
+  probe, the Prometheus scrape, the two liveness checks, the dashboard bootstrap-urls
+  endpoint, the login/status/logout routes themselves, the static SPA shell — same
+  HTML/JS bundle for every visitor, no server data — and the Hermes
+  dashboard-plugin static asset proxy at
+  `/dashboard-plugins/{plugin_name}/{file_path}`).
+- **BOOTSTRAP** — open only until an admin key is configured (`/api/install/*`).
+- **CLIENT** — the `/v1/*` inference/writer surface plus a short list of genuinely
+  read-only introspection `GET`s.
+- **ADMIN** — everything else, including every mutating route and every route that can
+  return secrets or config. **Unclassified paths fall back to ADMIN** (deny-by-default).
+
+These classes only matter once `[security].require_auth` is actually on — while it's
+off the whole surface is trusted-LAN-open regardless of class. The table below states
+each group's class as enforced by `exposure.py`, not as a claim about the current
+default posture.
 
 <Aside type="note">
-This index was not able to verify the `/v1/*` OpenAI-compatible inference surface, the
-"slot as an OpenAI model" addressing scheme, or SSE streaming response shapes in this
-pass — those need a dedicated read of `src/hal0/api/routes/*` inference-serving code
-before publishing exact request/response schemas. Treat any such claims from prior
-(pre-v1.0) docs as unverified until then.
+`src/hal0/api/routes/events.py`, `activity.py`, and `journal.py` each carry a
+module docstring claiming "no auth dependency" / "no auth gate" for first-run UX
+reasons (the footer/journal/activity panels must render before any credential
+exists). `exposure.py`'s own module docstring names eight routes not spelled out
+in either explicit OPEN/CLIENT bucket list — `/api/status`, JSON `/api/metrics`,
+`/api/features`, `/api/logs`, `/api/events`, `/api/activity`, `/api/journal`, and
+the dashboard-plugin manifest — as an "UNSURE — please review" bucket that
+defaults to ADMIN except where a close analogy to an existing CLIENT bucket
+argued otherwise: `/api/status` and JSON `/api/metrics` were reasoned across to
+CLIENT (and `/api/features` GET separately resolves CLIENT via its own exact-match
+rule). That leaves `/api/logs`, `/api/events`, `/api/activity`, `/api/journal`,
+and the dashboard-plugin manifest as the UNSURE items that actually landed
+ADMIN. If `require_auth` is ever turned on, the events/activity/journal panels
+will 401 during first-run before a credential exists — contradicting the
+rationale their own route files state. Flagging this as a real discrepancy
+between route-level intent and the enforced classification, not a doc error to
+silently paper over.
+</Aside>
+
+## Router groups
+
+| Prefix | Auth | Purpose |
+|---|---|---|
+| `/api/auth` | Mixed | `login`/`status`/`logout` are OPEN (you can't require a cookie to obtain one); `require` (toggle enforcement) and `rotate` (mint a new admin/client key) are ADMIN; `exposure` (serialize this whole rule table) is ADMIN. |
+| `/api/secrets` | ADMIN | Operator-managed secrets store. See "Secrets" below — dedicated section, not just a table row. |
+| `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan preview. |
+| `/api/settings/models/store` | ADMIN | Model store path get/set/migrate (part of the `/api/settings` prefix). |
+| `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See "Proxmox integration" below — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
+| `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance, metrics, capacity. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
+| `/api/models` | CLIENT (GET) / ADMIN (mutations) | Model registry — list, pull, delete, inspect, scan, catalogue, update checks. `GET /api/models/health` is registered by `hardware.router`, not `models.router` — it's mounted ahead of `/api/models` so the literal path wins over the `{model_id}` catch-all. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
+| `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — discovery + pull-job orchestration for GHCR-hosted runner images. |
+| `/api/ports` | CLIENT (GET) / ADMIN (else) | Port allocation view. |
+| `/api/hardware` | CLIENT (GET) / ADMIN (`/probe`) | Hardware probe read + on-demand re-probe. |
+| `/api/stats/hardware` | CLIENT | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |
+| `/api/stats` (`/slots`, `/requests`, `/throughput/history`, `/power`) | CLIENT (GET) / ADMIN (else) | Dispatcher rollups, throughput history, power stats. |
+| `/api/status` | CLIENT | Version/build summary. |
+| `/api/health`, `/api/health/system` | OPEN | Shallow + deep liveness probes hit by the installer/systemd watchdog before any credential exists. |
+| `/api/doctor` | ADMIN | `GET /api/doctor` — the same report card `hal0 doctor verify --json` prints, aggregated in-process from health/urls/system/memory/services, over HTTP. Classified ADMIN (not CLIENT) because it re-surfaces detail from ADMIN-only subsystems. |
+| `/api/metrics` | CLIENT | JSON metrics snapshot. |
+| `/api/metrics/prometheus` | OPEN | Prometheus scrape target. |
+| `/api/features` | CLIENT (GET) | Feature-flag surface. `GET /api/features` is the only route `health.py` registers on this prefix — no mutating route is mounted, so `exposure.py`'s ADMIN-mutations rule is currently latent, not backing a real endpoint. The CLIENT rule is an exact match on `/api/features` only, so a hypothetical `GET /api/features/<sub>` would fall through to the prefix rule and resolve ADMIN. |
+| `/api/system-info`, `/api/system-stats` | CLIENT | Host system info / fleet metrics over the SQLite tables (OBS-1). |
+| `/api/capabilities` | ADMIN | Capability-slot configuration (embed/rerank/stt/tts/vision child slots). |
+| `/api/backends` | CLIENT (GET) / ADMIN (else) | Backend introspection (NPU/GPU-Vulkan/GPU-ROCm/CPU status) + NPU load/unload. |
+| `/api/npu` | CLIENT (GET) / ADMIN (else) | NPU trio swap-status for the "swap incoming" dashboard banner. |
+| `/api/providers` | ADMIN | Local provider entries (`providers.toml`). See [Providers, profiles & devices](/docs/reference/providers-profiles-devices/). |
+| `/api/upstreams` | ADMIN | Remote/cloud upstream entries (`upstreams.toml`), including credential write and connectivity test. Mounted on the same router as `/api/providers`. |
+| `/api/stacks` | ADMIN | Stack bundles — list, create, apply, import/export, snapshot. |
+| `/api/profiles` | CLIENT (GET) / ADMIN (mutations) | Backend-tuning profiles — list, create, update, import/export. |
+| `/api/benchmarks` | ADMIN | Benchmark queue, run status, control. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
+| `/api/chat-templates` | ADMIN | Chat-template catalog — bundled + operator-added templates. |
+| `/api/logs` | ADMIN | Secret-redacted log tail. |
+| `/api/mcp` | ADMIN | MCP server lifecycle/introspection — **not** tool invocation. See [MCP tools](/docs/reference/mcp-tools/) for the full endpoint table. |
+| `/api/comfyui` | ADMIN | ComfyUI generation-engine status and image-gen slot control. |
+| `/api/install` | BOOTSTRAP | First-run wizard endpoints, including `GET /api/install/curated-models`. Open until an admin key is configured, then treated as ADMIN. |
+| `/api/memory` | ADMIN | Two routers share this prefix: the `[memory.graph]` gate/status, and the Hindsight engine admin surface (banks, graph, recall/reflect, mental models, directives, async operations). Every `DELETE` under this prefix is pinned ADMIN by an explicit rule independent of the generic one (issues #1024/#1302 — a prior unauthenticated bank-delete cascade-dropped ~632 live records); bank-scoped deletes additionally require a `?confirm=` echo + dry-run preview. |
+| `/api/board` | ADMIN | Operator Board — task/board CRUD, links, dispatch, `WS /api/board/events`, and the `POST /api/board/chat` orchestrator alias. Frozen FE↔BE contract (`ui/CONTRACTS.md` §4). |
+| `/api/brain` | ADMIN | `POST /api/brain/chat` (SSE) — the primary hal0-brain platform-steward chat surface. Drives the full admin tool surface (slot mutations, model pulls, board writes), hence ADMIN. `/api/board/chat` is a thin alias into the same engine. |
+| `/api/updates` | ADMIN | Self-update: release-manifest check, prepare/commit/apply/rollback, channel get/set, post-update slot-drift report + restart. |
+| `/api/events` | ADMIN | Dashboard footer event feed — backfill + `GET /api/events/stream` (SSE). See the auth-tier note above. |
+| `/api/activity` | ADMIN | Durable audit surface (SQLite-backed) — the slots-page ActivityLog's source of truth, with `/export` (csv/json) and `/stream` (SSE). See the auth-tier note above. |
+| `/api/journal` | ADMIN | Unified journal panel — flattens `/api/events` into one envelope for the dashboard journal view. See the auth-tier note above. |
+| `/api/images` | ADMIN | Cache for PNGs written by `POST /v1/images/generations`. ADMIN because a cached-image URL could otherwise leak a prompt via filename. |
+| `/api/agents` | ADMIN | Bundled-agent lifecycle (install/uninstall/list/status), personas, service restart, memory stats, and the chat-proxy WS/REST shim to the Hermes dashboard process. |
+| `/api/agent/approvals` | ADMIN | Gated-tool approval inbox — every method (GET list, POST approve/deny, GET `/events` SSE) is ADMIN; `exposure.py`'s rule on this prefix carries no method filter, and the route module itself (`approvals.py`) declares no `Depends` — enforcement is entirely middleware-side. |
+| `/api/user` | ADMIN | Dashboard layout persistence (single-operator LAN device — one layout file per install). |
+| `/api/config` | Mixed | `GET /api/config/urls` (dashboard bootstrap hostnames) is OPEN; the rest of this prefix is ADMIN (may hold config-derived secrets). |
+| `/api/meta` | CLIENT (GET) / ADMIN (else) | `GET /api/meta/enums` — the canonical device/backend/capability vocabulary from `hal0.model_meta`. |
+| `/api/hf` | CLIENT (GET) / ADMIN (else) | HuggingFace Hub search proxy backing the dashboard's "Search HF" button. |
+| `/api/services` | ADMIN | `services_health.router` (`GET /api/services/health`, 3-service overview) and `services_routes.router` (full per-service detail + lifecycle actions + mDNS) share this prefix. |
+| `/api/dashboard/plugins` | ADMIN | Hermes dashboard-plugin manifest (kanban plugin discovery for `<AgentView>`). |
+| `/api/openrouter` | ADMIN | OpenRouter OAuth callback scaffold — only mounted when `HAL0_OPENROUTER_OAUTH_ENABLED` is truthy; 501 placeholder otherwise absent from the route table entirely. |
+
+Every prefix above is backed by at least one route confirmed directly against
+`src/hal0/api/routes/` and the mount list in `src/hal0/api/__init__.py`. This brings
+documented coverage to every `/api/*` prefix currently mounted (previously 18 of
+roughly 43). `WS /v1/realtime` is documented separately — see
+[Realtime API reference](/docs/reference/api/realtime/).
+
+## Secrets (`/api/secrets`)
+
+Backs the dashboard's Settings → Secrets panel. Persists to `/etc/hal0/api.env` — the
+same systemd `EnvironmentFile=` the provider-credential writer targets — via the
+shared atomic, mode-0600 writer in `hal0.api._env_store`. A successful write also
+updates the running process's `os.environ` so the new value is observable without a
+restart; the persisted file is the source of truth across restarts. ADMIN-gated
+(whole prefix, `exposure.py` line-item `secrets`).
+
+| Method | Path | Status | Notes |
+|---|---|---|---|
+| GET | `/api/secrets` | 200 | Lists secret **names** only — `{"secrets": [{name, set, masked, updated_at, protected}]}`. `masked` is always the constant `"••••••••"`; a value is never returned by any endpoint, logged, or echoed in an error body. |
+| POST | `/api/secrets/{name}` | 204 | Set/overwrite. Body `{"value": "..."}`. Accepted alongside PUT because the shipped dashboard hook POSTs. |
+| PUT | `/api/secrets/{name}` | 204 | Set/overwrite — the documented-contract verb; identical handler to POST. |
+| DELETE | `/api/secrets/{name}` | 204 | Idempotent — 204 even if the name was never set. |
+
+Validation, enforced server-side (not just in the UI, since this route is reachable
+by anyone who can reach the API):
+
+- **Name grammar**: `^[A-Z][A-Z0-9_]{0,63}$` — ALL_CAPS, leading letter, ≤64 chars.
+  A non-conforming name is `400 secret.name_invalid`.
+- **Protected prefix**: any name starting with `HAL0_` is hal0's own service
+  configuration and auth surface (written by the installer, `hal0.toml` derivation,
+  and `hal0 auth rotate`) — it is listed by GET (with `protected: true`, so an
+  operator can see what the service is configured with) but every mutation against
+  it is refused with `403 secret.protected`, including a DELETE of a name that isn't
+  even currently set (so the response doesn't leak which `HAL0_*` keys exist on the
+  box). Deleting `HAL0_ADMIN_KEY` would disarm every future login and deleting
+  `HAL0_PORT`/`HAL0_UI_DIST` would break the service on next restart — this is the
+  control introduced after #1450.
+- **Value grammar**: non-empty and printable (`str.isprintable()`). Control
+  characters — including the higher-codepoint line separators `U+0085`/`U+2028`/
+  `U+2029`, not just the ASCII C0 set — are rejected as `400 secret.value_invalid`,
+  because `api.env` is an unauthenticated-at-the-filesystem-level, LAN-writable
+  systemd `EnvironmentFile`: an injected line separator could otherwise smuggle a
+  second `KEY=value` pair into the file on round-trip.
+
+Every set/delete emits a structured `hal0.audit` log line and a footer journal event
+carrying the secret **name** only, never the value.
+
+## Proxmox integration (`/api/settings/proxmox`)
+
+Lets an operator configure the optional Proxmox API token the dashboard's "Proxmox
+host" hardware panel uses (`hal0.hardware.pve`). Persisted to `/etc/hal0/proxmox.json`
+— a separate file from `hal0.toml`, mounted as a sibling under `/api/settings` purely
+for the dashboard's Settings-panel grouping. There is **no dedicated exposure.py rule**
+for this path — it inherits ADMIN from the generic `/api/settings` prefix rule, the
+same as every other settings sub-route.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/settings/proxmox` | Returns `{configured, host, port, user, token_name, verify_ssl, token_value_set, status}` — the token **value** is never included; `token_value_set` is a boolean instead. `status` is a live `pve_status()` cluster snapshot fetched on every call. |
+| PUT | `/api/settings/proxmox` | Body: `{host, port?, user, token_name, token_value?, verify_ssl?}`. `token_value` is optional on edit — if omitted and a config already exists on disk, the existing token is preserved so an operator can flip `verify_ssl` or change the host without re-entering the secret. If omitted with **no** existing config, the write is rejected `400 proxmox.token_required`. |
+| DELETE | `/api/settings/proxmox` | Removes the config file entirely — returns to "not configured". |
+| POST | `/api/settings/proxmox/test` | Body: same shape as PUT but `token_value` is **required** (there's no "test the saved config" path that can omit it — that's what GET's live `status` field already covers). Validates a candidate connection without writing anything to disk. |
+
+`port` defaults to `8006` and is constrained `1-65535`; `verify_ssl` defaults to
+`false`. Both request bodies are `extra: "forbid"` pydantic models — an unrecognized
+field is a validation error, not a silently-dropped key.
+
+<Aside type="note">
+This page could not verify the `/v1/*` OpenAI-compatible inference surface in depth —
+see [OpenAI-compatible API reference](/docs/reference/api/openai-compat/),
+[Streaming reference](/docs/reference/api/streaming/), and
+[Realtime API reference](/docs/reference/api/realtime/) for those, verified in
+separate passes.
 </Aside>

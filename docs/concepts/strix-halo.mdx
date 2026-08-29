@@ -135,9 +135,10 @@ reads the cgroup limit and treats it as a third constraint, so the reported
 headroom reflects what you can really use.
 
 Because one pool is shared, two GPU workloads can't both hold their weights at
-once. That's exactly why the [GPU arbiter](/docs/concepts/slots#the-gpu-arbiter)
-exists: it gives the GPU's memory to either the LLM slots or the image slot, one
-group at a time, rather than letting them fight over the pool.
+once. That's exactly why the GPU arbiter exists (see the GPU arbiter
+section of [Slots](/docs/concepts/slots)): it gives the GPU's memory to
+either the LLM slots or the image slot, one group at a time, rather than
+letting them fight over the pool.
 
 ![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
 *The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*

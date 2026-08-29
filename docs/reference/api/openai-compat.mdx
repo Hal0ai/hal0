@@ -14,8 +14,9 @@ authenticated `router` for everything else, plus a separate realtime WebSocket r
 <Aside type="caution">
 The `/v1/*` route module's own comment states auth was removed and the surface is open
 on the local network — this predates or is independent of the `[security].require_auth`
-/ `hal0 auth` machinery documented in [Config schema](/docs/reference/config-schema/#security)
-and [CLI](/docs/reference/cli/#hal0-auth--manage-hal0-api-authentication). Verify
+/ `hal0 auth` machinery documented in the `[security]` section of
+[Config schema](/docs/reference/config-schema/)
+and the `hal0 auth` section of [CLI](/docs/reference/cli/). Verify
 whether `require_auth` actually gates `/v1/*` routes, `/api/*` routes, or both before
 publishing an unqualified "auth is/isn't enforced" claim.
 </Aside>
@@ -26,14 +27,14 @@ publishing an unqualified "auth is/isn't enforced" claim.
 |---|---|---|
 | `/v1/models` | GET | Aggregated catalog. Hides non-text-modality models (image/tts/stt) by default — pass `?show_all=true` to see them. Supports `X-hal0-Model-Filter` header or `?owned_by=` query param to scope by owner (hal0 extension, not OpenAI-standard). |
 | `/v1/models/{model_id}` | GET | By-id lookup — bypasses the modality filter above. |
-| `/v1/chat/completions` | POST | See [request body deviations](#v1chatcompletions) below. |
+| `/v1/chat/completions` | POST | See the `/v1/chat/completions` entry under Request body deviations, below. |
 | `/v1/completions` | POST | Pure passthrough — no hal0-specific body handling at the route layer. |
 | `/v1/embeddings` | POST | Standard `{model, input}`. Requests that resolve to the NPU "embed" trio slot bypass the generic dispatcher and post directly to that slot's own `/v1/embeddings`. |
 | `/v1/rerankings` | POST | OpenAI-compat shape name. Rewritten to `/v1/rerank` on the outgoing leg for llama-server upstreams (llama-server only serves native `POST /rerank`). |
 | `/v1/rerank` | POST | Alias, for clients that already speak llama-server's native shape. |
-| `/v1/audio/transcriptions` | POST | multipart/form-data. `model` form field is **required** — 400 `request.missing_model` if absent. See [deviations](#v1audiotranscriptions) below. |
+| `/v1/audio/transcriptions` | POST | multipart/form-data. `model` form field is **required** — 400 `request.missing_model` if absent. See the `/v1/audio/transcriptions` entry under Request body deviations, below. |
 | `/v1/audio/speech` | POST | JSON body. `model` is **required** (400 `request.missing_model` if missing/blank) — a deliberate deviation from the dispatcher's usual default-model fallback. |
-| `/v1/images/generations` | POST | ComfyUI-backed. **Not** a passthrough — see [Images](#v1imagesgenerations) below. |
+| `/v1/images/generations` | POST | ComfyUI-backed. **Not** a passthrough — see the `/v1/images/generations` entry under Request body deviations, below. |
 | `/v1/realtime` | WebSocket | Separate module (`realtime.py`) — not covered in depth by this pass. |
 
 ### Not implemented

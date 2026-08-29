@@ -60,8 +60,8 @@ connect to directly:
 <Aside type="note">
 hal0 supports optional static-key network auth (`hal0 auth status` / `hal0
 auth rotate`) — **off by default** on a fresh loopback/LAN install. When
-it's armed, both MCP mounts are token-gated — see
-[Authenticate](#authenticate) below. Auth or not, run hal0 on a trusted LAN
+it's armed, both MCP mounts are token-gated — see the Authenticate
+section below. Auth or not, run hal0 on a trusted LAN
 or behind your own reverse proxy — do not expose `/mcp/*` to the internet.
 </Aside>
 
@@ -164,9 +164,10 @@ live.
 
 Connecting **from a workstation to a hal0 box on the LAN** — rather than a
 client running on the box itself — needs three things: the box's
-hostname/IP [widened into the allowlist](#widen-the-host-and-origin-allowlists)
-above, the mount URL pointed at the box instead of `127.0.0.1`, and — if
-[auth is armed](#authenticate) — the bearer header.
+hostname/IP widened into the allowlist (see Widen the host and origin
+allowlists, above), the mount URL pointed at the box instead of
+`127.0.0.1`, and — if auth is armed (see Authenticate, above) — the
+bearer header.
 
 A workstation Hermes' `config.yaml` (the same `mcp_servers.*` shape `hal0
 agent bootstrap hermes` renders for the box's own bundled agent):
@@ -198,7 +199,7 @@ Replace `<host>` with the hal0 box's LAN hostname or IP, and `<key>` with
 the value read from `/etc/hal0/api.env` **on the hal0 box** — never commit
 it into a workstation dotfile checked into git. `HAL0_ADMIN_KEY` satisfies
 both mounts; a client-tier `HAL0_CLIENT_KEY` only satisfies `/mcp/memory`
-(see the [tier table above](#authenticate)).
+(see the tier table in Authenticate, above).
 
 ### Memory tools (`/mcp/memory`)
 
@@ -236,8 +237,9 @@ routes to the gated tier at call time.
 `config_write`, `provider_credential_write`, `stack_apply`,
 `stack_import`, `stack_delete`, `profile_import`, `profile_delete`, and
 `logs_tail`. `slot_create` and `config_write` here follow the same
-[server].extra_args screening as every other slot write path — see
-[Edit configuration](/docs/guides/configure#server-extra_args-is-screened-everywhere).
+[server].extra_args screening as every other slot write path — see the
+"[server].extra_args is screened everywhere" section of
+[Edit configuration](/docs/guides/configure).
 
 ### The approval flow
 

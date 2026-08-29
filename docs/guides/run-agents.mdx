@@ -28,7 +28,7 @@ sudo hal0 agent install hermes
 ```
 
 Installing Hermes runs a three-step foreground pipeline: ensure the
-toolchain (Python ≥3.11, venv stdlib, pip/pipx), provision the managed
+toolchain (Python ≥3.12, venv stdlib, pip/pipx), provision the managed
 venv and register the agent, then enable and start the systemd unit
 (`hal0-agent@hermes`).
 
@@ -149,13 +149,19 @@ from a slot's runtime logs.
 
 ```sh
 hal0 agent reprovision hermes          # idempotent re-converge
-hal0 agent reprovision hermes --repair # force every phase
+hal0 agent reprovision hermes --repair # force every phase, rebuilding the venv
 hal0 agent upgrade hermes              # bump the version pin + repair
 hal0 agent upgrade hermes --to 0.15.3  # pin a specific version
 ```
 
 `reprovision` is a stable wrapper over the same state machine `install`
-runs. For finer control — skipping a phase, staging the agent wheel
+runs. Plain `reprovision` re-converges the agent, including its managed
+virtualenv, so it is the command to reach for when the agent is running
+but its MCP tools are missing. `--repair` forces every phase instead of
+converging: it rebuilds the venv, re-writes the persona seeds and
+re-renders the config.
+
+For finer control — skipping a phase, staging the agent wheel
 offline, or a dry run that doesn't persist the checkpoint — drop to the
 underlying command directly:
 
@@ -281,6 +287,40 @@ curl 'http://localhost:8080/api/agents/hermes/activity?limit=50'
 
 Each row carries `tool`, `args`, `gated`, `outcome`, `timestamp`, and the
 `client_id` the action was attributed to.
+
+## When the agent has no memory tools
+
+An otherwise healthy Hermes that answers chat but cannot recall anything
+usually has a broken MCP client rather than a broken memory service. There
+are two independent causes, and both are repaired automatically now.
+
+The first is the wiring: the `X-hal0-Private` header has to be a YAML
+string, and a version that wrote it unquoted left the client unable to
+connect. The second is the managed virtualenv itself. A venv that drifted
+off its vetted pin — no `mcp` package installed at all — used to survive
+every upgrade untouched, because nothing outside provisioning re-converges
+the venv and `hal0 update` never provisions. The symptom is a client that
+fails to import with `mcp.client.streamable_http is not available` while
+the config header reads correctly.
+
+`hal0 update` now checks both on every upgrade and repairs what it finds.
+Verification is a re-probe of the import, not pip's exit code, so a repair
+that silently produces an unusable venv is reported as a failure rather
+than a success. If a repair cannot run — no venv on the box, an
+unresolvable pip — the update logs the fault and the remedy and carries on
+rather than failing.
+
+`hal0-api` also probes this on every start, including crash-restarts, but
+that path only diagnoses: it will not run pip during the startup of a box
+that is already unhealthy. It logs the remedy, and the next real update
+performs the repair.
+
+To fix a box by hand:
+
+```sh
+hal0 agent reprovision hermes           # re-converges the venv; usually enough
+hal0 agent reprovision hermes --repair  # forces a full venv rebuild
+```
 
 ## Related
 

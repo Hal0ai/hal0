@@ -101,7 +101,7 @@ already matches).
 On a v1.0 update, the profile catalog is reset once (gated on a schema-version
 watermark) — custom profiles are backed up and the seed catalog is reapplied.
 `hal0 update` prints a convergence report before applying. See
-[Config schema](/docs/reference/config-schema/#profilestoml) and the update guide for
+[Config schema](/docs/reference/config-schema/) and the update guide for
 what gets backed up and how to recover a custom profile afterward.
 </Aside>
 
@@ -120,8 +120,8 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist` |
 | `slot logs <name>` | `name` | `--follow`/`-f`, `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--backend`/`-b` (hidden, deprecated alias for `--provider`), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`) |
-| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--backend`/`-b` (hidden, deprecated) |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--backend`/`-b` (hidden, deprecated alias for `--provider`), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`), `--profile` (default: inferred from `--type`/`--hardware`) |
+| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--profile`, `--backend`/`-b` (hidden, deprecated) |
 | `slot delete <name>` | `name` | `--force`/`-f` |
 | `slot add <name>` | `name` | hidden, deprecated alias for `slot create` |
 | `slot remove <name>` | `name` | hidden, deprecated alias for `slot delete` |
@@ -156,7 +156,7 @@ selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu
 | `model scan` | — | — |
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
 | `model store [path]` | optional `path` | `--migrate` |
-| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [slot lifecycle timeouts](#slot-lifecycle-timeouts)) |
+| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see "Slot lifecycle timeouts" below) |
 | `model import-backup <path>` | `path` (required) | `--force`/`-f`, `--dest` (default `/var/lib/hal0/registry/registry.toml`) |
 
 ## `hal0 memory` — manage hal0 memory (Hindsight engine)
@@ -238,8 +238,17 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | `doctor models` | `--fix`, `--force`/`-f`, `--json` |
 | `doctor migrations` | `--json` |
 | `doctor profiles` | `--json` |
+| `doctor ports` | `--fix` (delete stale netavark DNAT rules found by the audit; privileged) |
 | `doctor all` | `--json` |
 | `doctor bundle` | `--out`, `--no-rocm-smi`, `--include-logs` (default `auto`; `auto\|yes\|no`) |
+
+`doctor all` rolls up every read-only check into one report. Each row has a stable id
+(`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
+`dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
+`migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
+`agent-uid`, `stt-weights`, `seams`, `mcp_mounts`, `hermes_mcp_auth`,
+`hermes_anchor_window`, `hindsight_llm_auth`. There is no standalone `hal0 doctor seams`
+command — `seams` is one of these roll-up rows, surfaced by `hal0 doctor all`.
 
 ## `hal0 upstream` — manage upstream LLM providers
 
@@ -255,12 +264,19 @@ disambiguation.
 | `upstream list` | — | `--json` |
 | `upstream advertise <name> <state>` | `name`, `state` (`on\|off`) | — |
 | `upstream show <name>` | `name` | `--json` |
-| `upstream create <name>` | `name` | `--catalog`/`-c`, `--url`/`--base-url`, `--auth-style` (`bearer\|anthropic\|google_query\|header\|none`), `--auth-header`, `--auth-env`, `--timeout`, `--api-key`/`-k`, `--advertise-models`/`--hide-models` (default advertise), `--enabled`/`--disabled` (default enabled) |
-| `upstream update <name>` | `name` | same as `create` (partial update) plus `--model` (repeatable), `--include` (repeatable), `--exclude` (repeatable), `--clear-filters` |
+| `upstream create <name>` | `name` | `--catalog`/`-c`, `--url`/`--base-url`, `--auth-style` (`bearer\|anthropic\|header\|none`), `--auth-header`, `--auth-env`, `--timeout`, `--api-key`/`-k`, `--advertise-models`/`--hide-models` (default advertise), `--enabled`/`--disabled` (default enabled) |
+| `upstream update <name>` | `name` | partial update — `--url`/`--base-url`, `--auth-style` (`bearer\|anthropic\|header\|none`), `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models`/`--hide-models`, `--enabled`/`--disabled`, `--model` (repeatable), `--include` (repeatable), `--exclude` (repeatable), `--clear-filters`. No `--catalog`/`--api-key` — use `upstream credentials set` to rotate the key. |
 | `upstream delete <name>` | `name` | `--force`/`-f` |
 | `upstream test <name>` | `name` | — |
 | `upstream credentials set <name>` | `name` | `--key` (required, prompts securely if omitted), `--env-var` |
 | `upstream set-credentials <name>` | `name` | hidden, deprecated alias for `upstream credentials set` |
+
+<Aside type="note">
+`google_query` is a retired `--auth-style`. The valid values are `bearer`, `anthropic`,
+`header`, and `none` — that's what the CLI's own `--help` lists. An existing upstream
+config with `auth_style = "google_query"` still loads: it's coerced to `bearer` on read
+(with a one-time retirement warning) rather than failing.
+</Aside>
 
 ## `hal0 capabilities` — capability-slot configuration
 
@@ -280,7 +296,7 @@ disambiguation.
 
 | Command | Args | Flags |
 |---|---|---|
-| `agent install <name>` | `name` (e.g. `hermes`) | `--switch`, `--gateway`/`--no-gateway` (default gateway), `--reset-personas` |
+| `agent install <name>` | `name` (e.g. `hermes`) | `--switch`, `--gateway`/`--no-gateway` (default gateway), `--reset-personas`, `--terminal-tool`/`--no-terminal-tool` (default: off on a fresh install, preserved on an existing box) |
 | `agent uninstall <name>` | `name` | `--keep-memory`, `--force`/`-f` |
 | `agent list` | — | `--json` |
 | `agent peers` | — | — |

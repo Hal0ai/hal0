@@ -22,7 +22,8 @@ exactly what the stack describes, in one guarded operation.
 **An honest maturity note.** Stacks is hal0's youngest major subsystem —
 real, working, not a stub, but with a track record worth knowing about. The
 guard that stops a stack from writing a slot config a manual edit would be
-refused (the [model-owned-key partition](/docs/concepts/slots#the-hardwaremodel-write-boundary))
+refused (the model-owned-key partition described in the hardware/model
+write boundary section of [Slots](/docs/concepts/slots))
 had to be retrofitted into the stacks-apply path more than once, because the
 apply engine originally hand-rolled its own merge instead of routing through
 the same guarded pipeline every other slot writer used. A shared gate
