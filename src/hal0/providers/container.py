@@ -1720,15 +1720,21 @@ def _guard_specialty_runner(
     hard-refuse (422) exactly like :func:`_guard_fpx_quant_runner`.
 
     Returns ``None`` when the accelerated path is clear, else the reason
-    dict — this is returned IDENTICALLY on both the launch and preview
-    paths (parity), regardless of ``log_degraded``. ``log_degraded`` only
-    gates the ``log.warning`` side-effect: the preview path
-    (:func:`_resolve_slot_argv`, default ``for_launch=False``) backs the
-    dashboard's ~2s slot-poll, and logging unconditionally there turns a
-    once-per-launch hint into a per-poll-per-open-tab stream (the same bug
+    dict — this is returned IDENTICALLY on the launch path, the preview
+    path, AND the slot-status route (parity), regardless of
+    ``log_degraded``. ``log_degraded`` only gates the ``log.warning``
+    side-effect: the preview path (:func:`_resolve_slot_argv`, via
+    :func:`_resolve_preview_bundle`, default ``for_launch=False``) backs the
+    dashboard's ~2s slot-poll, and the status route
+    (:func:`specialty_degraded_for_slot`, same ``for_launch=False`` bundle)
+    backs a detail-route GET — logging unconditionally on either turns a
+    once-per-launch hint into a per-poll/per-request stream (the same bug
     :func:`_effective_mtp` guards against three lines below via
     ``log_ineligible=for_launch``). Called from the single choke point
-    (:func:`_resolve_llama_scalars`) both launch and preview share.
+    (:func:`_resolve_llama_scalars`) launch, preview, AND the status route
+    all share — no other call site is permitted to re-derive the runner and
+    call this directly; go through ``_resolve_llama_scalars`` (or
+    ``_resolve_preview_bundle`` off the launch path) instead.
     """
     from hal0.registry.specialty import SPECIALTY_KINDS
 
@@ -3217,20 +3223,28 @@ def _best_effort_model_info(
     return info
 
 
-def _resolve_slot_argv(
+def _resolve_preview_bundle(
     slot_cfg: dict[str, Any],
     model_path: str | None = None,
-) -> tuple[str, ResolvedArgv] | None:
-    """Build the labelled argv segments for a slot and resolve them.
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Resolve ``(model_info, scalars)`` for a slot's preview/status render.
 
-    Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
-    excluded) plus per-flag provenance — or ``None`` when the slot has no
-    profile / the profile lookup fails. Consumes the SAME
-    :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
-    resolver the launch path uses, so the previewed argv (including the mtp
-    override, model-registry defaults, chat-template file, mmproj, slot ngl
-    override, and the always-resolved ctx-size) is byte-identical to what
-    :meth:`ContainerProvider.container_spec` would launch.
+    SINGLE SOURCE for every preview- or status-side consumer that needs
+    scalar-derived facts without a live model download: :func:`_resolve_slot_argv`
+    (the "resolved command" drawer) and :func:`specialty_degraded_for_slot`
+    (the slot-status ``specialty_degraded`` key) both call THIS instead of
+    each re-deriving profile / model info / runner themselves — the actual
+    scalar resolution is :func:`_resolve_llama_scalars` (``for_launch=False``,
+    the preview/status contract, never the launch one), the SAME function
+    :meth:`ContainerProvider.container_spec` calls for a real launch. A
+    future change inside ``_resolve_llama_scalars`` (how model_info/runner
+    resolve, a new capability gate, …) therefore reaches every consumer
+    identically — there is no second call site to silently drift out of
+    parity (see :func:`_guard_specialty_runner`'s single-choke-point note).
+
+    Returns ``None`` for a slot with no profile, or on ANY resolution
+    failure — best-effort, fail-open, the contract every caller already
+    relies on.
     """
     profile_name = str(slot_cfg.get("profile") or "")
     if not profile_name:
@@ -3241,6 +3255,29 @@ def _resolve_slot_argv(
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
     except Exception:
         return None
+    return model_info, scalars
+
+
+def _resolve_slot_argv(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> tuple[str, ResolvedArgv] | None:
+    """Build the labelled argv segments for a slot and resolve them.
+
+    Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
+    excluded) plus per-flag provenance — or ``None`` when the slot has no
+    profile / the profile lookup fails. Consumes the SAME
+    :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
+    resolver (via :func:`_resolve_preview_bundle`) the launch path uses, so
+    the previewed argv (including the mtp override, model-registry defaults,
+    chat-template file, mmproj, slot ngl override, and the always-resolved
+    ctx-size) is byte-identical to what :meth:`ContainerProvider.container_spec`
+    would launch.
+    """
+    resolved = _resolve_preview_bundle(slot_cfg, model_path)
+    if resolved is None:
+        return None
+    model_info, scalars = resolved
 
     # port: may be at top-level or nested under [slot]
     port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
@@ -3301,32 +3338,34 @@ def specialty_degraded_for_slot(
     /api/slots/{name}`` and friends, the same detail route that already
     carries the config-drift comparator's output) needs to surface whether
     the slot's model is a specialty distribution running degraded on its
-    resolved runner — without paying for a full argv render.
+    resolved runner.
 
-    Mirrors :func:`_resolve_slot_argv`'s best-effort resolution (profile +
-    model info via :func:`_best_effort_model_info`, same as the "resolved
-    command" preview) but stops at :func:`_effective_runner` +
-    :func:`_guard_specialty_runner` instead of building the full launch
-    plan — the status route only needs the guard's reason dict, not the
-    rendered command. ``log_degraded=False`` (parity with the preview path,
-    NOT the launch path): a ~2s status poll must never re-log the once-per-
-    launch degraded warning.
+    Fix round 1: this used to re-derive profile/model info and call
+    :func:`_effective_runner` + :func:`_guard_specialty_runner` directly —
+    a THIRD call site outside :func:`_resolve_llama_scalars`, the documented
+    single choke point launch and preview share. That was the exact
+    parity-drift class this codebase's SINGLE SOURCE comments forbid: a
+    future change to how ``_resolve_llama_scalars`` resolves model_info/
+    runner would silently not apply here. Now it goes through
+    :func:`_resolve_preview_bundle` — the SAME helper :func:`_resolve_slot_argv`
+    uses — and just reads ``scalars["specialty_degraded"]`` back out; the
+    guard call inside ``_resolve_llama_scalars`` runs with ``for_launch=False``
+    (the preview/status contract, not the launch one), so ``log_degraded``
+    stays ``False`` — a ~2s status poll must never re-log the once-per-launch
+    degraded warning, exactly the parity :func:`_guard_specialty_runner`'s
+    docstring already documents for the preview path.
 
     Returns ``None`` — never raises — for a slot with no profile, a model
     with no specialty, or any resolution failure (best-effort, same
-    fail-open contract as ``_resolve_slot_argv``); the status route treats
-    that as "no degraded reason" (``null`` on the wire).
+    fail-open contract :func:`_resolve_preview_bundle` already guarantees);
+    the status route treats that as "no degraded reason" (``null`` on the
+    wire).
     """
-    profile_name = str(slot_cfg.get("profile") or "")
-    if not profile_name:
+    resolved = _resolve_preview_bundle(slot_cfg, model_path)
+    if resolved is None:
         return None
-    try:
-        profile = _resolve_profile_or_base(profile_name, slot_cfg)
-        model_info = _best_effort_model_info(slot_cfg, model_path)
-        runner = _effective_runner(slot_cfg, profile, model_info)
-        return _guard_specialty_runner(model_info, runner, log_degraded=False)
-    except Exception:
-        return None
+    _, scalars = resolved
+    return scalars["specialty_degraded"]
 
 
 __all__ = [
