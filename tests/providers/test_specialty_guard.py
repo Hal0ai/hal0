@@ -2,9 +2,14 @@ from unittest.mock import patch
 
 import pytest
 
-from hal0.config.schema import ProfileConfig
+from hal0.config.schema import SEED_PROFILES, ProfileConfig
 from hal0.errors import UnprocessableEntity
-from hal0.providers.container import ContainerProvider, _guard_specialty_runner, _resolve_llama_scalars
+from hal0.providers.container import (
+    ContainerProvider,
+    _guard_specialty_runner,
+    _resolve_context_size,
+    _resolve_llama_scalars,
+)
 from hal0.registry.specialty import specialty_env_for
 from hal0.runners import RUNNER_IMAGES
 
@@ -164,3 +169,47 @@ def test_operator_server_env_wins():
     assert plan.env["PROMPTFORGE_SIDECAR"] == "/operator/override.pfs"
     # non-overridden companion env still rides through from the specialty path.
     assert plan.env["PROMPTFORGE_GDN_SIDECAR"] == "/var/lib/hal0/models/m/gdn.pfs"
+
+
+# ── promptforge seed profile (spec 2026-08-29, #1946) ────────────────────────
+
+
+def test_promptforge_seed_profile_exists():
+    prof = SEED_PROFILES["promptforge"]
+    assert "--no-cache-prompt" in prof["flags"]
+    assert "-fa on" in prof["flags"]
+    assert prof["mtp"] is True
+
+
+# ── specialty default_ctx in the context precedence chain ────────────────────
+
+
+def _specialty_model_info(**overrides):
+    base = {
+        "path": "/mnt/ai-models/qwen-pf.gguf",
+        "_model_key": "qwen-pf",
+        "metadata": {"specialty": "promptforge"},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_specialty_default_ctx_used_when_model_has_none():
+    """metadata.specialty=promptforge, no defaults.context_size, no
+    metadata.context_length, generous slot ceiling -> the card's 262144."""
+    mi = _specialty_model_info()
+    assert _resolve_context_size(300_000, mi) == 262_144
+
+
+def test_specialty_default_ctx_still_clamped_by_slot_ceiling():
+    """The specialty default is authoritative but not exempt from the slot's
+    hardware-ceiling clamp — same clamp path every other source uses."""
+    mi = _specialty_model_info()
+    assert _resolve_context_size(65_536, mi) == 65_536
+
+
+def test_model_defaults_context_size_still_wins():
+    """defaults.context_size=8192 -> 8192, specialty ignored: an explicit
+    model choice outranks the card's default_ctx."""
+    mi = _specialty_model_info(defaults={"context_size": 8192})
+    assert _resolve_context_size(None, mi) == 8192

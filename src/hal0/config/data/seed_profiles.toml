@@ -1,4 +1,4 @@
-# hal0 1.0 seeded profile catalog (17 profiles total).
+# hal0 1.0 seeded profile catalog (18 profiles total).
 #
 # Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md §4:
 # Profiles are device-agnostic logical-tune TEMPLATES — they carry only
@@ -184,3 +184,23 @@ flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format non
 mtp = false
 intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
 quant = ""
+
+[profile.promptforge]
+# CIRU ActiveFPX + PromptForge accelerated serving recipe (#1946's first
+# specialty distribution — see hal0.registry.specialty.SPECIALTY_KINDS).
+# `-fa on` is a DELIBERATE exception to this file's `-fa auto` rule above:
+# PromptForge's accelerated kernel path is a card requirement, not a
+# generic model/backend combination this template lands on unmodified —
+# the whole point of a specialty distribution is that its runner is built
+# a particular way, so a forced kernel is safe here where it would not be
+# on a generic seed. `--no-cache-prompt` matches the card's serving mode.
+# Unlike every other seed, this profile pins device_class/backend: it is
+# hardware-specific (ROCm GPU + ActiveFPX weights only), so the pin is a
+# genuine `hal0.slots.profile_adopt.profile_fits_slot` gate, not an inert
+# fit hint.
+flags = "-b 2048 -ub 2048 -fa on -ctk f16 -ctv f16 --no-cache-prompt"
+mtp = true
+device_class = "gpu"
+backend = "rocm"
+quant = "ActiveFPX"
+intent = "CIRU ActiveFPX + PromptForge accelerated serving (#1946)"

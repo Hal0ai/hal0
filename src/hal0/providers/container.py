@@ -1476,6 +1476,30 @@ def _dense_cap_for(slot_ceiling: int | None) -> int:
     return max(_CTX_DENSE_CAP, slot_ceiling)
 
 
+def _specialty_default_ctx(model_info: dict[str, Any]) -> int | None:
+    """The specialty kind's card-intended window (spec 2026-08-29, #1946).
+
+    A specialty distribution (e.g. CIRU ActiveFPX + PromptForge) ships a
+    launch card that specifies its own intended context window
+    (:data:`hal0.registry.specialty.SpecialtyKind.default_ctx`) — a MODEL
+    fact, same standing as an explicit ``defaults.context_size``, just
+    sourced from the registry's specialty entry instead of the model row.
+    Slots into the precedence chain below the model's own explicit choice
+    and above the GGUF-arch derived fallback: an operator who sets
+    ``defaults.context_size`` still outranks the card, but an unset model
+    gets the card's window instead of falling all the way to the generic
+    arch-max/safe-fallback path. Never raises — an unknown or absent
+    specialty key returns ``None`` and the caller falls through unchanged.
+    """
+    from hal0.registry.specialty import SPECIALTY_KINDS
+
+    meta = (model_info or {}).get("metadata") or {}
+    kind = SPECIALTY_KINDS.get(meta.get("specialty") or "")
+    if kind is not None and kind.default_ctx:
+        return kind.default_ctx
+    return None
+
+
 def _resolve_context_size(
     slot_ceiling: int | None,
     model_info: dict[str, Any],
@@ -1493,13 +1517,18 @@ def _resolve_context_size(
        window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped —
        but an unparseable or implausible value is ignored rather than launched
        (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
-    2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
+    2. ``SPECIALTY_KINDS[metadata.specialty].default_ctx`` — a specialty
+       distribution's card-intended window (:func:`_specialty_default_ctx`,
+       spec 2026-08-29 / #1946). Also authoritative and NOT dense-capped
+       (same standing as an explicit choice), but only reached when the model
+       declares no ``defaults.context_size`` of its own.
+    3. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
        window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
        (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
        is higher — #1827). Still a model fact, but a *derived* one, so an
        explicit choice outranks it — the reverse of the pre-1.0 order, which let
        a 262144-token arch max shadow a deliberate ``defaults.context_size``.
-    3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
+    4. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
 
     ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
     override. It is honored only as a **hardware CEILING**: the slot owns
@@ -1533,14 +1562,18 @@ def _resolve_context_size(
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
-        native = _native_ctx(model_info)
-        if native:
-            resolved, source = (
-                min(native, _dense_cap_for(ceiling)),
-                "model.metadata.context_length",
-            )
+        specialty_ctx = _specialty_default_ctx(model_info)
+        if specialty_ctx is not None:
+            resolved, source = specialty_ctx, "specialty.default_ctx"
         else:
-            resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
+            native = _native_ctx(model_info)
+            if native:
+                resolved, source = (
+                    min(native, _dense_cap_for(ceiling)),
+                    "model.metadata.context_length",
+                )
+            else:
+                resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
 
     if ceiling is None:
         return resolved

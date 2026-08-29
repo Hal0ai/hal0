@@ -31,8 +31,15 @@ def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
 
 
 def test_seed_profiles_do_not_select_backend(tmp_hal0_home: str) -> None:
+    """Every seed leaves backend selection to the slot, except the
+    `promptforge` specialty seed (spec 2026-08-29, #1946), which is
+    genuinely ROCm-GPU-only."""
     catalog = ProfileCatalog()
-    assert all(profile.backend is None for profile in catalog.list())
+    assert all(
+        profile.backend is None for profile in catalog.list() if profile.name != "promptforge"
+    )
+    promptforge = next(p for p in catalog.list() if p.name == "promptforge")
+    assert promptforge.backend == "rocm"
 
 
 def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
