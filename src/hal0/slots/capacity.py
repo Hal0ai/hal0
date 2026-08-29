@@ -135,9 +135,26 @@ def companion_bytes_mb(model_meta: dict[str, Any] | None) -> float:
     """Total specialty-companion bytes for a model, in MiB (0.0 for plain).
 
     Spec 2026-08-29 / #1946 seam 6: a specialty model's runtime sidecars
-    (PromptForge: +21 GiB) load alongside the GGUF; the pre-load fit math
-    must book them or every ActiveFPX slot under-books by more than the
-    model file itself.
+    (PromptForge: +21 GiB) load alongside the GGUF, so a resident-footprint
+    estimate has to account for them.
+
+    **NOT an additive term on top of ``Model.size_bytes``** (fix wave, C1).
+    ``size_bytes`` is defined as *every installed byte of this model*:
+    :func:`hal0.registry.pull._register_pulled_fileset` — the ONLY writer
+    that stamps ``companion_sizes`` — computes it as
+    ``sum(dest.stat().st_size for _, dest in installed)``, companions
+    included, and the single-file path (:func:`hal0.registry.pull._register_pulled`)
+    writes the one file that is likewise its whole install. So the sidecar
+    bytes are ALREADY inside the number capacity reads as ``model_mb``;
+    adding this on top double-books them (~57 GiB reported for a ~36 GiB
+    ActiveFPX slot, evicting neighbours that never needed to go).
+
+    What it is for: introspection and the invariant test that pins
+    ``companion_bytes_mb(row) <= size_bytes`` so the two can't drift apart
+    again. If a future row shape ever records an entry-only ``size_bytes``,
+    THAT writer has to opt its callers into
+    :func:`estimate_file_size_kv_mb`'s ``companion_mb`` argument — the
+    default stays 0.0.
 
     Reads ``metadata.companion_sizes`` ONLY — never ``model_file`` rows.
     ``metadata`` is authoritative; ``model_file`` can hold stale rows for
@@ -163,20 +180,26 @@ def estimate_file_size_kv_mb(
     *,
     companion_mb: float = 0.0,
 ) -> float:
-    """Model-file-size + companion-bytes + KV-cache footprint estimate, in MiB.
+    """Installed-bytes + KV-cache footprint estimate, in MiB.
 
     This is the same baseline/fallback formula :func:`build_per_slot` uses
-    (its path 3, and the floor under path 2's cgroup probe): model file
-    size plus specialty companion bytes (:func:`companion_bytes_mb`) plus a
-    coarse per-context-token KV estimate (:func:`_kv_estimate_mb` /
-    :func:`_ctx_tokens_for`). Factored out so other callers that must size
-    a model BEFORE it is resident — and therefore have no cgroup/FLM figure
-    to read yet, e.g. pre-load eviction (:mod:`hal0.slots.preload_evict`)
-    deciding whether an incoming load will fit — reuse exactly this
-    estimator instead of a second, divergent one.
+    (its path 3, and the floor under path 2's cgroup probe): the model's
+    installed size plus a coarse per-context-token KV estimate
+    (:func:`_kv_estimate_mb` / :func:`_ctx_tokens_for`). Factored out so
+    other callers that must size a model BEFORE it is resident — and
+    therefore have no cgroup/FLM figure to read yet, e.g. pre-load eviction
+    (:mod:`hal0.slots.preload_evict`) deciding whether an incoming load will
+    fit — reuse exactly this estimator instead of a second, divergent one.
 
-    ``companion_mb`` defaults to 0.0 so every pre-existing caller that
-    doesn't pass it stays byte-identical.
+    ``model_mb`` is ``Model.size_bytes`` in MiB, which is EVERY installed
+    byte of the model — specialty companions included (see
+    :func:`companion_bytes_mb`). Specialty sidecars are therefore booked by
+    ``model_mb`` alone; seam 6's companion accounting is satisfied, once.
+
+    ``companion_mb`` is the escape hatch for a hypothetical caller holding a
+    ``model_mb`` that provably EXCLUDES the sidecars. No caller in-tree does
+    (fix wave, C1: both capacity call sites used to pass it and double-booked
+    the 21 GiB), so it defaults to 0.0 and every caller stays byte-identical.
     """
     kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
     return round(model_mb + companion_mb + kv_mb, 1)
@@ -528,9 +551,14 @@ async def build_per_slot(
                 ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
             except Exception:
                 model_mb = 0.0
-        estimate_mb = estimate_file_size_kv_mb(
-            model_mb, ctx_meta, companion_mb=companion_bytes_mb(ctx_meta)
-        )
+        # NO companion_mb= here (fix wave, C1): ``Model.size_bytes`` — the
+        # source of ``model_mb`` two lines up — already sums every installed
+        # file including the specialty sidecars, so the pre-fix
+        # ``companion_mb=companion_bytes_mb(...)`` counted PromptForge's
+        # 21 GiB twice (~57 GiB reported for a ~36 GiB slot) and evicted
+        # resident neighbours that never needed to go. Seam 6's companion
+        # bytes are booked exactly once, inside ``model_mb``.
+        estimate_mb = estimate_file_size_kv_mb(model_mb, ctx_meta)
 
         # ── Container cgroup probe (path 2) ────────────────────────────────
         # Probe the live podman/docker cgroup.  Returns 0 when no container
