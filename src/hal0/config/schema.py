@@ -1029,6 +1029,13 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: template's RestartPreventExitStatus=64 can park a doomed model).
 DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 
+#: ``DEFAULT_PROMPTFORGE_IMAGE`` — the PromptForge-flavor runner (HIP-only
+#: build of ciru-ai/ROCmFPX v2.3 + the card's runtime patch; GGML_VULKAN=OFF,
+#: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
+#: item 4 and spec 2026-08-29). Candidate tag until the ct150 validation
+#: gate (#1891) passes; the pin only moves operator-gated.
+DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
+
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
 #: FORMER DEFAULT — debris from slot creation under an older release — not a

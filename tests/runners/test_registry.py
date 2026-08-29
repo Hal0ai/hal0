@@ -34,6 +34,7 @@ def test_registry_has_every_expected_key() -> None:
     assert set(RUNNER_IMAGES) == {
         "rocmfpx",
         "vulkanfpx",
+        "promptforge",
         "cuda",
         "cpu",
         "flm",

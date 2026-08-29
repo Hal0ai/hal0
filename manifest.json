@@ -40,6 +40,11 @@
       "tag": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
       "digest": "sha256:748774babc8bd9b83da4c437d09311bbcbd279f0328d1a9f5b419e70ca2a036c",
       "_notes": "Qwen3-TTS-12Hz-1.7B-CustomVoice multilingual GPU TTS (ROCm); OpenAI-compat /v1/audio/speech. Digest pinned from the CI push via .github/workflows/toolbox.yml; refresh with scripts/update-toolbox-digests.sh."
+    },
+    "promptforge": {
+      "tag": "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38",
+      "digest": null,
+      "_notes": "PromptForge-flavor runner (HIP-only build of ciru-ai/ROCmFPX v2.3 + runtime patch; GGML_VULKAN=OFF). Candidate tag until ct150 validation gate (#1891) passes."
     }
   },
   "_legacy_toolboxes": {
