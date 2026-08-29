@@ -1653,6 +1653,82 @@ def _guard_fpx_quant_runner(
     )
 
 
+def _guard_specialty_runner(
+    model_info: dict[str, Any],
+    runner: Any,
+) -> dict[str, Any] | None:
+    """Gate a specialty-distribution model against the resolved runner.
+
+    Spec 2026-08-29 / #1946: a specialty model (e.g. CIRU ActiveFPX +
+    PromptForge) runs ACCELERATED only on a runner image that lists the
+    kind in ``RunnerSupports.specialties`` AND has every required
+    companion installed. Anything else is the card-blessed GGUF-only mode
+    — legitimate, but NEVER silent (#1888): this returns a structured
+    degraded reason the launch path stamps on the slot, shows in the
+    drawer/health, and logs. Kinds that declare ``degraded_ok=False``
+    hard-refuse (422) exactly like :func:`_guard_fpx_quant_runner`.
+
+    Returns ``None`` when the accelerated path is clear, else the reason
+    dict. Called from the single choke point
+    (:func:`_resolve_llama_scalars`) both launch and preview share.
+    """
+    from hal0.registry.specialty import SPECIALTY_KINDS
+
+    meta = (model_info or {}).get("metadata") or {}
+    key = meta.get("specialty")
+    if not key:
+        return None
+    model_key = str(model_info.get("_model_key") or model_info.get("id") or "?")
+    kind = SPECIALTY_KINDS.get(key)
+    if kind is None:
+        # Row stamped by a newer hal0 than this one — degrade, don't crash.
+        log.warning("slot launch degraded: model %s unknown specialty %r", model_key, key)
+        return {
+            "code": "slot.specialty_degraded",
+            "specialty": str(key),
+            "runner": getattr(runner, "key", None),
+            "detail": f"unknown specialty kind {key!r} (newer registry?)",
+        }
+
+    def _degrade_or_raise(detail: str) -> dict[str, Any]:
+        if not kind.degraded_ok:
+            raise UnprocessableEntity(
+                f"model {model_key!r} is a {key!r} specialty distribution with no "
+                f"legitimate fallback mode; the resolved runner "
+                f"{getattr(runner, 'key', '?')!r} cannot serve it — {detail}",
+                code="slot.unsupported_specialty_for_runner",
+                details={"model": model_key, "specialty": key,
+                         "runner": getattr(runner, "key", None)},
+            )
+        log.warning(
+            "slot launch degraded: model %s specialty %s — %s", model_key, key, detail
+        )
+        return {
+            "code": "slot.specialty_degraded",
+            "specialty": key,
+            "runner": getattr(runner, "key", None),
+            "detail": detail,
+        }
+
+    if key not in getattr(runner.supports, "specialties", ()):
+        return _degrade_or_raise(
+            f"runner {getattr(runner, 'key', '?')!r} does not list specialty "
+            f"{key!r}; launching GGUF-only"
+        )
+    companions = meta.get("companions") or {}
+    missing = [
+        spec.role
+        for spec in kind.companions
+        if spec.required and spec.env is not None and spec.role not in companions
+    ]
+    if missing:
+        return _degrade_or_raise(
+            f"required companion files missing from the store: {missing}; "
+            "re-pull the model to install them"
+        )
+    return None
+
+
 def resolve_effective_context_size(
     slot_ceiling: int | None,
     model_registry: Any = None,
@@ -1749,6 +1825,7 @@ def _resolve_llama_scalars(
     )
     if for_launch:
         _guard_fpx_quant_runner(slot_cfg, model_info, runner)
+    specialty_degraded = _guard_specialty_runner(model_info, runner)
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
@@ -2028,6 +2105,7 @@ def _resolve_llama_scalars(
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
+        "specialty_degraded": specialty_degraded,
         # Slot-owned hardware grid (spec-hw-slot-ownership §2): NGL + THREADS
         # reach the argv chain via _llama_argv_segments' slot_hardware segment.
         "slot_n_gpu_layers": slot_n_gpu_layers,
