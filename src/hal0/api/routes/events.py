@@ -1,9 +1,25 @@
 """Dashboard footer event surface — backfill + live SSE stream.
 
-Mounted under ``/api/events`` by ``hal0.api.create_app``. Reads only; no
-auth dependency because the footer must surface state during first-run
-before any credential exists. Writers live on ``app.state.events`` and
-are emitted from the slot state machine, pull jobs, and lifecycle hooks.
+Mounted under ``/api/events`` by ``hal0.api.create_app``. Reads only.
+Writers live on ``app.state.events`` and are emitted from the slot state
+machine, pull jobs, and lifecycle hooks.
+
+Auth: **ADMIN** (#2109). There is no route-level ``dependencies=`` here,
+but that is not what decides the tier — enforcement is central, through
+:func:`hal0.security.exposure.classify` (imported by
+:mod:`hal0.api.auth`), and this prefix is classified ADMIN. An earlier
+version of this docstring claimed the route was deliberately auth-free so
+the dashboard footer could render during first-run; the classification
+always said otherwise, and the classification is the one that runs.
+
+The first-run concern the old wording was reaching for is answered by the
+posture instead of by the tier: ``require_auth`` ships **off**
+(:func:`hal0.api.auth.require_auth_enabled`), so a fresh box enforces
+nothing and the footer renders. An operator who turns auth on does it
+from the dashboard, whose session cookie resolves to the admin tier, so
+their footer keeps rendering. Only an unauthenticated third party loses
+the stream — which is the intent for a surface that narrates every slot
+transition and pull on the box.
 
 Endpoint contract::
 

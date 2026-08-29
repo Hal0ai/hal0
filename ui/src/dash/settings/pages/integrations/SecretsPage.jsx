@@ -111,7 +111,7 @@ export function SecretsPage() {
   return (
     <div className="s-section">
       <h2>Secrets</h2>
-      <p className="desc">Stored encrypted at rest, never shown again after saving. Each key is exported to hal0 services and slot containers as an environment variable — model-pull auth, fallback providers, or your own custom keys.</p>
+      <p className="desc">Stored in <span className="mono">/etc/hal0/api.env</span> (mode 0600, root-owned) — not encrypted, and readable by anyone who can read root's files, so treat host backups and support bundles accordingly. Never shown again after saving. Each key is exported to hal0 services and slot containers as an environment variable — model-pull auth, fallback providers, or your own custom keys.</p>
       <HfTokenField />
       {secretsQuery.isLoading && (
         <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading…</div>

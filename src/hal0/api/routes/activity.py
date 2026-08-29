@@ -5,8 +5,15 @@ source of truth for config-mutating actions and system state changes. Unlike
 ``/api/events`` (volatile ring), this surface survives restarts and carries
 before/after state + a success/failure outcome per action.
 
-Read-only; no auth dependency — the slots-page ActivityLog must render during
-first-run before any credential exists (same rationale as ``/api/events``).
+Read-only.
+
+Auth: **ADMIN** (#2109) — decided by the central classification in
+:mod:`hal0.security.exposure`, not by the absence of a route-level
+``dependencies=`` here. This surface replays config-mutating actions with
+their before/after state, so ADMIN is the tier it wants regardless of
+first-run convenience. See ``/api/events`` for why first-run rendering is
+unaffected: ``require_auth`` ships off, and once it is on the operator's
+own dashboard session is admin.
 
 Endpoints::
 

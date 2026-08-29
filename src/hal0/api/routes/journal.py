@@ -16,10 +16,12 @@ The journal route is purposely separate from ``/api/events``: that
 exposes the raw event shape for callers wanting native fidelity, while
 ``/api/journal`` serves the panel envelope.
 
-No auth gate — same rationale as ``/api/events`` (hal0-api
-is open on 0.0.0.0:8080; agent identity rides on ``X-hal0-Agent``, not
-Bearer tokens; the journal panel must surface during first-run before
-any agent identity exists).
+Auth: **ADMIN** (#2109) — same as ``/api/events``, which this surface
+re-envelopes, and applied centrally through
+:mod:`hal0.security.exposure` rather than by a route-level
+``dependencies=``. The panel still renders on a fresh box because
+``require_auth`` ships off, and for an operator who enables it because
+the dashboard session resolves to admin.
 """
 
 from __future__ import annotations

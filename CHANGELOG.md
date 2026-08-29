@@ -24,12 +24,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-These are the 1.0.0 notes. They carried a `## [1.0.0] — 2026-08-07`
-heading for three weeks, which read as a shipped release: no `v1.0.0` tag
-exists, and the line has run rc.1 → rc.12 the whole time. They live here
-until 1.0.0 actually tags, at which point this content moves back under a
-`## [1.0.0] — <tag date>` heading so `scripts/gen_release_notes.py` can
-bundle it into the release.
+The first stable release. hal0 stops being a box you configure and starts
+being a box that is already configured: the whole platform is reachable by
+an agent, slots start when you say so, and the documentation that describes
+all of it ships from this repository.
+
+Everything below is the accumulated work of the rc.1 → rc.12 line. The
+**Breaking** section is long — this is the release that spends the pre-1.0
+allowance — so if you are upgrading from 0.9.8, read it along with **Operator
+migrations** and **Supported upgrades** before you run `hal0 update`.
 
 ### Highlights
 
@@ -266,6 +269,21 @@ full detail in the
   stamps it into the model's `defaults.chat_template` at pull time so
   fresh installs launch with `--chat-template-file` instead of the broken
   embedded template.
+
+- The Secrets page no longer claims credentials are encrypted at rest (#2110).
+  They never were: `/etc/hal0/api.env` is a plaintext `KEY="value"` file written
+  atomically at mode 0600 and owned by root. That is a defensible posture for a
+  single-tenant appliance, but the old copy could talk an operator into handing
+  over a host snapshot or a support bundle believing the provider keys inside
+  were protected. The page now states the real storage, and the docs already
+  did.
+
+- Settings ▸ Models ▸ Model Defaults no longer offers a "GPU layers" field
+  (#2105). NGL became slot-owned hardware in the 1.0 line, so the value an
+  operator typed there was dropped by the registry on validation and cleared
+  again by the next model-drawer save — it looked saved and never was. NGL is
+  set on the slot's hardware grid. The unreachable pre-drawer recipe editor,
+  which carried the same dead field, is deleted.
 
 ### Audience
 

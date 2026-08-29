@@ -93,7 +93,11 @@ export const MANAGED_FLAG_SOURCE = {
   "--ctx-size": "the context_size field",
   "--host": "the server bind host (authority-owned)",
   "--port": "PortAuthority (shown read-only on the slot)",
-  "--n-gpu-layers": "the n_gpu_layers field",
+  // #2105: NGL is slot-owned hardware (spec-hw-slot-ownership §2) — there is no
+  // model-side n_gpu_layers field to point at any more. The slot-hardware check
+  // normally answers first for this flag; this entry is the profile drawer's
+  // fallback, so it has to name the slot's grid, not a field that was removed.
+  "--n-gpu-layers": "the slot's hardware grid (NGL)",
   "--alias": "the model id / dispatch alias (authority-owned)",
 };
 
