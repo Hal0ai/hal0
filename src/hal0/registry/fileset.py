@@ -29,6 +29,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.registry.detect import quant_from_filename
+from hal0.registry.specialty import companion_role_of
 
 log = logging.getLogger(__name__)
 
@@ -311,8 +312,10 @@ async def resolve_revision(
 def role_of(rel: str) -> str:
     """Classify one repo-relative path into a ``model_file.role`` value.
 
-    ``model`` | ``shard`` | ``mmproj`` | ``tokenizer`` | ``config``. Reuses
-    the same "mmproj" name-token rule discovery already applies
+    ``model`` | ``shard`` | ``mmproj`` | ``tokenizer`` | ``config`` or a
+    specialty companion role (e.g. ``promptforge_ffn``, ``promptforge_gdn``,
+    ``promptforge_output_k8``, ``runtime_patch`` from :data:`hal0.registry.specialty.SPECIALTY_KINDS`).
+    Reuses the same "mmproj" name-token rule discovery already applies
     (:func:`hal0.registry.discover._is_mmproj_sidecar`), so a repo file and
     a locally-scanned file classify identically.
     """
@@ -320,6 +323,9 @@ def role_of(rel: str) -> str:
     lowered = name.lower()
     if "mmproj" in lowered:
         return "mmproj"
+    companion = companion_role_of(name)
+    if companion is not None:
+        return companion
     if SHARD_RE.match(name):
         return "shard"
     ext = PurePosixPath(rel).suffix.lower()
