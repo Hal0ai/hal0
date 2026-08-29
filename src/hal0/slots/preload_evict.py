@@ -275,7 +275,7 @@ async def _estimate_incoming_footprint_mb(
     "never swallow into a fabricated number" convention in this module tree
     (see capacity.py's Tier-1 fixes).
     """
-    from hal0.slots.capacity import estimate_file_size_kv_mb
+    from hal0.slots.capacity import companion_bytes_mb, estimate_file_size_kv_mb
 
     info = model_info if model_info is not None else await host._resolve_model_info(model_id)
     if not info:
@@ -286,7 +286,7 @@ async def _estimate_incoming_footprint_mb(
         model_mb = 0.0
     if model_mb <= 0:
         return 0.0
-    return estimate_file_size_kv_mb(model_mb, info)
+    return estimate_file_size_kv_mb(model_mb, info, companion_mb=companion_bytes_mb(info))
 
 
 async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[CandidateSlot]:

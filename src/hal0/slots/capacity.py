@@ -131,27 +131,65 @@ def _kv_estimate_mb(ctx_tokens: int) -> float:
     return (ctx_tokens / 1000.0) * _KV_MIB_PER_1K_TOKENS
 
 
-def estimate_file_size_kv_mb(model_mb: float, ctx_meta: dict[str, Any] | None) -> float:
-    """Model-file-size + KV-cache footprint estimate, in MiB.
+def companion_bytes_mb(model_meta: dict[str, Any] | None) -> float:
+    """Total specialty-companion bytes for a model, in MiB (0.0 for plain).
+
+    Spec 2026-08-29 / #1946 seam 6: a specialty model's runtime sidecars
+    (PromptForge: +21 GiB) load alongside the GGUF; the pre-load fit math
+    must book them or every ActiveFPX slot under-books by more than the
+    model file itself.
+
+    Reads ``metadata.companion_sizes`` ONLY — never ``model_file`` rows.
+    ``metadata`` is authoritative; ``model_file`` can hold stale rows for
+    companions that have since been dropped from the distribution.
+
+    Accepts either the model dict or its ``metadata`` sub-dict directly —
+    call sites hold one or the other; the double-read below covers both.
+    """
+    if not isinstance(model_meta, dict):
+        return 0.0
+    meta = model_meta.get("metadata")
+    meta = meta if isinstance(meta, dict) else model_meta
+    sizes = meta.get("companion_sizes")
+    if not isinstance(sizes, dict):
+        return 0.0
+    total = sum(v for v in sizes.values() if isinstance(v, (int, float)) and v > 0)
+    return round(total / (1024 * 1024), 1)
+
+
+def estimate_file_size_kv_mb(
+    model_mb: float,
+    ctx_meta: dict[str, Any] | None,
+    *,
+    companion_mb: float = 0.0,
+) -> float:
+    """Model-file-size + companion-bytes + KV-cache footprint estimate, in MiB.
 
     This is the same baseline/fallback formula :func:`build_per_slot` uses
     (its path 3, and the floor under path 2's cgroup probe): model file
-    size plus a coarse per-context-token KV estimate (:func:`_kv_estimate_mb`
-    / :func:`_ctx_tokens_for`). Factored out so other callers that must size
+    size plus specialty companion bytes (:func:`companion_bytes_mb`) plus a
+    coarse per-context-token KV estimate (:func:`_kv_estimate_mb` /
+    :func:`_ctx_tokens_for`). Factored out so other callers that must size
     a model BEFORE it is resident — and therefore have no cgroup/FLM figure
     to read yet, e.g. pre-load eviction (:mod:`hal0.slots.preload_evict`)
     deciding whether an incoming load will fit — reuse exactly this
     estimator instead of a second, divergent one.
+
+    ``companion_mb`` defaults to 0.0 so every pre-existing caller that
+    doesn't pass it stays byte-identical.
     """
     kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
-    return round(model_mb + kv_mb, 1)
+    return round(model_mb + companion_mb + kv_mb, 1)
 
 
 def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     """Resolve the effective context window (tokens) for a model.
 
     Reads, in priority order: ``defaults.context_size`` (the launcher's
-    pinned n_ctx), ``metadata.context_length`` (GGUF arch max), falling
+    pinned n_ctx), the specialty kind's ``default_ctx`` (e.g. PromptForge's
+    262144 — a pre-load capacity estimate has no degraded/accelerated
+    knowledge, so this applies unconditionally as a conservative
+    over-booking), ``metadata.context_length`` (GGUF arch max), falling
     back to :data:`_DEFAULT_CTX_TOKENS`.
     """
     if not isinstance(model_meta, dict):
@@ -162,10 +200,15 @@ def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
         if isinstance(cs, (int, float)) and cs > 0:
             return int(cs)
     meta = model_meta.get("metadata")
-    if isinstance(meta, dict):
-        cl = meta.get("context_length")
-        if isinstance(cl, (int, float)) and cl > 0:
-            return int(cl)
+    meta = meta if isinstance(meta, dict) else model_meta
+    from hal0.registry.specialty import SPECIALTY_KINDS
+
+    kind = SPECIALTY_KINDS.get(meta.get("specialty") or "")
+    if kind is not None and kind.default_ctx:
+        return int(kind.default_ctx)
+    cl = meta.get("context_length")
+    if isinstance(cl, (int, float)) and cl > 0:
+        return int(cl)
     return _DEFAULT_CTX_TOKENS
 
 
@@ -485,7 +528,9 @@ async def build_per_slot(
                 ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
             except Exception:
                 model_mb = 0.0
-        estimate_mb = estimate_file_size_kv_mb(model_mb, ctx_meta)
+        estimate_mb = estimate_file_size_kv_mb(
+            model_mb, ctx_meta, companion_mb=companion_bytes_mb(ctx_meta)
+        )
 
         # ── Container cgroup probe (path 2) ────────────────────────────────
         # Probe the live podman/docker cgroup.  Returns 0 when no container
