@@ -90,9 +90,16 @@ rationale and code-path detail in the
 - **NPU trio dispatch reads the anchor's `[npu]` table, not the shadow slots' own flags.**
   `flm-stt`/`flm-embed` are display+dispatch records for the anchor's single
   `flm serve` process; a modality that was never launched is no longer routable.
-- **Deprecated surfaces are `HAL0-SUNSET`-stamped for scheduled removal:**
-  the `--backend` flag (use `--provider`), `SlotConfig.runtime`/`workers`,
-  the `cognee` engine literal, and several legacy CLI aliases.
+- **Deprecated surfaces are `HAL0-SUNSET`-stamped for removal, and all still
+  work in 1.0.0:** the `--backend` flag (use `--provider`),
+  `SlotConfig.runtime`/`workers`, `SlotConfig.chat_template`, the slot-level
+  `n_gpu_layers` flag-ownership shims, the `cognee` engine literal, and seven
+  legacy CLI aliases (`probe`, `model add`, `slot edit --model`,
+  `model import-backup`, `slot create`, `slot delete`,
+  `upstream credentials set`). Eighteen shims in total. They were stamped for
+  1.0.0 and are now stamped `v1.1.0`: removing them in the same release that
+  first announces them gives no deprecation window at all. Nothing is removed
+  here — treat this as the notice, not the removal.
 
 ### Migrations
 

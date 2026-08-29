@@ -225,7 +225,7 @@ def status() -> None:
     console.print(table)
 
 
-# HAL0-SUNSET: v1.0.0 — alias for `hal0 config hardware --refresh`; drop the alias.
+# HAL0-SUNSET: v1.1.0 — alias for `hal0 config hardware --refresh`; drop the alias.
 @app.command(hidden=True)
 def probe() -> None:
     """[DEPRECATED] alias for `hal0 config hardware --refresh`; use that instead."""
