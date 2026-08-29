@@ -395,6 +395,11 @@ def plan_fileset(
     5. Carry tokenizer/config files from the same directory too (the FLM /
        HF-transformers multi-file shape needs them; GGUF-only repos won't
        have any).
+    6. Detect the specialty kind (spec 2026-08-29, #1946) from the CHOSEN
+       unit only — its filenames and resolved quant, plus companions in its
+       directory subtree when that directory holds a single unit — and carry
+       the matching companions. A mixed repo's plain variant therefore
+       installs no sidecars and stamps no ``specialty``.
 
     Raises :class:`FilesetEmpty` when no model-role file exists, or
     :class:`FilesetVariantNotFound` when ``requested_variant`` matches
@@ -539,13 +544,43 @@ def plan_fileset(
                 )
             )
 
-    # ── specialty companion carry (spec 2026-08-29, #1946) ────────────────
+    # ── specialty detection + companion carry (spec 2026-08-29, #1946) ────
+    #
+    # Keyed on the CHOSEN unit, never the whole tree (fix wave, I1). Detection
+    # used to scan every path in the repo and the carry loop was unfiltered, so
+    # an HF repo shipping `…-CIRU-ActiveFPX-….gguf` beside a plain
+    # `…-Q4_K_M.gguf` made a Q4 pull download +21 GiB of sidecars and stamp
+    # `metadata.specialty` on a plain model — which then wears a bogus degraded
+    # badge on every normal runner and, on a promptforge runner, launches with
+    # PROMPTFORGE_* env pointing at sidecars that don't match its weights.
+    #
+    # The two signals are scoped like this:
+    #   * quant marker — the chosen unit's own filenames + its resolved quant.
+    #     This is the signal that discriminates variants inside one directory.
+    #   * companion presence — only meaningful when the companion can be
+    #     attributed to the chosen unit: it must sit in the chosen unit's
+    #     directory subtree AND that directory must hold exactly ONE model
+    #     unit. With two units in a directory a loose `.pfs` belongs to one of
+    #     them and this module never guesses; the marker still decides.
+    #
+    # The carry is scoped to the same subtree rather than the strict same-dir
+    # rule tokenizer/config use, because the real distribution ships its
+    # `runtime.patch` in a `runtime/` subdirectory next to the root-level GGUF.
+    def _under_chosen(rel: str) -> bool:
+        d = _dirname(rel)
+        return chosen_dir == "." or d == chosen_dir or d.startswith(chosen_dir + "/")
+
+    scoped_companions = [(r, e) for r, e in companion_files if _under_chosen(e.path)]
+    units_in_chosen_dir = sum(1 for u in units if u["dirname"] == chosen_dir)
+    specialty_signals = [e.path for e in chosen["entries"]]
+    if units_in_chosen_dir == 1:
+        specialty_signals += [e.path for _, e in scoped_companions]
     specialty = detect_specialty(
-        [e.path for e in entries],
+        specialty_signals,
         quant=quant_from_filename(PurePosixPath(entry_rel).name),
     )
     if specialty is not None:
-        for comp_role, e in companion_files:
+        for comp_role, e in scoped_companions:
             files.append(
                 FileSetEntry(
                     rel=e.path,

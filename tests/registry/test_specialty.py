@@ -69,6 +69,39 @@ class TestDetectSpecialty:
         paths = ["model-Q4_K_M.gguf", "mmproj-F16.gguf", "config.json"]
         assert detect_specialty(paths) is None
 
+    def test_ambiguous_match_returns_none(self):
+        """Spec 2026-08-29: ambiguity → ``None`` (M4, fix wave).
+
+        With one kind registered this can't happen in production; the rule
+        exists so the day a second kind lands, a listing that lights up both
+        stops stamping the dict-order winner. Registers a throwaway second
+        kind to prove the rule instead of asserting it can't be reached.
+        """
+        import re
+
+        from hal0.registry.specialty import CompanionSpec, SpecialtyKind
+
+        other = SpecialtyKind(
+            key="_test_other",
+            quant_marker="ActiveFPX",  # deliberately the same marker
+            companions=(
+                CompanionSpec(
+                    role="_test_other_blob",
+                    pattern=re.compile(r"other[^/]*\.blob$", re.IGNORECASE),
+                    env="OTHER_SIDECAR",
+                ),
+            ),
+        )
+        SPECIALTY_KINDS["_test_other"] = other
+        try:
+            assert detect_specialty(["Qwen-CIRU-ActiveFPX-v3-Q8.gguf"]) is None
+            # one signal each, two different kinds — still ambiguous
+            assert detect_specialty(["model-FFN.pfs", "model-other.blob"]) is None
+        finally:
+            del SPECIALTY_KINDS["_test_other"]
+        # and the rule doesn't disturb the single-kind answer
+        assert detect_specialty(["Qwen-CIRU-ActiveFPX-v3-Q8.gguf"]) == "promptforge"
+
 
 class TestKindForRole:
     def test_maps_role_back_to_kind(self):

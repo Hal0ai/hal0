@@ -132,17 +132,31 @@ def detect_specialty(paths: Iterable[str], quant: str | None = None) -> str | No
     Two independent signals, either suffices:
     1. the kind's ``quant_marker`` appears in ``quant`` or any filename;
     2. any *required* companion pattern matches a file.
-    Never guesses: no signal => ``None``.
+    Never guesses: no signal => ``None``, and AMBIGUITY => ``None`` too —
+    if ``paths``/``quant`` light up MORE THAN ONE kind there is no honest
+    answer, and stamping the dict-order winner would attach a
+    launch-behaviour-changing metadata key arbitrarily (spec 2026-08-29's
+    "ambiguity → None"; inert with one kind registered, load-bearing the
+    moment a second lands).
+
+    ``paths`` is the caller's responsibility to SCOPE. It must describe the
+    unit actually being installed, not a whole repo tree: a mixed repo that
+    ships an ActiveFPX variant beside a plain Q4_K_M would otherwise stamp
+    specialty on the plain pull (see :func:`hal0.registry.fileset.plan_fileset`).
     """
     names = [PurePosixPath(p).name for p in paths]
+    hits: list[str] = []
     for kind in SPECIALTY_KINDS.values():
         marker = kind.quant_marker
         if marker and (
             (quant and marker.lower() in quant.lower())
             or any(marker.lower() in n.lower() for n in names)
         ):
-            return kind.key
-        for spec in kind.companions:
-            if spec.required and any(spec.pattern.search(n) for n in names):
-                return kind.key
-    return None
+            hits.append(kind.key)
+            continue
+        if any(
+            spec.required and any(spec.pattern.search(n) for n in names)
+            for spec in kind.companions
+        ):
+            hits.append(kind.key)
+    return hits[0] if len(hits) == 1 else None
