@@ -1,0 +1,151 @@
+# Provenance for the PromptForge runner image (#1946).
+#
+# CANDIDATE recipe: this manifest reproduces the accelerated-path runner for
+# `jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge` (spec
+# 2026-08-29-specialty-distributions). The tag it produces —
+# ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38 — is a CANDIDATE, not yet the
+# value `DEFAULT_PROMPTFORGE_IMAGE` (src/hal0/config/schema.py) is pinned to
+# as an unconditional default. That pin only moves after the ct150
+# validation gate (#1891) passes: the temp-0 Paris probe (same shape as
+# rocmfpx's #1948 matrix), the card's stated quality/HumanEval envelope, and
+# MTP (depth-4) acceptance. Same discipline #1888 forced onto
+# DEFAULT_ROCMFPX_IMAGE — see packaging/runner/rocmfpx — applied here before
+# the first build rather than after an incident.
+#
+# Modelled on packaging/runner/rocmfpx/manifest.toml: everything variable
+# lives here, build.sh only executes it. But this is a DIFFERENT source tree
+# (ciru-ai/ROCmFPX, not charlie's — see [source] below) and a narrower build
+# target (HIP-only, one model family), so do not assume parity with rocmfpx
+# beyond the shape of this file.
+#
+# The CT130 build pipeline job and the `Hal0ai/hal0-runner-images`
+# `images.json` entry that actually build this recipe are tracked on #1946
+# and are explicitly NOT part of this task — this manifest is the tracked
+# recipe only, not runnable in this repo's CI.
+
+[image]
+#: The tag this recipe produces. CANDIDATE — see the header note above; keep
+#: in lockstep with DEFAULT_PROMPTFORGE_IMAGE, itself a candidate pin until
+#: the #1891 gate passes.
+tag = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
+
+[base]
+#: TODO(operator): sourcing and verifying a new base image was OUT OF SCOPE
+#: for the task that wrote this recipe (packaging/runner/promptforge/, see
+#: task-12 of the specialty-distributions plan) — it only had the source
+#: ref, the runtime-patch reference, the one cmake flag flip, and the
+#: composable_kernel/ROCm facts below to work with, no network access to
+#: verify or resolve a base image against. `image`/`digest` are left BLANK
+#: rather than copying rocmfpx's Kyuz0 ROCm-7.2.4 base pin: that base does
+#: NOT satisfy the ROCm 7.15 requirement recorded below, and rocmfpx's own
+#: note on this table applies doubly here — "the ROCm version here must
+#: match the toolchain the binaries are linked against, or the runner
+#: resolves libraries from two different ROCm trees." Stating a wrong-but-
+#: plausible digest would be worse than leaving this openly unresolved.
+#: Do not build from this manifest until image/digest are filled in.
+image = ""
+digest = ""
+#: PromptForge v2.3's card requires ROCm 7.15, built via TheRock
+#: (https://github.com/ROCm/TheRock, AMD's newer ROCm build system) — see
+#: the TODO above: the base image itself has not been re-pinned to match
+#: this yet.
+rocm_version = "7.15"
+#: composable_kernel is the GEMM/conv kernel library rocBLAS/hipBLASLt link
+#: against; CIRU ActiveFPX's FPX kernels are sensitive to which
+#: composable_kernel commit the toolchain was built against, so the card
+#: pins one explicitly rather than floating "whatever ROCm 7.15 shipped
+#: with." https://github.com/ROCm/composable_kernel
+composable_kernel_ref = "fdf4bb7fcc98"
+
+#: Same DEFERRED position rocmfpx takes on unpinned dnf packages (see that
+#: manifest's comment for the full rationale) — doubly provisional here
+#: since the base itself is not yet resolved (see the TODO above), so this
+#: is inherited scaffolding, not a considered decision for this recipe.
+dnf_packages_pinned = false
+
+[source]
+#: ciru-ai's tree, NOT charlie's — the opposite choice from rocmfpx (see
+#: that manifest's [source] comment: charlie's fork was pinned specifically
+#: BECAUSE ciru's port emits invalid Vulkan tokens on gfx1151, #1888). That
+#: defect does not matter here: this build is HIP-only (GGML_VULKAN=OFF,
+#: see [build] below), so ciru's Vulkan regression never executes, and
+#: ciru's tree is what the PromptForge v2.3 card actually specifies.
+repo = "https://github.com/ciru-ai/ROCmFPX.git"
+ref = "qwen3.8-activefpx-promptforge-v2.3"
+#: TODO(operator): resolve this tag to its full 40-char commit sha and pin
+#: that instead, matching rocmfpx's discipline (a tag/branch can move
+#: silently — see that manifest's [source] comment and build.sh's own
+#: "never a branch tip" checkout comment). Not resolved in this task: the
+#: brief specified this exact ref value and no network access to
+#: ciru-ai/ROCmFPX was available while writing this recipe to resolve it
+#: further.
+ref_description = "TODO(operator): fill in from `git log -1 --format=%s` on ciru-ai/ROCmFPX at this ref"
+#: TODO(operator): not verified for this tree/ref. Copied from rocmfpx as a
+#: starting assumption only, not a checked fact.
+submodules = false
+
+[build]
+#: gfx1151 (Strix Halo) — unchanged from rocmfpx; same hardware target, just
+#: a different (HIP-only) backend combination.
+gpu_arch = "gfx1151"
+cmake_flags = [
+    "-DGGML_HIP=ON",
+    "-DGGML_HIP_ROCWMMA_FATTN=OFF",
+    "-DGGML_HIP_FORCE_MMQ=ON",
+    # The one flag flip vs rocmfpx (which builds this ON): the PromptForge
+    # v2.3 card requires a HIP-only build. rocmfpx's combined HIP+Vulkan
+    # image cannot be reused for this flavor — #1946 item 4 found the two
+    # backends are a mutually exclusive requirement here (unlike rocmfpx,
+    # where combining them into one tag is the whole point of that
+    # recipe's [build] comment) — so this image can never share a tag with
+    # DEFAULT_ROCMFPX_IMAGE and needs its own recipe, which is this file.
+    "-DGGML_VULKAN=OFF",
+    "-DGGML_CUDA=OFF",
+    "-DCMAKE_HIP_ARCHITECTURES=gfx1151",
+    "-DGPU_TARGETS=gfx1151",
+    "-DLLAMA_BUILD_SERVER=ON",
+    "-DLLAMA_BUILD_WEBUI=OFF",
+    "-DLLAMA_USE_PREBUILT_WEBUI=OFF",
+]
+
+#: Applied in order to a pristine checkout of [source]. Unlike rocmfpx's
+#: four patches (which patch charlie's llama.cpp tree itself and would not
+#: apply to ciru's — different fork, different line contexts), this is the
+#: single patch the PromptForge v2.3 card specifies, and it ships from the
+#: MODEL repo, not from [source]. Reusing rocmfpx's patches/ mechanism (same
+#: [[patches]] shape, same directory) for a differently-sourced patch,
+#: deliberately, rather than inventing a second mechanism for one entry.
+[[patches]]
+file = "qwen38-v3-output-k8-runtime.patch"
+remote_source = "https://huggingface.co/jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge"
+remote_path = "runtime/qwen38-v3-output-k8-runtime.patch"
+# TODO(operator): pin sha256 from the model card digest table before first build
+sha256 = ""
+why = """
+Tunes v2.3's output-K8 runtime companion path for this specific checkpoint
+(PROMPTFORGE_MTP_OUTPUT_K8_PROXY; see spec
+2026-08-29-specialty-distributions). Ships with the model card rather than
+with ciru-ai/ROCmFPX itself, so it is fetched and applied from the HF model
+repo above at build time, not from a local patches/ file the way rocmfpx's
+four patches are. The card's digest table was not reachable while writing
+this recipe (no network access in this task), so the sha256 pin above is a
+placeholder — see the TODO. The stub committed at
+patches/qwen38-v3-output-k8-runtime.patch documents this and fails
+`git apply --check` loudly if used as-is, deliberately: a silently wrong or
+missing runtime patch is exactly the failure class #1888 argues against.
+"""
+
+[verification]
+#: What this image MUST be proven against before DEFAULT_PROMPTFORGE_IMAGE
+#: (src/hal0/config/schema.py) can move to it as an unconditional default —
+#: the ct150 validation gate, #1891. NOT YET RUN as of this recipe: this
+#: table records the REQUIRED gate, not a completed one (contrast with
+#: rocmfpx's [verification], which records probes that image already
+#: passed). Full context: spec 2026-08-29-specialty-distributions, #1946.
+gate_issue = "https://github.com/Hal0ai/hal0/issues/1891"
+required_probes = [
+    "temp-0 'The capital of France is' -> 'Paris' (same shape as rocmfpx's #1948 matrix)",
+    "card-stated quality/HumanEval envelope reproduced within tolerance",
+    "MTP (depth-4) acceptance rate within the card's stated envelope",
+]
+status = "not run — candidate pin only, pending #1891"

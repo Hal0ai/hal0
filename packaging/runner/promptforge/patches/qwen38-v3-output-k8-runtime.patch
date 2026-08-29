@@ -1,0 +1,24 @@
+# PLACEHOLDER — this is NOT a real patch (#1946, task-12).
+#
+# The actual bytes live in the model repo, not here:
+#   https://huggingface.co/jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge
+#   path: runtime/qwen38-v3-output-k8-runtime.patch
+#
+# The task that wrote this recipe (packaging/runner/promptforge/, see the
+# task-12 brief under .superpowers/sdd/2026-08-29-specialty-distributions/)
+# tracked the manifest.toml reference and the sha256 pin FIELD for this file
+# (manifest.toml's [[patches]] entry) but had no network access to fetch the
+# model card here, so the real patch was never retrieved and this stub
+# stands in its place.
+#
+# TODO(operator): before first build —
+#   1. fetch the model card's digest table and fill in the sha256 in
+#      manifest.toml's [[patches]] entry for this file
+#   2. download runtime/qwen38-v3-output-k8-runtime.patch from the model
+#      repo at that pinned sha256 and overwrite this stub with the real
+#      diff
+#
+# `git apply --check` on this stub fails loudly, by design — it is not
+# valid diff syntax. A silently missing or wrong runtime patch is exactly
+# the failure class hal0 #1888 argues against: fail loud, never quietly
+# serve a degraded runner.
