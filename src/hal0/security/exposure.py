@@ -43,6 +43,20 @@ analogy to an explicitly-CLIENT bucket is very close (``/api/status``
 mirrors the CLIENT ``slots list`` / ``hardware`` bucket; JSON
 ``/api/metrics`` mirrors the OPEN ``/api/metrics/prometheus`` sibling).
 See the KB-1 delivery report for the full "UNSURE — please review" list.
+
+**Reviewed for 1.0 (#2109): ADMIN confirmed for the three streaming
+surfaces.** ``/api/events``, ``/api/activity`` and ``/api/journal`` each
+carried a docstring asserting they were deliberately auth-free so their
+dashboard panel could render during first-run — a claim this table has
+always contradicted, since enforcement is central and the absence of a
+route-level ``dependencies=`` decides nothing. The tier is right and the
+docstrings were wrong: all three narrate box state (every slot
+transition, every pull, and — for ``/api/activity`` — the before/after
+of every config mutation), which is squarely the "can return
+secrets/config" bucket. Nothing regresses for first-run either, because
+``require_auth`` ships off (:func:`hal0.api.auth.require_auth_enabled`)
+and an operator who enables it does so from a dashboard session that
+already resolves to the admin tier. The three docstrings now say this.
 """
 
 from __future__ import annotations
@@ -289,6 +303,10 @@ RULES: tuple[_Rule, ...] = (
     ),
     _Rule("dashboard plugin manifest", _exact("/api/dashboard/plugins"), AuthClass.ADMIN, _GET),
     _Rule("logs", _prefix("/api/logs"), AuthClass.ADMIN, None),
+    # #2109: ADMIN here is reviewed and intended, not a leftover "when unsure"
+    # default — see the module docstring. Each of these three narrates box
+    # state; /api/activity additionally replays the before/after of every
+    # config mutation. Their route docstrings say the same.
     _Rule("events", _prefix("/api/events"), AuthClass.ADMIN, None),
     _Rule("activity", _prefix("/api/activity"), AuthClass.ADMIN, None),
     _Rule("journal", _prefix("/api/journal"), AuthClass.ADMIN, None),
