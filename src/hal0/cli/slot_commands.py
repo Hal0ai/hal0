@@ -474,7 +474,7 @@ def slot_create(
         ),
         case_sensitive=False,
     ),
-    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
+    # HAL0-SUNSET: v1.1.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -599,7 +599,7 @@ def slot_edit(
             "created before the profile was inferred (#1830)."
         ),
     ),
-    # HAL0-SUNSET: v1.0.0 — --backend renamed to --provider in v0.2; use --provider.
+    # HAL0-SUNSET: v1.1.0 — --backend renamed to --provider in v0.2; use --provider.
     backend: str | None = typer.Option(
         None,
         "--backend",
@@ -707,7 +707,7 @@ def slot_delete(
     console.print(f"Deleted slot [bold]{name}[/bold].")
 
 
-# HAL0-SUNSET: v1.0.0 — alias for `slot create`; drop the alias.
+# HAL0-SUNSET: v1.1.0 — alias for `slot create`; drop the alias.
 @app.command("add", hidden=True)
 def slot_add(
     name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
@@ -739,7 +739,7 @@ def slot_add(
     )
 
 
-# HAL0-SUNSET: v1.0.0 — alias for `slot delete`; drop the alias.
+# HAL0-SUNSET: v1.1.0 — alias for `slot delete`; drop the alias.
 @app.command("remove", hidden=True)
 def slot_remove(
     name: str = typer.Argument(..., help="Slot name to delete"),

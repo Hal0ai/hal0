@@ -149,7 +149,7 @@ class ModelConfig(BaseModel):
             "hal0.providers.container._resolve_context_size."
         ),
     )
-    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # HAL0-SUNSET: v1.1.0 — flags own by models (spec-flags-ownership §2/§4).
     # This slot [model].n_gpu_layers no longer reaches the launch argv; the
     # migrator folds a slot's effective -ngl into its model's
     # ``defaults.n_gpu_layers`` (trusted, managed-flag) field. Field stays for
@@ -262,7 +262,7 @@ class ServerConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # HAL0-SUNSET: v1.1.0 — flags own by models (spec-flags-ownership §2/§4).
     # This slot [server].extra_args no longer reaches the launch argv chain;
     # the migrator folds a slot's effective tune into its model's
     # ``defaults.extra_args`` (the screened ``model_extra_args`` segment). Kept
@@ -448,7 +448,7 @@ class SlotConfig(BaseModel):
     # already required a model id. Stale ``enabled`` keys from older installs
     # round-trip harmlessly via ``extra="allow"`` until
     # ``hal0.config.migrations.slot_enabled_removal`` sweeps them off disk.
-    # HAL0-SUNSET: v1.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
+    # HAL0-SUNSET: v1.1.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
         description=(
@@ -477,7 +477,7 @@ class SlotConfig(BaseModel):
     # pre-migration TOML still carrying the keys loads without error; the
     # one-shot migrator (hal0.config.migrations.model_owned_caps) folds any
     # such value into the bound model's defaults and drops the slot key.
-    # HAL0-SUNSET: v1.0.0 — flags own by models (spec-flags-ownership §2/§4).
+    # HAL0-SUNSET: v1.1.0 — flags own by models (spec-flags-ownership §2/§4).
     # This slot-level parallelism knob no longer reaches the launch argv; the
     # migrator folds an effective ``--parallel N`` (plus ``--kv-unified`` when
     # N>1) into the bound model's ``defaults.extra_args``. Kept for round-trip
@@ -493,7 +493,7 @@ class SlotConfig(BaseModel):
             "Retained for TOML round-trip."
         ),
     )
-    # HAL0-SUNSET: v1.0.0 — chat_template is model-intrinsic and folds into the
+    # HAL0-SUNSET: v1.1.0 — chat_template is model-intrinsic and folds into the
     # model (spec-flags-ownership §7 slot-purity). INERT at launch: the slot
     # tier was removed from resolve_chat_template, so model.defaults.chat_template
     # is the single source. The one-shot migrator folds each slot's effective
@@ -556,7 +556,7 @@ class SlotConfig(BaseModel):
     # keys, not [server] keys, into the validated SlotConfig).  The new
     # nested ``server`` model below holds fields that are authored under
     # [server] in TOML — keep additions there.
-    # HAL0-SUNSET: v1.0.0 — workers is inert; a non-default value only logs a warning.
+    # HAL0-SUNSET: v1.1.0 — workers is inert; a non-default value only logs a warning.
     workers: int = Field(
         default=1,
         ge=1,
@@ -2804,7 +2804,7 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
-    # HAL0-SUNSET: v1.0.0 — 'cognee' engine literal retired here. It is no
+    # HAL0-SUNSET: v1.1.0 — 'cognee' engine literal retired here. It is no
     # longer an accepted config value (was previously a back-compat alias
     # that resolved to hindsight at runtime). provider_from_config's runtime
     # resolution still treats any *unrecognized* engine as Hindsight as a
