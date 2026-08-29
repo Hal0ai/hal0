@@ -1,5 +1,0 @@
-# vendored / not hal0 source — keep out of the graph
-gateway/
-.venv/
-# graphify's own output
-graphify-out/

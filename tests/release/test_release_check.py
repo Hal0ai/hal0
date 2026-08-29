@@ -35,11 +35,10 @@ def _make_tree(
         encoding="utf-8",
     )
     (root / "uv.lock").write_bytes(b"fixture lock bytes\n")
-    (root / ".gitignore").write_text(".pi/\ngraphify-out/*\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".pi/\ngraphify-out/\n", encoding="utf-8")
     tracked_generated = {
         root / ".pi" / "shepherd" / "index.json": "generated index\n",
         root / ".pi" / "shepherd" / "nearby.json": "tracked source state\n",
-        root / "graphify-out" / "graph.json": "generated graph\n",
     }
     for path, content in tracked_generated.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +73,6 @@ fi
             "-f",
             ".pi/shepherd/index.json",
             ".pi/shepherd/nearby.json",
-            "graphify-out/graph.json",
         ],
         check=True,
     )
@@ -300,12 +298,12 @@ def test_git_cleanliness_allows_exact_generated_dirt(tmp_path: Path) -> None:
     shepherd_run = root / ".pi" / "shepherd" / "runs" / "run.json"
     shepherd_run.parent.mkdir(parents=True)
     shepherd_run.write_text("untracked run receipt\n", encoding="utf-8")
-    (root / "graphify-out" / "graph.json").write_text(
-        "modified generated graph\n", encoding="utf-8"
-    )
     subagent_log = root / ".pi-subagents" / "worker.log"
     subagent_log.parent.mkdir(parents=True)
     subagent_log.write_text("untracked generated log\n", encoding="utf-8")
+    # graphify-out/ is gitignored outright now — nothing under it is tracked,
+    # so untracked generated graph data must still not read as working-tree dirt.
+    (root / "graphify-out").mkdir(parents=True, exist_ok=True)
     (root / "graphify-out" / "untracked.json").write_text(
         "untracked generated graph data\n", encoding="utf-8"
     )

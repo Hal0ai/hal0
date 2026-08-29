@@ -32,7 +32,7 @@ The two run as **the same UID**. That single fact is what this ADR turns on.
 
 ### What is actually where — measured, not assumed
 
-Read-only inspection of production (10.0.1.142) on 2026-08-12:
+Read-only inspection of a production box on 2026-08-12:
 
 ```
 /etc/hal0/api.env         hal0:hal0 600
@@ -138,7 +138,7 @@ and injecting it into `hal0-api` via `EnvironmentFile=`.
 processes pass. Yama's `ptrace_scope` does not apply: `yama_ptrace_access_check`
 only constrains `PTRACE_MODE_ATTACH`, not `PTRACE_MODE_READ`.
 
-Verified on ct152 (10.0.1.152, the mutable test box) on 2026-08-12, read-only
+Verified on ct152 (the mutable test box) on 2026-08-12, read-only
 probe:
 
 ```
