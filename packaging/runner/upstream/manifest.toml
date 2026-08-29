@@ -1,0 +1,100 @@
+# Provenance for the UPSTREAM runner image variant (qwen4exp unblock).
+#
+# WHY THIS EXISTS: Qwen3.8-Flash-Next ships the `qwen4exp` architecture,
+# merged into ggml-org/llama.cpp on 2026-08-27 (#27742) with correctness
+# fixes on 2026-08-28 (#27880). The default runner (../rocmfpx) builds from
+# charlie12345/ROCmFPX, whose HEAD (c49ebdbd, 2026-08-22) predates that
+# merge and carries zero qwen4exp support. Porting a week of upstream into
+# the diverged fork is exactly the #1888-shaped risk; building a second
+# image from pristine upstream is not.
+#
+# WHAT THIS IS NOT: a replacement for ../rocmfpx. That recipe's image stays
+# `DEFAULT_ROCMFPX_IMAGE` and keeps serving every existing slot. This image
+# is wired to a slot ONLY via the per-slot `image_pin` escape hatch
+# (providers/container.py — pin outranks BINARY/registry resolution), so
+# nothing resolves to it by default and nothing can drift onto it.
+#
+# FEATURE DELTA vs ../rocmfpx (:0826), stated so nobody re-derives it:
+#   PRESERVED by sharing build.sh + entrypoint.sh (symlinks in this dir):
+#     * combined HIP+Vulkan in one image (same cmake flags, same builder)
+#     * hal0-runner entrypoint: device-less GPU preflight (#1936) and
+#       load-death -> exit 64 translation (#2037)
+#     * /opt/rocmfpx/bin layout, LD_LIBRARY_PATH, HSA_OVERRIDE_GFX_VERSION,
+#       GGML_HIP_ENABLE_UNIFIED_MEMORY, provenance labels
+#     * same pinned base digest => same ROCm 7.2.4 toolchain lineage
+#   GAINED:  qwen4exp (Qwen3.8-Flash-Next) + all upstream fixes since Aug 22
+#   ABSENT — deliberately, and why that is safe:
+#     * ROCmFPX/ROCmI4/IU4 quant formats: only the FPX-family GGUFs need
+#       them (hal0-brain-sft-*-rocmfpx, chadrock/qwopus ROCmFP4). Those
+#       models must never be launched on this image; the pairing rule below
+#       is the guard.
+#     * 0001/0002 minicpm5 pretokenizer + tool-call parser and
+#       0004 lfm2.5 response-format grammar: brain-family models only;
+#       they keep running on :0826.
+#     * 0003 vulkan-shaders-serialize-glslc: build-host workaround for a
+#       glslc race in the FORK's older vulkan-shaders-gen; upstream gained
+#       its own serialization long since. If the build ever hits a glslc
+#       race, port the patch — do not pre-apply it to a tree it no longer
+#       matches.
+#
+# PAIRING RULE (the one operational invariant this file can only document,
+# not enforce): `image_pin` to this image travels WITH the model swap. Pin
+# it when a qwen4exp model lands on the slot; CLEAR the pin when the slot
+# swaps back to an FPX-family model, or the load fails on the missing quant
+# format. RUNNER_IMAGES/RunnerSupports gating for arch families is the real
+# fix and belongs in the ML-5 flag-resolution lane, not here.
+
+[image]
+#: NOT DEFAULT_ROCMFPX_IMAGE and must never become it — see header.
+tag = "ghcr.io/hal0ai/hal0-combined-upstream:0829"
+
+[base]
+#: Same base, same digest, same rationale as ../rocmfpx/manifest.toml —
+#: the digest pin freezes the entire ROCm toolchain both stages build
+#: against. Re-resolved nothing: byte-identical to the :0826 lineage so the
+#: only variable between the two images is [source].
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+digest = "sha256:4f5418c1b1e39e5ad9bbadfd2e8381c6b8a70e9b03f667179a7233c6f681462a"
+rocm_version = "7.2.4"
+upstream_family = "https://github.com/kyuz0/amd-strix-halo-toolboxes"
+upstream_ref = "unknown — inherited finding, see ../rocmfpx/manifest.toml"
+dnf_packages_pinned = false
+
+[source]
+#: Pristine ggml-org master, NOT a fork. Pinned to the exact commit the
+#: 2026-08-29 kyuz0 vulkan-radv toolbox build (llama.cpp build 10687)
+#: shipped and was binary-verified against on lxc105: `strings libllama`
+#: shows qwen4exp AND qwen35/qwen35moe, so this ref demonstrably loads both
+#: the new model and everything the fork-independent fleet runs.
+#: Contains #27742 (qwen4exp, merged 2026-08-27) and #27880 (correctness
+#: fixes, merged 2026-08-28).
+repo = "https://github.com/ggml-org/llama.cpp.git"
+ref = "c841aeeb8bb2fe417038dadfa9b007cf1a9ef950"
+ref_description = "opencl: use a better matmul path on two Adreno GPU generations (#27640)"
+#: Upstream vendors ggml in-tree at this ref, same as the fork; no
+#: submodule pointer hides a second unpinned input.
+submodules = false
+
+[build]
+#: Identical flag set to ../rocmfpx — that identity IS the preservation
+#: claim for the combined HIP+Vulkan property. If upstream has renamed or
+#: dropped a flag since the fork diverged, the cmake configure fails loudly
+#: on the build host; resolve by updating the flag HERE with a note, never
+#: by silently dropping a backend.
+gpu_arch = "gfx1151"
+cmake_flags = [
+    "-DGGML_HIP=ON",
+    "-DGGML_HIP_ROCWMMA_FATTN=OFF",
+    "-DGGML_HIP_FORCE_MMQ=ON",
+    "-DGGML_VULKAN=ON",
+    "-DGGML_CUDA=OFF",
+    "-DCMAKE_HIP_ARCHITECTURES=gfx1151",
+    "-DGPU_TARGETS=gfx1151",
+    "-DLLAMA_BUILD_SERVER=ON",
+    "-DLLAMA_BUILD_WEBUI=OFF",
+    "-DLLAMA_USE_PREBUILT_WEBUI=OFF",
+]
+
+#: No patches — the whole point of this variant. The fork patches target
+#: fork-only gaps (see FEATURE DELTA above); an empty series here is a
+#: statement, not an omission.
