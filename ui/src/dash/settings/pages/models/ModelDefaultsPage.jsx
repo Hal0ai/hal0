@@ -1,5 +1,5 @@
-// MODELS ▸ Model Defaults — per-model launch defaults (ctx / GPU layers /
-// chat template) + the arch/runner resolution reference. Unblocked by ML-4
+// MODELS ▸ Model Defaults — per-model launch defaults (ctx / chat template)
+// + the arch/runner resolution reference. Unblocked by ML-4
 // (the runner-image registry + model-config taxonomy); slots into the MODELS
 // group per the old SettingsNav TODO.
 //
@@ -31,12 +31,16 @@ import { _advInputStyle } from '../../shared/SchemaRow.jsx'
 // editor exactly. Since #1413 the registry merges `defaults` one level deep, so
 // absent means "keep the stored value" and only `null` deletes: an emptied input
 // sends `null` ("launcher default"), never an omitted key.
-function buildDefaultsPatch(init, { ctx, ngl, chatTemplate }) {
+function buildDefaultsPatch(init, { ctx, chatTemplate }) {
   const defaults = { ...init }
   const ctxNum = ctx.trim() ? parseInt(ctx, 10) : NaN
   defaults.context_size = Number.isFinite(ctxNum) ? ctxNum : null
-  const nglNum = ngl.trim() ? parseInt(ngl, 10) : NaN
-  defaults.n_gpu_layers = Number.isFinite(nglNum) ? nglNum : null
+  // #2105: NGL is slot-owned hardware (spec-hw-slot-ownership §2) — it is not a
+  // ModelDefaults field any more (registry/model.py drops it on validation) and
+  // the launcher reads the SLOT's typed n_gpu_layers instead. Send `null` so a
+  // save from here unsets any residual stored value, exactly as model-drawer.jsx
+  // does; the field is no longer offered for editing.
+  defaults.n_gpu_layers = null
   // 'auto' = GGUF-embedded template = absence of an override.
   defaults.chat_template = chatTemplate && chatTemplate !== 'auto' ? chatTemplate : null
   return defaults
@@ -47,15 +51,12 @@ function ModelDefaultsRow({ model, templates }) {
   const init = model?.defaults || {}
 
   const origCtx = init.context_size != null ? String(init.context_size) : ''
-  const origNgl = init.n_gpu_layers != null ? String(init.n_gpu_layers) : ''
   const origTpl = init.chat_template ?? 'auto'
 
   const [ctx, setCtx] = useState(origCtx)
-  const [ngl, setNgl] = useState(origNgl)
   const [chatTemplate, setChatTemplate] = useState(origTpl)
   useEffect(() => {
     setCtx(origCtx)
-    setNgl(origNgl)
     setChatTemplate(origTpl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model?.id])
@@ -65,12 +66,11 @@ function ModelDefaultsRow({ model, templates }) {
   // inline here rather than round-tripping to a red toast.
   const ctxValid =
     ctx.trim() === '' || (/^\d+$/.test(ctx.trim()) && Number(ctx.trim()) >= 128)
-  const nglValid = ngl.trim() === '' || /^-?\d+$/.test(ngl.trim())
-  const dirty = ctx !== origCtx || ngl !== origNgl || chatTemplate !== origTpl
-  const canSave = dirty && ctxValid && nglValid && !update.isPending
+  const dirty = ctx !== origCtx || chatTemplate !== origTpl
+  const canSave = dirty && ctxValid && !update.isPending
 
   const onSave = async () => {
-    const defaults = buildDefaultsPatch(init, { ctx, ngl, chatTemplate })
+    const defaults = buildDefaultsPatch(init, { ctx, chatTemplate })
     try {
       await update.mutateAsync({ id: model.id, body: { defaults } })
       window.__hal0Toast && window.__hal0Toast(`Defaults saved for ${model.longName || model.id} — restart its slot to apply`, 'warn')
@@ -106,11 +106,6 @@ function ModelDefaultsRow({ model, templates }) {
         v={<input className="mono" value={ctx} onChange={e => setCtx(e.target.value)} placeholder="auto" style={numStyle(ctxValid)} />}
       />
       <SRow
-        k="GPU layers"
-        sub="n_gpu_layers · -1 = all on GPU, 0 = CPU only, empty = default"
-        v={<input className="mono" value={ngl} onChange={e => setNgl(e.target.value)} placeholder="auto" style={numStyle(nglValid)} />}
-      />
-      <SRow
         k="Chat template"
         sub="Pinned template · auto = use the model's embedded template"
         v={
@@ -137,9 +132,10 @@ export function ModelDefaultsPage() {
     <div className="s-section">
       <h2>Model Defaults</h2>
       <p className="desc">
-        Per-model launch defaults — context length, GPU layers, and chat template. These are stored on the
+        Per-model launch defaults — context length and chat template. These are stored on the
         model registry row and resolved into a slot's launch command when it starts, so a change takes
-        effect on the next slot restart.
+        effect on the next slot restart. GPU layers are not a model default: NGL is slot-owned
+        hardware, set on the slot's hardware grid.
       </p>
 
       {/* ── Resolution reference (read-only meta) ────────────────────────── */}

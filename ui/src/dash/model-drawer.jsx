@@ -1,7 +1,7 @@
 // hal0 dashboard — Model editor drawer (D1, post-R3 surface rework).
 //
-// Replaces RecipeEditorModal (model-modals.jsx) with a right-side Drawer built
-// around one claim: "the model is the launchable thing." Converged design per
+// Replaced the pre-drawer RecipeEditorModal (deleted from model-modals.jsx in
+// #2105) with a right-side Drawer built around one claim: "the model is the launchable thing." Converged design per
 // the R3 canvas — 1b launch-command hero (the flags text leads, framed as the
 // resolved launch command) + 1c's inline divergence diff + 1a's form-row rhythm
 // for the typed-capability block.
@@ -600,7 +600,7 @@ function ModelDrawer({ open, onClose, model }) {
 	// in one place and forgotten in the other.
 	const saveBlocked = !!flagsError || !!mmprojError || !!ctxError;
 
-	// Return null when closed — matching the Modal contract the old
+	// Return null when closed — matching the Modal contract the deleted
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
 	// primitive otherwise stays mounted, and `selected` is non-null even when the
 	// drawer is shut, so an always-mounted drawer would leave phantom inputs in
