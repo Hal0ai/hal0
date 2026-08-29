@@ -132,8 +132,14 @@ def advertise_upstream(
     """Flip an upstream's ``advertise_models`` flag live (no hal0-api restart).
 
     Advertising controls catalog visibility only — dispatch/routing to the
-    upstream by explicit id is unaffected. The change takes effect on the next
-    ``/v1/models`` request (the API punches the composite catalog cache).
+    upstream by explicit id is unaffected.
+
+    #2112: the API punches the *per-upstream* model cache on a visibility flip
+    (``app.state.upstream_models``, in ``api/routes/providers.py``), not the
+    composite catalogue — that has its own module-level TTL cache in
+    ``hal0.api`` which per-upstream flips do not touch. So ``/api/upstreams``
+    reflects the change on the very next call, while ``/v1/models`` picks it up
+    once the composite TTL rolls over. Still no restart either way.
     """
     key = state.strip().lower()
     if key in _ADVERTISE_ON:
