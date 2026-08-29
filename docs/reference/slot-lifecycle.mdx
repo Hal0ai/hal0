@@ -80,15 +80,25 @@ Each is an HTTP-status-bearing error under the `slot.*` namespace:
 | `SlotNotReady` | 503 | — |
 | `SlotSpawnFailed` | 500 | — |
 | `SlotHealthFailed` | 503 | — |
-| `SlotOutputSanityFailed` | 500 | The server is healthy but its output is not language — see [Output-sanity gate](#output-sanity-gate). |
-| `SlotCrashLooping` | 503 | Reload blocked during exponential backoff, or after too many consecutive failures. Carries `retry_after_s`. |
+| `SlotOutputSanityFailed` | 500 | The server is healthy but its output is not language — see Output-sanity gate below. |
+| `SlotCrashLooping` | 503 | Reload blocked during exponential backoff, or after too many consecutive failures — see Crash-loop breaker below. Carries `retry_after_s`. |
 | `SlotTerminateTimeout` | 504 | Stop didn't return in time — the request unblocks anyway. |
 | `SlotConfigError` | 400 | — |
-| `NpuExclusivityViolation` | 409 | Only one `device=npu, type=llm, enabled=true` slot is allowed at a time (AMD XDNA hardware context limit). |
+| `NpuExclusivityViolation` | 409 | Only one `device=npu, type=llm` slot with a bound model is allowed at a time (AMD XDNA hardware context limit). |
 | `SlotPinned` | 409 | A pinned slot needs `?force=true` to unload or delete. |
 
 Health-probe resolution on timeout: unresolved health checks resolve to `WARMING`, not
 `ERROR` — an ambiguous outcome is treated as "still loading," not "failed."
+
+<Aside type="note" title="Client-side lifecycle timeouts">
+The CLI and the MCP admin bridge derive their read timeout for `load` / `unload`
+/ `restart` / `swap` from the server's own worst-case budget
+(`hal0.slot_lifecycle_budget`) rather than a fixed number — a load charges the
+health poll, the output-sanity gate's CPU-lane budget, and up to three
+in-series eviction unloads, all with a 1.15x overhead margin. A restart or swap
+charges both an unload and a load. This is why a slow (e.g. CPU-only) box's
+load can legitimately take several minutes before a client gives up.
+</Aside>
 
 ## Output-sanity gate
 
@@ -131,11 +141,59 @@ Escape hatches, both default-ON:
 | Whole box | `HAL0_SLOT_OUTPUT_SANITY=0` in the api environment |
 | One slot | `output_sanity = false` in the slot TOML, or via `PUT /api/slots/{name}/config` |
 
+## Crash-loop breaker
+
+A slot in `ERROR` is freely re-loadable, but not at request cadence. `SlotManager`
+tracks consecutive load failures per slot (`hal0.slots.manager`) and throttles
+further `load()` calls through three states:
+
+| State | When | Next retry |
+|---|---|---|
+| `backoff` | 1–4 consecutive failures | Exponential: `min(5s * 2^(failures-1), 300s)` |
+| `parked` | 5 or more consecutive failures | `min(300s * 2^(failures-5), 3600s)` — loads are refused outright |
+| `half-open` | The current backoff or parked cooldown has elapsed | One trial load runs; success closes the breaker, a failed trial re-parks it at the next cooldown step |
+
+A load the breaker refuses raises `SlotCrashLooping` (503, see above) with **no**
+state transition — no `STARTING` event, no journal row, no `systemctl` call — and
+carries `retry_after_s` for the response's `Retry-After` header. Any operator
+action (a manual load, a restart, or a config edit) resets the breaker
+immediately, independent of the cooldown clock; a load that converges healthy
+clears it too.
+
+The manager stamps the live view onto every slot snapshot as
+`metadata.breaker = {state, failures, retry_after_s}` while the breaker is
+non-closed, and omits the key entirely once it's closed — so the field's
+presence is the render signal. The dashboard shows this as a chip on both the
+slot card and the Edit-slot drawer's state strip: amber "retry in Ns" while
+backing off, red "parked · N failures" once parked, and a neutral "trial
+pending" during the half-open window.
+
+## Container image status
+
+`image_status` on a slot snapshot is one of `present`, `pulling`, `missing`,
+`unknown`, or `not-configured` (`hal0.slot_view.image_status_for`). Only
+`unknown` renders a dashboard chip: it means hal0 could not read the container
+image store at all — the rootful `hal0-podman-ro` seam returned an error, the
+sudoers grant is absent, or the read probe timed out — which is a different
+claim from `missing` (podman was asked and said the image isn't there).
+`present` and `not-configured` are the quiet, correct states, and `pulling`
+already has its own progress bar. Seeing the "image ?" chip is the cue to run
+`hal0 doctor all` and check the `seams` row — there is no standalone
+`hal0 doctor seams` command.
+
+A slot or its container that was stopped cleanly no longer paints as `crashed`
+on either the slot card or the dashboard's slot list — only a unit that
+actually failed (`state = "error"` or a `crashed` container status) gets the
+red treatment; a graceful stop renders the same neutral "stopped" state as any
+other offline slot.
+
 ## Persistence
 
 `SlotStateRecord` (`name`, `state`, `model_id`, `port`, `updated_at`, `message`,
 `extra`) is written atomically (tempfile + `fsync` + `os.replace`) to
-`/var/lib/hal0/slots/<name>/state.json`, so SSE readers never observe a torn write.
+`/var/lib/hal0/slots/<stem>/state.json`, where `<stem>` is the slot's name
+(or, after `migrate-id-keying`, its stable numeric id — see
+`hal0.slots.layout`), so SSE readers never observe a torn write.
 
 ## Self-managed providers
 
@@ -183,13 +241,13 @@ previously were not.
 
 ## The v1.0 write-boundary guard
 
-<Aside type="caution">
-New in v1.0 (Stream F, `fix/write-boundary-enforcement` — reviewed PASS, not yet
-merged to `main` at time of writing). Before this change, `stacks/apply.py` and
-`SlotManager.create()` could both write slot TOML in-process **without** ever routing
-through the HTTP-layer's model-owned-key guard or the `[server].extra_args`
-hardware-flag screen — a real bypass of the model/slot key-ownership split described in
-[Config schema](/docs/reference/config-schema/#model-nested-under-a-slot).
+<Aside type="note">
+New in v1.0 (Stream F, `fix/write-boundary-enforcement`). Before this change,
+`stacks/apply.py` and `SlotManager.create()` could both write slot TOML
+in-process **without** ever routing through the HTTP-layer's model-owned-key
+guard or the `[server].extra_args` hardware-flag screen — a real bypass of the
+model/slot key-ownership split described in the [Config schema](/docs/reference/config-schema)
+reference.
 </Aside>
 
 `guard_slot_write_payload` (`hal0.slots.config_write`) is now the single shared
@@ -199,5 +257,5 @@ and `SlotManager` alike. It partitions model-owned vs. slot-owned keys and scree
 silently write a key the model is supposed to own. `PATCH /slots/{name}/defaults`
 correctly reports model-owned keys as such after this change.
 
-For the CLI surface that drives slot lifecycle transitions directly, see
-[CLI reference → hal0 slot](/docs/reference/cli/#hal0-slot--manage-inference-slots).
+For the CLI surface that drives slot lifecycle transitions directly, see the
+[CLI reference](/docs/reference/cli), `hal0 slot`.

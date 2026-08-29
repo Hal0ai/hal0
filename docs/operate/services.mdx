@@ -1,6 +1,6 @@
 ---
 title: Services
-description: The two systemd units that make up the hal0 platform — hal0-api and hindsight-api. Unit contents, config files, ports, health checks, and how to start/stop/restart/inspect logs for each.
+description: "The two systemd units that make up the hal0 platform — hal0-api and hindsight-api — plus the four companion services the dashboard's Services page manages (OpenWebUI, ComfyUI, Hermes, Hindsight): unit contents, config files, health checks, lifecycle actions, and mDNS discovery."
 sidebar:
   order: 20
 ---
@@ -13,10 +13,13 @@ it delegates recall/extraction to. Both run as the unprivileged `hal0` system
 user and are managed with plain `systemctl`/`journalctl`.
 
 <Aside type="note">
-This page covers the two platform units. Per-model inference units
-(`hal0-slot@<name>.service`) and companion apps managed through the
-`/api/services` registry (OpenWebUI, ComfyUI, Hermes) each have their own
-lifecycle and aren't covered here.
+This page covers the two platform units by raw `systemctl` below, and —
+further down, in Companion services — the four services in the
+`/api/services` registry (OpenWebUI, ComfyUI, Hermes, Hindsight) that the
+dashboard's Services page controls. Per-model inference units
+(`hal0-slot@<name>.service`) have their own lifecycle; see
+[Manage slots](/docs/guides/manage-slots) and the
+[slot lifecycle reference](/docs/reference/slot-lifecycle).
 </Aside>
 
 ## hal0-api.service
@@ -114,6 +117,7 @@ Environment=HINDSIGHT_API_LLM_PROVIDER=openai
 Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
+EnvironmentFile=-/etc/hal0/hindsight-llm.env
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
 Environment=HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
 
@@ -139,7 +143,12 @@ WantedBy=multi-user.target
   OpenAI-compatible endpoint (`HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1`).
   hindsight-api is a consumer of hal0-api, not the reverse.
 - **No TOML config** — every setting is an inline `Environment=` line in the
-  unit itself. An optional operator drop-in,
+  unit itself, with one exception: `EnvironmentFile=-/etc/hal0/hindsight-llm.env`
+  (the leading `-` means "ignore if absent") overrides the inline
+  `HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth` placeholder with the real
+  client key. `installer/install.sh` writes that file at install time from
+  `HAL0_CLIENT_KEY`/`HAL0_ADMIN_KEY` in `/etc/hal0/api.env`, and `hal0 auth
+  rotate` keeps it fresh afterward. An optional operator drop-in,
   `hindsight-api.service.d/extraction-model.conf`, overrides
   `HINDSIGHT_API_LLM_MODEL` and `HINDSIGHT_API_LLM_TIMEOUT` without editing the
   installer-owned unit (written by `hal0 memory graph enable --slot <name>` or
@@ -159,6 +168,13 @@ WantedBy=multi-user.target
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).
+
+### Config files it reads
+
+| File | Purpose |
+|---|---|
+| `/etc/hal0/hindsight-llm.env` | Optional `EnvironmentFile`, `-` prefixed (ignored if absent) — supplies the real `HINDSIGHT_API_LLM_API_KEY`, written by `installer/install.sh` and kept fresh by `hal0 auth rotate`. |
+| `hindsight-api.service.d/extraction-model.conf` | Optional systemd drop-in under `/etc/systemd/system` — overrides `HINDSIGHT_API_LLM_MODEL`/`HINDSIGHT_API_LLM_TIMEOUT`, written via `hal0 memory graph enable --slot <name>` or the Memory dashboard page. |
 
 ### Health endpoint
 
@@ -200,6 +216,113 @@ GET /api/logs/stream?unit=hal0-api&level=...     # SSE tail
 
 Swap `unit=hindsight-api` for the memory engine's logs. Both routes are
 admin-tier.
+
+## Companion services
+
+The dashboard's Services page manages four companion services from a single
+registry — `hal0.services.registry.SERVICES` in
+`src/hal0/services/registry.py`. One `ServiceDef` per service names its
+owning unit, its probe strategy, and which lifecycle verbs it permits:
+
+| Service | Purpose | Unit | Allowed actions |
+|---|---|---|---|
+| OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
+| ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188`) | `hal0-slot@img.service` | start, restart (no stop) |
+| Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
+| Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
+
+Hindsight's entry here isn't a second thing to learn: the Services page's
+buttons for it run through the identical `unit_action` → `hal0-systemctl`
+path already described in hindsight-api.service above.
+
+### Start, Stop, Restart
+
+The Services page renders one button per allowed action
+(`ui/src/dash/services.jsx:100-124`): Restart whenever it's allowed, Start
+when the unit isn't currently active, Stop only while it is. Clicking one
+calls `POST /api/services/{id}/action` with `{"action": "start"|"stop"|"restart"}`,
+which `hal0.services.systemd.unit_action()` runs against the unit — the
+same verb allow-list and `hal0-systemctl` wrapper described above for
+hal0-api and hindsight-api.
+
+Stop carries a browser confirmation — "Stop `<name>`? Clients using it will
+lose access until it is started again." — because stopping OpenWebUI,
+Hermes, or Hindsight takes down something other browsers or agents may be
+using right now. It's a client-side prompt only: it isn't enforced by the
+API, so a direct `POST` bypasses it. Restart shows no such prompt.
+
+ComfyUI has no Stop button at all — the registry grants it only `start`
+and `restart`. Its "start" is not a raw `systemctl start`: the route
+substitutes the GPU-arbiter switchover (`_comfyui_start`,
+`src/hal0/api/routes/services.py:187-208`, delegating to the same
+`comfyui_switchover` handler the FirstRun repair flow uses) so resident LLM
+slots get drained before the iGPU is handed to ComfyUI. Stopping is
+arbiter-managed too, per its card hint: "stop is GPU-arbiter managed —
+switch back to inference in the Image-Gen pane".
+
+The registry also allows `enable`/`disable` for OpenWebUI, Hermes, and
+Hindsight, but the Services page renders no buttons for those two verbs —
+only `POST /api/services/{id}/action` with `{"action": "enable"|"disable"}`
+reaches them.
+
+There's no `hal0 service` command group, and for OpenWebUI and Hermes
+specifically there's no CLI equivalent for start/stop/restart. `hal0 app
+list` and `hal0 agent list`/`hal0 agent status` show a service's systemd
+enabled/active state, but neither `hal0 app` nor `hal0 agent` has a
+start/stop/restart subcommand — for those two services, the dashboard
+buttons, or a direct `systemctl {start|stop|restart} <unit>` as root (same
+mechanism as the platform units above), are the only ways to drive these
+verbs today. ComfyUI is the exception: its unit is `hal0-slot@img.service`,
+the same seeded `img` slot the Slots page manages, so `hal0 slot restart
+img`, `hal0 slot load img`, and `hal0 slot unload img` reach it from the
+CLI.
+
+### Health
+
+Two endpoints report health, for different consumers:
+
+- `GET /api/services` — the Services page's own source. Every entry
+  carries `up` (bool), a probe-specific `detail` string, and the raw
+  systemd `unit_state` (`active_state`/`sub_state`/`unit_file_state`/`since`).
+  The page's status pill is green **up** when `up` is true, red **failed**
+  when `unit_state.active_state` is `"failed"`, grey **down** for any other
+  managed service, and a plain grey **—** for an unmanaged one
+  (`ui/src/dash/services.jsx:67`).
+- `GET /api/services/health` — an older, stable three-service summary
+  (OpenWebUI, ComfyUI, Hermes only — no Hindsight) that feeds the Overview
+  page's Services widget. It collapses the same probes into
+  `state: "up" | "stopped" | "down"`, splitting "not up" into a deliberate
+  `stopped` (unit `inactive` — comes back on demand) from `down` (unit
+  `failed`, or reachable-but-unhealthy).
+
+Each service is probed differently: OpenWebUI is a loopback
+`GET http://127.0.0.1:3001/health` (2xx = up); ComfyUI is its own
+`/system_stats` + `/queue` (reachable = up, with a live "N running / M
+queued" job count); Hermes and Hindsight both fall back to systemd
+`active_state == "active"`. Every probe is fail-soft by design — a probe or
+systemd failure degrades to `up=false` with an honest detail, never a
+fabricated "up" and never a 500. A service with no wired probe would report
+`detail: "unmonitored"`, though none of the four registered services hits
+that path today.
+
+### mDNS discovery toggle
+
+The DISCOVERY (mDNS) card above the service grid
+(`DiscoveryCard`, `ui/src/dash/services.jsx:200-241`, toggle button at
+`:214-219`) toggles `POST /api/services/mdns` with
+`{"advertise": true|false}`. Turning it on writes one avahi service-group
+file — `/etc/avahi/services/hal0-addon-<id>.service` — per service that is
+both mDNS-capable and LAN-published; today that's OpenWebUI and ComfyUI
+only (Hermes and Hindsight are loopback-only and carry no LAN port, so
+they're never mdns-capable). avahi-daemon inotify-watches that directory,
+so the announcement takes effect immediately — no reload, no unit restart.
+Turning it off removes every `hal0-addon-*.service` file.
+
+The toggle never touches `hal0.service`, the base dashboard announcement
+the installer writes separately — that's why "Dashboard announced as
+`<host>.local`" can be true even when the addon toggle is off. If
+avahi-daemon isn't active, the button is disabled and the card tells the
+operator to install/enable it or add a static hosts entry.
 
 ## See also
 

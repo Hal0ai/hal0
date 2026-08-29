@@ -1,0 +1,205 @@
+---
+title: Find your way around the dashboard
+description: The dashboard's persistent chrome — command palette, notifications bell, Agent Chat drawer, sidebar, and footer — and a map of every page under Settings, including what the Storage model-store migration actually does.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The dashboard has two layers: a shell that's on screen no matter what page
+you're looking at, and the pages themselves. This guide maps the shell —
+the command palette, the notifications bell, the Agent Chat launcher, the
+sidebar, and the footer — and then walks every page under **Settings**, so
+nothing in the operator surface is a surprise.
+
+## The chrome
+
+### Command palette
+
+Press **⌘K** (or **Ctrl+K**) anywhere in the dashboard to open the command
+palette — a fuzzy-search launcher over everything the dashboard knows
+about. On mobile, the same surface opens from the **Quick actions** row in
+the nav drawer.
+
+Typing filters a grouped list:
+
+- **Routes** — jump to Dashboard, Slots, Runner Images, Models, Profiles,
+  Operator Board, Benchmarks, Hardware, Logs, Agent, or Settings.
+- **Slots** — every configured slot, live; selecting one opens its edit
+  drawer.
+- **Models** — every catalogue and installed model; selecting one opens
+  the Models page.
+- **Settings** — a deep link straight into most Settings pages (see
+  below) — the palette has an entry for every page except **Model
+  Defaults**, which has no deep link.
+- **Actions** — global actions that are always live: Create slot, Add
+  model from HF, Open Chat Pro UI (when OpenWebUI is reachable), and Open
+  docs. A Cancel download action appears only while a model pull is
+  actually running.
+- **Copy** — clipboard utilities for hitting the API directly, currently
+  just Copy API base URL. Rendered as its own group, separate from
+  Actions.
+- **Slot actions** — per-slot verbs (Restart, Stop or Start, View logs,
+  Copy curl) that only show up once you type a verb or a slot name — they
+  stay out of the default list to keep it uncluttered.
+
+Arrow keys move the selection, Enter runs it, Escape closes the palette.
+
+### Notifications bell
+
+The bell in the top bar aggregates everything that needs your attention
+into one panel, grouped into sections:
+
+- **needs attention** — pending agent tool-call approvals and slots that
+  have failed and need a restart.
+- **downloads** — active and failed model pulls, with cancel/retry
+  controls and a link to the full downloads pane.
+- **updates** — an available hal0 release, slots running a pre-update
+  config that need a restart, and any model updates available on
+  Hugging Face.
+- **messages** — developer/system notices pushed into the dashboard at
+  runtime.
+
+The badge shows a live count; when nothing needs you, the panel says so.
+
+### Agent Chat drawer
+
+The **Agent Chat** button in the top bar (the two-hemisphere brain icon)
+toggles a slide-out drawer — the UI surface for talking to hal0's brain.
+This page only covers the drawer as a piece of chrome; for what the brain
+is and how it's configured, see [Brain](/docs/concepts/brain).
+
+### Documentation and sidebar
+
+The book icon next to Agent Chat opens the hosted docs in a new tab. The
+sidebar below it lists the primary destinations — Overview, Slots (with
+Endpoints, Runner Images, and Stacks as sub-pages), Models (with
+Profiles), Benchmarks, Agents (with Memory, when the memory subsystem is
+enabled, and MCP), Services, Logs, and Settings — plus a **Services**
+zone pinned to the bottom of the sidebar with quick external launchers:
+**Kanban** (the in-app Operator Board, also reachable with ⌘B),
+**OpenWebUI**, and **Hermes Dash** — the latter two only appear when the
+backend reports them reachable.
+
+### Footer
+
+The footer is always visible as a thin strip and expands into a pane when
+toggled. Collapsed, it shows two LED-pip groups plus a toggle:
+
+- a **slots** group — one pip per active slot (colored by state) and a
+  ready count,
+- a **services** group — one pip per backing service and a ready count
+  (a single warn-toned "services unknown" pip appears if the health
+  check itself hasn't answered, rather than falsely reporting all-green),
+- an update chip when a new hal0 release is available,
+- a trailing tail of the most recent journal lines.
+
+Expanded, it becomes a two-tab pane: **journal** (the live event stream,
+filterable by source and searchable) and **downloads** (active/queued/
+completed/failed model pulls with cancel, retry, and clear controls).
+
+## Settings
+
+Settings groups its pages into four sections in the left rail. Several
+pages are the primary documentation surface for another guide — those get
+one line and a link here rather than a repeat.
+
+### GENERAL
+
+- **Overview** — the landing page: overall health status, per-service
+  health, live hardware/power counters, the `/v1` request rollup, and the
+  telemetry opt-in.
+- **Security** — auth posture only (never a key value): whether auth is
+  required, whether an admin key is set, and the tier; rotates the admin
+  or client key; shows the live route-exposure table. See
+  [Auth](/docs/operate/auth).
+- **Doctor** — runs and renders `hal0 doctor`'s typed diagnoses (id,
+  severity, evidence, next steps) over HTTP.
+
+### MODELS & INFERENCE
+
+- **Loaded Models**, **Model Defaults**, and **AI Capabilities** (TTS,
+  STT, embeddings, reranking, image generation, plus the NPU anchor) —
+  see [Choose models](/docs/guides/choose-models) for the catalogue and
+  per-model launch defaults, and
+  [Generate images](/docs/guides/generate-images) /
+  [Speech to text and text to speech](/docs/guides/voice-stt-tts) for
+  the capability slots.
+
+### SYSTEM
+
+- **Hardware & Runtimes** — read-only evidence: detected hardware,
+  available backends, and the runner-image registry per slot. See
+  [Manage slots](/docs/guides/manage-slots) and
+  [Manage runner images](/docs/guides/manage-runner-images) for what
+  actually controls what a slot runs on.
+- **Storage** — where hal0 reads and writes model files on disk. Covered
+  in detail below.
+- **Memory** — the memory engine, graph extraction, and reranker. See
+  [Enable memory](/docs/guides/enable-memory).
+- **Updates** — signed self-update plus version/license identity. See
+  [Update and roll back](/docs/guides/update-and-rollback).
+- **Advanced** — low-level dispatcher and activity-log tuning rendered
+  straight from the server's settings schema, plus a hal0-api restart
+  control.
+
+### INTEGRATIONS
+
+- **Secrets** — provider keys, pull-auth, and custom env vars. This is
+  **not** an encrypted store: values are persisted as plaintext
+  double-quoted `KEY="value"` lines in `/etc/hal0/api.env`, root-only at
+  mode `0600` — the same systemd `EnvironmentFile=` `hal0-api` reads at
+  start. Includes a dedicated `HF_TOKEN` field that applies live (no
+  restart) so a gated or large pull can authenticate right away. See
+  "Secrets" on [REST API index](/docs/reference/api/rest-api/) for the
+  write path.
+- **Agent Chat** — the `[brain_chat]` policy surface (kill switch, target
+  slot override, loop knobs). See [Brain](/docs/concepts/brain).
+
+## Settings ▸ Storage, in detail
+
+Storage holds one field: **Storage location**, an absolute directory that
+every model consumer — the pull engine, the registry, slots — resolves
+through. Alongside it:
+
+- **Current state** — a live probe of the effective path: whether it
+  exists, file count, bytes used, bytes free, and whether it's writable.
+- **Suggested locations** — clickable preset paths, each labeled with its
+  current state.
+- **Auto-scan on start** — whether hal0-api walks the storage path at
+  startup and registers any new files it finds.
+- **File extensions** — read-only; edit via `hal0 config edit`.
+
+### Changing the location: the migration flow
+
+If you change **Storage location** to a path that doesn't yet hold your
+existing model files, Saving doesn't move anything right away. hal0 first
+does a dry run and shows a confirmation dialog: it will move a specific
+number of files (with a total size) from the old path to the new one. If
+source and target are on the same filesystem the move is effectively
+instant; across filesystems it's a real copy and can take a while. Only
+after you confirm does hal0 actually touch disk.
+
+On confirm, hal0 moves the files first and persists the new path to
+`hal0.toml` second — deliberately in that order, so a failed move leaves
+your prior config and your files exactly where they were; you can safely
+re-run the move. Once the new path is saved, hal0 immediately rescans it
+and registers any files it finds, so newly-visible models show up in the
+registry without waiting for a restart.
+
+<Aside type="caution">
+Moving files does **not** touch already-running slots. A slot that has a
+model loaded keeps serving it from memory against the old path — nothing
+interrupts an in-flight request. What changes is the *next* time each
+slot's container restarts: only then does it observe the new storage
+path. The Storage location row carries an amber "requires restarting
+slots to take effect" badge for exactly this reason. If you want every
+slot serving from the new location immediately, restart them yourself
+afterward — from the Slots page, or with **Restart &lt;slot&gt;** in the
+command palette.
+</Aside>
+
+If a move partially fails, the files that already moved are **not**
+rolled back — the operator can re-run the same move (now effectively a
+no-op for what already succeeded) to finish it safely.

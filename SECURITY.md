@@ -2,9 +2,8 @@
 
 ## Supported Versions
 
-hal0 is pre-1.0 and ships from `main`. Security fixes land on the latest
-release and the current `main` branch. Older tagged releases are not
-back-patched.
+Security fixes land on the latest release and the current `main` branch.
+Older tagged releases are not back-patched.
 
 | Version        | Supported          |
 | -------------- | ------------------ |
@@ -15,8 +14,15 @@ back-patched.
 
 **Treat the bundled agent as root-equivalent on the box it runs on.**
 
-hal0 ships a bundled agent (Hermes) provisioned with `terminal.backend = local`,
-so it can execute arbitrary shell commands on the host. It runs under
+hal0 ships a bundled agent (Hermes). Its terminal tool — the one that executes
+arbitrary shell commands on the host — is **off by default** as of v1.0 and is
+an explicit opt-in (`sudo hal0 agent install hermes --terminal-tool`, or
+`HAL0_HERMES_TERMINAL=1` for an unattended install). A piped, headless or
+non-interactive install never enables it. `hal0 agent status hermes` prints the
+current posture.
+
+Turning it on makes the agent root-equivalent, and the rest of this section
+describes that state. Even with the terminal tool off, the agent runs under
 `hal0-agent@<instance>.service` as `User=hal0` — the same user `hal0-api.service`
 runs as. Two consequences follow, and neither is hypothetical:
 

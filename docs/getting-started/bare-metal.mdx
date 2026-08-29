@@ -44,12 +44,13 @@ sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
 Before installing on GPU hardware, make sure the host kernel already
 exposes the iGPU (and NPU, if present) as device nodes — hal0 ships the
 ROCm/XRT userspace inside its containers, but it cannot load a kernel
-driver from inside one. See [GPU drivers and memory](/docs/getting-started/drivers/#kernel-and-firmware)
+driver from inside one. See the Kernel and firmware section of
+[GPU drivers and memory](/docs/getting-started/drivers/)
 for the kernel/firmware requirements and verification steps.
 
 On a Strix Halo box, also size the amdgpu **GTT** pool on the host kernel
-command line before you install — see
-[Size the GTT pool](/docs/getting-started/drivers/#size-the-gtt-pool) for
+command line before you install — see the Size the GTT pool section of
+[GPU drivers and memory](/docs/getting-started/drivers/) for
 the reference `grub` parameters.
 
 ## 3. Install hal0
@@ -67,8 +68,8 @@ for the full sequence and every environment variable and flag.
 <Aside type="tip" title="GPU device groups">
 On a GPU host the installer adds the `hal0` service user to the `render`
 and `video` groups so slot containers can open `/dev/kfd` and
-`/dev/dri/renderD*`. See
-[Render-group gids](/docs/getting-started/drivers/#render-group-gids) if
+`/dev/dri/renderD*`. See the Render-group gids section of
+[GPU drivers and memory](/docs/getting-started/drivers/) if
 you need to hand-wire device access (e.g. in an LXC).
 </Aside>
 

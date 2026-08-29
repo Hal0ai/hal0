@@ -81,7 +81,7 @@ than pointing an upstream straight at `api.anthropic.com`.
 hal0 upstream update openrouter --timeout 120
 hal0 upstream test openrouter
 hal0 upstream show openrouter
-hal0 upstream advertise openrouter    # toggle whether its models are advertised
+hal0 upstream advertise openrouter on # required on|off — set /v1/models visibility
 hal0 upstream delete openrouter
 ```
 
@@ -90,11 +90,41 @@ reachability report: `{ok, status, latency_ms, models_count, error?}`. If
 the declared env var is empty, the probe fails fast without making an
 HTTP call.
 
+## Curate which models are advertised
+
+`[upstream.model_filters]` narrows which of an upstream's models show up
+in the aggregated `/v1/models` catalog, without touching dispatch — a
+model can be filtered out of the catalog and still be reachable by its
+explicit id.
+
+```sh
+hal0 upstream update openrouter --include 'anthropic/*' --exclude '*:free'
+hal0 upstream update openrouter --model gpt-4o-mini
+hal0 upstream update openrouter --clear-filters
+```
+
+- **`--model`** (repeatable) — allowlist one exact model id.
+- **`--include`** (repeatable) — an fnmatch glob; a model is advertised if
+  it's in `--model` or matches any `--include` glob (both empty means
+  everything is included).
+- **`--exclude`** (repeatable) — an fnmatch glob that always wins over
+  `--model`/`--include`.
+- **`--clear-filters`** — drop all filters and advertise everything again.
+
+`hal0 upstream list` shows a **Filters** column summarizing what's
+active per upstream. Like `--advertise-models`/`--enabled`, filter
+changes apply live — no restart.
+
 ## Write a credential without recreating the upstream
 
 ```sh
-hal0 upstream update openrouter --api-key sk-or-new-key
+hal0 upstream credentials set openrouter --key sk-or-new-key
 ```
+
+`credentials set` posts to `/api/providers/{name}/credentials` and binds
+the key to the upstream's declared `auth_value_env` — pass `--env-var` to
+target a different env-var name instead of the upstream's default. Omit
+`--key` to be prompted for it securely.
 
 Or directly over the API:
 
@@ -125,9 +155,20 @@ if it needs to be exposed beyond the LAN.
 
 ## Picking up changes
 
-Credential writes apply to the running process immediately — no restart
-needed. Structural edits to `upstreams.toml` (adding, removing, or
-retiming an upstream through the CLI) are read once at `hal0-api`
-startup — `hal0 config reload` re-reads `hal0.toml`, **not**
+Credential writes, and every `hal0 upstream create` / `update` / `delete`
+/ `advertise` call, apply to the running `hal0-api` process immediately —
+no restart needed. Creating an upstream registers it live; patching one
+(visibility flags, auth, URL, timeout, model filters) applies live too. A
+patch that flips `advertise_models` or `enabled` punches only that
+upstream's entry in the per-upstream model cache (and only if it's
+already cached), so the next `/api/upstreams` or `/v1/models` request
+refetches it. The composite `/v1/models` catalogue itself is served from
+a separate, module-level TTL cache that per-upstream visibility patches
+do not touch — it's refreshed by its own TTL (default 5s) and by slot
+readiness events, not by upstream PATCH calls.
+
+The one case that still needs a restart is a **hand-edit** of
+`upstreams.toml` outside the CLI/API — nothing watches that file for
+changes, and `hal0 config reload` only re-reads `hal0.toml`, not
 `upstreams.toml`. Run `hal0 config validate` after a hand-edit, then
-`systemctl restart hal0-api` to pick it up.
+`sudo systemctl restart hal0-api` to pick it up.

@@ -55,7 +55,7 @@ about hardware. As of v1.0, a profile carries **no container image and no
 placement information at all**: no device, no GPU index, no thread count, no
 `-c`/`--ctx-size` (that flag is on hal0's own managed-args denylist and can
 never appear in a profile's flags). All of that lives on the
-[slot](/docs/concepts/slots#the-hardwaremodel-write-boundary).
+[slot](/docs/concepts/slots), in the hardware/model write boundary.
 
 This is a genuine v1.0 change, not a renaming exercise: pre-1.0 profiles were
 identity-bound to a backend (`rocm`, `vulkan`, `cuda`) and carried an image.
@@ -162,7 +162,8 @@ never deduped, since llama-server treats repeats of those additively):
 
 1. **base** — `--host`/`--port`/`--model`/`--alias`/`--ctx-size`, always
    present. Context size here is the model's resolved window, capped by the
-   slot's own ceiling — see [Slots](/docs/concepts/slots#context-size-is-a-ceiling-not-an-override).
+   slot's own ceiling — see the "context size is a ceiling, not an
+   override" section of [Slots](/docs/concepts/slots).
 2. **profile** — the profile's `flags`.
 3. **model defaults** — the registry model's `defaults.extra_args` (plus
    `-ngl` from the slot, not the model), with the model's **family default**

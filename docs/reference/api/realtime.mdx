@@ -1,0 +1,207 @@
+---
+title: Realtime API reference
+description: "WS /v1/realtime — hal0's OpenAI-Realtime-shaped voice WebSocket, what it implements versus not, and how it relates to the STT/TTS/chat routes and the voice stack. Verified against src/hal0/realtime/ and src/hal0/api/routes/realtime.py."
+sidebar:
+  order: 40
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`WS /v1/realtime` is a WebSocket endpoint that speaks a subset of the OpenAI Realtime
+API's event protocol. It is a thin transport shell (`src/hal0/api/routes/realtime.py`,
+~100 lines) over an engine in `src/hal0/realtime/` (~1,100 lines: `session.py`'s turn
+state machine, `backends.py`'s STT/TTS/chat seams, `audio.py`'s pcm framing,
+`vad.py`'s voice-activity detector, and `events.py`'s event vocabulary). It is
+**enabled by default** (`[realtime].enabled = true`) and classified **CLIENT** tier in
+`src/hal0/security/exposure.py` — see [REST API index](/docs/reference/api/rest-api/)
+for what that means once `[security].require_auth` is on.
+
+<Aside type="caution">
+This is not an OpenAI Realtime API passthrough. hal0 implements its own engine that
+speaks a compatible-looking subset of the wire event vocabulary, but every "model" it
+talks to is a local hal0 slot reached over loopback HTTP — there is no upstream OpenAI
+connection anywhere in this path.
+</Aside>
+
+## What it is
+
+hal0's realtime engine ties together three things it already exposes as separate
+REST routes — speech-to-text, chat (or the hal0-brain steward), and text-to-speech —
+into one stateful WebSocket session, so a voice client doesn't have to orchestrate
+record → transcribe → chat → synthesize → play as four separate round trips. The
+session owns: connection state, an input-audio ring buffer, server-side voice-activity
+detection (turn boundaries), the STT/LLM/TTS pipeline for a turn, sentence-chunked
+audio output, cancellation, and barge-in.
+
+Relation to the rest of the API surface: the engine is deliberately fenced away from
+importing model/provider/slot internals directly. It reaches STT via
+`POST /v1/audio/transcriptions`, TTS via `POST /v1/audio/speech`, and chat via either
+`POST /v1/chat/completions` or `POST /api/brain/chat` — all as loopback HTTP calls to
+hal0's own already-documented endpoints (see
+[OpenAI-compatible API reference](/docs/reference/api/openai-compat/)). The base URL
+for these internal calls is `http://127.0.0.1:8080` by default, overridable via
+`HAL0_SELF_BASE_URL`. This means the realtime session's STT/TTS quality and latency
+are exactly whatever the `[realtime].stt_model` / `[realtime].tts_model` slots deliver
+through their normal REST contract — there is no separate, faster internal path.
+
+## Connecting and authenticating
+
+Connect to `ws://<host>:8080/v1/realtime?model=<model>` (or `wss://` behind TLS
+termination). `model` is an optional query parameter; if omitted, the session falls
+back to `[realtime].default_model`, and if that's also empty the session starts with
+an empty model string until a `session.update` event sets one.
+
+Authentication is forwarded, not renegotiated over the socket: the
+`AuthEnforcementMiddleware` gates the WebSocket upgrade itself (it classifies every
+request — HTTP, SSE, and WS — before a handler ever runs), and separately the session
+forwards a credential on its own outbound loopback calls to `/v1/chat/completions`,
+`/api/brain/chat`, etc., so those internal calls also pass the same enforcement when
+auth is on. That credential is resolved as: the `Authorization` header if the client
+sent one, otherwise synthesized as `Bearer <value>` from a `?api_key=` query
+parameter — the fallback exists because browser WebSocket clients cannot set
+arbitrary upgrade headers.
+
+The server always accepts the WebSocket upgrade, even when the endpoint is disabled.
+If `[realtime].enabled` is `false`, the server accepts the connection, immediately
+sends a typed `error` event (`code: "disabled"`), and closes with WS code `4404`. A
+client can't tell "disabled" from "wrong URL" purely from the handshake succeeding —
+it has to read the first frame.
+
+## Session lifecycle and event vocabulary
+
+On connect the server emits `session.created` with the current session object
+(`id`, `model`, `modalities: ["audio", "text"]`, `voice`, `instructions`,
+`turn_detection`, `tools`, `input_audio_format: "pcm16"`,
+`output_audio_format: "pcm16"`).
+
+**Client → server events the engine accepts** (`ACCEPTED_CLIENT_EVENTS` in
+`events.py`):
+
+| Event | Effect |
+|---|---|
+| `session.update` | Updates `model`, `voice`, `instructions`, `tools`, and/or `turn_detection` (only these fields are read — see "Not implemented" below). Replies with `session.updated`. |
+| `input_audio_buffer.append` | Appends base64 pcm16 audio to the input buffer; if `turn_detection` is `server_vad`, also feeds the VAD. |
+| `input_audio_buffer.commit` | Runs STT on the buffered audio, appends a `user` message, emits `conversation.item.input_audio_transcription.completed`, and starts a response. Errors `input_audio_buffer_commit_empty` if the buffer is empty. |
+| `response.create` | Starts a response turn from the current message history (no-op if one is already running). |
+| `response.cancel` | Cancels the in-flight response; emits `response.done` with `status: "cancelled"`, or acknowledges the same way if nothing was running. |
+| `conversation.item.create` | Injects an item into history: `type: "message"` (text) or `type: "function_call_output"` (a tool result for the plain LLM leg — see below). Accepted silently; the client must send `response.create` next. |
+
+**Client → server events the engine recognizes but does not implement**
+(`REJECTED_CLIENT_EVENTS`) — these get a typed `error` event
+(`code: "unsupported_event"`), never a silent drop or a closed socket:
+`input_audio_buffer.clear`, `conversation.item.delete`, `conversation.item.truncate`.
+
+Anything else — an unrecognized `type`, a non-JSON frame, or a JSON frame that isn't
+an object — also becomes a typed `error` event (`unknown_event`, or a parse-error
+message) rather than tearing down the connection.
+
+**Server → client events emitted** (`EMITTED_SERVER_EVENTS`): `session.created`,
+`session.updated`, `input_audio_buffer.speech_started`,
+`input_audio_buffer.speech_stopped`,
+`conversation.item.input_audio_transcription.completed`, `response.created`,
+`response.output_audio_transcript.delta`, `response.output_audio.delta`,
+`response.function_call_arguments.done`, `response.done`, `error`.
+
+## Turn detection and audio format
+
+Turn detection defaults to `server_vad` and is driven by `EnergyVAD`
+(`src/hal0/realtime/vad.py`) — a pure normalized-RMS energy threshold detector, not a
+machine-learning VAD (the shipped runtime has numpy but deliberately no
+onnxruntime/webrtcvad/silero, to avoid a heavyweight dependency and an unpullable
+multi-file model). It emits `speech_started` on voiced onset and `speech_stopped`
+after `[realtime].vad_silence_ms` of trailing silence, auto-committing the buffer and
+starting a response only if the segment carried at least `vad_min_speech_ms` of voiced
+audio — a cough or click below that floor is dropped, not treated as a turn.
+Disabling VAD is also accepted via `session.update`, but only as `turn_detection:
+null` or `turn_detection: {"type": "none"}` — the handler (`_on_session_update` in
+`session.py`) checks `td is None` and `isinstance(td, dict)` and nothing else. A
+bare string like `turn_detection: "none"` matches neither branch: it's silently
+dropped, the server still replies `session.updated` as if it took effect, and the
+session stays in `server_vad` — the same silent-drop trap this page warns about
+above for other `session.update` fields. In `none` mode the client must send
+`input_audio_buffer.commit` itself. Threshold/silence tuning can be set per-session
+through `session.update`'s `turn_detection.threshold` /
+`turn_detection.silence_duration_ms`, in addition to the `[realtime].vad_*` config
+defaults documented on [Config schema](/docs/reference/config-schema/) — note that
+`silence_duration_ms` is only honored when it's a JSON integer (`_reconfigure_vad`
+checks `isinstance(..., int)`); a float value is silently dropped too.
+
+Barge-in is implemented: if the VAD detects new speech onset while a response is
+still being spoken, the in-flight response is cancelled (`response.done`,
+`status: "cancelled"`) before the new turn proceeds.
+
+Audio is fixed at **mono, 16-bit signed little-endian PCM at 24 kHz** for both
+directions (`[realtime].sample_rate` is schema-constrained to 8000–48000 but the
+engine does no resampling on either leg — it assumes the configured rate end to end).
+Input arrives as base64 pcm16 in `input_audio_buffer.append`. Output is emitted as a
+sequence of `response.output_audio.delta` events, each carrying one base64 pcm16
+frame sliced to `[realtime].frame_ms` (default 20ms). There is no Opus, no G.711
+(`g711_ulaw`/`g711_alaw`), and no WebRTC transport — WebSocket with raw pcm16 frames
+is the only transport.
+
+## The two LLM legs
+
+The session's `model` field selects between two independent chat backends
+(`src/hal0/realtime/backends.py`):
+
+- **Plain leg** (any model other than the sentinel below) — streams
+  `POST /v1/chat/completions`, forwarding the session's `tools` array. Tool calls
+  surface to the client as `response.function_call_arguments.done` for **client-side**
+  execution; the client is expected to run the tool and reply with
+  `conversation.item.create` (`type: "function_call_output"`), then send
+  `response.create` again.
+- **Steward leg** (`model == "hal0-brain"`, the `STEWARD_MODEL` sentinel) — streams
+  `POST /api/brain/chat` and consumes its SSE frames (`token` → spoken text,
+  `approval_required` → a spoken notice, `error` → a typed `error` event). Tools run
+  **server-side** inside the steward; the client never sees
+  `response.function_call_arguments.done` on this leg. Because a gated steward tool
+  can otherwise block the brain's SSE stream for up to 300 seconds waiting on
+  operator approval, the session bounds that wait to `[realtime].approval_wait_s`
+  (default 20s): if the next chunk doesn't arrive in time, the session speaks
+  "I'm still waiting on that approval — I'll stop here. Approve it at the bell and
+  ask me again," and ends the turn rather than leaving the caller in silence.
+
+## What is NOT implemented (with evidence)
+
+- **`input_audio_buffer.clear`, `conversation.item.delete`, `conversation.item.truncate`**
+  — recognized as valid OpenAI Realtime event names but explicitly rejected with a
+  typed `unsupported_event` error (`REJECTED_CLIENT_EVENTS` in
+  `src/hal0/realtime/events.py`).
+- **Most `session.update` fields are silently ignored, not rejected.** The handler
+  (`_on_session_update` in `session.py`) only reads `model`, `voice`, `instructions`,
+  `tools`, and `turn_detection`. Sending OpenAI-standard fields like `modalities`,
+  `temperature`, `max_response_output_tokens`, or `input_audio_transcription` gets a
+  normal `session.updated` acknowledgment — the fields are simply dropped, with no
+  error to signal they weren't honored.
+- **No G.711 / Opus audio, no WebRTC transport** — `audio.py` hardcodes pcm16 mono at
+  a single configured sample rate; `input_audio_format`/`output_audio_format` in the
+  session object are always `"pcm16"`, never negotiated.
+- **No server-side tool execution on the plain leg** — only the steward leg
+  (`hal0-brain` model) executes tools server-side; the plain leg always hands
+  `tool_call` chunks back to the client (`backends.py`'s `_default_chat_plain`).
+- **No conversation-item retrieval/listing** — history is an internal, append-only
+  `self.messages` list per session with no read-back event; a client that wants to
+  know what's in history has to have tracked it itself.
+- **No multi-turn response streaming controls** — there's no `response.cancel`
+  target-selection (only "cancel whatever's running"), and only one response can be
+  in flight per session at a time; a redundant `response.create` while one is already
+  running is a silent no-op (not queued, not errored).
+
+## Relation to the voice stack
+
+This endpoint is the single integration point tying hal0's STT slot, chat/steward
+routing, and TTS slot into one live session — the same three pieces the dashboard's
+`/v1/audio/transcriptions` and `/v1/audio/speech` endpoints expose individually (see
+[OpenAI-compatible API reference](/docs/reference/api/openai-compat/)). Which actual
+model backs STT/TTS is controlled by `[realtime].stt_model` / `[realtime].tts_model`
+(default `tts_model` is `"kokoro"`; an empty `stt_model` falls back to the session's
+chat model) — configuration reference for the full `[realtime]` table lives on
+[Config schema](/docs/reference/config-schema/).
+
+<Aside type="note">
+Everything on this page was verified directly against `src/hal0/realtime/session.py`,
+`backends.py`, `audio.py`, `vad.py`, `events.py`, and
+`src/hal0/api/routes/realtime.py` in this tree. It was not possible to verify this
+against a running voice client in this pass — treat any claim about real-world
+latency or audio quality as unverified.
+</Aside>

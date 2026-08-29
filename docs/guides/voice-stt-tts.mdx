@@ -23,9 +23,14 @@ hal0 exposes two voice directions through OpenAI-compatible endpoints:
 
 Both are children of the **`voice`** capability: `voice.stt` maps to the
 `stt` slot and `voice.tts` maps to the `tts` slot. Both children are
-now device-keyed engine switches with the same shape — see
-[ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/) for why `stt`
-was redesigned to match `tts` here.
+now device-keyed engine switches with the same shape. Before this
+redesign, `voice.stt` could only ever run `backend=npu` — any host
+without the XDNA NPU had zero speech-to-text. Reinstating Moonshine as a
+CPU-side STT engine and keying `stt` on device the same way `tts`
+already was closed that gap (see ADR-0001, "Reinstate Moonshine as the
+CPU STT engine", `docs/adr/0001-moonshine-cpu-stt-reinstatement.md` in
+the repository — an internal design record, not published to these
+docs).
 
 ## Enable the voice capability
 
@@ -98,7 +103,8 @@ There is deliberately no GPU row — hal0 ships no GPU STT engine. This is a
 two-engine, two-device special case, not a general `provider` selector: if
 a second CPU (or GPU) STT engine ever lands, `device` alone stops being
 enough to disambiguate and `provider` must become a first-class part of
-capability selection (see [ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/)).
+capability selection — this future-work trigger is recorded in ADR-0001
+(`docs/adr/0001-moonshine-cpu-stt-reinstatement.md`, repo-only).
 
 ### The `voice.tts` engine switch
 
@@ -193,7 +199,7 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 ```
 
 `model` is required. `voice`, `speed`, and `response_format` are
-optional — see [request defaults](#tts-request-defaults) below.
+optional — see TTS request defaults below.
 
 ### TTS request defaults
 

@@ -18,7 +18,7 @@ running daemon; most subcommands are simple wrappers over
 
 | File | What it holds |
 |------|---------------|
-| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots]` policy, `[dispatcher]` prefetch tuning, `[models]` roots/store, `[memory]` engine + `[memory.graph]` extraction, `[telemetry] channel`. |
+| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots]` policy, `[dispatcher]` prefetch tuning, `[telemetry] channel`, `[models]` roots/store, `[memory]` engine + `[memory.graph]` extraction, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]` — all fields of the root `Hal0Config` model. The same file also carries `[metrics]` (sampling/retention tuning), read independently by its own small loader rather than through `Hal0Config`. |
 | `upstreams.toml` | External/upstream provider routing — one `[[upstream]]` block per remote or local endpoint. |
 | `providers.toml` | Provider credential *references* — env-var **names**, never plaintext secrets. |
 | `profiles.toml` | Optional reusable backend/flag templates. Built-in seed profiles are always overlaid from code on load and never written back here, even if the file exists. |
@@ -79,8 +79,12 @@ restart:
 hal0 config reload
 ```
 
-This hits `POST /api/settings/reload`. Structural edits to
-`upstreams.toml` still need a full `hal0-api` restart — see
+This hits `POST /api/settings/reload`, which re-reads `hal0.toml`. It
+does not touch `upstreams.toml` — but that's fine for day-to-day use,
+because `hal0 upstream create`/`update`/`delete`/`advertise` already
+apply to the running daemon live, no reload or restart needed. A
+restart is only required after a hand-edit of `upstreams.toml` outside
+the CLI/API — see
 [Connect external providers](/docs/guides/connect-external-providers).
 
 ![Settings page showing live reload status](/screenshots/settings-page.png)

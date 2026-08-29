@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: "hal0's agent model: Hermes runs as the sandboxed bundled agent, shaped by personas and a policy-layer MCP client, with the hal0-brain steward driving hal0's own admin tools, an approval queue, and per-persona spending budgets."
+description: "hal0's agent model: Hermes runs as the sandboxed bundled agent, shaped by personas and a policy-layer MCP client, with an approval queue and per-persona spending budgets. hal0-brain, the platform steward, is a separate, related piece — see Brain."
 sidebar:
   order: 60
 ---
@@ -10,9 +10,11 @@ import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 hal0 doesn't build its own agent runtime — it **bundles** one, and hal0's job
 is to run it safely: as a sandboxed service, shaped by a persona that controls
 what it can do, with a human in the loop for risky actions and a spending cap
-for paid calls. A second, distinct piece — the **hal0-brain steward** — is
-hal0's own small model driving hal0's own admin tool catalog. The two are
-easy to conflate; they aren't the same thing.
+for paid calls. A second, distinct piece — the **hal0-brain steward**, hal0's
+own resident model that chats and drives hal0's own admin tool catalog — sits
+alongside it and shares the persona, approval-queue, and memory machinery
+described on this page. The two are easy to conflate; they aren't the same
+thing, and the steward has its own concept page: see [Brain](/docs/concepts/brain).
 
 ## Hermes: the bundled agent runtime
 
@@ -45,18 +47,20 @@ the agent runtime; it doesn't reimplement one.
 ## hal0-brain: the steward that drives hal0 itself
 
 Separately from the bundled agent runtime, hal0 runs its own **brain
-steward** — a small, always-available model (tuned via the dedicated `brain`
-profile) whose job is routing tool calls against hal0's own curated
-`hal0-admin` MCP tool catalog, not general-purpose coding or chat. It's the
-mechanism behind features like the Operator Board, and it's deliberately kept
-1:1 with a small model rather than sharing a slot with the general agent's
-model — the steward handles its own tool-call turns, including routing
-specific rounds to a dedicated `tool_model` where that's a better fit than
-the conversational model.
+steward** — a small, always-available model that chats with the operator and
+routes tool calls against hal0's own curated `hal0-admin` MCP tool catalog,
+not general-purpose coding or chat. It's the mechanism behind features like
+the Operator Board, and it's deliberately kept 1:1 with a small model rather
+than sharing a slot with the general agent's model — the steward handles its
+own tool-call turns, including routing specific rounds to a dedicated
+`tool_model` where that's a better fit than the conversational model.
 
 Where Hermes is "a general-purpose agent hal0 governs," hal0-brain is "hal0's
 own operator, wired straight into the admin surface." Both speak MCP and both
-go through the same approval queue for anything gated.
+go through the same approval queue for anything gated. The default model,
+the `[brain_chat]` config table, tool routing, and the native-tool-calling
+capability gate are covered in full on the dedicated [Brain](/docs/concepts/brain)
+page — this page stops at "what it is and how it relates to Hermes."
 
 ## Personas: the agent's character and limits
 
@@ -150,6 +154,7 @@ cross-agent brain described in [Memory](/docs/concepts/memory).
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Brain" href="/docs/concepts/brain" description="The hal0-brain steward, in full: default model, config, tool routing." />
   <LinkCard title="Memory" href="/docs/concepts/memory" description="The opt-in brain the agent reads and writes." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, gating, and the auth layer." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the agent surfaces sit under the API." />

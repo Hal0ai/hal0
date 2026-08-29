@@ -1,0 +1,259 @@
+---
+title: Brain
+description: "hal0-brain: the resident platform steward that chats and calls tools against hal0's own admin surface. What it is, its default model, the [brain_chat] config table, and how tool routing and native tool calling resolve."
+sidebar:
+  order: 65
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+**hal0-brain** is hal0's own resident operator — a small, always-on model whose
+job is chatting with you and driving hal0's own admin tool catalog: slots,
+models, hardware, the Operator Board, orchestration settings. It is mounted at
+`POST /api/brain/chat` (`POST /api/board/chat` is a thin back-compat alias for
+the same route) and is a first-class module in its own right: it carries
+**no import dependency on Hermes** at all, and works whether or not a
+bundled agent is installed.
+
+## Brain, slot, agent, chat UI — four different things
+
+These four terms get used loosely; the code draws sharp lines between them.
+
+- **A slot** is an inference unit — one model bound to one backend on one
+  port (see [Slots](/docs/concepts/slots)). The brain is not a slot; it
+  *drives* one. The virtual model it speaks through, `hal0/brain`, resolves
+  to the `brain` slot when one is loaded, and falls back to the `agent` slot
+  otherwise, via the normal `hal0/<slot>` resolver chain.
+- **An agent** — as of v1.0, Hermes — is a bundled, sandboxed general-purpose
+  agent runtime hal0 governs but doesn't build. The brain is not an agent
+  runtime: it's hal0's own conversational front end onto hal0's own admin
+  API, described in [Agents](/docs/concepts/agents).
+- **The chat UI** is a client of the brain, not the brain itself. Two ship
+  today: the dashboard's top-bar "Agent Chat" slide-out (configured under
+  Settings → Integrations → Agent Chat), and `hal0 chat --brain`, a terminal
+  REPL for SSH/headless boxes. Both stream the same
+  `{"type": "token"|"thinking"|"tool_call"|"tool_result"|"approval_required"|"notice"|"error"|"done"}`
+  SSE contract from `/api/brain/chat`.
+
+The brain embodies the **`hal0-brain` persona** — a persona TOML in the same
+store Hermes personas live in (see
+[Agents → Personas](/docs/concepts/agents)). `seed_default_personas` writes
+`hal0-brain.toml` unconditionally, both at install time and again on every
+`hal0-api` startup, so the persona is present on every v1.0 box unless an
+operator deletes the file. Its own system prompt and `preferred_model =
+"hal0/brain"` are what the brain actually runs on; the built-in system
+prompt baked into `hal0.brain.chat` is only a fallback, used when the
+persona TOML is missing or fails to parse. A persona's `tools_allowed` /
+approval policy narrows the brain's tool surface exactly the way it narrows
+Hermes's.
+
+<Aside type="note">
+The `brain` **slot's** `profile = "brain"` (in `installer/etc-hal0/slots/brain.toml`)
+is a third, unrelated "profile" — an inference-runtime profile (context size,
+reasoning-format) from the [profiles catalog](/docs/concepts/capabilities-and-profiles),
+not the persona. Don't confuse the two.
+</Aside>
+
+## The default model, and how to change it
+
+Every fresh v1.0 install pulls the same brain model unconditionally, before
+any hardware fork: **LFM2.5-2.6B, Q8_0** (curated id `lfm2.5-2.6b`,
+`LiquidAI/LFM2.5-2.6B-GGUF`, 2.87 GB), bound to the `brain` slot. It's a
+plain GGUF with no custom tensor types, so it loads on the ROCmFPX runner
+and on stock llama.cpp alike — unlike the earlier `hal0-brain-sft` family it
+replaced as the default, whose Q8/Q4 quants carry custom GGML tensor types
+that only the ROCmFPX runner accepts.
+
+<Steps>
+1. **At install time**: set `HAL0_BRAIN_MODEL` before running `install.sh` to
+   pull a different curated id instead — `hal0-brain-sft-q8-rocmfpx` (1.1 GB,
+   ROCm/Vulkan boxes only), `hal0-brain-sft-q4-rocmfp4` (0.65 GB, smallest,
+   ROCm/Vulkan only), or `hal0-brain-sft-f16` (2.0 GB, portable, runs on a
+   CPU-only box too). An unrecognized id is ignored with a warning and the
+   default is pulled instead.
+2. **After install, per-turn**: point `[brain_chat] model` in `hal0.toml` (or
+   the "Model / slot override" field on the dashboard's Agent Chat settings
+   page) at any `hal0/<slot>` — e.g. `hal0/npu` to run the steward on the NPU
+   chat slot. Empty (the default) means "use the persona's `preferred_model`,
+   or `hal0/brain` if there's no persona."
+3. **Per-request**: a client can send an explicit `model` in the chat body,
+   which wins over both of the above for that turn.
+</Steps>
+
+Whichever slot ends up serving the brain needs at least **8k tokens of
+context** — sized for the built-in fallback prompt, which alone is roughly
+7.3k tokens (the seeded persona's own prompt is considerably shorter, but the
+floor has to cover the fallback case too) — and it must actually be loaded,
+or `/api/brain/chat` 404s with an actionable error naming the model it
+tried. The seeded `brain` slot ships with a 65536-token context window, well
+above the floor.
+
+## `[brain_chat]`
+
+The config table that governs the steward chat. `extra="forbid"` — an unknown
+key fails validation rather than being silently ignored.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Hard kill switch — `false` refuses every turn before any model call. |
+| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
+| `model` | str | `""` | Chat-model override; empty defers to the persona / `hal0/brain`. |
+| `tool_model` | str | `"hal0/agent"` | Where tool-calling rounds reroute when the chat model can't carry them (see below). `""` on disk is treated as "nobody set this" and coerced back to the default with a logged warning — to genuinely turn routing off, set it to `"off"`, `"none"`, or `"disabled"` explicitly. |
+| `max_rounds` | int | `8` | `1`–`100`. Runaway backstop on the tool loop per turn. |
+| `completion_timeout_s` | float | `300.0` | `> 0`. Transport timeout for each LLM round. |
+
+The dashboard's Agent Chat settings page (Settings → Integrations) edits
+`enabled`, `read_only`, `model`, `max_rounds`, and `completion_timeout_s`
+live — `tool_model` is not exposed there; it's a `hal0.toml`-only knob today.
+
+### How tool routing resolves
+
+Every turn starts on the **chat model** (`model` above) — that's the whole
+point of running a small, fast steward for plain conversation. A round only
+reroutes to `tool_model` when one of three things happens on the chat model's
+round: it produced a real tool call (native or text-embedded — nothing is
+rerun, that call just dispatches); it produced a tool-call *artefact* it
+couldn't fully express (garbled `<function name=...>` syntax, or reasoning
+that says "I'll call X()" with nothing usable in the visible reply); or the
+operator asked a live-box-state question and the chat model answered without
+calling anything, which on the shipped small models is reliably a fabricated
+answer rather than a skipped lookup. Once a turn enters a tool chain by any
+of those paths, every remaining round of that turn stays on `tool_model` —
+the model that owns the tool chain finishes it; the brain's own voice returns
+on the next user turn.
+
+`tool_model` defaults to `hal0/agent`, the always-on anchor from ADR-0023.
+That default has a real gap on a fresh v1.0 box: the `agent` slot ships with
+no bound model — it's an explicit, size-disclosed opt-in at install time (15
+to 31 GB) — so the first tool-needing turn on an unmodified install gets a
+plain-English explanation that tool routing has no live target yet, with the
+fix (bind a model to `agent`, or point `tool_model` at a slot that's
+already loaded).
+
+## Native tool calling: a capability question, not an image check
+
+Whether a round can carry OpenAI-style `tools` at all depends on the
+**runner** behind the resolved slot, checked as a capability — not by
+comparing the image to one known-good tag. An older gate asked "is this
+exactly the current default ROCmFPX image?", which answered "no" for every
+runner that simply wasn't that one release — including the plain upstream
+llama.cpp toolboxes a CPU-only or CUDA box resolves to by default, which
+parse `tools` perfectly well. That false negative silently stripped tools
+from every brain round on those boxes, and the steward answered platform
+questions from imagination instead of admitting it couldn't look.
+
+The fix, as shipped: a short deny list of runner images known to reject a
+`tools`-attached request outright (the pre-`ade07ba` ROCmFPX lineage, which
+500s with a "peg-native format" parser error), plus a small in-process
+learned set — if an unlisted image's first tools-attached round *does* get
+rejected, that round is retried without `tools` and the image is remembered
+as incapable for the rest of the process. Everything else is assumed
+capable by default.
+
+For an operator, this means: if tools look silently unavailable on a chat
+model whose runner isn't on the deny list, the most likely explanation is
+that the runner rejected a tools round once already and got learned as
+incapable for this process — the learned set lives in the hal0-api process,
+not the slot's container, so restarting the slot's backend does *not* clear
+it; `systemctl restart hal0-api` does. If **both** the chat model's runner can't carry tools **and**
+`tool_model` is off or points at the same model, the brain has genuinely no
+way to see live state that turn: it says so explicitly (a system notice
+constrains its reply, and the SSE stream carries a `{"type": "notice", "code":
+"tools_unavailable"}` frame) rather than inventing slot names or numbers.
+
+## The tool loop: what the brain can and cannot call
+
+The brain drives the same shared tool-calling core
+(`hal0.toolloop.engine.run_tool_loop`) that OmniRouter's `/v1/chat/completions`
+tool loop uses — one provider-agnostic "send `tools`, extract calls, dispatch,
+fold the result back, repeat" machine, decoupled from either caller's
+transport.
+
+The surface offered to the model is two catalogs combined, then filtered by
+the `hal0-brain` persona's tool policy (when one exists):
+
+- A local set of board and platform tools purpose-built for the steward:
+  board reads/writes (`get_board`, `move_task`, `create_task`, `comment_task`,
+  dependency and orchestration verbs, `nudge_dispatcher`, …) against hal0's
+  own `BoardStore` — the same store `/api/board/*` answers from, not a Hermes
+  proxy — and platform tools (`list_slots`, `get_slot`, `slot_load/unload/
+  restart`, `list_models`, `hardware_stats`, `list_agents`) that re-enter
+  hal0-api's own REST routes over self-HTTP.
+- The full [`hal0-admin` MCP catalog](/docs/reference/mcp-tools) minus a
+  short exclusion list: names that collide with the local tools above (e.g.
+  `slot_load`/`slot_list`/`model_list`), and every `memory_*` tool — the
+  brain reaches its own memory through Hindsight directly (see below), not
+  through the agent memory engine's MCP dispatcher. That's well over 100
+  tools once the exclusions are removed — this page doesn't enumerate them;
+  see the catalog reference.
+
+Everything in that combined surface is classified exactly as `/mcp/admin`
+classifies it — autonomous read, autonomous write, or **gated**. A gated call
+(model pulls/deletes, slot create/delete/restart, capability or config
+writes, credential writes, stack/profile CRUD, log tails, …) doesn't run: it
+enqueues on the same `ApprovalQueue` the dashboard's Approvals panel and bell
+read from, the chat turn pauses (up to five minutes, pinging the stream every
+15 seconds) for the operator's decision, and the turn continues once it
+lands.
+
+Two things enforce the boundary at dispatch time, both independent of what
+the model was shown: the persona's `tools_allowed` policy is checked again
+against the call the model actually made (never trust the advertised list),
+and `[brain_chat] read_only` — when true, the default — refuses any tool
+that isn't a read, full stop, regardless of what the persona would otherwise
+allow.
+
+<Aside type="tip">
+Because `read_only` ships `true`, a freshly installed v1.0 brain can read and
+converse but cannot move a board card, load a slot, or write config until an
+operator flips it — that's a deliberate default, not a bug.
+</Aside>
+
+## Memory and MCP
+
+When [memory](/docs/concepts/memory) is enabled, the `hal0-brain` persona
+gets its own namespace (`private:hermes__hal0-brain`), separate from
+Hermes's own agent namespace, reached through Hindsight directly rather than
+the `memory_*` MCP tools an agent uses — which is exactly why `memory_*` is
+excluded from the tool surface described above.
+
+For everything else the brain's admin surface *is* MCP under the hood: it
+calls the same `hal0.mcp.admin.dispatch()` core, the same tool descriptions
+and parameter schemas, and the same `ApprovalQueue` that `/mcp/admin` serves
+externally — it just calls that core in-process instead of going out over
+the MCP wire protocol. A client that wants raw MCP access (rather than a
+chat front end) talks to `/mcp/admin` directly; see
+[MCP tools reference](/docs/reference/mcp-tools).
+
+## Observing the brain
+
+- **`hal0 chat --brain`** — a terminal REPL over `POST /api/brain/chat`,
+  useful on an SSH session where the dashboard isn't reachable. It always
+  streams; `--no-stream` is ignored in this mode.
+- **The dashboard** — the top-bar "Agent Chat" toggle opens the same route's
+  browser client; Settings → Integrations → Agent Chat exposes the
+  `[brain_chat]` knobs listed above as live settings.
+- **Slot health** — because the brain ultimately runs on a real slot
+  (`brain`, or the `agent` fallback), watch it the way you'd watch any slot:
+  `hal0 slot list` / `hal0 slot show brain`, or the dashboard's Slots panel.
+  The brain can also answer questions about itself, since `list_slots` and
+  `hardware_stats` are in its own tool surface.
+- **Logs** — structured `structlog` events worth grepping for:
+  `hal0.brain_chat.tools_unavailable`, `hal0.brain_chat.native_tools_unsupported`,
+  `hal0.brain_chat.tool_round_rerouted`, `hal0.brain_chat.ungrounded_round_rerouted`,
+  `hal0.brain_chat.tool_model_unavailable`, and
+  `hal0.brain_chat.completion_budget_raised`.
+
+hal0 does not currently ship a `hal0 brain` CLI subcommand group or a
+dedicated `hal0 doctor` check for the steward — the paths above are what
+exist today.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Agents" href="/docs/concepts/agents" description="Hermes, personas, and the approval queue the brain shares." />
+  <LinkCard title="Memory" href="/docs/concepts/memory" description="The Hindsight-backed store the brain's persona namespace lives in." />
+  <LinkCard title="MCP tools reference" href="/docs/reference/mcp-tools" description="The full hal0-admin catalog the brain surfaces a filtered slice of." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="What the brain and agent slots actually are underneath the virtual model." />
+  <LinkCard title="Config schema reference" href="/docs/reference/config-schema" description="Every hal0.toml table, including [brain_chat]." />
+</CardGrid>

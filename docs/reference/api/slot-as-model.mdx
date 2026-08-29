@@ -8,8 +8,8 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 hal0's dispatcher resolves the `model` field of an OpenAI-compatible request primarily
-by **model id**, not by slot name — see
-[OpenAI-compatible API → Model → slot resolution](/docs/reference/api/openai-compat/#model--slot-resolution)
+by **model id**, not by slot name — see the Model → slot resolution
+section of [OpenAI-compatible API](/docs/reference/api/openai-compat/)
 for the full 5-step resolution order. Direct slot-name addressing exists, but only as
 the last-resort fallback in that chain (`SLOT_ALIASES` direct lookup) — described in
 source as "operator muscle memory," for requesting a slot literally by name.

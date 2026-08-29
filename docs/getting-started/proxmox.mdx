@@ -17,9 +17,10 @@ a Proxmox VM instead of a container.
 ## 1. Prepare the PVE host
 
 Everything the accelerators need lives on the **host kernel**, because an
-LXC shares it. See [GPU drivers and memory](/docs/getting-started/drivers/#kernel-and-firmware)
-for the `amdgpu`/`amdxdna` kernel and firmware requirements, and
-[Size the GTT pool](/docs/getting-started/drivers/#size-the-gtt-pool) for
+LXC shares it. See the Kernel and firmware section of
+[GPU drivers and memory](/docs/getting-started/drivers/)
+for the `amdgpu`/`amdxdna` kernel and firmware requirements, and the
+Size the GTT pool section for
 the GRUB parameters that raise the amdgpu GTT window — both are set on the
 **Proxmox host**, not inside the container.
 
@@ -82,8 +83,8 @@ pct stop <CTID> && pct start <CTID>
 
 <Aside type="caution" title="gid means the CONTAINER's gid, not the host's">
 The `gid=` value must be the render group's id **inside the container**,
-not on the host — the two gid spaces can disagree. See
-[Render-group gids](/docs/getting-started/drivers/#render-group-gids) for
+not on the host — the two gid spaces can disagree. See the Render-group
+gids section of [GPU drivers and memory](/docs/getting-started/drivers/) for
 how to read the correct value with `stat -c %g` and why `getent group
 render` can silently resolve to the wrong group.
 </Aside>

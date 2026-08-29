@@ -24,7 +24,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 
 | File | Format | Purpose |
 |---|---|---|
-| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]`. |
+| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
 | `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
 | `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
@@ -62,6 +62,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
+| `default_images` | dict[str,str] | `{}` | keys must be a known `RUNNER_IMAGES` family (e.g. `rocmfpx`, `vulkanfpx`, `cuda`, `cpu`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`); values must be non-empty image refs; sending `null` for a family clears its override |
 
 ### `[dispatcher]`
 
@@ -106,7 +107,7 @@ clock: a healthy long generation on slow hardware that outlives it is also cut.
 | `roots` | list[str] | `[models_dir()]` = `["/var/lib/hal0/models"]` | each entry non-empty and absolute |
 | `auto_scan_on_start` | bool | `true` | — |
 | `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | — |
-| `pull_root` | str | `"/var/lib/hal0/models"` | **deprecated**; absolute or empty |
+| `pull_root` | str | `"/var/lib/hal0/models"` | **deprecated**; must be non-empty and absolute |
 | `store` | str | `""` | absolute if set, else empty |
 | `flm_store` | str | `""` | absolute if set (NPU/FLM model store) |
 
@@ -156,7 +157,15 @@ override: `HAL0_FLM_MODELS_DIR`.
 |---|---|---|---|
 | `enabled` | bool | `true` | — |
 | `retention_days` | int | `30` | `>= 1` |
-| `max_rows` | int \| null | `50000` | `>= 100`; `null` disables the cap |
+| `max_rows` | int \| null | `50000` | `>= 100`; in memory, `null` disables the cap |
+
+`max_rows` is unrepresentable as `null` in TOML (`tomli_w` raises on it), so
+the on-disk spelling of "unlimited" is `0`, not the bare key omitted or set to
+an unwritable null. A load-time validator maps on-disk `0` to `None` in
+memory; the reverse holds on save — an in-memory `None` is written back out
+as `0` (`0` is otherwise unreachable as a real cap, since it sits below the
+`>= 100` floor). Write `max_rows = 0` to disable the cap; anything you read
+back as `null` from the API is the same state (#1665).
 
 ### `[brain_chat]`
 
@@ -169,11 +178,19 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `model` | str | `""` | empty → persona default |
 | `max_rounds` | int | `8` | `1-100` |
 | `completion_timeout_s` | float | `300.0` | `> 0` |
+| `tool_model` | str | `"hal0/agent"` | see below |
+
+`tool_model` is the model a brain turn reroutes to when it needs a tool the
+chat model's runner cannot serve natively. It is a live routing knob, not a
+dead key.
 
 <Aside type="caution">
-`brain_chat.tool_model` was removed from the schema on the v1.0 branch (`#1453`) —
-current source has zero references to it. If you see it in an old config, it's a dead
-key that gets silently stripped on load. Do not document it as a live field.
+An empty `tool_model` is **not** how you switch tool routing off. An explicit
+`tool_model = ""` in `hal0.toml` is indistinguishable on disk from never having
+set the key, but pydantic treats it as an override of the `"hal0/agent"`
+default — which would leave tool turns with no target, silently. hal0 therefore
+coerces an empty value back to the default and logs a warning. To genuinely
+disable rerouting, say so out loud: `off`, `none` or `disabled`.
 </Aside>
 
 ### `[security]`
@@ -205,6 +222,39 @@ key that gets silently stripped on load. Do not document it as a live field.
 | `approval_wait_s` | float | `20.0` | `> 0, <= 300.0` |
 | `max_buffer_seconds` | float | `30.0` | `> 0, <= 600.0` |
 
+### `[metrics]`
+
+<Aside type="caution">
+`[metrics]` is read straight out of `hal0.toml` by its own small
+`MetricsSettings` dataclass (`hal0.metrics.config`) — it is **not** a field
+on `Hal0Config` and does not appear anywhere in the root-model tree this
+page otherwise describes. Only the *file read* is guarded: a missing or
+unparseable `hal0.toml` (`OSError` or a TOML parse error) is caught and
+treated as an empty table, so every key falls back to its default. There
+is no `extra="forbid"`/pydantic validation on the table itself, so a
+present, correctly-typed value is used as-is with no range checking. But
+an individual key's type is **not** guarded — a wrong-typed value such as
+`sample_interval_s = "fast"` raises `ValueError`/`TypeError` straight out
+of the loader and into `MetricsService` construction, which can block API
+startup.
+</Aside>
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Master on/off. When `false`, every background metrics task (sampler, aggregator, retention sweep) stays unconstructed rather than running disabled. |
+| `sample_interval_s` | float | `5.0` | Sampling cadence. |
+| `aggregate_interval_s` | float | `3600.0` | Rollup/aggregation cadence. |
+| `retention_interval_s` | float | `21600.0` (6h) | How often the retention sweep runs. |
+| `retention_request_days` | int | `7` | Retention window for raw request-level rows. |
+| `retention_slot_sample_days` | int | `3` | Retention window for slot sample rows. |
+| `retention_rollup_days` | int | `90` | Retention window for aggregated rollup rows. |
+| `queue_maxsize` | int | `1024` | Bounded queue depth for the async metrics writer. |
+| `write_batch_size` | int | `64` | Rows drained per `BEGIN IMMEDIATE` transaction. |
+
+Each key also has a `HAL0_METRICS_*` environment variable that overrides it
+(precedence: env var > `[metrics]` TOML table > default) — see
+[Environment variables](/docs/reference/env-vars/) for that list.
+
 ## `slots/<name>.toml`
 
 Root model `SlotConfig`, `extra="allow"`. Both a legacy nested `[slot]` table and flat
@@ -219,6 +269,7 @@ top-level scalars are accepted on load and normalized.
 | `gpu_index` | int \| null | `null` | — | `>= 0` |
 | `n_gpu_layers` | int | `-1` | — | `-1` = all, `0` = CPU-only |
 | `threads` | int | `0` | — | `>= 0`; `0` = unset |
+| `metrics` | bool | `true` | — | emits `--metrics`, enabling llama-server's loopback-only `/metrics` endpoint; without it `/metrics` 501s and hal0's tok/s and request-count collection can never populate (#1810) |
 | `binary` | str | `""` | — | key into `RUNNER_IMAGES` |
 | `image_pin` | str \| null | `null` | — | escape-hatch image ref override |
 | `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
@@ -243,11 +294,11 @@ top-level scalars are accepted on load and normalized.
 There is **no `enabled` field** — a non-empty `model.default` is the activation signal.
 Boot start is separate and explicit (`autoload`); a retired `lru` key is still accepted
 but ignored, with a one-time deprecation warning. See
-[Slot lifecycle → Activation](/docs/reference/slot-lifecycle/#activation).
+[Slot lifecycle](/docs/reference/slot-lifecycle/) for the activation model.
 
 `output_sanity` (bool, default `true`) is accepted here too, though it is not a typed
-field: `false` exempts this one slot from the
-[output-sanity gate](/docs/reference/slot-lifecycle/#output-sanity-gate).
+field: `false` exempts this one slot from the output-sanity gate — see
+[Slot lifecycle](/docs/reference/slot-lifecycle/).
 
 <Aside type="note">
 A legacy `backend` key on a slot is silently promoted to `device` and dropped on load
@@ -330,7 +381,7 @@ Root model `UpstreamsConfig`, `extra="allow"`: `upstream: list[UpstreamEntry]`
 | `name` | str | — | **required** | non-empty |
 | `kind` | str | `"remote"` | — | `slot` or `remote` |
 | `url` | str | — | **required** | non-empty |
-| `auth_style` | str | `"bearer"` | — | `bearer, anthropic, google_query, header, none` |
+| `auth_style` | str | `"bearer"` | — | `bearer, anthropic, header, none` |
 | `auth_header` | str | `""` | — | required if `auth_style = "header"` |
 | `auth_value_env` | str | `""` | — | — |
 | `timeout_seconds` | float | `300.0` | — | `> 0.0` |
@@ -339,6 +390,14 @@ Root model `UpstreamsConfig`, `extra="allow"`: `upstream: list[UpstreamEntry]`
 | `advertise_models` | bool | `true` | — | — |
 | `enabled` | bool | `true` | — | — |
 | `model_filters` | table \| null | `null` | — | see below |
+| `hal0_peer` | bool \| null | `null` | — | `null` auto-derives from the URL host: private/loopback hosts are treated as another hal0's dashboard API (pollable for hardware/slot metrics), public hosts never are. Set `true` to opt a public-hostname hal0 peer in. |
+
+`google_query` was a fifth `auth_style` value with no implementation behind
+it — Google AI Studio calls dispatched unauthenticated while the UI showed
+"key set" (#1513). It is retired from the accepted set; an on-disk
+`auth_style = "google_query"` still loads without error, coerced on read to
+`"bearer"` (the style the endpoint it points at actually accepts), with a
+warning logged.
 
 ### `[[upstream]].model_filters`
 

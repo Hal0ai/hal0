@@ -1,0 +1,350 @@
+---
+title: Manage runner images
+description: Browse, pull, pin, and reason about the container images that back hal0's slots — the Runner Images catalogue under Slots, the Vulkan image gate, and what happens to a running slot when its image changes.
+sidebar:
+  order: 15
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+A **runner image** is the container image a slot actually launches: the
+`podman` image that bundles `llama-server` (or FLM, Kokoro, Qwen3-TTS,
+Moonshine, ComfyUI) plus the GPU/CPU backend it was built against. hal0
+tracks the known runner images in a catalogue, and the dashboard's **Runner
+Images** page — a sub-page of **Slots** (`#slots/runner-images`) — is where
+you browse it, pull an image ahead of time, and set per-family defaults.
+
+## How a runner image relates to a slot
+
+A [slot](/docs/concepts/slots/) owns its own hardware placement: `device`,
+`binary`, and an optional `image_pin`. `binary` is a key into hal0's runner
+registry (`hal0.runners.RUNNER_IMAGES`) — the fixed set of runner families
+hal0 knows how to launch:
+
+| Runner key | Runtime | Device class | Backend |
+|---|---|---|---|
+| `rocmfpx` | llama-server | gpu | rocm |
+| `vulkanfpx` | llama-server | gpu | vulkan |
+| `cuda` | llama-server | gpu | cuda |
+| `cpu` | llama-server | cpu | — |
+| `flm` | flm (NPU) | npu | — |
+| `kokoro` | kokoro (TTS) | cpu | — |
+| `moonshine` | moonshine (STT) | cpu | — |
+| `qwen3tts` | qwen3tts (TTS) | gpu | rocm |
+| `comfyui` | comfyui (image gen) | img | — |
+
+`rocmfpx` and `vulkanfpx` resolve to the *same* image today — the shipped
+runner build is Vulkan-portable, so one image serves both GPU lanes on AMD.
+The two keys exist so a future split has somewhere to land, not because they
+differ right now.
+
+A slot with no `binary` set derives one from its `device`
+(`hal0.runners.runner_for_backend`) — this is the ordinary case. A
+**profile** never names an image: profiles are device-agnostic flag
+templates (see [Providers, profiles & devices](/docs/reference/providers-profiles-devices/)).
+The provider (`ContainerProvider`, `FLMProvider`, …) is what actually starts
+the process for whichever image resolution picks.
+
+Resolution order, from `hal0.providers.container._resolve_image_ref`:
+
+<Steps>
+1. `slot.image_pin` — a per-slot escape hatch (debug build, A/B test, pinned
+   rollback). A non-empty value is honored verbatim and never re-resolved.
+2. `[slots].default_images[<runner key>]` in `hal0.toml` — the operator's
+   per-family default, set from the Runner Images page's **Defaults strip**
+   or the **Set as … default** button.
+3. The release-baked default (`hal0.runners.RUNNER_IMAGES[key].image`),
+   further resolved through an `HAL0_TOOLBOX_IMAGE_<KEY>` environment
+   override or a release manifest digest pin, in that order.
+</Steps>
+
+## The Runner Images page
+
+Open **Slots → Runner Images**. The list is every catalogued image; the
+right-hand card shows the selected row's detail.
+
+**Defaults strip** (top of the list, when at least one family has a
+catalogued row): one line per runner family — its effective image:tag, and
+a `release default` or `override` chip. An `override` row gets a **clear**
+button that removes the `[slots].default_images` entry and falls back to
+the release default; the confirm dialog names the slots currently on that
+family's image, since they pick up the change on their next restart, not
+immediately.
+
+Each row in the list shows:
+
+- A download indicator (green when `local_path`/`downloaded_at` is set).
+- The catalogue id and `image:tag`.
+- Chips: `<family> default` (with `· override` when it's an operator
+  override), `newer: <tag>` when the registry has a tag ahead of the row's
+  headline, `ownership` (`owned`/`referenced`), `publish`
+  (`ci`/`external`/`manual`), and any `extra.features` chips (forward-compat
+  — today's `images.json` carries no `features` field, so this is usually
+  empty).
+- Size, and a `✓ downloaded` chip once pulled.
+
+The detail card adds digest, ownership, publish, `manifest_key`, and **in
+use by** — the slot names whose rendered unit (or, absent that, resolved
+config) currently launches this exact `image:tag`.
+
+### Sync now
+
+**Sync now** runs one discovery pass: it re-fetches
+`Hal0ai/hal0-runner-images`'s `images.json` for display metadata, and probes
+each entry's GHCR repo anonymously for its tag list, digest, and size. Rows
+also auto-refresh every 30 seconds without a manual sync, but a sync is the
+only way to pick up a brand-new tag or a metadata edit immediately. If
+`images.json` is unreachable, sync degrades to GHCR-only data for the images
+already catalogued and says so in the toast; a single package's probe
+failing never aborts the rest of the run.
+
+<Aside type="note">
+The catalogue only knows about GHCR repos that appear in `images.json`. An
+image published to GHCR but never added there — including, historically,
+hal0's own flagship combined image — will not appear until that file lists
+it. This is an external-repo edit, not something a sync run can fix on its
+own.
+</Aside>
+
+### How a tag is picked
+
+Every row has one **headline tag** (`image.tag`) and a newest-first
+`available_tags` list from the GHCR `tags/list` probe. The headline is
+either the tag `images.json` pins for that entry, or — when the entry is
+unpinned — the newest tag by `sort_tags_newest_first`: all-digit tags
+(date-stamps like `0826`) sorted numerically descending, then semver tags,
+then everything else in registry order.
+
+The card's **tag** dropdown lets you pick any tag in `available_tags` for
+display and for **Set as … default**, but the **Pull** button always pulls
+the row's headline tag — it is disabled with an explanatory tooltip if you've
+picked a different one in the dropdown. Pulling a specific non-headline tag
+isn't wired up in the dashboard; see "Pulling a specific tag" further down
+this page for the API-level workaround.
+
+### The defaults strip and #2043
+
+The Defaults strip, the tag picker, and Set-as-family-default all shipped
+together as the runner-image-catalogue v2 UI wave. What did **not** ship
+from that design: there is still no way to remove a catalogued or
+downloaded image from the dashboard or the API ("Removing an image" below),
+and per-tag pulling from the UI (above). If you're comparing this page
+against the catalogue v2 design doc, those two gaps are the difference
+between the design and what's shipped.
+
+## `image_status`: what a slot is actually running
+
+The Runner Images page's own `downloaded`/`local_path` fields describe the
+*catalogue* — what's on disk, independent of any slot. A **slot's**
+`image_status` (visible on `GET /api/slots`, and in the dashboard's slot
+detail) is a different, tri-plus-state answer to "is the image this slot
+would launch actually present":
+
+| Value | Meaning |
+|---|---|
+| `present` | The resolved image is on disk. |
+| `pulling` | A pull job for this image is in flight. |
+| `missing` | podman was asked and the image is confirmed absent. |
+| `not-configured` | The slot has no profile/image to check — not a fault. |
+| `unknown` | The probe could not be made at all. |
+
+`unknown` (added by #1968, with two remaining gaps closed by #1980) exists
+because `missing` used to be overloaded: before that work, *any* probe
+failure — the rootful `hal0-podman-ro` seam not answering, `sudo -n` being
+denied, the probe timing out — was reported as `missing`, indistinguishable
+from "podman was asked and said no." That collapse made `missing` on a
+`running`, healthy slot look like the smoking gun it's supposed to be, when
+it usually meant the probe seam itself was broken.
+
+If you see `image_status: "unknown"` on a slot:
+
+<Steps>
+1. Run `hal0 doctor` — it probes the `hal0-podman-ro` seam directly
+   (`check-slot-token`) and will name a missing or stale sudoers grant if
+   that's the cause.
+2. Check the hal0-api journal for a `slot_view.image_probe_failed` line —
+   it always logs the specific reason (seam denial, subprocess failure,
+   timeout) behind an `unknown`, even though the API payload itself carries
+   no reason field.
+3. Don't treat `unknown` as `missing`: retrying a pull on a slot that's
+   actually fine, just unprobeable, wastes bandwidth and doesn't fix the
+   seam.
+</Steps>
+
+## The Vulkan LLM lane's image gate
+
+On an AMD host, a `gpu-vulkan` llama.cpp slot is gated on its **resolved
+runner image**, not just on hardware presence. This is a narrower,
+newer check than the ROCm lane's `/dev/kfd` requirement, and it exists
+because of a specific, nasty failure mode:
+
+<Aside type="caution" title="Why the gate exists">
+The retired runner lineage (`ade07ba`) emitted invalid tokens on its Vulkan
+backend for every model, at full nominal speed, while HTTP 200, container
+health, and `hal0 doctor` all read green. #1923 retired the Vulkan LLM lane
+entirely over this and required `/dev/kfd` (ROCm) for every AMD GPU slot.
+#1973 re-enabled Vulkan, but only behind an explicit image allowlist — so
+the same silent-garbage failure can't recur on a new build until that build
+has been validated.
+</Aside>
+
+Membership in `hal0.config.schema.VULKAN_CAPABLE_IMAGE_REFS` is earned per
+exact image ref, not by "newer than the pin": the tags are git shortrefs and
+date stamps, not versions, and Vulkan correctness has not been monotonic
+across builds (an older tree passed where a newer one failed). As of this
+writing the set holds one ref, `ghcr.io/hal0ai/hal0-combined:0826`
+(`VULKAN_FIXED_IMAGE`) — check the constant in `src/hal0/config/schema.py`
+for the current membership, since new refs are added only after passing the
+validation matrix.
+
+A `gpu-vulkan` llama-server slot on an AMD host is refused at load if its
+resolved image isn't in that set — the error names the image and tells you
+to repin to `VULKAN_FIXED_IMAGE` or move the slot to `gpu-rocm`. This gate
+applies only to the llama.cpp runtime lane; ComfyUI and Qwen3-TTS's
+`gpu-vulkan` slots are actually ROCm images behind the picker's GPU row and
+are unaffected, and Kokoro/Moonshine never touch a GPU node at all. See
+[Manage slots → Switching a slot to the Vulkan lane](/docs/guides/manage-slots/)
+for the walkthrough (the `--hardware vulkan` CLI flag, the dashboard drawer
+equivalent, and the `HAL0_ALLOW_VULKAN_FALLBACK` escape hatch, which
+downgrades this refusal to a warning and has no supported use).
+
+## Pulling, updating, pinning, and removing an image
+
+<Aside type="note" title="No `hal0` CLI for runner images">
+There is currently no `hal0` CLI command for the runner-image catalogue —
+no `hal0 image pull`, no `hal0 registry runner-images …`. Everything below
+that isn't dashboard-only is a direct call to the local API
+(`http://localhost:8080`), which is also what the dashboard itself calls.
+</Aside>
+
+### Pulling an image
+
+<Tabs>
+<TabItem label="Dashboard">
+Select the row, then click **Pull** (or **Re-pull** if it's already
+downloaded). Progress streams into the **Runner image downloads** pane
+below the list — `layers_done`/`layers_total`, mirroring how model
+downloads report progress, since this is a whole OCI image pull via
+`podman pull`, not a single file.
+</TabItem>
+<TabItem label="API">
+```sh
+curl -X POST http://localhost:8080/api/runner-images/hal0ai%2Fhal0-toolbox-cpu/pull
+```
+
+Pulls the row's headline tag. Job state is keyed one-per-image: a second
+request for the same tag (or with no tag) while one is already in flight is
+idempotently handed the existing job rather than duplicated; a request for a
+*different* tag while one is in flight answers `409
+runner_image.pull_conflict`.
+</TabItem>
+</Tabs>
+
+#### Pulling a specific tag
+
+The pull route does accept `?tag=<tag>` for any tag in the row's
+`available_tags` — the dashboard just never sends it. If you need a
+non-headline tag pulled onto disk right now, call the API directly:
+
+```sh
+curl -X POST "http://localhost:8080/api/runner-images/hal0ai%2Fhal0-toolbox-cpu/pull?tag=v1.2.3"
+```
+
+An unknown tag 404s as `runner_image.tag_not_available`.
+
+### Setting a family default (updating what new/unpinned slots launch)
+
+<Tabs>
+<TabItem label="Dashboard">
+On the card, pick the tag you want (if not the headline), then **Set as
+`<family>` default**. The confirm dialog names every slot currently running
+that family's image — none of them restart immediately; they pick up the
+new default on their next (re)start. This writes
+`{"slots": {"default_images": {"<family>": "<image>:<tag>"}}}` through the
+existing settings deep-merge, i.e. `[slots].default_images.<family>` in
+`hal0.toml`.
+</TabItem>
+<TabItem label="API">
+```sh
+curl -X PUT http://localhost:8080/api/settings \
+  -H 'content-type: application/json' \
+  -d '{"slots": {"default_images": {"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0826"}}}'
+```
+
+Send an explicit `null` value for the family to clear the override and fall
+back to the release default (the deep-merge has no key-delete idiom, so
+`null` is the documented clear signal) — an empty string is rejected.
+</TabItem>
+</Tabs>
+
+### Pinning a single slot
+
+A family default changes what *unpinned* slots in that family launch. To
+pin one slot to a specific image regardless of the family default, set that
+slot's `image_pin` — see
+[Manage slots](/docs/guides/manage-slots/) for the CLI/dashboard flow. A
+non-default pin is surfaced on the slot card so the drift is never hidden.
+
+### Removing an image
+
+There is no remove action — not in the dashboard, not in the API, and not
+in the catalogue v2 design. A downloaded runner image can only be removed
+by hand on the host, outside hal0's management surface:
+
+<Steps>
+1. Check the image's **in use by** field on its detail card (or `GET
+   /api/runner-images/<id>`) — don't remove an image a running slot still
+   references.
+2. Since slots run under rootful podman
+   (`/etc/containers/systemd`), remove it as root:
+   `sudo podman rmi <image>:<tag>`.
+3. hal0 will not notice the removal on its own; the row stays catalogued
+   (its `downloaded`/`local_path` fields go stale until the next successful
+   pull or a process that re-checks local state runs).
+</Steps>
+
+## What happens to a running slot when its image changes
+
+Nothing, immediately — and this is true whether the change comes from an
+operator override or a release upgrade. Every image-resolution write above
+is documented as applying "on the next (re)start," and that's not a
+simplification: no code path here restarts a slot for you.
+
+**Release upgrades.** `hal0 update` retags stale slot pins —
+`retag_stale_slot_images` rewrites any slot whose `image_pin` (or legacy
+`image`) is *exactly* a known former default to the new one — but it does
+not touch the running container, and it does not restart the unit. The new
+image applies (and is pulled by podman if absent) the next time that slot's
+unit starts, whether that's a manual restart, a crash-restart, or a reboot.
+An operator pin that isn't a known former default is never touched — that's
+the escape hatch working as intended, not a bug.
+
+<Aside type="caution" title="Known gap, not a design choice">
+`hal0 update` does not restart slots when a release rolls the runner
+image, so a slot can keep serving the build the release replaced
+indefinitely. Until that changes, **restart your slots after every `hal0
+update` that touches a runner image** (check the release notes, or just
+restart every GPU/LLM slot to be safe): `hal0 slot restart <name>` per slot,
+or the dashboard's restart control on each slot card. There is no
+"restart everything" single command today — restart the slots you care
+about individually.
+</Aside>
+
+**Operator defaults and per-slot pins.** Same story: setting a family
+default or a slot's `image_pin` writes config, it does not bounce anything.
+Watch a slot's `image_mismatch` field (or the dashboard's drift indicator)
+to see when the running container's actual image has diverged from what
+hal0 would now resolve — see
+[Manage slots → Config drift after an update](/docs/guides/manage-slots/)
+— and restart the slot once you're ready for the new image to take effect.
+
+## See also
+
+- [Slots](/docs/concepts/slots/) — the lifecycle state machine and the
+  hardware/model write boundary that `binary`/`image_pin` are part of.
+- [Manage slots](/docs/guides/manage-slots/) — creating/editing slots,
+  switching GPU lanes, and reading the config-drift warning.
+- [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) —
+  how `binary`/`device` map to a runner, and why profiles carry no image.
+- [Hardware matrix](/docs/reference/hardware-matrix/) — device detection and
+  backend selection upstream of a slot's `device`.

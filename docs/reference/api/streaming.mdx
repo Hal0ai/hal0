@@ -29,7 +29,7 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
 
 <Aside type="caution">
 `[dispatcher].direct_read_timeout_s` (default `300.0`, range `30.0-600.0` — see
-[Config schema](/docs/reference/config-schema/#dispatcher)) sets the HTTP client's
+the `[dispatcher]` section of [Config schema](/docs/reference/config-schema/)) sets the HTTP client's
 `read` timeout, which httpx applies to **every** body read — streaming included.
 While the stall guard is active, streaming requests therefore disable it
 per-request so the guard owns the *body* bound and a stall always produces the

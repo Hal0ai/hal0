@@ -37,7 +37,8 @@ hand-registered outside that layout).
 <Aside type="note">
 As of the v1.0 slot/hardware-ownership rework, the **model**, not the slot, owns
 tuning knobs like `context_size` and MTP. A slot's `[model].context_size` is now a
-ceiling only — see [Config schema](/docs/reference/config-schema/#model-nested-under-a-slot).
+ceiling only — see the "Model nested under a slot" section of
+[Config schema](/docs/reference/config-schema/).
 </Aside>
 
 ## Curated catalogue
@@ -69,7 +70,9 @@ Moonshine's resolution is decided (it doesn't wait on the curated-schema redesig
 weights are operator-staged under the model store rather than registry-pulled, and
 both slot spawn and `hal0 doctor` preflight the staged path, failing loudly and by
 name (`slot.weights_missing`) instead of starting a container that 500s on first
-request. See [ADR-0001](/docs/adr/0001-moonshine-cpu-stt-reinstatement/).
+request. This is recorded in ADR-0001, "Reinstate Moonshine as the CPU STT engine"
+(`docs/adr/0001-moonshine-cpu-stt-reinstatement.md` in the repository — an internal
+design record, not published to these docs).
 </Aside>
 
 ## Hardware-driven recommendation
@@ -134,6 +137,73 @@ hal0 bench plan|run|status|worker|results|history|reindex|devices|publish|eval|b
 (drives `llama-bench`/`llama-server`), `bench/store.py` (JSONL/db layer),
 `bench/publish.py` (pushes results to the dashboard), `bench/suites.py`,
 `bench/regress.py`.
+
+### Dashboard pane
+
+The dashboard's **Benchmarks** page (`#benchmarks`, a top-level nav
+destination — `ui/src/dash/Benchmarks.tsx`) is a UI over the same
+`/var/lib/hal0-bench` store the CLI reads and writes, via `GET/POST
+/api/benchmarks/*`. The API process never drives the GPU itself — it only
+queues and reads; `hal0 bench worker` is what drains the queue, same as a
+run started from the CLI.
+
+The page has four tabs:
+
+- **Roster** — every registry model (blessed and pulled) as one row:
+  `decode`/`prefill`/`acc` throughput, capability and spec/kv chips, size,
+  last run, and run count. Expanding a row loads that model's lane×depth
+  matrix, a history sparkline across every recorded sweep, and its recent
+  run chips.
+- **Runs** — run records newest-first, each expandable into a full-detail
+  drawer: identity chips, the per-repetition measurement table, telemetry,
+  and artifact links.
+- **Evals** — the agentic-eval leaderboard (model × task scores).
+- **Run Queue** — worker control and the queue. A dot next to the tab
+  label reflects `hal0-bench-worker`'s own heartbeat (written every poll
+  tick), distinguishing "armed but idle" from "worker not reporting" —
+  not just whether the queue is turned on.
+
+#### Starting a run
+
+From **Run Queue**, an operator queues work one of two ways:
+
+- **Queue suite** — pick one of the suites the staleness planner
+  considered (by default `roster`, `smoke`, `lane-matrix` — the three
+  seeded under `installer/bench/suites/`, or whatever
+  `/etc/hal0/bench/suites/*.toml` defines) and click **Queue suite**. Each
+  suite in the dropdown shows its stale-cell count, from the same planner
+  `hal0 bench plan` runs.
+- **Queue model** — pick a single roster model, then choose one of five
+  ad-hoc benches from the **Queue model** menu: **Vulkan Bench** (pp+tg on
+  the `vulkan_radv` lane), **ROCm Bench** (pp+tg on the `rocm` lane),
+  **Comparison of Both** (both lanes), **Tool Bench** (the agentic
+  tool-calling eval against the live endpoint), or **Tune Bench** (a
+  5-config flag-tuning grid — batch/ubatch size, flash attention, KV
+  quantization — restricted to the planner's flag whitelist).
+
+Either action posts to the queue; nothing runs until the worker is armed.
+**Start**/**Pause**/**Stop** control `hal0-bench-worker`; Pause and Stop
+take effect between cells, since a sweep can't be interrupted mid-run. The
+**exclusive** checkbox is the same GPU-exclusivity gate as the CLI's
+`--exclusive` — checked by default, it stops competing slots so the
+numbers are clean.
+
+The plan panel alongside the queue lists every stale cell (model, suite,
+lane, kind, depth, priority, exclusive, and why it's stale — never
+measured vs. aged out): the same computation behind `hal0 bench plan`.
+
+#### Results
+
+Everything the dashboard shows comes from the same store the CLI's
+`results`/`history`/`publish`/`bundle` verbs read: `records.jsonl`
+(append-only, schema-2 records) plus the `bench.db` SQLite index rebuilt
+from it, both under `/var/lib/hal0-bench` (`$HAL0_BENCH_STATE`, or
+`$HAL0_HOME/var-lib/hal0-bench` in a dev/sandboxed install). A run queued
+from the dashboard lands in the same queue `hal0 bench worker` drains
+whether started from the CLI or the UI — there is one queue and one
+result store, not a separate dashboard-only pipeline. Sharing a
+dashboard-produced run still goes through `hal0 bench bundle`/`upload` as
+described below — the dashboard has no upload action of its own.
 
 ### Sharing results
 

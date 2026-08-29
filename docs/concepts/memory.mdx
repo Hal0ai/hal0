@@ -1,6 +1,6 @@
 ---
 title: Memory
-description: hal0's memory subsystem — a Hindsight-backed brain that operators and agents share. Gated by [memory].enabled in hal0.toml (on by default on a fresh install) and degrades cleanly to a no-op when off.
+description: hal0's memory subsystem — a Hindsight-backed brain that operators and agents share. Gated by [memory].enabled in hal0.toml (on by default on a fresh install) and degrades cleanly to a volatile fallback when the engine is unreachable.
 sidebar:
   order: 50
 ---
@@ -14,6 +14,11 @@ completely absent when it's off. A fresh install turns it on for you; it stays
 a conscious, revertible choice rather than something that silently accumulates
 data on an existing box.
 
+Memory was rebuilt for v1.0 ("memory v2"): a redesigned dashboard workspace
+(ranked fact list, curate, history, a force-directed graph) sits behind the
+same engine-neutral backend described on this page. See
+[Browse the Bank workspace](/docs/guides/memory-workspace) for the UI tour.
+
 ## What memory is
 
 The memory subsystem is an engine-neutral layer behind two surfaces: the
@@ -22,27 +27,31 @@ The memory subsystem is an engine-neutral layer behind two surfaces: the
 the same provider, so a fact written by an agent over MCP is the same fact
 the dashboard shows.
 
-The MCP surface covers the full read/write/curate/synthesize lifecycle, not
-just add-and-search:
+The MCP surface covers the full read/write/curate/synthesize lifecycle:
 
 - **Core**: `memory_add`, `memory_search`, `memory_list`, `memory_delete`,
   `memory_recall` — the token-budgeted, observation-aware retrieval path
   (preferred over `memory_search`), with native per-result relevance scores
   and optional entity/chunk/source-fact enrichment.
 - **Reflect**: `memory_reflect` — ask a question and get an LLM-written
-  answer grounded in recalled facts, instead of a raw fact list.
+  answer grounded in recalled facts, instead of a raw fact list. Answers
+  `{status: "unsupported"}` on an engine without the capability (the
+  pgvector fallback) instead of erroring.
 - **Curation**: `memory_curate` edits a fact or soft-invalidates/reverts it
-  (reversible) — the non-destructive "this is wrong" correction path, as
-  distinct from `memory_delete`. `memory_history` shows a fact's revision
-  trail.
+  (reversible, no approval gate) — the non-destructive "this is wrong"
+  correction path, as distinct from `memory_delete`. `memory_history` shows
+  a fact's revision trail — but only **observation** facts have history;
+  world/experience facts 404 there by design — see Fact types below.
 - **Mental models**: `memory_mental_model_list` / `_get` / `_create` /
   `_update` / `_delete` / `_refresh` — standing questions ("what does the
-  user prefer for X") whose answer is kept refreshed from memory.
+  operator prefer for X") whose answer is kept refreshed from memory.
 - **Directives**: `memory_directive_list` / `_get` / `_create` / `_update` /
-  `_delete` — standing instructions injected into prompts.
+  `_delete` — standing instructions injected into an agent's prompt every
+  turn.
 - **Async operations**: `memory_operation_list` / `_get` / `_cancel` /
   `_retry` — retain is async by default, so these are the poll target for
-  `memory_add`'s `operation_id` and for mental-model refreshes.
+  `memory_add`'s `operation_id` and for mental-model refreshes and bank
+  consolidation.
 - **Bank introspection**: `memory_tags_list`, `memory_bank_stats`,
   `memory_bank_consolidate` — read-only counts plus an early-trigger for
   consolidation. No destructive bank operations (delete/clear a whole bank)
@@ -52,38 +61,44 @@ Every write/destructive tool goes through the same namespace ACL and
 approval-gate pattern as `memory_add`/`memory_delete` — `memory_curate`'s
 `state` toggle is reversible so it stays autonomous, while
 `memory_mental_model_delete` and `memory_directive_delete` gate for operator
-approval the same way a bulk `memory_delete` does.
+approval the same way a bulk `memory_delete` does. The full tool-by-tool
+schema lives in [MCP tools](/docs/reference/mcp-tools) — this page covers the
+concepts those tools operate on.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
-*Memory view in the hal0 dashboard*
+*The dashboard's Memory view (Bank workspace, list mode)*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
-and agent "brain." (Cognee, the prior engine, was fully removed; `hal0 memory
-migrate` remains only for boxes still carrying a Cognee-era store.) When
-configured, hal0 builds a Hindsight client and wraps it with a reranker so
-recall surfaces the most relevant facts. If the Hindsight daemon is
-unavailable at boot, hal0 degrades to an in-memory PgVector fallback rather
-than failing — the subsystem stays usable, but that fallback is volatile
-(writes don't survive a restart) and exists to keep the tools answering, not
-as a durable substitute.
-
-![Memory graph visualization showing relationships between facts](/screenshots/memory-graph.png)
-*Fact relationships in the knowledge graph*
+and agent "brain." When configured, hal0 builds a Hindsight client and wraps
+it with a second-pass reranker so recall surfaces the most relevant facts. If
+the Hindsight daemon is unreachable at boot, hal0 degrades to an in-memory
+PgVector fallback rather than failing — the subsystem stays usable, but that
+fallback is volatile (every write is lost on restart) and exists to keep the
+tools answering, not as a durable substitute. Once the daemon comes back,
+hal0 swaps the durable engine back in on its own (no restart required) — but
+writes accepted while degraded are gone; they were never on the durable side.
 
 <Aside type="note">
 The memory layer is engine-neutral by design — a `MemoryProvider` interface is
-the explicit anti-lock-in seam. Hindsight is the default, but the provider is
-selected from config, so the surfaces (REST + MCP) stay the same regardless of
-which engine backs them.
+the explicit anti-lock-in seam. `[memory].engine` accepts `hindsight` (the
+default and the only fully-implemented engine), `pgvector` (the volatile
+fallback, selectable directly), or `mem0` — but `mem0` is **accepted by
+config validation and not implemented**: selecting it logs a warning and
+silently runs Hindsight instead. The legacy `cognee` engine was retired in
+v1.0.0 and now fails config validation outright; there is no automated
+migration path off a Cognee-era store, and Cognee itself has been dark since
+v0.4.
 </Aside>
 
 ## Memory is gated by one config flag
 
 This is the most important thing to know: hal0 only constructs a memory
-provider when `[memory].enabled` is set in `hal0.toml`. This replaces the
-older `HAL0_MEMORY_ENABLED` environment variable — the toggle is now a
-persisted config value, editable from the dashboard settings without an env
-edit. When it's off:
+provider when `[memory].enabled` is `true`, and it **defaults to `true`** —
+no shipped `hal0.toml` and no installer step writes the key, so a box with no
+`[memory]` section at all comes up with memory *on*. This replaces the older
+`HAL0_MEMORY_ENABLED` environment variable — the toggle is now a persisted
+config value, editable from `hal0 memory enable`/`disable` or the dashboard's
+Settings without an env edit. Set `enabled = false` and memory is off:
 
 - No memory provider is built.
 - Every downstream caller degrades to a no-op or a clean error — the
@@ -92,33 +107,155 @@ edit. When it's off:
 - The dashboard hides the Memory navigation.
 
 Flipping the flag is the *entire* toggle — no code change required either way.
-A fresh install turns memory on for you and stands up the local Hindsight
-daemon automatically. An upgrade never rewrites an existing config, so a box
-that was installed before memory shipped on by default, or that had it turned
-off by hand, stays off until you set it yourself. Either way it's a conscious,
-revertible choice, not something that quietly starts accumulating data you
-didn't ask for.
+A fresh install leaves memory on (the default) and stands up the local
+Hindsight daemon automatically. An upgrade never rewrites an existing config,
+so a box that already had `enabled = false` written by hand keeps memory off
+across the upgrade — but a box with no `[memory]` key at all picks up the
+`true` default and comes up with memory on, upgrade or not.
 
 <Aside type="caution">
-The flag is the whole toggle. Until `[memory].enabled` is set (by the
-installer or by hand) and the API is restarted, the memory surfaces are inert.
+The flag is the whole toggle, but the flag's *absence* means on, not off:
+memory is inert only once you (or the installer) have written
+`[memory].enabled = false` to `hal0.toml` and restarted `hal0-api`.
 </Aside>
 
-## Namespaces: who a fact belongs to
+## Namespaces and banks: who a fact belongs to
 
 Every memory operation is scoped to a namespace, and the grammar is a closed
 set: `shared`, `agents`, `project:<id>`, or the caller's own
 `private:<client_id>`. A write with no explicit namespace defaults to
-`shared`. Passing `--private` promotes the write to `private:<client_id>` and
-**wins over an explicit `dataset` field in the request body** — so a
-private-mode client can't smuggle data into `shared` by naming it directly in
-the payload. An unknown namespace on write raises an error; on read it
-silently drops (fail-open-empty), so a typoed namespace can't leak data but
-also won't crash a caller mid-conversation.
+`shared`. Setting the `X-hal0-Private` header over REST (or `private=true`
+over MCP) promotes the write to `private:<client_id>` and **wins over an
+explicit `dataset` field in the request body** — so a private-mode client
+can't smuggle data into `shared` by naming it directly in the payload. An
+unknown namespace on write raises an error. A read naming
+several namespaces drops just the unknown ones and still answers from
+whichever are valid — but if *every* named namespace is unknown, the read
+now raises rather than silently falling back to `shared`: an earlier version
+collapsed "nothing addressable" into "nothing requested," which let an
+approval-gated `memory_delete` scoped to a bank the caller couldn't even
+name execute against `shared` instead.
 
 Callers identify themselves via the `X-hal0-Agent` header, and the same
 identity resolves the same memory namespace whether it arrives over REST or
 MCP.
+
+Namespaces map onto Hindsight **banks** — `shared` is the `shared` bank,
+`private:<agent>` is the `private__<agent>` bank. `[memory].unified_bank`
+(default `true`) changes what a private write actually does: instead of
+forking a separate `private:<agent>` bank, the write still lands in `shared`
+but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
+recall stays single-bank (no cross-bank fan-out). Set it `false` to restore
+the pre-unified model — real `private:<agent>` / `project:<id>` banks and
+fan-out recall across them.
+
+## Fact types: world, experience, observation
+
+Every stored fact carries a `fact_type`:
+
+- **world** — a stable fact or configuration detail.
+- **experience** — something that happened.
+- **observation** — a noticed pattern, derived by Hindsight's own
+  consolidation pass over world/experience facts.
+
+Only `world` and `experience` are operator- or agent-authored — `memory_add`
+and the dashboard's Add-fact form only offer those two, and `memory_curate`
+only accepts `"world"`/`"experience"` as a *new* `fact_type` value. History
+runs in reverse of what you'd expect from the name: `memory_history` is
+*only* available for observations (their revision trail comes from
+consolidation re-runs). Curation (edit text, soft-invalidate) has no such
+backend restriction — `memory_curate` over MCP accepts an observation's id
+and will edit or invalidate it; it's the dashboard inspector that hides the
+Curate/Invalidate buttons for observation facts, as a UI convenience rather
+than an engine rule. Either fact type can be deleted outright.
+
+Facts relate to each other through typed links, surfaced in the dashboard's
+graph views: `temporal` (near in time), `semantic` (related meaning),
+`entity` (shared entity), and `caused_by` (led to). `causal` and
+`cooccurrence` are legacy/prototype spellings that don't appear in real
+Hindsight payloads — the dashboard still renders them if it ever sees them,
+but don't expect to.
+
+## Directives and mental models
+
+Two concepts sit alongside plain facts:
+
+<CardGrid>
+  <Card title="Directives" icon="document">
+    A standing instruction injected verbatim into an agent's prompt every
+    turn it uses a bank — "shape behaviour, not memory." Created with a
+    `name`, `content`, `priority`, and `is_active` flag; toggled on/off
+    without deleting them. Deleting a directive is destructive and gated for
+    operator approval.
+  </Card>
+  <Card title="Mental models" icon="brain">
+    A standing question ("what does the operator prefer for X") whose
+    answer is kept refreshed from memory rather than re-derived on every
+    ask. Created with a `name` and `source_query`; the first answer builds
+    as an async operation, and later refreshes are triggered manually or
+    (per the dashboard's Add-model form) on a schedule — though only the
+    manual `memory_mental_model_refresh` trigger is actually wired to the
+    backend today; a mental model can be marked `is_stale`, surfaced in the
+    dashboard as a warning badge.
+  </Card>
+</CardGrid>
+
+## Reranking
+
+Recall unions results across banks under one token budget, then re-ranks
+that union so the most relevant facts surface first. Configured under
+`[memory.embedding]` in `hal0.toml`:
+
+- `rerank_gateway_url` (default `http://127.0.0.1:8080`) — the
+  OpenAI-compatible gateway the reranker POSTs `/v1/rerankings` to (hal0-api
+  itself by default, whose dispatcher routes to the `rerank` capability
+  slot).
+- `rerank_model` (default `builtin.jina-reranker-v1-tiny-en-q8`) — the model
+  id sent to the gateway.
+- `rerank_connect_timeout_s` / `rerank_read_timeout_s` (defaults `1.0` /
+  `8.0`) — HTTP budgets. A timeout or an unreachable reranker never blocks
+  recall: it fails soft back to the fused vector ordering.
+
+The dashboard's Settings → Memory page has a picker for `rerank_model`: the
+schema default is offered as "builtin", plus every model in the
+capabilities catalog tagged for reranking (labelled with its serving
+backend), plus whatever is currently saved if it's outside both lists. Free
+text isn't offered — an id the gateway can't resolve just makes every recall
+fail soft to vector-only ordering. The picker links out to Settings →
+Capabilities, where the underlying `rerank` slot itself is configured.
+
+## Graph extraction
+
+Storing facts is one thing; running an LLM over them to build a knowledge
+graph and observations is heavier and separately gated — **off by default**
+even on a fresh install, under `[memory.graph]`:
+
+- `enabled` (default `false`) — Hindsight builds its graph natively, so this
+  flag is a *reporting and routing* gate, not a hard stop. Disabling it does
+  **not** cancel in-flight extraction or stop the daemon — Hindsight keeps
+  extracting either way; the flag only controls how hal0 labels and routes
+  it.
+- `extraction_slot` (default `"utility"`) — the local `type=llm` slot
+  Hindsight's extraction/consolidation/reflect calls are routed to.
+- `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
+  daemon's LLM calls, covering cold slot starts and long reflects.
+
+Both are propagated to the `hindsight-api` service as
+`HINDSIGHT_API_LLM_MODEL=hal0/<slot>` and `HINDSIGHT_API_LLM_TIMEOUT=<n>` via
+a systemd drop-in at `/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`,
+followed by `daemon-reload` + a service restart — all routed through hal0's
+privileged-operation seam rather than hal0-api (which runs unprivileged)
+touching `/etc/systemd` directly.
+
+<Aside type="note">
+A memory write is refused (fast, with a clear error) rather than silently
+corrupted if the extraction slot's model can't clear a context-window floor
+(8192 tokens by default — an estimate of the extraction prompt's own
+footprint, overridable via the `HAL0_MEMORY_EXTRACTION_FLOOR` environment
+variable on the hal0-api service). Without this guard, a too-small context
+window either drops the retain silently or persists prompt scaffolding as a
+"fact." Chat is unaffected — only memory extraction is gated.
+</Aside>
 
 ## What memory powers
 
@@ -127,20 +264,24 @@ When enabled, memory becomes the shared brain that ties the platform together:
 <CardGrid>
   <Card title="Hermes's durable memory, by default" icon="comment">
     Provisioning a fresh bundled agent wires it straight to this subsystem
-    with no manual config: a `private:hermes` bank for its own facts and a
-    `shared` bank every agent on the host can read, both backed by Hindsight
-    via the hal0-api REST front door. Reads union both banks; recalled context
-    is injected automatically every turn, and the agent can also call the MCP
-    tools directly.
+    with no manual config, backed by Hindsight via the hal0-api REST front
+    door. Under the default `unified_bank = true`, Hermes' private writes
+    land in the single `shared` bank tagged `visibility:private` and
+    `agent:hermes` rather than forking a separate bank, and recall is
+    single-bank. Set `unified_bank = false` to give Hermes a real
+    `private:hermes` bank plus `shared`, with recall unioning both. Recalled
+    context is injected automatically every turn either way, and the agent
+    can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
-    The dashboard Memory view and the `/api/memory/*` routes let you add,
-    search, browse the graph, and prune facts directly — across banks,
-    documents, mental models, and directives.
+    The dashboard's Memory view (Overview + Bank workspace) and the
+    `/api/memory/*` routes let you add, search, browse the graph, and curate
+    facts directly — across banks, documents, mental models, and directives.
+    See [Browse the Bank workspace](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
-    writes land in the right per-agent namespace rather than a shared pool.
+    writes land in the right per-agent scope rather than a shared pool.
   </Card>
   <Card title="Destructive ops are audited" icon="approve-check">
     Bank deletes and every memories / config / document / directive /
@@ -154,7 +295,8 @@ When enabled, memory becomes the shared brain that ties the platform together:
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
+  <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
-  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the memory surfaces sit in the API." />
 </CardGrid>

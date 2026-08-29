@@ -75,16 +75,23 @@ If the bytes are already on the host — say you dropped a GGUF into the
 model store — register it without re-downloading:
 
 ```sh
-hal0 model add qwen3-4b-q4_k_m \
-  --path /path/to/qwen3-4b-instruct-q4_k_m.gguf \
+hal0 model add /path/to/qwen3-4b-instruct-q4_k_m.gguf \
+  --id qwen3-4b-q4_k_m \
   --name "Qwen3 4B Q4_K_M" \
   --license Apache-2.0
 ```
 
-`hal0 model add` reads the file's header to auto-detect id/capabilities/
-backends. The old `hal0 model register` name is a deprecated alias for
-the same command. The API also exposes a directory scan that registers
-every new file it finds:
+The path is the positional argument; `--id` is optional (omit it and the
+registry derives one). `hal0 model add` reads the file's header to
+auto-detect capabilities and backends — when the header doesn't carry
+enough signal (no `pooling_type`, say) it falls back to a filename guess
+and prints a confidence/warning line; fix a wrong guess with
+`PUT /api/models/{id}` (`{"capabilities": [...]}`). Pass `--overwrite` to
+replace an existing entry at the same id. The old `hal0 model register`
+name is a deprecated alias with the *old* argument order —
+`hal0 model register <id> --path <path> --name … --license …` — kept
+only for scripts that haven't moved to `model add` yet. The API also
+exposes a directory scan that registers every new file it finds:
 
 ```sh
 hal0 model scan
@@ -220,17 +227,27 @@ loading it.
 ## Restore a pre-registry backup
 
 ```sh
-hal0 model import-backup /path/to/backup [--dest /mnt/models] [--force]
+hal0 model import-backup /path/to/backup [--dest /var/lib/hal0/registry/registry.toml] [--force]
 ```
 
-Disaster-recovery import for a model store captured before hal0's
-registry existed — restores files and re-registers them.
+Disaster-recovery import for a v0.1.x model store backup — restores only
+`registry.toml` from the archive, then syncs its entries into the SQLite
+registry (`INSERT OR IGNORE`, so anything already present in SQLite is left
+alone). It does **not** restore model bytes, `capabilities.toml`, or
+per-slot TOML files — redo slot selection with `hal0 slot create` (or the
+bundle picker) after importing. `--dest` is the destination *registry.toml
+path*, not a model directory; it defaults to
+`/var/lib/hal0/registry/registry.toml` and exists mainly as a test/dev
+escape hatch. `--force` overwrites an existing `registry.toml` at that
+destination — without it, the command refuses to clobber one that may
+already hold current selections.
 
 ## The registry on disk
 
 Registry entries are metadata records — id, display name, path, size,
 SHA-256, capabilities, and the model's own launch defaults (including an
 optional preferred profile) — see
-[Choose models](/docs/guides/choose-models#launch-flags-now-live-on-the-model-not-the-slot).
+[Choose models](/docs/guides/choose-models), which covers how those launch
+defaults now live on the model instead of the slot.
 The registry is the source of truth the dispatcher resolves model ids
 against; the actual weights live in your configured model store.
