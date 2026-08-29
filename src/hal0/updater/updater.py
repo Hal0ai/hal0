@@ -1734,12 +1734,139 @@ def repair_hermes_mcp_headers(
     return True
 
 
+#: Where the managed hermes venv lives. Mirrors ``HERMES_VENV_DEFAULT`` in
+#: :mod:`hal0.agents.hermes_provision`, duplicated for the same reason
+#: :data:`HERMES_CONFIG_PATH` is: this pass must stay importable from the
+#: post-swap subprocess without pulling the provisioning module in at import
+#: time. The one place that module IS needed — an actual repair — imports it
+#: lazily, inside the branch that has already proven the box is broken.
+HERMES_VENV_PATH = Path("/var/lib/hal0/venvs/hermes")
+
+#: What an operator runs by hand when the automatic repair could not (no
+#: network during the update, a resolver conflict). Logged with the failure so
+#: the remedy travels with the diagnosis — the omission #2102 is partly about.
+HERMES_VENV_REMEDY = "hal0 agent reprovision hermes --repair"
+
+
+def repair_hermes_mcp_client(
+    *,
+    job_id: str | None = None,
+    venv: Path | None = None,
+    install: bool = True,
+    restart_gateway: bool = True,
+) -> bool:
+    """Reinstall a hermes venv whose MCP client cannot import (#2102).
+
+    :func:`repair_hermes_mcp_headers` heals the YAML half of "the agent has no
+    memory tools". This is the other half, and it reaches the same population:
+    a venv that drifted off the vetted pin — no ``mcp`` package at all, the
+    residual of #2021 — survives every upgrade untouched, because nothing
+    outside provisioning ever re-converges the venv and ``hal0 update`` never
+    provisions. Measured on ct150 during the rc.12 lane: the #2090 header
+    repair landed correctly and the live client still failed at 7181 ms with
+    ``mcp.client.streamable_http is not available``.
+
+    The diagnosis is the provisioner's own import assertion
+    (``_probe_mcp_client`` with no URL — no server round-trip, just "can this
+    interpreter import the client stack"), and the cure is the provisioner's
+    own venv install. Both are reused rather than reimplemented, so a repaired
+    box lands on exactly the state a fresh install produces.
+
+    ``install=False`` diagnoses without touching the venv. The boot-time safety
+    net passes it: :func:`check_outstanding_migrations` runs on every
+    ``hal0-api`` start, crash-restarts included, and a pip run in that path
+    would put an unbounded network operation in the startup of a box that is
+    already unhealthy. There it logs the fault and the remedy instead, and the
+    next real update repairs it.
+
+    Verification is a re-probe, never pip's exit code: the #2021 lesson is that
+    an install step reporting success over an unusable artefact is precisely
+    how this class hides. Returns ``True`` only when the client imports
+    afterwards.
+
+    Every failure is a quiet ``False``. An absent venv (no hermes on this box),
+    a pip that cannot resolve, a repair that does not take — none of them is a
+    reason to fail an update, and each leaves the box no worse than it was.
+    """
+    venv = venv or HERMES_VENV_PATH
+    venv_python = venv / "bin" / "python"
+    if not venv_python.exists():
+        log.debug("updater.hermes_venv_absent", job_id=job_id, venv=str(venv))
+        return False
+
+    # Lazy: see HERMES_VENV_PATH. Only a box that reaches this line pays for it.
+    from hal0.agents import hermes_provision as hermes
+
+    try:
+        before = hermes._probe_mcp_client(venv_python, None, agent_id="hermes")
+    except Exception as exc:
+        log.warning("updater.hermes_mcp_client_probe_failed", job_id=job_id, error=str(exc))
+        return False
+    if before.get("ok"):
+        return False
+
+    log.warning(
+        "updater.hermes_mcp_client_broken",
+        job_id=job_id,
+        stage=before.get("stage"),
+        error=before.get("error"),
+        remedy=HERMES_VENV_REMEDY,
+        repairing=install,
+    )
+    if not install:
+        return False
+
+    try:
+        hermes._install_venv(venv, hermes.HERMES_REQUIREMENTS)
+    except Exception as exc:
+        log.warning(
+            "updater.hermes_venv_repair_failed",
+            job_id=job_id,
+            error=str(exc),
+            remedy=HERMES_VENV_REMEDY,
+        )
+        return False
+
+    try:
+        after = hermes._probe_mcp_client(venv_python, None, agent_id="hermes")
+    except Exception as exc:
+        log.warning("updater.hermes_mcp_client_probe_failed", job_id=job_id, error=str(exc))
+        return False
+    if not after.get("ok"):
+        log.warning(
+            "updater.hermes_venv_repair_ineffective",
+            job_id=job_id,
+            stage=after.get("stage"),
+            error=after.get("error"),
+            remedy=HERMES_VENV_REMEDY,
+        )
+        return False
+
+    log.info("updater.hermes_venv_repaired", job_id=job_id, venv=str(venv))
+
+    if restart_gateway:
+        # Same reason as the header repair: hermes builds its MCP client at
+        # start, so a running gateway keeps the broken one until it bounces.
+        try:
+            subprocess.run(
+                ["systemctl", "restart", "hermes-gateway.service"],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("updater.hermes_gateway_bounce_failed", job_id=job_id, error=str(exc))
+
+    return True
+
+
 def run_post_activation_migrations(
     min_data_version: int = 1,
     *,
     job_id: str | None = None,
     ceiling: int | None = None,
     skip_image_retag: bool = False,
+    repair_hermes_venv: bool = True,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1826,6 +1953,13 @@ def run_post_activation_migrations(
         # before this pass existed, and never a reason to fail an update.
 
     try:
+        repair_hermes_mcp_client(job_id=job_id, install=repair_hermes_venv)
+    except Exception as exc:
+        log.warning("updater.hermes_venv_repair_pass_failed", job_id=job_id, error=str(exc))
+        # Non-fatal, same posture as the header repair above: the box keeps
+        # the venv it had and the logged remedy names the manual repair.
+
+    try:
         relabel_stale_vulkan_slots(job_id=job_id)
     except Exception as exc:
         log.warning("updater.vulkan_migration_failed", job_id=job_id, error=str(exc))
@@ -1897,7 +2031,12 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
     try:
         reset_outstanding = bool(profile_reset_status().get("due"))
         ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
-        return run_post_activation_migrations(job_id=job_id, ceiling=ceiling, skip_image_retag=True)
+        return run_post_activation_migrations(
+            job_id=job_id,
+            ceiling=ceiling,
+            skip_image_retag=True,
+            repair_hermes_venv=False,
+        )
     except Exception as exc:
         log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
         return None

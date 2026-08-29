@@ -1699,7 +1699,11 @@ def agent_reprovision(
     repair: bool = typer.Option(
         False,
         "--repair",
-        help="Force re-run of every phase (re-writes persona seeds, re-renders config).",
+        help=(
+            "Force re-run of every phase: rebuilds the managed venv, re-writes "
+            "persona seeds, re-renders config. The venv rebuild is what recovers a "
+            "box whose agent has no MCP tools."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
