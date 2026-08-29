@@ -29,7 +29,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.registry.detect import quant_from_filename
-from hal0.registry.specialty import companion_role_of
+from hal0.registry.specialty import companion_role_of, detect_specialty
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +143,7 @@ class FileSetPlan:
     #: Why this mmproj (if any) was picked — surfaced to the UI so a
     #: deterministic-but-surprising pairing is explainable (plan §7.1c a2).
     mmproj_tiebreak_reason: str | None = None
+    specialty: str | None = None  # SPECIALTY_KINDS key, when detected
 
 
 # ── HF tree enumeration (recursive + paginated) ───────────────────────────
@@ -404,6 +405,7 @@ def plan_fileset(
     mmproj_files: list[RawTreeEntry] = []
     tokenizer_files: list[RawTreeEntry] = []
     config_files: list[RawTreeEntry] = []
+    companion_files: list[tuple[str, RawTreeEntry]] = []  # (role, entry)
 
     for e in entries:
         role = role_of(e.path)
@@ -419,6 +421,8 @@ def plan_fileset(
             mmproj_files.append(e)
         elif role == "tokenizer":
             tokenizer_files.append(e)
+        elif role not in ("model", "shard", "mmproj", "tokenizer", "config"):
+            companion_files.append((role, e))
         else:
             config_files.append(e)
 
@@ -535,6 +539,25 @@ def plan_fileset(
                 )
             )
 
+    # ── specialty companion carry (spec 2026-08-29, #1946) ────────────────
+    specialty = detect_specialty(
+        [e.path for e in entries],
+        quant=quant_from_filename(PurePosixPath(entry_rel).name),
+    )
+    if specialty is not None:
+        for comp_role, e in companion_files:
+            files.append(
+                FileSetEntry(
+                    rel=e.path,
+                    size_bytes=_entry_bytes(e),
+                    lfs_sha256=e.lfs_oid,
+                    role=comp_role,
+                    shard_index=None,
+                )
+            )
+    # If specialty is None, companions are NOT carried — a stray
+    # companion-shaped file in a normal repo stays uninstalled; never guess.
+
     total_bytes = sum(f.size_bytes for f in files)
     return FileSetPlan(
         repo=repo,
@@ -545,6 +568,7 @@ def plan_fileset(
         total_bytes=total_bytes,
         runner_hint=_infer_runner_hint(files),
         mmproj_tiebreak_reason=mmproj_reason,
+        specialty=specialty,
     )
 
 
