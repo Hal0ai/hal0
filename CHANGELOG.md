@@ -22,7 +22,7 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
-## [Unreleased]
+## [1.0.0] — 2026-08-29
 
 The first stable release. hal0 stops being a box you configure and starts
 being a box that is already configured: the whole platform is reachable by
