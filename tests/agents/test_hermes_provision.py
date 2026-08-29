@@ -304,9 +304,17 @@ def test_home_init_converges_on_second_run(tmp_path: Path) -> None:
     assert (hermes_home / "config.yaml").read_text() == "# operator file"
 
 
-def test_install_phase_skips_venv_when_binary_exists(
+def test_install_phase_skips_venv_when_binary_exists_and_client_imports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A converged venv is left alone — binary present AND client importable.
+
+    Re-baselined for #2102: the skip used to key on ``bin/hermes`` existing
+    alone, which is what let a venv with no ``mcp`` package sail through the
+    install phase and fail at ``mcp_wire``. The probe is injected healthy here
+    so this test still covers what it was written to cover (a converged venv is
+    not rebuilt); the drift case has its own test below.
+    """
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
@@ -324,10 +332,24 @@ def test_install_phase_skips_venv_when_binary_exists(
     def _no_install(*args: Any, **kwargs: Any) -> None:
         called.append(args)
 
-    out = hp._phase_install(hp._StepCtx(state=state, io=hp.InstallIO(install_venv=_no_install)))
+    out = hp._phase_install(
+        hp._StepCtx(
+            state=state,
+            io=hp.InstallIO(
+                install_venv=_no_install,
+                probe_mcp_client=lambda *_a, **_kw: {
+                    "ok": True,
+                    "stage": "import",
+                    "tools": [],
+                    "error": None,
+                },
+            ),
+        )
+    )
     assert out.status == hp.PhaseStatus.OK
-    # Venv binary already present → the venv build is skipped entirely.
+    # Venv binary present and its MCP client imports → no rebuild.
     assert called == []
+    assert "venv_reinstalled_reason" not in out.details
     # Canonical `hermes` wrapper is installed (the hal0-hermes back-compat
     # symlink is retired).
     assert hermes_cli_dst.is_file()
@@ -338,6 +360,57 @@ def test_install_phase_skips_venv_when_binary_exists(
     assert (hermes_home / "plugins" / "hal0-memory" / "__init__.py").is_file()
     assert (hermes_home / "plugins" / "model-providers" / "hal0" / "__init__.py").is_file()
     assert not any("hal0-provider" in s for s in out.details.get("plugins_skipped", []))
+
+
+def test_install_phase_reinstalls_a_venv_whose_mcp_client_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2102: ``bin/hermes`` existing is not proof the venv is usable.
+
+    A venv that drifted off the vetted pin has the binary and no ``mcp``
+    package, so the old existence gate skipped the install, reported
+    ``install: ok``, and left ``mcp_wire`` to hard-fail over the very artefact
+    the previous phase had just blessed. The operator was then told
+    ``bootstrap failed in steps: mcp_wire`` with no remedy named, while plain
+    ``hal0 agent reprovision hermes`` could not fix it and ``--repair`` — which
+    could — advertised itself as a persona/config re-run.
+
+    The phase now re-runs the install when the venv cannot import the client,
+    with no ``--repair`` needed: the provisioner already knows both the
+    diagnosis and the cure.
+    """
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
+    (venv / "bin" / "hermes").chmod(0o755)
+
+    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes")
+    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes")
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hermes_home"))
+
+    install_calls: list[Path] = []
+
+    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
+        install_calls.append(v)
+
+    out = hp._phase_install(
+        hp._StepCtx(
+            state=state,
+            io=hp.InstallIO(
+                install_venv=_fake_install,
+                probe_mcp_client=lambda *_a, **_kw: {
+                    "ok": False,
+                    "stage": "import",
+                    "tools": [],
+                    "error": "ModuleNotFoundError: No module named 'mcp'",
+                },
+            ),
+        )
+    )
+
+    assert out.status == hp.PhaseStatus.OK
+    assert install_calls == [venv]
+    assert out.details["venv_reinstalled_reason"] == "mcp client import failed"
 
 
 def test_install_phase_runs_venv_install_when_binary_missing(

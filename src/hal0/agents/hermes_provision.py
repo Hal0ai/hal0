@@ -960,7 +960,33 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
 
     # ── hal0-owned artifacts (born hal0:hal0 when the provisioner runs as hal0) ─
     hermes_bin = _venv_python(venv).parent / "hermes"
-    if not hermes_bin.exists() or ctx.repair:
+    # #2102: `bin/hermes` existing is not proof the venv is USABLE. A venv that
+    # drifted off the vetted pin keeps the binary and loses the `mcp` package
+    # (the residual population of #2021), and the old existence gate skipped
+    # the install over it — recording `install: ok` immediately before
+    # `mcp_wire` hard-failed on the same venv, with no remedy named and plain
+    # `reprovision` unable to fix what only `--repair` could. Ask the venv
+    # whether it can import the client hermes actually uses (the same
+    # assertion `mcp_wire` makes, no URL, no server round-trip) and rebuild it
+    # when it cannot. The provisioner already holds both the diagnosis and the
+    # cure; this just stops it walking past one to fail on the other.
+    reinstall_reason: str | None = None
+    if not hermes_bin.exists():
+        reinstall_reason = "hermes binary missing"
+    elif ctx.repair:
+        reinstall_reason = "--repair"
+    else:
+        try:
+            probe = ctx.io.probe_mcp_client(_venv_python(venv), None, agent_id=state.agent_id)
+        except Exception as exc:  # a probe that cannot run is not a verdict
+            log.warning("hermes_provision.mcp_client_probe_failed", error=str(exc))
+            probe = {"ok": True}
+        if not probe.get("ok"):
+            reinstall_reason = "mcp client import failed"
+            details["mcp_client_before_reinstall"] = probe
+
+    if reinstall_reason is not None:
+        details["venv_reinstalled_reason"] = reinstall_reason
         try:
             ctx.io.install_venv(venv, requirements)
             changed = True
@@ -2791,7 +2817,8 @@ def _phase_mcp_wire(ctx: _StepCtx) -> PhaseResult:
             },
             reason=(
                 f"hermes venv has no working MCP client "
-                f"({client_import.get('stage')}): {client_import.get('error')}"
+                f"({client_import.get('stage')}): {client_import.get('error')} "
+                f"— run: hal0 agent reprovision hermes --repair"
             ),
         )
     allowlist = _load_agent_allowlist()

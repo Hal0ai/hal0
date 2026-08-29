@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from hal0.errors import Hal0Error
-from hal0.updater.updater import run_post_activation_migrations
+from hal0.updater.updater import check_outstanding_migrations, run_post_activation_migrations
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +32,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "vulkan_migration": [],
         "image_retag": [],
         "extra_args": [],
+        "hermes_venv": [],
     }
 
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
@@ -58,12 +59,17 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["extra_args"].append(job_id)
         return 0
 
+    def _hermes_venv(*, job_id=None, install=True, venv=None, restart_gateway=True):
+        calls["hermes_venv"].append((job_id, install))
+        return False
+
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
     monkeypatch.setattr("hal0.updater.updater.retag_stale_slot_images", _image_retag)
     monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
+    monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
     return calls
 
 
@@ -139,3 +145,32 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["vulkan_migration"] == []
     assert _stub_every_pass["image_retag"] == []
     assert _stub_every_pass["extra_args"] == []
+
+
+def test_update_path_repairs_a_drifted_hermes_venv(
+    _stub_every_pass: dict[str, list[Any]],
+) -> None:
+    """#2102: an upgrade heals a venv whose MCP client cannot import.
+
+    rc.12's #2090 pass repairs the config header only, so a box whose venv
+    drifted off the vetted pin (the residual of #2021) came out of a
+    successful ``hal0 update`` still holding zero memory tools.
+    """
+    run_post_activation_migrations(job_id="j1")
+    assert _stub_every_pass["hermes_venv"] == [("j1", True)]
+
+
+def test_boot_safety_net_diagnoses_the_venv_without_installing(
+    _stub_every_pass: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boot path must not put a pip install in ``hal0-api``'s startup.
+
+    ``check_outstanding_migrations`` runs on every start, crash-restarts
+    included. It still probes — the fault and its remedy get logged — but the
+    repair itself waits for a real update.
+    """
+    monkeypatch.setattr("hal0.updater.updater.profile_reset_status", lambda: {"due": False})
+
+    check_outstanding_migrations(job_id="boot")
+
+    assert _stub_every_pass["hermes_venv"] == [("boot", False)]
