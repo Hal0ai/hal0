@@ -45,7 +45,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="${HERE}/manifest.toml"
-WORK="${HAL0_RUNNER_BUILD_DIR:-/tmp/hal0-rocmfpx-build}"
+WORK="${HAL0_RUNNER_BUILD_DIR:-/tmp/hal0-promptforge-build}"
 TAG_OVERRIDE=""
 CHECK_ONLY=0
 
@@ -146,7 +146,7 @@ fi
 RUNTIME="${HAL0_CONTAINER_RUNTIME:-$(command -v docker || command -v podman || true)}"
 [[ -n "$RUNTIME" ]] || { echo "no docker/podman on PATH" >&2; exit 65; }
 
-BUILDER="localhost/hal0-rocmfpx-builder:$(read_manifest base.rocm_version)"
+BUILDER="localhost/hal0-promptforge-builder:$(read_manifest base.rocm_version)"
 cat > "${WORK}/Containerfile.builder" <<EOF
 FROM ${BASE_REF}
 RUN dnf install -y \
@@ -203,21 +203,23 @@ PATCH_SERIES_SHA="$(
 cat > "${STAGE}/Containerfile" <<EOF
 FROM ${BASE_REF}
 RUN dnf install -y mesa-vulkan-drivers vulkan-loader vulkan-tools && dnf clean all
-COPY bin/ /opt/rocmfpx/bin/
-COPY hal0-runner-entrypoint.sh /opt/rocmfpx/hal0-runner-entrypoint.sh
-# NO llama-* on PATH, deliberately. The stock toolbox ships its own
-# /usr/local/bin/llama-* which ABI-mismatches these binaries and segfaults, so
-# removing them is correct; what used to follow was a symlink loop meant to put
-# ours in their place, and it never worked — the escaping rendered a literal
-# \$b into the Containerfile, so it created nothing and short-circuited before
-# ldconfig, with \`|| true\` masking the whole thing. Nothing in hal0 noticed
-# because bench/harness.py invokes /opt/rocmfpx/bin/llama-bench by absolute path
-# and LD_LIBRARY_PATH below covers the skipped ldconfig. Rather than revive dead
-# code nothing needs, the state it actually produced is now the stated intent:
-# use the absolute path under /opt/rocmfpx/bin.
-RUN chmod +x /opt/rocmfpx/hal0-runner-entrypoint.sh && \\
+COPY bin/ /opt/promptforge/bin/
+COPY hal0-runner-entrypoint.sh /opt/promptforge/hal0-runner-entrypoint.sh
+# NO llama-* on PATH, deliberately — same reasoning as rocmfpx's Containerfile
+# (this recipe is modelled on packaging/runner/rocmfpx/build.sh; see that
+# file's comment here for the full symlink-loop bug history). The stock
+# toolbox ships its own /usr/local/bin/llama-* which ABI-mismatches these
+# binaries and segfaults, so removing them is correct.
+# UNLIKE rocmfpx: nothing in hal0 today invokes THIS image's binaries by an
+# /opt/promptforge/... absolute path — src/hal0/bench/harness.py's bench_bin
+# is hardcoded to /opt/rocmfpx/bin/llama-bench only (rocmfpx-specific; not
+# extended to this recipe, out of scope for task-12). LD_LIBRARY_PATH below
+# still needs to cover the skipped ldconfig regardless of that gap, so the
+# binaries remain reachable under the absolute path below even without a
+# hal0 caller wired to it yet.
+RUN chmod +x /opt/promptforge/hal0-runner-entrypoint.sh && \\
     rm -f /usr/local/bin/llama-* /usr/local/lib64/libllama* /usr/local/lib64/libggml*
-ENV LD_LIBRARY_PATH=/opt/rocmfpx/bin:/opt/rocm/lib \\
+ENV LD_LIBRARY_PATH=/opt/promptforge/bin:/opt/rocm/lib \\
     HSA_OVERRIDE_GFX_VERSION=11.5.1 \\
     GGML_HIP_ENABLE_UNIFIED_MEMORY=1
 # Provenance in the image itself, so a box can answer "where did this come
@@ -227,12 +229,12 @@ LABEL org.opencontainers.image.source="${REPO}" \\
       org.opencontainers.image.revision="${REF}" \\
       org.opencontainers.image.base.name="${BASE}" \\
       org.opencontainers.image.base.digest="${BASE_DIGEST}" \\
-      dev.hal0.runner.recipe="packaging/runner/rocmfpx" \\
+      dev.hal0.runner.recipe="packaging/runner/promptforge" \\
       dev.hal0.recipe.revision="${RECIPE_REV}" \\
       dev.hal0.runner.base="${BASE_REF}" \\
       dev.hal0.runner.patches="$(IFS=,; echo "${PATCHES[*]}")" \\
       dev.hal0.runner.patches.sha256="${PATCH_SERIES_SHA}"
-ENTRYPOINT ["/opt/rocmfpx/hal0-runner-entrypoint.sh"]
+ENTRYPOINT ["/opt/promptforge/hal0-runner-entrypoint.sh"]
 EOF
 "$RUNTIME" build -f "${STAGE}/Containerfile" -t "$TAG" "$STAGE"
 echo "==> built ${TAG}"
