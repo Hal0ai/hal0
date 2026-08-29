@@ -1,7 +1,11 @@
+from unittest.mock import patch
+
 import pytest
 
+from hal0.config.schema import ProfileConfig
 from hal0.errors import UnprocessableEntity
-from hal0.providers.container import _guard_specialty_runner
+from hal0.providers.container import ContainerProvider, _guard_specialty_runner, _resolve_llama_scalars
+from hal0.registry.specialty import specialty_env_for
 from hal0.runners import RUNNER_IMAGES
 
 
@@ -89,3 +93,74 @@ def test_unknown_specialty_silent_by_default_warns_when_launch(caplog):
         )
     assert reason2 == reason  # parity: identical dict regardless of log_degraded
     assert any(caplog.records)
+
+
+class TestSpecialtyEnv:
+    def test_env_synthesized_from_companions(self):
+        meta = _pf_model()["metadata"]
+        env = specialty_env_for(meta)
+        assert env["PROMPTFORGE_SIDECAR"] == "/var/lib/hal0/models/m/ffn.pfs"
+        assert env["PROMPTFORGE_GDN_SIDECAR"] == "/var/lib/hal0/models/m/gdn.pfs"
+        assert env["PROMPTFORGE_MTP_OUTPUT_K8_PROXY"] == "/var/lib/hal0/models/m/k8.pfs"
+
+    def test_plain_metadata_empty(self):
+        assert specialty_env_for({}) == {}
+        assert specialty_env_for({"specialty": "promptforge"}) == {}  # no companions
+
+
+def _pf_slot(**overrides):
+    base = {
+        "name": "s",
+        "port": 8099,
+        "device": "cpu",
+        "model": {"default": "qwen-pf"},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_scalars_carry_specialty_env_only_when_accelerated():
+    """_resolve_llama_scalars: accelerated (capable runner) vs degraded
+    (incapable runner) — specialty_env is synthesized ONLY on the
+    accelerated path; a degraded launch gets NO specialty env."""
+    model = _pf_model()
+    profile = ProfileConfig()
+
+    capable = _resolve_llama_scalars(
+        _pf_slot(binary="promptforge"), model, profile
+    )
+    assert capable["specialty_degraded"] is None
+    assert capable["specialty_env"]["PROMPTFORGE_SIDECAR"] == "/var/lib/hal0/models/m/ffn.pfs"
+    assert capable["specialty_env"]["PROMPTFORGE_GDN_SIDECAR"] == "/var/lib/hal0/models/m/gdn.pfs"
+    assert (
+        capable["specialty_env"]["PROMPTFORGE_MTP_OUTPUT_K8_PROXY"]
+        == "/var/lib/hal0/models/m/k8.pfs"
+    )
+
+    incapable = _resolve_llama_scalars(
+        _pf_slot(binary="rocmfpx"), model, profile
+    )
+    assert incapable["specialty_env"] == {}
+    assert incapable["specialty_degraded"]["code"] == "slot.specialty_degraded"
+
+
+def test_operator_server_env_wins():
+    """container_spec: an explicit [server].env key on the SAME name the
+    specialty env synthesizes still wins in the merged launch plan — the
+    three-way merge is vis_env < specialty_env < server_env (operator
+    last, operator wins)."""
+    cfg = _pf_slot(
+        profile="promptforge",
+        binary="promptforge",
+        server={"env": {"PROMPTFORGE_SIDECAR": "/operator/override.pfs"}},
+    )
+    model = _pf_model()
+    provider = ContainerProvider()
+    profile = ProfileConfig()
+
+    with patch("hal0.providers.container._resolve_profile", return_value=profile):
+        plan = provider.container_spec(cfg, model)
+
+    assert plan.env["PROMPTFORGE_SIDECAR"] == "/operator/override.pfs"
+    # non-overridden companion env still rides through from the specialty path.
+    assert plan.env["PROMPTFORGE_GDN_SIDECAR"] == "/var/lib/hal0/models/m/gdn.pfs"

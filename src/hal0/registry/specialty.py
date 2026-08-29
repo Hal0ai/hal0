@@ -80,6 +80,30 @@ SPECIALTY_KINDS: dict[str, SpecialtyKind] = {
 }
 
 
+def specialty_env_for(metadata: Mapping[str, object]) -> dict[str, str]:
+    """Synthesize the env block for a specialty model's accelerated launch.
+
+    ``{CompanionSpec.env: installed path}`` for every companion present in
+    ``metadata["companions"]``, plus the kind's static ``mode_env``.
+    Empty dict for plain models, unknown kinds, or missing companions —
+    the caller gates completeness via the guard, this never raises.
+    """
+    key = metadata.get("specialty")
+    kind = SPECIALTY_KINDS.get(key) if isinstance(key, str) else None
+    companions = metadata.get("companions")
+    if kind is None or not isinstance(companions, Mapping) or not companions:
+        return {}
+    env: dict[str, str] = {}
+    for spec in kind.companions:
+        if spec.env is None:
+            continue
+        path = companions.get(spec.role)
+        if isinstance(path, str) and path:
+            env[spec.env] = path
+    env.update(kind.mode_env)
+    return env
+
+
 def companion_role_of(filename: str) -> str | None:
     """Classify one filename into a companion role, or ``None``.
 

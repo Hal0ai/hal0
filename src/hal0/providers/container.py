@@ -1991,6 +1991,16 @@ def _resolve_llama_scalars(
     if not isinstance(server_env, dict):
         server_env = None
 
+    # ── specialty env (spec 2026-08-29, #1946) — synthesized only on the
+    # accelerated path; a degraded launch gets NO specialty env so the
+    # runner behaves exactly like a plain GGUF load.
+    if specialty_degraded is None:
+        from hal0.registry.specialty import specialty_env_for
+
+        specialty_env = specialty_env_for((model_info or {}).get("metadata") or {})
+    else:
+        specialty_env = {}
+
     # Registry model id → llama-server --alias so the container advertises the
     # hal0 id (not the raw GGUF basename) for dispatcher matching.
     model_alias = model_info.get("_model_key") or model_table.get("default") or None
@@ -2112,6 +2122,7 @@ def _resolve_llama_scalars(
         "context_size": context_size,
         "extra_args": extra_args,
         "server_env": server_env,
+        "specialty_env": specialty_env,
         "model_alias": model_alias,
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
@@ -2247,7 +2258,7 @@ class ContainerProvider(Provider):
         # slot's [server].env so an operator's explicit key always wins.
         vis_env = gpu_visibility_env(scalars["device"], scalars["gpu_index"])
         server_env = scalars["server_env"] or {}
-        merged_env = {**vis_env, **server_env}
+        merged_env = {**vis_env, **scalars["specialty_env"], **server_env}
 
         return _llama_launch_plan(
             image=scalars["image"],
