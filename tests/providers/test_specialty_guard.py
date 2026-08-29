@@ -54,3 +54,38 @@ def test_degraded_not_ok_raises_422(monkeypatch):
     with pytest.raises(UnprocessableEntity) as exc:
         _guard_specialty_runner(_pf_model(), RUNNER_IMAGES["rocmfpx"])
     assert exc.value.code == "slot.unsupported_specialty_for_runner"
+
+
+def test_preview_call_does_not_warn(caplog):
+    # default log_degraded=False — the preview/poll path (for_launch=False)
+    # must stay silent on every dashboard poll (#1946 fix round 1).
+    with caplog.at_level("WARNING"):
+        reason = _guard_specialty_runner(_pf_model(), RUNNER_IMAGES["rocmfpx"])
+    assert reason["code"] == "slot.specialty_degraded"
+    assert not caplog.records
+
+
+def test_launch_call_warns(caplog):
+    # log_degraded=True — the real launch path — still logs once.
+    with caplog.at_level("WARNING"):
+        reason = _guard_specialty_runner(
+            _pf_model(), RUNNER_IMAGES["rocmfpx"], log_degraded=True
+        )
+    assert reason["code"] == "slot.specialty_degraded"
+    assert any("specialty" in r.message for r in caplog.records)
+
+
+def test_unknown_specialty_silent_by_default_warns_when_launch(caplog):
+    model = {"_model_key": "future", "metadata": {"specialty": "hyperdrive-v9"}}
+    with caplog.at_level("WARNING"):
+        reason = _guard_specialty_runner(model, RUNNER_IMAGES["rocmfpx"])
+    assert reason["code"] == "slot.specialty_degraded"
+    assert not caplog.records
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        reason2 = _guard_specialty_runner(
+            model, RUNNER_IMAGES["rocmfpx"], log_degraded=True
+        )
+    assert reason2 == reason  # parity: identical dict regardless of log_degraded
+    assert any(caplog.records)

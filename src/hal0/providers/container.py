@@ -1656,6 +1656,8 @@ def _guard_fpx_quant_runner(
 def _guard_specialty_runner(
     model_info: dict[str, Any],
     runner: Any,
+    *,
+    log_degraded: bool = False,
 ) -> dict[str, Any] | None:
     """Gate a specialty-distribution model against the resolved runner.
 
@@ -1669,7 +1671,14 @@ def _guard_specialty_runner(
     hard-refuse (422) exactly like :func:`_guard_fpx_quant_runner`.
 
     Returns ``None`` when the accelerated path is clear, else the reason
-    dict. Called from the single choke point
+    dict — this is returned IDENTICALLY on both the launch and preview
+    paths (parity), regardless of ``log_degraded``. ``log_degraded`` only
+    gates the ``log.warning`` side-effect: the preview path
+    (:func:`_resolve_slot_argv`, default ``for_launch=False``) backs the
+    dashboard's ~2s slot-poll, and logging unconditionally there turns a
+    once-per-launch hint into a per-poll-per-open-tab stream (the same bug
+    :func:`_effective_mtp` guards against three lines below via
+    ``log_ineligible=for_launch``). Called from the single choke point
     (:func:`_resolve_llama_scalars`) both launch and preview share.
     """
     from hal0.registry.specialty import SPECIALTY_KINDS
@@ -1682,7 +1691,8 @@ def _guard_specialty_runner(
     kind = SPECIALTY_KINDS.get(key)
     if kind is None:
         # Row stamped by a newer hal0 than this one — degrade, don't crash.
-        log.warning("slot launch degraded: model %s unknown specialty %r", model_key, key)
+        if log_degraded:
+            log.warning("slot launch degraded: model %s unknown specialty %r", model_key, key)
         return {
             "code": "slot.specialty_degraded",
             "specialty": str(key),
@@ -1700,9 +1710,10 @@ def _guard_specialty_runner(
                 details={"model": model_key, "specialty": key,
                          "runner": getattr(runner, "key", None)},
             )
-        log.warning(
-            "slot launch degraded: model %s specialty %s — %s", model_key, key, detail
-        )
+        if log_degraded:
+            log.warning(
+                "slot launch degraded: model %s specialty %s — %s", model_key, key, detail
+            )
         return {
             "code": "slot.specialty_degraded",
             "specialty": key,
@@ -1825,7 +1836,7 @@ def _resolve_llama_scalars(
     )
     if for_launch:
         _guard_fpx_quant_runner(slot_cfg, model_info, runner)
-    specialty_degraded = _guard_specialty_runner(model_info, runner)
+    specialty_degraded = _guard_specialty_runner(model_info, runner, log_degraded=for_launch)
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
