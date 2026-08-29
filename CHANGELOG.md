@@ -24,12 +24,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-These are the 1.0.0 notes. They carried a `## [1.0.0] — 2026-08-07`
-heading for three weeks, which read as a shipped release: no `v1.0.0` tag
-exists, and the line has run rc.1 → rc.12 the whole time. They live here
-until 1.0.0 actually tags, at which point this content moves back under a
-`## [1.0.0] — <tag date>` heading so `scripts/gen_release_notes.py` can
-bundle it into the release.
+The first stable release. hal0 stops being a box you configure and starts
+being a box that is already configured: the whole platform is reachable by
+an agent, slots start when you say so, and the documentation that describes
+all of it ships from this repository.
+
+Everything below is the accumulated work of the rc.1 → rc.12 line. The
+**Breaking** section is long — this is the release that spends the pre-1.0
+allowance — so if you are upgrading from 0.9.8, read it along with **Operator
+migrations** and **Supported upgrades** before you run `hal0 update`.
 
 ### Highlights
 
@@ -87,9 +90,6 @@ rationale and code-path detail in the
 - **NPU trio dispatch reads the anchor's `[npu]` table, not the shadow slots' own flags.**
   `flm-stt`/`flm-embed` are display+dispatch records for the anchor's single
   `flm serve` process; a modality that was never launched is no longer routable.
-- **`[brain_chat] tool_model` is removed — it was never read.**
-  A config that sets it explicitly now fails validation with a clear error;
-  the live `[brain_chat] model` override is the real steering knob.
 - **Deprecated surfaces are `HAL0-SUNSET`-stamped for scheduled removal:**
   the `--backend` flag (use `--provider`), `SlotConfig.runtime`/`workers`,
   the `cognee` engine literal, and several legacy CLI aliases.
@@ -110,8 +110,6 @@ full detail in the
   just loses the key. Idempotent; the CLI form is dry-run by default and safe live.
 - **Slot id-keying (operator-run, optional): run `hal0 slot migrate-id-keying` in a downtime window (takes a pre-flight backup).**
   The runtime reads either layout; the flip is deliberate and reversible.
-- **A stale `[brain_chat] tool_model` key in `hal0.toml` no longer breaks config load.**
-  `load_hal0_config` drops it before validation on every load path.
 - **Disabling a capability now clears the slot's model instead of writing `enabled = false`.**
   The pick survives in `capabilities.toml` and a re-enable rebinds it.
 - **Honcho → Hindsight (only boxes that ran Honcho): no migration step — Honcho support was removed outright and Hindsight starts fresh.**
@@ -259,6 +257,21 @@ full detail in the
   stamps it into the model's `defaults.chat_template` at pull time so
   fresh installs launch with `--chat-template-file` instead of the broken
   embedded template.
+
+- The Secrets page no longer claims credentials are encrypted at rest (#2110).
+  They never were: `/etc/hal0/api.env` is a plaintext `KEY="value"` file written
+  atomically at mode 0600 and owned by root. That is a defensible posture for a
+  single-tenant appliance, but the old copy could talk an operator into handing
+  over a host snapshot or a support bundle believing the provider keys inside
+  were protected. The page now states the real storage, and the docs already
+  did.
+
+- Settings ▸ Models ▸ Model Defaults no longer offers a "GPU layers" field
+  (#2105). NGL became slot-owned hardware in the 1.0 line, so the value an
+  operator typed there was dropped by the registry on validation and cleared
+  again by the next model-drawer save — it looked saved and never was. NGL is
+  set on the slot's hardware grid. The unreachable pre-drawer recipe editor,
+  which carried the same dead field, is deleted.
 
 ### Audience
 
