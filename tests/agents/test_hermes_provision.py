@@ -384,8 +384,12 @@ def test_install_phase_reinstalls_a_venv_whose_mcp_client_is_missing(
     (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
     (venv / "bin" / "hermes").chmod(0o755)
 
-    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes")
-    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes")
+    monkeypatch.setattr(
+        hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    )
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hermes_home"))
 
     install_calls: list[Path] = []
