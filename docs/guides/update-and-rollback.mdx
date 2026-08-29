@@ -125,6 +125,69 @@ hal0 update --channel preview
 
 </Steps>
 
+## Upgrading from 0.9.8
+
+Every stable-channel box has been pinned at 0.9.8 since 2026-07-13, so this is
+the hop most existing installs make into 1.0. It works — with one prerequisite
+that is easy to miss.
+
+<Aside type="caution" title="0.9.8 boxes have no cosign">
+0.9.8's updater verifies the release tarball with `cosign verify-blob` and
+aborts when the binary is missing:
+
+```
+Error: prepare failed: cosign is not installed
+```
+
+`HAL0_UPDATE_SKIP_COSIGN=1` does not help — it is ignored on the stable
+channel. And nothing on a 0.9.8-era box ever installed cosign; hal0 only began
+persisting a verified one during install in `1.0.0-rc.10`.
+</Aside>
+
+### The short way: re-run the installer
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+This is an **upgrade in place, not a reinstall**. `/etc/hal0` and
+`/var/lib/hal0` are carried across, your slot TOMLs stay as they are, and the
+installer adds what 1.0 needs rather than replacing what you had. It also
+resolves the dependencies 0.9.8 never installed — cosign among them — which is
+what makes it the path of least resistance from 0.9.8.
+
+Because its migrations run under the new code, the box also lands on
+`meta.schema_version = 2` in the same pass.
+
+### The long way: install cosign, then update
+
+```sh
+curl -fsSL -o /usr/local/bin/cosign \
+  https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+chmod +x /usr/local/bin/cosign
+hal0 update -y
+```
+
+Same destination, and it keeps you on the `hal0 update` flow described above.
+
+### Three things specific to leaving 0.9.8
+
+- **The CLI may exit 1 on an update that worked.** The 0.9.8 client polls the
+  API it is restarting and treats the mid-restart refusal as fatal. Check
+  `hal0 --version` before retrying — the update has usually applied.
+- **Your channel does not change.** 0.9.8 persisted `stable` and neither route
+  overwrites a channel already on disk, so `HAL0_CHANNEL=preview` on the
+  command line is ignored. Set it afterwards with `hal0 update --channel
+  preview` if you are deliberately tracking preview.
+- **Do not point `HAL0_RELEASES_URL` at a GitHub release-asset URL.** 0.9.8's
+  updater does not follow redirects and those URLs answer `302`, so it stops
+  with `release manifest fetch returned HTTP 302`. The default
+  (`releases.hal0.dev`) serves manifests directly.
+
+Rolling back afterwards works normally — the 0.9.8 tree is kept, not deleted.
+See [Roll back](#roll-back), and note that config migrations are forward-only:
+a rolled-back 0.9.8 daemon reads a `hal0.toml` that 1.0 already migrated.
+
 ## The profiles.toml reseed (a pre-v1.0 one-time wipe)
 
 hal0's seed profile catalogue is baked into code, not into

@@ -260,6 +260,17 @@ full detail in the
   fresh installs launch with `--chat-template-file` instead of the broken
   embedded template.
 
+### Audience
+
+Everyone. This is the release the stable channel has been waiting for since
+0.9.8 shipped on 2026-07-13 — every box on `stable` has been told it is up to
+date for six weeks while the 1.0 line ran rc.1 through rc.12 on preview.
+
+Existing 0.9.8 operators get the most out of it and have the most to read:
+start at Supported upgrades, which is specific about what leaving 0.9.8
+involves. Boxes already on a late rc get a normal update with nothing special
+to do. New installs get the one-liner and nothing here applies.
+
 ### Known Issues
 
 These carry forward from `1.0.0-rc.1`. The first two concern **upgrading from
@@ -268,9 +279,98 @@ These carry forward from `1.0.0-rc.1`. The first two concern **upgrading from
 `rc.1` to this release.
 
 - **The profile-catalog reset does not fire during the 0.9.8 → 1.0 update itself** (#1585, still open). The update's commit phase runs inside the *old* (0.9.8) daemon, which predates the reset — so an upgraded box keeps its `profiles.toml` and `meta.schema_version = 1` until the **next** update applied by v1.0 code. Nothing is lost (the reset is biased against deletion), but `hal0 update` on such a box reports "nothing to apply" without mentioning the outstanding reset.
+- **`hal0 update` from 0.9.8 stops before it starts unless `cosign` is on the box.** 0.9.8's updater verifies the release tarball with `cosign verify-blob` and aborts when the binary is missing — `Error: prepare failed: cosign is not installed` — and its `HAL0_UPDATE_SKIP_COSIGN` escape hatch is ignored on the stable channel, so there is no bypass. Nothing on a 0.9.8-era box ever installed one: bootstrap only began persisting a verified cosign in `1.0.0-rc.10` (#2058). Re-running the install one-liner handles this for you; see Supported upgrades.
 - **Updating *from* 0.9.8 ends with a spurious error from the old client.** The 0.9.8 CLI polls job status through the API it is restarting, treats the mid-restart connection refusal as fatal, and exits 1 after the update has in fact applied. The fix (#1540) ships in the v1.0 CLI, but the client driving a 0.9.8 → 1.0 update is by definition the old one. Verify the real outcome with `hal0 --version` and `curl http://127.0.0.1:8080/api/health`.
 - **First-boot installs can lose the dpkg lock race to `unattended-upgrades`** (#1584, still open) — the hermes-agent provisioning step degrades gracefully with a remediation line (`hal0 agent install hermes`) rather than failing the install.
 - **A box still on `1.0.0-rc.1` sees no update available for this GA release** (#1663/#1640, fixed going forward but not retroactively — a running rc.1 daemon can't rerun its own fix). Its venv predates the prerelease-aware version comparison, so the old naive tuple fallback ranks `1.0.0rc1` above `1.0.0` and `hal0 update`/`/api/updates/check` both report nothing to do. Boxes that updated `rc.1` → `rc.2` first are unaffected — the rc-vs-rc comparison orders correctly even on the old fallback. If you're still on `rc.1`, pull this release directly with `hal0 update --target 1.0.0`, which bypasses the `update_available` gate entirely.
+
+### Operator migrations
+
+The automatic ones run themselves — schema migrations, the one-shot `enabled`
+sweep at first v1.0 boot, and the config-load repairs listed under Migrations
+above.
+
+Two are deliberately left to you, because both rewrite state in ways that want
+a human deciding when:
+
+The **slot-flag fold** (`hal0 slot migrate-flags`) moves per-slot tunes onto
+their bound model. It is a dry run until you pass `--apply`, and `--apply`
+refuses to proceed while `hal0-api` or any `hal0-slot@*` unit is active unless
+you add `--stop-services`. Back up `hal0.db` and your slot dirs first, and
+expect it to refuse the whole run — rather than write half of it — when slots
+share a model with divergent tunes.
+
+**Slot id-keying** (`hal0 slot migrate-id-keying`) is optional and reversible;
+the runtime reads either layout. Run it in a downtime window.
+
+Both are described in full under Migrations above, which is also what the
+`hal0 update` confirmation banner renders — this section is deliberately prose
+so those entries are not counted twice.
+
+### Supported upgrades
+
+`hal0 update` from any `1.0.0-rc`, and from **0.9.8** — the version every
+stable-channel box has been pinned at since 2026-07-13 (#1530), and so the
+path most existing installs take into 1.0.
+
+**The one-liner is the supported 0.9.8 path.** It is an upgrade in place, not a
+reinstall: `/etc/hal0` and `/var/lib/hal0` are carried across, your slot TOMLs
+stay where they are, and the installer adds what 1.0 needs rather than replacing
+what you had.
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+It resolves the dependencies 0.9.8 never installed — **cosign included** — and
+that is the whole reason to prefer it: without cosign, `hal0 update` on a 0.9.8
+box refuses to run at all (see Known Issues).
+
+If you would rather drive the updater yourself, install cosign first:
+
+```sh
+curl -fsSL -o /usr/local/bin/cosign \
+  https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+chmod +x /usr/local/bin/cosign
+hal0 update -y
+```
+
+Both routes were exercised end to end on a box installed from the published
+one-liner at 0.9.8, with no cosign on it.
+
+The one-liner has a second advantage on this particular hop: its migrations run
+under the *new* code, so the box lands on `meta.schema_version = 2` in the same
+pass (verified: `1` before, `2` after). Driving `hal0 update` from 0.9.8 commits
+inside the old daemon, which is why the profile-catalog reset waits for the next
+update there (#1585, below).
+
+Three things to know before you start, all specific to being on 0.9.8:
+
+- **The CLI may exit 1 on a successful update.** That is the old client losing
+  the API across the restart it just triggered (#1540, fixed in the 1.0 client —
+  which by definition is not the one driving this update). Check
+  `hal0 --version` before you retry anything.
+- **Your channel does not change.** 0.9.8 persisted `stable`, and the installer
+  will not overwrite a channel already on disk, so `HAL0_CHANNEL=preview` on the
+  upgrade command is ignored. Stable is what you want at 1.0; if you are
+  deliberately tracking preview, set it afterwards with
+  `hal0 update --channel preview`.
+- **Do not point `HAL0_RELEASES_URL` at a GitHub release-asset URL.** 0.9.8's
+  updater does not follow redirects, and those URLs answer `302` — it reports
+  `release manifest fetch returned HTTP 302` and stops. `releases.hal0.dev`
+  serves manifests directly and is what the default resolves to.
+
+Upgrading from `1.0.0-rc.9` or later needs none of this: cosign is already
+persisted, the channel is already right, and the 1.0 client drives the update.
+
+### Rollback
+
+`hal0 update --rollback` restores the previous tree from
+`/var/lib/hal0/hal0.previous` — the 0.9.8 tree is kept, not deleted, so a 0.9.8
+box that upgrades stays rollback-capable. Config and state are not rewound: the
+schema migrations 1.0 applies are forward-only, and a rolled-back 0.9.8 daemon
+reads a `hal0.toml` at the newer schema version. Treat rollback as a way to get
+serving again quickly, not as an undo.
 
 ### Security
 
