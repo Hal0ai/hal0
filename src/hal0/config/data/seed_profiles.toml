@@ -194,13 +194,13 @@ quant = ""
 # the whole point of a specialty distribution is that its runner is built
 # a particular way, so a forced kernel is safe here where it would not be
 # on a generic seed. `--no-cache-prompt` matches the card's serving mode.
-# Unlike every other seed, this profile pins device_class/backend: it is
-# hardware-specific (ROCm GPU + ActiveFPX weights only), so the pin is a
-# genuine `hal0.slots.profile_adopt.profile_fits_slot` gate, not an inert
-# fit hint.
+# Device-agnostic like every other seed (fix round 1, #1946): the
+# ROCm-only enforcement lives where it already did — the promptforge
+# runner's supported_backends=("rocm",) and _guard_specialty_runner
+# (container.py) — pinning device_class/backend here would only have
+# duplicated that gate imprecisely (this is a template, not a hardware
+# placement decision; see ProfileConfig.device_class docs).
 flags = "-b 2048 -ub 2048 -fa on -ctk f16 -ctv f16 --no-cache-prompt"
 mtp = true
-device_class = "gpu"
-backend = "rocm"
 quant = "ActiveFPX"
 intent = "CIRU ActiveFPX + PromptForge accelerated serving (#1946)"

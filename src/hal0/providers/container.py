@@ -1490,6 +1490,11 @@ def _specialty_default_ctx(model_info: dict[str, Any]) -> int | None:
     gets the card's window instead of falling all the way to the generic
     arch-max/safe-fallback path. Never raises — an unknown or absent
     specialty key returns ``None`` and the caller falls through unchanged.
+
+    Unaware of runner/guard state by design — the DEGRADED gate (fix round
+    1, #1946: a card window is only safe to apply on the accelerated path)
+    lives in the caller, :func:`_resolve_context_size`, via its
+    ``specialty_degraded`` parameter.
     """
     from hal0.registry.specialty import SPECIALTY_KINDS
 
@@ -1505,6 +1510,7 @@ def _resolve_context_size(
     model_info: dict[str, Any],
     *,
     slot_name: str = "",
+    specialty_degraded: dict[str, Any] | None = None,
 ) -> int:
     """The slot's effective context window — the MODEL is authoritative.
 
@@ -1521,7 +1527,15 @@ def _resolve_context_size(
        distribution's card-intended window (:func:`_specialty_default_ctx`,
        spec 2026-08-29 / #1946). Also authoritative and NOT dense-capped
        (same standing as an explicit choice), but only reached when the model
-       declares no ``defaults.context_size`` of its own.
+       declares no ``defaults.context_size`` of its own, AND only when
+       ``specialty_degraded is None`` (fix round 1, #1946): the card's window
+       assumes the accelerated kernel path; a DEGRADED launch (unsupported
+       runner / missing companion) resolves context exactly like a plain
+       model — path 3/4 below — never the card's number. Callers that don't
+       know the guard's verdict (``specialty_degraded`` defaults to ``None``,
+       the guard's own "accelerated" sentinel) get the accelerated behavior;
+       :func:`_resolve_llama_scalars` passes its already-computed
+       ``specialty_degraded`` scalar through.
     3. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
        window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
        (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
@@ -1562,7 +1576,9 @@ def _resolve_context_size(
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
-        specialty_ctx = _specialty_default_ctx(model_info)
+        specialty_ctx = (
+            _specialty_default_ctx(model_info) if specialty_degraded is None else None
+        )
         if specialty_ctx is not None:
             resolved, source = specialty_ctx, "specialty.default_ctx"
         else:
@@ -1965,6 +1981,13 @@ def _resolve_llama_scalars(
     #     operator never picked (same rule as the overlay);
     #   * the profile FITS the slot (``profile_fits_slot``) — a wrong-type
     #     profile must not inject mode-changing flags.
+    # specialty_degraded gate (spec 2026-08-29, #1946 fix round 1): a
+    # specialty model's card profile (e.g. promptforge) carries argv the card
+    # requires for its accelerated kernel path (``-fa on`` et al) — safe only
+    # on a runner that actually serves the accelerated path. A DEGRADED
+    # launch (unsupported runner / missing companion) must behave exactly
+    # like a plain GGUF load, mirroring the ``specialty_env`` gate below: no
+    # template-injected profile flags either, degraded or not.
     slot_profile_template_flags = ""
     _md_extra = _mi_defaults.get("extra_args") if isinstance(_mi_defaults, Mapping) else None
     _has_model_tune = bool(_md_extra and str(_md_extra).strip())
@@ -1973,6 +1996,7 @@ def _resolve_llama_scalars(
         and not _has_model_tune
         and not (isinstance(_provenance, str) and _provenance)
         and (_resolved_name is None or _resolved_name == _cfg_profile)
+        and specialty_degraded is None
     ):
         from hal0.slots.profile_adopt import profile_fits_slot
 
@@ -2014,6 +2038,7 @@ def _resolve_llama_scalars(
         model_table.get("context_size"),
         model_info,
         slot_name=str(slot_cfg.get("name") or ""),
+        specialty_degraded=specialty_degraded,
     )
 
     server_table = slot_cfg.get("server") or {}

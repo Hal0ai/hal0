@@ -112,24 +112,15 @@ class TestListProfiles:
         assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
-        """All virtual 1.0 seeds leave device ownership to the slot, except
-        the `promptforge` specialty seed (spec 2026-08-29, #1946), which is
-        genuinely ROCm-GPU-only."""
+        """All virtual 1.0 seeds leave device ownership to the slot."""
         data = client.get("/api/profiles").json()
-        by_name = {item["name"]: item for item in data}
-        assert all(
-            item["device_class"] is None for name, item in by_name.items() if name != "promptforge"
-        )
-        assert by_name["promptforge"]["device_class"] == "gpu"
+        assert all(item["device_class"] is None for item in data)
 
     def test_backend_values(self, client: TestClient) -> None:
         """backend surfaces in the route response (rocm|vulkan|None)."""
         data = client.get("/api/profiles").json()
         by_name = {item["name"]: item for item in data}
-        assert all(
-            item["backend"] is None for name, item in by_name.items() if name != "promptforge"
-        )
-        assert by_name["promptforge"]["backend"] == "rocm"
+        assert all(item["backend"] is None for item in by_name.values())
 
     def test_moe_rocmfp4_mtp_false(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()

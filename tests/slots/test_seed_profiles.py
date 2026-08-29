@@ -2,10 +2,11 @@
 
 Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
 - Every profile must have: name (implicit via [profile.<name>]), flags, intent.
-- `device_class` field is REMOVED (slot owns device) — except the
-  `promptforge` specialty seed (spec 2026-08-29, #1946), which pins
-  device_class/backend as a genuine hardware-fit gate; see
-  `test_every_seed_profile_is_device_agnostic` below.
+- `device_class` field is REMOVED (slot owns device) — including the
+  `promptforge` specialty seed (spec 2026-08-29, #1946 fix round 1):
+  ROCm-only enforcement lives at the runner/guard layer
+  (`RunnerSupports.supported_backends` + `_guard_specialty_runner`), not on
+  the profile template.
 - `flags` must NOT contain SLOT_HARDWARE_FLAGS or operational flags.
 - Profile names match the 1.0 catalog (18 total — 11 kept + 5 new for 1.0
   + moonshine, reinstated post-1.0-freeze + promptforge (#1946); see
@@ -94,16 +95,8 @@ def test_catalog_has_exactly_18_profiles() -> None:
 
 @pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
 def test_every_seed_profile_is_device_agnostic(profile_name: str) -> None:
-    """Every seed is device-agnostic except `promptforge` (spec 2026-08-29,
-    #1946): PromptForge only runs on a ROCm GPU runner with ActiveFPX
-    weights, so it pins device_class/backend as a genuine
-    `hal0.slots.profile_adopt.profile_fits_slot` fit gate."""
     profiles = _load_seed_profiles()
     assert profile_name in profiles, f"missing {profile_name}"
-    if profile_name == "profile.promptforge":
-        assert profiles[profile_name].get("device_class") == "gpu"
-        assert profiles[profile_name].get("backend") == "rocm"
-        return
     assert "device_class" not in profiles[profile_name], (
         f"{profile_name} should be device-agnostic; the slot owns device "
         "per seeded-profile-rework §4.1"

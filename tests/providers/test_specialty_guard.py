@@ -5,6 +5,7 @@ import pytest
 from hal0.config.schema import SEED_PROFILES, ProfileConfig
 from hal0.errors import UnprocessableEntity
 from hal0.providers.container import (
+    _CTX_SAFE_FALLBACK,
     ContainerProvider,
     _guard_specialty_runner,
     _resolve_context_size,
@@ -213,3 +214,62 @@ def test_model_defaults_context_size_still_wins():
     model choice outranks the card's default_ctx."""
     mi = _specialty_model_info(defaults={"context_size": 8192})
     assert _resolve_context_size(None, mi) == 8192
+
+
+# ── I2 fix round 1: specialty default_ctx only applies when accelerated ──────
+
+
+def test_specialty_default_ctx_not_applied_when_degraded():
+    """A DEGRADED specialty launch resolves context exactly like a plain
+    model — never the card's default_ctx (spec 2026-08-29, #1946 fix
+    round 1). No metadata.context_length either, so this lands on the safe
+    8192 floor, same as any other unstamped/unmetadata'd model."""
+    mi = _specialty_model_info()
+    degraded_reason = {"code": "slot.specialty_degraded", "specialty": "promptforge"}
+    assert _resolve_context_size(300_000, mi, specialty_degraded=degraded_reason) == (
+        _CTX_SAFE_FALLBACK
+    )
+
+
+def test_specialty_default_ctx_end_to_end_via_resolve_llama_scalars():
+    """Integration coverage for the real wiring (not just the pure
+    function): _resolve_llama_scalars computes specialty_degraded from the
+    ACTUAL guard against the resolved runner and threads it into
+    _resolve_context_size. Capable runner -> the card's 262144; incapable
+    runner -> plain-model resolution (8192 safe floor, no metadata.context_length
+    on this fixture)."""
+    model = _pf_model()
+    profile = ProfileConfig()
+
+    capable = _resolve_llama_scalars(_pf_slot(binary="promptforge"), model, profile)
+    assert capable["specialty_degraded"] is None
+    assert capable["context_size"] == 262_144
+
+    incapable = _resolve_llama_scalars(_pf_slot(binary="rocmfpx"), model, profile)
+    assert incapable["specialty_degraded"]["code"] == "slot.specialty_degraded"
+    assert incapable["context_size"] == _CTX_SAFE_FALLBACK
+
+
+# ── I1 fix round 1: unstamped-model template injection (#1787) ───────────────
+
+
+def test_promptforge_template_flags_not_injected_when_degraded():
+    """The unstamped-model profile-TEMPLATE injection path (#1787,
+    container.py's ``slot_profile_template_flags`` block) must not leak the
+    card's forced-kernel argv (``-fa on`` et al) onto a DEGRADED launch
+    (spec 2026-08-29, #1946 fix round 1): that runner never runs the
+    accelerated kernel path the card's flags assume, so a degraded launch
+    must resolve flags exactly like a plain, unstamped model — none of the
+    slot's named profile flags injected as a template."""
+    profile = ProfileConfig.model_validate(SEED_PROFILES["promptforge"])
+    model = _pf_model()  # no stamped defaults/provenance -> hits the #1787 path
+
+    capable = _resolve_llama_scalars(
+        _pf_slot(profile="promptforge", binary="promptforge"), model, profile
+    )
+    assert "--no-cache-prompt" in capable["slot_profile_template_flags"]
+
+    incapable = _resolve_llama_scalars(
+        _pf_slot(profile="promptforge", binary="rocmfpx"), model, profile
+    )
+    assert incapable["slot_profile_template_flags"] == ""

@@ -212,16 +212,8 @@ class TestLoadProfilesConfig:
         assert cfg.profile["chat"].backend is None
 
     def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
-        """Canonical GPU seeds do not pin a backend, except the `promptforge`
-        specialty seed (spec 2026-08-29, #1946), which is genuinely
-        ROCm-only."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert all(
-            profile.backend is None
-            for name, profile in cfg.profile.items()
-            if name != "promptforge"
-        )
-        assert cfg.profile["promptforge"].backend == "rocm"
+        assert all(profile.backend is None for profile in cfg.profile.values())
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
         toml_content = (
@@ -433,27 +425,12 @@ def test_profile_device_class_defaults_none() -> None:
 
 
 def test_seed_device_classes() -> None:
-    """Every 1.0 seed is device-agnostic; the slot owns the device — except
-    the `promptforge` specialty seed (spec 2026-08-29, #1946), which pins
-    device_class="gpu" as a genuine hardware-fit gate (ROCm GPU + ActiveFPX
-    weights only)."""
-    assert all(
-        "device_class" not in profile
-        for name, profile in SEED_PROFILES.items()
-        if name != "promptforge"
-    )
-    assert SEED_PROFILES["promptforge"]["device_class"] == "gpu"
+    """Every 1.0 seed is device-agnostic; the slot owns the device."""
+    assert all("device_class" not in profile for profile in SEED_PROFILES.values())
 
 
 def test_seed_backends() -> None:
-    """Same exception as test_seed_device_classes: promptforge pins
-    backend="rocm"."""
-    assert all(
-        profile.get("backend") is None
-        for name, profile in SEED_PROFILES.items()
-        if name != "promptforge"
-    )
-    assert SEED_PROFILES["promptforge"]["backend"] == "rocm"
+    assert all(profile.get("backend") is None for profile in SEED_PROFILES.values())
 
 
 def test_device_default_profiles_map() -> None:
