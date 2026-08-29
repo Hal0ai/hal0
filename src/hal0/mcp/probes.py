@@ -234,7 +234,7 @@ def model_store_probe(path: str) -> dict[str, Any]:
     free_bytes = st.f_bavail * st.f_frsize
     total_bytes = st.f_blocks * st.f_frsize
     # UMA-aware: the host's iGPU draws from the same pool the
-    # filesystem sits on. ZFS on devpool is the Strix Halo recipe;
+    # filesystem sits on. A local ZFS pool is the Strix Halo recipe;
     # NFS overlays don't qualify (latency budget unsuitable for
     # weight loads).
     is_uma_aware = fstype in {"zfs", "ext4", "btrfs", "xfs"} and not fstype.startswith("nfs")

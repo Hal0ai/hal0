@@ -308,19 +308,16 @@ cd "${REPO_ROOT}"
 TRACKED_DIRT="$(
 	{
 		git diff --name-only -- . \
-			':(exclude).pi/shepherd/**' \
-			':(exclude)graphify-out/**'
+			':(exclude).pi/shepherd/**'
 		git diff --cached --name-only -- . \
-			':(exclude).pi/shepherd/**' \
-			':(exclude)graphify-out/**'
+			':(exclude).pi/shepherd/**'
 	}
 )"
 UNTRACKED_DIRT="$(
 	{
 		git ls-files --others --exclude-standard -- . \
 			':(exclude).pi/shepherd/**' \
-			':(exclude).pi-subagents/**' \
-			':(exclude)graphify-out/**'
+			':(exclude).pi-subagents/**'
 		# `.pi/` is ignored globally, so explicitly surface any ignored
 		# untracked entry outside the two generated runtime subtrees.
 		git ls-files --others -- .pi \

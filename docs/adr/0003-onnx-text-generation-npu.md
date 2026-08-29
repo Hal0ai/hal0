@@ -51,7 +51,7 @@ both things the existing NPU lane cannot do.
   would have to unwind that assumption; this ADR concludes it should stand.
 - **No RyzenAI/VitisAI/onnxruntime-genai references exist anywhere in the
   tree.** This would be a from-scratch lane, not an extension.
-- **Hardware is ready.** Read-only probe of ct150 (10.0.1.150, 2026-08-20):
+- **Hardware is ready.** Read-only probe of ct150 (2026-08-20):
   `/dev/accel0` present, `amdxdna` 0.7.0 loaded, firmware
   `amdnpu/17f0_11/npu_7.sbin`, kernel 7.0.6-2-pve, `libxrt-npu2` 2.21.75
   installed, FLM v0.9.44 answering. The kernel/firmware/device layer is not

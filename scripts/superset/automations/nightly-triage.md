@@ -24,8 +24,8 @@ Do the following, in order:
      why before closing.
 3. Apply the label with `gh issue edit <n> --add-label "<label>" --remove-label needs-triage`.
    Leave a one-line comment explaining the call.
-4. Cross-check against the Linear mirror (team "Hal0", workspace
-   `thinmintdev`) for anything that exists **only** in Linear. If found,
+4. Cross-check against the Linear mirror (team "Hal0") for anything that
+   exists **only** in Linear. If found,
    create the matching GitHub issue (cross-reference the `HAL0-N`
    identifier in the body) before doing anything else with it — per
    `docs/.devdocs/agents/issue-tracker.md`, GitHub is canonical the moment an item is

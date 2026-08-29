@@ -19,6 +19,7 @@ const VERSION = A.version
 const MODE = A.mode || 'file'                    // 'report' | 'file'
 const REPO = A.repo || process_cwd_placeholder() // see below
 const BOX_IDS = A.boxes && A.boxes.length ? A.boxes : ['ct151-cpu-fresh']
+const ARTIFACTS = A.artifacts || artifacts_placeholder()
 const ONLY = A.lanes && A.lanes.length ? A.lanes : null
 
 function process_cwd_placeholder() {
@@ -27,10 +28,16 @@ function process_cwd_placeholder() {
   return '<REPO PATH NOT PROVIDED — locate the hal0 worktree yourself and say so in your report>'
 }
 
+function artifacts_placeholder() {
+  // Same contract as the repo path: the durable artefact store is site-specific,
+  // so it is passed in rather than hardcoded to one operator's mount.
+  return '<ARTIFACTS ROOT NOT PROVIDED — pass args.artifacts (a durable path, not /tmp) and say so in your report>'
+}
+
 if (!VERSION) throw new Error('rc-validate requires args.version, e.g. "1.0.0-rc.5"')
 
 const KIT = `${REPO}/tests/release-validation`
-const RUN = `/mnt/mintdev/artifacts/hal0-release-validation/${VERSION}`
+const RUN = `${ARTIFACTS}/hal0-release-validation/${VERSION}`
 
 // Box id -> role. Mirrors tests/release-validation/boxes.toml.
 // ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) — there is no CPU-only fresh box left.

@@ -1,41 +1,42 @@
-## graphify
+# Working in this repository
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+Notes for coding agents. Anything an agent needs that a human contributor also
+needs lives in `CONTRIBUTING.md` and `ARCHITECTURE.md` — read those first; this
+file only covers what is specific to working here with an agent.
 
-Rules:
+## Verify before you write
 
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+The single rule that matters most in this repo: **check the source, not your
+memory.** Every CLI flag, config key, endpoint, path, and default has exactly
+one authority under `src/hal0/`, and docs and comments have gone stale against
+it before. Cite what you verified — `file:line`, a commit, or a CHANGELOG
+entry — rather than asserting it.
 
-## hindsight
+`CONTRIBUTING.md` carries the anti-scar rules, the test tiers, the DCO
+sign-off requirement, and the stable-patch triage policy. They apply to agent
+commits exactly as they apply to human ones.
 
-This project has long-term memory via Hindsight at <http://10.0.1.142:9177>. Memories persist across sessions and agents.
+## Issues
 
-Rules:
+Issues live in GitHub Issues; use the `gh` CLI. The five canonical triage
+labels are `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`
+and `wontfix` — use them unmodified rather than inventing new ones.
 
-- **Before answering "what did we do", "what's configured", "do you remember" — call `hindsight_recall` first.** Don't guess; check.
-- **When the user states a durable preference, decision, or fact — call `hindsight_retain`.** Be specific: include who, what, when, why. Format: "User prefers X because Y" / "Decided to use Z for W (2026-07-22)".
-- **Use `hindsight_reflect` for synthesis.** Unlike recall (raw results), reflect generates a coherent answer from memory. Use it to answer "what do you know about X".
-- **Auto-recall runs on session_start; auto-retain runs every 3 turns.** These handle transient session context. Explicit retain/recall calls are for durable long-term facts.
-- **One unified bank: `shared`.** All agents (Claude, Pi, Hermes) read and write the `shared` bank, scoped by tags (`agent:<id>`, `project:<slug>`) — not by per-agent or per-project banks. Do NOT enable `dynamicBankId` and do not add `directoryBankMap` entries; fragmenting into many banks makes memories invisible across agents (consolidated 14 banks back to 2 on 2026-08-07). The only other bank is `agents` — hal0's peer-registry dataset (agent identity cards); never write ordinary memories there.
-- **Check status** with `hindsight_status` before assuming memories are gone — it shows reachability, resolved bank, and bank count.
+Prefer filing an issue over documenting around a product bug.
 
-## Agent skills
+## Architecture decisions
 
-### Issue tracker
+`docs/adr/` holds the accepted decision records. Read the relevant one before
+changing behaviour it covers, and add a new record rather than quietly
+diverging from an existing one.
 
-Issues live in GitHub Issues (`gh` CLI); Linear is a read-only mirror — migrate any Linear-only item into GitHub and work from git. See `docs/.devdocs/agents/issue-tracker.md`.
+## Local-only notes
 
-### Triage labels
+`docs/.devdocs/` and `docs/superpowers/` are gitignored: planning documents,
+handoffs, session notes, and internal audits stay on the machine that wrote
+them and are not part of this repository. If you are looking for a plan or
+spec that a source comment cites under `docs/superpowers/...`, it is in the
+history, not the working tree.
 
-The five canonical triage labels, unmodified (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/.devdocs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily). See `docs/.devdocs/agents/domain.md`.
-
-### Superset.sh
-
-Local dev-agent workspaces (git worktrees + Claude/Codex/etc. sessions), wired to the Hal0 Linear mirror and GitHub Issues. See `docs/.devdocs/agents/superset-integration.md`.
+Anything written into the tracked part of the repo is published. Keep host
+names, LAN addresses, and operator-local paths out of it.
