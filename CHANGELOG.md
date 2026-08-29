@@ -87,9 +87,6 @@ rationale and code-path detail in the
 - **NPU trio dispatch reads the anchor's `[npu]` table, not the shadow slots' own flags.**
   `flm-stt`/`flm-embed` are display+dispatch records for the anchor's single
   `flm serve` process; a modality that was never launched is no longer routable.
-- **`[brain_chat] tool_model` is removed — it was never read.**
-  A config that sets it explicitly now fails validation with a clear error;
-  the live `[brain_chat] model` override is the real steering knob.
 - **Deprecated surfaces are `HAL0-SUNSET`-stamped for scheduled removal:**
   the `--backend` flag (use `--provider`), `SlotConfig.runtime`/`workers`,
   the `cognee` engine literal, and several legacy CLI aliases.
@@ -110,8 +107,6 @@ full detail in the
   just loses the key. Idempotent; the CLI form is dry-run by default and safe live.
 - **Slot id-keying (operator-run, optional): run `hal0 slot migrate-id-keying` in a downtime window (takes a pre-flight backup).**
   The runtime reads either layout; the flip is deliberate and reversible.
-- **A stale `[brain_chat] tool_model` key in `hal0.toml` no longer breaks config load.**
-  `load_hal0_config` drops it before validation on every load path.
 - **Disabling a capability now clears the slot's model instead of writing `enabled = false`.**
   The pick survives in `capabilities.toml` and a re-enable rebinds it.
 - **Honcho → Hindsight (only boxes that ran Honcho): no migration step — Honcho support was removed outright and Hindsight starts fresh.**
@@ -206,6 +201,18 @@ full detail in the
   exempts a slot entirely.
 
 ### Changed
+
+- **`[brain_chat] tool_model` is a real steering knob again, and this time it
+  is wired.** #1453 deleted the field in `1.0.0-rc.1` because nothing read it;
+  #1644 brought it back with an implementation behind it. Tool rounds now run
+  on `tool_model` (default `hal0/agent`) while chat stays on the brain slot,
+  so a brain model whose runner cannot emit parseable tool calls reroutes
+  instead of failing the turn. Set it to `off`, `none` or `disabled` to route
+  tool turns nowhere — an empty string is *not* a disable spelling, because on
+  disk it is indistinguishable from a key nobody set, and it coerces back to
+  the default with a warning. `[brain_chat] model` still points the whole
+  steward chat at one model. Boxes coming from 0.9.8 see no schema change
+  here: the key existed there too (as a no-op) and is accepted now.
 
 - Slot drawer: the Profile field moved into the Model group, directly under
   the model select (it rides the model choice). NPU slots keep a standalone

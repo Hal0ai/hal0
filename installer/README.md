@@ -56,7 +56,7 @@ supported everywhere).
 8. **Systemd units** — writes `hal0-api.service`, `hal0.target`, `hal0-openwebui.service`, the podman↔Docker forward-reconciliation unit, and the `hal0-agent@.service` template (+ hermes drop-in, session-state hook, and the `hal0-systemctl` / `hal0-agentenv` / `hal0-benchctl` sudo seams with their sudoers grants), then `systemctl daemon-reload`. Units are written here; `hal0-api` and `hal0-openwebui` aren't enabled/started until the "Service start" step below. Per-slot `hal0-slot@<name>.service` units are managed by hal0 itself when slots are loaded.
 9. **Container slot seeds** — copies `installer/etc-hal0/slots/{flm,tts,rerank,utility,img,agent,brain,qwen3tts,coder,embed}.toml` into `/etc/hal0/slots/` (never overwriting operator edits, and honoring a `hal0 slot delete` tombstone). Each slot gates on its own runtime validation at load time.
 10. **Hardware probe** — runs `hal0 setup --auto --no-pull --no-extensions` (first-run seeding): scaffolds capability-slot structure with no model picks, writes `/etc/hal0/hardware.json`, and prints the detected backends. Skipped by `HAL0_SKIP_SETUP=1` or `HAL0_NO_PROBE=1`.
-11. **Steward + agent models** — unconditionally pulls a hardware-matched brain model (~1-2 GB) and binds it to the `brain` slot, so the dashboard's steward chat works out of the box — the brain models are native tool-callers on the shipped runner, so tool calls work too. `HAL0_SKIP_BRAIN_MODEL=1` skips the pull; `HAL0_BRAIN_MODEL=<id>` forces a specific curated quant. Then, only on an interactive terminal, an **opt-in** offer for a larger agent model (15-31 GB, exact size printed first, default **No**, skipped entirely on non-interactive installs) — it becomes the bigger tool-caller behind the `[brain_chat] tool_model` fallback (default `hal0/agent`); `HAL0_PULL_AGENT_MODEL=1` opts in unattended, `=0` force-skips even on a TTY, `HAL0_AGENT_MODEL=<id>` picks a specific rung. Both pulls are fail-soft — a decline or failure never fails the install.
+11. **Steward + agent models** — unconditionally pulls the curated brain model and binds it to the `brain` slot, so the dashboard's steward chat works out of the box — the brain models are native tool-callers on the shipped runner, so tool calls work too. Since rc.10 the default is hardware-blind: `lfm2.5-2.6b` (LiquidAI LFM2.5-2.6B-Q8_0, ~2.87 GB, 131k context) is plain Q8_0 GGUF that the FPX runner and stock llama.cpp both load, and the install step discloses the download size first. `HAL0_SKIP_BRAIN_MODEL=1` skips the pull; `HAL0_BRAIN_MODEL=<id>` forces a specific curated quant — mind that the `hal0-brain-sft` Q8/Q4 builds carry custom GGML tensor type ids and are **ROCmFPX-runner only**, so forcing one onto a CPU box crash-loops the slot. Then, only on an interactive terminal, an **opt-in** offer for a larger agent model (15-31 GB, exact size printed first, default **No**, skipped entirely on non-interactive installs) — it becomes the bigger tool-caller behind the `[brain_chat] tool_model` fallback (default `hal0/agent`); `HAL0_PULL_AGENT_MODEL=1` opts in unattended, `=0` force-skips even on a TTY, `HAL0_AGENT_MODEL=<id>` picks a specific rung. Both pulls are fail-soft — a decline or failure never fails the install.
 12. **NPU prerequisites (FastFlowLM)** — on apt hosts, installs `libxrt-npu2` (best-effort, from the lemonade-team PPA) and the per-distro, SHA-256-pinned FastFlowLM `.deb` (`ubuntu24.04`/`ubuntu25.10`/`ubuntu26.04`/`debian13`); `apt-get install ./deb` then resolves that release's own ffmpeg/boost/fftw dependencies from the host's own repos — no hardcoded library list. FastFlowLM ships Debian/Ubuntu `.deb`s only upstream, so on non-apt distros (Fedora, Arch, openSUSE…) this step is skipped with an honest message naming the distro — GPU/CPU paths are unaffected; the NPU/FLM trio waits on a manual FastFlowLM install. All fail-soft: a GPU-only host still installs fine.
 13. **ComfyUI model share** — creates the `models`/`output`/`input`/`user`/`custom_nodes` share directories the `img` slot container bind-mounts, and seeds custom nodes + `extra_model_paths.yaml` (never overwriting an existing copy). Skip with `HAL0_SKIP_COMFYUI=1`; a squashed/read-only mount here warns rather than aborts.
 14. **Bundle picker manifests** — copies the five first-run bundle manifests (hal0-Lite / hal0-Default / hal0-Pro / hal0-Max + LMX-Omni-52B-Halo) into `/var/lib/hal0/models/collections/omni/`, so the dashboard's bundle picker works from a packaged install and not just a source checkout.
@@ -176,22 +176,44 @@ Two ways to resolve this, depending on what you're trying to do:
 
 The installer prints the same warning block at the end of every `--dev` run as a reminder.
 
-## ROCmFP4 + MTP (container profiles)
+## ROCmFP4 + MTP
 
-FP4 GGUFs with a baked-in multi-token-prediction (MTP) head are served
-by the `rocm-7.2.4-rocmfp4-server` toolbox image — the fork
-`llama-server` that loads the FP4 quant types is **inside the
-container**, no host-side build or binary wiring required. Two seed
-profiles use it (see `/etc/hal0/profiles.toml`):
+FP4 GGUFs with a baked-in multi-token-prediction (MTP) head are served by the
+**ROCmFPX runner image** (`hal0.config.schema.DEFAULT_ROCMFPX_IMAGE`) — the
+fork `llama-server` that loads the FP4 quant types is **inside the
+container**, no host-side build or binary wiring required. The old
+`--rocmfp4` installer flag and host-side fork binary are gone.
 
-- `rocm` — A3B MoE models (~52.8 tok/s gen, 131k ctx).
-- `rocm-mtp` — dense chat with MTP (`mtp = true`, ~2× non-MTP).
+Two things compose to launch a slot, and neither is the other:
 
-Point a slot at one of them (`profile = "rocm-mtp"`) or let
-the device default pick it (`device = "gpu-rocm"` resolves to
-`rocm`). gfx1151 (Strix Halo) + ROCm hosts only; non-eligible
-hosts should stay on `vulkan`. The old `--rocmfp4` installer flag
-and host-side fork binary are gone.
+- The **runner** is slot-owned — `slot.image_pin or RUNNER_IMAGES[slot.binary]`
+  (`hal0.runners`). `rocmfpx` and `vulkanfpx` both resolve to the FPX image
+  and both declare `RunnerSupports(mtp=True)`; `cuda` and `cpu` do not
+  support MTP drafting.
+- The **profile** is a device-agnostic tune template — a flag bundle, nothing
+  more. Profiles no longer carry an image. The generic chat seeds are `chat`,
+  `chat-long-context`, `dense` and `moe`, with family-specific variants
+  (`chadrock-dense`, `chadrock-moe`) for models that need their own kv-cache
+  or sampler policy.
+
+**MTP is a model property, not a profile tune.** `profile.mtp` in
+`profiles.toml` is informational only and is not consulted at launch
+(`providers.container._effective_mtp`). Precedence: an explicit
+`ModelDefaults.mtp` tri-state wins in either direction; `None` falls back to
+the registry `mtp` tag; and the runner must support drafting either way. When
+MTP resolves on, `MTP_FLAG_BUNDLE` (`--spec-type draft-mtp` and its
+`--spec-draft-*` defaults) is appended after the profile flags, and a model
+can override any of those from its own `defaults.extra_args`.
+
+The seed profile catalog is **virtual** — it lives in code (`SEED_PROFILES`,
+sourced from `hal0/config/data/seed_profiles.toml`) and is overlaid on every
+load, so a re-tuned seed reaches every install on upgrade instead of being
+frozen by a stale on-disk copy. `/etc/hal0/profiles.toml` is for operator
+profiles only; seeds are immutable and are cloned under a new name to
+customize.
+
+FP4 is gfx1151 (Strix Halo) + ROCm territory; non-eligible hosts run the same
+FPX image through the `vulkanfpx` runner.
 
 ## Uninstall
 
