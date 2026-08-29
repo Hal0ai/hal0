@@ -118,6 +118,20 @@ export interface Slot {
     breaker?: SlotBreaker
     [key: string]: unknown
   }
+  /** Specialty-guard verdict (spec 2026-08-29 #1946) — top-level, same
+   *  detail-route-only enrichment gate as `config_drift` (SlotManager.
+   *  status()'s `include_config_drift` branch, lifted by serialize_slot).
+   *  `null` when the slot has no profile, the bound model carries no
+   *  specialty, or resolution fails (fail-open). Only GET /api/slots/{name}
+   *  (and the by-name/by-id detail routes) populate it — the hot GET
+   *  /api/slots list poll never does, so read it off `useSlotDetail`, not
+   *  the list-backed `useSlots()` rows. */
+  specialty_degraded?: {
+    code: string
+    specialty: string
+    runner: string
+    detail: string
+  } | null
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the

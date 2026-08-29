@@ -39,6 +39,17 @@ export interface SystemInfoBackend {
   /** GGUF/format arch the runner accepts (lxc105: forks reject newer GGUFs).
    *  Assumed surfaced alongside supported_backends; optional. */
   format_arch?: string | null
+  /** Per-runner launch-capability metadata (UI-API-1 item 2 / spec §7),
+   *  read from `hal0.runners.RunnerSupports`. `specialties` (spec
+   *  2026-08-29 #1946) lists which specialty-distribution kinds (e.g.
+   *  "promptforge") this runner image serves ACCELERATED — empty when it
+   *  serves none (a specialty model still loads, degraded to GGUF-only). */
+  supports?: {
+    mtp?: boolean
+    jinja?: boolean
+    mmproj?: boolean
+    specialties?: string[]
+  }
   state: RunnerState
 }
 

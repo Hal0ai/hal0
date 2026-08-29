@@ -12,6 +12,7 @@ import {
 	useSlotLoad,
 	useSlotSwap,
 	useSlotResolved,
+	useSlotDetail,
 	useSlots,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
@@ -501,6 +502,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Resolved command provenance — only fetched while the drawer is open.
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
+
+	// Slot DETAIL payload (spec 2026-08-29 #1946) — GET /api/slots/{name}
+	// enriches with `specialty_degraded` (config_drift's sibling key, same
+	// detail-route-only gate), which the list poll backing `slot` never
+	// carries. Only fetched while the drawer is open, mirroring
+	// resolvedQuery above; null/absent renders nothing (additive, absent-safe).
+	const slotDetailQuery = useSlotDetail(open ? slot?.name : null);
+	const specialtyDegraded = slotDetailQuery.data?.specialty_degraded ?? null;
 
 	// Seed the form AND snapshot the baseline — deliberately the same effect, so
 	// the two can never come from different payloads (which is the #1398 class).
@@ -1348,6 +1357,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{/* #2038: breaker view rides next to the lifecycle state so
 								    "error" + "parked · N failures" read as one story. */}
 								<SlotBreakerChip s={slot} />
+								{/* Specialty guard verdict (spec 2026-08-29 #1946): the runner
+								    serving this slot doesn't list the model's specialty, so it
+								    launched GGUF-only (degraded, not blocked) — loud amber badge,
+								    same warn tokens as SlotBreakerChip/backend-mismatch chips.
+								    `.detail` carries the human-readable reason as the tooltip. */}
+								{specialtyDegraded && (
+									<span
+										className="tag-chip"
+										data-testid="slot-specialty-degraded"
+										title={specialtyDegraded.detail || "Specialty distribution degraded to GGUF-only"}
+										style={{
+											color: "var(--warn)",
+											borderColor: "var(--warn-line)",
+											background: "var(--warn-soft)",
+										}}
+									>
+										⚠ {specialtyDegraded.specialty || "specialty"} degraded
+									</span>
+								)}
 							</span>
 						}
 					/>
@@ -1690,14 +1718,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											{binary && !fitBinaryKeys.includes(binary) && (
 												<option value={binary}>{binary}</option>
 											)}
-											{fitBinaryKeys.map((k) => (
-												<option key={k} value={k}>
-													{k}
-													{backends[k]?.backend
-														? ` · ${backends[k].backend}`
-														: ""}
-												</option>
-											))}
+											{fitBinaryKeys.map((k) => {
+												// #1946: which specialty-distribution kinds (e.g.
+												// "promptforge") this runner image serves ACCELERATED
+												// (system-info's supports.specialties) — plain-text
+												// suffix so the operator can tell an accelerated runner
+												// from a plain-GGUF one before picking it.
+												const specialties = backends[k]?.supports?.specialties;
+												return (
+													<option key={k} value={k}>
+														{k}
+														{backends[k]?.backend
+															? ` · ${backends[k].backend}`
+															: ""}
+														{Array.isArray(specialties) && specialties.length > 0
+															? ` · ${specialties.join(", ")}`
+															: ""}
+													</option>
+												);
+											})}
 										</select>
 										{!binary && fitBinaryKeys.length > 0 && (
 											<div className="hint">
