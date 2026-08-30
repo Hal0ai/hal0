@@ -1439,10 +1439,16 @@ function buildMemoryGraphStatus() {
 // ─── Runner Images (Slots → Runner Images tab) ────────────────────────────
 // Shape mirrors /api/runner-images (registry rows synced from
 // hal0-runner-images images.json + GHCR), including the runner-catalogue-v2
-// contract enrichment (available_tags newest-first, is_default, in_use_by).
-// One row is enough for the catalog list + card + Defaults strip to render;
-// the pulls list must be an ARRAY — the downloads pane calls `.filter` on it
-// directly.
+// contract enrichment (available_tags newest-first, is_default, in_use_by)
+// AND the v3 per-tag/store-truth fields (tags[], badges, store_state,
+// downloaded) the page now reads directly instead of the retired
+// local_path/downloaded_at markers, plus the v3 `families` launch-truth
+// summary the FamilyStrip renders (Task 10 — DefaultsStrip used to derive
+// this from the row's `is_default` instead; the strip now reads the
+// server's `families` array only, so a row-only mock renders an empty
+// strip). One row is enough for the catalog list + card + FamilyStrip to
+// render; the pulls list must be an ARRAY — the downloads pane calls
+// `.filter` on it directly.
 function buildRunnerImages() {
   return {
     images: [
@@ -1465,8 +1471,32 @@ function buildRunnerImages() {
         // Headline deliberately trails available_tags[0] so the "newer tag"
         // chip surface renders in mock mode.
         available_tags: ['0824', '0822'],
+        // v3 per-tag payload backing tagLanes()/newerTagAvailable() digest
+        // comparison — mirrors available_tags above.
+        tags: [
+          { tag: '0824', digest: 'sha256:1111111111111111111111111111111111111111111111111111111111111111', downloaded: false },
+          { tag: '0822', digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000', downloaded: true },
+        ],
+        badges: { '0824': 'candidate' },
+        store_state: 'present',
+        downloaded: true,
         is_default: { family: 'rocmfpx', source: 'release' },
         in_use_by: ['agent', 'utility'],
+      },
+    ],
+    // Launch-truth per-family summary (Task 9 contract) — kept in sync with
+    // the row above's is_default/in_use_by so mock mode renders the same
+    // family the row claims to default for.
+    families: [
+      {
+        family: 'rocmfpx',
+        effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
+        source: 'release',
+        store_state: 'present',
+        slots: ['agent', 'utility'],
+        pinned_slots: [],
+        newest_release: null,
+        update_available: false,
       },
     ],
   }

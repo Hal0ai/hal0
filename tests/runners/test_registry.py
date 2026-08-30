@@ -15,11 +15,13 @@ import pytest
 
 from hal0.errors import NotFound
 from hal0.runners import (
+    CANONICAL_FAMILY,
     FPX_RUNNER_KEYS,
     RUNNER_IMAGES,
     STALE_RUNNER_IMAGE_REFS,
     Runner,
     RunnerSupports,
+    canonical_family,
     canonical_runner_key,
     get_runner,
     runner_for_backend,
@@ -195,3 +197,31 @@ def test_runner_matches_consults_supported_backends() -> None:
         "cpu",
     )
     assert runner_matches(agnostic, device_class="cpu", backend="cuda")
+
+
+def test_promptforge_shipped_pin_matches_the_gate_digest() -> None:
+    """The shipped manifest entry IS the #1891 gate evidence made durable:
+    tag must stay in lockstep with DEFAULT_PROMPTFORGE_IMAGE, and the digest
+    must be the exact image the ct150 gate validated (report
+    2026-08-30, hal0-runner-images images.json pins the same digest)."""
+    from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+
+    manifest = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["toolbox_images"]["promptforge"]
+    assert entry["tag"] == DEFAULT_PROMPTFORGE_IMAGE
+    assert entry["digest"] == (
+        "sha256:370af6e9717e8c96742198a4b920888e6a248d447e21e3432de4d2c913703aea"
+    )
+
+
+# --- canonical family keys (runner-image-catalogue v3, task 11) ------------ #
+
+
+def test_canonical_family_folds_vulkanfpx() -> None:
+    assert canonical_family("vulkanfpx") == "rocmfpx"
+    assert canonical_family("rocmfpx") == "rocmfpx"
+    assert canonical_family("comfyui") == "comfyui"
+
+
+def test_canonical_family_map_only_folds_the_fpx_twin() -> None:
+    assert CANONICAL_FAMILY == {"vulkanfpx": "rocmfpx"}

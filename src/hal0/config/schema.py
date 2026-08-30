@@ -1076,18 +1076,20 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #: ``DEFAULT_PROMPTFORGE_IMAGE`` — the PromptForge-flavor runner (HIP-only
 #: build of ciru-ai/ROCmFPX v2.3 + the card's runtime patch; GGML_VULKAN=OFF,
 #: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
-#: item 4 and spec 2026-08-29). Candidate tag until the ct150 validation
-#: gate (#1891) passes; the pin only moves operator-gated.
+#: item 4 and spec 2026-08-29).
 #:
-#: DELIBERATELY ABSENT from ``manifest.json``'s ``toolbox_images`` (fix wave,
-#: I3): the image isn't built yet, so the entry could only carry
-#: ``"digest": null`` — which is exactly what ``scripts/release-check.sh``
-#: step 4 hard-fails on ("manifest.json has unpinned toolbox image(s)"), and
-#: it buys nothing: ``manifest_image_ref()`` with a null digest falls through
-#: to the tag, which is byte-identical to this constant, so
-#: ``resolve_runner_image`` resolves the same string either way. The manifest
-#: entry gets ADDED, with a real digest, at the #1891 ct150 gate — the
-#: sequencing the spec's own image-build workstream already specifies.
+#: GATE PASSED: the #1891 ct150 validation ran 2026-08-30 (report at
+#: /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md,
+#: results on #1946) — Paris probe, HumanEval+ 0.939/0.909 with the card's
+#: disclosed task-130 regression reproducing exactly, MTP depth-4 at ~86%
+#: acceptance (+75% decode vs MTP-off). ``manifest.json``'s
+#: ``toolbox_images.promptforge`` now carries the gate-validated digest
+#: (sha256:370af6e9…) and the promptforge Runner's ``manifest_key`` points
+#: at it, so installs resolve the digest pin; this tag constant is the
+#: bundled fallback and stays in lockstep with the manifest entry (pinned by
+#: tests/runners/test_registry.py). promptforge is an OPTIONAL runner by
+#: operator decision — never the AMD default; DEFAULT_ROCMFPX_IMAGE above
+#: is untouched by any of this.
 DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation

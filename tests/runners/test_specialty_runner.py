@@ -8,10 +8,10 @@ def test_promptforge_runner_registered():
     assert r.backend == "rocm"
     assert r.supported_backends == ("rocm",)  # HIP-only: no vulkan
     assert r.format_arch == "gguf"
-    # None until the CANDIDATE image passes the #1891 gate and ships in
-    # manifest.json's toolbox_images (test_registry enforces that a set key
-    # actually exists there).
-    assert r.manifest_key is None
+    # Real key since the #1891 ct150 gate passed (2026-08-30): the image
+    # ships in manifest.json's toolbox_images with the gate-validated digest
+    # (test_registry enforces both existence and the exact digest).
+    assert r.manifest_key == "promptforge"
     assert r.supports.specialties == ("promptforge",)
     assert r.supports.mtp is True
 

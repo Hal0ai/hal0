@@ -38,7 +38,13 @@ def _reset_provider_factory():
 def test_list_runner_images_empty(client: TestClient) -> None:
     resp = client.get("/api/runner-images")
     assert resp.status_code == 200
-    assert resp.json() == {"images": []}
+    body = resp.json()
+    assert body["images"] == []
+    # ``families`` always covers every hal0.runners.RUNNER_IMAGES key, even
+    # with an empty catalogue — it's the launch-truth summary, not a view
+    # over catalogued rows.
+    assert body["families"]
+    assert {f["family"] for f in body["families"]} >= {"rocmfpx", "cpu"}
 
 
 def test_get_unknown_runner_image_404s(client: TestClient) -> None:
@@ -156,6 +162,139 @@ def test_downloaded_list_empty_by_default(client: TestClient) -> None:
     assert resp.json() == {"images": []}
 
 
+# ── restart-affected-slots (#2096 page-side workaround, task 12) ────────────
+
+
+def test_restart_affected_names_slots(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826", "ops": "ghcr.io/x/a:0826", "flm": "other:1"},
+    )
+    restarted: list[str] = []
+
+    async def _fake_restart(name: str, request) -> None:
+        restarted.append(name)
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._restart_slot", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain", "ops"]
+    assert restarted == ["brain", "ops"]
+
+
+def test_restart_affected_rejects_bad_ref(client: TestClient) -> None:
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "bad ref"})
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "runner_image.ref_invalid"
+
+
+def test_restart_affected_empty_when_no_slot_matches(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/nomatch:1"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == []
+
+
+def test_restart_affected_is_fail_soft_per_slot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing slot restart is logged and skipped, not a 500 for the batch."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826", "ops": "ghcr.io/x/a:0826"},
+    )
+
+    async def _flaky_restart(name: str, request) -> None:
+        if name == "brain":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._restart_slot", _flaky_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["ops"]
+
+
+def test_restart_affected_delegates_to_slot_manager_restart(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_restart_slot`` uses the exact same service call as
+    ``POST /api/slots/{name}/restart`` — ``SlotManager.restart``."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+    calls: list[str] = []
+
+    async def _fake_restart(name: str):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain"]
+    assert calls == ["brain"]
+
+
+def test_restart_affected_clears_snapshot_cache_even_on_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cache invalidation must run even when ``sm.restart`` raises — mirrors
+    slots.py's ``@_invalidates_snapshot`` decorator's try/finally semantics
+    (fix round 1: the cache clear used to sit after the ``record_action``
+    block, so a raising restart left ``/api/slots`` serving a stale
+    pre-restart snapshot for the rest of its TTL)."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+
+    async def _boom(name: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _boom)
+    client.app.state._slots_snapshot_cache = {"stale": "snapshot"}
+
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == []  # the raising restart is fail-soft-skipped
+    assert client.app.state._slots_snapshot_cache is None
+
+
+def test_restart_affected_records_after_state_on_success(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batch-restart audit rows match per-slot ones: ``rec.after`` is set from
+    ``_state_value(snap)`` exactly as slots.py's own ``restart_slot`` route
+    does (fix round 1 audit-parity finding)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+
+    async def _fake_restart(name: str):
+        return SimpleNamespace(state=SimpleNamespace(value="running"))
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain"]
+
+    activity = client.get(
+        "/api/activity", params={"category": "slot", "action": "slot.restart"}
+    ).json()
+    rec = next(r for r in activity["records"] if r["target"] == "brain")
+    assert rec["after"] == {"state": "running"}
+    assert rec["outcome"] == "ok"
+
+
 # ── row enrichment: is_default / in_use_by (runner-image-catalogue v2) ──────
 
 
@@ -175,6 +314,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-combined", "0777"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
             slot_usage={},
+            local=None,
         )
         # "any tag": the family default's REPO matching row.image is enough.
         assert row["is_default"] == {"family": "rocmfpx", "source": "release"}
@@ -186,6 +326,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-other", "1"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-other:1", "override")},
             slot_usage={},
+            local=None,
         )
         assert row["is_default"] == {"family": "rocmfpx", "source": "override"}
 
@@ -196,6 +337,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-unrelated", "1"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
             slot_usage={},
+            local=None,
         )
         assert row["is_default"] is None
 
@@ -211,6 +353,7 @@ class TestEnrichRow:
                 "npu": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
                 "old": "ghcr.io/hal0ai/hal0-combined:0822",  # other tag: no match
             },
+            local=None,
         )
         assert row["in_use_by"] == ["agent", "utility"]
         assert row["is_default"] is None
@@ -503,3 +646,503 @@ class TestRunnerImageRouteEnrichment:
         rows = isolated_client.get("/api/runner-images").json()["images"]
         row = next(r for r in rows if r["id"] == "rocmfpx-combined")
         assert row["in_use_by"] == ["agent"]
+
+
+# ── store-truth enrichment: store_state / per-tag downloaded / badges ───────
+#
+# runner-image-catalogue v3 (task 5): rows gain store_state ("present" /
+# "missing" / "unknown"), a per-tag ``downloaded`` flag, ``store_context``,
+# and validated/candidate/deprecated ``badges`` — sourced from
+# ``hal0.providers.podman_introspect.images_digests()`` (monkeypatched at
+# the route module's imported name, its patch point) and the
+# ``hal0.config.schema`` image-ref sets.
+
+
+class TestStoreStateEnrichment:
+    DIGEST_A = "sha256:" + "a" * 64
+    DIGEST_B = "sha256:" + "b" * 64
+
+    def _seed(self, client: TestClient, **overrides):
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        image = RunnerImage(
+            id="x",
+            image="ghcr.io/x/a",
+            tag="0826",
+            available_tags=["0826", "0824"],
+            **overrides,
+        )
+        store = client.app.state.runner_image_registry
+        store.upsert(image)
+        store.set_tags(
+            "x",
+            [
+                RunnerImageTag(tag="0826", digest=self.DIGEST_A),
+                RunnerImageTag(tag="0824", digest=self.DIGEST_B),
+            ],
+        )
+        return image
+
+    def test_store_state_present_by_digest(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"docker.io/y/alias:zz": self.DIGEST_A}, context="rootful"
+            ),
+        )
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["store_state"] == "present"  # digest match, name irrelevant
+        assert row["store_context"] == "rootful"
+        assert row["downloaded"] is True
+        assert row["tags"][0]["downloaded"] is True
+        assert row["tags"][1]["downloaded"] is False
+
+    def test_store_state_missing_when_absent_from_store(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={}, context="rootful"),
+        )
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["store_state"] == "missing"
+        assert row["downloaded"] is False
+        assert row["tags"][0]["downloaded"] is False
+        assert row["tags"][1]["downloaded"] is False
+
+    def test_store_state_unknown_falls_back_to_marker(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client, local_path="/var/lib/hal0/images/x")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")  # x has local_path set
+        assert row["store_state"] == "unknown"
+        assert row["store_context"] is None
+        assert row["downloaded"] is True  # marker honoured only here
+        assert row["tags"][0]["downloaded"] is None
+        assert row["tags"][1]["downloaded"] is None
+
+    def test_downloaded_route_filters_by_store_truth(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={"ghcr.io/x/a:0826": None}, context="rootful"),
+        )
+
+        rows = client.get("/api/runner-images/downloaded").json()["images"]
+        assert [r["id"] for r in rows] == ["x"]
+        assert rows[0]["store_state"] == "present"
+
+    def test_validated_badge(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="combined", image="ghcr.io/hal0ai/hal0-combined", tag="0826"))
+        store.set_tags("combined", [RunnerImageTag(tag="0826")])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "combined")
+        assert row["badges"]["0826"] == "validated"
+
+    def test_deprecated_badge(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(
+            RunnerImage(id="stale-combined", image="ghcr.io/hal0ai/hal0-combined", tag="0824")
+        )
+        store.set_tags("stale-combined", [RunnerImageTag(tag="0824")])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "stale-combined")
+        assert row["badges"]["0824"] == "deprecated"
+
+    def test_badges_missing_when_no_match(self, client: TestClient) -> None:
+        rows_before = self._seed(client)
+        del rows_before  # seed just for a row with no badge-set membership
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["badges"] == {}
+
+    def test_promptforge_import_error_degrades_gracefully(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEFAULT_PROMPTFORGE_IMAGE now exists (landed with #2129/#1946),
+        but ``_tag_badges``'s fail-soft ImportError branch is still real
+        production code (guards against a future rename/removal of the
+        constant) and must stay exercised: simulate the absence via
+        monkeypatch rather than relying on the branch predating #2129."""
+        import hal0.config.schema as schema_mod
+
+        monkeypatch.delattr(schema_mod, "DEFAULT_PROMPTFORGE_IMAGE", raising=False)
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        resp = client.get("/api/runner-images")
+        assert resp.status_code == 200
+
+    def test_promptforge_candidate_badge_when_catalogued(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With DEFAULT_PROMPTFORGE_IMAGE now a real constant (#2129), a
+        catalogued row matching its ref gets the "candidate" badge — the
+        happy path the ImportError branch above used to make unreachable."""
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        image, _, tag = DEFAULT_PROMPTFORGE_IMAGE.rpartition(":")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="promptforge", image=image, tag=tag))
+        store.set_tags("promptforge", [RunnerImageTag(tag=tag)])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "promptforge")
+        assert row["badges"][tag] == "candidate"
+
+    def test_get_runner_image_detail_carries_store_state(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={}, context="rootless"),
+        )
+
+        detail = client.get("/api/runner-images/x").json()
+        assert detail["store_state"] == "missing"
+        assert detail["store_context"] == "rootless"
+
+    def test_sync_route_rows_carry_store_state(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        images_json = {
+            "schema": "hal0.runner-images.v1",
+            "images": [
+                {
+                    "image": "ghcr.io/hal0ai/hal0-toolbox-cpu",
+                    "tag": "latest",
+                    "manifest_key": "toolbox-cpu",
+                    "ownership": "owned",
+                    "publish": "ci",
+                    "notes": "CPU-only toolbox image.",
+                }
+            ],
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == sync_mod.IMAGES_JSON_URL:
+                return httpx.Response(200, json=images_json)
+            if url.startswith("https://ghcr.io/token"):
+                return httpx.Response(200, json={"token": "tok"})
+            if "/manifests/" in url:
+                return httpx.Response(
+                    200,
+                    headers={"docker-content-digest": "sha256:abc", "content-length": "42"},
+                )
+            return httpx.Response(404)
+
+        real_async_client = httpx.AsyncClient
+
+        def _mock_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(*args, **kwargs)
+
+        monkeypatch.setattr(sync_mod.httpx, "AsyncClient", _mock_client)
+
+        resp = client.post("/api/runner-images/sync")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["images"][0]["store_state"] == "unknown"
+        assert "families" in body
+
+
+# ── launch-truth families payload (runner-image-catalogue v3, task 9) ───────
+#
+# GET /api/runner-images gains a top-level ``families`` list: per
+# hal0.runners.RUNNER_IMAGES key, the effective ref, its source tier
+# (override → env → manifest → release), store state, the newest
+# release-shaped tag catalogued for that repo, and an update marker.
+
+
+class TestFamiliesPayload:
+    DIGEST_A = "sha256:" + "a" * 64  # tag 0826 — newest
+    DIGEST_B = "sha256:" + "b" * 64  # tag 0824 — effective (override)
+
+    def _seed_repo_x(self, client: TestClient) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        store = client.app.state.runner_image_registry
+        store.upsert(
+            RunnerImage(id="x", image="ghcr.io/x/a", tag="0826", available_tags=["0826", "0824"])
+        )
+        store.set_tags(
+            "x",
+            [
+                RunnerImageTag(tag="0826", digest=self.DIGEST_A),
+                RunnerImageTag(tag="0824", digest=self.DIGEST_B),
+            ],
+        )
+
+    def test_families_payload(
+        self, isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(isolated_client)
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"rocmfpx": "ghcr.io/x/a:0824"}}},
+        )
+        assert r.status_code == 200, r.text
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"ghcr.io/x/a:0824": self.DIGEST_B}, context="rootful"
+            ),
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["effective_ref"] == "ghcr.io/x/a:0824"
+        assert fam["source"] == "override"
+        assert fam["store_state"] == "present"
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is True
+
+    def test_families_env_source(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:custom")
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["source"] == "env"
+        assert fam["effective_ref"].endswith(":custom")
+
+    def test_families_release_source_no_row_no_update(self, client: TestClient) -> None:
+        """No override/env, no manifest pin, and no catalogue row for the
+        release ref: newest_release is null and update_available is False —
+        never a crash on an unmatched repo."""
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["source"] == "release"
+        assert fam["newest_release"] is None
+        assert fam["update_available"] is False
+        assert fam["slots"] == []
+        assert fam["pinned_slots"] == []
+
+    def test_families_digest_pinned_ref_present_and_update_available(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manifest-tier effective ref pinned by digest (``repo@sha256:…``
+        — what ``manifest_image_ref`` returns with a real digest, and what a
+        digest-form override/env value would also look like) must resolve
+        store presence and ``update_available`` via digest match, not the
+        tag-lookup path — ``ref.rpartition(":")`` would otherwise split
+        inside the digest and produce hex garbage as a fake "tag" (review
+        finding #1, fix round 1). ``flm`` is the family exercised: it has a
+        real ``manifest_key`` (unlike rocmfpx/vulkanfpx/cuda/cpu, which are
+        deliberately unwired — see the ``hal0.runners`` module docstring)."""
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(client)  # repo ghcr.io/x/a, tags 0826/DIGEST_A, 0824/DIGEST_B
+        pinned_ref = f"ghcr.io/x/a@{self.DIGEST_B}"
+        monkeypatch.setattr(
+            "hal0.config.loader.manifest_image_ref",
+            lambda key: pinned_ref if key == "flm" else None,
+        )
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"docker.io/y/alias:zz": self.DIGEST_B}, context="rootful"
+            ),
+        )
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "flm")
+        assert fam["source"] == "manifest"
+        assert fam["effective_ref"] == pinned_ref
+        assert fam["store_state"] == "present"  # digest match, name irrelevant
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is True
+
+    def test_families_store_state_unknown_when_store_unreadable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_repo_x(client)
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:0824")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["store_state"] == "unknown"
+
+    def test_families_no_update_when_digests_match(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Effective ref already pinned to the newest catalogued digest —
+        update_available is False."""
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(client)
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:0826")
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"ghcr.io/x/a:0826": self.DIGEST_A}, context="rootful"
+            ),
+        )
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is False
+
+    def test_families_slots_and_pinned_slots(
+        self, isolated_client: TestClient, tmp_hal0_home: str
+    ) -> None:
+        """A slot resolving to the exact effective ref lands in ``slots``; a
+        slot pinned to a different tag of the same repo lands in
+        ``pinned_slots`` instead."""
+        from pathlib import Path
+
+        self._seed_repo_x(isolated_client)
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"rocmfpx": "ghcr.io/x/a:0824"}}},
+        )
+        assert r.status_code == 200, r.text
+
+        slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        slots_dir.mkdir(parents=True, exist_ok=True)
+        (slots_dir / "agent.toml").write_text(
+            'name = "agent"\nport = 8081\nimage_pin = "ghcr.io/x/a:0824"\n',
+            encoding="utf-8",
+        )
+        (slots_dir / "utility.toml").write_text(
+            'name = "utility"\nport = 8082\nimage_pin = "ghcr.io/x/a:0826"\n',
+            encoding="utf-8",
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["slots"] == ["agent"]
+        assert fam["pinned_slots"] == ["utility"]
+
+    def test_families_payload_never_500s_on_bad_default_images(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``load_hal0_config`` blow-up must degrade families to release
+        defaults, not 500 the whole route (fail-soft contract)."""
+
+        def _boom():
+            raise RuntimeError("config corrupt")
+
+        monkeypatch.setattr("hal0.config.loader.load_hal0_config", _boom)
+
+        resp = client.get("/api/runner-images")
+        assert resp.status_code == 200
+        assert resp.json()["families"]
+
+
+# ── canonical family keys (runner-image-catalogue v3, task 11) ──────────────
+#
+# ``vulkanfpx`` shares DEFAULT_ROCMFPX_IMAGE with ``rocmfpx`` — one lever
+# (rocmfpx) governs the shared image lineage; vulkanfpx never emits its own
+# families row or defaults entry, and an override written under the alias
+# key folds into the canonical family.
+
+
+class TestCanonicalFamilyFold:
+    def test_vulkanfpx_absent_from_families(self, client: TestClient) -> None:
+        body = client.get("/api/runner-images").json()
+        fams = [f["family"] for f in body["families"]]
+        assert "vulkanfpx" not in fams
+        assert "rocmfpx" in fams
+
+    def test_alias_override_key_applies_to_rocmfpx_family_row(
+        self, isolated_client: TestClient
+    ) -> None:
+        """An override written under the alias key ``vulkanfpx`` applies to
+        the canonical ``rocmfpx`` family row — both keys never produce two
+        strip rows for the same image lineage."""
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"vulkanfpx": "ghcr.io/x/a:0999"}}},
+        )
+        assert r.status_code == 200, r.text
+
+        body = isolated_client.get("/api/runner-images").json()
+        fams = [f["family"] for f in body["families"]]
+        assert "vulkanfpx" not in fams
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:0999"
+        assert rocm["source"] == "override"
+
+    def test_canonical_key_wins_when_both_present(self, isolated_client: TestClient) -> None:
+        """When both the exact canonical key and the alias key are set, the
+        canonical key wins (``folded.setdefault`` semantics)."""
+        r = isolated_client.put(
+            "/api/settings",
+            json={
+                "slots": {
+                    "default_images": {
+                        "rocmfpx": "ghcr.io/x/a:canonical",
+                        "vulkanfpx": "ghcr.io/x/a:alias",
+                    }
+                }
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        body = isolated_client.get("/api/runner-images").json()
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"
+
+    def test_canonical_key_wins_regardless_of_map_iteration_order(
+        self, isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fix round 1: the canonical key must win even when the alias key
+        iterates FIRST (realistic hand-edited toml order) — a single
+        ``setdefault`` pass over ``overrides.items()`` would let whichever
+        key happened to iterate first win instead of the canonical one."""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "hal0.config.loader.load_hal0_config",
+            lambda: SimpleNamespace(
+                slots=SimpleNamespace(
+                    default_images={
+                        "vulkanfpx": "ghcr.io/x/a:alias",
+                        "rocmfpx": "ghcr.io/x/a:canonical",
+                    }
+                )
+            ),
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"

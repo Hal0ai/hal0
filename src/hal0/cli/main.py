@@ -45,6 +45,7 @@ from hal0.cli.model_commands import app as model_app
 from hal0.cli.ports_command import ports_cmd
 from hal0.cli.profile_commands import app as profile_app
 from hal0.cli.registry_commands import app as registry_app
+from hal0.cli.runner_image_commands import app as runner_images_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update_app
@@ -84,6 +85,10 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(app_ext_app, name="app")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(registry_app, name="registry")
+# Issue #2106 — ``hal0 runner-images {ls,sync,pull}``: the CLI-absence gap
+# on the runner-image catalogue (API + dashboard existed, no CLI verb at
+# all). `rm` deliberately absent pending spec D2.
+app.add_typer(runner_images_app, name="runner-images")
 # Issue #1796 — ``hal0 profile {list,show}``, the read half of /api/profiles
 # every slot TOML references but which had no CLI surface at all.
 app.add_typer(profile_app, name="profile")

@@ -101,3 +101,34 @@ class TestKindForRole:
     def test_maps_role_back_to_kind(self):
         assert kind_for_role("promptforge_ffn").key == "promptforge"
         assert kind_for_role("mmproj") is None
+
+
+class TestModeEnv:
+    """The card's mode envs, admitted by the #1891 ct150 gate (2026-08-30).
+
+    These four values ran the entire gate — Paris probe, the HumanEval+
+    panel, and the MTP acceptance runs — exactly as recorded in the gate
+    report; the values are card-verbatim and must never drift from it.
+    """
+
+    def test_promptforge_mode_env_is_the_gated_card_set(self):
+        kind = SPECIALTY_KINDS["promptforge"]
+        assert dict(kind.mode_env) == {
+            "PROMPTFORGE_MODE": "m2048_fused_tail1476",
+            "PROMPTFORGE_ENABLE_SMALLM_W8": "1",
+            "PROMPTFORGE_MTP_OUTPUT_K8": "1",
+            "PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE": "0",
+        }
+
+    def test_mode_env_rides_along_in_specialty_env_for(self):
+        from hal0.registry.specialty import specialty_env_for
+
+        env = specialty_env_for(
+            {
+                "specialty": "promptforge",
+                "companions": {"promptforge_ffn": "/models/x-FFN.pfs"},
+            }
+        )
+        assert env["PROMPTFORGE_SIDECAR"] == "/models/x-FFN.pfs"
+        assert env["PROMPTFORGE_MODE"] == "m2048_fused_tail1476"
+        assert env["PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE"] == "0"

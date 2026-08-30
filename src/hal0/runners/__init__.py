@@ -39,7 +39,9 @@ carry ``manifest_key=None`` (env override still applies; the manifest tier
 is simply skipped, exactly matching the OLD :func:`resolve_default_image`
 behaviour, which never consulted the manifest either). ``flm`` / ``kokoro``
 / ``qwen3tts`` / ``comfyui`` DO have real, correctly-corresponding manifest
-keys and are wired accordingly.
+keys and are wired accordingly — and ``promptforge`` joined them once the
+#1891 ct150 gate passed (2026-08-30): its manifest entry was created fresh
+for this image lineage, so the wrong-lineage trap above does not apply.
 """
 
 from __future__ import annotations
@@ -163,12 +165,16 @@ RUNNER_IMAGES: dict[str, Runner] = {
         RunnerSupports(mtp=True, jinja=True, mmproj=True, specialties=("promptforge",)),
         "gpu",
         "rocm",
-        # manifest_key=None until the CANDIDATE image passes the #1891 gate
-        # and actually ships in manifest.json's toolbox_images — same
-        # doctrine as rocmfpx above: a key pointing at a manifest entry that
-        # doesn't exist yet would either fail the registry test
-        # or, worse, silently pin to whatever lands under that key later.
-        None,
+        # Real key as of the #1891 ct150 gate PASS (2026-08-30, report at
+        # /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md):
+        # manifest.json's toolbox_images.promptforge now exists and carries
+        # the exact digest the gate validated, so — unlike rocmfpx, whose
+        # manifest key would resolve a DIFFERENT lineage (module docstring)
+        # — this key points at the same image this Runner's bundled tag
+        # names. promptforge remains an OPTIONAL runner either way (operator
+        # decision on #1946): a slot gets this image only by selecting this
+        # runner; nothing here touches the AMD default.
+        "promptforge",
         supported_backends=("rocm",),  # HIP-only build: deliberately NOT
         # vulkan — the existing (device, BINARY) fit-check refuses a
         # gpu-vulkan pairing with no new code.
@@ -362,6 +368,24 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 FPX_RUNNER_KEYS = frozenset({"rocmfpx"})
 
 
+#: Family view of :data:`RUNNER_ALIASES`, kept for the runner-images
+#: catalogue surfaces (the family strip, ``_effective_defaults``'s override
+#: fold, ``_resolve_image_ref``'s defaults-map fold). Since the vulkanfpx
+#: collapse there is exactly ONE key per image lineage, so "family of a
+#: key" and "canonical runner key" are the same fold — this is the same
+#: dict, not a second table that could drift.
+CANONICAL_FAMILY: dict[str, str] = RUNNER_ALIASES
+
+
+def canonical_family(key: str) -> str:
+    """The default-images/strip family a runner key belongs to.
+
+    Post-collapse this is identical to :func:`canonical_runner_key`; it
+    survives as a name because the catalogue surfaces speak in families.
+    """
+    return canonical_runner_key(key)
+
+
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
@@ -383,6 +407,7 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
 
 
 __all__ = [
+    "CANONICAL_FAMILY",
     "FPX_RUNNER_KEYS",
     "RUNNER_ALIASES",
     "RUNNER_IMAGES",
@@ -390,6 +415,7 @@ __all__ = [
     "Runner",
     "RunnerSupports",
     "RuntimeFamily",
+    "canonical_family",
     "canonical_runner_key",
     "get_runner",
     "resolve_runner_image",

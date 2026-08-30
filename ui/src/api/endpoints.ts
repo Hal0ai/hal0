@@ -102,6 +102,9 @@ export const ENDPOINTS = {
   runnerImagesDownloaded: '/api/runner-images/downloaded',
   runnerImagesSync: '/api/runner-images/sync',
   runnerImagesPulls: '/api/runner-images/pulls/list',
+  // #2096 page-side workaround (Task 12): restart every slot launching a
+  // given image:tag ref in one click, instead of visiting each slot.
+  runnerImagesRestartAffected: '/api/runner-images/restart-affected',
   runnerImage: (id: string) => `/api/runner-images/${id}`,
   runnerImagePull: (id: string) => `/api/runner-images/${id}/pull`,
   runnerImagePullStatus: (id: string) => `/api/runner-images/${id}/pull/status`,
