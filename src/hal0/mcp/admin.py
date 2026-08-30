@@ -2786,7 +2786,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "updater_channel_get": "Get the configured update channel.",
     "updater_slot_drift": "Report slots whose running argv has drifted from a fresh post-update render.",
     "updater_job_status": "Poll an update/prepare/commit job's state. Args: job_id.",
-    "component_status": "Per-component version/converge status — catalog x components.json x live probes (OpenWebUI, ComfyUI, Hermes, Hindsight, runner images).",
+    "component_status": "Per-component version/converge status — catalog x components.json x live probes (OpenWebUI, runner images [ComfyUI rides this component], Hermes, Hindsight).",
     "update_check": "Fetch the release manifest and diff it against the running version; includes components_pending (count of components needing converge).",
     "component_converge": "Re-run one component's converge arm — stops+restarts the companion service, may trigger a one-way DB migration (hindsight) (gated). Args: component_id.",
     "doctor_report": "Composed doctor verdict — health, URLs, system, memory, services, capabilities in one read.",

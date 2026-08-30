@@ -10,6 +10,7 @@ No snapshot machinery — hermes has no one-way DB; HERMES_HOME untouched.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +31,42 @@ def stamp_path() -> Path:
     return var_lib() / "state" / "agents" / "hermes" / "venv.pin"
 
 
+def _provision_checkpoint_path() -> Path:
+    return var_lib() / "state" / "agents" / "hermes" / "provision.json"
+
+
+def _installed_pin_from_provision_checkpoint() -> str | None:
+    """Fall back to the provisioner's last-run report for the installed pin.
+
+    No box provisioned before the venv.pin stamp existed has one — see
+    ``hermes_arm.stamp_path`` — so on those boxes ``installed_hermes_pin``
+    would otherwise report "not installed" on an install that has been
+    running fine, and the first `hal0 update` needlessly rebuilds the live
+    venv. ``hermes_provision._write_run_report`` (hermes_provision.py:6618)
+    writes a flat JSON object with a top-level ``hermes_version`` key on
+    every provision/repair run; that is the same identifier
+    ``_hermes_version_pin()`` produces, which is what the venv.pin stamp
+    also holds. Parsed defensively: any missing file, bad JSON, non-dict
+    top level, or non-string/empty ``hermes_version`` reads as "no
+    fallback available" (``None``) rather than raising.
+    """
+    try:
+        text = _provision_checkpoint_path().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("hermes_version")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 def installed_hermes_pin(venv: Path | None = None) -> str | None:
     """The pin identifier stamped after the last successful converge.
 
@@ -47,6 +84,13 @@ def installed_hermes_pin(venv: Path | None = None) -> str | None:
     tests) this one follows the sandbox and the hardcoded FHS constant does
     not — gating on the constant made this getter permanently blind to a
     freshly-written, correctly-sandboxed stamp in exactly that posture.
+
+    When the venv.pin stamp is absent or empty — every box provisioned
+    before this component-status pass shipped — fall back to the
+    ``hermes_version`` recorded in the provisioner's ``provision.json``
+    checkpoint (see :func:`_installed_pin_from_provision_checkpoint`)
+    rather than misreporting a working install as not-installed. The
+    stamp wins whenever it is present.
     """
     venv = venv or (var_lib() / "venvs" / "hermes")
     if not (venv / "bin" / "python").exists():
@@ -54,8 +98,10 @@ def installed_hermes_pin(venv: Path | None = None) -> str | None:
     try:
         value = stamp_path().read_text(encoding="utf-8").strip()
     except OSError:
-        return None
-    return value or None
+        value = ""
+    if value:
+        return value
+    return _installed_pin_from_provision_checkpoint()
 
 
 def converge_hermes(

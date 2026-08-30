@@ -42,10 +42,12 @@ OPENWEBUI_UNIT_NAME = "hal0-openwebui.service"
 
 #: The digest every box converges on — the release-carried pin (spec
 #: 2026-08-30 §2, same single-owner posture as
-#: hal0.memory.engine_upgrade.HINDSIGHT_API_PIN). Must stay in lockstep
-#: with packaging/systemd/hal0-openwebui.service + installer/install.sh
-#: (tests/installer/test_owui_pin_lockstep.py enforces it). Bump via
-#: scripts/update-owui-digest.sh.
+#: hal0.memory.engine_upgrade.HINDSIGHT_API_PIN). Three declaration sites
+#: by design, and this is only one of them: this constant, the shipped
+#: unit (packaging/systemd/hal0-openwebui.service — pins the digest twice,
+#: ExecStartPre pull + ExecStart run), and installer/install.sh. Bump all
+#: three together; tests/installer/test_owui_pin_lockstep.py fails naming
+#: whichever site is stale.
 OPENWEBUI_IMAGE_PIN = "sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e"
 
 #: Human-readable label for the pin, shown next to the digest in status

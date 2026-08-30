@@ -15,9 +15,15 @@ from typing import Any, Callable
 import structlog
 
 from hal0.components.registry import COMPONENTS, ComponentDef
-from hal0.components.state import record_component_result
+from hal0.components.state import load_component_state, record_component_result
 
 log = structlog.get_logger(__name__)
+
+#: Statuses that carry operator-facing failure breadcrumbs (error/remedy —
+#: what the dashboard Retry affordance reads). A boot-time diagnose-only
+#: pass must not clobber one of these with a generic "stale"/"pending"
+#: result that has no error/remedy of its own (M1, final-review).
+_FAILURE_STATUSES = ("build_failed", "snapshot_failed", "rolled_back")
 
 
 def _resolve_converge(comp: ComponentDef) -> Callable[..., dict[str, Any]]:
@@ -56,12 +62,47 @@ def _arm_kwargs(
     return {"job_id": job_id, "apply": apply}
 
 
-def converge_component(comp: ComponentDef, **kwargs: Any) -> dict[str, Any]:
+def _is_diagnose_only(comp: ComponentDef, kwargs: dict[str, Any]) -> bool:
+    """Whether ``kwargs`` (as built by :func:`_arm_kwargs`) runs a probe-only
+    pass for ``comp`` rather than one that may actually converge it.
+
+    hindsight's arm spells its apply flag ``upgrade`` instead of ``apply``
+    (see ``_arm_kwargs``) — every other arm uses ``apply``.
+    """
+    if comp.id == "hindsight":
+        return not kwargs.get("upgrade", True)
+    return not kwargs.get("apply", True)
+
+
+def converge_component(
+    comp: ComponentDef, *, diagnose_only: bool = False, **kwargs: Any
+) -> dict[str, Any]:
     try:
         result = _resolve_converge(comp)(**kwargs)
     except Exception as exc:  # genuine bug in an arm — isolate it
         log.warning("components.converge_arm_crashed", component=comp.id, error=str(exc))
         result = {"status": "build_failed", "error": str(exc)}
+
+    # Boot-time diagnose (apply=False) runs on every daemon restart. If the
+    # last recorded result for this component was a real failure
+    # (build_failed/snapshot_failed/rolled_back — the statuses that carry
+    # the error/remedy the dashboard's Retry affordance reads), a
+    # diagnose-only result must not overwrite it: diagnose reports drift
+    # ("stale"/"pending"), not the richer failure breadcrumb, so recording
+    # it here would silently erase the operator-facing detail on every
+    # restart until someone happens to retry. An apply=True pass (retry,
+    # `hal0 update`) always records — it may be curing or re-confirming the
+    # failure, and either way its result is the freshest truth.
+    if diagnose_only:
+        existing = load_component_state().get(comp.id) or {}
+        if existing.get("status") in _FAILURE_STATUSES:
+            log.info(
+                "components.diagnose_skip_record",
+                component=comp.id,
+                existing_status=existing.get("status"),
+            )
+            return result
+
     record_component_result(comp.id, result)
     return result
 
@@ -80,5 +121,6 @@ def converge_components(
             comp, job_id=job_id, apply=apply,
             image_retag=image_retag, engine=engine, hermes_install=hermes_install,
         )
-        results[comp.id] = converge_component(comp, **kwargs)
+        diagnose_only = _is_diagnose_only(comp, kwargs)
+        results[comp.id] = converge_component(comp, diagnose_only=diagnose_only, **kwargs)
     return results

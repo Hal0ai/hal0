@@ -14,10 +14,20 @@
 # what makes "required" safe here.
 name: hindsight-pin-gate
 
+# No `paths:` filter here, deliberately: with one, GitHub never reports a
+# status for this workflow on a PR that doesn't touch
+# src/hal0/memory/engine_upgrade.py at all, and a branch-protection required
+# check that never reports goes to "Expected" forever — it blocks merging
+# every other PR, not just ones that skip the gate. Running `detect` on
+# every PR is cheap (one checkout + a grep), so it always runs; `engine-gate`
+# itself still only runs `if: needs.detect.outputs.changed == 'true'`.
+#
+# Required-check note: if `engine-gate` is marked required on the protected
+# branch, a *skipped* job (the `if:` evaluates false) still reports success
+# to branch protection — that is what makes marking it required safe even
+# though most PRs skip it.
 on:
-  pull_request:
-    paths:
-      - "src/hal0/memory/engine_upgrade.py"
+  pull_request: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -355,7 +355,6 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.seed_profiles_prune_failed": "seed-profile cleanup",
     "updater.mtp_migration_failed": "mtp override cleanup",
     "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",
-    "updater.image_retag_failed": "runner image retag",
     "updater.extra_args_sanitize_failed": "managed extra_args sanitisation",
     "updater.memory_engine_upgrade_failed": "memory engine upgrade",
     "updater.components_converge_failed": "component convergence",
@@ -743,7 +742,21 @@ def update(
         # running the pre-update command so the operator can opt into a restart.
         _print_drift_banner(_fetch_slot_drift())
         converged = _print_convergence(final.get("convergence"))
-        components_ok = _print_component_table(_component_rows())
+        # hal0-api is mid-self-restart right after commit applies (the unit
+        # files were just re-rendered), so a strict _component_rows() fetch
+        # here can 409/connection-refuse on a clean apply. Use the tolerant
+        # variant and treat "couldn't recheck" as success rather than
+        # fabricating an exit-2 convergence failure — `hal0 update status`
+        # still does the strict check.
+        component_rows = _component_rows_tolerant()
+        if component_rows is None:
+            console.print(
+                "[dim]components not re-checked — hal0-api restarting; "
+                "run `hal0 update status`[/dim]"
+            )
+            components_ok = True
+        else:
+            components_ok = _print_component_table(component_rows)
         if converged and components_ok:
             console.print(Panel("[green]update applied.[/green]", border_style="green"))
             return
@@ -788,6 +801,22 @@ def _component_rows() -> list[dict]:
     except CliApiError as exc:
         die(str(exc))
         return []
+    return body.get("components") or []
+
+
+def _component_rows_tolerant() -> list[dict] | None:
+    """Fetch the /api/updates/components rows, or None on an API error.
+
+    Used right after a self-update commit, where hal0-api may be mid
+    self-restart and briefly unreachable/erroring — that is not a
+    convergence failure, just a fetch that couldn't happen yet. Callers
+    that want strict "die on API error" behavior (e.g. `hal0 update
+    status`) should keep using `_component_rows()` instead.
+    """
+    try:
+        body = api_get("/api/updates/components")
+    except CliApiError:
+        return None
     return body.get("components") or []
 
 

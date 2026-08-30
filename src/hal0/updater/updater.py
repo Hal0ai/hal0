@@ -4200,7 +4200,6 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.seed_profiles_prune_failed",
     "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",
-    "updater.image_retag_failed",
     "updater.extra_args_sanitize_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",

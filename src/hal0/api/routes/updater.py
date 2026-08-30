@@ -1095,16 +1095,23 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
         raise ComponentNotFound(
             f"no component {component_id!r}", details={"component": component_id}
         )
+    # Parse the body BEFORE the busy check, deliberately: `await
+    # request.json()` yields control back to the event loop, so if the busy
+    # check ran first, two concurrent converge POSTs could both observe an
+    # empty/idle `jobs` dict, both pass the check, and both register + spawn
+    # a job — running two converge arms for the same component at once.
+    # With no `await` between the check and the job-dict write below, the
+    # check-then-register span is atomic from the event loop's perspective.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     jobs = _update_jobs(request)
     if any(j.get("state") in ("queued", "running") for j in jobs.values()):
         raise ComponentConvergeBusy(
             "an update or converge job is already in flight",
             details={"component": component_id},
         )
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
     # Reuse runner._arm_kwargs so the per-component flag mapping (e.g. the
     # hindsight arm's ``upgrade`` kwarg spelling) isn't duplicated here.
     # job_id is dropped from the base mapping and passed explicitly by

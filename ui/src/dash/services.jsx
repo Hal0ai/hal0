@@ -327,8 +327,15 @@ function DiscoveryCard({ mdns, services }) {
 // converge_runner_images) is rendered here instead, with the same retry
 // treatment as a per-service version cell.
 function RunnerImagesCard({ component }) {
-  if (!component) return null
+  // Hooks must run on every render regardless of `component` — the
+  // components query resolves after first paint, so `component` starts
+  // undefined and becomes defined on a later render of this same instance.
+  // An early return before useComponentRetry (which calls
+  // useMutation/useState/useUpdateJob) would change the hook count between
+  // renders and trigger React's "Rendered more hooks than during the
+  // previous render" crash. See C1 final-review finding.
   const { retry, jobBusy, starting } = useComponentRetry(component)
+  if (!component) return null
   const cell = componentCell(component)
   const retryable = RETRYABLE_STATUSES.includes(component.status)
   const detail = component.detail || []
