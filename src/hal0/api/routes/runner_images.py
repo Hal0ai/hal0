@@ -740,53 +740,67 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
          update the catalogue via ``store.remove_tag`` and respond 200.
 
     Audited the same way ``restart-affected`` is: ``record_action`` with
-    category ``"runner_image"``, action ``"runner_image.rm"``, target the
-    ``image:tag`` ref — a raised 409/502 inside the block is recorded
-    ``outcome="error"`` and re-raised (``hal0.activity.audit_action``'s
-    confirmation guarantee), so the audit trail is honest either way.
+    category ``"runner_image"``, action ``"runner_image.rm"`` — but here
+    ``record_action`` wraps the WHOLE handler, pre-checks included, not
+    just the seam call. A refused delete (any of the five guards above) is
+    a real user-visible outcome and belongs in the trail exactly as much as
+    a successful one: ``hal0.activity.audit_action`` records
+    ``outcome="error"`` on any raised exception INSIDE the block (then
+    re-raises, so the normal error envelope is untouched) — that includes
+    an ``Hal0Error`` like ``NotFound``/``Conflict`` just as much as a bug,
+    which is exactly the behaviour this route now leans on for guards 1-4.
+    ``target`` starts as ``<image_id>:<tag>`` (the only ref this handler
+    can name before the catalogue lookup resolves ``image.image``) and is
+    upgraded to the real ``image:tag`` ref the moment ``image`` is known,
+    same target shape either way once past guard 1.
     """
-    store = request.app.state.runner_image_registry
-    image = store.get(image_id)
-    if image is None:
-        raise NotFound(
-            f"runner image {image_id!r} not in catalogue",
-            details={"image_id": image_id},
-            code="runner_image.not_found",
-        )
-    tag_known = (
-        tag == image.tag or any(t.tag == tag for t in image.tags) or tag in image.available_tags
-    )
-    if not tag_known:
-        raise NotFound(
-            f"tag {tag!r} not catalogued for {image_id!r}",
-            details={"image_id": image_id, "tag": tag},
-            code="runner_image.tag_not_found",
-        )
-
-    jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
-    job = jobs.get(image_id)
-    if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
-        raise Conflict(
-            f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
-            details={"image_id": image_id, "tag": tag},
-            code="runner_image.pull_in_progress",
-        )
-
-    ref = f"{image.image}:{tag}"
-    in_use_slots = _tag_in_use_by(image, tag, _slot_image_usage())
-    if in_use_slots:
-        raise Conflict(
-            f"runner image tag {ref!r} is in use",
-            details={"image_id": image_id, "tag": tag, "slots": in_use_slots},
-            code="runner_image.tag_in_use",
-        )
-
     from hal0.api._audit import record_action
     from hal0.providers import podman_mutate
 
+    store = request.app.state.runner_image_registry
+
     async with record_action(
-        request, category="runner_image", action="runner_image.rm", target=ref
+        request,
+        category="runner_image",
+        action="runner_image.rm",
+        target=f"{image_id}:{tag}",
     ) as rec:
+        image = store.get(image_id)
+        if image is None:
+            raise NotFound(
+                f"runner image {image_id!r} not in catalogue",
+                details={"image_id": image_id},
+                code="runner_image.not_found",
+            )
+        tag_known = (
+            tag == image.tag or any(t.tag == tag for t in image.tags) or tag in image.available_tags
+        )
+        if not tag_known:
+            raise NotFound(
+                f"tag {tag!r} not catalogued for {image_id!r}",
+                details={"image_id": image_id, "tag": tag},
+                code="runner_image.tag_not_found",
+            )
+
+        jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
+        job = jobs.get(image_id)
+        if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
+            raise Conflict(
+                f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
+                details={"image_id": image_id, "tag": tag},
+                code="runner_image.pull_in_progress",
+            )
+
+        ref = f"{image.image}:{tag}"
+        rec.target = ref
+        in_use_slots = _tag_in_use_by(image, tag, _slot_image_usage())
+        if in_use_slots:
+            raise Conflict(
+                f"runner image tag {ref!r} is in use",
+                details={"image_id": image_id, "tag": tag, "slots": in_use_slots},
+                code="runner_image.tag_in_use",
+            )
+
         outcome, reason = await asyncio.to_thread(podman_mutate.remove_image, ref)
         rec.after = {"outcome": outcome}
         if outcome == "in-use":
