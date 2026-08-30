@@ -398,7 +398,9 @@ class _HindsightyWrapper(StubWrapper):
 
         class _Client:
             async def request_json(self, method: str, path: str) -> Any:
-                if path == "/v1/default/banks":
+                if path.startswith("/v1/default/banks?") or path == "/v1/default/banks":
+                    # 0.9.x paginates (limit/offset); this 0.8.x-shaped reply
+                    # has no `total`, so the route stops after one page.
                     return {"banks": [{"bank_id": b} for b in parent._stats]}
                 for bank, stats in parent._stats.items():
                     if path == f"/v1/default/banks/{bank}/stats":
@@ -463,7 +465,9 @@ class _RetryWrapper(StubWrapper):
 
         class _Client:
             async def request_json(self, method: str, path: str) -> Any:
-                if method == "GET" and path == "/v1/default/banks":
+                if method == "GET" and (
+                    path.startswith("/v1/default/banks?") or path == "/v1/default/banks"
+                ):
                     return {"banks": [{"bank_id": b} for b in parent._ops]}
                 for bank, ops in parent._ops.items():
                     if method == "GET" and path.startswith(f"/v1/default/banks/{bank}/operations?"):

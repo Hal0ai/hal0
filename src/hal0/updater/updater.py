@@ -1867,6 +1867,7 @@ def run_post_activation_migrations(
     ceiling: int | None = None,
     skip_image_retag: bool = False,
     repair_hermes_venv: bool = True,
+    upgrade_memory_engine_venv: bool = True,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1907,6 +1908,22 @@ def run_post_activation_migrations(
     :func:`_maybe_run_config_migrations` for why (the one-shot v1.0
     profile-catalog reset gate). ``None`` (the default, and what
     install.sh's caller always passes) applies no cap.
+
+    ``upgrade_memory_engine_venv`` gates the hindsight engine-venv
+    convergence pass (:func:`hal0.memory.engine_upgrade.upgrade_memory_engine`).
+    It runs LAST: it is the slowest pass by an order of magnitude (a pip
+    build of the engine's ML wheel set) and it stops/starts the
+    ``hindsight-api`` companion service — every cheap config-convergence
+    pass should land even when it wedges, and it has no ordering dependency
+    on any of them (the engine venv is disjoint state).
+    :func:`check_outstanding_migrations` passes ``False`` — the engine pass
+    is the ``retag_stale_slot_images``/``repair_hermes_venv`` argument taken
+    further still: a boot-time pip is an unbounded network operation, the
+    stop/start is a surprise memory outage on every crash-restart race, and
+    the first start of a newer engine triggers its ONE-WAY database
+    migration — none of which belongs outside an operator-visible update.
+    At boot the pass only logs ``updater.memory_engine_stale`` with the
+    remedy.
 
     ``skip_image_retag`` (#1960 N2) omits ``retag_stale_slot_images``.
     Every OTHER pass here is either purely additive (seed profiles, mtp
@@ -1980,6 +1997,17 @@ def run_post_activation_migrations(
         # Non-fatal: an affected model keeps failing to launch until the
         # operator removes the managed flag in the model drawer.
 
+    try:
+        from hal0.memory.engine_upgrade import upgrade_memory_engine
+
+        upgrade_memory_engine(job_id=job_id, upgrade=upgrade_memory_engine_venv)
+    except Exception as exc:
+        log.warning("updater.memory_engine_upgrade_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the pass itself reports operational failures as status
+        # dicts (and logs this same event with a remedy); reaching here means
+        # a genuine bug, and the box keeps its current working engine either
+        # way — never a reason to fail an update.
+
     return migration_info
 
 
@@ -2036,6 +2064,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
             ceiling=ceiling,
             skip_image_retag=True,
             repair_hermes_venv=False,
+            upgrade_memory_engine_venv=False,
         )
     except Exception as exc:
         log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
@@ -4140,7 +4169,7 @@ async def _rerender_units_after_swap(job_id: str | None) -> None:
 #: stdout carries nothing but this envelope, scanned from the end.
 _MIGRATION_RESULT_KEY = "hal0_migration_result"
 
-#: The five non-fatal per-pass failure events ``run_post_activation_migrations``
+#: The non-fatal per-pass failure events ``run_post_activation_migrations``
 #: can log without raising (#1960 B2). A pass that swallows its own
 #: exception still exits the subprocess with rc=0 — by design, see that
 #: function's docstring — so it would otherwise be invisible outside
@@ -4153,6 +4182,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.vulkan_migration_failed",
     "updater.image_retag_failed",
     "updater.extra_args_sanitize_failed",
+    "updater.memory_engine_upgrade_failed",
 )
 
 
@@ -4244,7 +4274,13 @@ async def _run_post_activation_migrations_after_swap(
             [sys.executable, "-c", script, payload],
             capture_output=True,
             text=True,
-            timeout=300,
+            # 2700s, not the old 300s: the memory-engine convergence pass may
+            # pip-build the hindsight venv (transformers/sentence-transformers
+            # wheel churn — gigabytes). Its own pip runs are capped at 2400s
+            # (hal0.memory.engine_upgrade._PIP_TIMEOUT_S) so this envelope
+            # always has headroom to emit the JSON result; fast passes still
+            # finish fast — this is a runaway cap, not a wait.
+            timeout=2700,
         )
     except subprocess.TimeoutExpired as exc:
         # Same containment class as _rerender_units_after_swap and the
@@ -4252,8 +4288,8 @@ async def _run_post_activation_migrations_after_swap(
         # rather than return a CompletedProcess, and the old code only
         # handled the "returns a non-zero CompletedProcess" shape (#1960 B1).
         raise UpdateError(
-            "post-activation migrations timed out after 300s in the newly activated tree",
-            details={"job_id": job_id, "timeout": 300},
+            "post-activation migrations timed out after 2700s in the newly activated tree",
+            details={"job_id": job_id, "timeout": 2700},
         ) from exc
     except OSError as exc:
         raise UpdateError(

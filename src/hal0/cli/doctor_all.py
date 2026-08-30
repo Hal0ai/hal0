@@ -1006,6 +1006,43 @@ def check_hindsight_llm_auth(
     return Check(name, title, _PASS, "memory engine carries a current client-tier LLM key")
 
 
+def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
+    """The engine should be at the pinned version — staleness signal only.
+
+    Both upgrade paths converge the engine venv via the post-activation
+    migration pass (``hal0.memory.engine_upgrade``); a box that reports an
+    older ``api_version`` missed or failed that pass. Advisory by
+    convention: behavior gates on ``/version`` ``features``, never the
+    version string (see memory_admin's document-transfer gate), so a stale
+    engine WARNs with the remedy and never fails the roll-up.
+
+    ``memory`` is the ``GET /api/memory/engine`` payload the roll-up already
+    fetched — one probe, two rows.
+    """
+    from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
+
+    name, title = "memory_engine_version", "Memory engine version"
+    if memory is None:
+        return Check(name, title, _WARN, "engine status unreachable — is hal0-api up?")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        # check_memory (the shared classifier) already reports reachability;
+        # a second row saying the same thing would be noise.
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    version = memory.get("version")
+    if version == HINDSIGHT_API_PIN:
+        return Check(name, title, _PASS, f"hindsight-api {version} matches the pin")
+    return Check(
+        name,
+        title,
+        _WARN,
+        f"engine reports {version or 'unknown'} but this release pins {HINDSIGHT_API_PIN} — "
+        "the engine-upgrade pass missed or failed; run `hal0 update` (or re-run install.sh) "
+        "and check the journal for updater.memory_engine_upgrade_failed",
+    )
+
+
 def check_hermes_anchor_window(
     *,
     base: str | None = None,
@@ -1147,6 +1184,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_anchor_window(base=base),
         check_hindsight_llm_auth(auth=auth_payload),
+        check_memory_engine_version(memory=payloads["memory"]),
     ]
     return verify_rows + extra_rows
 
@@ -1234,6 +1272,7 @@ __all__ = [
     "check_hermes_mcp_config_auth",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
+    "check_memory_engine_version",
     "check_migrations",
     "check_model_store",
     "check_ports",

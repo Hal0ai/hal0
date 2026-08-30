@@ -211,13 +211,22 @@ async def engine_status(request: Request) -> dict[str, Any]:
     version, banks = await asyncio.gather(
         _probe(client, "/version"), _probe(client, "/v1/default/banks")
     )
+    if isinstance(banks, dict):
+        # hindsight-api >= 0.9 paginates the banks list (default limit=100)
+        # and reports the real count in `total`; 0.8.x has neither, so fall
+        # back to counting the page.
+        banks_total = banks.get("total")
+        if banks_total is None:
+            banks_total = len(banks.get("banks", []))
+    else:
+        banks_total = None
     return {
         "enabled": True,
         "engine": "hindsight",
         "reachable": version is not None or banks is not None,
         "version": (version or {}).get("api_version"),
         "features": (version or {}).get("features"),
-        "banks_total": len(banks.get("banks", [])) if isinstance(banks, dict) else None,
+        "banks_total": banks_total,
     }
 
 
@@ -527,8 +536,9 @@ async def bank_units(request: Request, bank_id: str) -> dict[str, Any]:
 
 #: #1024 dry-run preview: bank-stats keys carrying stored-item counts. Best
 #: effort — Hindsight versions differ, so absent keys are simply omitted.
-#: These are the real hindsight-api 0.8.4 ``/v1/default/banks/{bank}/stats``
-#: keys (verified live) — NOT the ``memory_count``/``document_count``/
+#: These are the real hindsight-api ``/v1/default/banks/{bank}/stats`` keys
+#: (verified live on 0.8.4; unchanged in the 0.9.2 wheels, which only add
+#: ``last_memory_write_at``) — NOT the ``memory_count``/``document_count``/
 #: ``entity_count`` keys that endpoint has never returned (#1653).
 _PREVIEW_COUNT_KEYS = ("total_nodes", "total_documents", "total_observations")
 
@@ -634,8 +644,10 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # ── /banks/{bank_id}/document-transfer — cross-bank migration (NOT a table
 #    passthrough) ─────────────────────────────────────────────────────────────
 #
-# hindsight-api>=0.8.0 (source-verified against the v0.8.4 tag; absent from
-# the 0.7.2 instance this router was built against — gate on
+# hindsight-api>=0.8.0 (source-verified against the v0.8.4 tag and re-checked
+# against the 0.9.2 wheels — both endpoints unchanged; 0.9.2 additionally
+# ships an async ``document-transfer/export`` variant this router does not
+# use. Absent from the 0.7.2 instance this router was built against — gate on
 # ``features.document_export_api``/``document_import_api`` from ``/version``,
 # not the version string). GET returns a ZIP file (source bank's documents +
 # optionally their observations); POST accepts that ZIP as a multipart

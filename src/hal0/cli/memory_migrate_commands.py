@@ -4,10 +4,12 @@
 bank by tag, so multiple per-agent private banks can be consolidated under
 a shared/unified bank without losing which agent a fact came from.
 
-Upstream mechanics (source-verified against the hindsight-api v0.8.4 tag —
-the live instance this CLI was built against is still 0.7.2, which lacks
-all of this; ``--apply`` gates on ``/version``'s ``features.document_export_api``/
-``document_import_api`` flags so it fails loud rather than guessing):
+Upstream mechanics (source-verified against the hindsight-api v0.8.4 tag and
+re-checked against the 0.9.2 wheels — every endpoint/flag below is unchanged
+there, and 0.9.2's import replays the archive deterministically without LLM
+calls, so a unify stays cheap; ``--apply`` gates on ``/version``'s
+``features.document_export_api``/``document_import_api`` flags so it fails
+loud rather than guessing):
 
 * ``GET .../document-transfer?include_observations=`` exports a source
   bank's documents (optionally their observations) as a ZIP.

@@ -19,6 +19,10 @@ from typing import Any
 #: caused_by: 43}) — without this alias real causal edges silently floor to
 #: the semantic weight below, understating causal salience everywhere this
 #: feeds into (degree_by_node, rank_by_degree, ego_bfs, the units endpoint).
+#: The 0.9.2 wheels change no graph routes or schemas (and add no native
+#: subgraph/ego endpoint — this composition layer stays), but link-type
+#: emission is engine-internal: re-verify the counts live after the 0.9.x
+#: engine upgrade lands.
 _TYPE_WEIGHT = {
     "causal": 4.0,
     "caused_by": 4.0,

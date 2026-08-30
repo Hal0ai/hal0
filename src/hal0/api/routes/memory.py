@@ -278,6 +278,36 @@ async def graph_status(request: Request) -> dict[str, Any]:
     return status
 
 
+async def _all_banks(client: Any) -> list[Any] | None:
+    """Every bank entry, walking hindsight's paginated list when it is one.
+
+    hindsight-api >= 0.9 pages ``/v1/default/banks`` (default ``limit=100``,
+    real count in ``total``); 0.8.x ignores the paging params and returns the
+    whole list with no ``total``. One shape handles both: keep fetching pages
+    while ``total`` says there is more, stop immediately when the response
+    carries no ``total`` (unpaginated engine — the first response was
+    everything). Raises nothing; returns ``None`` when the first page fails.
+    """
+    page = 100
+    banks: list[Any] = []
+    offset = 0
+    while True:
+        try:
+            resp = await client.request_json(
+                "GET", f"/v1/default/banks?limit={page}&offset={offset}"
+            )
+        except Exception:
+            return banks or None
+        chunk = resp.get("banks") if isinstance(resp, dict) else resp
+        if not isinstance(chunk, list):
+            return banks or None
+        banks += chunk
+        total = resp.get("total") if isinstance(resp, dict) else None
+        if total is None or len(banks) >= int(total) or not chunk:
+            return banks
+        offset += page
+
+
 async def _augment_build_counters(request: Request, status: dict[str, Any]) -> None:
     """Replace the provider's placeholder ``0``/``None`` build counters with
     real extraction/consolidation activity aggregated from Hindsight's
@@ -299,8 +329,7 @@ async def _augment_build_counters(request: Request, status: dict[str, Any]) -> N
         except Exception:
             return None
 
-    banks_resp = await _get("/v1/default/banks")
-    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
+    banks = await _all_banks(client)
     if not isinstance(banks, list):
         return
 
@@ -384,12 +413,7 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
     _PAGE = 100
     _CAP = 2000  # backstop; far above any real failed-op count
 
-    banks_resp = None
-    try:
-        banks_resp = await client.request_json("GET", "/v1/default/banks")
-    except Exception as exc:
-        raise MemoryUnavailable("could not enumerate memory banks") from exc
-    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
+    banks = await _all_banks(client)
     if not isinstance(banks, list):
         raise MemoryUnavailable("could not enumerate memory banks")
 

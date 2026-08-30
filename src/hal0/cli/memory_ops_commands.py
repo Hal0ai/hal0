@@ -31,9 +31,20 @@ def _require_api() -> str:
 
 
 def _all_bank_ids() -> list[str]:
-    result = api_get("/api/memory/banks")
-    banks = (result or {}).get("banks", []) if isinstance(result, dict) else []
-    return [str(b["bank_id"]) for b in banks if "bank_id" in b]
+    # hindsight-api >= 0.9 pages the banks list (default limit=100, real count
+    # in `total`); 0.8.x ignores the params and returns everything with no
+    # `total`, so a missing `total` means the first page was the whole list.
+    page = 100
+    ids: list[str] = []
+    offset = 0
+    while True:
+        result = api_get("/api/memory/banks", params={"limit": str(page), "offset": str(offset)})
+        banks = (result or {}).get("banks", []) if isinstance(result, dict) else []
+        ids += [str(b["bank_id"]) for b in banks if "bank_id" in b]
+        total = result.get("total") if isinstance(result, dict) else None
+        if total is None or len(ids) >= int(total) or not banks:
+            return ids
+        offset += page
 
 
 def _list_bank_ops(bank: str, *, failed_only: bool) -> list[dict[str, Any]]:
