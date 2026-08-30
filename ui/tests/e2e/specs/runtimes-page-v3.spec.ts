@@ -32,17 +32,17 @@ async function openRuntimes(page: import('@playwright/test').Page) {
 test.describe('Settings → Hardware & Runtimes (runner images)', () => {
   test('renders runner rows with status derived from system-info state', async ({ page }) => {
     await mockSystemInfo(page, {
-      rocmfpx: { image: 'ghcr.io/hal0ai/hal0-rocmfp4:v0.9.4', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', state: 'installed' },
-      vulkanfpx: { image: 'ghcr.io/ggml-org/llama.cpp:server-vulkan', runtime_family: 'llama-server', device_class: 'gpu', backend: 'vulkan', state: 'installable' },
+      rocmfpx: { image: 'ghcr.io/hal0ai/hal0-rocmfp4:v0.9.4', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', supported_backends: ['rocm', 'vulkan'], state: 'installed' },
+      cudafpx: { image: 'ghcr.io/ggml-org/llama.cpp:server-cuda', runtime_family: 'llama-server', device_class: 'gpu', backend: 'cuda', supported_backends: ['cuda'], state: 'installable' },
     })
     await openRuntimes(page)
 
     await expect(page.getByTestId('runtime-row-rocmfpx')).toBeVisible()
-    await expect(page.getByTestId('runtime-row-vulkanfpx')).toBeVisible()
+    await expect(page.getByTestId('runtime-row-cudafpx')).toBeVisible()
 
     // Status derives from state, not hardcoded.
     await expect(page.getByTestId('runtime-status-rocmfpx')).toContainText(/installed/i)
-    await expect(page.getByTestId('runtime-status-vulkanfpx')).toContainText(/not pulled/i)
+    await expect(page.getByTestId('runtime-status-cudafpx')).toContainText(/not pulled/i)
 
     // Image ref is shown read-only.
     await expect(page.getByTestId('runtime-image-rocmfpx')).toContainText('hal0-rocmfp4')
@@ -51,7 +51,7 @@ test.describe('Settings → Hardware & Runtimes (runner images)', () => {
     await expect(page.getByTestId('hardware-page').locator('input, textarea')).toHaveCount(0)
 
     // The dead disabled "Pre-pull" placeholder is gone (no endpoint backs it).
-    await expect(page.getByTestId('runtime-prepull-vulkanfpx')).toHaveCount(0)
+    await expect(page.getByTestId('runtime-prepull-cudafpx')).toHaveCount(0)
   })
 
   test('degraded probe (all unavailable) shows a reason', async ({ page }) => {

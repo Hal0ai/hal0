@@ -304,10 +304,10 @@ test.describe('Slot edit controls (/slots)', () => {
   })
 
   test('HW grid — Runner Image is a catalog dropdown; picking one repopulates BINARY', async ({ page }) => {
-    // rocmfpx + vulkanfpx share one dual-binary image; cuda ships its own.
-    // The Runner Image select lists the two distinct refs; choosing the
-    // shared one offers both binaries, choosing cuda's hops BINARY to its
-    // sole key.
+    // rocmfpx alone serves both rocm and vulkan out of one dual-backend
+    // image; cuda ships its own. The Runner Image select lists the two
+    // distinct refs; choosing the shared one offers both (binary · backend)
+    // pairs, choosing cuda's hops BINARY to its sole key.
     await page.route('**/api/system-info', (route) =>
       route.fulfill({
         status: 200,
@@ -322,15 +322,6 @@ test.describe('Slot edit controls (/slots)', () => {
               runtime_family: 'llamacpp',
               device_class: 'gpu',
               backend: 'rocm',
-              supported_backends: ['rocm', 'vulkan'],
-              format_arch: 'gguf',
-              state: 'installed',
-            },
-            vulkanfpx: {
-              image: 'ghcr.io/hal0ai/tb:dual',
-              runtime_family: 'llamacpp',
-              device_class: 'gpu',
-              backend: 'vulkan',
               supported_backends: ['rocm', 'vulkan'],
               format_arch: 'gguf',
               state: 'installed',
@@ -356,12 +347,12 @@ test.describe('Slot edit controls (/slots)', () => {
     // Catalog: default + 2 distinct images + the custom escape hatch.
     await expect(imageSel.locator('option')).toHaveCount(4)
 
-    // Pick the shared dual-binary image → Backend offers every (binary ·
-    // backend) pair the image ships (2 binaries × rocm/vulkan = 4) and the
+    // Pick the shared dual-backend image → Backend offers every (binary ·
+    // backend) pair the image ships (1 binary × rocm/vulkan = 2) and the
     // current rocmfpx · rocm selection survives (it ships in the image).
     await imageSel.selectOption('ghcr.io/hal0ai/tb:dual')
     const binarySel = page.getByTestId('slot-hw-binary')
-    await expect(binarySel.locator('option')).toHaveCount(4)
+    await expect(binarySel.locator('option')).toHaveCount(2)
     await expect(binarySel).toHaveValue('rocmfpx::rocm')
 
     // Hop to the cuda image → rocmfpx doesn't ship in it, so the Backend

@@ -20,7 +20,7 @@ const backends = {
     runtime_family: 'llama-server',
     supports: { specialties: ['promptforge'] },
   },
-  vulkanfpx: {
+  otherbin: {
     image: COMBINED,
     backend: 'vulkan',
     device_class: 'gpu',
@@ -49,7 +49,7 @@ describe('backendOptions — release-catalog default (no image pin)', () => {
   it('expands multi-backend binaries into one option per (binary, backend) pair', () => {
     expect(values).toContain(optionValue('rocmfpx', 'rocm'))
     expect(values).toContain(optionValue('rocmfpx', 'vulkan'))
-    expect(values).toContain(optionValue('vulkanfpx', 'vulkan'))
+    expect(values).toContain(optionValue('otherbin', 'vulkan'))
   })
   it('derives the target device from the backend token', () => {
     const rv = res.options.find((o) => o.binary === 'rocmfpx' && o.backend === 'vulkan')
@@ -79,7 +79,7 @@ describe('backendOptions — catalog image pinned', () => {
       expect.arrayContaining([
         optionValue('rocmfpx', 'rocm'),
         optionValue('rocmfpx', 'vulkan'),
-        optionValue('vulkanfpx', 'vulkan'),
+        optionValue('otherbin', 'vulkan'),
       ]),
     )
     expect(values.some((v) => v.startsWith('cpubin'))).toBe(false)
@@ -158,7 +158,7 @@ describe('selectedBackendValue', () => {
       ...gpuLlm,
     })
     expect(
-      selectedBackendValue({ binary: 'vulkanfpx', device: 'gpu-rocm', options: pinned.options }),
+      selectedBackendValue({ binary: 'otherbin', device: 'gpu-rocm', options: pinned.options }),
     ).toBe(null)
   })
   it('returns empty string when no binary is pinned (auto)', () => {
