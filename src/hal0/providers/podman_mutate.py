@@ -314,7 +314,8 @@ def remove_image(
         ``sudo -n`` denied (``"grant-denied"``), the wrapper's rc 64/65/66
         (``"invalid-argument"``/``"podman-absent"``/``"podman-failed"``), or
         the call raising / an rc or stdout the contract does not define
-        (``"seam-error"``).
+        (``"seam-error"``; an undefined rc keeps that rc in the reason,
+        e.g. ``"seam-error (image-rm exited rc=99)"``).
 
     Root fallback: when ``is_hal0_user()`` is False but this process is
     already root (``os.geteuid() == 0`` — an admin at a root prompt, or
@@ -329,7 +330,9 @@ def remove_image(
       * rc 0 -> ``("removed", None)``
       * rc 1 -> ``("missing", None)``
       * rc 2 -> ``("in-use", None)``
-      * any other rc, or a raise -> ``("unknown", "podman-failed")``
+      * any other rc -> ``("unknown", "podman-failed (podman rmi exited
+        rc=N)")`` — the collapsed bucket keeps the actual rc in the reason
+      * a raise -> ``("unknown", "podman-failed")``
       * ``podman`` absent from ``PATH`` -> ``("unknown", "podman-absent")``
 
     A non-root, non-service-user caller still gets exactly
@@ -360,7 +363,9 @@ def remove_image(
             return ("missing", None)
         if proc.returncode == 2:
             return ("in-use", None)
-        return ("unknown", "podman-failed")
+        # Collapsed bucket for every rc outside the documented {0, 1, 2} —
+        # keep the actual rc in the reason so it is not lost to the caller.
+        return ("unknown", f"podman-failed (podman rmi exited rc={proc.returncode})")
     try:
         proc = run(
             ["sudo", "-n", RW_SEAM_BIN, "image-rm", image],
@@ -381,7 +386,13 @@ def remove_image(
         return ("unknown", "seam-error")
     if proc.returncode == 67:
         return ("in-use", None)
-    return ("unknown", _RC_REASON.get(proc.returncode, "seam-error"))
+    reason = _RC_REASON.get(proc.returncode)
+    if reason is None:
+        # An rc the wrapper's EXIT-CODE CONTRACT does not define — collapsed
+        # to "seam-error", but keep the actual rc in the reason so it is not
+        # lost to the caller.
+        return ("unknown", f"seam-error (image-rm exited rc={proc.returncode})")
+    return ("unknown", reason)
 
 
 __all__ = [

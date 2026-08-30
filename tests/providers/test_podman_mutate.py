@@ -128,7 +128,10 @@ def test_remove_image_seam_argv() -> None:
         (64, "", ("unknown", "invalid-argument")),
         (65, "", ("unknown", "podman-absent")),
         (66, "", ("unknown", "podman-failed")),
-        (99, "", ("unknown", "seam-error")),  # rc the contract does not define
+        # rc the contract does not define: collapsed to "seam-error", but the
+        # actual rc must survive into the reason string — it is the only
+        # forensic detail the caller ever sees.
+        (99, "", ("unknown", "seam-error (image-rm exited rc=99)")),
         (0, "bogus\n", ("unknown", "seam-error")),  # rc0 with undefined stdout
     ],
 )
@@ -166,7 +169,10 @@ def test_remove_image_root_fallback_removed_no_sudo_in_argv(monkeypatch) -> None
         (0, ("removed", None)),
         (1, ("missing", None)),
         (2, ("in-use", None)),
-        (3, ("unknown", "podman-failed")),
+        # rc outside the documented {0,1,2}: collapsed to "podman-failed",
+        # but the actual rc must survive into the reason string.
+        (3, ("unknown", "podman-failed (podman rmi exited rc=3)")),
+        (125, ("unknown", "podman-failed (podman rmi exited rc=125)")),
     ],
 )
 def test_remove_image_root_fallback_outcome_mapping(monkeypatch, returncode, expected) -> None:
