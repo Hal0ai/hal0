@@ -967,3 +967,28 @@ class TestCanonicalFamilyFold:
         body = isolated_client.get("/api/runner-images").json()
         rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
         assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"
+
+    def test_canonical_key_wins_regardless_of_map_iteration_order(
+        self, isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fix round 1: the canonical key must win even when the alias key
+        iterates FIRST (realistic hand-edited toml order) — a single
+        ``setdefault`` pass over ``overrides.items()`` would let whichever
+        key happened to iterate first win instead of the canonical one."""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "hal0.config.loader.load_hal0_config",
+            lambda: SimpleNamespace(
+                slots=SimpleNamespace(
+                    default_images={
+                        "vulkanfpx": "ghcr.io/x/a:alias",
+                        "rocmfpx": "ghcr.io/x/a:canonical",
+                    }
+                )
+            ),
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"

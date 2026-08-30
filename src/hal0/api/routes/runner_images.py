@@ -107,8 +107,12 @@ def enrich_row(
 
     ``is_default`` matches on the default ref's REPO against ``image.image``
     (contract: "any tag"), first matching family in ``defaults`` order wins
-    (RUNNER_IMAGES insertion order — deterministic for the rocmfpx/vulkanfpx
-    shared-image pair). ``in_use_by`` matches the exact ``image:tag`` ref.
+    (RUNNER_IMAGES insertion order — deterministic). Note ``defaults`` only
+    ever carries ONE entry per shared image lineage: ``vulkanfpx`` is folded
+    into its canonical ``rocmfpx`` key upstream (runner-image-catalogue v3,
+    task 11 — see :func:`_effective_defaults`), so it never appears here to
+    race rocmfpx for the match. ``in_use_by`` matches the exact ``image:tag``
+    ref.
 
     ``local`` is one request's ``podman_introspect.images_digests()`` read
     (``None`` when neither store answered) — store-truth (v3): ``store_state``
@@ -195,12 +199,22 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
     except Exception:
         log.warning("runner_images.default_images_load_failed", exc_info=True)
 
+    # Two passes so the canonical key always wins regardless of dict/toml
+    # iteration order (fix round 1: a single ``setdefault`` pass let
+    # whichever key happened to iterate first win, not the canonical one —
+    # e.g. ``{"vulkanfpx": ..., "rocmfpx": ...}`` would keep the alias
+    # value). Pass 1 seeds every canonical key present verbatim; pass 2
+    # folds alias keys in with ``setdefault``, so an already-seeded
+    # canonical value can never be overwritten by its alias.
     folded: dict[str, str] = {}
+    for k, v in overrides.items():
+        if canonical_family(k) == k:
+            folded[k] = v
     for k, v in overrides.items():
         canon = canonical_family(k)
         if canon != k:
             log.warning("runner_images.default_images_alias_key key=%s canonical=%s", k, canon)
-        folded.setdefault(canon, v)
+            folded.setdefault(canon, v)
     overrides = folded
 
     out: dict[str, tuple[str, str]] = {}
