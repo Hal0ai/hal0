@@ -30,26 +30,30 @@
 tag = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
 
 [base]
-#: TODO(operator): sourcing and verifying a new base image was OUT OF SCOPE
-#: for the task that wrote this recipe (packaging/runner/promptforge/, see
-#: task-12 of the specialty-distributions plan) — it only had the source
-#: ref, the runtime-patch reference, the one cmake flag flip, and the
-#: composable_kernel/ROCm facts below to work with, no network access to
-#: verify or resolve a base image against. `image`/`digest` are left BLANK
-#: rather than copying rocmfpx's Kyuz0 ROCm-7.2.4 base pin: that base does
-#: NOT satisfy the ROCm 7.15 requirement recorded below, and rocmfpx's own
-#: note on this table applies doubly here — "the ROCm version here must
-#: match the toolchain the binaries are linked against, or the runner
-#: resolves libraries from two different ROCm trees." Stating a wrong-but-
-#: plausible digest would be worse than leaving this openly unresolved.
-#: Do not build from this manifest until image/digest are filled in.
-image = ""
-digest = ""
+#: RESOLVED 2026-08-30 (was the recipe's one open TODO). TheRock does NOT
+#: publish a pullable ROCm runtime container — ghcr.io/rocm only exposes
+#: `therock_build_manylinux_x86_64`, a toolchain image, and the dist
+#: artifacts are release tarballs. So the "base" here is two pins, not one:
+#: a plain distro image (below) and the TheRock dist tarball ([base.therock])
+#: that build.sh unpacks into /opt/rocm in BOTH stages. rocmfpx's Kyuz0
+#: ROCm-7.2.4 base was rejected, per rocmfpx's own warning: it bundles a
+#: second ROCm tree that does NOT match the 7.15 toolchain these binaries
+#: link against. fedora-minimal:43 is the distro the Kyuz0 family itself
+#: builds on (rocmfpx [base] comment: fedora-minimal:43 lineage), so this
+#: keeps distro-family parity with the rest of the runner fleet while
+#: carrying zero ROCm of its own.
+#:
+#: Digest is the multi-arch OCI INDEX digest, resolved 2026-08-30 via
+#: `docker buildx imagetools inspect` on the CT130 build host; build.sh
+#: pulls `FROM ${image}@${digest}` in both stages.
+image = "registry.fedoraproject.org/fedora-minimal:43"
+digest = "sha256:64d7765c1c6af97ff168d112eee06731676ad32bd5a8fc15d97cfd938ad4e281"
 #: PromptForge v2.3's card requires ROCm 7.15, built via TheRock
-#: (https://github.com/ROCm/TheRock, AMD's newer ROCm build system) — see
-#: the TODO above: the base image itself has not been re-pinned to match
-#: this yet.
-rocm_version = "7.15"
+#: (https://github.com/ROCm/TheRock, AMD's newer ROCm build system). The
+#: card pins no exact nightly; 7.15.0a20260728 below is the LAST build of
+#: the 7.15 line (the versioning then jumped to 10.0.0a — TheRock's
+#: renumber), from the legacy multi-arch nightly channel.
+rocm_version = "7.15.0a20260728"
 #: composable_kernel is the GEMM/conv kernel library rocBLAS/hipBLASLt link
 #: against; CIRU ActiveFPX's FPX kernels are sensitive to which
 #: composable_kernel commit the toolchain was built against, so the card
@@ -58,10 +62,24 @@ rocm_version = "7.15"
 composable_kernel_ref = "fdf4bb7fcc984811cef48ce817d89aac064b984a"
 
 #: Same DEFERRED position rocmfpx takes on unpinned dnf packages (see that
-#: manifest's comment for the full rationale) — doubly provisional here
-#: since the base itself is not yet resolved (see the TODO above), so this
-#: is inherited scaffolding, not a considered decision for this recipe.
+#: manifest's comment for the full rationale) — provisional scaffolding,
+#: not a considered decision for this recipe; the builder's dnf set is now
+#: plain compiler/tooling packages only (zero ROCm, zero vulkan).
 dnf_packages_pinned = false
+
+#: The TheRock ROCm dist tarball build.sh unpacks into /opt/rocm in both
+#: build stages — the actual 7.15 toolchain + runtime. Channel context:
+#: TheRock's per-family S3 nightly bucket froze mid-June 2026; 7.15
+#: nightlies live only in the LEGACY multi-arch channel below (TheRock
+#: docs/packaging/legacy_multi_arch_releases.md — "nightly releases through
+#: ROCm 7.14" plus this short 7.15 tail before the 10.0 renumber). The URL
+#: is expected to stay stable; the sha256 is what build.sh actually
+#: verifies before unpacking, computed 2026-08-30 from the fetched bytes on
+#: CT130 (the bucket publishes CRC64NVME only, no sha256 sidecar to cross-
+#: check against).
+[base.therock]
+url = "https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-gfx1151-7.15.0a20260728.tar.gz"
+sha256 = "e6866abda85097caf22a2dce30c40adbcda4e09226014c852a916101feaf68e4"
 
 [source]
 #: ciru-ai's tree, NOT charlie's — the opposite choice from rocmfpx (see
@@ -147,12 +165,11 @@ Tunes v2.3's output-K8 runtime companion path for this specific checkpoint
 2026-08-29-specialty-distributions). Ships with the model card rather than
 with ciru-ai/ROCmFPX itself, so it is fetched and applied from the HF model
 repo above at build time, not from a local patches/ file the way rocmfpx's
-four patches are. The card's digest table was not reachable while writing
-this recipe (no network access in this task), so the sha256 pin above is a
-placeholder — see the TODO. The stub committed at
-patches/qwen38-v3-output-k8-runtime.patch documents this and fails
-`git apply --check` loudly if used as-is, deliberately: a silently wrong or
-missing runtime patch is exactly the failure class #1888 argues against.
+four patches are. The vendored copy at
+patches/qwen38-v3-output-k8-runtime.patch is the real 627-line patch
+(fetched from the HF repo and hash-verified 2026-08-29, replacing the
+earlier loud placeholder stub); the sha256 above matches both the vendored
+bytes and the card's digest table.
 """
 
 [verification]

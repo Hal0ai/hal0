@@ -11,11 +11,10 @@
 # forced onto DEFAULT_ROCMFPX_IMAGE, applied here before the first build.
 #
 # Modelled on packaging/runner/rocmfpx/build.sh: everything variable lives
-# in manifest.toml; this script only executes it. See that manifest's
-# header, and this recipe's own manifest.toml, for what is and is not yet
-# resolved (base image/digest and the runtime patch's sha256 are both open
-# TODOs — this script will not produce a real image until those are filled
-# in). A clean checkout of this repo plus a build host with docker/podman
+# in manifest.toml; this script only executes it. All pins are resolved as
+# of 2026-08-30 (base distro digest, TheRock 7.15 dist tarball url+sha256,
+# runtime patch sha256 — see manifest [base] and [[patches]]).
+# A clean checkout of this repo plus a build host with docker/podman
 # and network is meant to be the entire input, matching rocmfpx's
 # reproduction contract — `ade07ba` was a hand-build with no tracked
 # recipe, and a signed default pin must never be in that position again.
@@ -76,9 +75,25 @@ PY
 TAG="${TAG_OVERRIDE:-$(read_manifest image.tag)}"
 BASE="$(read_manifest base.image)"
 BASE_DIGEST="$(read_manifest base.digest)"
+# Preflight the pins that used to ship blank (the recipe's original open
+# TODO): dying here with the manifest's own field names beats dying twenty
+# minutes later inside a docker build with a misleading FROM error.
+[[ -n "$BASE" && -n "$BASE_DIGEST" ]] || {
+    echo "manifest [base] image/digest are blank — resolve the base pins before building (see [base] comments)" >&2
+    exit 67
+}
 # What both FROM lines actually consume. The tag is carried alongside for
 # readability only — pulling by digest ignores it, which is the point.
 BASE_REF="${BASE}@${BASE_DIGEST}"
+# The ROCm toolchain is NOT in the base image (no pullable TheRock container
+# exists — see manifest [base]): it is this dist tarball, unpacked into
+# /opt/rocm in both stages.
+THEROCK_URL="$(read_manifest base.therock.url)"
+THEROCK_SHA256="$(read_manifest base.therock.sha256)"
+[[ -n "$THEROCK_URL" && -n "$THEROCK_SHA256" ]] || {
+    echo "manifest [base.therock] url/sha256 are blank — resolve the TheRock tarball pin before building" >&2
+    exit 67
+}
 REPO="$(read_manifest source.repo)"
 REF="$(read_manifest source.ref)"
 mapfile -t CMAKE_FLAGS < <(read_manifest build.cmake_flags)
@@ -128,10 +143,11 @@ done
 if (( CHECK_ONLY )); then
     echo "==> --check: patch series applies cleanly against ${REF}; nothing built"
     # SCOPE, stated plainly because this is the mode people quote as evidence:
-    # --check proves the source ref is reachable and the three patches apply to
-    # it. Everything below this line is UNEXERCISED — dnf resolution, the cmake
-    # configure against the toolchain, the four build targets, and both
-    # container builds. A green --check is not a green build.
+    # --check proves the source ref is reachable and the single runtime patch
+    # applies to it. Everything below this line is UNEXERCISED — the TheRock
+    # tarball fetch, dnf resolution, the cmake configure against the
+    # toolchain, the four build targets, and both container builds. A green
+    # --check is not a green build.
     exit 0
 fi
 
@@ -146,19 +162,60 @@ fi
 RUNTIME="${HAL0_CONTAINER_RUNTIME:-$(command -v docker || command -v podman || true)}"
 [[ -n "$RUNTIME" ]] || { echo "no docker/podman on PATH" >&2; exit 65; }
 
+# Fetch (or reuse) the TheRock dist tarball and verify it against the
+# manifest pin BEFORE any container build consumes it. Cached in $WORK so a
+# rebuild does not re-pull ~1.8GB; the hash check runs on every build either
+# way, so a stale or truncated cache dies here with the manifest value in
+# the error, never inside a docker ADD.
+THEROCK_TARBALL="${WORK}/$(basename "$THEROCK_URL")"
+if [[ ! -f "$THEROCK_TARBALL" ]]; then
+    echo "==> fetching TheRock dist tarball"
+    curl -fSL -o "${THEROCK_TARBALL}.part" "$THEROCK_URL"
+    mv "${THEROCK_TARBALL}.part" "$THEROCK_TARBALL"
+fi
+ACTUAL_SHA="$(sha256sum "$THEROCK_TARBALL" | cut -d' ' -f1)"
+[[ "$ACTUAL_SHA" == "$THEROCK_SHA256" ]] || {
+    echo "TheRock tarball sha256 mismatch: got ${ACTUAL_SHA}, manifest pins ${THEROCK_SHA256}" >&2
+    exit 68
+}
+echo "==> TheRock tarball verified (${THEROCK_SHA256})"
+
+# HIP-only image: no vulkan toolchain in the builder (GGML_VULKAN=OFF — the
+# defining flag of this recipe), and no rocm dnf packages either: the
+# fedora base carries zero ROCm, the toolchain is the ADDed tarball. docker
+# ADD auto-extracts a local tar.gz; the dist tarball is root-relative
+# (./bin, ./lib, ./share), so it lands as a complete /opt/rocm tree.
 BUILDER="localhost/hal0-promptforge-builder:$(read_manifest base.rocm_version)"
+ln -f "$THEROCK_TARBALL" "${WORK}/therock-dist.tar.gz" 2>/dev/null \
+    || cp "$THEROCK_TARBALL" "${WORK}/therock-dist.tar.gz"
 cat > "${WORK}/Containerfile.builder" <<EOF
 FROM ${BASE_REF}
 RUN dnf install -y \
-      rocm-llvm hipcc hip-devel rocm-device-libs \
-      hipblas-devel rocblas-devel \
       gcc gcc-c++ cmake ninja-build make git \
-      vulkan-headers vulkan-loader-devel glslc glslang spirv-headers-devel \
       libcurl-devel \
     && dnf clean all
-ENV PATH=/opt/rocm/bin:\${PATH}
+ADD therock-dist.tar.gz /opt/rocm/
+ENV ROCM_PATH=/opt/rocm \\
+    PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:\${PATH} \\
+    LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib/llvm/lib
 EOF
 "$RUNTIME" build -f "${WORK}/Containerfile.builder" -t "$BUILDER" "$WORK"
+
+# composable_kernel, pinned in [base] — PROMPTFORGE_CK_ROOT in the manifest's
+# cmake flags points at ../composable_kernel relative to /src, so it is
+# checked out as a sibling and mounted alongside. Same clone-then-checkout
+# rationale as the source tree above.
+CK_REF="$(read_manifest base.composable_kernel_ref)"
+CK="${WORK}/composable_kernel"
+if [[ ! -d "$CK/.git" ]]; then
+    git clone -q --no-checkout https://github.com/ROCm/composable_kernel.git "$CK"
+fi
+git -C "$CK" checkout -q "$CK_REF"
+CK_HEAD="$(git -C "$CK" rev-parse HEAD)"
+[[ "$CK_HEAD" == "$CK_REF" ]] || {
+    echo "composable_kernel checkout landed on ${CK_HEAD}, manifest pins ${CK_REF}" >&2; exit 66
+}
+echo "==> composable_kernel at ${CK_HEAD}"
 
 # `:z` — SELinux shared relabel on the bind mount. Without it the build fails
 # on an enforcing host, which is the default on the Fedora/RHEL family this
@@ -167,12 +224,22 @@ EOF
 # `:Z` because $SRC is a scratch dir under $WORK that may be reused across
 # builds; and unlike the slot mounts there is no NFS caveat here, since $WORK is
 # always local scratch on the build host.
-"$RUNTIME" run --rm --entrypoint bash -v "${SRC}:/src:z" -w /src \
+#
+# Compiler selection follows the card's build section verbatim (TheRock's
+# clang out of /opt/rocm/llvm/bin, CMAKE_PREFIX_PATH at the ROCm root)
+# rather than rocmfpx's hipconfig indirection — hipconfig ships in the
+# tarball but the card's explicit form is what v2.3 was validated with.
+"$RUNTIME" run --rm --entrypoint bash \
+    -v "${SRC}:/src:z" -v "${CK}:/composable_kernel:z" -w /src \
     -e JOBS="${JOBS:-6}" "$BUILDER" -c "
 set -e
-export HIPCXX=\"\$(hipconfig -l)/clang\"
-export HIP_PATH=\"\$(hipconfig -R)\"
-cmake -S . -B build $(printf '%s ' "${CMAKE_FLAGS[@]}")
+export ROCM_PATH=/opt/rocm
+cmake -S . -B build \
+  -DCMAKE_C_COMPILER=\"\$ROCM_PATH/llvm/bin/clang\" \
+  -DCMAKE_CXX_COMPILER=\"\$ROCM_PATH/llvm/bin/clang++\" \
+  -DCMAKE_HIP_COMPILER=\"\$ROCM_PATH/llvm/bin/clang++\" \
+  -DCMAKE_PREFIX_PATH=\"\$ROCM_PATH\" \
+  $(printf '%s ' "${CMAKE_FLAGS[@]}")
 cmake --build build -j \"\$JOBS\" --target llama-server llama-cli llama-bench llama-quantize
 "
 
@@ -200,26 +267,35 @@ PATCH_SERIES_SHA="$(
     for p in "${PATCHES[@]}"; do cat "${HERE}/patches/${p}"; done | sha256sum | cut -d' ' -f1
 )"
 
+ln -f "$THEROCK_TARBALL" "${STAGE}/therock-dist.tar.gz" 2>/dev/null \
+    || cp "$THEROCK_TARBALL" "${STAGE}/therock-dist.tar.gz"
 cat > "${STAGE}/Containerfile" <<EOF
 FROM ${BASE_REF}
-RUN dnf install -y mesa-vulkan-drivers vulkan-loader vulkan-tools && dnf clean all
+# No vulkan packages, deliberately: this is the HIP-only image
+# (GGML_VULKAN=OFF is this recipe's defining flag) — pulling mesa/vulkan in
+# here was inherited rocmfpx scaffolding, now dropped.
+#
+# The FULL TheRock dist tree, not a pruned lib/ subset: the runtime needs
+# /opt/rocm/lib, /opt/rocm/lib/llvm/lib (card's LD_LIBRARY_PATH), and the
+# comgr/device-lib support files whose exact layout varies by TheRock
+# nightly — pruning by guesswork risks a runtime-only load failure the
+# builder never sees. Cost is image size; prune later with ldd evidence if
+# it matters.
+ADD therock-dist.tar.gz /opt/rocm/
 COPY bin/ /opt/promptforge/bin/
 COPY hal0-runner-entrypoint.sh /opt/promptforge/hal0-runner-entrypoint.sh
-# NO llama-* on PATH, deliberately — same reasoning as rocmfpx's Containerfile
-# (this recipe is modelled on packaging/runner/rocmfpx/build.sh; see that
-# file's comment here for the full symlink-loop bug history). The stock
-# toolbox ships its own /usr/local/bin/llama-* which ABI-mismatches these
-# binaries and segfaults, so removing them is correct.
-# UNLIKE rocmfpx: nothing in hal0 today invokes THIS image's binaries by an
-# /opt/promptforge/... absolute path — src/hal0/bench/harness.py's bench_bin
-# is hardcoded to /opt/rocmfpx/bin/llama-bench only (rocmfpx-specific; not
-# extended to this recipe, out of scope for task-12). LD_LIBRARY_PATH below
-# still needs to cover the skipped ldconfig regardless of that gap, so the
-# binaries remain reachable under the absolute path below even without a
-# hal0 caller wired to it yet.
-RUN chmod +x /opt/promptforge/hal0-runner-entrypoint.sh && \\
-    rm -f /usr/local/bin/llama-* /usr/local/lib64/libllama* /usr/local/lib64/libggml*
-ENV LD_LIBRARY_PATH=/opt/promptforge/bin:/opt/rocm/lib \\
+# UNLIKE rocmfpx there is no stock-toolbox /usr/local/bin/llama-* to scrub
+# here — the base is plain fedora-minimal and ships no llama binaries at
+# all. NO llama-* is put on PATH either, matching rocmfpx's position (see
+# that Containerfile's symlink-loop history): nothing in hal0 today invokes
+# THIS image's binaries by an /opt/promptforge/... absolute path —
+# src/hal0/bench/harness.py's bench_bin is hardcoded to
+# /opt/rocmfpx/bin/llama-bench only (rocmfpx-specific; parameterizing that
+# is the ledgered M5 follow-up). LD_LIBRARY_PATH below still covers the
+# skipped ldconfig, so the binaries stay reachable under the absolute path.
+RUN chmod +x /opt/promptforge/hal0-runner-entrypoint.sh
+ENV ROCM_PATH=/opt/rocm \\
+    LD_LIBRARY_PATH=/opt/promptforge/bin:/opt/rocm/lib:/opt/rocm/lib/llvm/lib \\
     HSA_OVERRIDE_GFX_VERSION=11.5.1 \\
     GGML_HIP_ENABLE_UNIFIED_MEMORY=1
 # Provenance in the image itself, so a box can answer "where did this come
@@ -232,6 +308,8 @@ LABEL org.opencontainers.image.source="${REPO}" \\
       dev.hal0.runner.recipe="packaging/runner/promptforge" \\
       dev.hal0.recipe.revision="${RECIPE_REV}" \\
       dev.hal0.runner.base="${BASE_REF}" \\
+      dev.hal0.runner.therock.url="${THEROCK_URL}" \\
+      dev.hal0.runner.therock.sha256="${THEROCK_SHA256}" \\
       dev.hal0.runner.patches="$(IFS=,; echo "${PATCHES[*]}")" \\
       dev.hal0.runner.patches.sha256="${PATCH_SERIES_SHA}" \\
       dev.hal0.runner.specialties="promptforge" \\
