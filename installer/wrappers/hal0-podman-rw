@@ -1,0 +1,201 @@
+#!/bin/bash
+# hal0-podman-rw — privileged seam for WRITING the rootful podman store
+# (runner-images v3, D1(a)/D2).
+#
+# Background: slots run ROOTFUL podman (Quadlet units under
+# /etc/containers/systemd/, root's image store — written via the
+# hal0-systemctl write-quadlet seam). hal0-api runs as the unprivileged
+# `hal0` system user, so any podman call it issues DIRECTLY hits its own
+# rootless store — a different store than the one slots actually launch
+# from. hal0-podman-ro (#1889) exists so hal0-api can at least READ the
+# rootful store; it deliberately never wires up rm/run/build/exec/pull,
+# because a read seam widened to writes would let a single grant both see
+# and mutate the store slots depend on with no separate audit trail.
+#
+# This wrapper is the FIRST write surface. runner-images v3 needs hal0-api to
+# be able to actually PULL a recipe's image into root's store (D1(a): the
+# manifest gate must be able to materialize what it verified) and to REMOVE
+# a stale/failed one (D2: eviction), both against the SAME rootful store the
+# read seam already reports on and slots already launch from — a rootless
+# pull/rm from hal0-api would populate or evict the wrong store entirely,
+# the mirror-image of the #1889 bug hal0-podman-ro exists to avoid.
+# hal0-podman-ro STAYS READ-ONLY: this grant is separate, narrower (two
+# verbs only), and independently revocable.
+#
+# ARGUMENT DOCTRINE — identical boundary to hal0-podman-ro. A caller-supplied
+# value may reach podman's argv ONLY as a single positional operand that has
+# been validated on the ROOT side of the boundary against a closed regex,
+# for a verb whose podman subcommand and flags are literals written here:
+#
+#   * every podman invocation is a hardcoded exec/argv array — no shell, no
+#     eval, no word splitting, no wildcards, no operator-supplied flags;
+#   * both verbs take an image REFERENCE, matched against the OCI ref
+#     grammar (optional host[:port]/, path segments with single ._-
+#     separators, optional :tag, optional @sha256:<64 hex>) and length-capped
+#     — byte-identical to hal0-podman-ro's IMAGE_REF_RE, so a ref this
+#     wrapper accepts is exactly one the read seam would also report on;
+#   * `image-rm` never passes `-f`: a caller can only remove an image that is
+#     NOT in use, never force-evict one out from under a running slot.
+#
+# EXIT-CODE CONTRACT (extends hal0-podman-ro's with one NEW code):
+#
+#   * rc 0   — the verb completed and produced a DEFINITIVE, on-purpose
+#              answer. `image-rm` printed `removed` (rc 0 from `podman rmi`)
+#              or `missing` (podman rc 1, no such image — a real negative
+#              answer, not an error). `image-pull` execs podman directly, so
+#              rc 0 here means podman's own pull actually succeeded (see the
+#              exec note below).
+#   * rc 64  — this wrapper rejected the argument (validation) or the verb.
+#              Always occurs BEFORE podman is even located.
+#   * rc 65  — podman is not installed / not executable here. Also always
+#              before podman is invoked.
+#   * rc 66  — podman ran but FAILED operationally for a reason other than
+#              "no such image" or "image in use" (store corruption, lock
+#              contention, permission error, …). NOT a negative answer.
+#   * rc 67  — NEW. `image-rm` only: podman rmi refused because the image is
+#              IN USE by a container (its rc 2). Distinct from rc 66 so a
+#              caller can tell "this image is still needed" apart from "the
+#              store itself is broken" — conflating the two would either
+#              retry a doomed rmi forever (66) or silently give up on an
+#              image that is actually fine to remove once its container
+#              stops (treating it as a hard failure).
+#
+# `image-pull` is `exec`'d, not captured through run_podman: pull progress is
+# long-running and streams multiple lines to stdout/stderr as layers land,
+# and the caller (hal0-api) wants that streamed raw rather than buffered
+# behind a single subprocess.run() — and podman's own exit code should pass
+# straight through as this wrapper's exit code with no translation, since a
+# pull failure has no "negative answer" reading the way `image exists`/`rmi`
+# do (see hal0-podman-ro's contract for that distinction). Validation and the
+# podman-present check still happen BEFORE the exec, so rc 64/65 are always
+# reachable even though nothing after the exec is.
+#
+# See src/hal0/providers/podman_introspect.py, which mirrors IMAGE_REF_RE so
+# the unprivileged side fails fast instead of burning a sudo round-trip.
+
+set -euo pipefail
+
+# LOCALE PIN — load-bearing for the validator below, not a tidiness nit.
+# bash's `[[ =~ ]]` bracket expressions use the CURRENT locale's collation, so
+# under a UTF-8 locale `[A-Za-z0-9]` matches accented letters: `alpiné` would
+# be accepted here while the Python mirror rejects it — the wrapper LOOSER
+# than its mirror, the dangerous direction. This is reachable in production
+# because sudo's default `env_keep` passes LANG/LC_* straight through from
+# the calling process. Pinning to C makes every character class below mean
+# exactly the ASCII bytes it spells, in any caller's environment. Set before
+# any validator can run. (Same finding as hal0-podman-ro's; security review
+# of #1889.)
+export LC_ALL=C
+
+PODMAN=/usr/bin/podman
+
+die() { echo "hal0-podman-rw: $1" >&2; exit 64; }
+
+# ── argument validator (root side of the privilege boundary) ───────────────
+#
+# Byte-identical to hal0-podman-ro's IMAGE_REF_RE: a ref this wrapper accepts
+# is exactly one the read seam would also report on, and a ref the read seam
+# rejects can never reach a write either. Duplicated rather than sourced —
+# each wrapper must stand alone as its own privileged binary with no runtime
+# dependency on a sibling file's presence or content.
+#
+# An OCI image reference: [host[:port]/]path[/path...][:tag][@sha256:<hex>].
+# The separator set is the distribution-reference grammar's, verbatim:
+#   separator := "." | "_" | "__" | "-"+
+_REF_SEP='(__|[._]|-+)'
+# A registry host is a dotted/dashed name OR a bracketed IPv6 literal
+# ([2001:db8::1]:5000/...), which the reference grammar permits. The bracket
+# body is hex-and-colons only, so it still cannot carry a path, whitespace, a
+# metacharacter or a second word.
+_REF_IPV6='\[[0-9A-Fa-f:]{2,45}\]'
+_REF_HOST="([A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*|${_REF_IPV6})(:[0-9]{1,5})?"
+_REF_PATH="[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*)*"
+_REF_TAG='(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?'
+_REF_DIGEST='(@sha256:[0-9a-f]{64})?'
+IMAGE_REF_RE="^(${_REF_HOST}/)?${_REF_PATH}${_REF_TAG}${_REF_DIGEST}\$"
+
+validate_image_ref() {   # arg: image reference
+  local ref="${1-}"
+  [[ -n "$ref" ]] || die "missing image ref"
+  # Length cap first: a pathological input should never be handed to the
+  # regex engine, and no real ref approaches this.
+  (( ${#ref} <= 512 )) || die "image ref too long (${#ref} > 512)"
+  [[ "$ref" =~ $IMAGE_REF_RE ]] || die "bad image ref: $ref"
+}
+
+require_podman() {
+  [[ -x "$PODMAN" ]] || { echo "hal0-podman-rw: podman not found at $PODMAN" >&2; exit 65; }
+}
+
+# An operational podman failure — distinct from a negative answer or the
+# in-use case. See the exit-code contract in the header.
+podman_failed() { echo "hal0-podman-rw: $1 (rc=$2)" >&2; exit 66; }
+
+# Run podman, tolerating a non-zero rc (the caller inspects PODMAN_RC itself
+# to distinguish a negative answer from an operational failure). Sets
+# PODMAN_RC/PODMAN_OUT. stderr is dropped: podman emits benign device
+# warnings under LXC.
+run_podman() {
+  PODMAN_OUT=""
+  PODMAN_RC=0
+  PODMAN_OUT="$("$PODMAN" "$@" 2>/dev/null)" || PODMAN_RC=$?
+}
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  image-pull)              # arg: image ref -> streams podman pull, exec'd
+    [[ $# -eq 1 ]] || die "image-pull takes exactly one argument"
+    validate_image_ref "$1"
+    require_podman
+    # exec deliberate: progress lines stream raw to the caller and podman's
+    # own exit code passes through unmodified. Validation and the podman
+    # presence check above are the only things standing between argv and
+    # podman, and both already ran.
+    exec "$PODMAN" pull "$1"
+    ;;
+
+  image-rm)                # arg: image ref -> "removed" | "missing"
+    [[ $# -eq 1 ]] || die "image-rm takes exactly one argument"
+    validate_image_ref "$1"
+    require_podman
+    # NEVER -f: a caller can remove an image that is not in use, never
+    # force-evict one out from under a running slot.
+    run_podman rmi -- "$1"
+    case "$PODMAN_RC" in
+      0) echo removed ;;
+      1) echo missing ;;   # no such image — a real negative answer
+      2) exit 67 ;;        # image in use by a container
+      *) podman_failed "podman rmi failed" "$PODMAN_RC" ;;
+    esac
+    ;;
+
+  check-image-ref)         # arg: image ref — side-effect-free validator probe
+    # Exists so the validation regex can be exercised by the test suite (and
+    # by an operator debugging a rejection) without podman, without root and
+    # without a provisioned box. Never touches podman. Mirrors
+    # hal0-podman-ro's verb of the same name.
+    [[ $# -eq 1 ]] || die "check-image-ref takes exactly one argument"
+    validate_image_ref "$1"
+    printf '%s\n' "$1"
+    ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-podman-rw <command> <ref>
+  image-pull <ref>    podman pull <ref>, exec'd (progress streams raw; podman's
+                       own exit code passes through unmodified)
+  image-rm <ref>       podman rmi -- <ref> (never -f); "removed" | "missing"
+  check-image-ref <ref>   validate an image ref only (no podman call)
+
+exit codes:
+  0    verb completed with a definitive answer (or a successful pull)
+  64   validation/verb rejected (before podman is located)
+  65   podman not found (before podman is invoked)
+  66   podman ran but failed operationally
+  67   image-rm only: image is in use by a container (podman rmi rc 2)
+EOF
+    ;;
+
+  *) die "bad cmd: $cmd" ;;
+esac

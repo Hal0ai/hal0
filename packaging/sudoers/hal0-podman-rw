@@ -1,0 +1,45 @@
+# hal0 — privileged seam grant for WRITING the rootful podman store
+# (runner-images v3, D1(a)/D2). This is the FIRST write surface for podman:
+# hal0-podman-ro (packaging/sudoers/hal0-podman-ro) is read-only by design
+# and stays that way — this is a separate, narrower, independently
+# revocable grant, not a widening of it.
+#
+# Slots run ROOTFUL podman (Quadlet units under /etc/containers/systemd/,
+# root's image store). hal0-api runs as the unprivileged `hal0` system user,
+# so a bare podman pull/rmi issued FROM hal0-api would populate or evict its
+# OWN rootless store — a different store from the one slots actually launch
+# from, the mirror-image of the #1889 bug the read seam exists to avoid.
+# D1(a) needs hal0-api to be able to materialize a manifest-verified image
+# into that SAME rootful store; D2 needs it to be able to evict a stale one.
+# This wrapper delegates exactly those two write ops to
+# /usr/lib/hal0/bin/hal0-podman-rw, which is the entire privileged write
+# surface: `image-pull <ref>` and `image-rm <ref>`, plus one side-effect-free
+# validator probe (`check-image-ref`). Every podman subcommand and flag is a
+# literal in the wrapper; no shell is ever evaluated, and `image-rm` never
+# passes `-f`. Both argument-taking verbs accept exactly ONE positional
+# operand, validated ROOT-side against the same closed image-ref regex
+# hal0-podman-ro uses, before podman is ever invoked. rm/run/build/exec other
+# than the two verbs above are never exposed; nothing here can start a
+# container, attach a volume, or touch anything but the image store.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-podman-rw /usr/lib/hal0/bin/hal0-podman-rw
+#   install -m 0440 -o root -g root hal0-podman-rw /etc/sudoers.d/hal0-podman-rw
+#   visudo -cf /etc/sudoers.d/hal0-podman-rw
+#
+# Keep this grant pinned to the helper binary; a broader grant would let the
+# API run arbitrary root commands. Note the grant deliberately does NOT
+# enumerate argv (a bare command path in sudoers permits any arguments): the
+# wrapper itself is the control surface, exactly as for hal0-podman-ro and
+# hal0-systemctl's write-quadlet verb. Constraining argv in sudoers instead
+# would be a second, silently-drifting copy of the verb list, and sudoers
+# wildcards are a well-known footgun. Every new verb is gated by a ROOT-side
+# validator in the wrapper, same as the read seam.
+# Revoke with: rm /etc/sudoers.d/hal0-podman-rw
+#
+# Revoking this grant alone (leaving hal0-podman-ro installed) returns hal0
+# to read-only introspection of the rootful store with no ability to pull or
+# remove images from it — the intended fallback posture if the write seam
+# ever needs to be pulled without disturbing the read seam.
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-podman-rw

@@ -45,6 +45,9 @@
 # src/hal0/providers/podman_introspect.py, which mirrors every regex below so
 # the unprivileged side fails fast instead of burning a sudo round-trip.
 #
+# Write verbs (`image-pull`, `image-rm`) live in the separate hal0-podman-rw
+# wrapper under its own independently revocable sudoers grant — never here.
+#
 # EXIT-CODE CONTRACT. The read verbs distinguish "podman answered, and the
 # answer is negative" from "the seam itself is unusable", because the caller
 # must fall back to its rootless read only in the second case:
