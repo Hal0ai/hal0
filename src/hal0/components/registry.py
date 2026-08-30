@@ -75,10 +75,8 @@ def _hermes_pinned() -> str:
 
 
 def _hermes_installed() -> str | None:
-    try:
-        from hal0.components.hermes_arm import installed_hermes_pin
-    except ImportError:
-        return None
+    from hal0.components.hermes_arm import installed_hermes_pin
+
     return installed_hermes_pin()
 
 
