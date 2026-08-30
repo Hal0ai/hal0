@@ -56,14 +56,46 @@ export function defaultsStripRows(images) {
   return rows;
 }
 
-// True when the registry knows a newer tag than the row's headline `tag` —
-// `available_tags` is newest-first per the sync contract, so this is just a
-// head comparison. False on probe failure (empty list) or missing fields.
+// Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
+// build (branch heads) or dev iteration (old floating dev tags), so their
+// push time means "whenever CI/a dev last ran," not "a newer release than
+// the headline." `available_tags` is already noise-free (cosign/CI-commit
+// tag shapes are filtered server-side —
+// hal0.registry.runner_image_sync.is_noise_tag), but these real, mutable
+// tags can still sort ahead of the true headline on pure registry order.
+// Live examples that motivated this: comfyui headlined `latest` but the
+// chip read `newer: main` (main = CI branch tag re-pushed every build);
+// rocmfpx showed `newer: server` (an old floating dev tag). `latest` is
+// only "mutable" when it ISN'T itself the row's headline — a row
+// headlined `latest` must still be able to see a genuinely newer tag.
+export const MUTABLE_TAGS = new Set(["main", "master", "server", "edge", "nightly"]);
+
+function isMutablePointerTag(tag, headlineTag) {
+  if (tag === "latest") return headlineTag !== "latest";
+  return MUTABLE_TAGS.has(tag);
+}
+
+// The newest tag fit to compare against (or display as) "newer than
+// headline" — the first entry of `available_tags` that isn't a mutable
+// pointer (see MUTABLE_TAGS). Digest-alias detection (a mutable tag that
+// happens to point at the SAME manifest as the headline) isn't done here:
+// available_tags carries only tag strings, no per-tag digest, so there's
+// no data to compare against — name-based exclusion is what's available.
+export function newestComparableTag(image) {
+  if (!image) return undefined;
+  const tags = Array.isArray(image.available_tags) ? image.available_tags : [];
+  return tags.find(t => !isMutablePointerTag(t, image.tag));
+}
+
+// True when the registry knows a newer tag than the row's headline `tag`,
+// ignoring mutable/floating pointers (see MUTABLE_TAGS). False on probe
+// failure (empty list), missing fields, or when only mutable pointers lead
+// the list (no comparable candidate).
 export function newerTagAvailable(image) {
   if (!image || !image.tag) return false;
-  const tags = image.available_tags;
-  if (!Array.isArray(tags) || tags.length === 0) return false;
-  return tags[0] !== image.tag;
+  const candidate = newestComparableTag(image);
+  if (!candidate) return false;
+  return candidate !== image.tag;
 }
 
 // Tag choices for the card's tag <select>: the contract's newest-first
@@ -263,7 +295,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
         )}
         {newerTagAvailable(image) && (
           <span className="chip" data-testid="ri-newer-tag" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-            newer: {image.available_tags[0]}
+            newer: {newestComparableTag(image)}
           </span>
         )}
         {image.ownership && <span className="chip">{image.ownership}</span>}
@@ -397,7 +429,7 @@ function RunnerCard({ image }) {
             </select>
             {newerTagAvailable(image) && (
               <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-                newer: {image.available_tags[0]}
+                newer: {newestComparableTag(image)}
               </span>
             )}
           </div>
