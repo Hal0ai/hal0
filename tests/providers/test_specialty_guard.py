@@ -92,6 +92,7 @@ def test_unknown_specialty_degrades_not_crashes():
 
 def test_degraded_not_ok_raises_422(monkeypatch):
     import dataclasses
+
     import hal0.registry.specialty as sp
     strict = dataclasses.replace(sp.SPECIALTY_KINDS["promptforge"], degraded_ok=False)
     monkeypatch.setitem(sp.SPECIALTY_KINDS, "promptforge", strict)
