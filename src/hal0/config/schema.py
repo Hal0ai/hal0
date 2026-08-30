@@ -1067,6 +1067,11 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: lazy with no trigger rules — an empty root — so generation ran
 #: unconstrained and every JSON-mode request 500'd at the parse; reproduced
 #: on prod's live LFM slot).
+#: Exported (with :data:`DEFAULT_PROMPTFORGE_IMAGE` and
+#: :data:`VULKAN_CAPABLE_IMAGE_REFS`) via ``exports/runner-image-pins.json``,
+#: which the hal0-runner-images retention automation fetches as its
+#: never-delete allowlist — ``tests/config/test_runner_image_pins_export.py``
+#: keeps the export in lockstep with these constants.
 #: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe rebuilt for the
 #: #2037 fail-fast entrypoint (supervises llama-server, translates a
 #: non-signal death before /health ever answered 200 into exit 64 so the
