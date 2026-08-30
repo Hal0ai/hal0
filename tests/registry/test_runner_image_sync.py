@@ -405,3 +405,68 @@ async def test_failed_images_json_never_prunes(tmp_path: Path) -> None:
 
     assert result.images_json_ok is False
     assert store.get("cpu") is not None
+
+
+# ── noise-tag filtering (cosign signatures + per-commit CI tags) ────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_excludes_cosign_and_ci_commit_tags_from_available_tags(
+    tmp_path: Path,
+) -> None:
+    """CI-built families (vulkan/rocm toolboxes) push a cosign ``.sig``
+    artifact and a per-commit ``sha-<7hex>`` tag alongside every real
+    build. Neither should ever reach the catalogue's ``available_tags`` —
+    that's the tag-picker flood + false "newer" candidate observed live
+    against ghcr.io/hal0ai packages."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    noisy_tags = [
+        "latest",
+        "0824",
+        "sha256-" + "a" * 64 + ".sig",
+        "sha256-" + "b" * 64 + ".att",
+        "sha-abc1234",
+        "sha-" + "c" * 40,
+    ]
+    handler = _route_handler(images_json=_IMAGES_JSON, tags=noisy_tags)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.available_tags == ["0824", "latest"]
+    for noise in noisy_tags[2:]:
+        assert noise not in cpu.available_tags
+
+
+@pytest.mark.asyncio
+async def test_sync_unpinned_headline_never_resolves_to_a_noise_tag(tmp_path: Path) -> None:
+    """The unpinned-headline fallback (newest of ``available_tags``) must
+    never land on a cosign/CI tag even when GHCR lists it as the most
+    recently pushed tag in registry order."""
+    images_json = {
+        "schema": "hal0.runner-images.v1",
+        "images": [
+            {"id": "combined", "image": "ghcr.io/hal0ai/hal0-combined"},
+        ],
+    }
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(
+        images_json=images_json,
+        tags=["sha-abc1234", "main", "sha256-" + "d" * 64 + ".sig"],
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    row = store.get("combined")
+    assert row is not None
+    assert row.tag == "main"
+    assert row.available_tags == ["main"]

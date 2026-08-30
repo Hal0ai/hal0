@@ -16,7 +16,9 @@ import { describe, expect, it } from 'vitest'
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
 
-const { defaultsStripRows, newerTagAvailable } = await import('../runner-images.jsx')
+const { defaultsStripRows, newerTagAvailable, newestComparableTag, MUTABLE_TAGS } = await import(
+  '../runner-images.jsx'
+)
 
 // Minimal contract-shaped row; overrides per case.
 function row(overrides: Record<string, unknown> = {}) {
@@ -85,5 +87,47 @@ describe('newerTagAvailable', () => {
     expect(newerTagAvailable(row({ available_tags: undefined }))).toBe(false)
     expect(newerTagAvailable(row({ tag: null }))).toBe(false)
     expect(newerTagAvailable(undefined)).toBe(false)
+  })
+
+  // Bug 2 — live dashboard observed the "newer" chip firing on mutable
+  // branch/floating tags: comfyui headlined `latest` but showed
+  // `newer: main` (a CI branch tag re-pushed every build); rocmfpx
+  // headlined a pinned tag but showed `newer: server` (an old floating
+  // dev tag). `main`/`server` sort ahead of the real headline only
+  // because they're first in GHCR's registry-order "rest" bucket — never
+  // because they're an actually newer build.
+  it('ignores mutable-pointer tags (main/master/server/edge/nightly) as "newer" candidates', () => {
+    for (const mutable of MUTABLE_TAGS) {
+      expect(
+        newerTagAvailable(row({ tag: '0824', available_tags: [mutable, '0824', '0822'] }))
+      ).toBe(false)
+    }
+  })
+
+  it('ignores `latest` as a "newer" candidate when latest is not the headline', () => {
+    expect(newerTagAvailable(row({ tag: '0824', available_tags: ['latest', '0824'] }))).toBe(
+      false
+    )
+  })
+
+  it('does not exclude `latest` from comparison when latest IS the headline', () => {
+    // comfyui: headline `latest`, registry lists CI branch tag `main`
+    // ahead of it — `main` must be skipped, `latest` must stay eligible
+    // (though here it's also the headline, so still no false positive).
+    expect(newerTagAvailable(row({ tag: 'latest', available_tags: ['main', 'latest'] }))).toBe(
+      false
+    )
+  })
+
+  it('still reports a real newer tag once mutable pointers are skipped', () => {
+    expect(
+      newerTagAvailable(row({ tag: '0822', available_tags: ['main', '0824', '0822'] }))
+    ).toBe(true)
+  })
+
+  it('newestComparableTag skips mutable pointers to find the display candidate', () => {
+    expect(newestComparableTag(row({ tag: '0822', available_tags: ['server', '0824', '0822'] }))).toBe(
+      '0824'
+    )
   })
 })
