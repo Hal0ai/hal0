@@ -19,7 +19,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import BadRequest, NotFound
-from hal0.providers.podman_introspect import LocalImagesDigests, images_digests
+from hal0.providers.podman_introspect import LocalImagesDigests, images_digests, is_valid_image_ref
 from hal0.registry import runner_pull_jobs as _pull_jobs
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_sync import sync_runner_images
@@ -378,18 +378,28 @@ async def _restart_slot(name: str, request: Request) -> None:
 
     Delegates to ``hal0.api.routes.slots._get_slot_manager(request).restart``
     — no new mechanism, no subprocess. Also mirrors that route's audit
-    trail (``record_action``) and cache invalidation (dropping the
-    ``/api/slots`` snapshot cache) so a batch restart from this page is
-    indistinguishable, downstream, from clicking each slot's own button.
-    Kept as a thin module-level shim so tests can monkeypatch it directly.
+    trail (``record_action``, with ``rec.after`` set from the same
+    ``_state_value(snap)`` slots.py's own restart route records) and cache
+    invalidation, so a batch restart from this page is indistinguishable,
+    downstream, from clicking each slot's own button. The cache clear sits
+    in a ``finally`` — same semantics as slots.py's ``@_invalidates_snapshot``
+    decorator — so a raising ``sm.restart()`` still drops the stale
+    ``/api/slots`` snapshot instead of leaving it to serve pre-restart state
+    for the rest of its TTL. Kept as a thin module-level shim so tests can
+    monkeypatch it directly.
     """
     from hal0.api._audit import record_action
-    from hal0.api.routes.slots import _get_slot_manager
+    from hal0.api.routes.slots import _get_slot_manager, _state_value
 
     sm = _get_slot_manager(request)
-    async with record_action(request, category="slot", action="slot.restart", target=name):
-        await sm.restart(name)
-    request.app.state._slots_snapshot_cache = None
+    try:
+        async with record_action(
+            request, category="slot", action="slot.restart", target=name
+        ) as rec:
+            snap = await sm.restart(name)
+            rec.after = {"state": _state_value(snap)}
+    finally:
+        request.app.state._slots_snapshot_cache = None
 
 
 def _request_context() -> tuple[
@@ -525,9 +535,7 @@ async def restart_affected_slots(request: Request, body: dict[str, Any]) -> dict
     skipped from ``restarted`` rather than 500ing the whole batch — one
     stuck slot shouldn't block the rest from rolling.
     """
-    from hal0.providers.podman_introspect import is_valid_image_ref
-
-    ref = body.get("ref") if isinstance(body, dict) else None
+    ref = body.get("ref")
     if not isinstance(ref, str) or not is_valid_image_ref(ref):
         raise BadRequest("invalid image ref", code="runner_image.ref_invalid", details={"ref": ref})
     names = sorted(n for n, r in _slot_image_usage().items() if r == ref)

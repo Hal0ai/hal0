@@ -241,6 +241,60 @@ def test_restart_affected_delegates_to_slot_manager_restart(
     assert calls == ["brain"]
 
 
+def test_restart_affected_clears_snapshot_cache_even_on_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cache invalidation must run even when ``sm.restart`` raises — mirrors
+    slots.py's ``@_invalidates_snapshot`` decorator's try/finally semantics
+    (fix round 1: the cache clear used to sit after the ``record_action``
+    block, so a raising restart left ``/api/slots`` serving a stale
+    pre-restart snapshot for the rest of its TTL)."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+
+    async def _boom(name: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _boom)
+    client.app.state._slots_snapshot_cache = {"stale": "snapshot"}
+
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == []  # the raising restart is fail-soft-skipped
+    assert client.app.state._slots_snapshot_cache is None
+
+
+def test_restart_affected_records_after_state_on_success(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batch-restart audit rows match per-slot ones: ``rec.after`` is set from
+    ``_state_value(snap)`` exactly as slots.py's own ``restart_slot`` route
+    does (fix round 1 audit-parity finding)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+
+    async def _fake_restart(name: str):
+        return SimpleNamespace(state=SimpleNamespace(value="running"))
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain"]
+
+    activity = client.get(
+        "/api/activity", params={"category": "slot", "action": "slot.restart"}
+    ).json()
+    rec = next(r for r in activity["records"] if r["target"] == "brain")
+    assert rec["after"] == {"state": "running"}
+    assert rec["outcome"] == "ok"
+
+
 # ── row enrichment: is_default / in_use_by (runner-image-catalogue v2) ──────
 
 
