@@ -334,6 +334,18 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `registry export` | — | `--out` (default: canonical registry path) |
 | `registry import-sqlite` | — | `--registry-file` (default: canonical registry path) |
 
+## `hal0 runner-images` — manage the runner-image catalogue
+
+Talks to the runner-image store/sync/pull service layer directly (not the
+API), so `ls` keeps working even when `hal0-api` is down. `rm` is
+deliberately absent pending a delete-story spec.
+
+| Command | Args | Flags |
+|---|---|---|
+| `runner-images ls` | — | — |
+| `runner-images sync` | — | — |
+| `runner-images pull <id>` | `id` (catalogue id) | `--tag` (default: the row's headline tag) |
+
 ## `hal0 profile` — inspect launch-flag profiles
 
 Read-only: full CRUD (create/update/delete/generate/import/export) is
