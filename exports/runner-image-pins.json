@@ -1,0 +1,7 @@
+{
+  "pins": [
+    "ghcr.io/hal0ai/hal0-combined:0826",
+    "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
+  ],
+  "source": "src/hal0/config/schema.py"
+}
