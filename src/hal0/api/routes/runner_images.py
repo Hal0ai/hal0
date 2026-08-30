@@ -158,15 +158,23 @@ def enrich_row(
 def _effective_defaults() -> dict[str, tuple[str, str]]:
     """Family key -> ``(effective default ref, source)`` for every runner family.
 
-    The override map is read fresh from hal0.toml (same live-read idiom as
-    ``hal0.providers.container._slot_default_images`` — a Settings save lands
-    on the next request); the release tier is the baked
-    :data:`hal0.runners.RUNNER_IMAGES` constant, deliberately NOT the
-    env/manifest-resolved ref: the contract's ``"release"`` source badge
-    means "shipped default", and the env/manifest escape hatches stay out of
-    the honesty story. Fail-soft: an unreadable config degrades to
-    release-only defaults, never a 500.
+    Full source vocabulary, mirroring :func:`hal0.runners.resolve_runner_image`'s
+    tiers WITHOUT calling it (that function only knows env → manifest →
+    release; the ``[slots].default_images`` override sits ABOVE all three —
+    it's what a slot actually launches with when set, same live-read idiom as
+    ``hal0.providers.container._slot_default_images``, a Settings save lands
+    on the next request):
+
+      1. ``override`` — ``[slots].default_images[key]``.
+      2. ``env`` — ``HAL0_TOOLBOX_IMAGE_<KEY>``.
+      3. ``manifest`` — ``manifest_image_ref(runner.manifest_key)``.
+      4. ``release`` — the baked :data:`hal0.runners.RUNNER_IMAGES` default.
+
+    Fail-soft throughout: an unreadable config or manifest degrades to the
+    next tier, never a 500.
     """
+    import os
+
     from hal0.runners import RUNNER_IMAGES
 
     overrides: Mapping[str, str] = {}
@@ -183,8 +191,83 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
         ref = overrides.get(key)
         if isinstance(ref, str) and ref:
             out[key] = (ref, "override")
+            continue
+        env_val = os.environ.get(f"HAL0_TOOLBOX_IMAGE_{key.upper()}", "").strip()
+        if env_val:
+            out[key] = (env_val, "env")
+            continue
+        if runner.manifest_key:
+            try:
+                from hal0.config.loader import manifest_image_ref
+
+                pinned = manifest_image_ref(runner.manifest_key)
+            except Exception:
+                pinned = None
+            if pinned:
+                out[key] = (pinned, "manifest")
+                continue
+        out[key] = (runner.image, "release")
+    return out
+
+
+def _families_payload(
+    images: list[RunnerImage],
+    defaults: Mapping[str, tuple[str, str]],
+    slot_usage: Mapping[str, str],
+    local: LocalImagesDigests | None,
+) -> list[dict[str, Any]]:
+    """Launch-truth per-family summary (runner-image-catalogue v3, task 9).
+
+    For every :data:`hal0.runners.RUNNER_IMAGES` family key: the effective
+    ref + its source tier (see :func:`_effective_defaults`), the store state
+    of that ref, which slots launch it (``slots``) vs. a different tag of
+    the same repo (``pinned_slots``), the newest release-shaped tag
+    catalogued for that repo, and whether that newest tag's digest differs
+    from the effective ref's own digest (``update_available``).
+
+    Pure function like ``enrich_row`` (no request state) — trivially safe
+    to call from both ``list_runner_images`` and ``sync_runner_images_route``
+    off the same ``defaults``/``slot_usage``/``local`` triple.
+    """
+    import re as _re
+
+    release_re = _re.compile(r"^v?\d+(\.\d+)*$")
+    by_repo: dict[str, RunnerImage] = {i.image: i for i in images}
+    out: list[dict[str, Any]] = []
+    for family, (ref, source) in defaults.items():
+        repo = _repo_of(ref)
+        row = by_repo.get(repo)
+        newest = None
+        if row is not None:
+            cand = next((t for t in row.tags if release_re.match(t.tag) and t.digest), None)
+            if cand is not None:
+                newest = {"tag": cand.tag, "digest": cand.digest}
+        eff_digest = None
+        if row is not None:
+            _, _, eff_tag = ref.rpartition(":")
+            eff = next((t for t in row.tags if t.tag == eff_tag), None)
+            eff_digest = eff.digest if eff else None
+        if local is None:
+            store_state = "unknown"
         else:
-            out[key] = (runner.image, "release")
+            present = ref in local.refs or (
+                eff_digest is not None and eff_digest in set(local.refs.values())
+            )
+            store_state = "present" if present else "missing"
+        slots = sorted(n for n, r in slot_usage.items() if r == ref)
+        pinned = sorted(n for n, r in slot_usage.items() if r != ref and _repo_of(r) == repo)
+        out.append(
+            {
+                "family": family,
+                "effective_ref": ref,
+                "source": source,
+                "store_state": store_state,
+                "slots": slots,
+                "pinned_slots": pinned,
+                "newest_release": newest,
+                "update_available": bool(newest and eff_digest and newest["digest"] != eff_digest),
+            }
+        )
     return out
 
 
@@ -247,18 +330,51 @@ def _slot_image_usage() -> dict[str, str]:
     return usage
 
 
-def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
+def _request_context() -> tuple[
+    dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None
+]:
+    """One ``defaults``/``slot_usage``/``local`` triple, shared by every row
+    AND the families payload for a single request — computed once each
+    (``_local_store`` is explicitly "one store read per request")."""
     defaults = _effective_defaults()
     slot_usage = _slot_image_usage()
-    local = _local_store()  # one store read per request, shared by every row
+    local = _local_store()
+    return defaults, slot_usage, local
+
+
+def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
+    defaults, slot_usage, local = _request_context()
     return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+
+
+def _safe_families_payload(
+    images: list[RunnerImage],
+    defaults: Mapping[str, tuple[str, str]],
+    slot_usage: Mapping[str, str],
+    local: LocalImagesDigests | None,
+) -> list[dict[str, Any]]:
+    """Fail-soft wrapper: the families payload must never 500 a catalogue
+    route — a bug in this newer, more speculative computation degrades to
+    an empty list rather than taking ``images``/``rows`` down with it."""
+    try:
+        return _families_payload(images, defaults, slot_usage, local)
+    except Exception:
+        log.warning("runner_images.families_payload_failed", exc_info=True)
+        return []
 
 
 @router.get("")
 async def list_runner_images(request: Request) -> dict[str, Any]:
-    """Return every catalogued runner image (catalogue-v2 enriched rows)."""
+    """Return every catalogued runner image (catalogue-v2 enriched rows)
+    plus the launch-truth ``families`` summary (catalogue v3, task 9)."""
     store = request.app.state.runner_image_registry
-    return {"images": _enriched(store.list())}
+    images = store.list()
+    defaults, slot_usage, local = _request_context()
+    rows = [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+    return {
+        "images": rows,
+        "families": _safe_families_payload(images, defaults, slot_usage, local),
+    }
 
 
 @router.get("/downloaded")
@@ -303,8 +419,13 @@ async def sync_runner_images_route(request: Request) -> dict[str, Any]:
     """
     store = request.app.state.runner_image_registry
     result = await sync_runner_images(store)
+    defaults, slot_usage, local = _request_context()
+    rows = [
+        enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in result.images
+    ]
     return {
-        "images": _enriched(result.images),
+        "images": rows,
+        "families": _safe_families_payload(result.images, defaults, slot_usage, local),
         "images_json_ok": result.images_json_ok,
         "images_json_error": result.images_json_error,
         "probe_errors": result.probe_errors,

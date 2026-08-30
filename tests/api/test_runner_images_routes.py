@@ -38,7 +38,13 @@ def _reset_provider_factory():
 def test_list_runner_images_empty(client: TestClient) -> None:
     resp = client.get("/api/runner-images")
     assert resp.status_code == 200
-    assert resp.json() == {"images": []}
+    body = resp.json()
+    assert body["images"] == []
+    # ``families`` always covers every hal0.runners.RUNNER_IMAGES key, even
+    # with an empty catalogue — it's the launch-truth summary, not a view
+    # over catalogued rows.
+    assert body["families"]
+    assert {f["family"] for f in body["families"]} >= {"rocmfpx", "cpu"}
 
 
 def test_get_unknown_runner_image_404s(client: TestClient) -> None:
@@ -718,3 +724,156 @@ class TestStoreStateEnrichment:
         assert resp.status_code == 202
         body = resp.json()
         assert body["images"][0]["store_state"] == "unknown"
+        assert "families" in body
+
+
+# ── launch-truth families payload (runner-image-catalogue v3, task 9) ───────
+#
+# GET /api/runner-images gains a top-level ``families`` list: per
+# hal0.runners.RUNNER_IMAGES key, the effective ref, its source tier
+# (override → env → manifest → release), store state, the newest
+# release-shaped tag catalogued for that repo, and an update marker.
+
+
+class TestFamiliesPayload:
+    DIGEST_A = "sha256:" + "a" * 64  # tag 0826 — newest
+    DIGEST_B = "sha256:" + "b" * 64  # tag 0824 — effective (override)
+
+    def _seed_repo_x(self, client: TestClient) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        store = client.app.state.runner_image_registry
+        store.upsert(
+            RunnerImage(id="x", image="ghcr.io/x/a", tag="0826", available_tags=["0826", "0824"])
+        )
+        store.set_tags(
+            "x",
+            [
+                RunnerImageTag(tag="0826", digest=self.DIGEST_A),
+                RunnerImageTag(tag="0824", digest=self.DIGEST_B),
+            ],
+        )
+
+    def test_families_payload(
+        self, isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(isolated_client)
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"rocmfpx": "ghcr.io/x/a:0824"}}},
+        )
+        assert r.status_code == 200, r.text
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"ghcr.io/x/a:0824": self.DIGEST_B}, context="rootful"
+            ),
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["effective_ref"] == "ghcr.io/x/a:0824"
+        assert fam["source"] == "override"
+        assert fam["store_state"] == "present"
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is True
+
+    def test_families_env_source(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:custom")
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["source"] == "env"
+        assert fam["effective_ref"].endswith(":custom")
+
+    def test_families_release_source_no_row_no_update(self, client: TestClient) -> None:
+        """No override/env, no manifest pin, and no catalogue row for the
+        release ref: newest_release is null and update_available is False —
+        never a crash on an unmatched repo."""
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["source"] == "release"
+        assert fam["newest_release"] is None
+        assert fam["update_available"] is False
+        assert fam["slots"] == []
+        assert fam["pinned_slots"] == []
+
+    def test_families_store_state_unknown_when_store_unreadable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_repo_x(client)
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:0824")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["store_state"] == "unknown"
+
+    def test_families_no_update_when_digests_match(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Effective ref already pinned to the newest catalogued digest —
+        update_available is False."""
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(client)
+        monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/a:0826")
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"ghcr.io/x/a:0826": self.DIGEST_A}, context="rootful"
+            ),
+        )
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is False
+
+    def test_families_slots_and_pinned_slots(
+        self, isolated_client: TestClient, tmp_hal0_home: str
+    ) -> None:
+        """A slot resolving to the exact effective ref lands in ``slots``; a
+        slot pinned to a different tag of the same repo lands in
+        ``pinned_slots`` instead."""
+        from pathlib import Path
+
+        self._seed_repo_x(isolated_client)
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"rocmfpx": "ghcr.io/x/a:0824"}}},
+        )
+        assert r.status_code == 200, r.text
+
+        slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        slots_dir.mkdir(parents=True, exist_ok=True)
+        (slots_dir / "agent.toml").write_text(
+            'name = "agent"\nport = 8081\nimage_pin = "ghcr.io/x/a:0824"\n',
+            encoding="utf-8",
+        )
+        (slots_dir / "utility.toml").write_text(
+            'name = "utility"\nport = 8082\nimage_pin = "ghcr.io/x/a:0826"\n',
+            encoding="utf-8",
+        )
+
+        body = isolated_client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert fam["slots"] == ["agent"]
+        assert fam["pinned_slots"] == ["utility"]
+
+    def test_families_payload_never_500s_on_bad_default_images(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``load_hal0_config`` blow-up must degrade families to release
+        defaults, not 500 the whole route (fail-soft contract)."""
+
+        def _boom():
+            raise RuntimeError("config corrupt")
+
+        monkeypatch.setattr("hal0.config.loader.load_hal0_config", _boom)
+
+        resp = client.get("/api/runner-images")
+        assert resp.status_code == 200
+        assert resp.json()["families"]
