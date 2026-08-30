@@ -6,11 +6,16 @@
 // mirroring useModels.ts's usePullJob() SSE pattern — progress here is
 // layers_done/layers_total (a whole OCI image pull via podman) instead of bytes.
 //
-// runner-catalogue-v2 additions: a Defaults strip (per-family effective image
-// ref + release/override badge + clear), a per-row tag picker over the
-// contract's `available_tags`, a "newer tag" chip when the headline lags the
-// registry, and Set-as-family-default (PUT /api/settings override map) with a
-// confirm dialog naming the `in_use_by` slots that will drift.
+// runner-catalogue-v2 additions: a per-row tag picker over the contract's
+// `available_tags`, a "newer tag" chip when the headline lags the registry,
+// and Set-as-family-default (PUT /api/settings override map) with a confirm
+// dialog naming the `in_use_by` slots that will drift.
+//
+// runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
+// FamilyStrip driven straight by the server's `families` summary (effective
+// ref, source tier, store state, newer-release marker), and the list groups
+// into "Default families" / "Specialized" / "Other catalogued" sections via
+// the pure groupRows() helper.
 
 import {
   useRunnerImages,
@@ -37,23 +42,22 @@ function fmtBytesRI(b) {
 
 // ── Pure helpers (unit-tested in __tests__/runner-images-view.test.tsx) ──
 
-// Defaults-strip rows from the enriched /api/runner-images list: one
-// {family, ref, source} per family whose default resolves to a catalogued
-// row (`is_default` carries the family + whether it's the baked release
-// default or a [slots].default_images override). First row per family wins;
-// sorted by family for a stable strip order. Defensive against rows from a
-// pre-contract backend (no is_default field) — they're simply skipped.
-export function defaultsStripRows(images) {
-  const rows = [];
-  const seen = new Set();
+// Row grouping for the catalogue list (runner-catalogue-v3, Task 10):
+// default-family repos first, then specialty images (server-provided
+// `specialties` from RUNNER_IMAGES supports / images.json — read
+// defensively, since rows don't carry the field from every backend yet),
+// then referenced/uncatalogued-family rows. A row that IS a family default
+// lands in `defaults` even if it also carries specialties — the family strip
+// above already surfaces it, so the list shouldn't also branch it into
+// "Specialized".
+export function groupRows(images) {
+  const g = { defaults: [], specialized: [], other: [] };
   for (const img of images || []) {
-    const d = img && img.is_default;
-    if (!d || !d.family || seen.has(d.family)) continue;
-    seen.add(d.family);
-    rows.push({ family: d.family, ref: `${img.image}:${img.tag}`, source: d.source });
+    if (img.is_default) g.defaults.push(img);
+    else if ((img.specialties || img.extra?.specialties || []).length) g.specialized.push(img);
+    else g.other.push(img);
   }
-  rows.sort((a, b) => (a.family < b.family ? -1 : a.family > b.family ? 1 : 0));
-  return rows;
+  return g;
 }
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
@@ -208,7 +212,8 @@ export function RunnerImagesView() {
   const [q, setQ] = useStateRI("");
 
   const imagesQuery = useRunnerImages();
-  const images = imagesQuery.data ?? [];
+  const images = imagesQuery.data?.images ?? [];
+  const families = imagesQuery.data?.families ?? [];
 
   useEffectRI(() => {
     if (!selId && images.length) setSelId(images[0].id);
@@ -221,12 +226,13 @@ export function RunnerImagesView() {
     return hay.includes(needle);
   });
 
+  const grouped = groupRows(filtered);
   const selected = images.find(i => i.id === selId) || images[0];
 
   return (
     <div className="models-layout" style={{marginTop: 18}}>
         <div className="mdl-list">
-          <DefaultsStrip images={images} />
+          <FamilyStrip families={families} />
           <div className="mdl-toolbar">
             <input
               className="input mono mdl-search"
@@ -260,9 +266,30 @@ export function RunnerImagesView() {
             </div>
           )}
 
-          {filtered.map(img => (
-            <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
-          ))}
+          {grouped.defaults.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Default families</span></div>
+              {grouped.defaults.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
+          {grouped.specialized.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Specialized</span></div>
+              {grouped.specialized.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
+          {grouped.other.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Other catalogued</span></div>
+              {grouped.other.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
         </div>
 
         <div className="models-sidebar">
@@ -273,24 +300,41 @@ export function RunnerImagesView() {
   );
 }
 
-// ── DefaultsStrip ───────────────────────────────────────────────────────
-// Per-family effective default images (from the rows' server-computed
-// `is_default` enrichment): family → effective ref + a release-default /
-// override badge. An override gets a clear button — clearing writes
-// `{family: null}` through the settings override map and falls back to the
-// baked release default, so the confirm names the slots that will drift.
-function DefaultsStrip({ images }) {
-  const rows = defaultsStripRows(images);
+// Source chip for a family row's effective ref (see FamilyStrip below):
+// override is the accent-colored chip with its clear button (unchanged from
+// the old DefaultsStrip); env/manifest are plain chips naming the tier;
+// release reads "release default" — the same label the strip has always
+// shown for a non-override default.
+function familySourceChip(source) {
+  if (source === "override") {
+    return <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>;
+  }
+  if (source === "release") {
+    return <span className="chip">release default</span>;
+  }
+  return <span className="chip">{source}</span>; // env | manifest
+}
+
+// ── FamilyStrip ─────────────────────────────────────────────────────────
+// Launch-truth per-family strip (runner-catalogue-v3, Task 10 — replaces
+// DefaultsStrip). Reads the server's `families` summary directly (Task 9's
+// GET /api/runner-images `families` entry) instead of re-deriving it from
+// image rows' `is_default` markers — the effective ref, its source tier,
+// the store state of THAT ref, which slots launch it now vs. a different
+// tag of the same repo, and whether the registry already has a newer
+// release-shaped tag. The override clear-confirm flow moves in verbatim
+// from DefaultsStrip: clearing writes `{family: null}` through the settings
+// override map and falls back to the baked release default, so the confirm
+// names the slots that will drift — now sourced from the family's own
+// `slots` list rather than a row's `in_use_by`.
+function FamilyStrip({ families }) {
+  const rows = families || [];
   const setDefault = useSetDefaultImage();
   const [clearFamily, setClearFamily] = useStateRI(null);
   if (rows.length === 0) return null;
 
-  const clearRow = rows.find(r => r.family === clearFamily) || null;
-  // Slots pinned to the override'd default — they fall back on clear.
-  const clearImg = clearRow
-    ? (images || []).find(i => i.is_default && i.is_default.family === clearRow.family)
-    : null;
-  const drifters = (clearImg?.in_use_by || []);
+  const clearRow = rows.find(f => f.family === clearFamily) || null;
+  const drifters = clearRow?.slots || [];
 
   const onClear = () => {
     const fam = clearFamily;
@@ -302,25 +346,38 @@ function DefaultsStrip({ images }) {
   };
 
   return (
-    <div className="ri-defaults" data-testid="ri-defaults" style={{padding: "10px 16px", borderBottom: "1px solid var(--line-soft)"}}>
+    <div className="ri-defaults" data-testid="ri-family-strip" style={{padding: "10px 16px", borderBottom: "1px solid var(--line-soft)"}}>
       <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6}}>
         Family defaults
       </div>
-      {rows.map(r => (
-        <div key={r.family} data-testid={`ri-default-${r.family}`} style={{display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12}}>
-          <span className="mono" style={{color: "var(--fg-2)", minWidth: 88}}>{r.family}</span>
-          <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{r.ref}</span>
-          {r.source === "override"
-            ? <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>
-            : <span className="chip">release default</span>}
-          {r.source === "override" && (
-            <button
-              className="btn ghost sm"
-              data-testid={`ri-clear-default-${r.family}`}
-              disabled={setDefault.isPending}
-              onClick={() => setClearFamily(r.family)}
-              title="Remove the operator override — the release default applies again"
-            >clear</button>
+      {rows.map(f => (
+        <div key={f.family} data-testid={`ri-family-${f.family}`} style={{padding: "3px 0"}}>
+          <div style={{display: "flex", alignItems: "center", gap: 8, fontSize: 12}}>
+            <span className="mono" style={{color: "var(--fg-2)", minWidth: 88}}>{f.family}</span>
+            <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{f.effective_ref}</span>
+            {familySourceChip(f.source)}
+            <StoreStateChip image={{ store_state: f.store_state, downloaded: f.store_state === "present" }} />
+            {f.update_available && f.newest_release && (
+              <span className="chip" data-testid="ri-family-newer" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
+                newer: {f.newest_release.tag}
+              </span>
+            )}
+            {f.source === "override" && (
+              <button
+                className="btn ghost sm"
+                data-testid={`ri-clear-default-${f.family}`}
+                disabled={setDefault.isPending}
+                onClick={() => setClearFamily(f.family)}
+                title="Remove the operator override — the release default applies again"
+              >clear</button>
+            )}
+          </div>
+          {(f.slots?.length > 0 || f.pinned_slots?.length > 0) && (
+            <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginTop: 2}}>
+              {f.slots?.length > 0 && `via slots: ${f.slots.join(", ")}`}
+              {f.slots?.length > 0 && f.pinned_slots?.length > 0 && " · "}
+              {f.pinned_slots?.length > 0 && `pinned: ${f.pinned_slots.join(", ")}`}
+            </div>
           )}
         </div>
       ))}
@@ -331,7 +388,7 @@ function DefaultsStrip({ images }) {
         title={`Clear ${clearRow?.family || ""} override`}
         message={
           clearRow
-            ? `Remove the ${clearRow.family} override (${clearRow.ref}) and fall back to the release default.` +
+            ? `Remove the ${clearRow.family} override (${clearRow.effective_ref}) and fall back to the release default.` +
               (drifters.length
                 ? ` Slots using it now: ${drifters.join(", ")} — they pick up the release image on their next restart.`
                 : " No slot currently references it.")

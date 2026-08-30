@@ -28,7 +28,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // vi.mock factories are hoisted above imports, so the spy + fixture rows they
 // close over must be hoisted too. The "spy" is a plain call log — enough to
 // assert exact mutation payloads without pulling vi.fn through the hoist.
-const { mutateSpy, ROWS } = vi.hoisted(() => ({
+const { mutateSpy, ROWS, FAMILIES } = vi.hoisted(() => ({
   mutateSpy: [] as unknown[],
   ROWS: [
     {
@@ -52,10 +52,30 @@ const { mutateSpy, ROWS } = vi.hoisted(() => ({
       in_use_by: ['agent', 'utility'],
     },
   ],
+  // Task 10's launch-truth families summary — kept in sync with ROWS[0]'s
+  // is_default so the strip still names the same family this test's
+  // set-as-default flow (RunnerCard, unrelated to FamilyStrip) exercises.
+  FAMILIES: [
+    {
+      family: 'rocmfpx',
+      effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
+      source: 'release',
+      store_state: 'unknown',
+      slots: ['agent', 'utility'],
+      pinned_slots: [],
+      newest_release: null,
+      update_available: false,
+    },
+  ],
 }))
 
 vi.mock('@/api/hooks/useRunnerImages', () => ({
-  useRunnerImages: () => ({ data: ROWS, isPending: false, isError: false, error: null }),
+  useRunnerImages: () => ({
+    data: { images: ROWS, families: FAMILIES },
+    isPending: false,
+    isError: false,
+    error: null,
+  }),
   useRunnerImageSync: () => ({ isPending: false, mutateAsync: async () => ({ images: ROWS }) }),
   useRunnerImagePullJob: () => ({
     imageId: null, jobId: null, state: 'idle', layersDone: 0, layersTotal: 0,
@@ -91,8 +111,8 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
       root.render(React.createElement(RunnerImagesView))
     })
 
-    // Contract surfaces are up: defaults strip row + set-default CTA.
-    expect(host.querySelector('[data-testid="ri-defaults"]')).toBeTruthy()
+    // Contract surfaces are up: family strip row + set-default CTA.
+    expect(host.querySelector('[data-testid="ri-family-rocmfpx"]')).toBeTruthy()
     const setBtn = host.querySelector('[data-testid="ri-set-default"]') as HTMLButtonElement
     expect(setBtn).toBeTruthy()
     // The headline tag already IS the rocmfpx default, so re-pinning it is a

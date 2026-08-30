@@ -31,7 +31,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // side-effect-free. vi.mock factories are hoisted above imports, so the spy +
 // fixture rows they close over must be hoisted too (mirrors
 // runner-images-confirm-flow.test.tsx's `vi.hoisted` idiom).
-const { apiPostCalls, PULL_ROW, imagesOverride } = vi.hoisted(() => ({
+const { apiPostCalls, PULL_ROW, imagesOverride, familiesOverride } = vi.hoisted(() => ({
   apiPostCalls: [] as string[],
   PULL_ROW: {
     id: 'rocmfpx-combined',
@@ -57,6 +57,10 @@ const { apiPostCalls, PULL_ROW, imagesOverride } = vi.hoisted(() => ({
   // without disturbing PULL_ROW (Task 6's per-tag-pull test asserts against
   // it directly) — a mutable box the mock reads lazily each call.
   imagesOverride: { current: null as Record<string, unknown>[] | null },
+  // Task 10's families payload (launch-truth FamilyStrip) — separate mutable
+  // box, defaults to no families so pre-existing describe blocks (which
+  // never set it) render an empty strip.
+  familiesOverride: { current: null as Record<string, unknown>[] | null },
 }))
 
 vi.mock('@/api/hooks/useRunnerImages', async () => {
@@ -69,7 +73,10 @@ vi.mock('@/api/hooks/useRunnerImages', async () => {
     // useRunnerImagePullJob is left as the real implementation — it's what
     // Task 6 wires up.
     useRunnerImages: () => ({
-      data: imagesOverride.current ?? [PULL_ROW],
+      data: {
+        images: imagesOverride.current ?? [PULL_ROW],
+        families: familiesOverride.current ?? [],
+      },
       isPending: false,
       isError: false,
       error: null,
@@ -97,7 +104,7 @@ vi.mock('@/api/client', async () => {
 })
 
 const {
-  defaultsStripRows,
+  groupRows,
   newerTagAvailable,
   newerTagCandidate,
   newestComparableTag,
@@ -119,43 +126,112 @@ function row(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('defaultsStripRows', () => {
-  it('emits one {family, ref, source} row per family default, sorted by family', () => {
-    const images = [
-      row(),
-      row({
-        id: 'kokoro',
-        image: 'ghcr.io/hal0ai/hal0-kokoro',
-        tag: 'v1.2',
-        available_tags: ['v1.2'],
-        is_default: { family: 'kokoro', source: 'override' },
-        in_use_by: [],
-      }),
+describe('groupRows', () => {
+  it('groups default families, specialized, and referenced rows', () => {
+    const rows = [
+      { id: 'a', is_default: { family: 'rocmfpx', source: 'release' } },
+      { id: 'b', is_default: null, specialties: ['promptforge'] },
+      { id: 'c', is_default: null, ownership: 'referenced' },
     ]
-    expect(defaultsStripRows(images)).toEqual([
-      { family: 'kokoro', ref: 'ghcr.io/hal0ai/hal0-kokoro:v1.2', source: 'override' },
-      { family: 'rocmfpx', ref: 'ghcr.io/hal0ai/hal0-combined:0824', source: 'release' },
-    ])
+    const g = groupRows(rows)
+    expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['a'])
+    expect(g.specialized.map((r: { id: string }) => r.id)).toEqual(['b'])
+    expect(g.other.map((r: { id: string }) => r.id)).toEqual(['c'])
   })
 
-  it('skips rows that are no family default (is_default null or missing)', () => {
-    const images = [row({ is_default: null }), row({ id: 'x', is_default: undefined })]
-    expect(defaultsStripRows(images)).toEqual([])
+  it('reads specialties from extra.specialties when the top-level field is absent', () => {
+    const rows = [{ id: 'd', is_default: null, extra: { specialties: ['comfyui'] } }]
+    expect(groupRows(rows).specialized.map((r: { id: string }) => r.id)).toEqual(['d'])
   })
 
-  it('keeps the first row per family when several rows carry the same family', () => {
-    const images = [
-      row(),
-      row({ id: 'rocmfpx-hy3', image: 'ghcr.io/hal0ai/hal0-rocmfpx-hy3', tag: 'hy3' }),
+  it('a default-family row wins over specialties (defaults bucket takes priority)', () => {
+    const rows = [
+      { id: 'e', is_default: { family: 'rocmfpx', source: 'override' }, specialties: ['promptforge'] },
     ]
-    const rows = defaultsStripRows(images)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].ref).toBe('ghcr.io/hal0ai/hal0-combined:0824')
+    const g = groupRows(rows)
+    expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['e'])
+    expect(g.specialized).toEqual([])
   })
 
   it('tolerates empty/absent input', () => {
-    expect(defaultsStripRows([])).toEqual([])
-    expect(defaultsStripRows(undefined)).toEqual([])
+    expect(groupRows([])).toEqual({ defaults: [], specialized: [], other: [] })
+    expect(groupRows(undefined)).toEqual({ defaults: [], specialized: [], other: [] })
+  })
+})
+
+// Task 10 — launch-truth FamilyStrip (replaces DefaultsStrip). Families now
+// come straight from the server's `families` summary (Task 9 payload)
+// instead of being derived from image rows' `is_default` markers — the
+// strip shows the effective ref, its source tier, and a "newer" chip when
+// the registry has a release-shaped tag the effective ref's digest doesn't
+// match.
+describe('FamilyStrip (Task 10)', () => {
+  afterEach(() => {
+    familiesOverride.current = null
+    document.body.innerHTML = ''
+  })
+
+  function mount() {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+    return { host, root }
+  }
+
+  it('shows launch truth — effective ref, source chip, and the newer chip', () => {
+    familiesOverride.current = [
+      {
+        family: 'rocmfpx',
+        effective_ref: 'ghcr.io/x/a:0824',
+        source: 'override',
+        store_state: 'present',
+        slots: ['brain'],
+        pinned_slots: [],
+        newest_release: { tag: '0826', digest: 'sha256:a' },
+        update_available: true,
+      },
+    ]
+    const { host, root } = mount()
+
+    const rowEl = host.querySelector('[data-testid="ri-family-rocmfpx"]') as HTMLElement
+    expect(rowEl).toBeTruthy()
+    expect(rowEl.textContent).toContain('ghcr.io/x/a:0824')
+    expect(rowEl.textContent).toContain('override')
+    expect(rowEl.textContent).toContain('newer: 0826')
+    expect(rowEl.textContent).toContain('via slots: brain')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders env/manifest as plain chips and release as "release default"', () => {
+    familiesOverride.current = [
+      { family: 'a', effective_ref: 'ghcr.io/x/a:1', source: 'env', store_state: 'missing', slots: [], pinned_slots: [], newest_release: null, update_available: false },
+      { family: 'b', effective_ref: 'ghcr.io/x/b:1', source: 'manifest', store_state: 'unknown', slots: [], pinned_slots: [], newest_release: null, update_available: false },
+      { family: 'c', effective_ref: 'ghcr.io/x/c:1', source: 'release', store_state: 'present', slots: [], pinned_slots: ['agent'], newest_release: null, update_available: false },
+    ]
+    const { host, root } = mount()
+
+    expect(host.querySelector('[data-testid="ri-family-a"]')?.textContent).toContain('env')
+    expect(host.querySelector('[data-testid="ri-family-b"]')?.textContent).toContain('manifest')
+    const releaseRow = host.querySelector('[data-testid="ri-family-c"]') as HTMLElement
+    expect(releaseRow.textContent).toContain('release default')
+    expect(releaseRow.textContent).toContain('pinned: agent')
+
+    act(() => {
+      root.unmount()
+    })
   })
 })
 

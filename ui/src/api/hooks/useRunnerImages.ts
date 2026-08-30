@@ -49,12 +49,38 @@ export interface RunnerImage {
 
 const RUNNER_IMAGES_POLL_MS = 30_000
 
+// Launch-truth per-family summary (runner-image-catalogue v3, Task 9's
+// GET /api/runner-images `families` entry): the effective ref a family
+// resolves to right now, its source tier, the store state of that ref,
+// which slots launch it (`slots`) vs. a different tag of the same repo
+// (`pinned_slots`), and whether a newer release-shaped tag is catalogued.
+export interface RunnerImageFamily {
+  family: string
+  effective_ref: string
+  source: 'override' | 'env' | 'manifest' | 'release'
+  store_state: 'present' | 'missing' | 'unknown'
+  slots: string[]
+  pinned_slots: string[]
+  newest_release: { tag: string; digest: string } | null
+  update_available: boolean
+}
+
+export interface RunnerImagesList {
+  images: RunnerImage[]
+  families: RunnerImageFamily[]
+}
+
 export function useRunnerImages() {
   return useQuery({
     queryKey: ['runner-images'],
     queryFn: async () => {
-      const body = await apiGet<{ images: RunnerImage[] }>(ENDPOINTS.runnerImages)
-      return Array.isArray(body?.images) ? body.images : []
+      const body = await apiGet<{ images: RunnerImage[]; families: RunnerImageFamily[] }>(
+        ENDPOINTS.runnerImages,
+      )
+      return {
+        images: Array.isArray(body?.images) ? body.images : [],
+        families: Array.isArray(body?.families) ? body.families : [],
+      } satisfies RunnerImagesList
     },
     refetchInterval: RUNNER_IMAGES_POLL_MS,
   })
