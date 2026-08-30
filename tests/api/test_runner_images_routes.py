@@ -358,6 +358,59 @@ class TestEnrichRow:
         assert row["in_use_by"] == ["agent", "utility"]
         assert row["is_default"] is None
 
+    def test_specialties_defaults_to_empty_list_when_omitted(self) -> None:
+        """``specialties`` is an opt-in kwarg (default ``{}``) — every
+        existing ``enrich_row`` call site in this file predates it and must
+        keep working unchanged."""
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-combined", "0824"),
+            defaults={},
+            slot_usage={},
+            local=None,
+        )
+        assert row["specialties"] == []
+
+    def test_specialties_matched_by_repo(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-promptforge", "v2.3-qwen38"),
+            defaults={},
+            slot_usage={},
+            local=None,
+            specialties={"ghcr.io/hal0ai/hal0-promptforge": ["promptforge"]},
+        )
+        assert row["specialties"] == ["promptforge"]
+
+
+class TestSpecialtiesRoute:
+    """``specialties`` is the catalogue-v3 field the UI's ``groupRows``
+    (``ui/src/dash/runner-images.jsx``) reads to route a row into the
+    "Specialized" group — sourced from :data:`hal0.runners.RUNNER_IMAGES`'s
+    ``supports.specialties``, matched by repo (any tag), and hoisted once
+    per request (:func:`hal0.api.routes.runner_images._repo_specialties`)."""
+
+    def test_promptforge_row_carries_specialties_rocmfpx_row_does_not(
+        self, client: TestClient
+    ) -> None:
+        from hal0.api.routes.runner_images import _repo_of
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE, DEFAULT_ROCMFPX_IMAGE
+        from hal0.registry.runner_image import RunnerImage
+
+        store = client.app.state.runner_image_registry
+        pf_repo = _repo_of(DEFAULT_PROMPTFORGE_IMAGE)
+        rocm_repo = _repo_of(DEFAULT_ROCMFPX_IMAGE)
+        store.upsert(RunnerImage(id="pf", image=pf_repo, tag="v2.3-qwen38"))
+        store.upsert(RunnerImage(id="rocm", image=rocm_repo, tag="0826"))
+
+        rows = client.get("/api/runner-images").json()["images"]
+        pf_row = next(r for r in rows if r["id"] == "pf")
+        rocm_row = next(r for r in rows if r["id"] == "rocm")
+        assert pf_row["specialties"] == ["promptforge"]
+        assert rocm_row["specialties"] == []
+
 
 # ── per-tag pull (catalogue v2 follow-up to #2043/#2044) ────────────────────
 
