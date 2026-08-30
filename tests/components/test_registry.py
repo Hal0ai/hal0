@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from hal0.components.registry import COMPONENTS, component_by_id
 from hal0.services.registry import service_by_id
 
@@ -24,7 +22,6 @@ def test_service_joins_resolve() -> None:
             assert service_by_id(comp.service_id) is not None, comp.id
 
 
-@pytest.mark.xfail(reason="OPENWEBUI_IMAGE_PIN lands in the next commit", strict=True)
 def test_pinned_callables_return_strings() -> None:
     for comp in COMPONENTS:
         assert isinstance(comp.pinned(), str) and comp.pinned()
