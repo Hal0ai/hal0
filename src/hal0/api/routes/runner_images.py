@@ -66,14 +66,15 @@ def _tag_badges(image: RunnerImage) -> dict[str, str]:
 
     ``VULKAN_CAPABLE_IMAGE_REFS`` wins ties over the candidate set (a
     validated image should never read as merely "candidate"); the candidate
-    set itself is fail-soft: ``DEFAULT_PROMPTFORGE_IMAGE`` doesn't exist on
-    this branch yet (lands with #2129), so an unmatched import degrades to
-    an empty candidate set rather than 500ing the catalogue routes.
+    set itself is fail-soft: ``DEFAULT_PROMPTFORGE_IMAGE`` landed with
+    #2129/#1946, but the import stays guarded so a future rename or removal
+    of the constant degrades to an empty candidate set rather than 500ing
+    the catalogue routes.
     """
     from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, VULKAN_CAPABLE_IMAGE_REFS
 
     candidates: set[str] = set()
-    try:  # present only once #2129 merges; enrichment must not depend on it
+    try:  # fail-soft — enrichment must not hard-depend on this constant
         from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
 
         candidates.add(DEFAULT_PROMPTFORGE_IMAGE)

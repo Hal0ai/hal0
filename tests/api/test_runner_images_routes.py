@@ -787,17 +787,38 @@ class TestStoreStateEnrichment:
     def test_promptforge_import_error_degrades_gracefully(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DEFAULT_PROMPTFORGE_IMAGE isn't on this branch yet (merges with
-        #2129 later) — the ImportError branch in ``_tag_badges`` must be
-        exercised today without ever surfacing as a 500."""
+        """DEFAULT_PROMPTFORGE_IMAGE now exists (landed with #2129/#1946),
+        but ``_tag_badges``'s fail-soft ImportError branch is still real
+        production code (guards against a future rename/removal of the
+        constant) and must stay exercised: simulate the absence via
+        monkeypatch rather than relying on the branch predating #2129."""
         import hal0.config.schema as schema_mod
 
-        assert not hasattr(schema_mod, "DEFAULT_PROMPTFORGE_IMAGE")
+        monkeypatch.delattr(schema_mod, "DEFAULT_PROMPTFORGE_IMAGE", raising=False)
         self._seed(client)
         monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
 
         resp = client.get("/api/runner-images")
         assert resp.status_code == 200
+
+    def test_promptforge_candidate_badge_when_catalogued(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With DEFAULT_PROMPTFORGE_IMAGE now a real constant (#2129), a
+        catalogued row matching its ref gets the "candidate" badge — the
+        happy path the ImportError branch above used to make unreachable."""
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        image, _, tag = DEFAULT_PROMPTFORGE_IMAGE.rpartition(":")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="promptforge", image=image, tag=tag))
+        store.set_tags("promptforge", [RunnerImageTag(tag=tag)])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "promptforge")
+        assert row["badges"][tag] == "candidate"
 
     def test_get_runner_image_detail_carries_store_state(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
