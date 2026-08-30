@@ -187,21 +187,21 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
 
-  test('HW grid — the typed fields + Runner Image + Device render (§2)', async ({ page }) => {
+  test('HW grid — the typed fields + Runner Image + Backend render, Device select is gone (§2)', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
-    // Device is editable post-create for GPU slots (fix-gpu-slot-switch):
-    // it is the UI's only rocm↔vulkan switch — BINARY never flips the
-    // backend (metadata, not a selector) and seed profiles declare none.
-    await expect(page.getByTestId('slot-hw-device')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-device')).toHaveValue('gpu-rocm')
+    // The standalone Device select is GONE (hw-cascade): `device` is derived
+    // from the Backend (binary · backend) pick, so Device/Binary can no
+    // longer be driven into a mismatch from this drawer.
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
     await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
     await expect(page.getByTestId('slot-hw-image-pin')).toBeVisible()
   })
 
-  test('HW grid — switching Device rocm→vulkan Save PUTs /config { device } and restarts', async ({ page }) => {
+  test('HW grid — picking the vulkan pair Save PUTs /config { device: gpu-vulkan } and restarts', async ({ page }) => {
     const puts: any[] = []
     const restarts: string[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
@@ -215,9 +215,33 @@ test.describe('Slot edit controls (/slots)', () => {
       restarts.push(route.request().method())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await seedSlots(page, [PRIMARY, EMBED])
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          hardware: {},
+          features: {},
+          podman_context: 'rootless',
+          backends: {
+            rocmfpx: {
+              image: 'ghcr.io/hal0ai/tb:dual',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'rocm',
+              supported_backends: ['rocm', 'vulkan'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+          },
+        }),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
-    await page.getByTestId('slot-hw-device').selectOption('gpu-vulkan')
+    // rocm↔vulkan rides the Backend pair choice now — picking the vulkan
+    // pair of the same binary derives device=gpu-vulkan.
+    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx::vulkan')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({ device: 'gpu-vulkan' })
@@ -226,7 +250,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect.poll(() => restarts.length).toBeGreaterThan(0)
   })
 
-  test('HW grid — Device select is absent on a non-GPU slot', async ({ page }) => {
+  test('HW grid — Device select is absent on a non-GPU slot too', async ({ page }) => {
     await seedSlots(page, [{ ...PRIMARY, name: 'cpuish', device: 'cpu' }, EMBED])
     await page.goto('/#slots/cpuish')
     await expect(page.locator('.drawer')).toBeVisible()
@@ -260,10 +284,9 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'gpu-rocm', threads: 0, binary: '', image_pin: null }, EMBED])
 
     await page.goto('/#slots/primary')
-    // Pick the runner binary — the options are the ones that fit this slot's
-    // (fixed) device lane. There is no "— default (from device) —" entry any
-    // more, so the first real option is index 0.
-    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx')
+    // Pick the Backend pair — options encode (binary · backend); picking one
+    // sets `binary` and derives `device`.
+    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx::rocm')
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
     // Runner Image is a catalog dropdown now; the free-text escape hatch
@@ -333,24 +356,26 @@ test.describe('Slot edit controls (/slots)', () => {
     // Catalog: default + 2 distinct images + the custom escape hatch.
     await expect(imageSel.locator('option')).toHaveCount(4)
 
-    // Pick the shared dual-binary image → BINARY offers both its binaries
-    // and the current rocmfpx selection survives (it ships in the image).
+    // Pick the shared dual-binary image → Backend offers every (binary ·
+    // backend) pair the image ships (2 binaries × rocm/vulkan = 4) and the
+    // current rocmfpx · rocm selection survives (it ships in the image).
     await imageSel.selectOption('ghcr.io/hal0ai/tb:dual')
     const binarySel = page.getByTestId('slot-hw-binary')
-    await expect(binarySel.locator('option')).toHaveCount(2)
-    await expect(binarySel).toHaveValue('rocmfpx')
+    await expect(binarySel.locator('option')).toHaveCount(4)
+    await expect(binarySel).toHaveValue('rocmfpx::rocm')
 
-    // Hop to the cuda image → rocmfpx doesn't ship in it, so BINARY moves
-    // to the image's sole binary.
+    // Hop to the cuda image → rocmfpx doesn't ship in it, so the Backend
+    // moves to the image's sole pair (and derives its device with it).
     await imageSel.selectOption('ghcr.io/hal0ai/tb:cuda')
-    await expect(binarySel).toHaveValue('cuda')
+    await expect(binarySel).toHaveValue('cuda::cuda')
     await expect(binarySel.locator('option')).toHaveCount(1)
   })
 
-  test('HW grid — fit-check warns when device backend ∉ BINARY supported_backends (§4)', async ({ page }) => {
-    // rocmfpx serves rocm/vulkan; a cpu-device slot pinned to it does not fit →
-    // non-blocking warning. system-info supplies the supported_backends the
-    // fit-check reads (spec-hw-slot-ownership §4).
+  test('HW grid — fit-check warns on a persisted pair the catalog does not offer (§4)', async ({ page }) => {
+    // rocmfpx serves rocm/vulkan; a cpu-device slot pinned to it does not fit.
+    // The cascade can no longer CREATE that state, but a persisted TOML can
+    // still carry it — the out-of-vocab pair keeps its own option and a
+    // non-blocking warning surfaces the misconfiguration (spec §4).
     await page.route('**/api/system-info', (route) =>
       route.fulfill({
         status: 200,
