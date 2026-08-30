@@ -325,6 +325,12 @@ class RunnerImageStore:
             leaves the marker untouched — deleting one tag must not erase
             proof that a sibling tag is still downloaded.
 
+        Deliberate non-fix: deleting the row's own HEADLINE tag (``image.tag``)
+        does not update that scalar column — ``row.tag`` is left pointing at
+        a now-untagged value until the next sync rewrites it. Self-heals on
+        the next successful sync pass; not fixed here to keep this method a
+        single, narrow concern (the tag-row/available-tags/marker triple).
+
         Notifies ``on_change`` only when a row was actually deleted.
         """
         with self._connect() as conn:

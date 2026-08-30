@@ -1195,6 +1195,89 @@ class TestDeleteRunnerImageTag:
         assert err["code"] == "runner_image.tag_not_found"
         assert err["details"] == {"image_id": self.IMAGE_ID, "tag": "9999"}
 
+    # ── pull-race guard (fix round 1, #2106) ────────────────────────────
+
+    def test_in_flight_pull_of_same_tag_409s_catalogue_untouched(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A running pull for THIS tag must block the delete — otherwise the
+        pull can complete after ``store.remove_tag`` and re-stamp
+        ``local_path``/``downloaded_at`` via ``set_local_state``, leaving the
+        row ``downloaded=True`` with zero tag rows (reviewer-reproduced
+        race, fix round 1)."""
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        job.state = "running"
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        def _boom(ref: str):
+            raise AssertionError("seam must not be reached while a pull is in flight")
+
+        monkeypatch.setattr("hal0.providers.podman_mutate.remove_image", _boom)
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "runner_image.pull_in_progress"
+
+        detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
+        assert any(t["tag"] == "0824" for t in detail["tags"])
+
+    def test_queued_untagged_job_also_blocks(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An older untagged job record (``job.tag is None``) always pulls
+        the headline — it must block a delete of the headline tag too."""
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0826")
+        job.state = "queued"
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+        monkeypatch.setattr(
+            "hal0.providers.podman_mutate.remove_image",
+            lambda ref: (_ for _ in ()).throw(AssertionError("seam must not be reached")),
+        )
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0826")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "runner_image.pull_in_progress"
+
+    def test_in_flight_pull_of_a_different_tag_does_not_block(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A running pull for a DIFFERENT tag of the same id must not block
+        deleting an unrelated, already-downloaded tag."""
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0826", tag="0826")
+        job.state = "running"
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+
+    def test_terminal_job_does_not_block(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed/failed/cancelled job record for this id is stale, not
+        in-flight — it must not block the delete."""
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        job.state = "completed"
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+
     # ── in-use guards ────────────────────────────────────────────────────
 
     def test_app_level_guard_409_names_slot_on_exact_ref_match(
@@ -1398,7 +1481,38 @@ class TestDeleteRunnerImageTag:
             r for r in activity["records"] if r["target"] == "ghcr.io/hal0ai/hal0-combined:0824"
         )
         assert rec["outcome"] == "ok"
-        assert rec["after"] == {"outcome": "removed"}
+        assert rec["after"] == {"outcome": "removed", "catalogue_removed": True}
+
+    def test_desync_logged_and_recorded_when_seam_removes_but_no_catalogue_row(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Fix round 1 (#2106, low finding): the seam agreeing the bytes are
+        gone doesn't guarantee ``store.remove_tag`` found a matching row —
+        e.g. the headline tag validated via ``image.tag`` with no
+        ``runner_image_tag`` row ever synced for it. That desync must be
+        both audited (``rec.after.catalogue_removed`` is ``False``) and
+        logged, without turning an honest 200 into an error."""
+        import logging
+
+        from hal0.registry.runner_image import RunnerImage
+
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="ghost", image="ghcr.io/x/ghost", tag="only"))
+        # Deliberately no set_tags call — no runner_image_tag row for "only".
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        with caplog.at_level(logging.WARNING, logger="hal0.api.routes.runner_images"):
+            resp = client.delete("/api/runner-images/ghost/tags/only")
+        assert resp.status_code == 200
+        assert resp.json() == {"removed": True, "outcome": "removed"}
+        assert "runner_image.rm_catalogue_desync" in caplog.text
+
+        activity = client.get(
+            "/api/activity", params={"category": "runner_image", "action": "runner_image.rm"}
+        ).json()
+        rec = next(r for r in activity["records"] if r["target"] == "ghcr.io/x/ghost:only")
+        assert rec["after"] == {"outcome": "removed", "catalogue_removed": False}
 
     def test_records_audit_action_as_error_on_conflict(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

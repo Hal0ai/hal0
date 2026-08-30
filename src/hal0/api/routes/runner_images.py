@@ -675,9 +675,19 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
       2. 404 ``runner_image.tag_not_found`` — id known, but ``tag`` is
          neither the headline tag, a ``runner_image_tag`` fact, nor an
          ``available_tags`` entry.
-      3. 409 ``runner_image.tag_in_use`` — application-level guard naming
+      3. 409 ``runner_image.pull_in_progress`` — a pull job for this id is
+         ``queued``/``running`` and targets this tag (or has no tag at
+         all — an older untagged job record, which always pulls the
+         headline). Fix round 1 (#2106): a pull racing this DELETE could
+         otherwise complete AFTER ``store.remove_tag`` and re-stamp
+         ``local_path``/``downloaded_at`` via ``set_local_state``, leaving
+         the row ``downloaded=True`` with zero tag rows. Mirrors
+         ``RunnerPullConflict``'s discipline (``runner_pull.py``): an
+         in-flight mutation on the same id wins, the caller is told to
+         cancel first rather than racing silently.
+      4. 409 ``runner_image.tag_in_use`` — application-level guard naming
          the slot(s) responsible (see :func:`_tag_in_use_by`).
-      4. ``podman_mutate.remove_image`` — the seam-level guard, a second
+      5. ``podman_mutate.remove_image`` — the seam-level guard, a second
          independent barrier: outcome ``"in-use"`` (podman rc 67) also 409s
          the same code but names no slots (the app-level guard above didn't
          catch it, e.g. an unmanaged container holding the image);
@@ -708,6 +718,15 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
             f"tag {tag!r} not catalogued for {image_id!r}",
             details={"image_id": image_id, "tag": tag},
             code="runner_image.tag_not_found",
+        )
+
+    jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
+    job = jobs.get(image_id)
+    if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
+        raise Conflict(
+            f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
+            details={"image_id": image_id, "tag": tag},
+            code="runner_image.pull_in_progress",
         )
 
     ref = f"{image.image}:{tag}"
@@ -741,7 +760,19 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
         # "removed" or "missing": the seam agrees the bytes are gone (or
         # already were) — update the catalogue to match.
         old_local_path = image.local_path
-        store.remove_tag(image_id, tag)
+        catalogue_removed = store.remove_tag(image_id, tag)
+        rec.after = {"outcome": outcome, "catalogue_removed": catalogue_removed}
+        if not catalogue_removed:
+            # The seam agrees the bytes are gone, but the catalogue had no
+            # matching tag row to delete — a desync worth a log line (the
+            # 200 response is still honest: the bytes really are gone/
+            # already-absent, this just flags the catalogue disagreeing).
+            log.warning(
+                "runner_image.rm_catalogue_desync image_id=%s tag=%s outcome=%s",
+                image_id,
+                tag,
+                outcome,
+            )
         if old_local_path:
             updated = store.get(image_id)
             if updated is None or updated.local_path is None:
