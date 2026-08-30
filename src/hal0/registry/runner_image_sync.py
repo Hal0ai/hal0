@@ -87,6 +87,32 @@ def _strip_registry_host(image_ref: str) -> str:
 #: ``v?1.2.3``-shaped tags — the "semver" bucket of :func:`sort_tags_newest_first`.
 _SEMVER_TAG_RE = re.compile(r"^v?\d+(\.\d+)+$")
 
+#: Cosign signature/attestation objects — ``cosign sign``/``cosign attest``
+#: pushes these into the SAME GHCR repo as the image itself, as an ordinary
+#: tag shaped ``sha256-<64 lowercase hex>`` (the signed digest, ``-``
+#: instead of ``:``), optionally suffixed ``.sig`` (signature) or ``.att``
+#: (attestation/provenance). They resolve and pull like any other tag, but
+#: they are never a "version" of the image — just noise in a tag picker or
+#: a "newer than headline" comparison.
+_COSIGN_ARTIFACT_TAG_RE = re.compile(r"^sha256-[0-9a-f]{64}(\.sig|\.att)?$")
+
+#: Per-commit CI tags — GitHub Actions pushes ``sha-<commit sha>`` (short,
+#: 7 hex chars, or full, 40) on every build of the CI-built toolbox
+#: families (hal0-toolbox-vulkan/rocm). Real, pullable images, but one per
+#: commit floods a family's tag list and should never win a "newer" slot
+#: either — that shape is what produced the observed .sig/CI-tag flood on
+#: ghcr.io/hal0ai/hal0-toolbox-vulkan and -rocm.
+_CI_COMMIT_TAG_RE = re.compile(r"^sha-[0-9a-f]{7,40}$")
+
+
+def is_noise_tag(tag: str) -> bool:
+    """True for cosign signature/attestation artifacts and per-commit CI
+    tags (see :data:`_COSIGN_ARTIFACT_TAG_RE` / :data:`_CI_COMMIT_TAG_RE`)
+    — real GHCR tags that must never reach a family's ``available_tags``
+    (tag picker) or a "newer than headline" comparison.
+    """
+    return bool(_COSIGN_ARTIFACT_TAG_RE.match(tag) or _CI_COMMIT_TAG_RE.match(tag))
+
 
 def sort_tags_newest_first(tags: list[str]) -> list[str]:
     """Order GHCR ``tags/list`` output newest-first (catalogue-v2 contract).
@@ -158,6 +184,14 @@ async def _ghcr_anon_token(repo: str, *, client: httpx.AsyncClient) -> str:
 
 
 async def _ghcr_list_tags(repo: str, *, token: str, client: httpx.AsyncClient) -> list[str]:
+    """Fetch ``tags/list`` for ``repo``, filtered of :func:`is_noise_tag` shapes.
+
+    Filtering here — the single fetch point every consumer (sync-time
+    ``available_tags``, the unpinned headline fallback, the API response,
+    the JSX tag picker/"newer" chip) is downstream of — is deliberate:
+    cosign signature/CI-commit tags never enter the catalogue at all,
+    rather than being filtered again by each reader.
+    """
     resp = await client.get(
         f"https://ghcr.io/v2/{repo}/tags/list",
         headers={"Authorization": f"Bearer {token}"},
@@ -166,7 +200,8 @@ async def _ghcr_list_tags(repo: str, *, token: str, client: httpx.AsyncClient) -
     resp.raise_for_status()
     payload = resp.json()
     tags = payload.get("tags")
-    return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+    raw = [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+    return [t for t in raw if not is_noise_tag(t)]
 
 
 def _manifest_content_size(payload: Any) -> int | None:
@@ -384,6 +419,7 @@ __all__ = [
     "IMAGES_JSON_URL",
     "SyncResult",
     "fetch_images_json",
+    "is_noise_tag",
     "probe_ghcr_package",
     "sort_tags_newest_first",
     "sync_runner_images",
