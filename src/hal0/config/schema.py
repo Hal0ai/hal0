@@ -50,9 +50,9 @@ from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
 
-#: Dedup set for the legacy-runner-key alias warnings below — config loads
+#: Dedup set for the runner-key alias warnings below — config loads
 #: live per request (settings PUT, slot reads, …), so without this a
-#: legacy box logs the same warning continuously until the operator hits
+#: pre-collapse box logs the same warning continuously until the operator hits
 #: Save once. Keyed ``(surface, key)`` so the two call sites (slot
 #: ``binary`` alias fold, ``[slots].default_images`` alias fold) each warn
 #: once per distinct offending key per process. Tests that assert on this
@@ -897,7 +897,7 @@ class SlotConfig(BaseModel):
     @field_validator("binary", mode="before")
     @classmethod
     def _binary_alias_fold(cls, v: Any) -> Any:
-        """Heal legacy runner keys (collapse spec §2) — read-side only.
+        """Heal superseded runner keys (collapse spec §2) — read-side only.
 
         Disk TOML is never rewritten; the canonical key is what the rest of
         the system (fit-check, launch, UI payload) sees, and the next

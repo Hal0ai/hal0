@@ -62,9 +62,9 @@ from hal0.errors import NotFound
 
 log = logging.getLogger(__name__)
 
-#: Dedup set for the legacy-env-override warning in
+#: Dedup set for the alias-env-override warning in
 #: :func:`resolve_runner_image` — config resolves live per request, so
-#: without this a legacy box logs the same warning continuously until the
+#: without this a pre-collapse box logs the same warning continuously until the
 #: operator switches off the old env var. Keyed ``(surface, key)``; tests
 #: that assert on this warning must clear it in their setup — see
 #: ``tests/runners/test_resolve_image.py``.
@@ -133,7 +133,7 @@ class Runner:
     #: member here; an incompatible pair WARNS at assignment (not at spawn).
     #: This is metadata, NOT a selector: ``rocmfpx`` is the single GPU key
     #: and lists both ``("rocm", "vulkan")`` because one Vulkan-portable
-    #: image serves both lanes — the legacy ``vulkanfpx`` spelling is a
+    #: image serves both lanes — the prior ``vulkanfpx`` spelling is a
     #: permanent alias that folds to ``rocmfpx`` before lookup, not a
     #: second registry entry. The concrete backend is chosen by the slot's
     #: typed ``device``, never by which key/spelling was used. Empty ``()``
@@ -275,7 +275,7 @@ RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
 
 
 def canonical_runner_key(key: str) -> str:
-    """Fold a legacy runner key to its canonical replacement (identity otherwise)."""
+    """Fold a superseded runner key to its canonical replacement (identity otherwise)."""
     return RUNNER_ALIASES.get(key, key)
 
 
@@ -296,7 +296,7 @@ def resolve_runner_image(runner: Runner) -> str:
     """Resolve ``runner`` to a pull-ready image ref.
 
     Precedence: ``HAL0_TOOLBOX_IMAGE_<KEY>`` env override (canonical name,
-    then any legacy-alias name, warned) → manifest pin → bundled default.
+    then any alias env name, warned) → manifest pin → bundled default.
     This is THE single resolver every provider (llama-server HW-gated
     runners, FLM, kokoro, qwen3-tts, comfyui) now shares — see the module
     docstring.
@@ -305,20 +305,20 @@ def resolve_runner_image(runner: Runner) -> str:
     env_val = os.environ.get(env_key, "").strip()
     if env_val:
         return env_val
-    for legacy, canon in RUNNER_ALIASES.items():
+    for alias_key, canon in RUNNER_ALIASES.items():
         if canon != runner.key:
             continue
-        legacy_key = f"HAL0_TOOLBOX_IMAGE_{legacy.upper()}"
-        legacy_val = os.environ.get(legacy_key, "").strip()
-        if legacy_val:
+        alias_env = f"HAL0_TOOLBOX_IMAGE_{alias_key.upper()}"
+        alias_val = os.environ.get(alias_env, "").strip()
+        if alias_val:
             _warn_once(
                 "runner_images.legacy_env_override",
-                legacy_key,
+                alias_env,
                 "runner_images.legacy_env_override var=%s use=HAL0_TOOLBOX_IMAGE_%s",
-                legacy_key,
+                alias_env,
                 runner.key.upper(),
             )
-            return legacy_val
+            return alias_val
     if runner.manifest_key:
         # Local import: hal0.config.loader is a much heavier module
         # (reads TOML config, paths, etc.) than this leaf registry should

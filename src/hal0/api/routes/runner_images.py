@@ -114,7 +114,7 @@ def enrich_row(
     (RUNNER_IMAGES insertion order — deterministic). Note ``defaults`` only
     ever carries ONE entry per image lineage BY CONSTRUCTION: the
     ``vulkanfpx`` runner key was collapsed into ``rocmfpx`` (permanent
-    alias — hal0.runners.RUNNER_ALIASES), legacy override keys are folded
+    alias — hal0.runners.RUNNER_ALIASES), alias override keys are folded
     to the canonical spelling at config load, and :func:`_effective_defaults`
     folds again as belt-and-braces, so no alias family can appear here to
     race its canonical for the match. ``in_use_by`` matches the exact
