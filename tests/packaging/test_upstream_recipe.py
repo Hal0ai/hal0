@@ -25,9 +25,7 @@ UPSTREAM = RUNNER / "upstream"
 ROCMFPX = RUNNER / "rocmfpx"
 
 MANIFEST = tomllib.loads((UPSTREAM / "manifest.toml").read_text(encoding="utf-8"))
-ROCMFPX_MANIFEST = tomllib.loads(
-    (ROCMFPX / "manifest.toml").read_text(encoding="utf-8")
-)
+ROCMFPX_MANIFEST = tomllib.loads((ROCMFPX / "manifest.toml").read_text(encoding="utf-8"))
 
 
 def test_the_variant_is_not_the_shipped_default() -> None:
@@ -56,9 +54,7 @@ def test_the_base_digest_is_byte_identical_to_the_default_recipe() -> None:
     toolchains on one box with one recipe claiming otherwise."""
     assert MANIFEST["base"]["digest"] == ROCMFPX_MANIFEST["base"]["digest"]
     assert MANIFEST["base"]["image"] == ROCMFPX_MANIFEST["base"]["image"]
-    assert (
-        MANIFEST["base"]["rocm_version"] == ROCMFPX_MANIFEST["base"]["rocm_version"]
-    )
+    assert MANIFEST["base"]["rocm_version"] == ROCMFPX_MANIFEST["base"]["rocm_version"]
 
 
 def test_the_cmake_flags_preserve_combined_hip_plus_vulkan() -> None:
@@ -66,9 +62,7 @@ def test_the_cmake_flags_preserve_combined_hip_plus_vulkan() -> None:
     property (both the rocmfpx and vulkanfpx lanes run one tag). Comparing as
     sets against the default recipe means a flag dropped from either manifest
     names itself in the diff."""
-    assert set(MANIFEST["build"]["cmake_flags"]) == set(
-        ROCMFPX_MANIFEST["build"]["cmake_flags"]
-    )
+    assert set(MANIFEST["build"]["cmake_flags"]) == set(ROCMFPX_MANIFEST["build"]["cmake_flags"])
     assert MANIFEST["build"]["gpu_arch"] == ROCMFPX_MANIFEST["build"]["gpu_arch"]
 
 
