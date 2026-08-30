@@ -124,3 +124,24 @@ def test_manifest_tier_applies_to_every_manifest_backed_runner(
     )
     resolved = resolve_runner_image(runner)
     assert resolved.endswith(f"@{digest}")
+
+
+def test_promptforge_manifest_digest_pin_resolves(tmp_hal0_home: str) -> None:
+    """Post-#1891: promptforge carries a REAL manifest_key (unlike
+    rocmfpx/vulkanfpx, whose manifest keys would point at the wrong lineage —
+    see the module docstring). A shipped manifest entry must therefore win
+    over the bundled tag default."""
+    runner = get_runner("promptforge")
+    assert runner.manifest_key == "promptforge"
+    _write_manifest(
+        tmp_hal0_home,
+        {
+            "toolbox_images": {
+                "promptforge": {
+                    "tag": "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38",
+                    "digest": "sha256:" + "c" * 64,
+                }
+            }
+        },
+    )
+    assert resolve_runner_image(runner) == f"ghcr.io/hal0ai/hal0-promptforge@sha256:{'c' * 64}"

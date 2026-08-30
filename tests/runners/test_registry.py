@@ -145,3 +145,18 @@ def test_rocm_and_vulkan_fpx_share_supported_backends() -> None:
     device — not BINARY — disambiguates (spec-hw-slot-ownership §2/§4)."""
     assert RUNNER_IMAGES["rocmfpx"].supported_backends == ("rocm", "vulkan")
     assert RUNNER_IMAGES["vulkanfpx"].supported_backends == ("rocm", "vulkan")
+
+
+def test_promptforge_shipped_pin_matches_the_gate_digest() -> None:
+    """The shipped manifest entry IS the #1891 gate evidence made durable:
+    tag must stay in lockstep with DEFAULT_PROMPTFORGE_IMAGE, and the digest
+    must be the exact image the ct150 gate validated (report
+    2026-08-30, hal0-runner-images images.json pins the same digest)."""
+    from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+
+    manifest = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["toolbox_images"]["promptforge"]
+    assert entry["tag"] == DEFAULT_PROMPTFORGE_IMAGE
+    assert entry["digest"] == (
+        "sha256:370af6e9717e8c96742198a4b920888e6a248d447e21e3432de4d2c913703aea"
+    )
