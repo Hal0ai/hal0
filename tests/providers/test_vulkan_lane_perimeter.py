@@ -40,9 +40,12 @@ def _pin(monkeypatch, ref: str) -> None:
     Uses ``resolve_runner_image``'s documented ``HAL0_TOOLBOX_IMAGE_<KEY>``
     seam rather than reaching into the registry — :class:`hal0.runners.Runner`
     is a frozen dataclass, and going through the real resolver means these
-    tests exercise the same precedence chain a box does. Both llama-server GPU
-    runner keys are pinned because ``rocmfpx`` and ``vulkanfpx`` resolve to the
-    same image today and either can back a GPU lane.
+    tests exercise the same precedence chain a box does. Both the canonical
+    (``ROCMFPX``) and legacy-alias (``VULKANFPX``) env var names are pinned:
+    ``rocmfpx`` is the only runner key since the collapse, but
+    ``resolve_runner_image`` still checks the legacy name as a fallback (see
+    ``RUNNER_ALIASES``), and pinning both keeps this test correct regardless
+    of which one a caller's config happens to hit.
 
     ``hal0.bench.harness`` imported ``DEFAULT_ROCMFPX_IMAGE`` by value at
     module load, so its ``LaneSpec`` table is pinned separately.

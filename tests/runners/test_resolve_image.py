@@ -11,11 +11,21 @@ in ``hal0.runners``).
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
+import hal0.runners as runners
 from hal0.runners import RUNNER_IMAGES, get_runner, resolve_runner_image
+
+
+@pytest.fixture(autouse=True)
+def _reset_legacy_env_warn_dedup() -> None:
+    """The legacy-env-override warning dedups once per (surface, key) per
+    process (finding 3) — clear the seen-set before each test so caplog
+    assertions here stay deterministic regardless of test order/reruns."""
+    runners._warned.clear()
 
 
 def _write_manifest(home: str, payload: dict[str, object]) -> None:
@@ -67,7 +77,7 @@ def test_env_override_beats_manifest_digest_pin(tmp_hal0_home: str, monkeypatch)
 def test_env_override_beats_bundled_default_with_no_manifest_key(
     tmp_hal0_home: str, monkeypatch
 ) -> None:
-    """rocmfpx/vulkanfpx/cuda/cpu deliberately carry manifest_key=None (see the
+    """rocmfpx/cuda/cpu deliberately carry manifest_key=None (see the
     module docstring) — the env tier still applies even though the manifest
     tier is always skipped for them."""
     runner = get_runner("rocmfpx")
@@ -126,9 +136,25 @@ def test_manifest_tier_applies_to_every_manifest_backed_runner(
     assert resolved.endswith(f"@{digest}")
 
 
+def test_legacy_alias_env_override_still_resolves(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", raising=False)
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", "ghcr.io/x/legacy:1")
+    with caplog.at_level(logging.WARNING, logger="hal0.runners"):
+        assert resolve_runner_image(get_runner("rocmfpx")) == "ghcr.io/x/legacy:1"
+    assert any("VULKANFPX" in r.message for r in caplog.records)
+
+
+def test_canonical_env_override_beats_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/canon:1")
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", "ghcr.io/x/legacy:1")
+    assert resolve_runner_image(get_runner("rocmfpx")) == "ghcr.io/x/canon:1"
+
+
 def test_promptforge_manifest_digest_pin_resolves(tmp_hal0_home: str) -> None:
     """Post-#1891: promptforge carries a REAL manifest_key (unlike
-    rocmfpx/vulkanfpx, whose manifest keys would point at the wrong lineage —
+    rocmfpx, whose manifest key would point at the wrong lineage —
     see the module docstring). A shipped manifest entry must therefore win
     over the bundled tag default."""
     runner = get_runner("promptforge")

@@ -130,11 +130,13 @@ def enrich_row(
     ``is_default`` matches on the default ref's REPO against ``image.image``
     (contract: "any tag"), first matching family in ``defaults`` order wins
     (RUNNER_IMAGES insertion order — deterministic). Note ``defaults`` only
-    ever carries ONE entry per shared image lineage: ``vulkanfpx`` is folded
-    into its canonical ``rocmfpx`` key upstream (runner-image-catalogue v3,
-    task 11 — see :func:`_effective_defaults`), so it never appears here to
-    race rocmfpx for the match. ``in_use_by`` matches the exact ``image:tag``
-    ref.
+    ever carries ONE entry per image lineage BY CONSTRUCTION: the
+    ``vulkanfpx`` runner key was collapsed into ``rocmfpx`` (permanent
+    alias — hal0.runners.RUNNER_ALIASES), alias override keys are folded
+    to the canonical spelling at config load, and :func:`_effective_defaults`
+    folds again as belt-and-braces, so no alias family can appear here to
+    race its canonical for the match. ``in_use_by`` matches the exact
+    ``image:tag`` ref.
 
     ``local`` is one request's ``podman_introspect.images_digests()`` read
     (``None`` when neither store answered) — store-truth (v3): ``store_state``

@@ -50,6 +50,25 @@ from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
 
+#: Dedup set for the runner-key alias warnings below — config loads
+#: live per request (settings PUT, slot reads, …), so without this a
+#: pre-collapse box logs the same warning continuously until the operator hits
+#: Save once. Keyed ``(surface, key)`` so the two call sites (slot
+#: ``binary`` alias fold, ``[slots].default_images`` alias fold) each warn
+#: once per distinct offending key per process. Tests that assert on this
+#: warning must clear it in their setup — see ``tests/config/
+#: test_runner_key_aliases.py``.
+_warned: set[tuple[str, str]] = set()
+
+
+def _warn_once(surface: str, key: str, message: str, *args: object) -> None:
+    dedup_key = (surface, key)
+    if dedup_key in _warned:
+        return
+    _warned.add(dedup_key)
+    log.warning(message, *args)
+
+
 # ── Shared constants ───────────────────────────────────────────────────────────
 #
 # The identity vocabularies (device enum, legacy backend enum, the
@@ -874,6 +893,31 @@ class SlotConfig(BaseModel):
             extra["image"] = image_gen
             data["extra"] = extra
         return data
+
+    @field_validator("binary", mode="before")
+    @classmethod
+    def _binary_alias_fold(cls, v: Any) -> Any:
+        """Heal superseded runner keys (collapse spec §2) — read-side only.
+
+        Disk TOML is never rewritten; the canonical key is what the rest of
+        the system (fit-check, launch, UI payload) sees, and the next
+        operator Save persists it naturally. Unknown keys pass through —
+        the drawer's out-of-vocab option owns that surface.
+        """
+        if not isinstance(v, str) or not v:
+            return v
+        from hal0.runners import canonical_runner_key
+
+        canon = canonical_runner_key(v)
+        if canon != v:
+            _warn_once(
+                "slot_config.binary_alias",
+                v,
+                "slot_config.binary_alias key=%s canonical=%s",
+                v,
+                canon,
+            )
+        return canon
 
     @field_validator("name")
     @classmethod
@@ -2204,7 +2248,7 @@ class SlotsConfig(BaseModel):
         description=(
             "Per-runner-family operator default-image overrides "
             "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
-            "family keys (rocmfpx, vulkanfpx, cuda, cpu, flm, kokoro, "
+            "family keys (rocmfpx, cuda, cpu, flm, kokoro, "
             "moonshine, qwen3tts, comfyui); values are full image refs "
             "(e.g. 'ghcr.io/hal0ai/hal0-combined:0824'). A family listed "
             "here launches that ref instead of the release-baked default "
@@ -2230,17 +2274,57 @@ class SlotsConfig(BaseModel):
         family vocabulary is ``hal0.runners.RUNNER_IMAGES`` (imported
         lazily: hal0.runners imports THIS module at import time, so a
         module-level import here would be a cycle).
+
+        Keys are canonicalized BEFORE the null check: a null on either
+        spelling (``vulkanfpx`` or ``rocmfpx``) clears the same canonical
+        family, order-independent. A merged request like
+        ``{"vulkanfpx": "x", "rocmfpx": null}`` (or the reverse order)
+        must clear the family rather than let the alias-origin write
+        silently resurrect it — every null-cleared canonical family is
+        tracked and refuses any later value write into it, regardless of
+        which spelling carried the value and regardless of iteration order.
         """
         if v is None:
             return {}
         if not isinstance(v, dict):
             return v  # let pydantic's dict[str, str] coercion produce the error
-        from hal0.runners import RUNNER_IMAGES
+        from hal0.runners import RUNNER_IMAGES, canonical_runner_key
 
-        cleaned: dict[str, Any] = {}
+        # Pass 1: canonicalize every key up front (so a null clear and a
+        # value write for the same family are recognized as the same
+        # family no matter which spelling carried which, and no matter
+        # which one appears first in the source dict).
+        entries: list[tuple[str, bool, Any]] = []  # (canon, aliased, ref)
+        cleared: set[str] = set()
         for key, ref in v.items():
+            canon = canonical_runner_key(key)
+            aliased = canon != key
+            if aliased:
+                _warn_once(
+                    "slots.default_images_alias",
+                    key,
+                    "slots.default_images_alias key=%s canonical=%s",
+                    key,
+                    canon,
+                )
             if ref is None:
-                continue  # explicit null = clear this family's override
+                cleared.add(canon)  # explicit null = clear this family's override
+                continue
+            entries.append((canon, aliased, ref))
+
+        # Pass 2: apply value writes, refusing any family a null cleared.
+        cleaned: dict[str, Any] = {}
+        canonical_origin: set[str] = set()  # keys in `cleaned` written by a canonical key
+        for canon, aliased, ref in entries:
+            if canon in cleared:
+                # A null clear (either spelling, either order) always wins
+                # over a value write to the same family.
+                continue
+            key = canon
+            if key in cleaned and (aliased or key in canonical_origin):
+                # A canonical-origin entry always wins over an alias-origin
+                # one, regardless of which key appeared first in the TOML.
+                continue
             if key not in RUNNER_IMAGES:
                 raise ValueError(
                     f"[slots].default_images key {key!r} is not a known runner "
@@ -2252,6 +2336,8 @@ class SlotsConfig(BaseModel):
                     "ref (send null to clear the override)"
                 )
             cleaned[key] = ref.strip()
+            if not aliased:
+                canonical_origin.add(key)
         return cleaned
 
     @field_validator("publish_host")

@@ -16,11 +16,13 @@ import pytest
 from hal0.errors import NotFound
 from hal0.runners import (
     CANONICAL_FAMILY,
+    FPX_RUNNER_KEYS,
     RUNNER_IMAGES,
     STALE_RUNNER_IMAGE_REFS,
     Runner,
     RunnerSupports,
     canonical_family,
+    canonical_runner_key,
     get_runner,
     runner_for_backend,
     runner_matches,
@@ -35,7 +37,6 @@ _REAL_DEVICE_CLASSES = {"gpu", "cpu", "npu", "img"}
 def test_registry_has_every_expected_key() -> None:
     assert set(RUNNER_IMAGES) == {
         "rocmfpx",
-        "vulkanfpx",
         "promptforge",
         "cuda",
         "cpu",
@@ -85,7 +86,7 @@ def test_get_runner_unknown_key_raises_not_found() -> None:
         ("cuda", None, "cuda"),
         (None, "cpu", "cpu"),
         ("cpu", None, "cpu"),
-        ("vulkan", "gpu", "vulkanfpx"),
+        ("vulkan", "gpu", "rocmfpx"),
         ("rocm", "gpu", "rocmfpx"),
         (None, None, "rocmfpx"),
         ("", "gpu", "rocmfpx"),
@@ -106,15 +107,16 @@ def test_runner_matches_device_class_gate() -> None:
 
 def test_runner_matches_backend_gate_only_when_both_declare_one() -> None:
     rocm_runner = RUNNER_IMAGES["rocmfpx"]
-    # Both sides declare a backend and disagree -> reject.
-    assert runner_matches(rocm_runner, device_class="gpu", backend="vulkan") is False
-    # Same backend -> accept.
+    # When runner.supported_backends is declared, backend membership is checked.
+    assert runner_matches(rocm_runner, device_class="gpu", backend="vulkan") is True
     assert runner_matches(rocm_runner, device_class="gpu", backend="rocm") is True
+    assert runner_matches(rocm_runner, device_class="gpu", backend="cuda") is False
     # Caller has no opinion on backend -> never vetoes over it.
     assert runner_matches(rocm_runner, device_class="gpu", backend=None) is True
-    # Backend-agnostic runner (kokoro) never vetoes on backend either.
+    # Runner with supported_backends only accepts those backends.
     kokoro_runner = RUNNER_IMAGES["kokoro"]
-    assert runner_matches(kokoro_runner, device_class="cpu", backend="rocm") is True
+    assert runner_matches(kokoro_runner, device_class="cpu", backend="cpu") is True
+    assert runner_matches(kokoro_runner, device_class="cpu", backend="rocm") is False
 
 
 def test_stale_runner_image_refs_alias_matches_schema() -> None:
@@ -143,10 +145,58 @@ def test_llama_server_runners_report_gguf_format() -> None:
 
 
 def test_rocm_and_vulkan_fpx_share_supported_backends() -> None:
-    """One Vulkan-portable image → both fpx keys advertise (rocm, vulkan);
+    """One Vulkan-portable image → both fpx keys resolve to rocmfpx;
     device — not BINARY — disambiguates (spec-hw-slot-ownership §2/§4)."""
     assert RUNNER_IMAGES["rocmfpx"].supported_backends == ("rocm", "vulkan")
-    assert RUNNER_IMAGES["vulkanfpx"].supported_backends == ("rocm", "vulkan")
+    assert get_runner("vulkanfpx") is get_runner("rocmfpx")
+
+
+def test_vulkanfpx_key_collapsed() -> None:
+    """#2127 follow-up: there is no vulkanFPX binary — the key is gone."""
+    assert "vulkanfpx" not in RUNNER_IMAGES
+
+
+def test_vulkanfpx_alias_resolves_to_rocmfpx() -> None:
+    assert canonical_runner_key("vulkanfpx") == "rocmfpx"
+    assert canonical_runner_key("rocmfpx") == "rocmfpx"
+    assert canonical_runner_key("kokoro") == "kokoro"  # non-aliased passthrough
+    assert get_runner("vulkanfpx") is RUNNER_IMAGES["rocmfpx"]
+
+
+def test_runner_for_backend_vulkan_is_rocmfpx() -> None:
+    assert runner_for_backend("vulkan").key == "rocmfpx"
+
+
+def test_fpx_guard_covers_only_the_canonical_key() -> None:
+    assert frozenset({"rocmfpx"}) == FPX_RUNNER_KEYS
+
+
+def test_runner_matches_consults_supported_backends() -> None:
+    """The vulkan lane must match rocmfpx now that the vulkanfpx row is gone.
+
+    The single `backend` field is the default lane, not a veto —
+    `supported_backends` is the membership test when declared (§4).
+    """
+    rocmfpx = RUNNER_IMAGES["rocmfpx"]
+    assert runner_matches(rocmfpx, device_class="gpu", backend="vulkan")
+    assert runner_matches(rocmfpx, device_class="gpu", backend="rocm")
+    assert not runner_matches(rocmfpx, device_class="gpu", backend="cuda")
+    # A caller with no opinion on backend (backend=None) never vetoes,
+    # regardless of what the runner declares — comfyui actually declares
+    # supported_backends=("rocm",) here, so this exercises the `not
+    # backend: return True` early return, not the empty-tuple branch.
+    assert runner_matches(RUNNER_IMAGES["comfyui"], device_class="img", backend=None)
+    # A genuinely backend-agnostic runner (empty supported_backends AND no
+    # declared `backend`) never vetoes on backend even when the caller DOES
+    # name one — this is the empty-supported_backends branch itself.
+    agnostic = Runner(
+        "synthetic-agnostic",
+        "ghcr.io/example/agnostic:1",
+        "flm",
+        RunnerSupports(),
+        "cpu",
+    )
+    assert runner_matches(agnostic, device_class="cpu", backend="cuda")
 
 
 def test_promptforge_shipped_pin_matches_the_gate_digest() -> None:

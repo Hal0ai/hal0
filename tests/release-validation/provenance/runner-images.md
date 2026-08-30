@@ -19,7 +19,7 @@ than hal0-resident, and the first question is always "which image, built from wh
 | | |
 |---|---|
 | Tag | `ghcr.io/hal0ai/hal0-combined:0822` |
-| Consumed by | `hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` — **both** the `rocmfpx` and `vulkanfpx` runners resolve to this one tag |
+| Consumed by | `hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` — the `rocmfpx` runner resolves to this one tag and serves the Vulkan lane too (`supported_backends`); `vulkanfpx` is a permanent legacy alias for `rocmfpx`, not a separate runner (2026-08-30 collapse, see below) |
 | Recipe | `packaging/runner/rocmfpx/` |
 | Manifest | `packaging/runner/rocmfpx/manifest.toml` |
 | Build script | `packaging/runner/rocmfpx/build.sh` |
@@ -129,3 +129,14 @@ language. No lane may trust generated text before it passes.
 Update it in the same PR that moves `DEFAULT_ROCMFPX_IMAGE` or changes anything in
 `packaging/runner/rocmfpx/`. A stale provenance note is the failure mode it exists to prevent,
 one level up.
+
+## Provenance note: the `vulkanfpx` key collapse (2026-08-30)
+
+`vulkanfpx` was removed from `RUNNER_IMAGES`; it never named a distinct binary or image — the
+`rocmfpx` image always served both the ROCm and Vulkan backends via `supported_backends`, so the
+two-key registry only ever pointed both keys at this same `:0822` lineage. `hal0.runners.RUNNER_ALIASES`
+now folds `vulkanfpx` to `rocmfpx` at every lookup (config load, env override, slot resolution).
+The alias is **permanent** — no removal date — because persisted slot TOML, model
+`preferred_runner` rows, and operator muscle memory all outlive any release. This provenance
+record is unaffected: the tag, digest, and recipe above describe the one image both keys always
+resolved to.

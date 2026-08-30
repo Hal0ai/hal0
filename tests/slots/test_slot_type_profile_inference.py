@@ -132,6 +132,16 @@ def test_type_implied_profile_vetoes_a_runtime_family_the_device_cannot_run(
     assert type_implied_profile({"type": "tts", "device": "gpu-rocm"}) == "qwen3-tts"
 
 
+def test_runner_fits_slot_honors_the_legacy_vulkanfpx_alias() -> None:
+    """Coverage lock: the permanent ``vulkanfpx`` alias must reach the
+    fit-check, not just ``get_runner`` in isolation — ``runner_fits_slot``
+    resolves the alias key to ``rocmfpx`` and then matches it against the
+    slot's device/backend exactly like the canonical spelling would."""
+    from hal0.slots.profile_adopt import runner_fits_slot
+
+    assert runner_fits_slot("vulkanfpx", {"device": "gpu-vulkan"}) is True
+
+
 def test_type_implied_profile_ignores_the_cli_legacy_provider_default(
     tmp_hal0_home: str,
 ) -> None:

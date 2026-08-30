@@ -31,10 +31,10 @@ Deliberate scope note for ``manifest_key``: ``manifest.json``'s
 the OLD per-backend toolboxes as ``"rocm"`` / ``"vulkan"`` (see
 ``hal0-toolbox-rocm:v1`` / ``hal0-toolbox-vulkan:v1`` in that file) — a
 DIFFERENT image lineage from :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE`.
-Wiring ``rocmfpx``/``vulkanfpx`` to those manifest keys would silently
+Wiring ``rocmfpx`` to those manifest keys would silently
 downgrade every fresh/updated install's GPU runner to the old toolbox the
 day a manifest ships with real digests. So — unlike the spec's illustrative
-pseudocode — the ``rocmfpx``/``vulkanfpx``/``cuda``/``cpu`` entries below
+pseudocode — the ``rocmfpx``/``cuda``/``cpu`` entries below
 carry ``manifest_key=None`` (env override still applies; the manifest tier
 is simply skipped, exactly matching the OLD :func:`resolve_default_image`
 behaviour, which never consulted the manifest either). ``flm`` / ``kokoro``
@@ -46,6 +46,7 @@ for this image lineage, so the wrong-lineage trap above does not apply.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -58,6 +59,25 @@ from hal0.config.schema import (
     STALE_ROCMFPX_IMAGE_REFS,
 )
 from hal0.errors import NotFound
+
+log = logging.getLogger(__name__)
+
+#: Dedup set for the alias-env-override warning in
+#: :func:`resolve_runner_image` — config resolves live per request, so
+#: without this a pre-collapse box logs the same warning continuously until the
+#: operator switches off the old env var. Keyed ``(surface, key)``; tests
+#: that assert on this warning must clear it in their setup — see
+#: ``tests/runners/test_resolve_image.py``.
+_warned: set[tuple[str, str]] = set()
+
+
+def _warn_once(surface: str, key: str, message: str, *args: object) -> None:
+    dedup_key = (surface, key)
+    if dedup_key in _warned:
+        return
+    _warned.add(dedup_key)
+    log.warning(message, *args)
+
 
 #: Kept as a plain local Literal (NOT imported from ``hal0.profiles``) so
 #: this module has zero import-time coupling to the profiles subsystem —
@@ -111,10 +131,13 @@ class Runner:
     #: fit-check metadata for spec-hw-slot-ownership §4. A slot's
     #: ``(device, BINARY)`` pair is compatible iff the device's backend is a
     #: member here; an incompatible pair WARNS at assignment (not at spawn).
-    #: This is metadata, NOT a selector: ``rocmfpx``/``vulkanfpx`` share one
-    #: Vulkan-portable image and therefore both list ``("rocm", "vulkan")`` —
-    #: the concrete backend is chosen by the slot's typed ``device``, never by
-    #: which key was picked. Empty ``()`` = backend-agnostic (no veto).
+    #: This is metadata, NOT a selector: ``rocmfpx`` is the single GPU key
+    #: and lists both ``("rocm", "vulkan")`` because one Vulkan-portable
+    #: image serves both lanes — the prior ``vulkanfpx`` spelling is a
+    #: permanent alias that folds to ``rocmfpx`` before lookup, not a
+    #: second registry entry. The concrete backend is chosen by the slot's
+    #: typed ``device``, never by which key/spelling was used. Empty ``()``
+    #: = backend-agnostic (no veto).
     supported_backends: tuple[str, ...] = ()
     #: Model-file format / arch family this runner consumes (``"gguf"`` for the
     #: llama-server fork family, else the single-purpose runtime's own format).
@@ -135,17 +158,6 @@ RUNNER_IMAGES: dict[str, Runner] = {
         supported_backends=("rocm", "vulkan"),
         format_arch="gguf",
     ),
-    "vulkanfpx": Runner(
-        "vulkanfpx",
-        DEFAULT_ROCMFPX_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=True, jinja=True, mmproj=True),
-        "gpu",
-        "vulkan",
-        None,
-        supported_backends=("rocm", "vulkan"),
-        format_arch="gguf",
-    ),
     "promptforge": Runner(
         "promptforge",
         DEFAULT_PROMPTFORGE_IMAGE,
@@ -156,12 +168,12 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # Real key as of the #1891 ct150 gate PASS (2026-08-30, report at
         # /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md):
         # manifest.json's toolbox_images.promptforge now exists and carries
-        # the exact digest the gate validated, so — unlike rocmfpx/vulkanfpx,
-        # whose manifest keys would resolve a DIFFERENT lineage (module
-        # docstring) — this key points at the same image this Runner's
-        # bundled tag names. promptforge remains an OPTIONAL runner either
-        # way (operator decision on #1946): a slot gets this image only by
-        # selecting this runner; nothing here touches the AMD default.
+        # the exact digest the gate validated, so — unlike rocmfpx, whose
+        # manifest key would resolve a DIFFERENT lineage (module docstring)
+        # — this key points at the same image this Runner's bundled tag
+        # names. promptforge remains an OPTIONAL runner either way (operator
+        # decision on #1946): a slot gets this image only by selecting this
+        # runner; nothing here touches the AMD default.
         "promptforge",
         supported_backends=("rocm",),  # HIP-only build: deliberately NOT
         # vulkan — the existing (device, BINARY) fit-check refuses a
@@ -253,9 +265,23 @@ RUNNER_IMAGES: dict[str, Runner] = {
 #: import) keep working unchanged.
 STALE_RUNNER_IMAGE_REFS = STALE_ROCMFPX_IMAGE_REFS
 
+#: Legacy runner keys → the canonical key that replaced them. PERMANENT —
+#: persisted slot TOML (`binary = "vulkanfpx"`), model `preferred_runner`
+#: rows, env overrides, and operator muscle memory all outlive any release;
+#: the cost of keeping an entry is one dict line. `vulkanfpx` never named a
+#: real binary: the runner is ROCmFPX, whose image happens to ship a
+#: working Vulkan backend (see the collapse spec, 2026-08-30).
+RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
+
+
+def canonical_runner_key(key: str) -> str:
+    """Fold a superseded runner key to its canonical replacement (identity otherwise)."""
+    return RUNNER_ALIASES.get(key, key)
+
 
 def get_runner(key: str) -> Runner:
     """Look up a runner by key, or raise :class:`~hal0.errors.NotFound`."""
+    key = canonical_runner_key(key)
     runner = RUNNER_IMAGES.get(key)
     if runner is None:
         raise NotFound(
@@ -269,16 +295,30 @@ def get_runner(key: str) -> Runner:
 def resolve_runner_image(runner: Runner) -> str:
     """Resolve ``runner`` to a pull-ready image ref.
 
-    Precedence: ``HAL0_TOOLBOX_IMAGE_<KEY>`` env override → the release
-    manifest's digest pin (only when ``runner.manifest_key`` is set) →
-    ``runner.image`` (the bundled default). This is THE single resolver
-    every provider (llama-server HW-gated runners, FLM, kokoro, qwen3-tts,
-    comfyui) now shares — see the module docstring.
+    Precedence: ``HAL0_TOOLBOX_IMAGE_<KEY>`` env override (canonical name,
+    then any alias env name, warned) → manifest pin → bundled default.
+    This is THE single resolver every provider (llama-server HW-gated
+    runners, FLM, kokoro, qwen3-tts, comfyui) now shares — see the module
+    docstring.
     """
     env_key = f"HAL0_TOOLBOX_IMAGE_{runner.key.upper()}"
     env_val = os.environ.get(env_key, "").strip()
     if env_val:
         return env_val
+    for alias_key, canon in RUNNER_ALIASES.items():
+        if canon != runner.key:
+            continue
+        alias_env = f"HAL0_TOOLBOX_IMAGE_{alias_key.upper()}"
+        alias_val = os.environ.get(alias_env, "").strip()
+        if alias_val:
+            _warn_once(
+                "runner_images.legacy_env_override",
+                alias_env,
+                "runner_images.legacy_env_override var=%s use=HAL0_TOOLBOX_IMAGE_%s",
+                alias_env,
+                runner.key.upper(),
+            )
+            return alias_val
     if runner.manifest_key:
         # Local import: hal0.config.loader is a much heavier module
         # (reads TOML config, paths, etc.) than this leaf registry should
@@ -305,13 +345,9 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 
       * ``backend == "cuda"`` → the ``cuda`` runner.
       * ``device_class == "cpu"`` or ``backend == "cpu"`` → the ``cpu`` runner.
-      * ``backend == "vulkan"`` → the ``vulkanfpx`` runner.
-      * everything else (rocm / unspecified GPU) → the ``rocmfpx`` runner.
-
-    ``rocmfpx`` and ``vulkanfpx`` resolve to the SAME image
-    (:data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` is Vulkan-portable —
-    see that constant's docstring) — the two keys exist so a future runner
-    split has somewhere to land, not because they differ today.
+      * ``backend == "rocm"``, ``backend == "vulkan"``, or unspecified GPU →
+        the ``rocmfpx`` runner (one Vulkan-portable image serves both GPU
+        lanes; the slot's ``device`` picks the lane).
     """
     be = (backend or "").lower()
     dc = (device_class or "").lower()
@@ -319,39 +355,43 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
         return get_runner("cuda")
     if dc == "cpu" or be == "cpu":
         return get_runner("cpu")
-    if be == "vulkan":
-        return get_runner("vulkanfpx")
     return get_runner("rocmfpx")
 
 
-#: The only two runner keys whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
+#: The only runner key whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
 #: single fork build that understands the custom GGML tensor type ids (100 /
 #: 103) a ROCmFPX-family GGUF (``hal0-brain-sft-q8-rocmfpx`` and friends) is
 #: packed with. Every other runner (``cpu``, ``cuda``, …) runs stock
 #: llama.cpp, which SIGSEGVs on those tensor types instead of rejecting them
 #: cleanly (hal0#1790). Used by the launch-time quant/runner compatibility
 #: guard in :func:`hal0.providers.container._resolve_llama_scalars`.
-FPX_RUNNER_KEYS = frozenset({"rocmfpx", "vulkanfpx"})
+FPX_RUNNER_KEYS = frozenset({"rocmfpx"})
 
 
-#: Family-key aliases for surfaces keyed "one lever per image lineage"
-#: ([slots].default_images, the family strip). ``vulkanfpx`` shares
-#: DEFAULT_ROCMFPX_IMAGE with ``rocmfpx`` (see runner_for_backend's docstring)
-#: — two override keys for one image would let them contradict each other.
-#: The runner KEYS both stay: slots still select either for launch.
-CANONICAL_FAMILY: dict[str, str] = {"vulkanfpx": "rocmfpx"}
+#: Family view of :data:`RUNNER_ALIASES`, kept for the runner-images
+#: catalogue surfaces (the family strip, ``_effective_defaults``'s override
+#: fold, ``_resolve_image_ref``'s defaults-map fold). Since the vulkanfpx
+#: collapse there is exactly ONE key per image lineage, so "family of a
+#: key" and "canonical runner key" are the same fold — this is the same
+#: dict, not a second table that could drift.
+CANONICAL_FAMILY: dict[str, str] = RUNNER_ALIASES
 
 
 def canonical_family(key: str) -> str:
-    """The default-images/strip family a runner key belongs to."""
-    return CANONICAL_FAMILY.get(key, key)
+    """The default-images/strip family a runner key belongs to.
+
+    Post-collapse this is identical to :func:`canonical_runner_key`; it
+    survives as a name because the catalogue surfaces speak in families.
+    """
+    return canonical_runner_key(key)
 
 
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
-    ``device_class`` is matched exactly when provided; ``backend`` is only
-    checked when BOTH the runner and the caller declare one (npu/cpu/img
+    ``device_class`` is matched exactly when provided; ``backend`` is checked against
+    ``supported_backends`` when the runner declares any (the single ``backend`` field is only
+    the default lane); otherwise against ``backend`` when both sides declare one (npu/cpu/img
     runners are backend-agnostic, and a caller with no opinion on backend
     never vetoes a runner over it). Shared "does this runner fit this device/
     backend lane" predicate — used by the slot ``binary`` fit-check
@@ -359,18 +399,24 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
     """
     if device_class and runner.device_class != device_class:
         return False
-    return not (runner.backend and backend and runner.backend != backend)
+    if not backend:
+        return True
+    if runner.supported_backends:
+        return backend in runner.supported_backends
+    return not (runner.backend and runner.backend != backend)
 
 
 __all__ = [
     "CANONICAL_FAMILY",
     "FPX_RUNNER_KEYS",
+    "RUNNER_ALIASES",
     "RUNNER_IMAGES",
     "STALE_RUNNER_IMAGE_REFS",
     "Runner",
     "RunnerSupports",
     "RuntimeFamily",
     "canonical_family",
+    "canonical_runner_key",
     "get_runner",
     "resolve_runner_image",
     "runner_for_backend",

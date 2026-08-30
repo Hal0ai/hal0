@@ -1974,7 +1974,8 @@ class TestSlotHardwareSegment:
 class TestFPXQuantRunnerGuard:
     """hal0#1790 defense-in-depth: a ROCmFPX-family quant (custom GGML tensor
     type ids 100/103 — see ``hal0.registry.detect.quant_from_rocmfpx_filename``)
-    must never reach a launch on a runner that isn't ``rocmfpx``/``vulkanfpx``.
+    must never reach a launch on a runner that isn't ``rocmfpx`` (vulkan
+    served via ``supported_backends``, not a separate runner key).
     The probe fix (``hal0.hardware.probe._amd_gpu_info``) stops the installer
     from picking this pairing going forward; this guard is the backstop for a
     stale slot TOML, a manual ``HAL0_BRAIN_MODEL`` override, or a hand-swapped
@@ -2028,6 +2029,8 @@ class TestFPXQuantRunnerGuard:
 
     def test_rocmfpx_quant_on_gpu_vulkan_slot_is_allowed(self) -> None:
         vulkan = ProfileConfig(flags="-fa on", backend="vulkan")
+        # binary="vulkanfpx" is deliberate here: the legacy alias spelling,
+        # exercised on purpose — it heals to "rocmfpx" via get_runner().
         cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat", binary="vulkanfpx")
         model_info = _model_info(quant="ROCmFP4")
         spec = self._spec(cfg, model_info, vulkan)
