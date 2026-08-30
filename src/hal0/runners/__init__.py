@@ -44,6 +44,7 @@ keys and are wired accordingly.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -56,6 +57,8 @@ from hal0.config.schema import (
     STALE_ROCMFPX_IMAGE_REFS,
 )
 from hal0.errors import NotFound
+
+log = logging.getLogger(__name__)
 
 #: Kept as a plain local Literal (NOT imported from ``hal0.profiles``) so
 #: this module has zero import-time coupling to the profiles subsystem —
@@ -266,16 +269,28 @@ def get_runner(key: str) -> Runner:
 def resolve_runner_image(runner: Runner) -> str:
     """Resolve ``runner`` to a pull-ready image ref.
 
-    Precedence: ``HAL0_TOOLBOX_IMAGE_<KEY>`` env override → the release
-    manifest's digest pin (only when ``runner.manifest_key`` is set) →
-    ``runner.image`` (the bundled default). This is THE single resolver
-    every provider (llama-server HW-gated runners, FLM, kokoro, qwen3-tts,
-    comfyui) now shares — see the module docstring.
+    Precedence: ``HAL0_TOOLBOX_IMAGE_<KEY>`` env override (canonical name,
+    then any legacy-alias name, warned) → manifest pin → bundled default.
+    This is THE single resolver every provider (llama-server HW-gated
+    runners, FLM, kokoro, qwen3-tts, comfyui) now shares — see the module
+    docstring.
     """
     env_key = f"HAL0_TOOLBOX_IMAGE_{runner.key.upper()}"
     env_val = os.environ.get(env_key, "").strip()
     if env_val:
         return env_val
+    for legacy, canon in RUNNER_ALIASES.items():
+        if canon != runner.key:
+            continue
+        legacy_key = f"HAL0_TOOLBOX_IMAGE_{legacy.upper()}"
+        legacy_val = os.environ.get(legacy_key, "").strip()
+        if legacy_val:
+            log.warning(
+                "runner_images.legacy_env_override var=%s use=HAL0_TOOLBOX_IMAGE_%s",
+                legacy_key,
+                runner.key.upper(),
+            )
+            return legacy_val
     if runner.manifest_key:
         # Local import: hal0.config.loader is a much heavier module
         # (reads TOML config, paths, etc.) than this leaf registry should

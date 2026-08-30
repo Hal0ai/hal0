@@ -11,6 +11,7 @@ in ``hal0.runners``).
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -124,3 +125,19 @@ def test_manifest_tier_applies_to_every_manifest_backed_runner(
     )
     resolved = resolve_runner_image(runner)
     assert resolved.endswith(f"@{digest}")
+
+
+def test_legacy_alias_env_override_still_resolves(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", raising=False)
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", "ghcr.io/x/legacy:1")
+    with caplog.at_level(logging.WARNING, logger="hal0.runners"):
+        assert resolve_runner_image(get_runner("rocmfpx")) == "ghcr.io/x/legacy:1"
+    assert any("VULKANFPX" in r.message for r in caplog.records)
+
+
+def test_canonical_env_override_beats_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", "ghcr.io/x/canon:1")
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", "ghcr.io/x/legacy:1")
+    assert resolve_runner_image(get_runner("rocmfpx")) == "ghcr.io/x/canon:1"
