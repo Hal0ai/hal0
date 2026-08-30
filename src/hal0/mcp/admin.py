@@ -388,6 +388,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "updater_channel_get",
         "updater_slot_drift",
         "updater_job_status",
+        # Component updates (spec 2026-08-30 §1b). component_status reads
+        # components.json + live probes; update_check rides the existing
+        # GET /api/updates/check route (which now also carries
+        # components_pending).
+        "component_status",
+        "update_check",
         "doctor_report",
         "health_system",
         "feature_list",
@@ -516,6 +522,14 @@ GATED_TOOLS: frozenset[str] = frozenset(
         # target the slot everywhere else — gated so a rename can't
         # silently redirect a subsequent autonomous call (spec §4.3).
         "slot_rename",
+        # ── Updates (spec 2026-08-30 §1b). Converge stops+restarts companion
+        # services and (hindsight) can trigger a one-way DB migration —
+        # always owner-approval gated, mirroring slot_restart. update_apply
+        # deliberately NOT added: EXCLUDED_TOOLS["updater_apply"] stands —
+        # self-update needs its own POLICY_NO_LOOSEN + operator-confirmation
+        # design; the agent-facing update surface stays these three tools
+        # (component_status / update_check / component_converge). ─────────
+        "component_converge",
         # Capability / config
         "capability_set",
         "config_write",
@@ -748,10 +762,21 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     # apply/commit/rollback/prepare/restart-slots/channel-PUT routes stay
     # unaliased (see EXCLUDED_TOOLS["updater_apply"]). ───────────────────────
     "GET:/api/updates/state": ("updater_state",),
-    "GET:/api/updates/check": ("updater_check",),
+    "GET:/api/updates/check": ("updater_check", "update_check"),
     "GET:/api/updates/channel": ("updater_channel_get",),
     "GET:/api/updates/slot-drift": ("updater_slot_drift",),
     "GET:/api/updates/status/{job_id}": ("updater_job_status",),
+    # ── Component updates (spec 2026-08-30 §1b). component_status is a
+    # read; component_converge stops+restarts companion services and
+    # (hindsight) can trigger a one-way DB migration — always
+    # owner-approval gated, see GATED_TOOLS. update_apply intentionally NOT
+    # aliased here: apply/commit/rollback/prepare/restart-slots/channel-PUT
+    # (incl. plain POST /apply) stay excluded per
+    # EXCLUDED_TOOLS["updater_apply"] — self-update needs its own
+    # POLICY_NO_LOOSEN + operator-confirmation design; this pass's
+    # agent-facing update surface is these three tools only. ─────────────
+    "GET:/api/updates/components": ("component_status",),
+    "POST:/api/updates/components/{component_id}/converge": ("component_converge",),
     "GET:/api/doctor": ("doctor_report",),
     "GET:/api/health/system": ("health_system",),
     "GET:/api/features": ("feature_list",),
@@ -2312,6 +2337,22 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "updater_job_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "component_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Same route as updater_check — fetches the release manifest, open-world.
+    "update_check": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    # Mirrors slot_restart's shape: mutating, reversible, non-idempotent
+    # (each call re-runs the converge arm). Not marked open-world itself —
+    # any network fetch a converge arm performs (e.g. an image pull) is the
+    # documented behavior of the already-open-world-classified tools that
+    # do that fetching directly (slot_pull_image/runner_image_sync), same
+    # treatment as comfyui_restart/comfyui_switchover.
+    "component_converge": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     "doctor_report": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2745,6 +2786,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "updater_channel_get": "Get the configured update channel.",
     "updater_slot_drift": "Report slots whose running argv has drifted from a fresh post-update render.",
     "updater_job_status": "Poll an update/prepare/commit job's state. Args: job_id.",
+    "component_status": "Per-component version/converge status — catalog x components.json x live probes (OpenWebUI, ComfyUI, Hermes, Hindsight, runner images).",
+    "update_check": "Fetch the release manifest and diff it against the running version; includes components_pending (count of components needing converge).",
+    "component_converge": "Re-run one component's converge arm — stops+restarts the companion service, may trigger a one-way DB migration (hindsight) (gated). Args: component_id.",
     "doctor_report": "Composed doctor verdict — health, URLs, system, memory, services, capabilities in one read.",
     "health_system": "Deep health check — disk, slot manager, event bus, MCP mount.",
     "feature_list": "Feature-flag map (comfyui_switchover, memory, memory_engine, npu, mcp_supervisor).",
@@ -2876,7 +2920,11 @@ EXCLUDED_TOOLS: dict[str, str] = {
         "dedicated lane rather than hand-added here. The READ half of the updater "
         "surface (state/check/channel-GET/slot-drift/status) IS classified now — see "
         "updater_state / updater_check / updater_channel_get / updater_slot_drift / "
-        "updater_job_status in TOOL_DESCRIPTIONS."
+        "updater_job_status in TOOL_DESCRIPTIONS. "
+        "Component-updates lane (2026-08-30, task 13): this exclusion stands "
+        "deliberately — spec §1b's `update_apply` row is superseded; the "
+        "agent-facing update surface is component_status / update_check / "
+        "component_converge only."
     ),
     "auth_rotate": (
         "Key rotation is a lockout-recovery / operator-console action — never "

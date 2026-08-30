@@ -94,6 +94,8 @@ overrides for the handful that don't map 1:1 onto their route live in
 | `updater_channel_get` | `GET /api/updates/channel` |
 | `updater_slot_drift` | `GET /api/updates/slot-drift` |
 | `updater_job_status` | `GET /api/updates/status/{job_id}` |
+| `component_status` | `GET /api/updates/components` |
+| `update_check` | `GET /api/updates/check` |
 | `doctor_report` | `GET /api/doctor` |
 | `health_system` | `GET /api/health/system` |
 | `feature_list` | `GET /api/features` |
@@ -170,6 +172,7 @@ overrides for the handful that don't map 1:1 onto their route live in
 | `slot_delete` | `DELETE /api/slots/{name}` |
 | `slot_restart` | `POST /api/slots/{name}/restart` |
 | `slot_rename` | `POST /api/slots/{name}/rename` |
+| `component_converge` | `POST /api/updates/components/{component_id}/converge` |
 | `capability_set` | `POST /api/capabilities/{slot}/{child}` |
 | `config_write` | `PUT /api/settings` |
 | `provider_credential_write` | `POST /api/providers/{name}/credentials` |
