@@ -25,7 +25,6 @@ purely additive.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import time
 from types import SimpleNamespace
@@ -165,6 +164,26 @@ async def _config_field_enrichment(request: Request) -> dict[str, dict[str, Any]
     except Exception:
         return {}
     return config_enrichment(configs)
+
+
+async def _slot_config_for(request: Request, name: str) -> dict[str, Any] | None:
+    """This slot's raw TOML dict, or ``None``.
+
+    Request-bound sibling of :func:`_config_field_enrichment` over the same
+    ``SlotManager.iter_configs()`` read. Never raises — an unreadable or
+    missing config degrades to ``None``, which every consumer already treats as
+    "no cfg available" rather than an error.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return None
+    try:
+        for cfg in await sm.iter_configs():
+            if str(cfg.get("name") or "") == name:
+                return cfg
+    except Exception:
+        return None
+    return None
 
 
 async def _container_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
@@ -1056,11 +1075,19 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         raw_ctx_max = out.get("ctx_max")
         model_id = str(out.get("model_default") or "")
         if model_id or isinstance(raw_ctx_max, int):
+            # #1946/I2: hand this slot's own TOML down so a DEGRADED specialty
+            # slot advertises the plain-model window it actually launches with,
+            # instead of the card's 262144 — and so this body agrees with the
+            # ``specialty_degraded`` reason it is already carrying (``status``
+            # was called with ``include_config_drift=True`` above). Detail-route
+            # only: the hot list poll deliberately skips this (see
+            # :meth:`hal0.slot_view.SlotViewAggregator.snapshot`).
             out["ctx_max"] = resolve_ctx_max(
                 raw_ctx_max if isinstance(raw_ctx_max, int) else None,
                 getattr(request.app.state, "model_registry", None),
                 model_id,
                 name,
+                await _slot_config_for(request, name),
             )
         return out
     except Exception:

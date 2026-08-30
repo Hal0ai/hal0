@@ -455,11 +455,13 @@ def resolve_ctx_max(
     launch path resolved, using the model registry the caller already
     carries.
 
-    ``slot_cfg`` — the slot's TOML dict, which both callers already hold —
-    lets the resolver reach the specialty guard's verdict, so a DEGRADED
-    specialty slot reports the plain-model window it actually launches with
-    instead of the card's 262144 (fix wave, I2). Omitted, the resolver
-    assumes the accelerated path exactly as before.
+    ``slot_cfg`` — the slot's TOML dict — lets the resolver reach the
+    specialty guard's verdict, so a DEGRADED specialty slot reports the
+    plain-model window it actually launches with instead of the card's 262144
+    (fix wave, I2). Omitted, the resolver assumes the accelerated path exactly
+    as before. Only the DETAIL route passes it: resolving the verdict costs a
+    preview-bundle resolution (and a fresh registry connection), which the hot
+    list poll must not pay per slot — see the call site in :meth:`snapshot`.
 
     Imported lazily (heavy neighbour, see module docstring) and never
     raises: a resolution failure degrades to the raw TOML ceiling — the
@@ -1042,10 +1044,6 @@ class SlotViewAggregator:
         real_names = {str(p["name"]) for p in payloads}
 
         configs = await self._safe_configs()
-        # #1946/I2: ``resolve_ctx_max`` needs the slot's own TOML to reach the
-        # specialty guard's verdict, and this pass has already paid for the
-        # config read.
-        cfg_by_name = {str(c.get("name") or ""): c for c in configs}
 
         enrichment = config_enrichment(configs)
         # #1427: the container probe, the capacity probe and the metrics
@@ -1079,12 +1077,31 @@ class SlotViewAggregator:
             raw_ctx_max = payload.get("ctx_max")
             model_id = str(payload.get("model_default") or "")
             if model_id or isinstance(raw_ctx_max, int):
+                # NO ``slot_cfg`` on this path, deliberately (#1946/I2). This
+                # is the ~2s dashboard poll: handing the cfg down would make
+                # every specialty-model slot resolve a preview bundle — and
+                # therefore open a fresh ModelRegistry/SQLite connection —
+                # synchronously on the event loop, on every poll. That is the
+                # same cost :meth:`hal0.slots.manager.SlotManager.status`
+                # refuses by gating ``specialty_degraded`` behind
+                # ``include_config_drift`` ("detail-route-only enrichments,
+                # never paid for by the hot GET /api/slots list poll").
+                #
+                # ASYMMETRY, recorded on purpose: for a DEGRADED specialty slot
+                # the list card's ``ctx_max`` therefore still reports the
+                # accelerated/card window, while the detail route
+                # (``GET /api/slots/{name}``, which already pays for the drift
+                # + degraded enrichment) and ``/v1/models`` report the
+                # plain-model window the slot actually launches with. The
+                # detail body is the surface that also carries
+                # ``specialty_degraded`` itself, so the two agree where an
+                # operator can see both; the list card is a summary that never
+                # claimed to carry guard state.
                 payload["ctx_max"] = resolve_ctx_max(
                     raw_ctx_max if isinstance(raw_ctx_max, int) else None,
                     self._registry,
                     model_id,
                     slot_name,
-                    cfg_by_name.get(slot_name),
                 )
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the

@@ -379,8 +379,13 @@ def _slot_ctx_size(
 
     slot_ceiling = _raw_slot_ctx_ceiling(cfg)
     slot_name = str(cfg.get("name") or "")
+    # #1946/I2: ``cfg`` is this slot's own TOML, so pass it — a DEGRADED
+    # specialty slot must advertise the plain-model window it launches with,
+    # not the card's 262144. Per-request surface (``/v1/models`` and friends),
+    # not the ~2s slot poll, so the guard resolution it triggers for a
+    # specialty model is affordable here.
     return resolve_effective_context_size(
-        slot_ceiling, model_registry, model_id, slot_name=slot_name
+        slot_ceiling, model_registry, model_id, slot_name=slot_name, slot_cfg=cfg
     )
 
 
