@@ -7,7 +7,11 @@ pulls a whole OCI container image via the existing
 ``hal0.providers.container.ContainerProvider.pull_image_stream`` layer-progress
 generator (``podman pull`` subprocess, one layer-progress dict per output
 line) rather than streaming a single HTTP file, so progress here is tracked
-in *layers* (``layers_done``/``layers_total``) instead of bytes. The
+in *layers* (``layers_done``/``layers_total``) instead of bytes.
+``pull_image_stream`` itself now routes through the rootful ``hal0-podman-rw``
+seam when available (runner-images v3 D1a, #2119) so a dashboard-triggered
+pull lands in the store slots actually launch from; the event shapes are
+identical either way, so nothing here changes. The
 job-state machine (queued → running → {completed, failed, cancelled}),
 persisted-snapshot format, and SSE-facing ``as_dict()`` shape otherwise
 mirror :class:`hal0.registry.pull.PullJob` closely so the orchestration

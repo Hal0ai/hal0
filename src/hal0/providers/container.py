@@ -3136,7 +3136,26 @@ class ContainerProvider(Provider):
         shared with the rootful pull path
         (:func:`hal0.providers.podman_mutate.pull_image_stream_rootful`) so both
         report identical event shapes regardless of which store they target.
+
+        Routing (#2119, runner-images v3 D1a): the rootful ``hal0-podman-rw``
+        seam is the PRIMARY path on an installed box — slots launch from
+        ROOT's podman store, so a dashboard-triggered pull that landed in
+        hal0-api's own rootless store was invisible to every slot that tried
+        to use it. When :func:`hal0.providers.podman_mutate.rw_seam_available`
+        says the seam is usable from here, this delegates wholesale to
+        :func:`hal0.providers.podman_mutate.pull_image_stream_rootful` (same
+        event shapes, so callers need no changes). The rootless path below is
+        unchanged and remains the path for dev/CI and any box without the
+        grant installed, where there is no seam to route through and the
+        operator's own store IS the one slots use.
         """
+        from hal0.providers import podman_mutate
+
+        if podman_mutate.rw_seam_available():
+            async for event in podman_mutate.pull_image_stream_rootful(image):
+                yield event
+            return
+
         import asyncio as _asyncio
 
         try:
