@@ -38,5 +38,9 @@ export default defineConfig({
     // server-side React mount smoke test, needs real JSX in a `.ts`-adjacent
     // test file.
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/e2e/*.test.ts'],
+    // macOS AppleDouble sidecars (`._foo.test.ts`) appear on non-native
+    // mounts and match the include glob — they are resource forks, not
+    // TypeScript, and explode esbuild's parser.
+    exclude: ['**/._*', '**/node_modules/**'],
   },
 })

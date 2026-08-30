@@ -1500,6 +1500,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							device: pendingDevice,
 							options: cascade.options,
 						});
+						// The one value the out-of-vocab self-option and the select's
+						// fallback `value` share — a single source so they can't diverge.
+						const oovValue = optionValue(
+							binary,
+							deviceBackend(pendingDevice),
+						);
 						return (
 							<>
 								{/* Device select removed: `device` is now DERIVED from the
@@ -1642,10 +1648,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												"input mono" + (fieldErrs.device ? " input-err" : "")
 											}
 											data-testid="slot-hw-binary"
-											value={
-												backendSel ??
-												optionValue(binary, deviceBackend(pendingDevice))
-											}
+											value={backendSel ?? oovValue}
 											onChange={(e) => {
 												const pick = applyBackendChoice(
 													cascade.options,
@@ -1669,12 +1672,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											    keeps its own option so the drawer never silently
 											    rewrites it. */}
 											{backendSel === null && (
-												<option
-													value={optionValue(
-														binary,
-														deviceBackend(pendingDevice),
-													)}
-												>
+												<option value={oovValue}>
 													{binary} · {deviceBackend(pendingDevice)} · not in
 													image
 												</option>
