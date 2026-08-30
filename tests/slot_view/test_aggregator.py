@@ -486,6 +486,23 @@ class TestConfigEnrichment:
         assert e["binary"] is None
         assert e["image_pin"] is None
 
+    def test_binary_alias_spelling_folds_to_canonical(self) -> None:
+        # #2141: a persisted ``binary = "vulkanfpx"`` (pre-collapse TOML) must
+        # surface as the canonical ``rocmfpx`` so the edit drawer never sees
+        # the retired spelling — the launch path already heals it via
+        # ``get_runner``; the view lift is the surface that leaked. The next
+        # drawer Save then persists the canonical key naturally.
+        cfg = _llm_cfg(binary="vulkanfpx")
+        e = config_enrichment([cfg])["chat"]
+        assert e["binary"] == "rocmfpx"
+
+    def test_binary_unknown_key_still_surfaces_verbatim(self) -> None:
+        # Genuinely unknown keys are NOT rewritten — the drawer's
+        # out-of-vocab option owns that surface (collapse spec §2).
+        cfg = _llm_cfg(binary="ghost")
+        e = config_enrichment([cfg])["chat"]
+        assert e["binary"] == "ghost"
+
     def test_ngl_prefers_top_level_over_nested(self) -> None:
         # Migration compat: a slot with BOTH the legacy nested
         # [model].n_gpu_layers and the new top-level field surfaces the

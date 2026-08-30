@@ -341,10 +341,35 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         #   threads: 0 = unset (runtime default)
         #   binary:  "" = derive the HW-gated default from device
         #   image_pin: null = release default (RUNNER_IMAGES[binary])
+        # One carve-out from "verbatim" (#2141): a superseded runner-key
+        # spelling (``vulkanfpx``, collapse spec §2/§3) folds to its
+        # canonical key here, mirroring the SlotConfig read-side heal the
+        # serve path's raw-dict flow bypasses — the drawer must never see
+        # the retired spelling, and its next Save persists the canonical
+        # key. Genuinely unknown keys still surface verbatim (the drawer's
+        # out-of-vocab option owns that surface). Warn-once per key so a
+        # pre-collapse box nudges the operator without flooding the journal
+        # on every 5s poll (reuses the runners module's dedup, same as the
+        # env-override warning).
         threads_val = cfg.get("threads")
         entry["threads"] = threads_val if isinstance(threads_val, int) else None
         binary_val = cfg.get("binary")
-        entry["binary"] = binary_val if isinstance(binary_val, str) else None
+        if isinstance(binary_val, str) and binary_val:
+            from hal0.runners import _warn_once, canonical_runner_key
+
+            canon = canonical_runner_key(binary_val)
+            if canon != binary_val:
+                _warn_once(
+                    "slot_view.binary_alias",
+                    binary_val,
+                    "slot_view.binary_alias slot=%s key=%s canonical=%s",
+                    name,
+                    binary_val,
+                    canon,
+                )
+            entry["binary"] = canon
+        else:
+            entry["binary"] = binary_val if isinstance(binary_val, str) else None
         entry["image_pin"] = cfg.get("image_pin")
         # METRICS (#1810) — completes the HW-grid lift: SlotConfig.metrics
         # controls whether --metrics reaches llama-server's argv. Surface it
