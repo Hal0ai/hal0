@@ -126,6 +126,10 @@ full detail in the
 
 ### Added
 
+- PromptForge runner digest pin: the #1891 ct150 gate passed (2026-08-30),
+  so `manifest.json.toolbox_images.promptforge` now ships the gate-validated
+  digest and the promptforge runner's `manifest_key` resolves it. Optional
+  runner only — the AMD default (`DEFAULT_ROCMFPX_IMAGE`) is untouched.
 - Bench: opt-in `promptforge` lane (`--backends promptforge`) — benches the
   HIP-only PromptForge runner image at its own `/opt/promptforge/bin/
   llama-bench`. Never part of a default sweep: the image serves one model
