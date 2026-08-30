@@ -193,6 +193,25 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
         /* skip malformed */
       }
     }
+    // A dropped connection (network blip, proxy timeout, server crash mid-pull)
+    // fires `error`, not a terminal SSE payload — without this the hook's last
+    // known state (often "running") sticks forever and the UI shows
+    // "running — 0/? layers" with no way out (#2120). Stream death is not an
+    // answer: close the stream, then ask the status route once so a
+    // server-side terminal state (failed/completed/cancelled) still lands.
+    // `id` is the value `attachStream` was called with, not the (possibly
+    // stale, by the time this fires) `imageId` React state.
+    esRef.current.onerror = () => {
+      closeStream()
+      ;(async () => {
+        try {
+          const status = await apiGet<any>(ENDPOINTS.runnerImagePullStatus(id))
+          if (status && typeof status === 'object') applyPayload(status)
+        } catch {
+          /* keep last known state; the pulls-list poll will refresh */
+        }
+      })()
+    }
   }
 
   const reset = () => {
