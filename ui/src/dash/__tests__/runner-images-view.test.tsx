@@ -31,7 +31,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // side-effect-free. vi.mock factories are hoisted above imports, so the spy +
 // fixture rows they close over must be hoisted too (mirrors
 // runner-images-confirm-flow.test.tsx's `vi.hoisted` idiom).
-const { apiPostCalls, PULL_ROW } = vi.hoisted(() => ({
+const { apiPostCalls, PULL_ROW, imagesOverride } = vi.hoisted(() => ({
   apiPostCalls: [] as string[],
   PULL_ROW: {
     id: 'rocmfpx-combined',
@@ -53,6 +53,10 @@ const { apiPostCalls, PULL_ROW } = vi.hoisted(() => ({
     is_default: null,
     in_use_by: [],
   },
+  // Task 8 render test swaps in a v3-shaped row (tags[]/badges/store_state)
+  // without disturbing PULL_ROW (Task 6's per-tag-pull test asserts against
+  // it directly) — a mutable box the mock reads lazily each call.
+  imagesOverride: { current: null as Record<string, unknown>[] | null },
 }))
 
 vi.mock('@/api/hooks/useRunnerImages', async () => {
@@ -64,7 +68,12 @@ vi.mock('@/api/hooks/useRunnerImages', async () => {
     ...actual,
     // useRunnerImagePullJob is left as the real implementation — it's what
     // Task 6 wires up.
-    useRunnerImages: () => ({ data: [PULL_ROW], isPending: false, isError: false, error: null }),
+    useRunnerImages: () => ({
+      data: imagesOverride.current ?? [PULL_ROW],
+      isPending: false,
+      isError: false,
+      error: null,
+    }),
     useRunnerImageSync: () => ({ isPending: false, mutateAsync: async () => ({ images: [PULL_ROW] }) }),
     useRunnerImagePullsList: () => ({ data: [] }),
     useDownloadedRunnerImages: () => ({ data: [] }),
@@ -91,6 +100,7 @@ const {
   defaultsStripRows,
   newerTagAvailable,
   newestComparableTag,
+  tagLanes,
   MUTABLE_TAGS,
   RunnerImagesView,
 } = await import('../runner-images.jsx')
@@ -204,6 +214,119 @@ describe('newerTagAvailable', () => {
     expect(newestComparableTag(row({ tag: '0822', available_tags: ['server', '0824', '0822'] }))).toBe(
       '0824'
     )
+  })
+})
+
+// Task 8 — three-lane tag picker + digest-aware "newer" over the v3 payload
+// (tags[].{tag,digest,downloaded}, badges). tagLanes replaces tagChoices;
+// newerTagAvailable becomes a digest fact when the row carries `tags`,
+// falling back to the pre-v3 newestComparableTag() name-based heuristic
+// (exercised by the `newerTagAvailable` describe block above) when it
+// doesn't.
+const V3_IMG = {
+  id: 'x',
+  image: 'ghcr.io/x/a',
+  tag: '0824',
+  available_tags: ['0826', '0824', 'latest', 'main'],
+  tags: [
+    { tag: '0826', digest: 'sha256:a', downloaded: false },
+    { tag: '0824', digest: 'sha256:b', downloaded: true },
+    { tag: 'latest', digest: 'sha256:a', downloaded: false },
+    { tag: 'main', digest: 'sha256:c', downloaded: false },
+  ],
+  badges: { '0826': 'validated' },
+}
+
+describe('tagLanes', () => {
+  it('buckets release / pin / other lanes', () => {
+    const lanes = tagLanes(V3_IMG)
+    expect(lanes.releases.map((t: { tag: string }) => t.tag)).toEqual(['0826', '0824'])
+    expect(lanes.other.map((t: { tag: string }) => t.tag)).toEqual(['latest', 'main'])
+  })
+
+  it('collapses digest aliases', () => {
+    const lanes = tagLanes(V3_IMG)
+    expect(lanes.other.find((t: { tag: string }) => t.tag === 'latest').aliasOf).toBe('0826')
+  })
+})
+
+describe('newerTagAvailable (digest-aware, v3 payload)', () => {
+  it('is a digest fact', () => {
+    expect(newerTagAvailable(V3_IMG)).toBe(true) // 0826 digest ≠ 0824's
+    const same = { ...V3_IMG, tags: V3_IMG.tags.map(t => ({ ...t, digest: 'sha256:b' })) }
+    expect(newerTagAvailable(same)).toBe(false) // all aliases of headline
+  })
+})
+
+// Real render — proves the <select> groups tags into <optgroup>s (other
+// collapsed behind "show all tags"), and the header/row chips read
+// store_state/downloaded truth instead of the retired
+// local_path/downloaded_at markers.
+describe('RunnerCard tag picker + store-truth chips (Task 8)', () => {
+  afterEach(() => {
+    imagesOverride.current = null
+    document.body.innerHTML = ''
+  })
+
+  it('renders releases/pins optgroups, hides other until "show all tags", and shows the downloaded chip', async () => {
+    imagesOverride.current = [
+      {
+        ...V3_IMG,
+        digest: 'sha256:b',
+        size_bytes: 1000,
+        manifest_key: null,
+        ownership: 'owned',
+        publish: 'external',
+        notes: null,
+        build: null,
+        local_path: null,
+        downloaded_at: null,
+        discovered_at: null,
+        updated_at: null,
+        extra: {},
+        store_state: 'present',
+        downloaded: true,
+        store_context: 'rootful',
+        is_default: null,
+        in_use_by: [],
+      },
+    ]
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+
+    const select = host.querySelector('[data-testid="ri-tag-pick"]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    let groups = Array.from(select.querySelectorAll('optgroup')).map(g => g.label)
+    expect(groups).toEqual(['releases']) // pins empty (headline "0824" lands in releases); other collapsed
+
+    const showAllBtn = host.querySelector('[data-testid="ri-show-all-tags"]') as HTMLButtonElement
+    expect(showAllBtn).toBeTruthy()
+    act(() => {
+      showAllBtn.click()
+    })
+    groups = Array.from(select.querySelectorAll('optgroup')).map(g => g.label)
+    expect(groups).toEqual(['releases', 'other'])
+
+    const chips = Array.from(host.querySelectorAll('[data-testid="ri-store-state"]')).map(
+      c => c.textContent,
+    )
+    expect(chips.length).toBeGreaterThan(0)
+    expect(chips.every(t => t === '✓ downloaded')).toBe(true)
+
+    act(() => {
+      root.unmount()
+    })
   })
 })
 

@@ -87,24 +87,75 @@ export function newestComparableTag(image) {
   return tags.find(t => !isMutablePointerTag(t, image.tag));
 }
 
-// True when the registry knows a newer tag than the row's headline `tag`,
-// ignoring mutable/floating pointers (see MUTABLE_TAGS). False on probe
-// failure (empty list), missing fields, or when only mutable pointers lead
-// the list (no comparable candidate).
-export function newerTagAvailable(image) {
-  if (!image || !image.tag) return false;
-  const candidate = newestComparableTag(image);
-  if (!candidate) return false;
-  return candidate !== image.tag;
+// Release-shaped tag names (bare or `v`-prefixed dotted version numbers,
+// e.g. "0824", "v1.2.3") — the "releases" lane in tagLanes() below.
+const RELEASE_TAG_RE = /^(v?\d+(\.\d+)*)$/;
+
+// Lane buckets over the v3 per-tag payload (Task 5: `image.tags[].{tag,
+// digest,downloaded}` + `image.badges`) for the card's three-lane tag
+// <select> — replaces the old flat tagChoices(). Falls back to bare
+// `available_tags` strings (digestless: digest/downloaded/badge come back
+// null) against a pre-v3 backend or a failed tag probe.
+//
+// releases: dotted/bare version-number tags. pins: the row's headline tag,
+// guaranteed present even when the probe didn't carry it. other: everything
+// else (branch heads, `latest`, floating dev tags — see MUTABLE_TAGS above).
+// `aliasOf` names the first earlier tag (releases/pins win ties by lane
+// order below, then array order) sharing the same digest, so e.g. a
+// `latest` that just points at the newest release reads as "latest =
+// 0826" instead of a mystery duplicate.
+export function tagLanes(image) {
+  const infos = Array.isArray(image?.tags) && image.tags.length
+    ? image.tags
+    : (image?.available_tags || []).map(t => ({ tag: t, digest: null, downloaded: null }));
+  const seen = new Map(); // digest -> first tag carrying it
+  const decorate = (t) => {
+    const aliasOf = t.digest && seen.has(t.digest) ? seen.get(t.digest) : null;
+    if (t.digest && !seen.has(t.digest)) seen.set(t.digest, t.tag);
+    return { ...t, badge: image?.badges?.[t.tag] || null, aliasOf };
+  };
+  const lanes = { releases: [], pins: [], other: [] };
+  for (const t of infos.map(decorate)) {
+    if (RELEASE_TAG_RE.test(t.tag)) lanes.releases.push(t);
+    else if (t.tag === image.tag) lanes.pins.push(t);   // headline pin
+    else lanes.other.push(t);
+  }
+  if (!infos.some(t => t.tag === image.tag) && image?.tag) {
+    lanes.pins.unshift({ tag: image.tag, digest: image.digest || null, downloaded: null, badge: image?.badges?.[image.tag] || null, aliasOf: null });
+  }
+  return lanes;
 }
 
-// Tag choices for the card's tag <select>: the contract's newest-first
-// `available_tags` with the headline tag guaranteed present (prepended when
-// the probe failed or predates the contract).
-function tagChoices(image) {
-  const tags = Array.isArray(image?.available_tags) ? image.available_tags : [];
-  if (image?.tag && !tags.includes(image.tag)) return [image.tag, ...tags];
-  return tags.length ? tags : (image?.tag ? [image.tag] : []);
+// True when the registry knows a genuinely newer build than the row's
+// headline `tag` — a digest fact when the row carries the v3 `tags[]`
+// payload (the newest release-shaped tag's digest differs from the
+// headline's; a probe that didn't resolve a digest for either side still
+// counts as "newer" by name, same as the pre-v3 behavior). Falls back to
+// the pre-v3 name-based newestComparableTag() heuristic (mutable-pointer
+// aware, see MUTABLE_TAGS) when the row predates the v3 payload.
+export function newerTagAvailable(image) {
+  if (!image || !image.tag) return false;
+  const tags = Array.isArray(image.tags) ? image.tags : null;
+  if (tags && tags.length) {
+    const head = tags.find(t => t.tag === image.tag);
+    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag) && t.tag !== image.tag);
+    if (!cand) return false;
+    if (head?.digest && cand.digest) return cand.digest !== head.digest;
+    return true;
+  }
+  const c = newestComparableTag(image);           // pre-v3 fallback, unchanged
+  return !!c && c !== image.tag;
+}
+
+// Tag option label for the card's <select>: the tag name, its digest alias
+// (`= <earlier tag>`) when it points at the same manifest as one already
+// listed, a downloaded checkmark, and a trailing badge suffix.
+function tagOptionLabel(t) {
+  let label = t.tag;
+  if (t.aliasOf) label += ` = ${t.aliasOf}`;
+  if (t.downloaded) label += ' ✓';
+  if (t.badge) label += ` · ${t.badge}`;
+  return label;
 }
 
 // ── RunnerImagesSyncButton ──────────────────────────────────────────────
@@ -274,12 +325,40 @@ function DefaultsStrip({ images }) {
   );
 }
 
+// Badge chip color for a tag's validated/candidate/deprecated badge
+// (hal0.api.routes.runner_images._tag_badges).
+const BADGE_COLOR = {
+  validated: "var(--ok)",
+  candidate: "var(--accent)",
+  deprecated: "var(--err)",
+};
+
+function BadgeChip({ badge }) {
+  if (!badge) return null;
+  const color = BADGE_COLOR[badge] || "var(--fg-4)";
+  return (
+    <span className="chip" data-testid="ri-badge" style={{color, borderColor: color}}>{badge}</span>
+  );
+}
+
+// Store-truth state chip: store_state "unknown" (the store couldn't be
+// read this request) takes precedence over the downloaded verdict —
+// showing "not downloaded" there would be a claim the backend can't back.
+function StoreStateChip({ image }) {
+  if (image.store_state === "unknown") {
+    return <span className="chip" data-testid="ri-store-state" title="Could not read the image store">state unknown</span>;
+  }
+  return image.downloaded
+    ? <span className="chip ok" data-testid="ri-store-state">✓ downloaded</span>
+    : <span className="chip" data-testid="ri-store-state">not downloaded</span>;
+}
+
 // ── RunnerImageRow ──────────────────────────────────────────────────────
 function RunnerImageRow({ image, selected, onSelect }) {
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className="mdl-row-icon">
-        {image.downloaded || image.local_path
+        {image.downloaded
           ? <span style={{color: "var(--green)", display: "inline-flex"}}>{Icons.download}</span>
           : <span style={{color: "var(--fg-5)", display: "inline-flex"}}>{Icons.download}</span>}
       </span>
@@ -298,6 +377,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
             newer: {newestComparableTag(image)}
           </span>
         )}
+        <BadgeChip badge={image.badges?.[image.tag]} />
         {image.ownership && <span className="chip">{image.ownership}</span>}
         {image.publish && <span className="chip">{image.publish}</span>}
         {(image.extra?.features || []).map(f => (
@@ -306,7 +386,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
       </span>
       <span className="sz num">{fmtBytesRI(image.size_bytes)}</span>
       <span className="tg">
-        {image.local_path ? <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)"}}>✓ downloaded</span> : null}
+        <StoreStateChip image={image} />
       </span>
     </div>
   );
@@ -322,6 +402,10 @@ function RunnerCard({ image }) {
   const imageId = image?.id;
   useEffectRI(() => { setPickedTag(null); }, [imageId]);
   const [confirmDefault, setConfirmDefault] = useStateRI(false);
+  // "other" lane (branch heads, floating dev tags) is collapsed behind this
+  // toggle — resets alongside the tag pick whenever the selected row changes.
+  const [showAllTags, setShowAllTags] = useStateRI(false);
+  useEffectRI(() => { setShowAllTags(false); }, [imageId]);
 
   if (!image) {
     return (
@@ -331,7 +415,8 @@ function RunnerCard({ image }) {
     );
   }
 
-  const tags = tagChoices(image);
+  const lanes = tagLanes(image);
+  const tagCount = lanes.releases.length + lanes.pins.length + lanes.other.length;
   const selTag = pickedTag ?? image.tag;
   const inFlight = pull.imageId === image.id && pull.inFlight;
   const onPull = async () => {
@@ -370,9 +455,7 @@ function RunnerCard({ image }) {
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
           <div className="nm mono">{image.id}</div>
           <span style={{marginLeft: "auto"}}>
-            {image.downloaded_at
-              ? <span className="chip ok">✓ downloaded</span>
-              : <span className="chip">not downloaded</span>}
+            <StoreStateChip image={image} />
           </span>
         </div>
         <div className="repo">{image.image}:{image.tag}</div>
@@ -405,8 +488,8 @@ function RunnerCard({ image }) {
       )}
 
       <div style={{padding: "0 16px 16px"}}>
-        {tags.length > 1 && (
-          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 10}}>
+        {tagCount > 1 && (
+          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap"}}>
             <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>tag</span>
             <select
               className="input mono"
@@ -415,10 +498,36 @@ function RunnerCard({ image }) {
               onChange={(e) => setPickedTag(e.target.value)}
               style={{fontSize: 11, padding: "3px 6px"}}
             >
-              {tags.map(t => (
-                <option key={t} value={t}>{t}{t === image.tag ? " · headline" : ""}</option>
-              ))}
+              {lanes.releases.length > 0 && (
+                <optgroup label="releases">
+                  {lanes.releases.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
+              {lanes.pins.length > 0 && (
+                <optgroup label="pins">
+                  {lanes.pins.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
+              {showAllTags && lanes.other.length > 0 && (
+                <optgroup label="other">
+                  {lanes.other.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
+            {lanes.other.length > 0 && (
+              <button
+                type="button"
+                className="btn ghost sm"
+                data-testid="ri-show-all-tags"
+                onClick={() => setShowAllTags(s => !s)}
+              >{showAllTags ? "hide extra tags" : "show all tags"}</button>
+            )}
             {newerTagAvailable(image) && (
               <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
                 newer: {newestComparableTag(image)}
