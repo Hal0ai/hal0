@@ -164,6 +164,13 @@ cp -a "${SRC}"/build/bin/. "${STAGE}/bin/"
 find "${SRC}/build" -name '*.so*' -exec cp -P {} "${STAGE}/bin/" \;
 cp "${HERE}/entrypoint.sh" "${STAGE}/hal0-runner-entrypoint.sh"
 
+# Which recipe DIRECTORY produced the image. This script is shared by symlink
+# (packaging/runner/upstream/build.sh -> ../rocmfpx/build.sh, #2118) between
+# more than one recipe, so this must come from $HERE rather than being spelled
+# out as a literal "rocmfpx" string — a literal would mislabel every image the
+# OTHER recipe builds while looking correct in isolation.
+RECIPE_DIR="packaging/runner/$(basename "$HERE")"
+
 # Which REVISION of this recipe built the image. Filenames alone cannot answer
 # that: the patch files are mutable in-tree under stable names, so an older
 # image labelled `0001-….patch` cannot be traced back to the bytes it was built
@@ -209,7 +216,7 @@ LABEL org.opencontainers.image.source="${REPO}" \\
       org.opencontainers.image.revision="${REF}" \\
       org.opencontainers.image.base.name="${BASE}" \\
       org.opencontainers.image.base.digest="${BASE_DIGEST}" \\
-      dev.hal0.runner.recipe="packaging/runner/rocmfpx" \\
+      dev.hal0.runner.recipe="${RECIPE_DIR}" \\
       dev.hal0.recipe.revision="${RECIPE_REV}" \\
       dev.hal0.runner.base="${BASE_REF}" \\
       dev.hal0.runner.patches="$(IFS=,; echo "${PATCHES[*]}")" \\
