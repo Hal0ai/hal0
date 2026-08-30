@@ -3,10 +3,11 @@
 Every privileged operation hal0 performs post-P3-perms goes through one of a
 handful of narrow ``sudo -n /usr/lib/hal0/bin/hal0-*`` wrappers: slot lifecycle
 (``hal0-systemctl``), self-update (``hal0-update``), agent env files
-(``hal0-agentenv``), the benchmark harness (``hal0-benchctl``) and read-only
-podman introspection (``hal0-podman-ro``). ``install.sh`` installs each
-best-effort — a ``visudo -cf`` failure, or a missing source file, produced only
-a mid-log ``warn`` and the install still printed its success box.
+(``hal0-agentenv``), the benchmark harness (``hal0-benchctl``), read-only
+podman introspection (``hal0-podman-ro``), and the podman write surface
+(``hal0-podman-rw``). ``install.sh`` installs each best-effort — a
+``visudo -cf`` failure, or a missing source file, produced only a mid-log
+``warn`` and the install still printed its success box.
 
 Nothing verified the result afterwards. ``preflight_all`` never touched sudoers,
 ``doctor verify`` composes only live-API rows, and ``doctor all``'s extra rows
@@ -32,9 +33,10 @@ Three independent facts per seam:
   doesn't exist).
 
 The grant probe only runs for seams that expose a genuinely side-effect-free
-verb. ``hal0-systemctl help`` and ``hal0-update check`` do; the other three are
-presence-checked only, which is stated in the row detail rather than silently
-implied.
+verb. ``hal0-systemctl help``, ``hal0-update check``, ``hal0-podman-ro
+check-slot-token`` and ``hal0-podman-rw check-image-ref`` do; the remaining
+seams are presence-checked only, which is stated in the row detail rather
+than silently implied.
 """
 
 from __future__ import annotations
@@ -108,6 +110,19 @@ SEAMS: tuple[SeamSpec, ...] = (
         probe=("check-slot-token", "hal0probe"),
         required=False,
         role="podman image introspection (slot image_status / actual_image)",
+    ),
+    # runner-images v3 (D1(a)/D2): the FIRST write surface for the rootful
+    # podman store — image-pull / image-rm — separate and independently
+    # revocable from the read-only seam above. `check-image-ref` is the
+    # side-effect-free validator probe (never touches podman), mirroring
+    # `check-slot-token` on hal0-podman-ro: presence-checking alone would let
+    # a stale pre-write-seam wrapper (there was none, but the pattern still
+    # applies to any future narrowing) probe green with neither verb wired.
+    SeamSpec(
+        "hal0-podman-rw",
+        probe=("check-image-ref", "hal0probe"),
+        required=False,
+        role="podman image write (manifest-gated pull / stale-image eviction)",
     ),
 )
 
