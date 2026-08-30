@@ -28,12 +28,15 @@ test.describe('Runner Images under Slots (/slots/runner-images)', () => {
     await expect(page.locator('.slot-tab.on:has-text("Runner Images")')).toBeVisible()
   })
 
-  test('defaults strip + per-row enrichment chips render from contract rows', async ({ page }) => {
+  test('family strip + per-row enrichment chips render from contract rows', async ({ page }) => {
     await page.goto('/#slots/runner-images')
-    // Defaults strip: family → effective ref + source badge.
-    const strip = page.getByTestId('ri-defaults')
+    // Family strip: family → effective ref + source badge (launch-truth,
+    // Task 10 — served by the `families` payload, not derived from rows).
+    const strip = page.getByTestId('ri-family-strip')
     await expect(strip).toBeVisible()
-    await expect(strip.getByTestId('ri-default-rocmfpx')).toContainText('rocmfpx')
+    const familyRow = strip.getByTestId('ri-family-rocmfpx')
+    await expect(familyRow).toContainText('rocmfpx')
+    await expect(familyRow).toContainText('ghcr.io/hal0ai/hal0-combined:0822')
     // Row card: pull CTA present; tag picker renders when several tags exist.
     await expect(page.getByTestId('ri-pull')).toBeVisible()
     await expect(page.getByTestId('ri-tag-pick')).toBeVisible()
