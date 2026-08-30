@@ -131,7 +131,7 @@ export interface RunnerPullSnapshot {
   pct: number | null
   inFlight: boolean
   terminal: boolean
-  start: (id: string) => Promise<unknown>
+  start: (id: string, tag?: string) => Promise<unknown>
   cancel: () => Promise<void>
   reset: () => void
   reattach: (id: string) => Promise<void>
@@ -206,12 +206,13 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
     setError(null)
   }
 
-  const start: RunnerPullSnapshot['start'] = async (id) => {
+  const start: RunnerPullSnapshot['start'] = async (id, tag) => {
     reset()
     setImageId(id)
     setState('queued')
     try {
-      const res = await apiPost<any>(ENDPOINTS.runnerImagePull(id))
+      const url = ENDPOINTS.runnerImagePull(id) + (tag ? `?tag=${encodeURIComponent(tag)}` : '')
+      const res = await apiPost<any>(url)
       setJobId(res?.id ?? null)
       attachStream(id)
       return res

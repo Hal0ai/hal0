@@ -333,19 +333,11 @@ function RunnerCard({ image }) {
 
   const tags = tagChoices(image);
   const selTag = pickedTag ?? image.tag;
-  // The pull job is id-keyed: POST /{id}/pull resolves the catalogued row's
-  // headline tag server-side (registry/runner_pull_jobs.enqueue) and takes no
-  // tag parameter. Pulling a non-headline tag therefore isn't wired yet — the
-  // button gates honestly instead of pretending, and setting a tag as the
-  // family default rolls the headline on the next sync, after which it IS the
-  // pullable tag. (Called out in the PR body; per-tag pull needs a backend
-  // pull-route change.)
-  const pullTagMismatch = selTag !== image.tag;
   const inFlight = pull.imageId === image.id && pull.inFlight;
   const onPull = async () => {
     try {
-      await pull.start(image.id);
-      window.__hal0Toast && window.__hal0Toast(`Pulling ${image.id}…`, "info");
+      await pull.start(image.id, selTag !== image.tag ? selTag : undefined);
+      window.__hal0Toast && window.__hal0Toast(`Pulling ${image.id}:${selTag}…`, "info");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Pull failed to start — ${e?.message || "see logs"}`, "err");
     }
@@ -448,13 +440,9 @@ function RunnerCard({ image }) {
             <button
               className="btn"
               data-testid="ri-pull"
-              disabled={pullTagMismatch}
-              title={pullTagMismatch
-                ? `Pull is keyed to the headline tag (${image.tag}) — set ${selTag} as the ${family || "family"} default first; the catalogue rolls to it on sync`
-                : undefined}
               onClick={onPull}
             >
-              {Icons.download} {image.local_path ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{image.tag}</span>
+              {Icons.download} {image.local_path ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span>
             </button>
             {family && (
               <button

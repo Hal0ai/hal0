@@ -1,4 +1,8 @@
-// Runner Images page pure helpers (runner-catalogue-v2, Task D).
+// @vitest-environment happy-dom
+//
+// Runner Images page pure helpers (runner-catalogue-v2, Task D), plus a real
+// render test for Task 6 (per-tag pull) — see that describe block below for
+// why this file needs a DOM environment now.
 //
 // Fixtures are shaped to the frozen Task-C contract: /api/runner-images rows
 // carry `available_tags` (newest-first), `is_default` ({family, source} |
@@ -11,14 +15,85 @@
 // at module top), so the globals are installed before the dynamic import —
 // same pattern as memoryOverviewV2.smoke.test.tsx.
 import React from 'react'
-import { describe, expect, it } from 'vitest'
+import { createRoot } from 'react-dom/client'
+import { act } from 'react-dom/test-utils'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
+// Icon glyphs come from chrome.jsx's window global — irrelevant here.
+;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 
-const { defaultsStripRows, newerTagAvailable, newestComparableTag, MUTABLE_TAGS } = await import(
-  '../runner-images.jsx'
-)
+// Task 6 (per-tag pull) render test below needs the REAL useRunnerImagePullJob
+// (it's the thing under test — the hook must build `?tag=` into the pull
+// POST) while the list/sync/default hooks stay stubbed, contract-shaped, and
+// side-effect-free. vi.mock factories are hoisted above imports, so the spy +
+// fixture rows they close over must be hoisted too (mirrors
+// runner-images-confirm-flow.test.tsx's `vi.hoisted` idiom).
+const { apiPostCalls, PULL_ROW } = vi.hoisted(() => ({
+  apiPostCalls: [] as string[],
+  PULL_ROW: {
+    id: 'rocmfpx-combined',
+    image: 'ghcr.io/hal0ai/hal0-combined',
+    tag: '0826',
+    digest: null,
+    size_bytes: 7_340_032_000,
+    manifest_key: null,
+    ownership: 'owned',
+    publish: 'external',
+    notes: null,
+    build: null,
+    local_path: null,
+    downloaded_at: null,
+    discovered_at: null,
+    updated_at: null,
+    extra: {},
+    available_tags: ['0826', '0824'],
+    is_default: null,
+    in_use_by: [],
+  },
+}))
+
+vi.mock('@/api/hooks/useRunnerImages', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/api/hooks/useRunnerImages')>(
+      '@/api/hooks/useRunnerImages',
+    )
+  return {
+    ...actual,
+    // useRunnerImagePullJob is left as the real implementation — it's what
+    // Task 6 wires up.
+    useRunnerImages: () => ({ data: [PULL_ROW], isPending: false, isError: false, error: null }),
+    useRunnerImageSync: () => ({ isPending: false, mutateAsync: async () => ({ images: [PULL_ROW] }) }),
+    useRunnerImagePullsList: () => ({ data: [] }),
+    useDownloadedRunnerImages: () => ({ data: [] }),
+    useRunnerImage: () => ({ data: null }),
+    useSetDefaultImage: () => ({ isPending: false, mutate: () => {} }),
+  }
+})
+
+// The real useRunnerImagePullJob posts through apiPost — mock the client
+// boundary (not the hook) so the URL it actually builds is what's asserted,
+// keeping apiGet/Hal0Error/etc. as the real implementations.
+vi.mock('@/api/client', async () => {
+  const actual = await vi.importActual<typeof import('@/api/client')>('@/api/client')
+  return {
+    ...actual,
+    apiPost: (url: string) => {
+      apiPostCalls.push(url)
+      return Promise.resolve({ id: 'job-1' })
+    },
+  }
+})
+
+const {
+  defaultsStripRows,
+  newerTagAvailable,
+  newestComparableTag,
+  MUTABLE_TAGS,
+  RunnerImagesView,
+} = await import('../runner-images.jsx')
 
 // Minimal contract-shaped row; overrides per case.
 function row(overrides: Record<string, unknown> = {}) {
@@ -129,5 +204,57 @@ describe('newerTagAvailable', () => {
     expect(newestComparableTag(row({ tag: '0822', available_tags: ['server', '0824', '0822'] }))).toBe(
       '0824'
     )
+  })
+})
+
+// Task 6 — the backend's POST /api/runner-images/{id}/pull?tag= route already
+// exists; the UI never sent it and disabled the Pull button on a non-headline
+// pick instead. A REAL render (mirrors runner-images-confirm-flow.test.tsx),
+// so the fix is proven end to end: pick a non-headline tag → button enables
+// → click → the pull job hook's real POST URL carries `?tag=`.
+describe('RunnerImagesView per-tag pull (Task 6)', () => {
+  afterEach(() => {
+    apiPostCalls.length = 0
+    document.body.innerHTML = ''
+  })
+
+  it('pulls the picked non-headline tag', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+
+    const pick = host.querySelector('[data-testid="ri-tag-pick"]') as HTMLSelectElement
+    expect(pick).toBeTruthy()
+    act(() => {
+      pick.value = '0824'
+      pick.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    const btn = host.querySelector('[data-testid="ri-pull"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.disabled).toBe(false) // was disabled pre-v3 on any tag mismatch
+
+    await act(async () => {
+      btn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(apiPostCalls[apiPostCalls.length - 1]).toMatch(/\/pull\?tag=0824$/)
+
+    act(() => {
+      root.unmount()
+    })
   })
 })
