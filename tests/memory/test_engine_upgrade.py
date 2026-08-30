@@ -46,7 +46,9 @@ def _make_venv_tree(venv: Path) -> None:
     (venv / "bin").mkdir(parents=True)
     for name in ("python", "pip", "hindsight-api"):
         f = venv / "bin" / name
-        f.write_text("#!/bin/sh\n")
+        # Console scripts carry pip's ABSOLUTE shebang naming the venv they
+        # were built in — the shape the shebang-retarget regression rides on.
+        f.write_text(f"#!{venv}/bin/python3.13\n" if name != "python" else "#!/bin/sh\n")
         f.chmod(0o755)
 
 
@@ -183,6 +185,19 @@ def test_happy_path_swaps_snapshots_and_postchecks(hs):
 
 class _NoFreeDisk:
     free = 0
+
+
+def test_swapped_scripts_shebang_points_at_the_final_venv(hs):
+    """pip's absolute shebangs name .venv.new; after the rename swap they
+    must name .venv or every entry point (systemd ExecStart included) execs
+    a deleted interpreter — found by the component-updates engine gate."""
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=FakeRunner(), http_get=_healthy, hs_dir=hs
+    )
+    assert result["status"] == "upgraded"
+    launcher = (hs / ".venv" / "bin" / "hindsight-api").read_text()
+    assert ".venv.new" not in launcher
+    assert f"#!{hs}/.venv/bin/python3.13" in launcher
 
 
 def test_snapshot_disk_full_aborts_and_restarts_old_engine(hs, monkeypatch):

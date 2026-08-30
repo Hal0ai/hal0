@@ -142,6 +142,38 @@ def _chown_tree(path: Path) -> None:
         log.warning("updater.memory_engine_chown_failed", path=str(path), error=str(exc))
 
 
+def _retarget_scripts(venv_new: Path, venv_final: Path) -> None:
+    """Rewrite the build-aside path to the final path in bin/ launchers.
+
+    pip writes console scripts with an ABSOLUTE shebang, so everything built
+    at ``.venv.new`` execs ``<...>/.venv.new/bin/python3.x`` — after the
+    rename swap that interpreter no longer exists and every entry point
+    (systemd's ``ExecStart=…/.venv/bin/hindsight-api`` included) fails
+    ENOENT, while the pre-swap checks all pass (the file exists, is
+    executable, and the version probe names its interpreter explicitly).
+    Found by the component-updates engine gate running the real upgrade:
+    without this, every upgrade fails postcheck and rolls back, and no box
+    can ever converge onto a new pin.
+
+    Plain path substitution over the small text launchers, which also covers
+    pip's ``#!/bin/sh`` trampoline form (long/space-y prefixes) where the
+    path sits in an exec line rather than the shebang. Symlinks
+    (``bin/python*`` → the base interpreter) and binary files are untouched;
+    ``pyvenv.cfg``'s ``home`` points at the base interpreter and needs no
+    rewrite. In-place write preserves each script's mode.
+    """
+    old, new = str(venv_new), str(venv_final)
+    for script in (venv_new / "bin").iterdir():
+        if script.is_symlink() or not script.is_file():
+            continue
+        try:
+            text = script.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue  # compiled/binary launcher — no embedded build path
+        if old in text:
+            script.write_text(text.replace(old, new), encoding="utf-8")
+
+
 def _installed_version(runner: Runner, venv: Path) -> str | None:
     """The ``hindsight-api`` dist version inside ``venv``, or ``None``.
 
@@ -379,6 +411,7 @@ def upgrade_memory_engine(
             raise subprocess.SubprocessError(
                 f"built venv reports {built!r}, expected {HINDSIGHT_API_PIN!r}"
             )
+        _retarget_scripts(venv_new, venv)
     except (OSError, subprocess.SubprocessError) as exc:
         shutil.rmtree(venv_new, ignore_errors=True)
         log.warning(
