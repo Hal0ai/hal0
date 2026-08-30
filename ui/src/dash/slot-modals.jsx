@@ -25,6 +25,9 @@ import {
 	optionValue,
 	selectedBackendValue,
 } from "./hw-cascade.js";
+// llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
+// the Runner Images page so option labels and the RunnerCard can't drift.
+import { formatProvenanceShort } from "./runner-images.jsx";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -1061,9 +1064,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			const backendsCat = systemInfoQuery.data?.backends ?? {};
 			const selRunner = binary ? backendsCat[binary] : null;
 			const sup = selRunner ? runnerBackends(selRunner) : [];
+			// Same provenance string the Runner select's option labels carry
+			// (h0/runner-provenance) — the fit-check line names the exact
+			// llama.cpp build it's warning about; absent provenance renders
+			// the line exactly as before.
+			const selProv = formatProvenanceShort(selRunner?.provenance);
 			if (binary && sup.length > 0 && !sup.includes(selCross.backend))
 				crossCautions.push(
-					`Runner binary "${binary}" does not list backend "${selCross.backend}" — clear it or pick a matching binary.`,
+					`Runner binary "${binary}${selProv ? ` — ${selProv}` : ""}" does not list backend "${selCross.backend}" — clear it or pick a matching binary.`,
 				);
 			if ((imagePin || "").trim())
 				crossCautions.push(
@@ -1690,6 +1698,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													{Array.isArray(o.specialties) &&
 													o.specialties.length > 0
 														? ` · ${o.specialties.join(", ")}`
+														: ""}
+													{/* llama.cpp build provenance of the runner's
+													    effective image (h0/runner-provenance) — e.g.
+													    `rocmfpx — ROCmFPX @0a59add (+4 patches)` vs
+													    `upstream — llama.cpp @c841aee`. Absent
+													    provenance renders exactly what rendered
+													    before. */}
+													{formatProvenanceShort(o.provenance)
+														? ` — ${formatProvenanceShort(o.provenance)}`
 														: ""}
 												</option>
 											))}

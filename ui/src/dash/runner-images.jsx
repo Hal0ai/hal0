@@ -181,6 +181,58 @@ export function newerTagAvailable(image) {
   return cand !== image.tag;               // pre-v3 fallback, unchanged
 }
 
+// ── Build provenance (h0/runner-provenance) ─────────────────────────────
+// The sync probe reads each tag's image-config OCI labels into
+// `provenance: {source_repo, revision, patch_count} | null` (per tag row,
+// hoisted to `row.provenance` for the headline; the system-info payload
+// carries the same shape per runner). All helpers return null when the
+// provenance is absent/empty so callers render EXACTLY what they render
+// today — no placeholder text.
+
+// Short repo name: last path segment of `source_repo` minus a `.git`
+// suffix — with `llama.cpp` kept as-is (its `.cpp` is the name, and
+// upstream's repo path ends in `llama.cpp.git` → `llama.cpp`).
+export function provenanceRepoName(sourceRepo) {
+  if (!sourceRepo || typeof sourceRepo !== 'string') return null;
+  const last = sourceRepo.replace(/\/+$/, '').split('/').pop();
+  if (!last) return null;
+  return last.endsWith('.git') ? last.slice(0, -4) || null : last;
+}
+
+// `(+4 patches)` / `(+1 patch)` — null for 0/absent (pristine upstream
+// carries an empty patch list, which shouldn't render as noise).
+function provenancePatchSuffix(patchCount) {
+  if (typeof patchCount !== 'number' || patchCount <= 0) return null;
+  return `(+${patchCount} patch${patchCount === 1 ? '' : 'es'})`;
+}
+
+// Compact provenance string for select options / fit-check lines, e.g.
+// `ROCmFPX @0a59add (+4 patches)` or `llama.cpp @c841aee`. Partial labels
+// degrade to whatever parts exist; null when nothing renders.
+export function formatProvenanceShort(prov) {
+  if (!prov) return null;
+  const parts = [
+    provenanceRepoName(prov.source_repo),
+    prov.revision ? `@${String(prov.revision).slice(0, 7)}` : null,
+    provenancePatchSuffix(prov.patch_count),
+  ].filter(Boolean);
+  return parts.length ? parts.join(' ') : null;
+}
+
+// Full provenance line for the RunnerCard detail: source URL + short
+// revision + patch count, e.g.
+// `https://github.com/ggml-org/llama.cpp.git @c841aee` (upstream, no
+// patches) or `<fork URL> @0a59add (+4 patches)`.
+export function formatProvenanceFull(prov) {
+  if (!prov) return null;
+  const parts = [
+    prov.source_repo || null,
+    prov.revision ? `@${String(prov.revision).slice(0, 7)}` : null,
+    provenancePatchSuffix(prov.patch_count),
+  ].filter(Boolean);
+  return parts.length ? parts.join(' ') : null;
+}
+
 // Tag option label for the card's <select>: the tag name, its digest alias
 // (`= <earlier tag>`) when it points at the same manifest as one already
 // listed, a downloaded checkmark, and a trailing badge suffix.
@@ -615,6 +667,14 @@ function RunnerCard({ image }) {
         <div><div className="k">publish</div><div className="v">{image.publish || "—"}</div></div>
         <div><div className="k">manifest key</div><div className="v">{image.manifest_key || "—"}</div></div>
         <div><div className="k">in use by</div><div className="v mono">{inUseBy.length ? inUseBy.join(", ") : "—"}</div></div>
+        {/* Build provenance (headline tag) — absent provenance renders
+            exactly what rendered before this line existed: nothing. */}
+        {formatProvenanceFull(image.provenance) && (
+          <div data-testid="ri-provenance">
+            <div className="k">build source</div>
+            <div className="v mono" title={image.provenance.revision || undefined}>{formatProvenanceFull(image.provenance)}</div>
+          </div>
+        )}
       </div>
 
       {image.notes && (

@@ -68,7 +68,9 @@ export function optionValue(binary, backend) {
  * @param slotType    slot.type — gates runner families via FAMILY_SLOT_TYPES
  *
  * Returns `{ options, fallback, emptyPin }`:
- * - options: [{binary, backend, device, specialties}] — the dropdown rows
+ * - options: [{binary, backend, device, specialties, provenance}] — the
+ *   dropdown rows; `provenance` is the runner row's build-provenance
+ *   object (h0/runner-provenance, from system-info) or undefined
  * - fallback: pinned ref is outside the catalog, so options are the
  *   device-fit union, not an enumeration of the image
  * - emptyPin: a catalog image is pinned, but nothing in it fits this slot
@@ -95,11 +97,16 @@ export function backendOptions({ backends, pinnedImage, device, slotType }) {
 		const specialties = Array.isArray(r.supports?.specialties)
 			? r.supports.specialties
 			: undefined;
+		// Build provenance of the runner's effective image (system-info's
+		// `provenance` field, h0/runner-provenance) — passed through so the
+		// option label can name the llama.cpp build; absent on an older
+		// backend payload, and the label then renders exactly as today.
+		const provenance = r.provenance || undefined;
 		const sups = runnerBackends(r);
 		if (sups.length === 0) {
 			// Backend-agnostic runner: one option, device untouched.
 			if (r.device_class && r.device_class !== devClass) continue;
-			options.push({ binary: key, backend: "", device, specialties });
+			options.push({ binary: key, backend: "", device, specialties, provenance });
 			continue;
 		}
 		for (const be of sups) {
@@ -110,13 +117,19 @@ export function backendOptions({ backends, pinnedImage, device, slotType }) {
 				// a re-create, not an edit.
 				if (deviceClassOf(target) !== devClass) continue;
 				if (r.device_class && r.device_class !== devClass) continue;
-				options.push({ binary: key, backend: be, device: target, specialties });
+				options.push({
+					binary: key,
+					backend: be,
+					device: target,
+					specialties,
+					provenance,
+				});
 			} else {
 				// Unmapped token (e.g. npu): only valid when it IS the slot's
 				// backend already — never a flip.
 				if (be !== devBe) continue;
 				if (r.device_class && r.device_class !== devClass) continue;
-				options.push({ binary: key, backend: be, device, specialties });
+				options.push({ binary: key, backend: be, device, specialties, provenance });
 			}
 		}
 	}
