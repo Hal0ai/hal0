@@ -556,3 +556,40 @@ async def test_sync_persists_tags(tmp_path: Path) -> None:
     assert cpu.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
     assert cpu.tags[1].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
     assert cpu.tags[2].digest == "sha256:hal0ai-hal0-toolbox-cpu-0824"
+
+
+@pytest.mark.asyncio
+async def test_sync_result_rows_carry_fresh_tags_on_first_sync(tmp_path: Path) -> None:
+    """The SyncResult rows returned by sync_runner_images must already carry
+    the freshly-probed tags — not the tag table's state from BEFORE this
+    sync's ``store.set_tags`` call.
+
+    ``store.upsert`` reads the tag table for the row it returns before the
+    sync loop calls ``store.set_tags`` with this run's probed tags; naively
+    appending ``store.upsert(image)``'s return value straight to
+    ``result.images`` carries the PREVIOUS sync's tags — empty on a first
+    sync against a brand-new store, since there is no previous sync at all.
+    That means the /sync response (and its ``families`` payload, which is
+    built from these rows) would lag by one full sync. This asserts the
+    fix: on a first sync (empty store), the rows in ``result.images``
+    already carry the tags this very probe just resolved.
+    """
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=_IMAGES_JSON, tags=["0826", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = next(img for img in result.images if img.id == "cpu")
+    # Same expectation as test_sync_persists_tags's store-reload check above,
+    # but asserted straight off the SyncResult row — no re-fetch from the
+    # store in between — so a regression back to the pre-fix ordering (which
+    # would leave this empty on a first sync) is caught here.
+    assert len(cpu.tags) == 3
+    assert [t.tag for t in cpu.tags] == ["latest", "0826", "0824"]
+    assert cpu.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
+    assert cpu.tags[1].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
+    assert cpu.tags[2].digest == "sha256:hal0ai-hal0-toolbox-cpu-0824"

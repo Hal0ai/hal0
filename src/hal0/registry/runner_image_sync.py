@@ -434,8 +434,16 @@ async def sync_runner_images(
                 )
                 continue
             image = _apply_manifest_metadata(image, entry)
-            result.images.append(store.upsert(image))
+            # `store.upsert` reads the tag table for the row it returns
+            # BEFORE `set_tags` below writes this sync's freshly-probed
+            # tags — reading upsert's return value straight would carry the
+            # PREVIOUS sync's tags into the SyncResult (empty on a first
+            # sync), so the /sync response — and its families payload —
+            # would lag by one sync. Persist the fresh tags first, then
+            # stamp them onto the row this call reports.
+            stored = store.upsert(image)
             store.set_tags(image.id, image.tags)
+            result.images.append(stored.model_copy(update={"tags": image.tags}))
 
         if result.images_json_ok:
             pruned = store.prune_absent(set(by_id))

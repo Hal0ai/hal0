@@ -363,6 +363,34 @@ describe('newerTagAvailable (digest-aware, v3 payload)', () => {
     expect(newerTagAvailable(DIVERGENT)).toBe(true) // 0826 digest ≠ 0824's
     expect(newerTagCandidate(DIVERGENT)).toBe('0826') // not '0827' — that tag was never compared
   })
+
+  // Fix-wave regression (final review): the digest-path scan used to exclude
+  // the headline from consideration (`t.tag !== image.tag`), so when the
+  // headline WAS already the newest release, the scan skipped straight past
+  // it to an OLDER release and reported that as the "candidate" — the
+  // newer: chip then showed permanently on an up-to-date row. The fix scans
+  // for the first release-shaped tag overall and only treats it as a
+  // candidate when it differs from the headline.
+  it('headline already newest release: no candidate, no chip', () => {
+    const UP_TO_DATE = {
+      id: 'z',
+      image: 'ghcr.io/x/c',
+      tag: '0826',
+      available_tags: ['0826', '0824'],
+      tags: [
+        { tag: '0826', digest: 'sha256:a', downloaded: true },
+        { tag: '0824', digest: 'sha256:b', downloaded: false },
+      ],
+    }
+    expect(newerTagCandidate(UP_TO_DATE)).toBeUndefined()
+    expect(newerTagAvailable(UP_TO_DATE)).toBe(false)
+  })
+
+  // Keep the headline-trails case green alongside the fix above.
+  it('headline trails the newest release: candidate + chip', () => {
+    expect(newerTagCandidate(V3_IMG)).toBe('0826')
+    expect(newerTagAvailable(V3_IMG)).toBe(true)
+  })
 })
 
 // Real render — proves the <select> groups tags into <optgroup>s (other

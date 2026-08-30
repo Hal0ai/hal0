@@ -144,8 +144,17 @@ export function newerTagCandidate(image) {
   if (!image || !image.tag) return undefined;
   const tags = Array.isArray(image.tags) ? image.tags : null;
   if (tags && tags.length) {
-    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag) && t.tag !== image.tag);
-    return cand?.tag;
+    // First release-shaped tag overall (not "first release-shaped tag other
+    // than the headline") — excluding the headline from the scan meant that
+    // when the headline WAS the newest release, an older release became the
+    // "candidate" and the newer: chip showed permanently on up-to-date rows.
+    // `tags` is already newest-first (sort_tags_newest_first), so the first
+    // release-shaped entry is the newest release known; if that's the
+    // headline itself (or there's no release-shaped tag at all), there's no
+    // newer candidate.
+    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag));
+    if (!cand || cand.tag === image.tag) return undefined;
+    return cand.tag;
   }
   return newestComparableTag(image);
 }

@@ -45,6 +45,23 @@ export interface RunnerImage {
   available_tags?: string[]
   is_default?: RunnerImageDefault | null
   in_use_by?: string[]
+  // runner-catalogue-v3 enrichment: per-tag digest/store facts
+  // (tags[].{tag,digest,size_bytes,last_seen,downloaded}), validated/
+  // candidate/deprecated badges keyed by tag, and store-truth fields
+  // mirroring what StoreStateChip / tagLanes() in runner-images.jsx read.
+  // Optional for the same pre-contract-backend reason as above — type-only,
+  // no behavior change.
+  tags?: Array<{
+    tag: string
+    digest: string | null
+    size_bytes: number | null
+    last_seen: string | null
+    downloaded: boolean | null
+  }>
+  badges?: Record<string, string>
+  store_state?: 'present' | 'missing' | 'unknown'
+  downloaded?: boolean
+  store_context?: 'rootful' | 'rootless' | null
 }
 
 const RUNNER_IMAGES_POLL_MS = 30_000
