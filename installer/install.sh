@@ -724,6 +724,50 @@ else
         usermod -aG "${KFD_GROUPS}" hal0
         info "added hal0 to groups: ${KFD_GROUPS}"
     fi
+
+    # Rootless-podman uid/gid ranges. `useradd --system` never allocates
+    # /etc/subuid + /etc/subgid entries, so the hal0 user's rootless podman
+    # ran in a single-uid namespace: any image layer carrying files owned by
+    # a non-root uid died at unpack ("potentially insufficient UIDs or GIDs
+    # available in user namespace", podman exit 125). Slot units pull as
+    # root and never hit it — which is why the gap stayed invisible until
+    # the dashboard's runner-image pull (runs as the hal0 service user) grew
+    # a Pull button. Idempotent: skipped once BOTH files carry a hal0 range.
+    # The start is placed after every range any user already claims so a
+    # pre-existing allocation (e.g. an operator's own account) is never
+    # overlapped.
+    # HAL0_SUBUID_JUST_ALLOCATED gates the deferred `podman system migrate`
+    # near "doctor perms --fix --force" below — VAR_DIR (hal0's $HOME) is
+    # still root:root here (the P3-perms chown to hal0:hal0 2775 hasn't run
+    # yet), so a migrate attempted from THIS block can't even create hal0's
+    # rootless storage dir under $HOME and would always hit the warn() path,
+    # fresh install or not.
+    HAL0_SUBUID_JUST_ALLOCATED=0
+    if ! grep -q '^hal0:' /etc/subuid 2>/dev/null \
+        || ! grep -q '^hal0:' /etc/subgid 2>/dev/null; then
+        SUB_START=100000
+        SUB_COUNT=65536
+        for _subfile in /etc/subuid /etc/subgid; do
+            [[ -f "${_subfile}" ]] || continue
+            while IFS=: read -r _sub_user _sub_first _sub_n; do
+                [[ -n "${_sub_first:-}" && -n "${_sub_n:-}" ]] || continue
+                _sub_end=$(( _sub_first + _sub_n ))
+                (( _sub_end > SUB_START )) && SUB_START=${_sub_end}
+            done < "${_subfile}"
+        done
+        if usermod --add-subuids "${SUB_START}-$(( SUB_START + SUB_COUNT - 1 ))" \
+                --add-subgids "${SUB_START}-$(( SUB_START + SUB_COUNT - 1 ))" \
+                hal0 2>/dev/null; then
+            info "allocated rootless uid/gid range ${SUB_START}:${SUB_COUNT} for hal0"
+        else
+            # shadow-utils too old for --add-subuids: append the entries
+            # directly — same format usermod writes.
+            echo "hal0:${SUB_START}:${SUB_COUNT}" >> /etc/subuid
+            echo "hal0:${SUB_START}:${SUB_COUNT}" >> /etc/subgid
+            info "allocated rootless uid/gid range ${SUB_START}:${SUB_COUNT} for hal0 (direct append)"
+        fi
+        HAL0_SUBUID_JUST_ALLOCATED=1
+    fi
 fi
 
 ui_step "Filesystem layout"
@@ -3127,6 +3171,25 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     else
         warn "'${HAL0_BIN} doctor perms --fix' reported drift/errors — re-run 'sudo ${HAL0_BIN} doctor perms --fix' after install"
     fi
+fi
+
+# Rootless-podman storage migrate (issue #2119), deferred to HERE — not the
+# "System user" step that allocated the subuid/subgid range above. VAR_DIR
+# only just became hal0:hal0 2775 in the doctor-perms step immediately
+# above; run this any earlier and hal0 can't even create its rootless
+# storage dir under $HOME yet (still root:root at that point), so the
+# migrate would fail on every install — fresh or upgrade — for a reason
+# that has nothing to do with the subuid mapping it's meant to validate.
+# An EXISTING install already initialized hal0's podman storage under the
+# old single-uid mapping; without this one-time migrate the next rootless
+# operation fails with "user namespace changed". A fresh install has no
+# storage yet and migrate is a cheap no-op. Gated on a fresh allocation
+# just having happened (HAL0_SUBUID_JUST_ALLOCATED) so a re-run of
+# install.sh against an already-converged box doesn't redo it every time.
+if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SUBUID_JUST_ALLOCATED:-0}" -eq 1 ]] \
+    && command -v podman >/dev/null 2>&1; then
+    runuser -u hal0 -- podman system migrate >/dev/null 2>&1 \
+        || warn "podman system migrate (as hal0) failed — run it once as the hal0 user before the first dashboard image pull"
 fi
 
 # ── Post-install smoke probes (#2066) ──────────────────────────────────────
