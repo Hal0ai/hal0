@@ -284,7 +284,14 @@ case "$cmd" in
       *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
     esac
     ref="$1"
-    run_podman image inspect --format '{{index .RepoDigests 0}}' -- "$ref"
+    # `if .RepoDigests` guards a real case: a present, locally-built image
+    # that was never pushed/pulled has an EMPTY RepoDigests slice, and
+    # `index .RepoDigests 0` on an empty slice panics podman (nonzero exit),
+    # which would otherwise be misreported as rc 66 — a seam failure, not the
+    # legitimate "present but digestless" answer it actually is. Still a
+    # hardcoded literal --format; only the SHAPE of the answer changed, not
+    # where the value comes from.
+    run_podman image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' -- "$ref"
     (( PODMAN_RC == 0 )) || podman_failed "podman image inspect failed" "$PODMAN_RC"
     printf '%s\n' "$PODMAN_OUT"
     ;;
@@ -295,7 +302,9 @@ usage: hal0-podman-ro <command> [arg]
   images                     podman images --format {{.Repository}}   (root's image store)
   images-digests             podman images --format {{.Repository}}:{{.Tag}} {{.Digest}}   (root's store)
   image-exists <ref>         "present" | "missing" for a validated image ref
-  image-digest <ref>         first RepoDigest of a validated image ref; EMPTY = not in root's store
+  image-digest <ref>         first RepoDigest of a validated image ref; EMPTY means
+                             either "not in root's store" or "present but
+                             digestless" (a locally-built image never pushed/pulled)
   image-user <ref>           the image's configured USER; EMPTY means either
                              "no USER declared" (runs as root) or "not in
                              root's store yet" — both map to root caller-side
