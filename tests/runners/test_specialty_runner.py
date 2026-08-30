@@ -17,5 +17,5 @@ def test_promptforge_runner_registered():
 
 
 def test_existing_runners_have_empty_specialties():
-    for key in ("rocmfpx", "vulkanfpx", "cuda", "cpu"):
+    for key in ("rocmfpx", "cuda", "cpu"):
         assert RUNNER_IMAGES[key].supports.specialties == ()

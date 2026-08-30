@@ -15,10 +15,12 @@ import pytest
 
 from hal0.errors import NotFound
 from hal0.runners import (
+    FPX_RUNNER_KEYS,
     RUNNER_IMAGES,
     STALE_RUNNER_IMAGE_REFS,
     Runner,
     RunnerSupports,
+    canonical_runner_key,
     get_runner,
     runner_for_backend,
     runner_matches,
@@ -33,7 +35,6 @@ _REAL_DEVICE_CLASSES = {"gpu", "cpu", "npu", "img"}
 def test_registry_has_every_expected_key() -> None:
     assert set(RUNNER_IMAGES) == {
         "rocmfpx",
-        "vulkanfpx",
         "promptforge",
         "cuda",
         "cpu",
@@ -83,7 +84,7 @@ def test_get_runner_unknown_key_raises_not_found() -> None:
         ("cuda", None, "cuda"),
         (None, "cpu", "cpu"),
         ("cpu", None, "cpu"),
-        ("vulkan", "gpu", "vulkanfpx"),
+        ("vulkan", "gpu", "rocmfpx"),
         ("rocm", "gpu", "rocmfpx"),
         (None, None, "rocmfpx"),
         ("", "gpu", "rocmfpx"),
@@ -141,7 +142,27 @@ def test_llama_server_runners_report_gguf_format() -> None:
 
 
 def test_rocm_and_vulkan_fpx_share_supported_backends() -> None:
-    """One Vulkan-portable image → both fpx keys advertise (rocm, vulkan);
+    """One Vulkan-portable image → both fpx keys resolve to rocmfpx;
     device — not BINARY — disambiguates (spec-hw-slot-ownership §2/§4)."""
     assert RUNNER_IMAGES["rocmfpx"].supported_backends == ("rocm", "vulkan")
-    assert RUNNER_IMAGES["vulkanfpx"].supported_backends == ("rocm", "vulkan")
+    assert get_runner("vulkanfpx") is get_runner("rocmfpx")
+
+
+def test_vulkanfpx_key_collapsed() -> None:
+    """#2127 follow-up: there is no vulkanFPX binary — the key is gone."""
+    assert "vulkanfpx" not in RUNNER_IMAGES
+
+
+def test_vulkanfpx_alias_resolves_to_rocmfpx() -> None:
+    assert canonical_runner_key("vulkanfpx") == "rocmfpx"
+    assert canonical_runner_key("rocmfpx") == "rocmfpx"
+    assert canonical_runner_key("kokoro") == "kokoro"  # non-aliased passthrough
+    assert get_runner("vulkanfpx") is RUNNER_IMAGES["rocmfpx"]
+
+
+def test_runner_for_backend_vulkan_is_rocmfpx() -> None:
+    assert runner_for_backend("vulkan").key == "rocmfpx"
+
+
+def test_fpx_guard_covers_only_the_canonical_key() -> None:
+    assert frozenset({"rocmfpx"}) == FPX_RUNNER_KEYS

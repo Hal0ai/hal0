@@ -31,10 +31,10 @@ Deliberate scope note for ``manifest_key``: ``manifest.json``'s
 the OLD per-backend toolboxes as ``"rocm"`` / ``"vulkan"`` (see
 ``hal0-toolbox-rocm:v1`` / ``hal0-toolbox-vulkan:v1`` in that file) — a
 DIFFERENT image lineage from :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE`.
-Wiring ``rocmfpx``/``vulkanfpx`` to those manifest keys would silently
+Wiring ``rocmfpx`` to those manifest keys would silently
 downgrade every fresh/updated install's GPU runner to the old toolbox the
 day a manifest ships with real digests. So — unlike the spec's illustrative
-pseudocode — the ``rocmfpx``/``vulkanfpx``/``cuda``/``cpu`` entries below
+pseudocode — the ``rocmfpx``/``cuda``/``cpu`` entries below
 carry ``manifest_key=None`` (env override still applies; the manifest tier
 is simply skipped, exactly matching the OLD :func:`resolve_default_image`
 behaviour, which never consulted the manifest either). ``flm`` / ``kokoro``
@@ -129,17 +129,6 @@ RUNNER_IMAGES: dict[str, Runner] = {
         RunnerSupports(mtp=True, jinja=True, mmproj=True),
         "gpu",
         "rocm",
-        None,
-        supported_backends=("rocm", "vulkan"),
-        format_arch="gguf",
-    ),
-    "vulkanfpx": Runner(
-        "vulkanfpx",
-        DEFAULT_ROCMFPX_IMAGE,
-        "llama-server",
-        RunnerSupports(mtp=True, jinja=True, mmproj=True),
-        "gpu",
-        "vulkan",
         None,
         supported_backends=("rocm", "vulkan"),
         format_arch="gguf",
@@ -247,9 +236,23 @@ RUNNER_IMAGES: dict[str, Runner] = {
 #: import) keep working unchanged.
 STALE_RUNNER_IMAGE_REFS = STALE_ROCMFPX_IMAGE_REFS
 
+#: Legacy runner keys → the canonical key that replaced them. PERMANENT —
+#: persisted slot TOML (`binary = "vulkanfpx"`), model `preferred_runner`
+#: rows, env overrides, and operator muscle memory all outlive any release;
+#: the cost of keeping an entry is one dict line. `vulkanfpx` never named a
+#: real binary: the runner is ROCmFPX, whose image happens to ship a
+#: working Vulkan backend (see the collapse spec, 2026-08-30).
+RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
+
+
+def canonical_runner_key(key: str) -> str:
+    """Fold a legacy runner key to its canonical replacement (identity otherwise)."""
+    return RUNNER_ALIASES.get(key, key)
+
 
 def get_runner(key: str) -> Runner:
     """Look up a runner by key, or raise :class:`~hal0.errors.NotFound`."""
+    key = canonical_runner_key(key)
     runner = RUNNER_IMAGES.get(key)
     if runner is None:
         raise NotFound(
@@ -299,13 +302,7 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 
       * ``backend == "cuda"`` → the ``cuda`` runner.
       * ``device_class == "cpu"`` or ``backend == "cpu"`` → the ``cpu`` runner.
-      * ``backend == "vulkan"`` → the ``vulkanfpx`` runner.
-      * everything else (rocm / unspecified GPU) → the ``rocmfpx`` runner.
-
-    ``rocmfpx`` and ``vulkanfpx`` resolve to the SAME image
-    (:data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` is Vulkan-portable —
-    see that constant's docstring) — the two keys exist so a future runner
-    split has somewhere to land, not because they differ today.
+      * ``backend == "vulkan"`` or unspecified GPU → the ``rocmfpx`` runner (one Vulkan-portable image; the slot's ``device`` picks the lane).
     """
     be = (backend or "").lower()
     dc = (device_class or "").lower()
@@ -313,19 +310,17 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
         return get_runner("cuda")
     if dc == "cpu" or be == "cpu":
         return get_runner("cpu")
-    if be == "vulkan":
-        return get_runner("vulkanfpx")
     return get_runner("rocmfpx")
 
 
-#: The only two runner keys whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
+#: The only runner key whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
 #: single fork build that understands the custom GGML tensor type ids (100 /
 #: 103) a ROCmFPX-family GGUF (``hal0-brain-sft-q8-rocmfpx`` and friends) is
 #: packed with. Every other runner (``cpu``, ``cuda``, …) runs stock
 #: llama.cpp, which SIGSEGVs on those tensor types instead of rejecting them
 #: cleanly (hal0#1790). Used by the launch-time quant/runner compatibility
 #: guard in :func:`hal0.providers.container._resolve_llama_scalars`.
-FPX_RUNNER_KEYS = frozenset({"rocmfpx", "vulkanfpx"})
+FPX_RUNNER_KEYS = frozenset({"rocmfpx"})
 
 
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
@@ -345,11 +340,13 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
 
 __all__ = [
     "FPX_RUNNER_KEYS",
+    "RUNNER_ALIASES",
     "RUNNER_IMAGES",
     "STALE_RUNNER_IMAGE_REFS",
     "Runner",
     "RunnerSupports",
     "RuntimeFamily",
+    "canonical_runner_key",
     "get_runner",
     "resolve_runner_image",
     "runner_for_backend",
