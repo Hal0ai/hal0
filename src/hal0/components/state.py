@@ -9,6 +9,7 @@ Writes are fail-soft: losing a breadcrumb must never fail an update.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -53,9 +54,7 @@ def record_component_result(component_id: str, result: dict[str, Any]) -> None:
             tmp = None
         finally:
             if tmp is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp)
-                except OSError:
-                    pass
     except OSError as exc:
         log.warning("components.state_persist_failed", component=component_id, error=str(exc))

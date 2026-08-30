@@ -10,7 +10,8 @@ lands in components.json. Only genuine bugs inside an arm are caught here
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 

@@ -1,9 +1,10 @@
-"""Merged component status: catalog × components.json × live probes."""
+"""Merged component status: catalog x components.json x live probes."""
 
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 

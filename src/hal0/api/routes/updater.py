@@ -1051,7 +1051,7 @@ async def set_channel(request: Request) -> dict[str, str]:
 
 @router.get("/components")
 async def list_components(request: Request) -> dict[str, Any]:
-    """Per-component version/converge status (catalog × state × live probes)."""
+    """Per-component version/converge status (catalog x state x live probes)."""
     from hal0.components.status import component_status_snapshot
 
     return await asyncio.to_thread(component_status_snapshot)

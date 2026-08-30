@@ -1,4 +1,4 @@
-"""Snapshot merge: live probes × recorded results."""
+"""Snapshot merge: live probes x recorded results."""
 
 from __future__ import annotations
 
