@@ -64,6 +64,49 @@ async def test_pull_routes_through_rootful_seam_when_available(
 
 
 @pytest.mark.asyncio
+async def test_pull_aclose_propagates_to_rootful_inner_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix-round-1 regression: a dashboard cancel calls ``.aclose()`` on the
+    OUTER generator (``runner_pull.run_runner_pull``'s teardown path). A bare
+    ``async for ... yield`` delegation does NOT forward that ``.aclose()`` to
+    the inner rootful generator, so the ROOT-owned
+    ``sudo hal0-podman-rw image-pull`` subprocess it kills in its own
+    ``finally`` would keep pulling until GC eventually (maybe) finalizes it.
+    This pins that the inner generator's cleanup runs BEFORE the outer
+    ``.aclose()`` call returns."""
+    monkeypatch.setattr(podman_mutate, "rw_seam_available", lambda: True)
+
+    cleanup_ran = False
+
+    async def _rootful(image: str) -> AsyncIterator[dict[str, Any]]:
+        nonlocal cleanup_ran
+        try:
+            yield {"state": "pulling", "layer": 1, "total_layers": 3, "line": "layer 1"}
+            yield {"state": "pulling", "layer": 2, "total_layers": 3, "line": "layer 2"}
+            yield {"state": "completed", "layer": 3, "total_layers": 3}
+        finally:
+            cleanup_ran = True
+
+    monkeypatch.setattr(podman_mutate, "pull_image_stream_rootful", _rootful)
+
+    def _boom() -> str:
+        raise AssertionError("rootless runtime was consulted despite the seam being available")
+
+    monkeypatch.setattr(container_mod, "_container_runtime", _boom)
+
+    agen = ContainerProvider().pull_image_stream(IMAGE)
+    first = await agen.__anext__()
+
+    assert first["state"] == "pulling"
+    assert cleanup_ran is False, "inner generator must still be open after only one event"
+
+    await agen.aclose()
+
+    assert cleanup_ran is True, "outer .aclose() must propagate into the inner rootful generator"
+
+
+@pytest.mark.asyncio
 async def test_pull_falls_back_to_rootless_when_seam_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:

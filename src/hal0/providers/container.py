@@ -3152,8 +3152,19 @@ class ContainerProvider(Provider):
         from hal0.providers import podman_mutate
 
         if podman_mutate.rw_seam_available():
-            async for event in podman_mutate.pull_image_stream_rootful(image):
-                yield event
+            # ``async with contextlib.aclosing(...)`` (not a bare ``async for``)
+            # is load-bearing: a bare ``async for ... yield`` never forwards
+            # this generator's own ``GeneratorExit``/``.aclose()`` to the inner
+            # one, so a dashboard cancel (``runner_pull.run_runner_pull`` calls
+            # ``agen.aclose()``) would return without killing the ROOT-owned
+            # ``sudo hal0-podman-rw image-pull`` subprocess — it keeps pulling
+            # until GC eventually (maybe) finalizes the inner generator.
+            # ``aclosing`` guarantees the inner generator's ``.aclose()`` (and
+            # therefore its ``finally: proc.kill()``) runs before this
+            # generator's own close completes, on every exit path.
+            async with contextlib.aclosing(podman_mutate.pull_image_stream_rootful(image)) as inner:
+                async for event in inner:
+                    yield event
             return
 
         import asyncio as _asyncio
