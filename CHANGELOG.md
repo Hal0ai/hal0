@@ -22,6 +22,18 @@ breaking/migrations as callouts — from the cosign-verified tarball, before
 applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
+## [Unreleased]
+
+### Changed
+
+- **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
+  binary; the runner is ROCmFPX and its image serves both GPU backends.
+  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
+  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
+  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
+  honored forever via a permanent alias (warned at load; TOML is never
+  rewritten in place).
+
 ## [1.0.0] — 2026-08-29
 
 The first stable release. hal0 stops being a box you configure and starts
@@ -100,13 +112,6 @@ rationale and code-path detail in the
   1.0.0 and are now stamped `v1.1.0`: removing them in the same release that
   first announces them gives no deprecation window at all. Nothing is removed
   here — treat this as the notice, not the removal.
-- **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
-  binary; the runner is ROCmFPX and its image serves both GPU backends.
-  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
-  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
-  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
-  honored forever via a permanent alias (warned at load; TOML is never
-  rewritten in place).
 
 ### Migrations
 
