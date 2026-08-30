@@ -1146,3 +1146,299 @@ class TestCanonicalFamilyFold:
         body = isolated_client.get("/api/runner-images").json()
         rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
         assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"
+
+
+# ── DELETE /{image_id:path}/tags/{tag} — disk reclaim (D2, #2106) ───────────
+
+
+class TestDeleteRunnerImageTag:
+    IMAGE_ID = "hal0ai/hal0-combined"
+
+    def _seed(self, client: TestClient, **overrides) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        store = client.app.state.runner_image_registry
+        kw = {"available_tags": ["0826", "0824"], **overrides}
+        store.upsert(
+            RunnerImage(id=self.IMAGE_ID, image="ghcr.io/hal0ai/hal0-combined", tag="0826", **kw)
+        )
+        store.set_tags(
+            self.IMAGE_ID,
+            [
+                RunnerImageTag(tag="0826", digest="sha256:" + "a" * 64),
+                RunnerImageTag(tag="0824", digest="sha256:" + "b" * 64),
+            ],
+        )
+
+    def _fake_remove_image(self, monkeypatch: pytest.MonkeyPatch, outcome: str, reason=None):
+        calls: list[str] = []
+
+        def _fake(ref: str):
+            calls.append(ref)
+            return (outcome, reason)
+
+        monkeypatch.setattr("hal0.providers.podman_mutate.remove_image", _fake)
+        return calls
+
+    # ── 404s ─────────────────────────────────────────────────────────────
+
+    def test_unknown_image_404s(self, client: TestClient) -> None:
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "runner_image.not_found"
+
+    def test_unknown_tag_404s(self, client: TestClient) -> None:
+        self._seed(client)
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/9999")
+        assert resp.status_code == 404
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.tag_not_found"
+        assert err["details"] == {"image_id": self.IMAGE_ID, "tag": "9999"}
+
+    # ── in-use guards ────────────────────────────────────────────────────
+
+    def test_app_level_guard_409_names_slot_on_exact_ref_match(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images._slot_image_usage",
+            lambda: {"brain": "ghcr.io/hal0ai/hal0-combined:0824"},
+        )
+
+        def _boom(ref: str):
+            raise AssertionError("seam must not be reached when app-level guard fires")
+
+        monkeypatch.setattr("hal0.providers.podman_mutate.remove_image", _boom)
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.tag_in_use"
+        assert err["details"]["slots"] == ["brain"]
+
+    def test_app_level_guard_409_names_slot_on_digest_sibling_match(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deleting the headline 0826 while a slot is pinned to 0824 — a
+        DIFFERENT tag of the same repo that (per the seeded digests) shares
+        0826's digest — is caught even though the ref strings differ."""
+        self._seed(client)
+        from hal0.registry.runner_image import RunnerImageTag
+
+        client.app.state.runner_image_registry.set_tags(
+            self.IMAGE_ID,
+            [
+                RunnerImageTag(tag="0826", digest="sha256:" + "a" * 64),
+                RunnerImageTag(tag="0824", digest="sha256:" + "a" * 64),  # same digest as 0826
+            ],
+        )
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images._slot_image_usage",
+            lambda: {"agent": "ghcr.io/hal0ai/hal0-combined:0824"},
+        )
+
+        def _boom(ref: str):
+            raise AssertionError("seam must not be reached when app-level guard fires")
+
+        monkeypatch.setattr("hal0.providers.podman_mutate.remove_image", _boom)
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0826")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["details"]["slots"] == ["agent"]
+
+    def test_seam_level_in_use_409_names_no_slots(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The app-level guard didn't catch anything (no slot config
+        matches), but the seam itself refuses (rc 67) — still 409, but
+        ``slots`` is absent/empty since no slot was implicated."""
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "in-use")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.tag_in_use"
+        assert not err["details"].get("slots")
+
+        # catalogue untouched
+        detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
+        assert any(t["tag"] == "0824" for t in detail["tags"])
+
+    # ── seam-unavailable ─────────────────────────────────────────────────
+
+    def test_seam_unavailable_502_catalogue_untouched(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "unknown", "grant-denied")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 502
+        err = resp.json()["error"]
+        assert err["code"] == "runner_image.rm_unavailable"
+        assert err["details"]["reason"] == "grant-denied"
+
+        detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
+        assert any(t["tag"] == "0824" for t in detail["tags"])
+        assert "0824" in detail["available_tags"]
+
+    # ── happy paths ──────────────────────────────────────────────────────
+
+    def test_removed_outcome_drops_the_tag_row(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        calls = self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+        assert resp.json() == {"removed": True, "outcome": "removed"}
+        assert calls == ["ghcr.io/hal0ai/hal0-combined:0824"]
+
+        detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
+        assert all(t["tag"] != "0824" for t in detail["tags"])
+        assert detail["available_tags"] == ["0826"]
+
+    def test_missing_outcome_also_drops_the_tag_row(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """podman already had no such image (a previous manual rm, e.g.) —
+        still an honest, successful reconciliation, not an error."""
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "missing")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+        assert resp.json() == {"removed": False, "outcome": "missing"}
+
+        detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
+        assert all(t["tag"] != "0824" for t in detail["tags"])
+
+    def test_headline_tag_deletable_even_without_available_tags_entry(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The headline ``tag`` column is always a valid delete target, even
+        if (unusually) it isn't also listed in available_tags."""
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="solo", image="ghcr.io/x/solo", tag="only"))
+        store.set_tags("solo", [RunnerImageTag(tag="only")])
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete("/api/runner-images/solo/tags/only")
+        assert resp.status_code == 200
+        assert resp.json()["removed"] is True
+
+    def test_marker_unlinked_on_disk_when_last_tag_removed(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        marker = tmp_path / "marker.json"
+        marker.write_text('{"image_id": "solo", "image": "ghcr.io/x/solo:only"}')
+
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="solo", image="ghcr.io/x/solo", tag="only"))
+        store.set_tags("solo", [RunnerImageTag(tag="only")])
+        store.set_local_state("solo", local_path=str(marker), downloaded_at="t")
+        assert marker.exists()
+
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete("/api/runner-images/solo/tags/only")
+        assert resp.status_code == 200
+        assert not marker.exists()
+
+        detail = client.get("/api/runner-images/solo").json()
+        assert detail["downloaded"] is False
+
+    def test_marker_left_alone_when_sibling_tag_survives(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        marker = tmp_path / "marker.json"
+        marker.write_text(
+            f'{{"image_id": "{self.IMAGE_ID}", "image": "ghcr.io/hal0ai/hal0-combined:0826"}}'
+        )
+        self._seed(client)
+        client.app.state.runner_image_registry.set_local_state(
+            self.IMAGE_ID, local_path=str(marker), downloaded_at="t"
+        )
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+        assert marker.exists()  # still the marker for the surviving 0826 tag
+
+    # ── audit ────────────────────────────────────────────────────────────
+
+    def test_records_audit_action_on_success(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 200
+
+        activity = client.get(
+            "/api/activity", params={"category": "runner_image", "action": "runner_image.rm"}
+        ).json()
+        rec = next(
+            r for r in activity["records"] if r["target"] == "ghcr.io/hal0ai/hal0-combined:0824"
+        )
+        assert rec["outcome"] == "ok"
+        assert rec["after"] == {"outcome": "removed"}
+
+    def test_records_audit_action_as_error_on_conflict(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "in-use")
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+
+        activity = client.get(
+            "/api/activity", params={"category": "runner_image", "action": "runner_image.rm"}
+        ).json()
+        rec = next(
+            r for r in activity["records"] if r["target"] == "ghcr.io/hal0ai/hal0-combined:0824"
+        )
+        assert rec["outcome"] == "error"
+
+    # ── route ordering ───────────────────────────────────────────────────
+
+    def test_delete_tag_route_ordering(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET single-image still resolves to the catch-all, and DELETE
+        .../tags/{tag} resolves to the new route — neither swallows the
+        other regardless of registration order (#2106)."""
+        self._seed(client)
+
+        get_resp = client.get(f"/api/runner-images/{self.IMAGE_ID}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["id"] == self.IMAGE_ID
+
+        monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
+        self._fake_remove_image(monkeypatch, "removed")
+        delete_resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert delete_resp.status_code == 200
+        assert delete_resp.json() == {"removed": True, "outcome": "removed"}
+
+        # GET still resolves correctly for the id afterward too.
+        get_resp2 = client.get(f"/api/runner-images/{self.IMAGE_ID}")
+        assert get_resp2.status_code == 200
+        assert all(t["tag"] != "0824" for t in get_resp2.json()["tags"])

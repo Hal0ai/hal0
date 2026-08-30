@@ -166,3 +166,119 @@ class TestRunnerImageTag:
         assert dl_img_b.id == "b"
         assert [t.tag for t in dl_img_b.tags] == ["v2"]
         assert dl_img_b.tags[0].digest == "sha256:" + "b" * 64
+
+
+class TestRemoveTag:
+    """``RunnerImageStore.remove_tag`` — per-tag DELETE, disk-reclaim task (D2, #2106)."""
+
+    def _seed(self, store: RunnerImageStore, *, tags: list[str], **overrides) -> None:
+        store.upsert(RunnerImage(id="x", image="ghcr.io/x/a", tag=tags[0], **overrides))
+        store.set_tags("x", [RunnerImageTag(tag=t) for t in tags])
+
+    def test_deletes_the_tag_row(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826", "0824"])
+        assert store.remove_tag("x", "0824") is True
+        row = store.get("x")
+        assert [t.tag for t in row.tags] == ["0826"]
+
+    def test_unknown_image_id_returns_false(self, store: RunnerImageStore) -> None:
+        assert store.remove_tag("nope", "0824") is False
+
+    def test_unknown_tag_on_known_image_returns_false(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826"])
+        assert store.remove_tag("x", "9999") is False
+        # the real row is untouched
+        assert [t.tag for t in store.get("x").tags] == ["0826"]
+
+    def test_prunes_available_tags_list(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826", "0824"], available_tags=["0826", "0824"])
+        store.remove_tag("x", "0824")
+        assert store.get("x").available_tags == ["0826"]
+
+    def test_prunes_available_tags_to_empty_list(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826"], available_tags=["0826"])
+        store.remove_tag("x", "0826")
+        assert store.get("x").available_tags == []
+
+    def test_tag_absent_from_available_tags_is_a_noop_there(self, store: RunnerImageStore) -> None:
+        """The removed tag might not be images.json's ``available_tags`` at
+        all (e.g. a probe-discovered tag) — pruning must not KeyError."""
+        self._seed(store, tags=["0826", "0824"], available_tags=["0826"])
+        store.remove_tag("x", "0824")
+        assert store.get("x").available_tags == ["0826"]
+
+    def test_notifies_on_change_only_when_a_row_is_deleted(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826"])
+        calls: list[int] = []
+        store.on_change = lambda: calls.append(1)
+        assert store.remove_tag("x", "nope") is False
+        assert calls == []
+        assert store.remove_tag("x", "0826") is True
+        assert calls == [1]
+
+    # ── marker ruling: clear local_path/downloaded_at iff (a) the marker's
+    # recorded ref matches the removed <image>:<tag>, or (b) no tags remain.
+
+    def test_marker_cleared_when_no_tags_remain(
+        self, store: RunnerImageStore, tmp_path: Path
+    ) -> None:
+        self._seed(store, tags=["0826"])
+        store.set_local_state("x", local_path="/nonexistent/marker.json", downloaded_at="t")
+        assert store.remove_tag("x", "0826") is True
+        row = store.get("x")
+        assert row.local_path is None
+        assert row.downloaded_at is None
+
+    def test_marker_cleared_when_it_matches_the_removed_tag(
+        self, store: RunnerImageStore, tmp_path: Path
+    ) -> None:
+        import json
+
+        self._seed(store, tags=["0826", "0824"])
+        marker = tmp_path / "marker.json"
+        marker.write_text(json.dumps({"image_id": "x", "image": "ghcr.io/x/a:0824"}))
+        store.set_local_state("x", local_path=str(marker), downloaded_at="t")
+
+        assert store.remove_tag("x", "0824") is True
+        row = store.get("x")
+        assert row.local_path is None
+        assert row.downloaded_at is None
+        # the sibling tag row (unrelated to the marker) is untouched
+        assert [t.tag for t in row.tags] == ["0826"]
+
+    def test_marker_untouched_when_it_names_a_surviving_tag(
+        self, store: RunnerImageStore, tmp_path: Path
+    ) -> None:
+        import json
+
+        self._seed(store, tags=["0826", "0824"])
+        marker = tmp_path / "marker.json"
+        marker.write_text(json.dumps({"image_id": "x", "image": "ghcr.io/x/a:0826"}))
+        store.set_local_state("x", local_path=str(marker), downloaded_at="t")
+
+        # Deleting 0824 must not disturb the marker recording 0826's pull.
+        assert store.remove_tag("x", "0824") is True
+        row = store.get("x")
+        assert row.local_path == str(marker)
+        assert row.downloaded_at == "t"
+
+    def test_marker_read_failure_is_fail_soft_and_leaves_marker_alone(
+        self, store: RunnerImageStore
+    ) -> None:
+        """A local_path that isn't readable JSON (missing file, garbage
+        content) must not raise, and — since it can't be confirmed to match
+        the removed tag, and a sibling tag still exists — the marker is
+        left as-is rather than guessed-cleared."""
+        self._seed(store, tags=["0826", "0824"])
+        store.set_local_state("x", local_path="/definitely/does/not/exist.json", downloaded_at="t")
+        assert store.remove_tag("x", "0824") is True
+        row = store.get("x")
+        assert row.local_path == "/definitely/does/not/exist.json"
+        assert row.downloaded_at == "t"
+
+    def test_no_marker_set_stays_none(self, store: RunnerImageStore) -> None:
+        self._seed(store, tags=["0826", "0824"])
+        assert store.remove_tag("x", "0824") is True
+        row = store.get("x")
+        assert row.local_path is None
+        assert row.downloaded_at is None
