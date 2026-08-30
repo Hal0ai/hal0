@@ -929,8 +929,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 16 extras.
-    assert keys[-16:] == [
+    # 7 verify rows + 17 extras.
+    assert keys[-17:] == [
         "auth",
         "models",
         "migrations",
@@ -947,6 +947,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "hermes_mcp_auth",
         "hermes_anchor_window",
         "hindsight_llm_auth",
+        "memory_engine_version",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -1006,6 +1007,42 @@ def test_hindsight_llm_auth_passes_on_current_key_fails_on_stale(
     check = da.check_hindsight_llm_auth(auth={"auth_required": True}, unit_path=unit, env_path=env)
     assert check.status == "fail"
     assert "stale" in check.detail
+
+
+# ── memory engine version (staleness signal, never a FAIL) ───────────────────
+
+
+def test_memory_engine_version_passes_on_pin_match() -> None:
+    from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
+
+    check = da.check_memory_engine_version(
+        memory={
+            "enabled": True,
+            "engine": "hindsight",
+            "reachable": True,
+            "version": HINDSIGHT_API_PIN,
+        }
+    )
+    assert check.status == "pass"
+
+
+def test_memory_engine_version_warns_on_stale_engine_with_remedy() -> None:
+    check = da.check_memory_engine_version(
+        memory={"enabled": True, "engine": "hindsight", "reachable": True, "version": "0.8.4"}
+    )
+    assert check.status == "warn"  # advisory: behavior gates on features, not versions
+    assert "hal0 update" in check.detail
+    assert "0.8.4" in check.detail
+
+
+def test_memory_engine_version_passes_when_memory_disabled_or_unreachable() -> None:
+    assert da.check_memory_engine_version(memory={"enabled": True, "engine": None}).status == "pass"
+    # Reachability is the memory row's job — no duplicate noise here.
+    check = da.check_memory_engine_version(
+        memory={"enabled": True, "engine": "hindsight", "reachable": False, "version": None}
+    )
+    assert check.status == "pass"
+    assert da.check_memory_engine_version(memory=None).status == "warn"
 
 
 # ── command ───────────────────────────────────────────────────────────────────

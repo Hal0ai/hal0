@@ -97,10 +97,17 @@ export function useMemoryEngine() {
 
 // ── banks ────────────────────────────────────────────────────────────────────
 
+// hindsight-api >= 0.9 paginates this passthrough (default limit=100, real
+// count in `total`); 0.8.x returns the whole list with neither. A box with
+// more than 100 banks renders the first page — acceptable for the bank grid,
+// and `total` lets the UI say so if it ever needs to.
 export function useMemoryBanks() {
-  return useQuery<{ banks: MemoryBank[] }>({
+  return useQuery<{ banks: MemoryBank[]; total?: number; limit?: number; offset?: number }>({
     queryKey: ['memory', 'banks'],
-    queryFn: () => apiGet<{ banks: MemoryBank[] }>(ENDPOINTS.memoryBanks),
+    queryFn: () =>
+      apiGet<{ banks: MemoryBank[]; total?: number; limit?: number; offset?: number }>(
+        ENDPOINTS.memoryBanks,
+      ),
     staleTime: 10_000,
     refetchInterval: 30_000,
   })

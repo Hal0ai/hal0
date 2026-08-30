@@ -295,7 +295,14 @@ def test_zero_exit_with_no_envelope_raises_update_error(monkeypatch: pytest.Monk
 def test_never_raises_on_internal_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(updater_module, "profile_reset_status", lambda: {"due": False})
 
-    def _boom(*, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True):
+    def _boom(
+        *,
+        job_id=None,
+        ceiling=None,
+        skip_image_retag=False,
+        repair_hermes_venv=True,
+        upgrade_memory_engine_venv=True,
+    ):
         raise RuntimeError("disk full")
 
     monkeypatch.setattr(updater_module, "run_post_activation_migrations", _boom)
@@ -308,7 +315,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True: (
+        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True: (
             1,
             2,
         ),
@@ -329,7 +336,12 @@ def test_caps_the_ceiling_while_the_profile_catalog_reset_is_outstanding(
     seen: dict[str, Any] = {}
 
     def _fake_migrations(
-        *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True
+        *,
+        job_id=None,
+        ceiling=None,
+        skip_image_retag=False,
+        repair_hermes_venv=True,
+        upgrade_memory_engine_venv=True,
     ):
         seen["ceiling"] = ceiling
         return (1, 1)
@@ -345,7 +357,12 @@ def test_no_ceiling_when_the_reset_is_not_due(monkeypatch: pytest.MonkeyPatch) -
     seen: dict[str, Any] = {}
 
     def _fake_migrations(
-        *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True
+        *,
+        job_id=None,
+        ceiling=None,
+        skip_image_retag=False,
+        repair_hermes_venv=True,
+        upgrade_memory_engine_venv=True,
     ):
         seen["ceiling"] = ceiling
         return (1, 1)
@@ -363,7 +380,7 @@ def test_never_calls_reset_profile_catalog(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True: (
+        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True: (
             1,
             1,
         ),
@@ -386,7 +403,12 @@ def test_skips_the_image_retag_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
     def _fake_migrations(
-        *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True
+        *,
+        job_id=None,
+        ceiling=None,
+        skip_image_retag=False,
+        repair_hermes_venv=True,
+        upgrade_memory_engine_venv=True,
     ):
         seen["skip_image_retag"] = skip_image_retag
         return (1, 1)

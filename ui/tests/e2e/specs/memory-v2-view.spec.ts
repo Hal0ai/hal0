@@ -53,7 +53,7 @@ test.describe('Memory view — Hindsight surface (v2 DOM)', () => {
     // buildMemoryEngine() mock: reachable: true, engine: 'hindsight',
     // version: '0.7.2', banks_total: MEM_BANKS.length (6).
     await expect(panel).toContainText('reachable')
-    await expect(panel).toContainText('hindsight 0.7.2')
+    await expect(panel).toContainText('hindsight 0.9.2')
     await expect(panel).toContainText('6')
   })
 

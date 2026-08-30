@@ -92,7 +92,8 @@ def test_ops_list_fans_out_across_banks(stub_api) -> None:
     payload = json.loads(result.output)
     banks = {op["bank_id"] for op in payload["operations"]}
     assert banks == {"shared", "private__hermes"}
-    assert ("/api/memory/banks", None) in stub_api["get"]
+    # The fan-out enumerates banks through the (0.9.x-paginated) list.
+    assert ("/api/memory/banks", {"limit": "100", "offset": "0"}) in stub_api["get"]
 
 
 def test_ops_list_failed_only_sets_status_param(stub_api) -> None:

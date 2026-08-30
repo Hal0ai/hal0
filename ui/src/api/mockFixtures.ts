@@ -958,14 +958,15 @@ function buildMemoryEngine() {
     enabled: true,
     engine: 'hindsight',
     reachable: true,
-    version: '0.7.2',
+    version: '0.9.2',
     features: { observations: true, mcp: true, mental_models: true },
     banks_total: MEM_BANKS.length,
   }
 }
 
 function buildMemoryBanks() {
-  return { banks: MEM_BANKS }
+  // 0.9.x paginated envelope (total/limit/offset alongside the page).
+  return { banks: MEM_BANKS, total: MEM_BANKS.length, limit: 100, offset: 0 }
 }
 
 // bank-id is the 4th path segment: /api/memory/banks/<bank>/…

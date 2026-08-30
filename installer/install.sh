@@ -2798,7 +2798,12 @@ fi
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping post-activation migrations (no system writes)"
 else
-    info "running post-activation migrations (schema + seed-profile/mtp/vulkan-slot/image-pin/extra-args)"
+    info "running post-activation migrations (schema + seed-profile/mtp/vulkan-slot/image-pin/extra-args + memory-engine)"
+    # Export so the heredoc's python child sees them (same posture as
+    # HAL0_RESET_PROFILES above): the memory-engine pass honors the skip
+    # hatch and the interpreter override.
+    export HAL0_SKIP_HINDSIGHT="${HAL0_SKIP_HINDSIGHT:-}"
+    export HAL0_HINDSIGHT_PYTHON="${HAL0_HINDSIGHT_PYTHON:-}"
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
 from hal0.updater.updater import run_post_activation_migrations
@@ -3246,6 +3251,26 @@ smoke_update_check() {
     "${HAL0_BIN}" update --check >/dev/null 2>&1
 }
 
+smoke_memory_engine_version() {
+    # The engine's /version must report exactly the pinned api_version — the
+    # install/upgrade paths were BOTH blind to a stale engine venv before the
+    # engine-upgrade pass existed, and this probe is what keeps them honest
+    # (a staleness signal only; behavior gates on /version `features`, never
+    # the version string). Fail-soft like the rest, skipped when the engine
+    # was skipped or never installed.
+    [[ "${HAL0_SKIP_HINDSIGHT:-0}" -eq 1 ]] && return 0
+    # Overridable unit path so the probe is drivable through fakes in
+    # tests/installer/test_install_smoke_probes.py.
+    [[ -f "${HINDSIGHT_UNIT_DST:-/etc/systemd/system/hindsight-api.service}" ]] || return 0
+    local resp
+    resp="$(curl -fsS -m 10 "http://127.0.0.1:9177/version" 2>/dev/null)" || return 1
+    printf '%s' "${resp}" | "${PY}" -c 'import json, sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("api_version") == sys.argv[1] else 1)
+except Exception:
+    sys.exit(1)' "${HINDSIGHT_PIN}" 2>/dev/null
+}
+
 run_post_install_smoke() {
     if smoke_structured_output; then
         info "structured-output probe ok (gateway /v1, json_object)"
@@ -3260,6 +3285,13 @@ run_post_install_smoke() {
         SMOKE_FAILED+=("update-check")
         warn "'${HAL0_BIN} update --check' FAILED — the update path is broken and the next release will not install"
         warn "  re-run '${HAL0_BIN} update --check' to see why (daemon reachability / manifest fetch / cosign verify)"
+    fi
+    if smoke_memory_engine_version; then
+        info "memory-engine version probe ok (hindsight-api ${HINDSIGHT_PIN} on :9177)"
+    else
+        SMOKE_FAILED+=("memory-engine-version")
+        warn "memory-engine version probe FAILED — :9177/version does not report the pinned ${HINDSIGHT_PIN}"
+        warn "  the engine is unreachable or stale; check 'journalctl -u hindsight-api -n 40' and the post-activation migrations output above"
     fi
 }
 
@@ -3296,6 +3328,19 @@ else
     # its extraction/reflection LLM is hal0/utility on :8080 (used lazily — the
     # unit sets HINDSIGHT_API_SKIP_LLM_VERIFICATION so it binds without a loaded
     # model). Escape hatch: HAL0_SKIP_HINDSIGHT=1.
+    #
+    # This block only CREATES the venv (fresh install). UPGRADING an existing
+    # venv to the pin is the engine-upgrade migration pass
+    # (hal0.memory.engine_upgrade, run by run_post_activation_migrations from
+    # the migration step earlier in this script and by `hal0 update`), so on a
+    # re-run the engine may already have been stopped/started once above —
+    # every step below is idempotent against that.
+    #
+    # HINDSIGHT_PIN must match hal0.memory.engine_upgrade.HINDSIGHT_API_PIN —
+    # tests/installer/test_hindsight_pin_lockstep.py enforces it. Kept as a
+    # shell literal (not read from the venv) so the fresh-install branch works
+    # even when the python side is broken.
+    HINDSIGHT_PIN="0.9.2"
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
@@ -3321,7 +3366,7 @@ else
             # /health poll below is the real gate on whether the engine came up.
             hs_installed=0
             if [[ "${hs_fallback}" -ne 1 ]]; then
-                if "${hs_pip}" install "hindsight-api==0.8.4" -q; then
+                if "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
                     hs_installed=1
                 else
                     hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
@@ -3331,7 +3376,7 @@ else
             if [[ "${hs_installed}" -ne 1 ]]; then
                 [[ "${hs_fallback}" -eq 1 ]] && \
                     info "installing hindsight-api with --ignore-requires-python (no Python 3.11-3.13 available; litellm's 3.14 gate is metadata-only)"
-                if "${hs_pip}" install --ignore-requires-python "hindsight-api==0.8.4" -q; then
+                if "${hs_pip}" install --ignore-requires-python "hindsight-api==${HINDSIGHT_PIN}" -q; then
                     hs_installed=1
                 else
                     warn "hindsight-api install failed — memory engine will be unavailable"
@@ -3339,7 +3384,16 @@ else
                 fi
             fi
         else
-            info "hindsight-api venv already present — skipping pip install"
+            # Existing venv: upgrading it was the engine-upgrade migration
+            # pass's job (see the block comment above) — just report where it
+            # landed so a failed pass is visible right here, not only in the
+            # migration-step output further up.
+            hs_have="$("${HS_DIR}/.venv/bin/python" -c 'import importlib.metadata as m; print(m.version("hindsight-api"))' 2>/dev/null || echo '?')"
+            if [[ "${hs_have}" == "${HINDSIGHT_PIN}" ]]; then
+                info "hindsight-api ${hs_have} already at pin — venv up to date"
+            else
+                warn "hindsight-api venv present at ${hs_have} (pinned ${HINDSIGHT_PIN}) — the engine-upgrade pass did not converge; see the post-activation migrations output above and re-run after fixing"
+            fi
         fi
         # The unit runs as hal0 with HOME=${HS_DIR}; hand it the whole tree.
         chown -R hal0:hal0 "${VAR_DIR}/memory" 2>/dev/null || true

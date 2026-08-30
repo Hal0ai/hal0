@@ -92,10 +92,11 @@ def _drive(tmp_path: Path, script_body: str) -> subprocess.CompletedProcess[str]
         "#!/usr/bin/env bash\nset -uo pipefail\n"
         "info() { :; }\n"
         'warn() { echo "WARN: $*" >&2; }\n'
-        "HAL0_PORT=8080\nPY=python3\n"
+        "HAL0_PORT=8080\nPY=python3\nHINDSIGHT_PIN=9.9.9\n"
         f"HAL0_BIN={tmp_path}/hal0\n"
         f"{_extract('smoke_structured_output')}\n"
         f"{_extract('smoke_update_check')}\n"
+        f"{_extract('smoke_memory_engine_version')}\n"
         f"{_extract('run_post_install_smoke')}\n"
         "SMOKE_FAILED=()\n"
         f"{script_body}\n",
@@ -151,6 +152,31 @@ def test_smoke_is_fail_soft_and_records_failures(tmp_path: Path) -> None:
     assert "structured-output" in res.stdout
     assert "update-check" in res.stdout
     assert "WARN:" in res.stderr, "fail-soft still has to be LOUD"
+
+
+def test_memory_engine_probe_passes_on_pin_match(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    _write_exec(tmp_path / "curl", 'echo \'{"api_version": "9.9.9"}\'')
+    res = _drive(tmp_path, f'HINDSIGHT_UNIT_DST="{unit}"\nsmoke_memory_engine_version')
+    assert res.returncode == 0, res.stderr
+
+
+def test_memory_engine_probe_fails_on_stale_engine(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    _write_exec(tmp_path / "curl", 'echo \'{"api_version": "0.8.4"}\'')
+    res = _drive(tmp_path, f'HINDSIGHT_UNIT_DST="{unit}"\nsmoke_memory_engine_version')
+    assert res.returncode != 0
+
+
+def test_memory_engine_probe_skips_when_engine_not_installed(tmp_path: Path) -> None:
+    """No unit file (fresh box with HAL0_SKIP_HINDSIGHT, or engine never
+    installed) — the probe must skip, not fail: curl faked dead proves it
+    never even probes."""
+    _write_exec(tmp_path / "curl", "exit 7")
+    res = _drive(tmp_path, f'HINDSIGHT_UNIT_DST="{tmp_path}/missing"\nsmoke_memory_engine_version')
+    assert res.returncode == 0, res.stderr
 
 
 def test_smoke_failures_surface_in_the_summary_box() -> None:

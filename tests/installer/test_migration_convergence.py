@@ -26,6 +26,32 @@ def test_install_sh_calls_the_shared_migration_sequence() -> None:
     )
 
 
+def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> None:
+    """The memory-engine venv convergence pass must ride the shared sequence
+    on both real upgrade paths (default kwarg — install.sh passes none) while
+    the boot-time safety net opts out: a boot-time pip is an unbounded
+    network op and the first start of a newer engine triggers its one-way DB
+    migration, neither of which belongs outside an operator-visible update
+    (the ``skip_image_retag``/``repair_hermes_venv`` posture, one step
+    further)."""
+    import inspect
+
+    from hal0.updater import updater
+
+    seq = inspect.signature(updater.run_post_activation_migrations)
+    assert seq.parameters["upgrade_memory_engine_venv"].default is True
+
+    boot_src = inspect.getsource(updater.check_outstanding_migrations)
+    assert "upgrade_memory_engine_venv=False" in boot_src
+
+    seq_src = inspect.getsource(updater.run_post_activation_migrations)
+    assert "upgrade_memory_engine(" in seq_src
+    assert "updater.memory_engine_upgrade_failed" in seq_src
+    assert "updater.memory_engine_upgrade_failed" in updater._NON_FATAL_MIGRATION_FAILURE_EVENTS, (
+        "a swallowed engine-pass failure must surface in commit()'s convergence report"
+    )
+
+
 def test_install_sh_no_longer_hand_picks_a_migration_subset() -> None:
     """The old two-heredoc block imported ensure_seed_profiles and
     clear_stale_mtp_overrides directly, skipping _maybe_run_config_migrations,
