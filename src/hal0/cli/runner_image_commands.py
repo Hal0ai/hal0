@@ -91,8 +91,8 @@ _STATE_BADGE = {
 
 
 def _headline_badge(image: RunnerImage) -> str:
-    """The headline tag's badge value (``"validated"``/``"candidate"``/
-    ``"deprecated"``), or ``""`` — reuses
+    """The headline tag's badge value (validated / candidate / the
+    retired-pin marker), or ``""`` — reuses
     ``hal0.api.routes.runner_images._tag_badges`` (same frozen
     ``hal0.config.schema`` image-ref sets the API's catalogue rows read) so
     the CLI never re-derives its own copy of the badge rule. Import stays
