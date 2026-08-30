@@ -361,6 +361,7 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.image_retag_failed": "runner image retag",
     "updater.extra_args_sanitize_failed": "managed extra_args sanitisation",
     "updater.memory_engine_upgrade_failed": "memory engine upgrade",
+    "updater.components_converge_failed": "component convergence",
 }
 
 
