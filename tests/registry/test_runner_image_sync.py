@@ -470,3 +470,89 @@ async def test_sync_unpinned_headline_never_resolves_to_a_noise_tag(tmp_path: Pa
     assert row is not None
     assert row.tag == "main"
     assert row.available_tags == ["main"]
+
+
+# ── per-tag digest resolution (runner-image-catalogue v3) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_probe_resolves_digest_per_tag(tmp_path: Path) -> None:
+    """probe_ghcr_package resolves a digest for every catalogued tag."""
+    from hal0.registry.runner_image_sync import probe_ghcr_package
+
+    handler = _route_handler(images_json=_IMAGES_JSON, tags=["0826", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        image = await probe_ghcr_package("hal0ai/hal0-toolbox-cpu", client=client)
+    finally:
+        await client.aclose()
+
+    assert [t.tag for t in image.tags] == ["0826", "0824"]
+    assert image.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
+    assert image.tags[1].digest == "sha256:hal0ai-hal0-toolbox-cpu-0824"
+    assert image.digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"  # headline unchanged
+
+
+@pytest.mark.asyncio
+async def test_per_tag_probe_failure_degrades_to_none(tmp_path: Path) -> None:
+    """When a per-tag manifest probe fails, that tag's digest is None but the row survives."""
+
+    from hal0.registry.runner_image_sync import probe_ghcr_package
+
+    def handler_with_failing_tag(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == IMAGES_JSON_URL:
+            return httpx.Response(200, json=_IMAGES_JSON)
+        if url.startswith("https://ghcr.io/token"):
+            scope = request.url.params.get("scope", "")
+            repo = scope.split(":")[1] if ":" in scope else ""
+            return httpx.Response(200, json={"token": f"tok-{repo}"})
+        if "/manifests/" in url:
+            repo, _, ref = url.split("https://ghcr.io/v2/")[1].partition("/manifests/")
+            # Fail on 0824 manifest probe, succeed on 0826
+            if ref == "0824":
+                return httpx.Response(500, content=b"manifest probe failed")
+            return httpx.Response(
+                200,
+                headers={"docker-content-digest": f"sha256:{repo.replace('/', '-')}-{ref}"},
+                json=_MANIFEST_BODY,
+            )
+        if "/tags/list" in url:
+            return httpx.Response(200, json={"tags": ["0826", "0824"]})
+        return httpx.Response(404, content=b"unrouted: " + url.encode())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler_with_failing_tag))
+    try:
+        image = await probe_ghcr_package("hal0ai/hal0-toolbox-cpu", client=client)
+    finally:
+        await client.aclose()
+
+    assert [t.tag for t in image.tags] == ["0826", "0824"]
+    assert image.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"  # success
+    assert image.tags[1].digest is None  # failed, degraded to None
+    assert image.tags[1].tag == "0824"  # row survives
+    assert image.digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
+
+
+@pytest.mark.asyncio
+async def test_sync_persists_tags(tmp_path: Path) -> None:
+    """sync_runner_images calls store.set_tags after upsert."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _route_handler(images_json=_IMAGES_JSON, tags=["0826", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    # After sync, the tags should be persisted and loaded back.
+    # CPU has pinned tag "latest" (from images.json), which is not in available
+    # tags ["0826", "0824"], so it gets prepended. Expected: ["latest", "0826", "0824"].
+    assert len(cpu.tags) == 3
+    assert [t.tag for t in cpu.tags] == ["latest", "0826", "0824"]
+    assert cpu.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
+    assert cpu.tags[1].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
+    assert cpu.tags[2].digest == "sha256:hal0ai-hal0-toolbox-cpu-0824"

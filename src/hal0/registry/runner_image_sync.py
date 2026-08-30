@@ -34,11 +34,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
-from hal0.registry.runner_image import RunnerImage
+from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_store import RunnerImageStore
 
 log = logging.getLogger(__name__)
@@ -321,6 +322,35 @@ async def probe_ghcr_package(
     available = sort_tags_newest_first(tags)
     resolved_tag = tag if tag is not None else (available[0] if available else "latest")
     digest, size = await _ghcr_manifest_info(repo, resolved_tag, token=token, client=client)
+
+    # Resolve a digest for every catalogued tag (catalogue v3).
+    now = datetime.now(UTC).isoformat()
+    tag_rows: list[RunnerImageTag] = []
+
+    # Build tag rows from available tags (newest-first).
+    for t in available:
+        if t == resolved_tag:
+            # Reuse the headline manifest result.
+            tag_rows.append(
+                RunnerImageTag(tag=t, digest=digest, size_bytes=size, last_seen=now)
+            )
+            continue
+        try:
+            t_digest, t_size = await _ghcr_manifest_info(repo, t, token=token, client=client)
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            log.warning("runner_images.tag_probe_failed repo=%s tag=%s error=%s", repo, t, exc)
+            t_digest, t_size = None, None
+        tag_rows.append(
+            RunnerImageTag(tag=t, digest=t_digest, size_bytes=t_size, last_seen=now)
+        )
+
+    # If resolved_tag (pinned or fallback) is not in available, prepend it.
+    if resolved_tag not in available:
+        tag_rows.insert(
+            0,
+            RunnerImageTag(tag=resolved_tag, digest=digest, size_bytes=size, last_seen=now)
+        )
+
     return RunnerImage(
         id=image_id or repo,
         image=f"ghcr.io/{repo}",
@@ -328,6 +358,7 @@ async def probe_ghcr_package(
         digest=digest,
         size_bytes=size,
         available_tags=available,
+        tags=tag_rows,
     )
 
 
@@ -404,6 +435,7 @@ async def sync_runner_images(
                 continue
             image = _apply_manifest_metadata(image, entry)
             result.images.append(store.upsert(image))
+            store.set_tags(image.id, image.tags)
 
         if result.images_json_ok:
             pruned = store.prune_absent(set(by_id))
