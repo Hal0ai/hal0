@@ -92,7 +92,11 @@
 set -euo pipefail
 
 UNIT_PREFIX="hal0-slot@"
-UNIT_DIR="/etc/systemd/system"
+# Overridable so `repin-owui` (component-updates task 3) can be exercised
+# against a fake unit tree in tests, same fallback shape as everything else
+# in this file that accepts a caller-supplied value: production never sets
+# UNIT_DIR in the environment, so this is a no-op there.
+UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
 SELF_UNIT="hal0-api.service"
 
 # Bundled-agent template unit (hal0-agent@<id>.service). Separate prefix +
@@ -832,6 +836,28 @@ case "$cmd" in
     exec systemctl "${cmd#svc-}" "$unit"
     ;;
 
+  repin-owui)                  # repin-owui <sha256:digest> — OWUI companion image pin
+    # `hal0 update owui` repins the *installed* OpenWebUI companion unit —
+    # the one privileged write that verb needs, same posture as the other
+    # atomic tmp+mv arms above: the digest is validated BEFORE the unit is
+    # touched, and rewriting happens via tmp+mv, never in place. The mode is
+    # fixed at 0644 rather than copied from the original ($unit) — matching
+    # every other write arm in this file (write-quadlet, write-*-dropin) —
+    # instead of a GNU-only `chmod --reference`, which is also what
+    # install.sh's `cp` leaves the shipped unit at.
+    digest="${1:-}"
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "repin-owui: bad digest"
+    unit="${UNIT_DIR}/hal0-openwebui.service"
+    [[ -f "$unit" ]] || die "repin-owui: $unit not found"
+    tmp="$(mktemp "${unit}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    sed -E "s|open-webui@sha256:[0-9a-f]{64}|open-webui@${digest}|g" "$unit" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$unit"
+    trap - EXIT
+    systemctl daemon-reload
+    ;;
+
   restart-self)                # literal-only: restart hal0-api.service, never a variable name
     # --no-block: this is invoked BY hal0-api, from inside hal0-api.service's
     # own cgroup. A blocking `systemctl restart` waits for the unit to stop —
@@ -865,6 +891,7 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
   svc-<verb> <openwebui|hindsight|hermes-gateway>
                                    systemctl <verb> on the mapped companion unit
+  repin-owui <sha256:digest>       rewrite the OpenWebUI companion image pin + daemon-reload
   restart-self                     systemctl restart ${SELF_UNIT}
 EOF
     ;;
