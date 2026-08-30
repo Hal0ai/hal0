@@ -19,8 +19,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import NotFound
+from hal0.providers.podman_introspect import LocalImagesDigests, images_digests
 from hal0.registry import runner_pull_jobs as _pull_jobs
-from hal0.registry.runner_image import RunnerImage
+from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_sync import sync_runner_images
 from hal0.registry.runner_pull import RunnerPullJob
 
@@ -50,13 +51,54 @@ def _repo_of(ref: str) -> str:
     return ref
 
 
+def _local_store() -> LocalImagesDigests | None:
+    """One store read per request — seam first, rootless fallback, honest None."""
+    try:
+        return images_digests()
+    except Exception:
+        log.warning("runner_images.local_store_read_failed", exc_info=True)
+        return None
+
+
+def _tag_badges(image: RunnerImage) -> dict[str, str]:
+    """Tag -> ``"validated" | "candidate" | "deprecated"``, from the frozen
+    ``hal0.config.schema`` image-ref sets.
+
+    ``VULKAN_CAPABLE_IMAGE_REFS`` wins ties over the candidate set (a
+    validated image should never read as merely "candidate"); the candidate
+    set itself is fail-soft: ``DEFAULT_PROMPTFORGE_IMAGE`` doesn't exist on
+    this branch yet (lands with #2129), so an unmatched import degrades to
+    an empty candidate set rather than 500ing the catalogue routes.
+    """
+    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, VULKAN_CAPABLE_IMAGE_REFS
+
+    candidates: set[str] = set()
+    try:  # present only once #2129 merges; enrichment must not depend on it
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+
+        candidates.add(DEFAULT_PROMPTFORGE_IMAGE)
+    except ImportError:
+        pass
+    out: dict[str, str] = {}
+    for t in image.tags or [RunnerImageTag(tag=image.tag)]:
+        ref = f"{image.image}:{t.tag}"
+        if ref in VULKAN_CAPABLE_IMAGE_REFS:
+            out[t.tag] = "validated"
+        elif ref in candidates:
+            out[t.tag] = "candidate"
+        elif ref in STALE_ROCMFPX_IMAGE_REFS:
+            out[t.tag] = "deprecated"
+    return out
+
+
 def enrich_row(
     image: RunnerImage,
     *,
     defaults: Mapping[str, tuple[str, str]],
     slot_usage: Mapping[str, str],
+    local: LocalImagesDigests | None,
 ) -> dict[str, Any]:
-    """One catalogue row + the derived catalogue-v2 contract fields. Pure.
+    """One catalogue row + the derived catalogue-v2/v3 contract fields. Pure.
 
     ``defaults`` maps runner-family key -> ``(effective image ref, source)``
     where source is ``"override"`` ([slots].default_images) or ``"release"``
@@ -67,6 +109,11 @@ def enrich_row(
     (contract: "any tag"), first matching family in ``defaults`` order wins
     (RUNNER_IMAGES insertion order — deterministic for the rocmfpx/vulkanfpx
     shared-image pair). ``in_use_by`` matches the exact ``image:tag`` ref.
+
+    ``local`` is one request's ``podman_introspect.images_digests()`` read
+    (``None`` when neither store answered) — store-truth (v3): ``store_state``
+    ("present"/"missing"/"unknown"), per-tag ``downloaded`` (``None`` when
+    the store is unknown), ``store_context``, and ``badges``.
     """
     row = _image_to_dict(image)
     is_default: dict[str, str] | None = None
@@ -77,6 +124,34 @@ def enrich_row(
     row["is_default"] = is_default
     row_ref = f"{image.image}:{image.tag}"
     row["in_use_by"] = sorted(name for name, ref in slot_usage.items() if ref == row_ref)
+
+    local_digests = set(filter(None, local.refs.values())) if local else set()
+    local_refs = set(local.refs) if local else set()
+
+    def _tag_state(t: RunnerImageTag) -> bool | None:
+        if local is None:
+            return None
+        if t.digest and t.digest in local_digests:
+            return True
+        return f"{image.image}:{t.tag}" in local_refs
+
+    tag_list = image.tags or []
+    row["tags"] = [{**t.model_dump(), "downloaded": _tag_state(t)} for t in tag_list]
+    headline = next((t for t in tag_list if t.tag == image.tag), None)
+    if local is None:
+        row["store_state"] = "unknown"
+        row["downloaded"] = bool(image.local_path)  # marker only as last resort
+    else:
+        present = (
+            _tag_state(headline)
+            if headline is not None
+            else f"{image.image}:{image.tag}" in local_refs
+            or (image.digest in local_digests if image.digest else False)
+        )
+        row["store_state"] = "present" if present else "missing"
+        row["downloaded"] = bool(present)
+    row["store_context"] = local.context if local else None
+    row["badges"] = _tag_badges(image)
     return row
 
 
@@ -175,7 +250,8 @@ def _slot_image_usage() -> dict[str, str]:
 def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
     defaults = _effective_defaults()
     slot_usage = _slot_image_usage()
-    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage) for i in images]
+    local = _local_store()  # one store read per request, shared by every row
+    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
 
 
 @router.get("")
@@ -187,14 +263,19 @@ async def list_runner_images(request: Request) -> dict[str, Any]:
 
 @router.get("/downloaded")
 async def list_downloaded_runner_images(request: Request) -> dict[str, Any]:
-    """Locally-downloaded runner images only.
+    """Locally-downloaded runner images only (store-truth, catalogue v3).
 
-    Shaped for the sibling ``fix/slot-edit-drawer-cleanup`` branch's
-    Runner Image dropdown — a flat list of ``{id, image, tag, local_path}``
-    rows for images that have actually landed on this host.
+    Shaped for the sibling ``fix/slot-edit-drawer-cleanup`` branch's Runner
+    Image dropdown. Routes through the same ``_enriched`` rows as every
+    other list route and filters on the enriched ``downloaded`` flag
+    (``store_state == "present"``, or the ``local_path`` marker when the
+    store couldn't be read) — one truth instead of two: the store's own
+    ``local_path``-only ``list_downloaded()`` stays available for other
+    callers, but this route no longer trusts it alone.
     """
     store = request.app.state.runner_image_registry
-    return {"images": [_image_to_dict(i) for i in store.list_downloaded()]}
+    rows = _enriched(store.list())
+    return {"images": [r for r in rows if r["downloaded"]]}
 
 
 @router.get("/pulls/list")

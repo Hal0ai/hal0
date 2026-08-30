@@ -175,6 +175,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-combined", "0777"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
             slot_usage={},
+            local=None,
         )
         # "any tag": the family default's REPO matching row.image is enough.
         assert row["is_default"] == {"family": "rocmfpx", "source": "release"}
@@ -186,6 +187,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-other", "1"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-other:1", "override")},
             slot_usage={},
+            local=None,
         )
         assert row["is_default"] == {"family": "rocmfpx", "source": "override"}
 
@@ -196,6 +198,7 @@ class TestEnrichRow:
             _row("ghcr.io/hal0ai/hal0-unrelated", "1"),
             defaults={"rocmfpx": ("ghcr.io/hal0ai/hal0-combined:0824", "release")},
             slot_usage={},
+            local=None,
         )
         assert row["is_default"] is None
 
@@ -211,6 +214,7 @@ class TestEnrichRow:
                 "npu": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
                 "old": "ghcr.io/hal0ai/hal0-combined:0822",  # other tag: no match
             },
+            local=None,
         )
         assert row["in_use_by"] == ["agent", "utility"]
         assert row["is_default"] is None
@@ -503,3 +507,214 @@ class TestRunnerImageRouteEnrichment:
         rows = isolated_client.get("/api/runner-images").json()["images"]
         row = next(r for r in rows if r["id"] == "rocmfpx-combined")
         assert row["in_use_by"] == ["agent"]
+
+
+# ── store-truth enrichment: store_state / per-tag downloaded / badges ───────
+#
+# runner-image-catalogue v3 (task 5): rows gain store_state ("present" /
+# "missing" / "unknown"), a per-tag ``downloaded`` flag, ``store_context``,
+# and validated/candidate/deprecated ``badges`` — sourced from
+# ``hal0.providers.podman_introspect.images_digests()`` (monkeypatched at
+# the route module's imported name, its patch point) and the
+# ``hal0.config.schema`` image-ref sets.
+
+
+class TestStoreStateEnrichment:
+    DIGEST_A = "sha256:" + "a" * 64
+    DIGEST_B = "sha256:" + "b" * 64
+
+    def _seed(self, client: TestClient, **overrides):
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        image = RunnerImage(
+            id="x",
+            image="ghcr.io/x/a",
+            tag="0826",
+            available_tags=["0826", "0824"],
+            **overrides,
+        )
+        store = client.app.state.runner_image_registry
+        store.upsert(image)
+        store.set_tags(
+            "x",
+            [
+                RunnerImageTag(tag="0826", digest=self.DIGEST_A),
+                RunnerImageTag(tag="0824", digest=self.DIGEST_B),
+            ],
+        )
+        return image
+
+    def test_store_state_present_by_digest(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"docker.io/y/alias:zz": self.DIGEST_A}, context="rootful"
+            ),
+        )
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["store_state"] == "present"  # digest match, name irrelevant
+        assert row["store_context"] == "rootful"
+        assert row["downloaded"] is True
+        assert row["tags"][0]["downloaded"] is True
+        assert row["tags"][1]["downloaded"] is False
+
+    def test_store_state_missing_when_absent_from_store(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={}, context="rootful"),
+        )
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["store_state"] == "missing"
+        assert row["downloaded"] is False
+        assert row["tags"][0]["downloaded"] is False
+        assert row["tags"][1]["downloaded"] is False
+
+    def test_store_state_unknown_falls_back_to_marker(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(client, local_path="/var/lib/hal0/images/x")
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")  # x has local_path set
+        assert row["store_state"] == "unknown"
+        assert row["store_context"] is None
+        assert row["downloaded"] is True  # marker honoured only here
+        assert row["tags"][0]["downloaded"] is None
+        assert row["tags"][1]["downloaded"] is None
+
+    def test_downloaded_route_filters_by_store_truth(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={"ghcr.io/x/a:0826": None}, context="rootful"),
+        )
+
+        rows = client.get("/api/runner-images/downloaded").json()["images"]
+        assert [r["id"] for r in rows] == ["x"]
+        assert rows[0]["store_state"] == "present"
+
+    def test_validated_badge(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(RunnerImage(id="combined", image="ghcr.io/hal0ai/hal0-combined", tag="0826"))
+        store.set_tags("combined", [RunnerImageTag(tag="0826")])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "combined")
+        assert row["badges"]["0826"] == "validated"
+
+    def test_deprecated_badge(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        store = client.app.state.runner_image_registry
+        store.upsert(
+            RunnerImage(id="stale-combined", image="ghcr.io/hal0ai/hal0-combined", tag="0824")
+        )
+        store.set_tags("stale-combined", [RunnerImageTag(tag="0824")])
+
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "stale-combined")
+        assert row["badges"]["0824"] == "deprecated"
+
+    def test_badges_missing_when_no_match(self, client: TestClient) -> None:
+        rows_before = self._seed(client)
+        del rows_before  # seed just for a row with no badge-set membership
+        rows = client.get("/api/runner-images").json()["images"]
+        row = next(r for r in rows if r["id"] == "x")
+        assert row["badges"] == {}
+
+    def test_promptforge_import_error_degrades_gracefully(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEFAULT_PROMPTFORGE_IMAGE isn't on this branch yet (merges with
+        #2129 later) — the ImportError branch in ``_tag_badges`` must be
+        exercised today without ever surfacing as a 500."""
+        import hal0.config.schema as schema_mod
+
+        assert not hasattr(schema_mod, "DEFAULT_PROMPTFORGE_IMAGE")
+        self._seed(client)
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+
+        resp = client.get("/api/runner-images")
+        assert resp.status_code == 200
+
+    def test_get_runner_image_detail_carries_store_state(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.providers import podman_introspect as pi
+
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(refs={}, context="rootless"),
+        )
+
+        detail = client.get("/api/runner-images/x").json()
+        assert detail["store_state"] == "missing"
+        assert detail["store_context"] == "rootless"
+
+    def test_sync_route_rows_carry_store_state(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
+        images_json = {
+            "schema": "hal0.runner-images.v1",
+            "images": [
+                {
+                    "image": "ghcr.io/hal0ai/hal0-toolbox-cpu",
+                    "tag": "latest",
+                    "manifest_key": "toolbox-cpu",
+                    "ownership": "owned",
+                    "publish": "ci",
+                    "notes": "CPU-only toolbox image.",
+                }
+            ],
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == sync_mod.IMAGES_JSON_URL:
+                return httpx.Response(200, json=images_json)
+            if url.startswith("https://ghcr.io/token"):
+                return httpx.Response(200, json={"token": "tok"})
+            if "/manifests/" in url:
+                return httpx.Response(
+                    200,
+                    headers={"docker-content-digest": "sha256:abc", "content-length": "42"},
+                )
+            return httpx.Response(404)
+
+        real_async_client = httpx.AsyncClient
+
+        def _mock_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(*args, **kwargs)
+
+        monkeypatch.setattr(sync_mod.httpx, "AsyncClient", _mock_client)
+
+        resp = client.post("/api/runner-images/sync")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["images"][0]["store_state"] == "unknown"
