@@ -16,12 +16,9 @@ Surface:
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import time
 from enum import StrEnum
-from pathlib import Path
 
 import httpx
 import typer
@@ -746,7 +743,8 @@ def update(
         # running the pre-update command so the operator can opt into a restart.
         _print_drift_banner(_fetch_slot_drift())
         converged = _print_convergence(final.get("convergence"))
-        if converged:
+        components_ok = _print_component_table(_component_rows())
+        if converged and components_ok:
             console.print(Panel("[green]update applied.[/green]", border_style="green"))
             return
         # Refuse to report a clean success while the old on-disk shape survives:
@@ -767,209 +765,170 @@ def update(
         die(f"update {state}: {err}")
 
 
-# ── hal0 update owui — repin the OpenWebUI companion image ─────────────────────
+# ── hal0 update status / component — per-component convergence (spec §3) ──────
 #
-# OpenWebUI is a podman container pinned by sha256 manifest-list digest in the
-# installed unit (packaging/systemd/hal0-openwebui.service, copied to
-# /etc/systemd/system by install.sh). It is NOT in manifest.json, and the hal0
-# self-updater does not touch companion units — so a runtime repin of the
-# installed unit is durable across `hal0 update` (only a fresh install.sh run
-# rewrites it). This command resolves a digest (upstream tag or explicit
-# --target), repins the unit, pulls, and restarts. The pure text seam lives in
-# hal0.openwebui.image_pin; the release-source pin sites (install.sh + the
-# packaging unit) are a separate maintainer concern — see
-# scripts/update-owui-digest.sh + the pin-consistency test.
+# The daemon owns the component catalog (hal0.components.*): GET
+# /api/updates/components reports each component's installed/pinned/status,
+# and POST /api/updates/components/{id}/converge (re)runs its converge arm as
+# a background job, polled the same way as the self-update prepare/commit
+# jobs above. These verbs give an operator a component-scoped alternative to
+# the all-or-nothing bare `hal0 update` for retrying just the piece that's
+# stuck.
+
+#: Component statuses that mean "not converged yet" — everything else
+#: (currently just "converged", plus the openwebui-only "override" and
+#: "not-installed") counts as settled for the purposes of the exit code.
+_COMPONENT_PENDING = ("pending", "stale", "build_failed", "snapshot_failed", "rolled_back")
 
 
-def _dev_mode() -> bool:
-    """True under an ``install.sh --dev`` layout (HAL0_HOME set).
-
-    In dev we rewrite the unit file but skip the privileged podman/systemctl
-    side effects — there is no real service to bounce.
-    """
-    return bool(os.environ.get("HAL0_HOME", "").strip())
-
-
-def _run_cmd(argv: list[str], *, timeout: float) -> tuple[int | None, str, str]:
-    """Run ``argv``; return ``(rc, stdout, stderr)``. rc=None on spawn/timeout."""
+def _component_rows() -> list[dict]:
+    """Fetch the /api/updates/components rows, or die on an API error."""
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
-        return None, "", f"{argv[0]} timed out after {timeout:.0f}s"
-    except (FileNotFoundError, OSError) as exc:
-        return None, "", f"{argv[0]} not runnable: {exc}"
-    return proc.returncode, proc.stdout, proc.stderr
+        body = api_get("/api/updates/components")
+    except CliApiError as exc:
+        die(str(exc))
+        return []
+    return body.get("components") or []
 
 
-def _resolve_owui_upstream_digest(tag: str) -> str:
-    """Resolve the published ghcr.io manifest-list digest for OWUI ``tag``.
+def _print_component_table(rows: list[dict]) -> bool:
+    """Render the component table; True when everything is converged."""
+    table = Table(title="Components", show_header=True, header_style="bold")
+    for col in ("component", "installed", "pinned", "status"):
+        table.add_column(col)
+    all_ok = True
+    for row in rows:
+        status_txt = row.get("status", "?")
+        if status_txt in _COMPONENT_PENDING:
+            all_ok = False
+            status_txt = f"[yellow]{status_txt}[/yellow]"
+        elif status_txt == "converged":
+            status_txt = "[green]converged[/green]"
+        pinned = row.get("pinned") or "—"
+        if row.get("pin_label"):
+            pinned = f"{pinned} ({row['pin_label']})"
+        table.add_row(row.get("name", row.get("id", "?")), str(row.get("installed") or "—"), str(pinned), status_txt)
+    console.print(table)
+    for row in rows:
+        if row.get("status") in _COMPONENT_PENDING and (row.get("error") or row.get("remedy")):
+            remedy = row.get("remedy") or f"retry with: hal0 update component {row['id']}"
+            console.print(
+                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} "
+                f"[dim]{remedy}[/dim]"
+            )
+    return all_ok
 
-    Reuses the anonymous OCI probe the toolbox surface already ships. Raises
-    ``httpx.HTTPError`` / ``RuntimeError`` / ``ValueError`` on failure for the
-    caller to turn into a clean ``die``.
-    """
-    import httpx
 
-    from hal0.cli.doctor_commands import _ghcr_anon_token, _ghcr_manifest_digest
-    from hal0.openwebui.image_pin import OPENWEBUI_GHCR_REPO
-
-    with httpx.Client(follow_redirects=True) as client:
-        token = _ghcr_anon_token(OPENWEBUI_GHCR_REPO, client=client)
-        return _ghcr_manifest_digest(OPENWEBUI_GHCR_REPO, tag, token=token, client=client)
-
-
-def _write_unit_atomic(unit: Path, text: str) -> None:
-    """Rewrite ``unit`` in place, preserving mode, via a same-dir temp + replace."""
+@update_app.command("status")
+def update_status_cmd() -> None:
+    """Show hal0 + per-component version/convergence status (exit 2 if outstanding)."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
     try:
-        mode = unit.stat().st_mode & 0o777
-    except OSError:
-        mode = 0o644
-    tmp = unit.with_name(f".{unit.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, mode)
-    os.replace(tmp, unit)
+        body = api_get("/api/updates/check")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    _print_check(body)
+    if not _print_component_table(_component_rows()):
+        console.print("[dim](exit 2 = components not converged — run `hal0 update` "
+                      "or `hal0 update component <id>`)[/dim]")
+        raise typer.Exit(2)
+
+
+@update_app.command("component")
+def update_component_cmd(
+    component_id: str = typer.Argument(..., help="Component id (see `hal0 update status`)."),
+    check: bool = typer.Option(False, "--check", help="Status row only; don't converge."),
+) -> None:
+    """Converge (or re-try) one component to its release pin."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    rows = [r for r in _component_rows() if r.get("id") == component_id]
+    if not rows:
+        die(f"unknown component {component_id!r} — run `hal0 update status` for the list")
+        return
+    _print_component_table(rows)
+    if check:
+        return
+    _converge_component(component_id)
+
+
+def _converge_component(component_id: str, body: dict | None = None) -> None:
+    try:
+        job = api_post(f"/api/updates/components/{component_id}/converge", json=body or {})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    job_id = job.get("id")
+    if not job_id:
+        die("server returned no job id")
+        return
+    console.print(f"[cyan]converging {component_id}:[/cyan] {job_id}")
+    final = _poll_job(job_id, terminal=("applied", "failed"))
+    result = final.get("component_result") or {}
+    if final.get("state") == "applied":
+        console.print(Panel(
+            f"[green]{component_id} {result.get('status', 'converged')}[/green]"
+            + (f" [dim]{result.get('from')} → {result.get('to')}[/dim]" if result.get("to") else ""),
+            border_style="green",
+        ))
+        return
+    die(f"{component_id} converge failed: {final.get('error') or 'unknown error'}"
+        + (f" — {result.get('remedy')}" if result.get("remedy") else ""))
+
+
+# ── hal0 update owui — converge the OpenWebUI companion to its release pin ────
+#
+# OpenWebUI is a podman container whose pin now rides hal0 releases (the
+# component catalog owns it — hal0.components.openwebui_arm — same as every
+# other component). This is a thin alias for `hal0 update component openwebui`
+# that also exposes the --target / --clear-override operator escape hatches
+# (spec §2) for pinning an explicit digest outside the release cadence. The
+# old --tag float-to-upstream flag, and the unit-rewrite/podman-pull/systemctl
+# legwork it drove client-side, are gone — the daemon does that work now.
 
 
 @update_app.command("owui")
 def update_owui(
-    check: bool = typer.Option(
-        False,
-        "--check",
-        help="Only report the pinned vs upstream digest; don't repin or restart.",
-    ),
-    tag: str | None = typer.Option(
-        None,
-        "--tag",
-        help="Upstream tag to resolve (default: OpenWebUI's :main). Ignored with --target.",
-    ),
+    check: bool = typer.Option(False, "--check", help="Status only; don't converge."),
     target: str | None = typer.Option(
-        None,
-        "--target",
-        help="Pin an explicit digest (sha256:… or bare 64-hex) instead of resolving a tag.",
+        None, "--target",
+        help="Pin an explicit digest override (sha256:… or bare 64-hex) instead of the release pin.",
     ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt before repinning."
+    clear_override: bool = typer.Option(
+        False, "--clear-override", help="Drop a --target override; converge back to the release pin.",
     ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="Repin + pull + restart even when the digest already matches.",
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Update the OpenWebUI companion container to a newer pinned image.
+    """Converge the OpenWebUI companion to its release-carried pin.
 
-    OpenWebUI runs as a podman container pinned by sha256 digest in its systemd
-    unit. This resolves a target digest (upstream ``--tag`` or explicit
-    ``--target``), repins the installed unit, pulls the image, and restarts
-    ``hal0-openwebui``. The repin is durable — ``hal0 update`` (the hal0
-    self-update) never rewrites companion units.
+    Alias for `hal0 update component openwebui`, plus the --target /
+    --clear-override operator escape hatches (spec §2). The old --tag
+    float-to-upstream flag is gone: pins ride hal0 releases.
     """
-    from hal0.openwebui import image_pin
-
-    unit = image_pin.installed_unit_path()
-    if not unit.is_file():
-        die(f"OpenWebUI unit not found at {unit} — is the OpenWebUI companion installed?")
-        return
-    text = unit.read_text(encoding="utf-8")
-    current = image_pin.parse_pinned_digest(text)
-    if current is None:
-        die(
-            f"could not read a consistent pinned digest from {unit} "
-            "(no pin, or the two pins disagree — inspect the unit)."
-        )
-        return
-
-    # ── Resolve the target digest ────────────────────────────────────────────
-    resolve_tag = tag or image_pin.OPENWEBUI_DEFAULT_TAG
-    if target is not None:
-        target_digest = image_pin.normalize_digest(target)
-        if target_digest is None:
-            die(f"--target {target!r} is not a sha256 digest (expected sha256:<64-hex> or 64-hex).")
-            return
-        source = "target"
-    else:
-        try:
-            target_digest = _resolve_owui_upstream_digest(resolve_tag)
-        except Exception as exc:
-            die(f"could not resolve ghcr.io {image_pin.OPENWEBUI_IMAGE_REPO}:{resolve_tag}: {exc}")
-            return
-        if not image_pin.is_sha256_digest(target_digest):
-            die(f"ghcr.io returned an unexpected digest for :{resolve_tag}: {target_digest!r}")
-            return
-        source = f"ghcr :{resolve_tag}"
-
-    drifted = target_digest != current
-    table = Table(title="OpenWebUI image pin", show_header=False)
-    table.add_column(style="bold")
-    table.add_column()
-    table.add_row("pinned (now)", current)
-    table.add_row(f"target ({source})", target_digest)
-    table.add_row(
-        "status", "[green]newer available[/green]" if drifted else "[dim]up to date[/dim]"
-    )
-    console.print(table)
-
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
     if check:
+        rows = [r for r in _component_rows() if r.get("id") == "openwebui"]
+        _print_component_table(rows)
         return
+    body: dict[str, object] = {}
+    if target is not None:
+        from hal0.openwebui.image_pin import normalize_digest
 
-    if not drifted and not force:
-        console.print(
-            "[dim]already pinned to that digest — nothing to do (use --force to re-pull).[/dim]"
-        )
-        return
-
-    dev = _dev_mode()
-    if not dev and hasattr(os, "geteuid") and os.geteuid() != 0:
-        die("repinning the unit and restarting hal0-openwebui need root — re-run with sudo.")
-        return
-
-    short = target_digest[:19] + "…"
-    if (
-        not yes
-        and _interactive()
-        and not typer.confirm(f"Repin OpenWebUI → {short}?", default=True)
-    ):
-        console.print("[dim]aborted — unit unchanged.[/dim]")
-        return
-
-    ref = image_pin.pinned_ref(target_digest)
-
-    # Pull FIRST (unless dev): if the new image isn't pullable, abort before
-    # touching the unit so we never leave it pointing at an unusable digest.
-    if not dev:
-        console.print(f"[cyan]pulling[/cyan] {ref}")
-        rc, _out, err = _run_cmd(["podman", "pull", ref], timeout=600.0)
-        if rc != 0:
-            die(f"podman pull failed — unit unchanged: {err.strip() or f'exit {rc}'}")
+        normalized = normalize_digest(target)
+        if normalized is None:
+            die(f"--target {target!r} is not a sha256 digest")
             return
-
-    new_text, count = image_pin.repin_unit_text(text, target_digest)
-    if count == 0:  # pragma: no cover — parse_pinned_digest already proved a match
-        die("internal error: no digest occurrences rewritten in the unit.")
+        body["target"] = normalized
+    if clear_override:
+        body["clear_override"] = True
+    prompt = "Repin OpenWebUI?" if not target else f"Repin OpenWebUI → {body['target'][:19]}…?"
+    if not yes and _interactive() and not typer.confirm(prompt, default=True):
+        console.print("[dim]aborted.[/dim]")
         return
-    try:
-        _write_unit_atomic(unit, new_text)
-    except OSError as exc:
-        die(f"could not write {unit}: {exc}")
-        return
-    console.print(f"[green]repinned[/green] {unit} ({count} occurrence(s))")
-
-    if dev:
-        console.print("[dim]dev mode (HAL0_HOME set): skipping daemon-reload / restart.[/dim]")
-        return
-
-    rc, _out, err = _run_cmd(["systemctl", "daemon-reload"], timeout=30.0)
-    if rc != 0:
-        console.print(
-            f"[yellow]systemctl daemon-reload failed:[/yellow] {err.strip() or f'exit {rc}'}"
-        )
-
-    console.print(f"[cyan]restarting[/cyan] {image_pin.OPENWEBUI_UNIT_NAME}")
-    rc, _out, err = _run_cmd(["systemctl", "restart", image_pin.OPENWEBUI_UNIT_NAME], timeout=120.0)
-    if rc != 0:
-        die(
-            f"restart failed: {err.strip() or f'exit {rc}'}. "
-            f"The unit is repinned; check `journalctl -u {image_pin.OPENWEBUI_UNIT_NAME} -n 40`."
-        )
-        return
-    console.print(Panel("[green]OpenWebUI updated.[/green]", border_style="green"))
+    _converge_component("openwebui", body)
