@@ -10,6 +10,7 @@ from hal0.providers.container import (
     _guard_specialty_runner,
     _resolve_context_size,
     _resolve_llama_scalars,
+    resolve_effective_context_size,
 )
 from hal0.registry.specialty import specialty_env_for
 from hal0.runners import RUNNER_IMAGES
@@ -273,3 +274,86 @@ def test_promptforge_template_flags_not_injected_when_degraded():
         _pf_slot(profile="promptforge", binary="rocmfpx"), model, profile
     )
     assert incapable["slot_profile_template_flags"] == ""
+
+
+# ── I2 (fix wave): the read-only ctx surface agrees with the launch ──────────
+
+
+class _FakeRegistry:
+    """Minimal ModelRegistry stand-in for the read-only wrapper."""
+
+    def __init__(self, dump):
+        self._dump = dump
+
+    def get(self, model_id):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(model_dump=lambda: dict(self._dump))
+
+
+def test_degraded_slot_reports_the_ctx_it_launches_with():
+    """``resolve_effective_context_size`` — the read-only wrapper backing
+    ``ctx_max`` on the slots list, the detail route and ``/v1/models`` — used
+    to take ``_resolve_context_size``'s ``specialty_degraded=None`` default
+    ("accelerated") unconditionally, so a PromptForge model on a ``rocmfpx``
+    slot LAUNCHED at 8192 while the drawer's "ctx used / max" pane advertised
+    262144. Given the slot's own cfg it now reaches the same guard verdict the
+    launch path does, through the same ``_resolve_llama_scalars`` choke point.
+    """
+    model = _pf_model()
+    registry = _FakeRegistry(model)
+    profile = ProfileConfig()
+
+    accelerated_cfg = _pf_slot(profile="promptforge", binary="promptforge")
+    degraded_cfg = _pf_slot(profile="promptforge", binary="rocmfpx")
+
+    with patch("hal0.providers.container._best_effort_model_info", return_value=model):
+        advertised_accel = resolve_effective_context_size(
+            300_000, registry, "qwen-pf", slot_name="s", slot_cfg=accelerated_cfg
+        )
+        advertised_degraded = resolve_effective_context_size(
+            300_000, registry, "qwen-pf", slot_name="s", slot_cfg=degraded_cfg
+        )
+
+    # parity with what the launch path actually resolves for the same slots
+    launched_accel = _resolve_llama_scalars(accelerated_cfg, model, profile)["context_size"]
+    launched_degraded = _resolve_llama_scalars(degraded_cfg, model, profile)["context_size"]
+
+    assert launched_accel == 262_144
+    assert launched_degraded == _CTX_SAFE_FALLBACK
+    assert advertised_accel == launched_accel
+    assert advertised_degraded == launched_degraded  # was 262144 pre-fix
+
+
+def test_ctx_wrapper_without_slot_cfg_is_unchanged():
+    """Back-compat pin: a caller with no slot cfg in hand (and therefore no way
+    to know the guard's verdict) keeps the pre-fix accelerated assumption
+    rather than degrading every specialty model on the wire."""
+    model = _pf_model()
+    assert (
+        resolve_effective_context_size(300_000, _FakeRegistry(model), "qwen-pf", slot_name="s")
+        == 262_144
+    )
+
+
+def test_ctx_wrapper_plain_model_never_touches_the_preview_bundle():
+    """The specialty gate is what keeps the ~2s slot poll cheap: a plain model
+    must not pay for a preview-bundle resolution just because a slot cfg was
+    passed."""
+    plain = {"_model_key": "plain", "metadata": {}}
+    calls = []
+
+    def _boom(cfg, model_path=None):
+        calls.append(cfg)
+        raise AssertionError("preview bundle must not be resolved for a plain model")
+
+    with patch("hal0.providers.container._resolve_preview_bundle", _boom):
+        ctx = resolve_effective_context_size(
+            65_536,
+            _FakeRegistry(plain),
+            "plain",
+            slot_name="s",
+            slot_cfg=_pf_slot(profile="promptforge", binary="rocmfpx"),
+        )
+    assert ctx == _CTX_SAFE_FALLBACK
+    assert calls == []

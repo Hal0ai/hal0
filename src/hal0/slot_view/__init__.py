@@ -441,6 +441,7 @@ def resolve_ctx_max(
     model_registry: Any,
     model_id: str,
     slot_name: str,
+    slot_cfg: dict[str, Any] | None = None,
 ) -> int | None:
     """Best-effort EFFECTIVE context resolution for the dashboard's ``ctx_max``.
 
@@ -454,6 +455,12 @@ def resolve_ctx_max(
     launch path resolved, using the model registry the caller already
     carries.
 
+    ``slot_cfg`` — the slot's TOML dict, which both callers already hold —
+    lets the resolver reach the specialty guard's verdict, so a DEGRADED
+    specialty slot reports the plain-model window it actually launches with
+    instead of the card's 262144 (fix wave, I2). Omitted, the resolver
+    assumes the accelerated path exactly as before.
+
     Imported lazily (heavy neighbour, see module docstring) and never
     raises: a resolution failure degrades to the raw TOML ceiling — the
     pre-fix behavior — rather than breaking the caller.
@@ -462,7 +469,11 @@ def resolve_ctx_max(
         from hal0.providers.container import resolve_effective_context_size
 
         return resolve_effective_context_size(
-            raw_ctx_max, model_registry, model_id, slot_name=slot_name
+            raw_ctx_max,
+            model_registry,
+            model_id,
+            slot_name=slot_name,
+            slot_cfg=slot_cfg,
         )
     except Exception:
         return raw_ctx_max
@@ -1031,6 +1042,10 @@ class SlotViewAggregator:
         real_names = {str(p["name"]) for p in payloads}
 
         configs = await self._safe_configs()
+        # #1946/I2: ``resolve_ctx_max`` needs the slot's own TOML to reach the
+        # specialty guard's verdict, and this pass has already paid for the
+        # config read.
+        cfg_by_name = {str(c.get("name") or ""): c for c in configs}
 
         enrichment = config_enrichment(configs)
         # #1427: the container probe, the capacity probe and the metrics
@@ -1069,6 +1084,7 @@ class SlotViewAggregator:
                     self._registry,
                     model_id,
                     slot_name,
+                    cfg_by_name.get(slot_name),
                 )
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the

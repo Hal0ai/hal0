@@ -1801,6 +1801,7 @@ def resolve_effective_context_size(
     model_id: str = "",
     *,
     slot_name: str = "",
+    slot_cfg: dict[str, Any] | None = None,
 ) -> int:
     """Public read-only-surface wrapper around :func:`_resolve_context_size`.
 
@@ -1828,6 +1829,12 @@ def resolve_effective_context_size(
     model-less slot (no ``model_id`` at all) resolves the same way: there is
     no model fact to be authoritative, so the safe floor (or the slot
     ceiling, if lower) is reported rather than inventing a number.
+
+    ``slot_cfg`` (the slot's TOML dict, which every caller already has in
+    hand) is what lets this wrapper answer for a SPECIALTY model: without it
+    the specialty guard's verdict is unknowable here and the accelerated
+    branch is assumed — see the gate below. Omit it and the pre-fix behavior
+    is preserved exactly.
     """
     model_info: dict[str, Any] = {}
     if model_registry is not None and model_id:
@@ -1853,7 +1860,31 @@ def resolve_effective_context_size(
     # refuses on was the advertised one, not the served one.
     if model_id:
         model_info.setdefault("_model_key", model_id)
-    return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
+    # Specialty degraded parity (fix wave, I2). ``_resolve_context_size``'s
+    # path 2 only applies the specialty card's window on the ACCELERATED path;
+    # this wrapper used to take the parameter's ``None`` default = "accelerated"
+    # unconditionally, so a PromptForge model on a ``rocmfpx`` slot LAUNCHED at
+    # 8192 while ``ctx_max`` on the wire (the drawer's "ctx used / max" and the
+    # per-slot detail body) reported 262144 — the exact launch-vs-surface
+    # disagreement this wrapper's own docstring, and slot_view's, promise
+    # against. Resolved through :func:`specialty_degraded_for_slot`, i.e. the
+    # SAME ``_resolve_llama_scalars`` choke point the launch path uses, never a
+    # re-derived runner + direct guard call.
+    #
+    # Gated on the model actually carrying ``metadata.specialty``: for every
+    # plain model (which is every model on a normal box) this costs one dict
+    # lookup and the read-only surfaces stay byte-identical, so the ~2s slot
+    # poll never pays for a preview-bundle resolution it doesn't need.
+    specialty_degraded = None
+    if slot_cfg is not None and ((model_info.get("metadata") or {}).get("specialty")):
+        with contextlib.suppress(Exception):
+            specialty_degraded = specialty_degraded_for_slot(slot_cfg)
+    return _resolve_context_size(
+        slot_ceiling,
+        model_info,
+        slot_name=slot_name,
+        specialty_degraded=specialty_degraded,
+    )
 
 
 def _resolve_llama_scalars(
