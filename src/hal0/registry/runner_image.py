@@ -16,6 +16,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class RunnerImageTag(BaseModel):
+    """One catalogued tag of a runner image, with its resolved digest."""
+
+    tag: str
+    digest: str | None = None
+    size_bytes: int | None = None
+    last_seen: str | None = None
+
+
 class RunnerImage(BaseModel):
     """A single runner image catalogue entry.
 
@@ -36,6 +45,10 @@ class RunnerImage(BaseModel):
     #: when the probe failed or hasn't run — the headline ``tag`` above
     #: keeps its own semantics (images.json pin, else newest, else latest).
     available_tags: list[str] = Field(default_factory=list)
+
+    #: Per-tag digest facts (catalogue v3) — transport-only, populated by the
+    #: store from runner_image_tag; never JSON-encoded into the row itself.
+    tags: list[RunnerImageTag] = Field(default_factory=list)
 
     # images.json (hal0.runner-images.v1) fields — None when unmatched.
     manifest_key: str | None = None
@@ -59,4 +72,4 @@ class RunnerImage(BaseModel):
         return bool(self.local_path)
 
 
-__all__ = ["RunnerImage"]
+__all__ = ["RunnerImage", "RunnerImageTag"]

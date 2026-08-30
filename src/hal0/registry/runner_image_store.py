@@ -23,7 +23,7 @@ from typing import Any
 from hal0.config import paths
 from hal0.db.connection import connect, tx
 from hal0.db.migrate import migrate
-from hal0.registry.runner_image import RunnerImage
+from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 
 log = logging.getLogger(__name__)
 
@@ -113,14 +113,42 @@ class RunnerImageStore:
         with self._connect() as conn:
             self._ensure_migrated(conn)
             rows = conn.execute("SELECT * FROM runner_image ORDER BY id").fetchall()
-            return [_row_to_runner_image(r) for r in rows]
+            images = [_row_to_runner_image(r) for r in rows]
+            # Fetch all tags in one query, grouped by image_id
+            tag_rows = conn.execute(
+                "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
+                "ORDER BY image_id, ord"
+            ).fetchall()
+            # Build a map of image_id -> list of tags
+            tags_by_image: dict[str, list[RunnerImageTag]] = {}
+            for tag_row in tag_rows:
+                image_id = tag_row["image_id"]
+                if image_id not in tags_by_image:
+                    tags_by_image[image_id] = []
+                tags_by_image[image_id].append(
+                    RunnerImageTag(
+                        tag=tag_row["tag"],
+                        digest=tag_row["digest"],
+                        size_bytes=tag_row["size_bytes"],
+                        last_seen=tag_row["last_seen"],
+                    )
+                )
+            # Attach tags to images
+            return [
+                image.model_copy(update={"tags": tags_by_image.get(image.id, [])})
+                for image in images
+            ]
 
     def get(self, image_id: str) -> RunnerImage | None:
         """Return one catalogued image by id, or None if absent."""
         with self._connect() as conn:
             self._ensure_migrated(conn)
             row = conn.execute("SELECT * FROM runner_image WHERE id = ?", (image_id,)).fetchone()
-            return _row_to_runner_image(row) if row is not None else None
+            if row is None:
+                return None
+        image = _row_to_runner_image(row)
+        tags = self.tags_for(image_id)
+        return image.model_copy(update={"tags": tags})
 
     def list_downloaded(self) -> list[RunnerImage]:
         """Return only images with a local pull landed (``local_path`` set).
@@ -133,7 +161,42 @@ class RunnerImageStore:
             rows = conn.execute(
                 "SELECT * FROM runner_image WHERE local_path IS NOT NULL ORDER BY id"
             ).fetchall()
-            return [_row_to_runner_image(r) for r in rows]
+            images = [_row_to_runner_image(r) for r in rows]
+            # Fetch all tags in one query, grouped by image_id
+            tag_rows = conn.execute(
+                "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
+                "ORDER BY image_id, ord"
+            ).fetchall()
+            # Build a map of image_id -> list of tags
+            tags_by_image: dict[str, list[RunnerImageTag]] = {}
+            for tag_row in tag_rows:
+                image_id = tag_row["image_id"]
+                if image_id not in tags_by_image:
+                    tags_by_image[image_id] = []
+                tags_by_image[image_id].append(
+                    RunnerImageTag(
+                        tag=tag_row["tag"],
+                        digest=tag_row["digest"],
+                        size_bytes=tag_row["size_bytes"],
+                        last_seen=tag_row["last_seen"],
+                    )
+                )
+            # Attach tags to images
+            return [
+                image.model_copy(update={"tags": tags_by_image.get(image.id, [])})
+                for image in images
+            ]
+
+    def tags_for(self, image_id: str) -> list[RunnerImageTag]:
+        """Return per-tag digest facts for one image, in insertion order."""
+        with self._connect() as conn:
+            self._ensure_migrated(conn)
+            rows = conn.execute(
+                "SELECT tag, digest, size_bytes, last_seen FROM runner_image_tag "
+                "WHERE image_id = ? ORDER BY ord",
+                (image_id,),
+            ).fetchall()
+        return [RunnerImageTag(**dict(r)) for r in rows]
 
     # ── writes ───────────────────────────────────────────────────────────
 
@@ -221,6 +284,23 @@ class RunnerImageStore:
         if removed:
             self._notify_change()
         return removed
+
+    def set_tags(self, image_id: str, tags: list[RunnerImageTag]) -> None:
+        """Replace the per-tag rows for one image (sync's newest-first order)."""
+        with self._connect() as conn:
+            self._ensure_migrated(conn)
+            with tx(conn):
+                conn.execute("DELETE FROM runner_image_tag WHERE image_id = ?", (image_id,))
+                conn.executemany(
+                    "INSERT INTO runner_image_tag "
+                    "(image_id, tag, digest, size_bytes, last_seen, ord) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (image_id, t.tag, t.digest, t.size_bytes, t.last_seen, i)
+                        for i, t in enumerate(tags)
+                    ],
+                )
+        self._notify_change()
 
     def reload(self) -> None:
         """No-op — kept for interface symmetry with SqliteModelRegistry."""

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.registry.runner_image import RunnerImage
+from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_store import RunnerImageStore
 
 
@@ -105,3 +105,25 @@ class TestLocalState:
         assert store.list_downloaded() == []
         got = store.get("hal0ai/hal0-toolbox-cpu")
         assert got.downloaded is False
+
+
+class TestRunnerImageTag:
+    def test_set_and_read_tags(self, store: RunnerImageStore) -> None:
+        store.upsert(RunnerImage(id="x", image="ghcr.io/x/a", tag="0826"))
+        tags = [
+            RunnerImageTag(tag="0826", digest="sha256:" + "a" * 64, size_bytes=10),
+            RunnerImageTag(tag="0824", digest="sha256:" + "b" * 64, size_bytes=9),
+        ]
+        store.set_tags("x", tags)
+        row = store.get("x")
+        assert row is not None
+        assert [t.tag for t in row.tags] == ["0826", "0824"]
+        assert row.tags[0].digest == "sha256:" + "a" * 64
+
+    def test_set_tags_replaces(self, store: RunnerImageStore) -> None:
+        store.upsert(RunnerImage(id="x", image="ghcr.io/x/a", tag="0826"))
+        store.set_tags("x", [RunnerImageTag(tag="old")])
+        store.set_tags("x", [RunnerImageTag(tag="new")])
+        got = store.get("x")
+        assert got is not None
+        assert [t.tag for t in got.tags] == ["new"]
