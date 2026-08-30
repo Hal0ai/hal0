@@ -32,7 +32,9 @@ OPENWEBUI_GHCR_REPO = "open-webui/open-webui"
 
 #: Tag we resolve against when checking for a newer image. OWUI publishes the
 #: multi-arch container under ``:main`` (the tag its own docs recommend for the
-#: self-hosted container). Overridable via ``hal0 update owui --tag``.
+#: self-hosted container). No longer operator-overridable — the pin now rides
+#: hal0 releases; use ``hal0 update owui --target`` for an explicit digest
+#: override instead.
 OPENWEBUI_DEFAULT_TAG = "main"
 
 #: systemd unit that runs the container.
