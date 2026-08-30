@@ -284,6 +284,25 @@ class _HangingFakeProc(_FakeProc):
         self.stdout = _HangingStdout(lines)
 
 
+class _TermIgnoringFakeProc(_HangingFakeProc):
+    """A hung process that ignores SIGTERM: ``wait()`` only ever resolves
+    after ``kill()`` — models a wedged ``sudo``/``podman pull`` that never
+    reacts to the relayed SIGTERM, so the teardown path's escalation to
+    SIGKILL is the only thing that can end it."""
+
+    def __init__(self, lines: list[bytes], returncode: int) -> None:
+        super().__init__(lines, returncode)
+        self._exited = asyncio.Event()
+
+    def kill(self) -> None:
+        super().kill()
+        self._exited.set()
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        return self._returncode
+
+
 async def test_pull_image_stream_rootful_bad_ref_short_circuits(monkeypatch) -> None:
     calls: list[tuple] = []
 
@@ -441,13 +460,15 @@ async def test_pull_image_stream_rootful_clean_eof_never_signals_process(monkeyp
 async def test_pull_image_stream_rootful_cancel_calls_terminate_not_kill(monkeypatch) -> None:
     """A consumer that tears the generator down mid-stream (cancellation,
     early ``break``/``aclose()``) must ``terminate()`` (SIGTERM) the seam
-    process, never ``kill()`` (SIGKILL).
+    process — and, when the process exits within the grace period (as this
+    fake does, immediately), must never escalate to ``kill()`` (SIGKILL).
 
     ``proc`` here is ``sudo``, not ``podman`` directly — sudo can relay a
     catchable signal like SIGTERM to the podman child it launched, but
     SIGKILL cannot be caught or relayed by sudo at all, so a ``.kill()``
     here would leave the root-owned ``podman pull`` running, orphaned,
-    to completion or failure with nobody watching.
+    to completion or failure with nobody watching. Escalation exists only
+    for the wedged case — see the ``escalates_to_kill_after_grace`` test.
     """
     proc = _HangingFakeProc([b"Pulling fs layer\n"], 0)
 
@@ -464,6 +485,35 @@ async def test_pull_image_stream_rootful_cancel_calls_terminate_not_kill(monkeyp
 
     assert proc.terminated is True
     assert proc.killed is False
+
+
+async def test_pull_image_stream_rootful_cancel_escalates_to_kill_after_grace(
+    monkeypatch,
+) -> None:
+    """SIGTERM is polite, not a guarantee: a wedged ``sudo``/``podman pull``
+    that never exits after ``terminate()`` must be ``kill()``ed once the
+    grace period lapses, or teardown blocks forever on a process that will
+    never leave on its own.
+
+    ``TERMINATE_GRACE_SECONDS`` is patched near zero so this test does not
+    actually sit out the production grace period.
+    """
+    proc = _TermIgnoringFakeProc([b"Pulling fs layer\n"], 0)
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _TermIgnoringFakeProc:
+        return proc
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+    monkeypatch.setattr(podman_mutate, "TERMINATE_GRACE_SECONDS", 0.01)
+
+    agen = pull_image_stream_rootful(_REF)
+    first_event = await agen.__anext__()
+    assert first_event["state"] == "pulling"
+
+    await asyncio.wait_for(agen.aclose(), timeout=5.0)
+
+    assert proc.terminated is True
+    assert proc.killed is True
 
 
 # ── PullLineParser: parity with the pre-extraction container.py heuristic ──

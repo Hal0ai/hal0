@@ -91,6 +91,12 @@ _RC_REASON: dict[int, SeamUnanswered] = {
     66: "podman-failed",
 }
 
+#: Seconds :func:`pull_image_stream_rootful`'s abnormal-teardown path waits
+#: after SIGTERM before escalating to SIGKILL. Module-level (rather than a
+#: literal at the call site) so a test can shrink it instead of sitting out
+#: the real grace period.
+TERMINATE_GRACE_SECONDS = 10.0
+
 #: Outcome of a guarded ``image-rm``. ``"unknown"`` pairs with a
 #: :data:`SeamUnanswered` reason (see :func:`remove_image`); the other three
 #: are definitive answers from the seam and carry no reason.
@@ -231,20 +237,32 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
         # cancelled) — never on a clean EOF, where the pull already
         # finished and `proc.wait()` below just reaps the exit code.
         #
-        # SIGTERM, not SIGKILL: `proc` here is `sudo`, not `podman` itself
-        # (see the `create_subprocess_exec` call above). sudo relays
+        # SIGTERM first, not SIGKILL: `proc` here is `sudo`, not `podman`
+        # itself (see the `create_subprocess_exec` call above). sudo relays
         # catchable signals like SIGTERM to the child it launched, so
         # podman gets a chance to unwind (or at least exit) cleanly.
-        # SIGKILL cannot be caught or relayed by sudo, so a `.kill()` here
-        # would leave the root-owned `podman pull` orphaned, running to
-        # completion (or failure) with nobody watching — and, on the
-        # clean-EOF path specifically, killing sudo in the gap between the
-        # stdout pipe closing and `proc.wait()` running turns a fully
+        # SIGKILL cannot be caught or relayed by sudo, so leading with
+        # `.kill()` would leave the root-owned `podman pull` orphaned,
+        # running to completion (or failure) with nobody watching — and, on
+        # the clean-EOF path specifically, killing sudo in the gap between
+        # the stdout pipe closing and `proc.wait()` running turns a fully
         # successful pull into a reported `{"state": "failed", "error":
         # "pull exited with code -9"}`.
+        #
+        # But SIGTERM is a request, not a guarantee: a wedged sudo/podman
+        # that never reacts would otherwise linger indefinitely with nobody
+        # watching it. So after TERMINATE_GRACE_SECONDS without an exit,
+        # escalate to SIGKILL — at that point the orphaned-rootful-child
+        # risk above is the lesser evil versus never reclaiming the
+        # process at all.
         if not clean_eof:
             with contextlib.suppress(ProcessLookupError, OSError):
                 proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), TERMINATE_GRACE_SECONDS)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.kill()
 
     exit_code = await proc.wait()
     if exit_code == 0:
@@ -368,6 +386,7 @@ def remove_image(
 
 __all__ = [
     "RW_SEAM_BIN",
+    "TERMINATE_GRACE_SECONDS",
     "PullLineParser",
     "RemoveOutcome",
     "pull_image_stream_rootful",
