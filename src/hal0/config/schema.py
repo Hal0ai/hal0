@@ -2255,15 +2255,19 @@ class SlotsConfig(BaseModel):
         from hal0.runners import RUNNER_IMAGES, canonical_runner_key
 
         cleaned: dict[str, Any] = {}
+        canonical_origin: set[str] = set()  # keys in `cleaned` written by a canonical key
         for key, ref in v.items():
             if ref is None:
                 continue  # explicit null = clear this family's override
             canon = canonical_runner_key(key)
-            if canon != key:
+            aliased = canon != key
+            if aliased:
                 log.warning("slots.default_images_alias key=%s canonical=%s", key, canon)
-                key = canon
-            if key in cleaned:
-                continue  # canonical entry (or first writer) wins
+            key = canon
+            if key in cleaned and (aliased or key in canonical_origin):
+                # A canonical-origin entry always wins over an alias-origin
+                # one, regardless of which key appeared first in the TOML.
+                continue
             if key not in RUNNER_IMAGES:
                 raise ValueError(
                     f"[slots].default_images key {key!r} is not a known runner "
@@ -2275,6 +2279,8 @@ class SlotsConfig(BaseModel):
                     "ref (send null to clear the override)"
                 )
             cleaned[key] = ref.strip()
+            if not aliased:
+                canonical_origin.add(key)
         return cleaned
 
     @field_validator("publish_host")

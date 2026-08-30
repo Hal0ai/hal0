@@ -34,6 +34,15 @@ def test_default_images_canonical_wins_on_conflict() -> None:
     assert s.default_images == {"rocmfpx": "ghcr.io/x/canon:1"}
 
 
+def test_default_images_canonical_wins_on_conflict_alias_first() -> None:
+    # Same conflict, opposite TOML order — the canonical entry must still
+    # win regardless of which key appears first in the source dict.
+    s = SlotsConfig(
+        default_images={"vulkanfpx": "ghcr.io/x/alias:1", "rocmfpx": "ghcr.io/x/canon:1"}
+    )
+    assert s.default_images == {"rocmfpx": "ghcr.io/x/canon:1"}
+
+
 def test_default_images_unknown_key_still_rejected() -> None:
     with pytest.raises(ValueError, match="not a known runner"):
         SlotsConfig(default_images={"ghost": "ghcr.io/x/y:1"})
