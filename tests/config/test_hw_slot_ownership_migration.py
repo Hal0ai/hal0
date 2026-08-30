@@ -111,7 +111,7 @@ def test_preferred_runner_folds_to_binary_when_empty():
 
 
 def test_already_set_binary_is_not_clobbered():
-    plan = _plan([_slot("s", "m", binary="vulkanfpx")], {"m": ModelHw(None, "rocmfpx")})
+    plan = _plan([_slot("s", "m", binary="rocmfpx")], {"m": ModelHw(None, "rocmfpx")})
     fold = plan.slot_fold("s")
     assert fold is None or fold.set_binary is None
 

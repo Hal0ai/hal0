@@ -353,9 +353,10 @@ CURATED_MODELS: list[CuratedModel] = [
     # The Q8/Q4 files carry CUSTOM GGML tensor type ids (100 / 103) that
     # STOCK llama.cpp REJECTS at load. They only run on the ROCmFPX runner
     # (``DEFAULT_ROCMFPX_IMAGE``, config/schema.py), which is what the
-    # ``rocmfpx``/``vulkanfpx`` runner rows resolve to and which carries the
-    # MiniCPM5 pre-tokenizer this model needs. The F16 file is plain GGUF and
-    # is therefore the portable fallback for a box with no ROCm/Vulkan device
+    # ``rocmfpx`` runner row resolves to (vulkan served via
+    # supported_backends) and which carries the MiniCPM5 pre-tokenizer this
+    # model needs. The F16 file is plain GGUF and is therefore the portable
+    # fallback for a box with no ROCm/Vulkan device
     # (the ``cpu`` runner row uses a stock llama.cpp image).
     # ``hal0.install.brain_model`` picks between them from hardware.json;
     # don't hardcode a variant in a slot seed.

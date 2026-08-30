@@ -1974,7 +1974,8 @@ class TestSlotHardwareSegment:
 class TestFPXQuantRunnerGuard:
     """hal0#1790 defense-in-depth: a ROCmFPX-family quant (custom GGML tensor
     type ids 100/103 — see ``hal0.registry.detect.quant_from_rocmfpx_filename``)
-    must never reach a launch on a runner that isn't ``rocmfpx``/``vulkanfpx``.
+    must never reach a launch on a runner that isn't ``rocmfpx`` (vulkan
+    served via ``supported_backends``, not a separate runner key).
     The probe fix (``hal0.hardware.probe._amd_gpu_info``) stops the installer
     from picking this pairing going forward; this guard is the backstop for a
     stale slot TOML, a manual ``HAL0_BRAIN_MODEL`` override, or a hand-swapped

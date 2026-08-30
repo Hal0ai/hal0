@@ -229,6 +229,7 @@ def test_check_mode_does_not_require_a_container_runtime() -> None:
     "flag", ["-DGGML_HIP=ON", "-DGGML_VULKAN=ON", "-DCMAKE_HIP_ARCHITECTURES=gfx1151"]
 )
 def test_the_build_is_combined_hip_plus_vulkan(flag: str) -> None:
-    """hal0 resolves BOTH the rocmfpx and vulkanfpx runners to this one tag, so
-    dropping either backend silently breaks a lane."""
+    """hal0's rocmfpx runner serves BOTH the ROCm and Vulkan backends
+    (supported_backends=("rocm", "vulkan")) from this one tag, so dropping
+    either backend's build flag silently breaks a lane."""
     assert flag in MANIFEST["build"]["cmake_flags"]

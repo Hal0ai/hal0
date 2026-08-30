@@ -319,8 +319,8 @@ async def test_stale_image_surfaces_as_drift_even_with_matching_argv(
     container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
     container_stub.running_argv_by_slot["chat"] = list(matching_argv)
     # The container is still running a retired/off-lane image; the slot's
-    # resolved (declared) image for backend="vulkan" is the vulkanfpx image,
-    # not this one.
+    # resolved (declared) image for backend="vulkan" is the rocmfpx image
+    # (vulkan served via supported_backends), not this one.
     container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-toolbox-cpu:retired"
 
     sm = SlotManager()

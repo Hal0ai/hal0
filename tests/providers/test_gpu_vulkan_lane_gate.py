@@ -628,7 +628,8 @@ class TestLoadSyncThreadsTheResolvedImage:
 
         A ``gpu-vulkan`` slot with NO pin resolves through the new
         ``[slots].default_images`` tier; when the operator points the
-        ``vulkanfpx`` family at the ade07ba lineage, ``load_sync``'s
+        ``rocmfpx`` family (the collapsed key vulkan is served through, per
+        ``supported_backends``) at the ade07ba lineage, ``load_sync``'s
         preflight must see THAT ref (it passes the raw ``_resolve_image_ref``
         result to ``require_kfd_for_gpu_slot``) and refuse with the typed
         error — never launch-and-emit-garbage. Verified red by reverting the
@@ -639,7 +640,7 @@ class TestLoadSyncThreadsTheResolvedImage:
 
         self._amd_box_without_kfd(monkeypatch)
         self._stub_unit_write(monkeypatch)
-        self._override(monkeypatch, "vulkanfpx", ADE07BA_REF)
+        self._override(monkeypatch, "rocmfpx", ADE07BA_REF)
 
         with pytest.raises(GpuPreflightError) as exc:
             container_mod.ContainerProvider().load_sync(
@@ -655,7 +656,7 @@ class TestLoadSyncThreadsTheResolvedImage:
 
         self._amd_box_without_kfd(monkeypatch)
         written = self._stub_unit_write(monkeypatch)
-        self._override(monkeypatch, "vulkanfpx", VULKAN_FIXED_IMAGE)
+        self._override(monkeypatch, "rocmfpx", VULKAN_FIXED_IMAGE)
 
         container_mod.ContainerProvider().load_sync(
             {"name": "utility", "device": "gpu-vulkan", "port": 8082},

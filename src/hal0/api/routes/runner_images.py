@@ -65,8 +65,8 @@ def enrich_row(
 
     ``is_default`` matches on the default ref's REPO against ``image.image``
     (contract: "any tag"), first matching family in ``defaults`` order wins
-    (RUNNER_IMAGES insertion order — deterministic for the rocmfpx/vulkanfpx
-    shared-image pair). ``in_use_by`` matches the exact ``image:tag`` ref.
+    (RUNNER_IMAGES insertion order — deterministic when two families happen
+    to share an image ref). ``in_use_by`` matches the exact ``image:tag`` ref.
     """
     row = _image_to_dict(image)
     is_default: dict[str, str] | None = None

@@ -145,8 +145,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "rocm",
         # manifest_key=None until the CANDIDATE image passes the #1891 gate
         # and actually ships in manifest.json's toolbox_images — same
-        # doctrine as rocmfpx/vulkanfpx above: a key pointing at a manifest
-        # entry that doesn't exist yet would either fail the registry test
+        # doctrine as rocmfpx above: a key pointing at a manifest entry that
+        # doesn't exist yet would either fail the registry test
         # or, worse, silently pin to whatever lands under that key later.
         None,
         supported_backends=("rocm",),  # HIP-only build: deliberately NOT

@@ -97,7 +97,8 @@ def rocmfpx_capable(hw: HardwareInfo) -> bool:
     any compute-capable GPU (ROCm/CUDA runtime detected), or any Vulkan-capable
     GPU lands on ``gpu-rocm``/``gpu-vulkan``, and BOTH of those device classes
     resolve to a runner row whose image is ``DEFAULT_ROCMFPX_IMAGE``
-    (``rocmfpx`` / ``vulkanfpx`` in :data:`hal0.runners.RUNNER_IMAGES`).
+    (``rocmfpx`` in :data:`hal0.runners.RUNNER_IMAGES`, vulkan served via
+    ``supported_backends``).
     Anything else derives ``cpu``, whose runner is a stock llama.cpp image that
     rejects tensor types 100/103.
     """
