@@ -22,6 +22,7 @@ actual podman binary.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -137,6 +138,77 @@ def test_remove_image_exec_failure_is_seam_error() -> None:
     assert remove_image(_REF, run=_raise, is_hal0_user=lambda: True) == ("unknown", "seam-error")
 
 
+# ── remove_image: root fallback (not the hal0 service user, but euid 0) ─────
+
+
+def test_remove_image_root_fallback_removed_no_sudo_in_argv(monkeypatch) -> None:
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 0)
+    calls, run = _recorder(returncode=0, stdout="")
+
+    outcome, reason = remove_image(
+        _REF, run=run, is_hal0_user=lambda: False, which=lambda _name: "/usr/bin/podman"
+    )
+
+    assert (outcome, reason) == ("removed", None)
+    assert calls == [["/usr/bin/podman", "rmi", "--", _REF]]
+    assert "sudo" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [
+        (0, ("removed", None)),
+        (1, ("missing", None)),
+        (2, ("in-use", None)),
+        (3, ("unknown", "podman-failed")),
+    ],
+)
+def test_remove_image_root_fallback_outcome_mapping(monkeypatch, returncode, expected) -> None:
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 0)
+    _, run = _recorder(returncode=returncode, stdout="")
+
+    outcome = remove_image(
+        _REF, run=run, is_hal0_user=lambda: False, which=lambda _name: "/usr/bin/podman"
+    )
+
+    assert outcome == expected
+
+
+def test_remove_image_root_fallback_podman_absent(monkeypatch) -> None:
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 0)
+    calls, run = _recorder()
+
+    outcome = remove_image(_REF, run=run, is_hal0_user=lambda: False, which=lambda _name: None)
+
+    assert outcome == ("unknown", "podman-absent")
+    assert calls == []
+
+
+def test_remove_image_root_fallback_exec_failure_is_podman_failed(monkeypatch) -> None:
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 0)
+
+    def _raise(*_args: object, **_kwargs: object) -> MagicMock:
+        raise OSError("no such file")
+
+    outcome = remove_image(
+        _REF, run=_raise, is_hal0_user=lambda: False, which=lambda _name: "/usr/bin/podman"
+    )
+
+    assert outcome == ("unknown", "podman-failed")
+
+
+def test_remove_image_non_root_non_service_user_unchanged(monkeypatch) -> None:
+    """Not root and not the hal0 service account: still ``not-service-user``,
+    no fallback, no subprocess call."""
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 1000)
+    calls, run = _recorder()
+
+    outcome = remove_image(_REF, run=run, is_hal0_user=lambda: False)
+
+    assert outcome == ("unknown", "not-service-user")
+    assert calls == []
+
+
 # ── pull_image_stream_rootful ────────────────────────────────────────────────
 
 
@@ -159,12 +231,51 @@ class _FakeProc:
         self.stdout = _FakeStdout(lines)
         self._returncode = returncode
         self.killed = False
+        self.terminated = False
 
     def kill(self) -> None:
         self.killed = True
 
+    def terminate(self) -> None:
+        self.terminated = True
+
     async def wait(self) -> int:
         return self._returncode
+
+
+class _HangingStdout:
+    """A ``proc.stdout`` whose iterator never advances past its first line.
+
+    Used to hold :func:`podman_mutate.pull_image_stream_rootful` paused
+    mid-stream so the test can ``aclose()`` the generator from the outside —
+    the same way a cancelled consumer (e.g. an HTTP client disconnecting
+    mid-download) tears the generator down — and observe which signal method
+    the ``finally`` block invokes on the still-running seam process.
+    """
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._iter = iter(lines)
+        self._yielded_first = False
+
+    def __aiter__(self) -> _HangingStdout:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._yielded_first:
+            # Never resolves on its own — the test tears the generator down
+            # with aclose() instead of letting this line complete.
+            await asyncio.Future()
+        self._yielded_first = True
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class _HangingFakeProc(_FakeProc):
+    def __init__(self, lines: list[bytes], returncode: int) -> None:
+        super().__init__(lines, returncode)
+        self.stdout = _HangingStdout(lines)
 
 
 async def test_pull_image_stream_rootful_bad_ref_short_circuits(monkeypatch) -> None:
@@ -226,6 +337,54 @@ async def test_pull_image_stream_rootful_nonzero_exit_is_failed(monkeypatch) -> 
     events = [e async for e in pull_image_stream_rootful(_REF)]
 
     assert events[-1] == {"state": "failed", "error": "pull exited with code 1"}
+
+
+async def test_pull_image_stream_rootful_clean_eof_never_signals_process(monkeypatch) -> None:
+    """Regression: a fully successful pull must not be torn down by the
+    ``finally`` block. Before the fix, ``finally: proc.kill()`` fired
+    unconditionally — including on a clean EOF, in the window before
+    ``await proc.wait()`` — and could turn a completed pull into a reported
+    ``{"state": "failed", "error": "pull exited with code -9"}``."""
+    proc = _FakeProc([b"Pulling fs layer\n", b"Download complete\n"], 0)
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _FakeProc:
+        return proc
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    events = [e async for e in pull_image_stream_rootful(_REF)]
+
+    assert proc.killed is False
+    assert proc.terminated is False
+    assert events[-1] == {"state": "completed", "layer": 1, "total_layers": 1}
+
+
+async def test_pull_image_stream_rootful_cancel_calls_terminate_not_kill(monkeypatch) -> None:
+    """A consumer that tears the generator down mid-stream (cancellation,
+    early ``break``/``aclose()``) must ``terminate()`` (SIGTERM) the seam
+    process, never ``kill()`` (SIGKILL).
+
+    ``proc`` here is ``sudo``, not ``podman`` directly — sudo can relay a
+    catchable signal like SIGTERM to the podman child it launched, but
+    SIGKILL cannot be caught or relayed by sudo at all, so a ``.kill()``
+    here would leave the root-owned ``podman pull`` running, orphaned,
+    to completion or failure with nobody watching.
+    """
+    proc = _HangingFakeProc([b"Pulling fs layer\n"], 0)
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _HangingFakeProc:
+        return proc
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    agen = pull_image_stream_rootful(_REF)
+    first_event = await agen.__anext__()
+    assert first_event["state"] == "pulling"
+
+    await agen.aclose()
+
+    assert proc.terminated is True
+    assert proc.killed is False
 
 
 # ── PullLineParser: parity with the pre-extraction container.py heuristic ──

@@ -287,7 +287,14 @@ def rm(
         )
         raise typer.Exit(1)
     if outcome == "unknown":
-        console.print(f"[red]✗[/red]  image removal seam unavailable ({reason}).")
+        if reason == "not-service-user":
+            console.print(
+                f"[red]✗[/red]  image removal seam unavailable ({reason}): this shell is "
+                "neither the hal0 service account nor root. Run this as "
+                "`sudo -u hal0 hal0 runner-images rm ...`, or as root."
+            )
+        else:
+            console.print(f"[red]✗[/red]  image removal seam unavailable ({reason}).")
         raise typer.Exit(1)
 
     # "removed" or "missing": the seam agrees the bytes are gone (or already

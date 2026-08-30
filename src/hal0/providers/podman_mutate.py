@@ -37,6 +37,13 @@ has child images"), not an unanswered question, so it maps to the
 ``"in-use"`` outcome rather than into the ``SeamUnanswered`` reason
 vocabulary.
 
+``remove_image`` also has a root fallback: a caller that is not the
+``hal0`` service account but IS ``os.geteuid() == 0`` skips the seam
+(there is nothing to gain from ``sudo``ing to a user you already are) and
+runs ``podman rmi`` directly against root's own store — the same
+rootful/rootless fallback philosophy ``podman_introspect.images`` already
+uses on the read side.
+
 ``pull_image_stream_rootful`` shares its line-progress heuristic with
 :meth:`hal0.providers.container.ContainerProvider.pull_image_stream` (the
 rootless pull path) via :class:`PullLineParser` below, so both pull paths
@@ -54,6 +61,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import shutil
 import subprocess
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -184,6 +193,7 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
     )
 
     parser = PullLineParser()
+    clean_eof = False
 
     try:
         assert proc.stdout is not None
@@ -192,12 +202,30 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
             if not line:
                 continue
             yield parser.feed(line)
+        clean_eof = True
     except Exception as exc:
         yield {"state": "failed", "error": str(exc)}
         return
     finally:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.kill()
+        # Only signal the child on an ABNORMAL exit from the loop above
+        # (the consumer stopped iterating early / the generator was
+        # cancelled) — never on a clean EOF, where the pull already
+        # finished and `proc.wait()` below just reaps the exit code.
+        #
+        # SIGTERM, not SIGKILL: `proc` here is `sudo`, not `podman` itself
+        # (see the `create_subprocess_exec` call above). sudo relays
+        # catchable signals like SIGTERM to the child it launched, so
+        # podman gets a chance to unwind (or at least exit) cleanly.
+        # SIGKILL cannot be caught or relayed by sudo, so a `.kill()` here
+        # would leave the root-owned `podman pull` orphaned, running to
+        # completion (or failure) with nobody watching — and, on the
+        # clean-EOF path specifically, killing sudo in the gap between the
+        # stdout pipe closing and `proc.wait()` running turns a fully
+        # successful pull into a reported `{"state": "failed", "error":
+        # "pull exited with code -9"}`.
+        if not clean_eof:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.terminate()
 
     exit_code = await proc.wait()
     if exit_code == 0:
@@ -215,6 +243,7 @@ def remove_image(
     *,
     run: _RunFn = subprocess.run,
     is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    which: Callable[[str], str | None] | None = None,
     timeout: float = 60.0,
 ) -> tuple[RemoveOutcome, str | None]:
     """Guarded ``hal0-podman-rw image-rm <image>`` — never force-removes.
@@ -231,16 +260,57 @@ def remove_image(
         both; the wrapper does not distinguish them, so neither do we).
       * ``("unknown", reason)`` — every other case: a bad ref rejected before
         any subprocess ran (``"invalid-argument"``), this process is not the
-        ``hal0`` service account (``"not-service-user"``), ``sudo -n`` denied
-        (``"grant-denied"``), the wrapper's rc 64/65/66
+        ``hal0`` service account and not root (``"not-service-user"``),
+        ``sudo -n`` denied (``"grant-denied"``), the wrapper's rc 64/65/66
         (``"invalid-argument"``/``"podman-absent"``/``"podman-failed"``), or
         the call raising / an rc or stdout the contract does not define
         (``"seam-error"``).
+
+    Root fallback: when ``is_hal0_user()`` is False but this process is
+    already root (``os.geteuid() == 0`` — an admin at a root prompt, or
+    ``sudo -u hal0 hal0 runner-images rm ...`` run as ``sudo -i`` instead),
+    the seam is skipped but root's OWN podman IS the rootful store, so no
+    ``sudo`` round-trip is needed to reach it — mirrors the read-side
+    rootful/rootless fallback philosophy in
+    :func:`hal0.providers.podman_introspect.images` (root's own podman
+    answers just as authoritatively as the seam would). In that case this
+    runs ``podman rmi -- <ref>`` directly, no ``sudo``, no ``-f``:
+
+      * rc 0 -> ``("removed", None)``
+      * rc 1 -> ``("missing", None)``
+      * rc 2 -> ``("in-use", None)``
+      * any other rc, or a raise -> ``("unknown", "podman-failed")``
+      * ``podman`` absent from ``PATH`` -> ``("unknown", "podman-absent")``
+
+    A non-root, non-service-user caller still gets exactly
+    ``("unknown", "not-service-user")`` — the fallback is root-only, never a
+    way for an arbitrary unprivileged caller to bypass the seam.
     """
     if not is_valid_image_ref(image):
         return ("unknown", "invalid-argument")
     if not is_hal0_user():
-        return ("unknown", "not-service-user")
+        if os.geteuid() != 0:
+            return ("unknown", "not-service-user")
+        which_fn = which or shutil.which
+        podman = which_fn("podman")
+        if podman is None:
+            return ("unknown", "podman-absent")
+        try:
+            proc = run(
+                [podman, "rmi", "--", image],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ("unknown", "podman-failed")
+        if proc.returncode == 0:
+            return ("removed", None)
+        if proc.returncode == 1:
+            return ("missing", None)
+        if proc.returncode == 2:
+            return ("in-use", None)
+        return ("unknown", "podman-failed")
     try:
         proc = run(
             ["sudo", "-n", RW_SEAM_BIN, "image-rm", image],

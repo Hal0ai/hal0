@@ -192,3 +192,22 @@ class TestRm:
 
         assert result.exit_code != 0
         assert "grant-denied" in result.output
+
+    def test_not_service_user_outcome_errors_actionably(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The not-service-user case is the one an operator hits interactively
+        (running the CLI from a dev/admin shell, not as the hal0 service
+        account) — its error text should tell them what to actually do next,
+        not just name the reason code."""
+        store.upsert(_image())
+        monkeypatch.setattr(
+            podman_mutate, "remove_image", lambda ref, **kw: ("unknown", "not-service-user")
+        )
+
+        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+
+        assert result.exit_code != 0
+        assert "not-service-user" in result.output
+        assert "sudo -u hal0 hal0 runner-images rm" in result.output
+        assert "root" in result.output.lower()

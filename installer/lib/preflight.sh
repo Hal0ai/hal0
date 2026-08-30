@@ -1461,9 +1461,8 @@ resolve_node() {
 # podman-ro/podman-rw are optional. install.sh used to install each
 # best-effort — a `visudo -cf` failure produced only a mid-log warn and the
 # run still printed its success box — and NOTHING verified the result
-# afterwards, so a box where that warn
-# fired reported all-green from every surface while every slot start failed
-# undiagnosably.
+# afterwards, so a box where that warn fired reported all-green from every
+# surface while every slot start failed undiagnosably.
 #
 # DELIBERATELY NOT IN preflight_all: preflight runs BEFORE the seams are
 # installed, where asserting them would fail every fresh install. This is a
