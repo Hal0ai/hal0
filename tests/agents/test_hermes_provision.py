@@ -545,6 +545,48 @@ def test_preflight_passes_when_uv_can_provision_python(
     assert out.details["uv_python_fallback"] is True
 
 
+class TestUvAvailableFallsBackToFixedPipxPath:
+    """#2124: `installer/agents/hermes-prereqs.sh` installs uv via pipx to a
+    fixed bin dir (production: `/usr/local/bin`), specifically so this
+    process can find it. But `_uv_available`'s PATH probe
+    (`shutil.which("uv")`) reads *this process's* `PATH` — which can lack
+    that bin dir on a non-login exec context (`pct exec`, `lxc-attach`,
+    `docker exec`, cloud-init/`runcmd`) even though the install landed
+    there just fine, and even though the bash script's OWN post-install
+    check no longer makes that mistake (see hermes-prereqs.sh `ensure_uv`).
+    A caller whose PATH lacks the bin dir would still see `uv_python_fallback:
+    False` and fail preflight with an actionable-sounding but false error —
+    unless `_uv_available` also checks the fixed location directly.
+    """
+
+    def test_falls_back_when_path_probe_misses_but_fixed_location_is_executable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bin_dir = tmp_path / "usr-local-bin"
+        fake_bin_dir.mkdir()
+        fake_uv = fake_bin_dir / "uv"
+        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+        monkeypatch.setattr(hp, "_UV_PIPX_FALLBACK_BIN", fake_uv)
+
+        # Simulates a PATH that excludes the pipx bin dir — the exact shape
+        # from the issue's repro (`/sbin:/bin:/usr/sbin:/usr/bin`).
+        out = hp._uv_available(prober=lambda _name: None)
+        assert out == str(fake_uv)
+
+    def test_path_probe_still_wins_when_it_finds_something(self) -> None:
+        # The fast path (uv already on PATH) must not be shadowed by the
+        # fallback — no unnecessary reliance on the fixed location.
+        out = hp._uv_available(prober=lambda _name: "/opt/homebrew/bin/uv")
+        assert out == "/opt/homebrew/bin/uv"
+
+    def test_returns_none_when_neither_path_nor_fixed_location_has_uv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(hp, "_UV_PIPX_FALLBACK_BIN", tmp_path / "no-such-uv")
+        assert hp._uv_available(prober=lambda _name: None) is None
+
+
 def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
     # A qualifying system Python 3.12 must win without uv ever being invoked.
     ran: list[list[str]] = []

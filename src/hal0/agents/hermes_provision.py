@@ -542,8 +542,30 @@ def _hal0_subprocess_env(**overrides: str) -> dict[str, str]:
     return env
 
 
+# hermes-prereqs.sh installs uv to this fixed location via pipx (see
+# UV_PIPX_BIN_DIR there) specifically so a caller can find it even when its
+# own PATH lacks /usr/local/bin — a real gap on non-login exec contexts (pct
+# exec, lxc-attach, docker exec, cloud-init/runcmd) that bypass PAM's
+# /etc/environment (#2124). This process inherits whatever PATH the CLI
+# invocation started with, and the root→hal0 privilege drop
+# (cli/agent_commands._run_as_hal0, via runuser/setpriv/sudo) can carry that
+# same deficient PATH straight through — `sudo`'s secure_path can even
+# override it. `shutil.which("uv")` alone reproduces, one call site later,
+# the exact "verify an install via inherited PATH instead of the location
+# that was actually written" bug hermes-prereqs.sh had to fix in itself.
+# Falling back to the fixed path here closes the same gap for this
+# Python-side consumer, independent of what PATH actually made it through.
+_UV_PIPX_FALLBACK_BIN = Path("/usr/local/bin/uv")
+
+
 def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | None:
-    return prober("uv")
+    found = prober("uv")
+    if found:
+        return found
+    fallback = _UV_PIPX_FALLBACK_BIN
+    if os.access(fallback, os.X_OK):
+        return str(fallback)
+    return None
 
 
 def _provision_python_via_uv(

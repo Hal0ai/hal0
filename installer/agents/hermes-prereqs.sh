@@ -61,15 +61,38 @@ have_system_hermes_py() {
     command -v python3.12 >/dev/null 2>&1
 }
 
-# Install uv to a PATH location (pipx → /usr/local/bin) so the provisioner's
-# managed-interpreter fallback (hermes_provision._provision_python_via_uv) can
-# find it via `command -v uv`. Idempotent; requires pipx. Returns non-zero if uv
-# still isn't on PATH afterwards.
+# Where pipx drops the uv shim. Hardcoded to /usr/local/bin in production;
+# overridable via an already-exported PIPX_BIN_DIR so tests can redirect it
+# without writing into a real system directory.
+UV_PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"
+
+# Install uv to a fixed location (pipx → ${UV_PIPX_BIN_DIR}) so the
+# provisioner's managed-interpreter fallback
+# (hermes_provision._provision_python_via_uv) can find it. Idempotent;
+# requires pipx. Returns non-zero if uv still isn't usable afterwards.
 ensure_uv() {
     have_uv && { info "uv already present ($(command -v uv))"; return 0; }
     have_pipx || { warn "pipx unavailable — cannot install uv for the managed-Python fallback"; return 1; }
-    info "installing uv (managed-Python fallback for hermes-agent on 3.14+ boxes) via pipx → /usr/local/bin"
-    PIPX_HOME="${PIPX_HOME:-/opt/pipx}" PIPX_BIN_DIR=/usr/local/bin pipx install uv >/dev/null 2>&1 || true
+    info "installing uv (managed-Python fallback for hermes-agent on 3.14+ boxes) via pipx → ${UV_PIPX_BIN_DIR}"
+    PIPX_HOME="${PIPX_HOME:-/opt/pipx}" PIPX_BIN_DIR="${UV_PIPX_BIN_DIR}" pipx install uv >/dev/null 2>&1 || true
+    # Verify the exact path pipx just wrote to — NOT via `command -v`/PATH
+    # (#2124). A non-login exec context (pct exec, lxc-attach, docker exec,
+    # cloud-init/runcmd, a service manager — anything that bypasses PAM's
+    # /etc/environment) can have a PATH that lacks ${UV_PIPX_BIN_DIR} even
+    # though the install landed there just fine, and `have_uv` (== `command -v
+    # uv`) would then falsely report failure on a successful install. `have_uv`
+    # above remains the correct fast path (a box that already has uv on PATH
+    # needs no reinstall) — it is only wrong as the POST-INSTALL check. On
+    # success, also fold ${UV_PIPX_BIN_DIR} onto PATH for the rest of this
+    # script's own run, so subsequent `command -v uv` calls here (e.g. the log
+    # line in ensure_interpreter_path) see it consistently.
+    if [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then
+        case ":${PATH}:" in
+            *":${UV_PIPX_BIN_DIR}:"*) ;;
+            *) PATH="${UV_PIPX_BIN_DIR}:${PATH}"; export PATH ;;
+        esac
+        return 0
+    fi
     have_uv
 }
 
