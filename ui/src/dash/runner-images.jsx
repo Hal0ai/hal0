@@ -23,6 +23,7 @@ import {
   useRunnerImagePullJob,
   useRunnerImagePullsList,
   useSetDefaultImage,
+  useRestartAffected,
 } from '@/api/hooks/useRunnerImages'
 // Explicit import rather than the legacy window-global (primitives.jsx also
 // publishes ConfirmDialog on window) — the settings pages' idiom. Keeps this
@@ -472,6 +473,8 @@ function RunnerImageRow({ image, selected, onSelect }) {
 function RunnerCard({ image }) {
   const pull = useRunnerImagePullJob();
   const setDefault = useSetDefaultImage();
+  const restartAffected = useRestartAffected();
+  const [confirmRestart, setConfirmRestart] = useStateRI(false);
   // Tag picker over the contract's available_tags (headline preselected).
   // null = "follow the headline"; reset whenever the selected row changes.
   const [pickedTag, setPickedTag] = useStateRI(null);
@@ -516,6 +519,23 @@ function RunnerCard({ image }) {
     setDefault.mutate({ family, ref: defaultRef }, {
       onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${family} default → ${defaultRef}`, "info"),
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Set default failed — ${e?.message || "see logs"}`, "err"),
+    });
+  };
+
+  // Restart-affected (#2096 page-side workaround, Task 12): `in_use_by` is
+  // matched server-side against this exact `image:tag` headline ref (see
+  // enrich_row's `row_ref`), not the tag picker's `selTag` — restarting
+  // targets what's actually launched right now, independent of whatever tag
+  // the operator has picked in the dropdown above.
+  const headlineRef = `${image.image}:${image.tag}`;
+  const onRestartAffected = () => {
+    setConfirmRestart(false);
+    restartAffected.mutate({ ref: headlineRef }, {
+      onSuccess: (res) => {
+        const n = res?.restarted?.length ?? 0;
+        window.__hal0Toast && window.__hal0Toast(`Restarted ${n} slot${n === 1 ? "" : "s"}`, "info");
+      },
+      onError: (e) => window.__hal0Toast && window.__hal0Toast(`Restart failed — ${e?.message || "see logs"}`, "err"),
     });
   };
 
@@ -645,6 +665,15 @@ function RunnerCard({ image }) {
                 onClick={() => setConfirmDefault(true)}
               >Set as {family} default</button>
             )}
+            {inUseBy.length > 0 && (
+              <button
+                className="btn ghost"
+                data-testid="ri-restart-affected"
+                disabled={restartAffected.isPending}
+                title={`Restart the ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}`}
+                onClick={() => setConfirmRestart(true)}
+              >Restart {inUseBy.length} affected slot{inUseBy.length === 1 ? "" : "s"}</button>
+            )}
           </div>
         )}
         {pull.imageId === image.id && pull.error && (
@@ -665,6 +694,18 @@ function RunnerCard({ image }) {
         }
         confirmLabel="Set default"
         footerNote="Applies on the next slot restart."
+      />
+
+      <ConfirmDialog
+        open={confirmRestart}
+        onCancel={() => setConfirmRestart(false)}
+        onConfirm={onRestartAffected}
+        title="Restart affected slots"
+        message={
+          `Restart ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}: ${inUseBy.join(", ")}.`
+        }
+        confirmLabel="Restart"
+        footerNote="A slot that fails to restart is skipped and logged — the rest still restart."
       />
     </div>
   );

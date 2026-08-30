@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.error_codes import NotFound
+from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.providers.podman_introspect import LocalImagesDigests, images_digests
 from hal0.registry import runner_pull_jobs as _pull_jobs
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
@@ -372,6 +372,26 @@ def _slot_image_usage() -> dict[str, str]:
     return usage
 
 
+async def _restart_slot(name: str, request: Request) -> None:
+    """Restart one slot via the exact same service call the per-slot
+    ``POST /api/slots/{name}/restart`` button makes today.
+
+    Delegates to ``hal0.api.routes.slots._get_slot_manager(request).restart``
+    — no new mechanism, no subprocess. Also mirrors that route's audit
+    trail (``record_action``) and cache invalidation (dropping the
+    ``/api/slots`` snapshot cache) so a batch restart from this page is
+    indistinguishable, downstream, from clicking each slot's own button.
+    Kept as a thin module-level shim so tests can monkeypatch it directly.
+    """
+    from hal0.api._audit import record_action
+    from hal0.api.routes.slots import _get_slot_manager
+
+    sm = _get_slot_manager(request)
+    async with record_action(request, category="slot", action="slot.restart", target=name):
+        await sm.restart(name)
+    request.app.state._slots_snapshot_cache = None
+
+
 def _request_context() -> tuple[
     dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None
 ]:
@@ -487,6 +507,38 @@ async def sync_runner_images_route(request: Request) -> dict[str, Any]:
         "images_json_error": result.images_json_error,
         "probe_errors": result.probe_errors,
     }
+
+
+@router.post("/restart-affected", status_code=202)
+async def restart_affected_slots(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Restart every slot whose launched image ref equals ``body['ref']``.
+
+    The page-side #2096 workaround: after rolling a family default, the
+    operator restarts the drifted slots in one click instead of visiting
+    each slot. Uses the exact same restart path as the per-slot button
+    (:func:`_restart_slot`). Registered ahead of the ``/{image_id:path}``
+    catch-alls below — same reasoning as ``/pulls/list``: a literal
+    ``restart-affected`` segment would otherwise be swallowed as an
+    ``image_id`` by the greedy ``:path`` converter if declared after it.
+
+    Fail-soft per slot: a restart failure is logged and the slot is
+    skipped from ``restarted`` rather than 500ing the whole batch — one
+    stuck slot shouldn't block the rest from rolling.
+    """
+    from hal0.providers.podman_introspect import is_valid_image_ref
+
+    ref = body.get("ref") if isinstance(body, dict) else None
+    if not isinstance(ref, str) or not is_valid_image_ref(ref):
+        raise BadRequest("invalid image ref", code="runner_image.ref_invalid", details={"ref": ref})
+    names = sorted(n for n, r in _slot_image_usage().items() if r == ref)
+    restarted: list[str] = []
+    for name in names:
+        try:
+            await _restart_slot(name, request)
+            restarted.append(name)
+        except Exception:
+            log.warning("runner_images.restart_failed slot=%s", name, exc_info=True)
+    return {"restarted": restarted}
 
 
 @router.post("/{image_id:path}/pull", status_code=202)

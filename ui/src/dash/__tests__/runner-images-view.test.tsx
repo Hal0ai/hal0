@@ -31,8 +31,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // side-effect-free. vi.mock factories are hoisted above imports, so the spy +
 // fixture rows they close over must be hoisted too (mirrors
 // runner-images-confirm-flow.test.tsx's `vi.hoisted` idiom).
-const { apiPostCalls, PULL_ROW, imagesOverride, familiesOverride } = vi.hoisted(() => ({
+const { apiPostCalls, apiPostBodies, PULL_ROW, imagesOverride, familiesOverride } = vi.hoisted(() => ({
   apiPostCalls: [] as string[],
+  apiPostBodies: [] as unknown[],
   PULL_ROW: {
     id: 'rocmfpx-combined',
     image: 'ghcr.io/hal0ai/hal0-combined',
@@ -89,16 +90,18 @@ vi.mock('@/api/hooks/useRunnerImages', async () => {
   }
 })
 
-// The real useRunnerImagePullJob posts through apiPost — mock the client
-// boundary (not the hook) so the URL it actually builds is what's asserted,
-// keeping apiGet/Hal0Error/etc. as the real implementations.
+// The real useRunnerImagePullJob (and Task 12's useRestartAffected) post
+// through apiPost — mock the client boundary (not the hook) so the URL/body
+// it actually builds is what's asserted, keeping apiGet/Hal0Error/etc. as
+// the real implementations.
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/api/client')>('@/api/client')
   return {
     ...actual,
-    apiPost: (url: string) => {
+    apiPost: (url: string, body?: unknown) => {
       apiPostCalls.push(url)
-      return Promise.resolve({ id: 'job-1' })
+      apiPostBodies.push(body)
+      return Promise.resolve({ id: 'job-1', restarted: [] })
     },
   }
 })
@@ -510,6 +513,7 @@ describe('RunnerCard tag picker + store-truth chips (Task 8)', () => {
 describe('RunnerImagesView per-tag pull (Task 6)', () => {
   afterEach(() => {
     apiPostCalls.length = 0
+    apiPostBodies.length = 0
     document.body.innerHTML = ''
   })
 
@@ -551,5 +555,88 @@ describe('RunnerImagesView per-tag pull (Task 6)', () => {
     act(() => {
       root.unmount()
     })
+  })
+})
+
+// Task 12 — restart-affected-slots verb (#2096 page-side workaround). A REAL
+// render (mirrors Task 6 above): when a row's `in_use_by` is non-empty, a
+// ghost "Restart N affected slot(s)" button appears behind the existing
+// ConfirmDialog pattern; confirming posts the row's headline `image:tag` ref
+// to POST /api/runner-images/restart-affected via the real useRestartAffected
+// mutation (apiPost mocked at the client boundary, same as Task 6).
+describe('RunnerImagesView restart-affected-slots (Task 12)', () => {
+  afterEach(() => {
+    apiPostCalls.length = 0
+    apiPostBodies.length = 0
+    imagesOverride.current = null
+    document.body.innerHTML = ''
+  })
+
+  it('renders the button when in_use_by is non-empty and posts the ref on confirm', async () => {
+    imagesOverride.current = [{ ...PULL_ROW, in_use_by: ['brain', 'ops'] }]
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+
+    const btn = host.querySelector('[data-testid="ri-restart-affected"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.textContent).toContain('Restart 2 affected slots')
+    expect(host.querySelector('.modal-backdrop')).toBeNull()
+
+    act(() => { btn.click() })
+    expect(host.querySelector('.modal-backdrop')).toBeTruthy()
+    expect(host.textContent).toContain('brain, ops')
+
+    const confirmBtn = Array.from(host.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Restart',
+    ) as HTMLButtonElement
+    expect(confirmBtn).toBeTruthy()
+    await act(async () => {
+      confirmBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(apiPostCalls[apiPostCalls.length - 1]).toBe('/api/runner-images/restart-affected')
+    expect(apiPostBodies[apiPostBodies.length - 1]).toEqual({
+      ref: 'ghcr.io/hal0ai/hal0-combined:0826',
+    })
+    expect(host.querySelector('.modal-backdrop')).toBeNull()
+
+    act(() => { root.unmount() })
+  })
+
+  it('does not render the button when in_use_by is empty', () => {
+    imagesOverride.current = [{ ...PULL_ROW, in_use_by: [] }]
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+
+    expect(host.querySelector('[data-testid="ri-restart-affected"]')).toBeNull()
+
+    act(() => { root.unmount() })
   })
 })

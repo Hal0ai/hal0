@@ -89,6 +89,10 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
     isPending: false,
     mutate: (vars: unknown) => { (mutateSpy as unknown[]).push(vars) },
   }),
+  useRestartAffected: () => ({
+    isPending: false,
+    mutate: () => {},
+  }),
 }))
 
 const { RunnerImagesView } = await import('../runner-images.jsx')

@@ -140,6 +140,30 @@ export function useSetDefaultImage() {
   })
 }
 
+// ─── useRestartAffected ────────────────────────────────────────────
+// #2096 page-side workaround (Task 12): one POST that restarts every slot
+// whose launched image ref equals `ref` — the same restart service call
+// `POST /api/slots/{name}/restart` makes, just batched over the affected
+// slots so the operator doesn't have to visit each one after rolling a
+// family default. Invalidates both `slots` (the dashboard's slot list)
+// and `runner-images` (in_use_by/families are launch-truth, and a restart
+// changes what's launched).
+export interface RestartAffectedResult {
+  restarted: string[]
+}
+
+export function useRestartAffected() {
+  const qc = useQueryClient()
+  return useMutation<RestartAffectedResult, Hal0Error, { ref: string }>({
+    mutationFn: ({ ref }) =>
+      apiPost<RestartAffectedResult>(ENDPOINTS.runnerImagesRestartAffected, { ref }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['slots'] })
+      qc.invalidateQueries({ queryKey: ['runner-images'] })
+    },
+  })
+}
+
 // ─── useRunnerImagePullJob ───────────────────────────────────────────
 
 export type RunnerPullState = 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'

@@ -162,6 +162,85 @@ def test_downloaded_list_empty_by_default(client: TestClient) -> None:
     assert resp.json() == {"images": []}
 
 
+# ── restart-affected-slots (#2096 page-side workaround, task 12) ────────────
+
+
+def test_restart_affected_names_slots(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826", "ops": "ghcr.io/x/a:0826", "flm": "other:1"},
+    )
+    restarted: list[str] = []
+
+    async def _fake_restart(name: str, request) -> None:
+        restarted.append(name)
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._restart_slot", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain", "ops"]
+    assert restarted == ["brain", "ops"]
+
+
+def test_restart_affected_rejects_bad_ref(client: TestClient) -> None:
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "bad ref"})
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "runner_image.ref_invalid"
+
+
+def test_restart_affected_empty_when_no_slot_matches(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/nomatch:1"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == []
+
+
+def test_restart_affected_is_fail_soft_per_slot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing slot restart is logged and skipped, not a 500 for the batch."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826", "ops": "ghcr.io/x/a:0826"},
+    )
+
+    async def _flaky_restart(name: str, request) -> None:
+        if name == "brain":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._restart_slot", _flaky_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["ops"]
+
+
+def test_restart_affected_delegates_to_slot_manager_restart(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_restart_slot`` uses the exact same service call as
+    ``POST /api/slots/{name}/restart`` — ``SlotManager.restart``."""
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._slot_image_usage",
+        lambda: {"brain": "ghcr.io/x/a:0826"},
+    )
+    calls: list[str] = []
+
+    async def _fake_restart(name: str):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(client.app.state.slot_manager, "restart", _fake_restart)
+    res = client.post("/api/runner-images/restart-affected", json={"ref": "ghcr.io/x/a:0826"})
+    assert res.status_code == 202
+    assert res.json()["restarted"] == ["brain"]
+    assert calls == ["brain"]
+
+
 # ── row enrichment: is_default / in_use_by (runner-image-catalogue v2) ──────
 
 
