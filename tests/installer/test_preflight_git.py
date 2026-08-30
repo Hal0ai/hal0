@@ -165,6 +165,36 @@ exit 0
         assert "-y" in marker.read_text()
         assert "git" in marker.read_text()
 
+    def test_apt_get_invocation_carries_lock_timeout(self, tmp_path: Path) -> None:
+        # #2125: preflight_git's apt-get branch omitted the
+        # `-o DPkg::Lock::Timeout` flag its own failure hint recommends
+        # (installer/install.sh uses it on every apt-get call; this file did
+        # not). A concurrent dpkg lock holder (unattended-upgrades,
+        # apt-daily — both routine on a freshly booted box) then makes the
+        # bare `apt-get install` fail immediately instead of waiting, and
+        # Hermes provisioning is skipped for what is really just a race.
+        d = tmp_path / "bin"
+        d.mkdir()
+        marker = tmp_path / "apt-get.called"
+        apt_get_body = f"""#!/usr/bin/env bash
+echo "$@" > {marker}
+cat > {d / "git"} <<'GITEOF'
+#!/usr/bin/env bash
+echo 'git version 2.43.0'
+exit 0
+GITEOF
+chmod +x {d / "git"}
+exit 0
+"""
+        _write_exe(d / "apt-get", apt_get_body)
+        proc = _run("preflight_git; exit $?\n", d, extra_env={"HAL0_GIT_REQUIRED": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert marker.exists(), "apt-get was never invoked — auto-install path not taken"
+        invocation = marker.read_text()
+        assert "-o DPkg::Lock::Timeout=" in invocation, (
+            f"apt-get invocation missing DPkg::Lock::Timeout: {invocation!r}"
+        )
+
     def test_apt_get_present_but_install_fails_is_a_hard_failure(self, tmp_path: Path) -> None:
         d = tmp_path / "bin"
         d.mkdir()

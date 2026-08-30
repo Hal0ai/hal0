@@ -180,8 +180,8 @@ _main_py_autoinstall() {
     info "no Python >=3.${MAIN_PY_MIN_MINOR} found — attempting to install ${cand} (${fam})"
     case "${fam}" in
         debian)
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || return 1 ;;
+            DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || return 1 ;;
         fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || return 1 ;;
         # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
         # minor isn't reliably in the base repos (mirrors
@@ -266,8 +266,8 @@ _hindsight_py_autoinstall() {
         cand="python3.${v}"
         case "${fam}" in
             debian)
-                DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || continue ;;
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || continue ;;
             fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || continue ;;
             # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
             # minor isn't reliably in the base repos. Skip — the metadata-gate
@@ -397,8 +397,8 @@ preflight_venv() {
         local ok=1
         case "$(distro_family)" in
             debian)
-                DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv python3-pip || ok=0
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq || true
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q python3-venv python3-pip || ok=0
                 ;;
             fedora) "${pm}" install -y python3 python3-pip || ok=0 ;;
             suse) zypper install -y python3 python3-pip || ok=0 ;;
@@ -678,7 +678,7 @@ preflight_container_runtime() {
         info "installing podman (required for hal0 inference slots)"
         local ok=1
         case "${pm}" in
-            apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y -q podman || ok=0 ;;
+            apt-get) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q podman || ok=0 ;;
             dnf) dnf install -y podman || ok=0 ;;
             yum) yum install -y podman || ok=0 ;;
             zypper) zypper install -y podman || ok=0 ;;
@@ -755,7 +755,7 @@ preflight_git() {
         info "installing git (required for Hermes agent provisioning)"
         local ok=1
         case "${pm}" in
-            apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y -q git || ok=0 ;;
+            apt-get) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q git || ok=0 ;;
             dnf) dnf install -y git || ok=0 ;;
             yum) yum install -y git || ok=0 ;;
             zypper) zypper install -y git || ok=0 ;;
@@ -1426,7 +1426,7 @@ _node_autoinstall() {
         debian)
             if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" -o /tmp/hal0-nodesource-setup.sh 2>/dev/null \
                 && DEBIAN_FRONTEND=noninteractive bash /tmp/hal0-nodesource-setup.sh >/dev/null 2>&1; then
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs >/dev/null 2>&1
+                DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q nodejs >/dev/null 2>&1
             fi
             rm -f /tmp/hal0-nodesource-setup.sh
             ;;
