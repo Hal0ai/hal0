@@ -116,6 +116,10 @@ full detail in the
 
 ### Added
 
+- Bench: opt-in `promptforge` lane (`--backends promptforge`) — benches the
+  HIP-only PromptForge runner image at its own `/opt/promptforge/bin/
+  llama-bench`. Never part of a default sweep: the image serves one model
+  family and its pin stays a candidate until the ct150 gate (#1891).
 - Admin MCP catalog expanded from 92 to 180 tools — the full platform
   management surface is now agent-reachable: services lifecycle
   (`service_list`/`service_health` + gated `service_action`), ComfyUI
