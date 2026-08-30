@@ -155,6 +155,9 @@ const {
   tagLanes,
   MUTABLE_TAGS,
   RunnerImagesView,
+  provenanceRepoName,
+  formatProvenanceShort,
+  formatProvenanceFull,
 } = await import('../runner-images.jsx')
 
 // Minimal contract-shaped row; overrides per case.
@@ -200,6 +203,66 @@ describe('groupRows', () => {
   it('tolerates empty/absent input', () => {
     expect(groupRows([])).toEqual({ defaults: [], specialized: [], other: [] })
     expect(groupRows(undefined)).toEqual({ defaults: [], specialized: [], other: [] })
+  })
+})
+
+// h0/runner-provenance — llama.cpp build-provenance formatters. Contract:
+// `provenance: {source_repo, revision, patch_count} | null` (per tag row,
+// hoisted to row.provenance for the headline; same shape on system-info's
+// per-runner entries). Absent/empty provenance must format to null so
+// callers render EXACTLY what they render today — no placeholder text.
+describe('provenance formatters', () => {
+  const ROCMFPX = {
+    source_repo: 'https://github.com/hal0ai/ROCmFPX.git',
+    revision: '0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708',
+    patch_count: 4,
+  }
+  const UPSTREAM = {
+    source_repo: 'https://github.com/ggml-org/llama.cpp.git',
+    revision: 'c841aee0d5b9e2f1a3c4d5e6f708192a3b4c5d6e',
+    patch_count: 0,
+  }
+
+  it('provenanceRepoName strips .git but keeps llama.cpp as-is', () => {
+    expect(provenanceRepoName(ROCMFPX.source_repo)).toBe('ROCmFPX')
+    expect(provenanceRepoName(UPSTREAM.source_repo)).toBe('llama.cpp')
+    expect(provenanceRepoName('https://example.com/x/fork')).toBe('fork')
+    expect(provenanceRepoName(null)).toBeNull()
+    expect(provenanceRepoName('')).toBeNull()
+  })
+
+  it('formatProvenanceShort: fork with patches', () => {
+    expect(formatProvenanceShort(ROCMFPX)).toBe('ROCmFPX @0a59add (+4 patches)')
+  })
+
+  it('formatProvenanceShort: pristine upstream omits the patch suffix', () => {
+    expect(formatProvenanceShort(UPSTREAM)).toBe('llama.cpp @c841aee')
+  })
+
+  it('formatProvenanceShort: singular patch reads "+1 patch"', () => {
+    expect(formatProvenanceShort({ ...ROCMFPX, patch_count: 1 }))
+      .toBe('ROCmFPX @0a59add (+1 patch)')
+  })
+
+  it('formatProvenanceShort: partial labels degrade to what exists', () => {
+    expect(formatProvenanceShort({ source_repo: ROCMFPX.source_repo, revision: null, patch_count: null }))
+      .toBe('ROCmFPX')
+    expect(formatProvenanceShort({ source_repo: null, revision: 'abc1234def', patch_count: null }))
+      .toBe('@abc1234')
+  })
+
+  it('formatProvenanceShort: absent/empty provenance is null (render nothing)', () => {
+    expect(formatProvenanceShort(null)).toBeNull()
+    expect(formatProvenanceShort(undefined)).toBeNull()
+    expect(formatProvenanceShort({ source_repo: null, revision: null, patch_count: null })).toBeNull()
+  })
+
+  it('formatProvenanceFull keeps the full source URL', () => {
+    expect(formatProvenanceFull(ROCMFPX))
+      .toBe('https://github.com/hal0ai/ROCmFPX.git @0a59add (+4 patches)')
+    expect(formatProvenanceFull(UPSTREAM))
+      .toBe('https://github.com/ggml-org/llama.cpp.git @c841aee')
+    expect(formatProvenanceFull(null)).toBeNull()
   })
 })
 

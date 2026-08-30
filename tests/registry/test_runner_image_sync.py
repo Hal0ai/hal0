@@ -16,6 +16,7 @@ from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.runner_image_sync import (
     IMAGES_JSON_URL,
     fetch_images_json,
+    provenance_from_labels,
     sync_runner_images,
 )
 
@@ -669,3 +670,159 @@ async def test_sync_result_rows_carry_fresh_tags_on_first_sync(tmp_path: Path) -
     assert cpu.tags[0].digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
     assert cpu.tags[1].digest == "sha256:hal0ai-hal0-toolbox-cpu-0826"
     assert cpu.tags[2].digest == "sha256:hal0ai-hal0-toolbox-cpu-0824"
+
+
+# ── build provenance (h0/runner-provenance: config-blob OCI labels) ─────────
+
+
+_ROCMFPX_LABELS = {
+    "org.opencontainers.image.source": "https://github.com/hal0ai/ROCmFPX.git",
+    "org.opencontainers.image.revision": "0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708",
+    "dev.hal0.runner.patches": "hip-graphs,fp4-mma,tunable-ops,rocm-7-abi",
+}
+
+_UPSTREAM_LABELS = {
+    "org.opencontainers.image.source": "https://github.com/ggml-org/llama.cpp.git",
+    "org.opencontainers.image.revision": "c841aee0d5b9e2f1a3c4d5e6f708192a3b4c5d6e",
+    "dev.hal0.runner.patches": "",
+}
+
+
+def test_provenance_from_labels_extracts_all_three() -> None:
+    prov = provenance_from_labels(_ROCMFPX_LABELS)
+    assert prov == {
+        "source_repo": "https://github.com/hal0ai/ROCmFPX.git",
+        "revision": "0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708",
+        "patch_count": 4,
+    }
+
+
+def test_provenance_from_labels_empty_patches_is_zero() -> None:
+    """Pristine upstream stamps an EMPTY patch list — that's patch_count 0,
+    a positive claim ("no patches"), not an absent one."""
+    prov = provenance_from_labels(_UPSTREAM_LABELS)
+    assert prov is not None
+    assert prov["patch_count"] == 0
+    assert prov["source_repo"] == "https://github.com/ggml-org/llama.cpp.git"
+
+
+def test_provenance_from_labels_partial_labels_keep_none_fields() -> None:
+    prov = provenance_from_labels({"org.opencontainers.image.revision": "abc1234def"})
+    assert prov == {"source_repo": None, "revision": "abc1234def", "patch_count": None}
+
+
+def test_provenance_from_labels_absent_or_unlabelled_is_none() -> None:
+    assert provenance_from_labels(None) is None
+    assert provenance_from_labels("not a dict") is None
+    assert provenance_from_labels({}) is None
+    assert provenance_from_labels({"unrelated.label": "x"}) is None
+
+
+def _provenance_handler(
+    *,
+    labels_by_ref: dict[str, dict[str, str]],
+    blob_fail: bool = False,
+    tags: list[str] | None = None,
+):
+    """MockTransport handler whose image manifests carry a ``config.digest``
+    and whose ``/blobs/<digest>`` route serves the config blob — the shape
+    the provenance probe walks (manifest → config.digest → blob GET).
+    """
+    tag_list = tags if tags is not None else ["latest"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == IMAGES_JSON_URL:
+            return httpx.Response(200, json=_IMAGES_JSON)
+        if url.startswith("https://ghcr.io/token"):
+            return httpx.Response(200, json={"token": "tok"})
+        if "/manifests/" in url:
+            repo, _, ref = url.split("https://ghcr.io/v2/")[1].partition("/manifests/")
+            return httpx.Response(
+                200,
+                headers={"docker-content-digest": f"sha256:{repo.replace('/', '-')}-{ref}"},
+                json={
+                    "schemaVersion": 2,
+                    "config": {"size": 345, "digest": f"sha256:cfg-{ref}"},
+                    "layers": [{"size": 6000}, {"size": 6000}],
+                },
+            )
+        if "/blobs/" in url:
+            if blob_fail:
+                return httpx.Response(500, content=b"nope")
+            _, _, blob_digest = url.partition("/blobs/")
+            ref = blob_digest.removeprefix("sha256:cfg-")
+            return httpx.Response(200, json={"config": {"Labels": labels_by_ref.get(ref) or {}}})
+        if "/tags/list" in url:
+            return httpx.Response(200, json={"tags": tag_list})
+        return httpx.Response(404, content=b"unrouted: " + url.encode())
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_sync_probe_extracts_and_persists_provenance(tmp_path: Path) -> None:
+    """Each tag's config blob labels land in RunnerImageTag.provenance and
+    survive the store round-trip (runner_image_tag.provenance_json)."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _provenance_handler(
+        labels_by_ref={"latest": _ROCMFPX_LABELS, "0824": _UPSTREAM_LABELS},
+        tags=["0824", "latest"],
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    by_tag = {t.tag: t.provenance for t in cpu.tags}
+    assert by_tag["latest"] == {
+        "source_repo": "https://github.com/hal0ai/ROCmFPX.git",
+        "revision": "0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708",
+        "patch_count": 4,
+    }
+    assert by_tag["0824"] == {
+        "source_repo": "https://github.com/ggml-org/llama.cpp.git",
+        "revision": "c841aee0d5b9e2f1a3c4d5e6f708192a3b4c5d6e",
+        "patch_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_blob_fetch_failure_degrades_to_none_provenance(tmp_path: Path) -> None:
+    """A failing config-blob GET never fails the sync — the tag row simply
+    carries provenance=None, digest/size untouched."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _provenance_handler(labels_by_ref={}, blob_fail=True, tags=["latest"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.digest == "sha256:hal0ai-hal0-toolbox-cpu-latest"
+    assert all(t.provenance is None for t in cpu.tags)
+
+
+@pytest.mark.asyncio
+async def test_unlabelled_config_blob_reads_as_none_provenance(tmp_path: Path) -> None:
+    """A reachable blob with no provenance labels reads back exactly like an
+    unprobed tag — None, never an all-None placeholder dict."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    handler = _provenance_handler(labels_by_ref={}, tags=["latest"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert all(t.provenance is None for t in cpu.tags)
