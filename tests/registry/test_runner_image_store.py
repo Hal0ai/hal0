@@ -127,3 +127,42 @@ class TestRunnerImageTag:
         got = store.get("x")
         assert got is not None
         assert [t.tag for t in got.tags] == ["new"]
+
+    def test_list_populates_tags_for_multiple_images(self, store: RunnerImageStore) -> None:
+        # Upsert two images with different tag sets
+        store.upsert(RunnerImage(id="a", image="ghcr.io/a/img", tag="v1"))
+        store.upsert(RunnerImage(id="b", image="ghcr.io/b/img", tag="v2"))
+
+        # Set tags for image a (2 tags)
+        tags_a = [
+            RunnerImageTag(tag="v1", digest="sha256:" + "a" * 64, size_bytes=100),
+            RunnerImageTag(tag="v0", digest="sha256:" + "c" * 64, size_bytes=95),
+        ]
+        store.set_tags("a", tags_a)
+
+        # Set tags for image b (1 tag)
+        tags_b = [RunnerImageTag(tag="v2", digest="sha256:" + "b" * 64, size_bytes=200)]
+        store.set_tags("b", tags_b)
+
+        # Verify list() populates tags correctly for each image, no cross-contamination
+        images = store.list()
+        assert len(images) == 2
+
+        img_a = next(i for i in images if i.id == "a")
+        assert [t.tag for t in img_a.tags] == ["v1", "v0"]
+        assert img_a.tags[0].digest == "sha256:" + "a" * 64
+        assert img_a.tags[1].digest == "sha256:" + "c" * 64
+
+        img_b = next(i for i in images if i.id == "b")
+        assert [t.tag for t in img_b.tags] == ["v2"]
+        assert img_b.tags[0].digest == "sha256:" + "b" * 64
+
+        # Mark image b as downloaded and verify list_downloaded() also populates tags correctly
+        store.set_local_state("b", local_path="/var/lib/hal0/b")
+        downloaded = store.list_downloaded()
+        assert len(downloaded) == 1
+
+        dl_img_b = downloaded[0]
+        assert dl_img_b.id == "b"
+        assert [t.tag for t in dl_img_b.tags] == ["v2"]
+        assert dl_img_b.tags[0].digest == "sha256:" + "b" * 64

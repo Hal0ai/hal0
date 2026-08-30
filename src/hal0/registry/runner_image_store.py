@@ -106,6 +106,27 @@ class RunnerImageStore:
         except Exception:
             log.warning("runner_images.on_change_failed", exc_info=True)
 
+    def _tags_by_image(self, conn: sqlite3.Connection) -> dict[str, list[RunnerImageTag]]:
+        """Fetch all tags grouped by image_id, in insertion order."""
+        tag_rows = conn.execute(
+            "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
+            "ORDER BY image_id, ord"
+        ).fetchall()
+        tags_by_image: dict[str, list[RunnerImageTag]] = {}
+        for tag_row in tag_rows:
+            image_id = tag_row["image_id"]
+            if image_id not in tags_by_image:
+                tags_by_image[image_id] = []
+            tags_by_image[image_id].append(
+                RunnerImageTag(
+                    tag=tag_row["tag"],
+                    digest=tag_row["digest"],
+                    size_bytes=tag_row["size_bytes"],
+                    last_seen=tag_row["last_seen"],
+                )
+            )
+        return tags_by_image
+
     # ── reads ────────────────────────────────────────────────────────────
 
     def list(self) -> list[RunnerImage]:
@@ -114,25 +135,7 @@ class RunnerImageStore:
             self._ensure_migrated(conn)
             rows = conn.execute("SELECT * FROM runner_image ORDER BY id").fetchall()
             images = [_row_to_runner_image(r) for r in rows]
-            # Fetch all tags in one query, grouped by image_id
-            tag_rows = conn.execute(
-                "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
-                "ORDER BY image_id, ord"
-            ).fetchall()
-            # Build a map of image_id -> list of tags
-            tags_by_image: dict[str, list[RunnerImageTag]] = {}
-            for tag_row in tag_rows:
-                image_id = tag_row["image_id"]
-                if image_id not in tags_by_image:
-                    tags_by_image[image_id] = []
-                tags_by_image[image_id].append(
-                    RunnerImageTag(
-                        tag=tag_row["tag"],
-                        digest=tag_row["digest"],
-                        size_bytes=tag_row["size_bytes"],
-                        last_seen=tag_row["last_seen"],
-                    )
-                )
+            tags_by_image = self._tags_by_image(conn)
             # Attach tags to images
             return [
                 image.model_copy(update={"tags": tags_by_image.get(image.id, [])})
@@ -162,25 +165,7 @@ class RunnerImageStore:
                 "SELECT * FROM runner_image WHERE local_path IS NOT NULL ORDER BY id"
             ).fetchall()
             images = [_row_to_runner_image(r) for r in rows]
-            # Fetch all tags in one query, grouped by image_id
-            tag_rows = conn.execute(
-                "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
-                "ORDER BY image_id, ord"
-            ).fetchall()
-            # Build a map of image_id -> list of tags
-            tags_by_image: dict[str, list[RunnerImageTag]] = {}
-            for tag_row in tag_rows:
-                image_id = tag_row["image_id"]
-                if image_id not in tags_by_image:
-                    tags_by_image[image_id] = []
-                tags_by_image[image_id].append(
-                    RunnerImageTag(
-                        tag=tag_row["tag"],
-                        digest=tag_row["digest"],
-                        size_bytes=tag_row["size_bytes"],
-                        last_seen=tag_row["last_seen"],
-                    )
-                )
+            tags_by_image = self._tags_by_image(conn)
             # Attach tags to images
             return [
                 image.model_copy(update={"tags": tags_by_image.get(image.id, [])})
