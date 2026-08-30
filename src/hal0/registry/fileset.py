@@ -29,6 +29,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.registry.detect import quant_from_filename
+from hal0.registry.specialty import companion_role_of, detect_specialty
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class FileSetPlan:
     #: Why this mmproj (if any) was picked — surfaced to the UI so a
     #: deterministic-but-surprising pairing is explainable (plan §7.1c a2).
     mmproj_tiebreak_reason: str | None = None
+    specialty: str | None = None  # SPECIALTY_KINDS key, when detected
 
 
 # ── HF tree enumeration (recursive + paginated) ───────────────────────────
@@ -311,8 +313,10 @@ async def resolve_revision(
 def role_of(rel: str) -> str:
     """Classify one repo-relative path into a ``model_file.role`` value.
 
-    ``model`` | ``shard`` | ``mmproj`` | ``tokenizer`` | ``config``. Reuses
-    the same "mmproj" name-token rule discovery already applies
+    ``model`` | ``shard`` | ``mmproj`` | ``tokenizer`` | ``config`` or a
+    specialty companion role (e.g. ``promptforge_ffn``, ``promptforge_gdn``,
+    ``promptforge_output_k8``, ``runtime_patch`` from :data:`hal0.registry.specialty.SPECIALTY_KINDS`).
+    Reuses the same "mmproj" name-token rule discovery already applies
     (:func:`hal0.registry.discover._is_mmproj_sidecar`), so a repo file and
     a locally-scanned file classify identically.
     """
@@ -320,6 +324,9 @@ def role_of(rel: str) -> str:
     lowered = name.lower()
     if "mmproj" in lowered:
         return "mmproj"
+    companion = companion_role_of(name)
+    if companion is not None:
+        return companion
     if SHARD_RE.match(name):
         return "shard"
     ext = PurePosixPath(rel).suffix.lower()
@@ -388,6 +395,11 @@ def plan_fileset(
     5. Carry tokenizer/config files from the same directory too (the FLM /
        HF-transformers multi-file shape needs them; GGUF-only repos won't
        have any).
+    6. Detect the specialty kind (spec 2026-08-29, #1946) from the CHOSEN
+       unit only — its filenames and resolved quant, plus companions in its
+       directory subtree when that directory holds a single unit — and carry
+       the matching companions. A mixed repo's plain variant therefore
+       installs no sidecars and stamps no ``specialty``.
 
     Raises :class:`FilesetEmpty` when no model-role file exists, or
     :class:`FilesetVariantNotFound` when ``requested_variant`` matches
@@ -398,6 +410,7 @@ def plan_fileset(
     mmproj_files: list[RawTreeEntry] = []
     tokenizer_files: list[RawTreeEntry] = []
     config_files: list[RawTreeEntry] = []
+    companion_files: list[tuple[str, RawTreeEntry]] = []  # (role, entry)
 
     for e in entries:
         role = role_of(e.path)
@@ -413,6 +426,8 @@ def plan_fileset(
             mmproj_files.append(e)
         elif role == "tokenizer":
             tokenizer_files.append(e)
+        elif role not in ("model", "shard", "mmproj", "tokenizer", "config"):
+            companion_files.append((role, e))
         else:
             config_files.append(e)
 
@@ -529,6 +544,55 @@ def plan_fileset(
                 )
             )
 
+    # ── specialty detection + companion carry (spec 2026-08-29, #1946) ────
+    #
+    # Keyed on the CHOSEN unit, never the whole tree (fix wave, I1). Detection
+    # used to scan every path in the repo and the carry loop was unfiltered, so
+    # an HF repo shipping `…-CIRU-ActiveFPX-….gguf` beside a plain
+    # `…-Q4_K_M.gguf` made a Q4 pull download +21 GiB of sidecars and stamp
+    # `metadata.specialty` on a plain model — which then wears a bogus degraded
+    # badge on every normal runner and, on a promptforge runner, launches with
+    # PROMPTFORGE_* env pointing at sidecars that don't match its weights.
+    #
+    # The two signals are scoped like this:
+    #   * quant marker — the chosen unit's own filenames + its resolved quant.
+    #     This is the signal that discriminates variants inside one directory.
+    #   * companion presence — only meaningful when the companion can be
+    #     attributed to the chosen unit: it must sit in the chosen unit's
+    #     directory subtree AND that directory must hold exactly ONE model
+    #     unit. With two units in a directory a loose `.pfs` belongs to one of
+    #     them and this module never guesses; the marker still decides.
+    #
+    # The carry is scoped to the same subtree rather than the strict same-dir
+    # rule tokenizer/config use, because the real distribution ships its
+    # `runtime.patch` in a `runtime/` subdirectory next to the root-level GGUF.
+    def _under_chosen(rel: str) -> bool:
+        d = _dirname(rel)
+        return chosen_dir == "." or d == chosen_dir or d.startswith(chosen_dir + "/")
+
+    scoped_companions = [(r, e) for r, e in companion_files if _under_chosen(e.path)]
+    units_in_chosen_dir = sum(1 for u in units if u["dirname"] == chosen_dir)
+    specialty_signals = [e.path for e in chosen["entries"]]
+    if units_in_chosen_dir == 1:
+        specialty_signals += [e.path for _, e in scoped_companions]
+    specialty = detect_specialty(
+        specialty_signals,
+        quant=quant_from_filename(PurePosixPath(entry_rel).name),
+    )
+    if specialty is not None:
+        for comp_role, e in scoped_companions:
+            files.append(
+                FileSetEntry(
+                    rel=e.path,
+                    size_bytes=_entry_bytes(e),
+                    lfs_sha256=e.lfs_oid,
+                    role=comp_role,
+                    shard_index=None,
+                )
+            )
+    # If specialty is None, companions are NOT carried — a stray
+    # companion-shaped file in a normal repo stays uninstalled; never guess.
+
     total_bytes = sum(f.size_bytes for f in files)
     return FileSetPlan(
         repo=repo,
@@ -539,6 +603,7 @@ def plan_fileset(
         total_bytes=total_bytes,
         runner_hint=_infer_runner_hint(files),
         mmproj_tiebreak_reason=mmproj_reason,
+        specialty=specialty,
     )
 
 

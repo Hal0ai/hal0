@@ -81,7 +81,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
+from hal0.config.schema import (
+    DEFAULT_PROMPTFORGE_IMAGE,
+    DEFAULT_ROCMFPX_IMAGE,
+    FALLBACK_VULKAN_IMAGE,
+)
 
 from .devices import TIER_CPU, BenchDeviceSpec
 
@@ -208,6 +212,10 @@ def lane_specs() -> dict[str, LaneSpec]:
     segfaults on that image); ``cpu`` runs the lean Vulkan/CPU toolbox at its
     own base-toolbox path. See ``config.sh`` for the full historical
     rationale this ports.
+
+    ``promptforge`` is NOT part of that ported matrix: it is the opt-in
+    specialty lane for the HIP-only PromptForge runner (see its entry's
+    comment), absent from every tier's default sweep.
     """
     return {
         "rocm": LaneSpec(
@@ -241,6 +249,26 @@ def lane_specs() -> dict[str, LaneSpec]:
             # No -dev pin: the CPU tier's device resolver emits no device
             # flags at all, so there is no backend device to select.
             dev_args=(("-ngl", "0"),),
+        ),
+        # OPT-IN ONLY — never enters ``default_lanes`` for any tier, and
+        # nothing in the planner's ``_BACKEND_TO_LANE`` maps to it, so it
+        # runs solely when a suite names it (``--backends promptforge``).
+        # Two reasons, either sufficient: the image serves exactly one model
+        # family (a routine sweep benching every roster model through it
+        # would be nonsense), and ``DEFAULT_PROMPTFORGE_IMAGE`` is a
+        # CANDIDATE pin until the ct150 gate (#1891) passes. Its own
+        # ``bench_bin`` is the point (M5): this lineage installs under
+        # ``/opt/promptforge/``, and the rocmfpx path does not exist in it.
+        # Plain HIP env only — the card's PROMPTFORGE_* mode envs stay out
+        # until the gate validates them, and llama-bench measures the plain
+        # GGUF path regardless (the sidecar-accelerated path needs the
+        # server, not llama-bench).
+        "promptforge": LaneSpec(
+            lane="promptforge",
+            image=DEFAULT_PROMPTFORGE_IMAGE,
+            bench_bin="/opt/promptforge/bin/llama-bench",
+            env=("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",),
+            dev_args=(("-ngl", "99"), ("-dev", "ROCm0")),
         ),
     }
 

@@ -12,12 +12,19 @@ import {
 	useSlotLoad,
 	useSlotSwap,
 	useSlotResolved,
+	useSlotDetail,
 	useSlots,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
+import {
+	applyBackendChoice,
+	backendOptions,
+	optionValue,
+	selectedBackendValue,
+} from "./hw-cascade.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -149,16 +156,8 @@ function runnerBackends(runner) {
 	return runner?.backend ? [runner.backend] : [];
 }
 
-// Slot types each runner family can serve — mirrors the backend's
-// profiles._supported_slot_types(runtime_family). An unknown/absent family
-// never vetoes (a new backend runtime shows up rather than vanishing).
-const FAMILY_SLOT_TYPES = {
-	"llama-server": ["llm", "embedding", "reranking"],
-	flm: ["llm", "embedding", "transcription"],
-	kokoro: ["tts"],
-	qwen3tts: ["tts"],
-	comfyui: ["image"],
-};
+// (FAMILY_SLOT_TYPES moved into hw-cascade.js with the Backend cascade —
+// the drawer no longer filters runner families inline.)
 
 // ─── Drawer dirty-tracking seam (#1398) ──────────────────────────
 //
@@ -502,6 +501,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
 
+	// Slot DETAIL payload (spec 2026-08-29 #1946) — GET /api/slots/{name}
+	// enriches with `specialty_degraded` (config_drift's sibling key, same
+	// detail-route-only gate), which the list poll backing `slot` never
+	// carries. Only fetched while the drawer is open, mirroring
+	// resolvedQuery above; null/absent renders nothing (additive, absent-safe).
+	const slotDetailQuery = useSlotDetail(open ? slot?.name : null);
+	const specialtyDegraded = slotDetailQuery.data?.specialty_degraded ?? null;
+
 	// Seed the form AND snapshot the baseline — deliberately the same effect, so
 	// the two can never come from different payloads (which is the #1398 class).
 	// Runs on slot identity change only; a degraded payload is skipped outright
@@ -642,7 +649,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				Array.isArray(profilesQuery.data) ? profilesQuery.data : []
 			).find((p) => p.name === profileSel);
 			if (selProf?.backend && selProf.backend !== deviceBackend(device)) {
-				errs.profile = `Profile "${profileSel}" declares backend "${selProf.backend}" but Device is set to "${device}" — pick a matching pair.`;
+				errs.profile = `Profile "${profileSel}" declares backend "${selProf.backend}" but the Backend picked above launches "${deviceBackend(device)}" — pick a matching pair.`;
 			}
 		}
 		if (Object.keys(errs).length > 0) {
@@ -752,10 +759,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// device this slot will actually launch on AFTER Save is the profile's
 	// backend device, not the still-persisted `device` state — the drawer
 	// has no direct device control, so `device` never moves on its own.
-	// Every dependent filter below (Runner Image/Binary fit, the Model
-	// swap picker's rocmfp4 gate) reads `pendingDevice`/`pendingDeviceClass`
-	// instead of `device` so they preview the POST-save world rather than
-	// hiding the very runner/model the operator is being told to pick.
+	// Every dependent filter below (the Backend cascade, the Model swap
+	// picker's rocmfp4 gate) reads `pendingDevice` instead of `device` so
+	// they preview the POST-save world rather than hiding the very
+	// runner/model the operator is being told to pick.
 	const pendingDevice = (() => {
 		// Only a live in-drawer edit counts as "pending" — a persisted slot
 		// whose device and profile already disagree (a pre-existing
@@ -774,7 +781,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		const target = crossDeviceTarget(p, deviceBackend(device));
 		return target || device;
 	})();
-	const pendingDeviceClass = deviceClassOf(pendingDevice);
 	// A live (uncommitted) cross-backend profile pick, or null — the single
 	// signal both the Save-time strand check and the Model-swap gate below
 	// key off. Split out from `pendingDevice` itself (which returns `device`
@@ -1348,6 +1354,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{/* #2038: breaker view rides next to the lifecycle state so
 								    "error" + "parked · N failures" read as one story. */}
 								<SlotBreakerChip s={slot} />
+								{/* Specialty guard verdict (spec 2026-08-29 #1946): the runner
+								    serving this slot doesn't list the model's specialty, so it
+								    launched GGUF-only (degraded, not blocked) — loud amber badge,
+								    same warn tokens as SlotBreakerChip/backend-mismatch chips.
+								    `.detail` carries the human-readable reason as the tooltip. */}
+								{specialtyDegraded && (
+									<span
+										className="tag-chip"
+										data-testid="slot-specialty-degraded"
+										title={specialtyDegraded.detail || "Specialty distribution degraded to GGUF-only"}
+										style={{
+											color: "var(--warn)",
+											borderColor: "var(--warn-line)",
+											background: "var(--warn-soft)",
+										}}
+									>
+										⚠ {specialtyDegraded.specialty || "specialty"} degraded
+									</span>
+								)}
 							</span>
 						}
 					/>
@@ -1443,40 +1468,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					{(() => {
 						const backends = systemInfoQuery.data?.backends ?? {};
 						const binaryKeys = Object.keys(backends);
-						// A pending cross-backend profile switch (#1636 Codex fix) moves
-						// this slot's device on Save even though `device` itself never
-						// changes in this drawer — read the pending device/class here so
-						// Runner Image/Binary options preview the POST-save fit instead
-						// of hiding the very runner the divergence hint tells the
-						// operator to pick.
-						const devBackend = deviceBackend(pendingDevice);
-						// Runner options filtered down to the ones that fit this slot:
-						// device_class exact (runner_matches), the family's slot types
-						// (_supported_slot_types — so a gpu llm slot is not offered
-						// qwen3tts/comfyui) and the SAME supported_backends list the
-						// fit-check below warns on. An out-of-vocab persisted value stays
-						// selectable underneath.
-						const deviceFitBinaryKeys = binaryKeys.filter((k) => {
-							const r = backends[k] || {};
-							if (r.device_class && r.device_class !== pendingDeviceClass)
-								return false;
-							const types = FAMILY_SLOT_TYPES[r.runtime_family];
-							if (types && slot.type && !types.includes(slot.type))
-								return false;
-							const sup = runnerBackends(r);
-							return !(sup.length > 0 && devBackend && !sup.includes(devBackend));
-						});
-						// The Runner Binary dropdown offers the binaries BUILT INTO the
-						// currently-named Runner Image — one image can ship several
-						// (e.g. the shared rocmfpx image serves both `rocmfpx · rocm`
-						// and `vulkanfpx · vulkan`). With no image named yet there is
-						// nothing to match against, so fall back to the device fit set.
 						const pinnedImage = (imagePin || "").trim();
 						// Runner Image catalog — the distinct image refs RUNNER_IMAGES
 						// resolves to (same system-info source the Runtimes page renders).
-						// One image can ship several binaries (rocmfpx/vulkanfpx share
-						// one Vulkan-portable image); the map records which, so picking
-						// an image repopulates the Runner Binary dropdown below.
+						// One image can ship several binaries (the combined image serves
+						// both `rocmfpx · rocm` and `rocmfpx · vulkan`); the map records
+						// which, so picking an image repopulates the Backend dropdown.
 						const imageKeysByRef = new Map();
 						for (const k of binaryKeys) {
 							const img = backends[k]?.image;
@@ -1485,89 +1482,38 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							imageKeysByRef.get(img).push(k);
 						}
 						const catalogImages = [...imageKeysByRef.keys()];
-						const imageFitKeys = pinnedImage
-							? binaryKeys.filter((k) => backends[k]?.image === pinnedImage)
-							: [];
-						const fitBinaryKeys = pinnedImage
-							? imageFitKeys
-							: deviceFitBinaryKeys;
-						// Fit-check (§4): the selected device's backend must be in the chosen
-						// BINARY's supported_backends. WARN at assignment, never block. Only
-						// when a BINARY is explicitly picked (empty = HW-gated default).
-						const selRunner = binary ? backends[binary] : null;
-						const supported = selRunner ? runnerBackends(selRunner) : null;
-						const fitWarn =
-							binary &&
-							devBackend &&
-							supported &&
-							supported.length > 0 &&
-							!supported.includes(devBackend)
-								? `Device backend "${devBackend}" is not in ${binary}'s supported backends (${supported.join(", ")}). The slot may fall back or fail at spawn.`
-								: null;
-						// GPU device options: the rocm↔vulkan pair every GPU box can
-						// host (one Vulkan-portable image serves both), plus the
-						// slot's persisted value when it sits outside that pair
-						// (gpu-cuda, hand-edited TOML) so opening the drawer never
-						// silently rewrites it. Non-GPU devices (npu/cpu/img) route
-						// to different runtime families — switching those is a
-						// re-create, not an edit, so they keep no control.
-						const gpuDeviceOptions = ["gpu-rocm", "gpu-vulkan"];
-						const persistedDevice = slot.device || "gpu-rocm";
-						if (
-							deviceClassOf(persistedDevice) === "gpu" &&
-							!gpuDeviceOptions.includes(persistedDevice)
-						)
-							gpuDeviceOptions.unshift(persistedDevice);
+						// Image → Backend cascade (hw-cascade.js): one dropdown of
+						// (binary · backend) pairs enumerated from the pinned image (or
+						// the release-catalog union when nothing is pinned). Picking a
+						// pair sets `binary` AND derives `device`, so the old
+						// Device/Binary mismatch is unrepresentable from this drawer.
+						// Reads `pendingDevice` (#1636 Codex fix) so a pending
+						// cross-backend profile switch previews the POST-save fit.
+						const cascade = backendOptions({
+							backends,
+							pinnedImage,
+							device: pendingDevice,
+							slotType: slot.type,
+						});
+						const backendSel = selectedBackendValue({
+							binary,
+							device: pendingDevice,
+							options: cascade.options,
+						});
+						// The one value the out-of-vocab self-option and the select's
+						// fallback `value` share — a single source so they can't diverge.
+						const oovValue = optionValue(
+							binary,
+							deviceBackend(pendingDevice),
+						);
 						return (
 							<>
-								{/* Device — the slot's typed backend fact (gpu-rocm /
-								    gpu-vulkan). Seeded from the model at creation, editable
-								    here post-create: this select is the ONLY UI path that
-								    switches a slot between the ROCm and Vulkan backends
-								    (the Runner Binary below is metadata-gated to the SAME
-								    image and never flips the backend; profiles carry
-								    backend only as an inert fit hint). Save persists it
-								    via PUT /config { device } and cold-restarts. */}
-								{deviceClassOf(persistedDevice) === "gpu" && (
-									<div className="form-row">
-										<div className="form-lbl">
-											<span>Device</span>
-											<FieldInfoIcon description="⟳ GPU backend this slot launches on. Switching
-												rocm↔vulkan restarts the slot onto the other
-												llama-server backend (same runner image). The bound
-												model must be runnable on the target backend —
-												Save blocks otherwise." />
-										</div>
-										<div className="form-ctl">
-											<select
-												className={
-													"input mono" + (fieldErrs.device ? " input-err" : "")
-												}
-												data-testid="slot-hw-device"
-												value={device}
-												onChange={(e) => {
-													setDevice(e.target.value);
-													setFieldErrs((p) => ({ ...p, device: undefined }));
-												}}
-											>
-												{gpuDeviceOptions.map((d) => (
-													<option key={d} value={d}>
-														{d} · {deviceBackend(d)}
-													</option>
-												))}
-											</select>
-											{fieldErrs.device && (
-												<div
-													className="hint"
-													data-testid="slot-hw-device-err"
-													style={{ color: "var(--err)" }}
-												>
-													{fieldErrs.device}
-												</div>
-											)}
-										</div>
-									</div>
-								)}
+								{/* Device select removed: `device` is now DERIVED from the
+								    Backend pick below (rocm↔vulkan rides the pair choice) —
+								    the old standalone select let Device and Binary disagree.
+								    Save still persists it via PUT /config { device } and
+								    cold-restarts; non-GPU devices (npu/cpu/img) route to
+								    different runtime families, so they never flip here. */}
 								<div className="form-row">
 									<div className="form-lbl">
 										<span>Runner Image</span>
@@ -1575,7 +1521,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											runner-image catalog (the same registry the Runtimes page
 											shows); ‘Custom image ref…’ keeps the free-text escape
 											hatch for a debug build, A/B test, or rollback. Empty
-											uses the release default resolved from Runner Binary." />
+											uses the release catalog — the Backend below then offers
+											everything the catalog can launch for this slot." />
 									</div>
 									<div className="form-ctl">
 										{pinCustom ? (
@@ -1630,20 +1577,36 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													}
 													setImagePin(v);
 													setFieldErrs((p) => ({ ...p, imagePin: undefined }));
-													// Keep BINARY coherent with the picked image: if the
-													// current binary doesn't ship in it, hop to the
-													// image's sole binary, or clear so the operator picks
-													// from the repopulated list.
-													const keys = imageKeysByRef.get(v) || [];
-													if (v && binary && !keys.includes(binary)) {
-														setBinary(keys.length === 1 ? keys[0] : "");
+													// Keep the Backend pick coherent with the new image:
+													// if the current (binary, backend) pair isn't among
+													// what the image ships, hop to its sole pair, or
+													// clear so the operator picks from the repopulated
+													// list. Hopping adopts the pair's derived device.
+													const next = backendOptions({
+														backends,
+														pinnedImage: v,
+														device: pendingDevice,
+														slotType: slot.type,
+													});
+													const stillFits =
+														!binary ||
+														selectedBackendValue({
+															binary,
+															device: pendingDevice,
+															options: next.options,
+														}) !== null;
+													if (v && !stillFits) {
+														if (next.options.length === 1) {
+															setBinary(next.options[0].binary);
+															setDevice(next.options[0].device);
+														} else {
+															setBinary("");
+														}
 													}
 												}}
 												style={imagePin ? {} : { color: "var(--fg-4)" }}
 											>
-												<option value="">
-													— default · resolved from Runner Binary —
-												</option>
+												<option value="">— default · release catalog —</option>
 												{/* A persisted pin outside the catalog (older release,
 												    hand-edited TOML) keeps its own option so opening the
 												    drawer never silently rewrites it. */}
@@ -1670,49 +1633,81 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Runner Binary</span>
-										<FieldInfoIcon description="⟳ Which binary inside the Runner Image executes (a
-											RUNNER_IMAGES key, not a profile). One image can ship
-											several — the list shows exactly what the named Runner
-											Image provides." />
+										<span>Backend</span>
+										<FieldInfoIcon description="⟳ Which runner binary · backend pair the slot launches
+											(a RUNNER_IMAGES key, not a profile). The list is exactly
+											what the selected Runner Image ships for this slot — the
+											release catalog when no image is pinned. Picking the
+											other GPU backend (rocm↔vulkan) restarts the slot onto
+											it; the bound model must be runnable there — Save blocks
+											otherwise." />
 									</div>
 									<div className="form-ctl">
 										<select
-											className={"input mono" + (fitWarn ? " input-err" : "")}
+											className={
+												"input mono" + (fieldErrs.device ? " input-err" : "")
+											}
 											data-testid="slot-hw-binary"
-											value={binary}
-											onChange={(e) => setBinary(e.target.value)}
+											value={backendSel ?? oovValue}
+											onChange={(e) => {
+												const pick = applyBackendChoice(
+													cascade.options,
+													e.target.value,
+													device,
+												);
+												setBinary(pick.binary);
+												setDevice(pick.device);
+												setFieldErrs((p) => ({ ...p, device: undefined }));
+											}}
 										>
-											{/* No "— default (from device) —" entry: the dropdown lists
-											    the binaries actually built into the Runner Image, and
-											    nothing else. An out-of-vocab persisted value keeps its
-											    own option so the drawer never silently rewrites it. */}
-											{binary && !fitBinaryKeys.includes(binary) && (
-												<option value={binary}>{binary}</option>
+											{/* Auto entry only while nothing is pinned — picking a
+											    real pair is one-way, same as the old Binary select. */}
+											{!binary && (
+												<option value="">
+													— auto · resolved from device —
+												</option>
 											)}
-											{fitBinaryKeys.map((k) => (
-												<option key={k} value={k}>
-													{k}
-													{backends[k]?.backend
-														? ` · ${backends[k].backend}`
+											{/* An out-of-vocab persisted pair (older release,
+											    hand-edited TOML, image that no longer ships it)
+											    keeps its own option so the drawer never silently
+											    rewrites it. */}
+											{backendSel === null && (
+												<option value={oovValue}>
+													{binary} · {deviceBackend(pendingDevice)} · not in
+													image
+												</option>
+											)}
+											{cascade.options.map((o) => (
+												<option
+													key={optionValue(o.binary, o.backend)}
+													value={optionValue(o.binary, o.backend)}
+												>
+													{o.binary}
+													{o.backend ? ` · ${o.backend}` : ""}
+													{/* #1946: specialty-distribution kinds this runner
+													    serves ACCELERATED — so the operator can tell an
+													    accelerated runner from a plain-GGUF one. */}
+													{Array.isArray(o.specialties) &&
+													o.specialties.length > 0
+														? ` · ${o.specialties.join(", ")}`
 														: ""}
 												</option>
 											))}
 										</select>
-										{!binary && fitBinaryKeys.length > 0 && (
+										{!binary && cascade.options.length > 0 && (
 											<div className="hint">
-												No binary pinned — the launcher resolves one from the
+												No backend pinned — the launcher resolves one from the
 												device. Pick one to fix it.
 											</div>
 										)}
-										{pinnedImage && fitBinaryKeys.length === 0 && (
+										{cascade.emptyPin && (
 											<div className="hint" data-testid="slot-hw-binary-none">
-												No known runner binary ships in{" "}
-												<span className="mono">{pinnedImage}</span>. Clear the
-												Runner Image to see the binaries that fit this device.
+												Nothing in <span className="mono">{pinnedImage}</span>{" "}
+												can serve this slot. Pick another Runner Image, or the
+												release-catalog default.
 											</div>
 										)}
-										{fitWarn && (
+										{(cascade.fallback || backendSel === null) && (
 											<div
 												className="hint"
 												data-testid="slot-hw-fit-warning"
@@ -1725,7 +1720,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													background: "var(--warn-soft)",
 												}}
 											>
-												⚠ {fitWarn}
+												{cascade.fallback
+													? "⚠ Custom image ref — the catalog can't verify what it ships, so the list shows every known pair. The slot may fall back or fail at spawn if the image lacks the picked binary."
+													: `⚠ The persisted pair "${binary} · ${deviceBackend(pendingDevice)}" is not something ${pinnedImage ? "the pinned image" : "the catalog"} offers for this slot. The slot may fall back or fail at spawn — pick a listed pair to fix it.`}
+											</div>
+										)}
+										{fieldErrs.device && (
+											<div
+												className="hint"
+												data-testid="slot-hw-device-err"
+												style={{ color: "var(--err)" }}
+											>
+												{fieldErrs.device}
 											</div>
 										)}
 									</div>

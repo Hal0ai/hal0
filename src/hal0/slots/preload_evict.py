@@ -286,6 +286,10 @@ async def _estimate_incoming_footprint_mb(
         model_mb = 0.0
     if model_mb <= 0:
         return 0.0
+    # NO companion_mb= here (fix wave, C1): ``size_bytes`` already sums every
+    # installed file, specialty sidecars included, so passing
+    # ``companion_bytes_mb(info)`` on top double-booked PromptForge's 21 GiB
+    # and made pre-load admission evict neighbours it never needed to.
     return estimate_file_size_kv_mb(model_mb, info)
 
 

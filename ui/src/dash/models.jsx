@@ -569,6 +569,13 @@ function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
         )}
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
+        {/* Specialty-distribution marker (spec 2026-08-29 #1946): the model
+            row's registry metadata carries `specialty` (e.g. "promptforge")
+            when the pulled fileset is a specialty distribution rather than a
+            plain GGUF. Label is the key verbatim, beside the quant chip. */}
+        {model.metadata?.specialty && (
+          <span className="chip" data-testid="mdl-row-specialty">{model.metadata.specialty}</span>
+        )}
         {backends.map(b => (
           <span key={b} className={"chip dev-" + b}>{b}</span>
         ))}

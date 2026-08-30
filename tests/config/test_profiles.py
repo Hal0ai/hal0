@@ -199,7 +199,7 @@ class TestLoadProfilesConfig:
     def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
         """Non-MTP profiles stay False; MTP-capable family profiles are True."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        _MTP_TRUE_PROFILES = {"chadrock-dense", "chadrock-moe"}
+        _MTP_TRUE_PROFILES = {"chadrock-dense", "chadrock-moe", "promptforge"}
         for name in SEED_PROFILES:
             expected_mtp = name in _MTP_TRUE_PROFILES
             assert cfg.profile[name].mtp is expected_mtp, (

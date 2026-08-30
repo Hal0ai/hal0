@@ -64,10 +64,15 @@ from hal0.bench.harness import (
     run_cell,
     telemetry_argv,
 )
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
+from hal0.config.schema import (
+    DEFAULT_PROMPTFORGE_IMAGE,
+    DEFAULT_ROCMFPX_IMAGE,
+    FALLBACK_VULKAN_IMAGE,
+)
 
 CPU_BENCH_BIN = "/usr/local/bin/llama-bench"
 ROCMFPX_BENCH_BIN = "/opt/rocmfpx/bin/llama-bench"
+PROMPTFORGE_BENCH_BIN = "/opt/promptforge/bin/llama-bench"
 COMMON_ARGS = [("-fa", "1"), ("-mmp", "0")]
 
 #: One llama-bench ``-o json`` row, the same shape
@@ -93,13 +98,14 @@ _FAKE_BENCH_JSON = json.dumps([_FAKE_BENCH_ROW])
 
 
 class TestLaneSpecs:
-    """``lane_specs()`` must carry the same 3-lane matrix Phase 1's
-    ``BACKENDS`` associative array did (``installer/bench/config.sh``)."""
+    """``lane_specs()`` must carry Phase 1's 3-lane ``BACKENDS`` matrix
+    (``installer/bench/config.sh``) plus the opt-in ``promptforge`` lane
+    (the M5 follow-up; never in a default sweep)."""
 
-    def test_all_three_lanes_are_present(self) -> None:
+    def test_the_lane_matrix_is_exactly_the_four_known_lanes(self) -> None:
         specs = lane_specs()
 
-        assert set(specs) == {"rocm", "vulkan_radv", "cpu"}
+        assert set(specs) == {"rocm", "vulkan_radv", "cpu", "promptforge"}
 
     def test_cpu_lane_uses_the_fallback_vulkan_image(self) -> None:
         """Regression guard for #1516-class bugs: the CPU lane must resolve
@@ -157,6 +163,39 @@ class TestLaneSpecs:
 
         for key, spec in specs.items():
             assert spec.lane == key
+
+    def test_promptforge_lane_uses_its_own_image_and_binary(self) -> None:
+        """The PromptForge runner is a separate image lineage installing under
+        ``/opt/promptforge/`` — the M5 follow-up: before this lane existed,
+        bench cells for that image had no LaneSpec to run through (the GPU
+        lanes' ``/opt/rocmfpx/bin/llama-bench`` does not exist in it)."""
+        spec = lane_specs()["promptforge"]
+
+        assert spec.image is DEFAULT_PROMPTFORGE_IMAGE
+        assert spec.bench_bin == PROMPTFORGE_BENCH_BIN
+
+    def test_promptforge_lane_pins_the_rocm_device(self) -> None:
+        """HIP-only image (GGML_VULKAN=OFF): ROCm0 is the only valid device."""
+        spec = lane_specs()["promptforge"]
+
+        assert spec.dev_args == (("-ngl", "99"), ("-dev", "ROCm0"))
+
+    def test_promptforge_lane_env_matches_the_rocm_lane(self) -> None:
+        """Same HIP unified-memory env as ``rocm``, and ONLY that: the card's
+        ``PROMPTFORGE_*`` mode envs stay out until the ct150 gate (#1891)
+        validates them — and llama-bench cells measure the plain GGUF path
+        anyway, not the sidecar-accelerated one."""
+        spec = lane_specs()["promptforge"]
+
+        assert spec.env == ("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",)
+
+    def test_promptforge_is_never_a_default_lane(self) -> None:
+        """``DEFAULT_PROMPTFORGE_IMAGE`` is a CANDIDATE pin until #1891
+        passes, and the image serves exactly one model family either way — a
+        routine sweep must never pull it in. The lane runs only when a suite
+        names it explicitly (``--backends promptforge``)."""
+        for tier in (TIER_CPU, TIER_AMD, TIER_NVIDIA):
+            assert "promptforge" not in default_lanes(tier)
 
 
 # ── default_lanes ────────────────────────────────────────────────────────────

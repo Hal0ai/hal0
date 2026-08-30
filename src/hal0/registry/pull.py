@@ -1516,6 +1516,7 @@ def _register_pulled_fileset(
         quant_from_filename,
         quant_from_rocmfpx_filename,
     )
+    from hal0.registry.specialty import SPECIALTY_KINDS, kind_for_role
 
     entry_name = Path(fileset.entry_rel).name
     detected_quant: str | None = None
@@ -1525,6 +1526,35 @@ def _register_pulled_fileset(
         detected_quant = None
     if not detected_quant:
         detected_quant = quant_from_rocmfpx_filename(entry_name) or quant_from_filename(entry_name)
+
+    # #1946: a specialty distribution's companion files (promptforge_ffn,
+    # _gdn, _output_k8, runtime_patch) are installed alongside the entry
+    # GGUF/manifest — record each recognised companion's dest + size so Task
+    # 7 (env synthesis) and Task 9 (capacity checks) have somewhere to read
+    # them from. `runtime_patch` (env=None) installs and gets its
+    # `model_file` row like any other companion below, but is excluded from
+    # this map: it's consumed by the image build, never fed to the launcher.
+    companion_paths: dict[str, str] = {}
+    companion_sizes: dict[str, int] = {}
+    if fileset.specialty is not None:
+        for f, dest in installed:
+            kind_of_role = kind_for_role(f.role)
+            if kind_of_role is None:
+                continue
+            spec = next((s for s in kind_of_role.companions if s.role == f.role), None)
+            if spec is not None and spec.env is not None:
+                companion_paths[f.role] = str(dest)
+                companion_sizes[f.role] = int(
+                    f.size_bytes or (dest.stat().st_size if dest.exists() else 0)
+                )
+        # #1890: same fill-only-if-unset rule as chat_template — the kind's
+        # quant marker backfills an entry the header/filename detection
+        # couldn't classify (e.g. a .pfs manifest with no quant token), but
+        # never clobbers a real detection.
+        kind = SPECIALTY_KINDS.get(fileset.specialty)
+        if kind is not None and kind.quant_marker and not detected_quant:
+            detected_quant = kind.quant_marker
+
     updates: dict[str, Any] = {
         "path": str(entry_dest),
         "size_bytes": total_size,
@@ -1538,6 +1568,11 @@ def _register_pulled_fileset(
     try:
         existing = registry.get(model_id)
     except ModelNotFound:
+        add_meta = dict(fresh_meta)
+        if fileset.specialty is not None:
+            add_meta["specialty"] = fileset.specialty
+            add_meta["companions"] = companion_paths
+            add_meta["companion_sizes"] = companion_sizes
         registry.add(
             Model(
                 id=model_id,
@@ -1549,12 +1584,27 @@ def _register_pulled_fileset(
                 quant=detected_quant,
                 capabilities=["chat"],
                 mmproj=str(mmproj_dest) if mmproj_dest else None,
-                metadata=dict(fresh_meta),
+                metadata=add_meta,
             )
         )
     else:
         merged_meta = dict(existing.metadata)
         merged_meta.update(fresh_meta)
+        if fileset.specialty is not None:
+            merged_meta["specialty"] = fileset.specialty
+            merged_meta["companions"] = companion_paths
+            merged_meta["companion_sizes"] = companion_sizes
+        else:
+            # A plain re-pull over a previously-specialty model must CLEAR the
+            # three keys, not leave them merged over from ``existing.metadata``
+            # (fix wave, M1). Stale keys point at blobs GC has since reclaimed;
+            # the guard only checks key PRESENCE, so it would say "accelerated"
+            # and the launch would export PROMPTFORGE_SIDECAR=/…/ffn.pfs for a
+            # file that isn't there. Same rule as ``quant`` two blocks up: a
+            # re-pull that detects nothing clears the stale value along with
+            # the stale bytes.
+            for stale in ("specialty", "companions", "companion_sizes"):
+                merged_meta.pop(stale, None)
         updates["metadata"] = merged_meta
         registry.update(model_id, updates)
 

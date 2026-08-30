@@ -1029,6 +1029,23 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: template's RestartPreventExitStatus=64 can park a doomed model).
 DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 
+#: ``DEFAULT_PROMPTFORGE_IMAGE`` — the PromptForge-flavor runner (HIP-only
+#: build of ciru-ai/ROCmFPX v2.3 + the card's runtime patch; GGML_VULKAN=OFF,
+#: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
+#: item 4 and spec 2026-08-29). Candidate tag until the ct150 validation
+#: gate (#1891) passes; the pin only moves operator-gated.
+#:
+#: DELIBERATELY ABSENT from ``manifest.json``'s ``toolbox_images`` (fix wave,
+#: I3): the image isn't built yet, so the entry could only carry
+#: ``"digest": null`` — which is exactly what ``scripts/release-check.sh``
+#: step 4 hard-fails on ("manifest.json has unpinned toolbox image(s)"), and
+#: it buys nothing: ``manifest_image_ref()`` with a null digest falls through
+#: to the tag, which is byte-identical to this constant, so
+#: ``resolve_runner_image`` resolves the same string either way. The manifest
+#: entry gets ADDED, with a real digest, at the #1891 ct150 gate — the
+#: sequencing the spec's own image-build workstream already specifies.
+DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
+
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
 #: FORMER DEFAULT — debris from slot creation under an older release — not a
@@ -1209,7 +1226,7 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
-#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 17 seed
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 18 seed
 #: entries (with their per-profile rationale comments) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
 #: is (re)assigned at the bottom of this module, once every model above

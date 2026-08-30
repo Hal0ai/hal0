@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from hal0.config.schema import (
+    DEFAULT_PROMPTFORGE_IMAGE,
     DEFAULT_ROCMFPX_IMAGE,
     FALLBACK_CUDA_IMAGE,
     FALLBACK_VULKAN_IMAGE,
@@ -87,6 +88,10 @@ class RunnerSupports:
     mtp: bool = False
     jinja: bool = False
     mmproj: bool = False
+    #: Specialty-distribution keys this image can execute accelerated
+    #: (matched against Model.metadata["specialty"]; see
+    #: hal0.registry.specialty.SPECIALTY_KINDS). Empty = plain runner.
+    specialties: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +142,24 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "vulkan",
         None,
         supported_backends=("rocm", "vulkan"),
+        format_arch="gguf",
+    ),
+    "promptforge": Runner(
+        "promptforge",
+        DEFAULT_PROMPTFORGE_IMAGE,
+        "llama-server",
+        RunnerSupports(mtp=True, jinja=True, mmproj=True, specialties=("promptforge",)),
+        "gpu",
+        "rocm",
+        # manifest_key=None until the CANDIDATE image passes the #1891 gate
+        # and actually ships in manifest.json's toolbox_images — same
+        # doctrine as rocmfpx/vulkanfpx above: a key pointing at a manifest
+        # entry that doesn't exist yet would either fail the registry test
+        # or, worse, silently pin to whatever lands under that key later.
+        None,
+        supported_backends=("rocm",),  # HIP-only build: deliberately NOT
+        # vulkan — the existing (device, BINARY) fit-check refuses a
+        # gpu-vulkan pairing with no new code.
         format_arch="gguf",
     ),
     "cuda": Runner(

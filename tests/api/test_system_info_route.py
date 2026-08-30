@@ -61,7 +61,21 @@ def test_system_info_backends_expose_runner_supports_metadata(
             "mtp": runner.supports.mtp,
             "jinja": runner.supports.jinja,
             "mmproj": runner.supports.mmproj,
+            "specialties": list(runner.supports.specialties),
         }
+
+
+def test_system_info_backends_expose_specialties(
+    isolated_client: TestClient,
+) -> None:
+    """Spec 2026-08-29 (#1946): the runner registry's per-runner
+    ``supports.specialties`` tuple is surfaced on the wire so the model
+    drawer / dashboard can tell which runner images serve which specialty
+    distributions (e.g. promptforge) accelerated vs. degraded GGUF-only."""
+    body = isolated_client.get("/api/system-info").json()
+    backends = body["backends"]
+    assert backends["promptforge"]["supports"]["specialties"] == ["promptforge"]
+    assert backends["rocmfpx"]["supports"]["specialties"] == []
 
 
 def test_system_info_backends_expose_fit_check_metadata(

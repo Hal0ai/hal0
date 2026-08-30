@@ -20,6 +20,7 @@ CANONICAL_PROFILES = {
     "thinking",
     "coding",
     "moonshine",
+    "promptforge",
 }
 
 

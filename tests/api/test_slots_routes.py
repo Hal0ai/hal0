@@ -2272,6 +2272,49 @@ def test_get_slot_includes_config_drift_when_requested(
     ]
 
 
+def test_get_slot_specialty_degraded_null_when_absent(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Spec 2026-08-29 (#1946): a slot whose model carries no specialty
+    surfaces ``specialty_degraded: null`` on the same detail payload that
+    carries ``config_drift`` — additive, absent-safe key."""
+    isolated_client.post("/api/slots/chat/load")
+
+    r = isolated_client.get("/api/slots/chat")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["specialty_degraded"] is None
+
+
+def test_get_slot_specialty_degraded_passes_through(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard's structured degraded reason (Task 6's
+    ``_guard_specialty_runner`` shape) rides through to the slot-status
+    payload verbatim when the guard flags the slot's model."""
+    reason = {
+        "code": "slot.specialty_degraded",
+        "specialty": "promptforge",
+        "runner": "rocmfpx",
+        "detail": "runner 'rocmfpx' does not list specialty 'promptforge'; launching GGUF-only",
+    }
+    monkeypatch.setattr(
+        "hal0.providers.container.specialty_degraded_for_slot",
+        lambda cfg, model_path=None: reason,
+    )
+    isolated_client.post("/api/slots/chat/load")
+
+    r = isolated_client.get("/api/slots/chat")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["specialty_degraded"] == reason
+
+
 # ── Backwards compatibility ────────────────────────────────────────────────
 
 
@@ -2641,3 +2684,25 @@ def test_fit_check_warning_paths() -> None:
     assert _fit_check_warning("gpu-rocm", None) is None
     # Unknown BINARY key → no check (launch path reports its own error).
     assert _fit_check_warning("gpu-rocm", "does-not-exist") is None
+
+
+def test_fit_check_refuses_promptforge_on_a_vulkan_device() -> None:
+    """Spec 2026-08-29 (#1946) testing list, M4: the promptforge runner is a
+    HIP-only build (``supported_backends == ("rocm",)``, GGML_VULKAN=OFF), so
+    the EXISTING fit-check must warn on a ``gpu-vulkan`` slot with no new code.
+    The runner registry test asserts the tuple's value; nothing exercised the
+    check itself, so the "no new code needed" claim was unpinned."""
+    from hal0.api.routes.slots import _fit_check_warning
+    from hal0.runners import RUNNER_IMAGES
+
+    assert RUNNER_IMAGES["promptforge"].supported_backends == ("rocm",)
+
+    warn = _fit_check_warning("gpu-vulkan", "promptforge")
+    assert warn is not None
+    assert "vulkan" in warn
+    assert "promptforge" in warn
+    assert "rocm" in warn  # names the backend it DOES support
+
+    # the sibling half: its own backend fits, and cpu is refused too
+    assert _fit_check_warning("gpu-rocm", "promptforge") is None
+    assert _fit_check_warning("cpu", "promptforge") is not None

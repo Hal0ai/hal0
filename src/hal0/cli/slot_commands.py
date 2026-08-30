@@ -252,6 +252,26 @@ def _drift_warning(status: dict[str, Any]) -> str | None:
     return f"WARN config drift: {detail}"
 
 
+def _specialty_degraded_warning(status: dict[str, Any]) -> str | None:
+    """Render the specialty guard's verdict off the same detail payload.
+
+    Spec 2026-08-29 (#1946) seam 4 says the degraded reason is "stamped on the
+    slot state, shown in the drawer and health output, and logged" — the drawer,
+    the log and the API all carried it, but ``hal0 slot status`` printed nothing
+    (fix wave, M3). ``specialty_degraded`` rides the SAME detail route payload
+    as ``config_drift`` (both are ``include_config_drift`` enrichments), so this
+    is its sibling renderer and follows the same conventions: ``None`` when the
+    key is absent/null/not a dict, one ``WARN`` line otherwise.
+    """
+    reason = status.get("specialty_degraded")
+    if not isinstance(reason, dict):
+        return None
+    kind = reason.get("specialty") or "?"
+    runner = reason.get("runner") or "?"
+    detail = reason.get("detail") or "running the plain GGUF-only fallback"
+    return f"WARN specialty degraded: {kind} on runner {runner} — {detail}"
+
+
 @app.command("status")
 def slot_status(
     name: str = typer.Argument(..., help="Slot name to inspect"),
@@ -283,6 +303,9 @@ def slot_status(
     warning = _drift_warning(status)
     if warning:
         console.print(f"[bold yellow]{warning}[/bold yellow]")
+    degraded = _specialty_degraded_warning(status)
+    if degraded:
+        console.print(f"[bold yellow]{degraded}[/bold yellow]")
 
 
 @app.command("load")
