@@ -177,6 +177,20 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
     A bad image reference is rejected HERE, before any subprocess is
     spawned — no ``sudo`` round-trip is spent on a ref the wrapper would
     reject anyway.
+
+    A bare nonzero exit code is a poor error message on its own — rc 1 is
+    what ``sudo -n`` itself returns for a denied/misconfigured grant
+    (missing NOPASSWD entry, sudoers not yet installed, mid-upgrade race),
+    the single most actionable failure this seam can hit. When the process
+    exits 1 AND nothing that looked like real podman progress ever came
+    through (either no output line at all, or every line matched sudo's own
+    diagnostic shapes — ``sudo:``-prefixed, or containing "a password is
+    required") the ``"failed"`` event's ``error`` names the seam and the
+    grant file (``/etc/sudoers.d/hal0-podman-rw``) instead of just the exit
+    code. Any other nonzero exit — or an rc 1 that followed real pull
+    output — keeps the bare ``pull exited with code N`` message: that
+    failure happened well past the sudo gate, and blaming the grant would
+    be dishonest.
     """
     if not is_valid_image_ref(image):
         yield {"state": "failed", "error": f"invalid image reference: {image}"}
@@ -194,6 +208,8 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
 
     parser = PullLineParser()
     clean_eof = False
+    saw_any_line = False
+    sudo_shaped_lines = True
 
     try:
         assert proc.stdout is not None
@@ -201,6 +217,9 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
             line = raw.decode("utf-8", errors="replace").rstrip()
             if not line:
                 continue
+            saw_any_line = True
+            if not (line.startswith("sudo:") or "a password is required" in line):
+                sudo_shaped_lines = False
             yield parser.feed(line)
         clean_eof = True
     except Exception as exc:
@@ -233,6 +252,19 @@ async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]
             "state": "completed",
             "layer": parser.done_layers,
             "total_layers": parser.total_layers,
+        }
+    elif exit_code == 1 and (not saw_any_line or sudo_shaped_lines):
+        # rc 1 with either no output at all, or output that only ever looked
+        # like sudo's own diagnostics (never a real podman progress line) —
+        # the write seam's grant is the far likelier culprit than podman
+        # itself, so name it instead of leaving an operator to guess at a
+        # bare exit code (see packaging/sudoers/hal0-podman-rw).
+        yield {
+            "state": "failed",
+            "error": (
+                "write seam grant denied or misconfigured — check "
+                f"/etc/sudoers.d/hal0-podman-rw (pull exited with code {exit_code})"
+            ),
         }
     else:
         yield {"state": "failed", "error": f"pull exited with code {exit_code}"}
