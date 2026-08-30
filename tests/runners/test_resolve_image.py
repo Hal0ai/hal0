@@ -16,7 +16,16 @@ from pathlib import Path
 
 import pytest
 
+import hal0.runners as runners
 from hal0.runners import RUNNER_IMAGES, get_runner, resolve_runner_image
+
+
+@pytest.fixture(autouse=True)
+def _reset_legacy_env_warn_dedup() -> None:
+    """The legacy-env-override warning dedups once per (surface, key) per
+    process (finding 3) — clear the seen-set before each test so caplog
+    assertions here stay deterministic regardless of test order/reruns."""
+    runners._warned.clear()
 
 
 def _write_manifest(home: str, payload: dict[str, object]) -> None:
@@ -68,7 +77,7 @@ def test_env_override_beats_manifest_digest_pin(tmp_hal0_home: str, monkeypatch)
 def test_env_override_beats_bundled_default_with_no_manifest_key(
     tmp_hal0_home: str, monkeypatch
 ) -> None:
-    """rocmfpx/vulkanfpx/cuda/cpu deliberately carry manifest_key=None (see the
+    """rocmfpx/cuda/cpu deliberately carry manifest_key=None (see the
     module docstring) — the env tier still applies even though the manifest
     tier is always skipped for them."""
     runner = get_runner("rocmfpx")

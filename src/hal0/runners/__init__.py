@@ -60,6 +60,23 @@ from hal0.errors import NotFound
 
 log = logging.getLogger(__name__)
 
+#: Dedup set for the legacy-env-override warning in
+#: :func:`resolve_runner_image` — config resolves live per request, so
+#: without this a legacy box logs the same warning continuously until the
+#: operator switches off the old env var. Keyed ``(surface, key)``; tests
+#: that assert on this warning must clear it in their setup — see
+#: ``tests/runners/test_resolve_image.py``.
+_warned: set[tuple[str, str]] = set()
+
+
+def _warn_once(surface: str, key: str, message: str, *args: object) -> None:
+    dedup_key = (surface, key)
+    if dedup_key in _warned:
+        return
+    _warned.add(dedup_key)
+    log.warning(message, *args)
+
+
 #: Kept as a plain local Literal (NOT imported from ``hal0.profiles``) so
 #: this module has zero import-time coupling to the profiles subsystem —
 #: ``hal0.profiles._runtime_family`` imports FROM here (lazily, to look up
@@ -112,10 +129,13 @@ class Runner:
     #: fit-check metadata for spec-hw-slot-ownership §4. A slot's
     #: ``(device, BINARY)`` pair is compatible iff the device's backend is a
     #: member here; an incompatible pair WARNS at assignment (not at spawn).
-    #: This is metadata, NOT a selector: ``rocmfpx``/``vulkanfpx`` share one
-    #: Vulkan-portable image and therefore both list ``("rocm", "vulkan")`` —
-    #: the concrete backend is chosen by the slot's typed ``device``, never by
-    #: which key was picked. Empty ``()`` = backend-agnostic (no veto).
+    #: This is metadata, NOT a selector: ``rocmfpx`` is the single GPU key
+    #: and lists both ``("rocm", "vulkan")`` because one Vulkan-portable
+    #: image serves both lanes — the legacy ``vulkanfpx`` spelling is a
+    #: permanent alias that folds to ``rocmfpx`` before lookup, not a
+    #: second registry entry. The concrete backend is chosen by the slot's
+    #: typed ``device``, never by which key/spelling was used. Empty ``()``
+    #: = backend-agnostic (no veto).
     supported_backends: tuple[str, ...] = ()
     #: Model-file format / arch family this runner consumes (``"gguf"`` for the
     #: llama-server fork family, else the single-purpose runtime's own format).
@@ -285,7 +305,9 @@ def resolve_runner_image(runner: Runner) -> str:
         legacy_key = f"HAL0_TOOLBOX_IMAGE_{legacy.upper()}"
         legacy_val = os.environ.get(legacy_key, "").strip()
         if legacy_val:
-            log.warning(
+            _warn_once(
+                "runner_images.legacy_env_override",
+                legacy_key,
                 "runner_images.legacy_env_override var=%s use=HAL0_TOOLBOX_IMAGE_%s",
                 legacy_key,
                 runner.key.upper(),
@@ -317,7 +339,9 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 
       * ``backend == "cuda"`` → the ``cuda`` runner.
       * ``device_class == "cpu"`` or ``backend == "cpu"`` → the ``cpu`` runner.
-      * ``backend == "vulkan"`` or unspecified GPU → the ``rocmfpx`` runner (one Vulkan-portable image; the slot's ``device`` picks the lane).
+      * ``backend == "rocm"``, ``backend == "vulkan"``, or unspecified GPU →
+        the ``rocmfpx`` runner (one Vulkan-portable image serves both GPU
+        lanes; the slot's ``device`` picks the lane).
     """
     be = (backend or "").lower()
     dc = (device_class or "").lower()

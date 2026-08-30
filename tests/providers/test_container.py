@@ -2029,6 +2029,8 @@ class TestFPXQuantRunnerGuard:
 
     def test_rocmfpx_quant_on_gpu_vulkan_slot_is_allowed(self) -> None:
         vulkan = ProfileConfig(flags="-fa on", backend="vulkan")
+        # binary="vulkanfpx" is deliberate here: the legacy alias spelling,
+        # exercised on purpose — it heals to "rocmfpx" via get_runner().
         cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat", binary="vulkanfpx")
         model_info = _model_info(quant="ROCmFP4")
         spec = self._spec(cfg, model_info, vulkan)

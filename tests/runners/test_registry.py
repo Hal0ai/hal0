@@ -179,5 +179,19 @@ def test_runner_matches_consults_supported_backends() -> None:
     assert runner_matches(rocmfpx, device_class="gpu", backend="vulkan")
     assert runner_matches(rocmfpx, device_class="gpu", backend="rocm")
     assert not runner_matches(rocmfpx, device_class="gpu", backend="cuda")
-    # backend-agnostic runner (empty supported_backends, backend=None) never vetoes
+    # A caller with no opinion on backend (backend=None) never vetoes,
+    # regardless of what the runner declares — comfyui actually declares
+    # supported_backends=("rocm",) here, so this exercises the `not
+    # backend: return True` early return, not the empty-tuple branch.
     assert runner_matches(RUNNER_IMAGES["comfyui"], device_class="img", backend=None)
+    # A genuinely backend-agnostic runner (empty supported_backends AND no
+    # declared `backend`) never vetoes on backend even when the caller DOES
+    # name one — this is the empty-supported_backends branch itself.
+    agnostic = Runner(
+        "synthetic-agnostic",
+        "ghcr.io/example/agnostic:1",
+        "flm",
+        RunnerSupports(),
+        "cpu",
+    )
+    assert runner_matches(agnostic, device_class="cpu", backend="cuda")

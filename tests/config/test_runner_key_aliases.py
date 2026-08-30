@@ -4,7 +4,16 @@ import logging
 
 import pytest
 
+import hal0.config.schema as schema
 from hal0.config.schema import SlotConfig, SlotsConfig
+
+
+@pytest.fixture(autouse=True)
+def _reset_alias_warn_dedup() -> None:
+    """The alias warnings dedup once per (surface, key) per process (finding
+    3) — clear the seen-set before each test so caplog assertions here stay
+    deterministic regardless of test order/reruns in the same process."""
+    schema._warned.clear()
 
 
 def test_slot_binary_alias_normalized(caplog: pytest.LogCaptureFixture) -> None:
@@ -46,3 +55,18 @@ def test_default_images_canonical_wins_on_conflict_alias_first() -> None:
 def test_default_images_unknown_key_still_rejected() -> None:
     with pytest.raises(ValueError, match="not a known runner"):
         SlotsConfig(default_images={"ghost": "ghcr.io/x/y:1"})
+
+
+def test_default_images_alias_null_clears_canonical_write() -> None:
+    # An alias-origin value followed by a canonical-key null clear must
+    # clear the family — the null is a clear on the CANONICAL family, not
+    # a no-op tied to the literal spelling it arrived under.
+    s = SlotsConfig(default_images={"vulkanfpx": "ghcr.io/x/y:1", "rocmfpx": None})
+    assert s.default_images == {}
+
+
+def test_default_images_canonical_null_blocks_later_alias_write() -> None:
+    # Same clear, opposite order — a canonical-key null seen first must
+    # still block a later alias-origin write to the same family.
+    s = SlotsConfig(default_images={"rocmfpx": None, "vulkanfpx": "ghcr.io/x/y:1"})
+    assert s.default_images == {}
