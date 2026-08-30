@@ -67,6 +67,36 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+      # BEFORE setup-python, deliberately: this step deletes preinstalled
+      # toolchains, and anything it removed after setup-python would be gone
+      # from under the interpreter the job then depends on.
+      - name: Make room for the engine venvs
+        # A hindsight-api venv is a full torch install (CUDA wheels included —
+        # the engine forces CPU at runtime but pip still pulls them) plus the
+        # bundled BGE embedder, and the gate holds FOUR of them at once: per
+        # engine dir the pass keeps the superseded venv (.venv.old-* on the
+        # upgrade leg, .venv.failed-* on the rollback leg) beside the live one.
+        # ubuntu-latest's root volume does not fit that. So drop the
+        # preinstalled toolchains nothing here uses, and put pytest's tmp tree
+        # on the runner's large scratch disk. `df` output is the receipt when
+        # a future engine release outgrows even this.
+        #
+        # AGENT_TOOLSDIRECTORY is NOT in the delete list: on hosted Ubuntu it
+        # is /opt/hostedtoolcache, which is exactly where setup-python lays the
+        # interpreter down. Removing it would either destroy the job's own
+        # Python or force a needless re-download.
+        #
+        # /mnt/gate (the PARENT) is what gets chowned, not just the basetemp:
+        # pytest's TempPathFactory rm_rf()s the --basetemp path and re-mkdir()s
+        # it, which needs write on its parent. Chowning only the leaf leaves
+        # root-owned /mnt as the parent and the run dies with PermissionError.
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost || true
+          sudo mkdir -p /mnt/gate/tmp
+          sudo chown -R "$(id -u):$(id -g)" /mnt/gate
+          df -h / /mnt
       - uses: actions/setup-python@v6
         with:
           # Inside engine_upgrade.PY_MIN_MINOR..PY_MAX_MINOR (3.11-3.13), and
@@ -79,25 +109,8 @@ jobs:
       - name: Install
         # Same --frozen/--python posture as ci.yml's python job.
         run: uv sync --frozen --extra dev --python "$(which python)"
-      - name: Make room for the engine venvs
-        # A hindsight-api venv is a full torch install (CUDA wheels included —
-        # the engine forces CPU at runtime but pip still pulls them) plus the
-        # bundled BGE embedder, and the gate holds FOUR of them at once: per
-        # engine dir the pass keeps the superseded venv (.venv.old-* on the
-        # upgrade leg, .venv.failed-* on the rollback leg) beside the live one.
-        # ubuntu-latest's root volume does not fit that. So drop the
-        # preinstalled toolchains nothing here uses, and put pytest's tmp tree
-        # on the runner's large scratch disk. `df` output is the receipt when
-        # a future engine release outgrows even this.
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
-          sudo mkdir -p /mnt/gate-tmp
-          sudo chown "$(id -u):$(id -g)" /mnt/gate-tmp
-          df -h / /mnt
       - name: upgrade / rollback / contract gate
         env:
           HAL0_ENGINE_GATE: "1"
           HAL0_GATE_OLD_PIN: ${{ needs.detect.outputs.old_pin }}
-        run: uv run pytest tests/memory/test_engine_gate.py -v --basetemp=/mnt/gate-tmp
+        run: uv run pytest tests/memory/test_engine_gate.py -v --basetemp=/mnt/gate/tmp
