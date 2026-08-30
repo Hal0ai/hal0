@@ -875,6 +875,25 @@ class SlotConfig(BaseModel):
             data["extra"] = extra
         return data
 
+    @field_validator("binary", mode="before")
+    @classmethod
+    def _binary_alias_fold(cls, v: Any) -> Any:
+        """Heal legacy runner keys (collapse spec §2) — read-side only.
+
+        Disk TOML is never rewritten; the canonical key is what the rest of
+        the system (fit-check, launch, UI payload) sees, and the next
+        operator Save persists it naturally. Unknown keys pass through —
+        the drawer's out-of-vocab option owns that surface.
+        """
+        if not isinstance(v, str) or not v:
+            return v
+        from hal0.runners import canonical_runner_key
+
+        canon = canonical_runner_key(v)
+        if canon != v:
+            log.warning("slot_config.binary_alias key=%s canonical=%s", v, canon)
+        return canon
+
     @field_validator("name")
     @classmethod
     def name_valid(cls, v: str) -> str:
@@ -2202,7 +2221,7 @@ class SlotsConfig(BaseModel):
         description=(
             "Per-runner-family operator default-image overrides "
             "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
-            "family keys (rocmfpx, vulkanfpx, cuda, cpu, flm, kokoro, "
+            "family keys (rocmfpx, cuda, cpu, flm, kokoro, "
             "moonshine, qwen3tts, comfyui); values are full image refs "
             "(e.g. 'ghcr.io/hal0ai/hal0-combined:0824'). A family listed "
             "here launches that ref instead of the release-baked default "
@@ -2233,12 +2252,18 @@ class SlotsConfig(BaseModel):
             return {}
         if not isinstance(v, dict):
             return v  # let pydantic's dict[str, str] coercion produce the error
-        from hal0.runners import RUNNER_IMAGES
+        from hal0.runners import RUNNER_IMAGES, canonical_runner_key
 
         cleaned: dict[str, Any] = {}
         for key, ref in v.items():
             if ref is None:
                 continue  # explicit null = clear this family's override
+            canon = canonical_runner_key(key)
+            if canon != key:
+                log.warning("slots.default_images_alias key=%s canonical=%s", key, canon)
+                key = canon
+            if key in cleaned:
+                continue  # canonical entry (or first writer) wins
             if key not in RUNNER_IMAGES:
                 raise ValueError(
                     f"[slots].default_images key {key!r} is not a known runner "
