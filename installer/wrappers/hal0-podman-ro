@@ -265,11 +265,37 @@ case "$cmd" in
     printf 'hal0-slot-%s\n' "$1"
     ;;
 
+  images-digests)          # local ref+digest set (root's image store)
+    [[ $# -eq 0 ]] || die "images-digests takes no arguments"
+    require_podman
+    run_podman images --format '{{.Repository}}:{{.Tag}} {{.Digest}}'
+    (( PODMAN_RC == 0 )) || podman_failed "podman images failed" "$PODMAN_RC"
+    printf '%s\n' "$PODMAN_OUT"
+    ;;
+
+  image-digest)            # arg: image ref -> first RepoDigest, or nothing
+    [[ $# -eq 1 ]] || die "image-digest takes exactly one argument"
+    validate_image_ref "$1"
+    require_podman
+    run_podman image exists -- "$1"
+    case "$PODMAN_RC" in
+      0) ;;
+      1) exit 0 ;;   # not in root's store — a real negative answer
+      *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
+    esac
+    ref="$1"
+    run_podman image inspect --format '{{index .RepoDigests 0}}' -- "$ref"
+    (( PODMAN_RC == 0 )) || podman_failed "podman image inspect failed" "$PODMAN_RC"
+    printf '%s\n' "$PODMAN_OUT"
+    ;;
+
   help|"")
     cat <<EOF
 usage: hal0-podman-ro <command> [arg]
   images                     podman images --format {{.Repository}}   (root's image store)
+  images-digests             podman images --format {{.Repository}}:{{.Tag}} {{.Digest}}   (root's store)
   image-exists <ref>         "present" | "missing" for a validated image ref
+  image-digest <ref>         first RepoDigest of a validated image ref; EMPTY = not in root's store
   image-user <ref>           the image's configured USER; EMPTY means either
                              "no USER declared" (runs as root) or "not in
                              root's store yet" — both map to root caller-side

@@ -174,7 +174,9 @@ def test_help_lists_every_verb() -> None:
     assert proc.returncode == 0, proc.stderr
     for verb in (
         "images",
+        "images-digests",
         "image-exists",
+        "image-digest",
         "image-user",
         "container-image",
         "container-argv",
@@ -184,6 +186,12 @@ def test_help_lists_every_verb() -> None:
         assert verb in proc.stdout, f"{verb} missing from usage"
 
 
+def test_help_lists_new_verbs() -> None:
+    proc = _run("help")
+    assert proc.returncode == 0, proc.stderr
+    assert "images-digests" in proc.stdout and "image-digest" in proc.stdout
+
+
 def test_unknown_verb_is_rejected() -> None:
     proc = _run("rm")
     assert proc.returncode == 64
@@ -191,10 +199,10 @@ def test_unknown_verb_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+    "verb", ["image-exists", "image-digest", "image-user", "container-image", "container-argv"]
 )
 def test_write_verbs_are_not_reachable(verb: str) -> None:
-    """The seam stays READ-ONLY: no verb spells a mutation, and the three
+    """The seam stays READ-ONLY: no verb spells a mutation, and the
     argument-taking verbs refuse a second argv word outright (so a validated
     operand can never be followed by a smuggled one)."""
     proc = _run(verb, "alpine", "extra")
@@ -203,10 +211,15 @@ def test_write_verbs_are_not_reachable(verb: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "verb", ["image-exists", "image-user", "container-image", "container-argv"]
+    "verb", ["image-exists", "image-digest", "image-user", "container-image", "container-argv"]
 )
 def test_argument_verbs_require_an_argument(verb: str) -> None:
     proc = _run(verb)
+    assert proc.returncode == 64
+
+
+def test_images_digests_takes_no_args() -> None:
+    proc = _run("images-digests", "extra")
     assert proc.returncode == 64
 
 
@@ -241,6 +254,19 @@ def test_malicious_ref_is_rejected_by_the_real_verb_too(ref: str) -> None:
     """The validator runs BEFORE podman is even located, so this holds on a
     box with no podman installed (CI) as well as on a provisioned one."""
     proc = _run("image-exists", ref)
+    assert proc.returncode == 64, f"ACCEPTED {ref!r} (rc={proc.returncode})"
+
+
+def test_image_digest_rejects_bad_ref() -> None:
+    proc = _run("image-digest", "bad ref with spaces")
+    assert proc.returncode == 64
+
+
+@pytest.mark.parametrize("ref", MALICIOUS_REFS)
+def test_image_digest_rejects_every_malicious_ref(ref: str) -> None:
+    """Same validator, same boundary as image-exists: runs before podman is
+    even located, so this holds without podman installed too."""
+    proc = _run("image-digest", ref)
     assert proc.returncode == 64, f"ACCEPTED {ref!r} (rc={proc.returncode})"
 
 
