@@ -703,7 +703,7 @@ function RunnerCard({ image }) {
               data-testid="ri-pull"
               onClick={onPull}
             >
-              {Icons.download} {image.local_path ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span>
+              {Icons.download} {image.downloaded ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span>
             </button>
             {family && (
               <button

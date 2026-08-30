@@ -811,3 +811,56 @@ describe('RunnerImagesView per-tag delete (Task 5)', () => {
     act(() => { root.unmount() })
   })
 })
+
+// Pull button label — store truth, not the retired `local_path` marker.
+// `local_path` is a pre-v3 field the catalogue can leave stale (or unset
+// even after a real pull, on a store-read miss); `image.downloaded` is the
+// v3 enriched field (`store_state === "present"`, or the `local_path`
+// fallback ONLY when the store itself couldn't be read) — the button must
+// key off that, not the raw marker.
+describe('RunnerImagesView pull button label (store truth, #polish item D)', () => {
+  afterEach(() => {
+    imagesOverride.current = null
+    document.body.innerHTML = ''
+  })
+
+  function mount() {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+    return { host, root }
+  }
+
+  it('reads "Re-pull" from image.downloaded even when local_path is unset', () => {
+    imagesOverride.current = [{ ...PULL_ROW, local_path: null, downloaded: true }]
+    const { host, root } = mount()
+
+    const btn = host.querySelector('[data-testid="ri-pull"]') as HTMLButtonElement
+    expect(btn.textContent).toContain('Re-pull')
+
+    act(() => { root.unmount() })
+  })
+
+  it('reads "Pull" from image.downloaded even when local_path is a stale marker', () => {
+    imagesOverride.current = [
+      { ...PULL_ROW, local_path: '/var/lib/hal0/runner-images/stale.json', downloaded: false },
+    ]
+    const { host, root } = mount()
+
+    const btn = host.querySelector('[data-testid="ri-pull"]') as HTMLButtonElement
+    expect(btn.textContent).toContain('Pull')
+    expect(btn.textContent).not.toContain('Re-pull')
+
+    act(() => { root.unmount() })
+  })
+})

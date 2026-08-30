@@ -345,6 +345,79 @@ async def test_pull_image_stream_rootful_nonzero_exit_is_failed(monkeypatch) -> 
     assert events[-1] == {"state": "failed", "error": "pull exited with code 1"}
 
 
+# ── pull_image_stream_rootful: grant-denied rc-1 message enrichment ────────
+
+
+_GRANT_DENIED_MESSAGE = (
+    "write seam grant denied or misconfigured — check /etc/sudoers.d/hal0-podman-rw "
+    "(pull exited with code 1)"
+)
+
+
+async def test_pull_image_stream_rootful_rc1_no_events_yields_grant_denied(monkeypatch) -> None:
+    """``sudo -n`` denies before the child even runs: no stdout at all, rc 1.
+    That is the "no events yielded" shape of a grant-denied failure —
+    enrich the message so an operator isn't left staring at a bare
+    ``pull exited with code 1``."""
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc([], 1)
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    events = [e async for e in pull_image_stream_rootful(_REF)]
+
+    assert events == [{"state": "failed", "error": _GRANT_DENIED_MESSAGE}]
+
+
+async def test_pull_image_stream_rootful_rc1_sudo_error_line_yields_grant_denied(
+    monkeypatch,
+) -> None:
+    """``sudo -n`` prints its own diagnostic to stderr (merged into stdout
+    here) before exiting 1 — every yielded line is sudo-shaped, so this is
+    still honestly "no real pull activity happened", just enriched."""
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc([b"sudo: a password is required\n"], 1)
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    events = [e async for e in pull_image_stream_rootful(_REF)]
+
+    assert events[-1] == {"state": "failed", "error": _GRANT_DENIED_MESSAGE}
+
+
+async def test_pull_image_stream_rootful_rc1_after_real_progress_stays_bare(monkeypatch) -> None:
+    """The pull actually started (a real podman progress line came through)
+    before something killed it at rc 1 — that is NOT a grant-denial shape,
+    so the bare exit-code message stays honest rather than blaming sudo for
+    a failure that happened well past the sudo gate."""
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc([b"Pulling fs layer\n"], 1)
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    events = [e async for e in pull_image_stream_rootful(_REF)]
+
+    assert events[-1] == {"state": "failed", "error": "pull exited with code 1"}
+
+
+async def test_pull_image_stream_rootful_rc2_stays_bare_even_with_no_events(monkeypatch) -> None:
+    """The enrichment is scoped to rc 1 (the sudo/grant exit code) only —
+    any other nonzero exit keeps the plain message, even with zero
+    events yielded."""
+
+    async def _fake_create(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc([], 2)
+
+    monkeypatch.setattr(podman_mutate.asyncio, "create_subprocess_exec", _fake_create)
+
+    events = [e async for e in pull_image_stream_rootful(_REF)]
+
+    assert events == [{"state": "failed", "error": "pull exited with code 2"}]
+
+
 async def test_pull_image_stream_rootful_clean_eof_never_signals_process(monkeypatch) -> None:
     """Regression: a fully successful pull must not be torn down by the
     ``finally`` block. Before the fix, ``finally: proc.kill()`` fired

@@ -559,6 +559,82 @@ async def test_sync_persists_tags(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_fetches_headline_manifest_exactly_once(tmp_path: Path) -> None:
+    """Regression: :func:`probe_ghcr_package` must not double-fetch the
+    headline tag's manifest — once for the top-level digest/size
+    resolution, once more inside the per-tag ``available_tags`` loop. The
+    loop's ``t == resolved_tag`` branch reuses the already-fetched result
+    instead of re-probing (see the "Reuse the headline manifest result"
+    comment in the module) — this pins that at the request-count level,
+    not just the output shape ``test_probe_resolves_digest_per_tag`` already
+    covers, so a regression that re-fetches the same ref (same output,
+    doubled GHCR traffic) would still be caught here."""
+    from hal0.registry.runner_image_sync import probe_ghcr_package
+
+    manifest_refs: list[str] = []
+    base_handler = _route_handler(images_json=_IMAGES_JSON, tags=["0826", "0824"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/manifests/" in url:
+            _, _, ref = url.partition("/manifests/")
+            manifest_refs.append(ref)
+        return base_handler(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await probe_ghcr_package("hal0ai/hal0-toolbox-cpu", client=client, tag="0826")
+    finally:
+        await client.aclose()
+
+    # "0826" is both the pinned headline AND a member of available_tags —
+    # exactly the case the reuse branch exists for.
+    assert manifest_refs.count("0826") == 1
+    assert manifest_refs.count("0824") == 1
+
+
+@pytest.mark.asyncio
+async def test_second_sync_probe_failure_retains_existing_tag_rows(tmp_path: Path) -> None:
+    """Regression: a package that synced successfully once, then FAILS its
+    probe on a second sync run (e.g. a transient GHCR 500 on the token
+    endpoint), must not lose its previously-persisted ``runner_image_tag``
+    rows. ``sync_runner_images``'s per-package loop ``continue``s straight
+    past ``store.upsert``/``store.set_tags`` on a probe exception — this
+    pins that the existing tag rows survive that skip untouched, store-side,
+    not just that the id stays in ``probe_errors``."""
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    good_handler = _route_handler(images_json=_IMAGES_JSON, tags=["0826", "0824"])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(good_handler))
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu_before = store.get("cpu")
+    assert cpu_before is not None
+    assert [t.tag for t in cpu_before.tags] == ["latest", "0826", "0824"]
+
+    failing_handler = _route_handler(
+        images_json=_IMAGES_JSON,
+        ghcr_fail={"hal0ai/hal0-toolbox-cpu"},
+        tags=["0826", "0824"],
+    )
+    client2 = httpx.AsyncClient(transport=httpx.MockTransport(failing_handler))
+    try:
+        result2 = await sync_runner_images(store, client=client2)
+    finally:
+        await client2.aclose()
+
+    assert "cpu" in result2.probe_errors
+    cpu_after = store.get("cpu")
+    assert cpu_after is not None
+    assert [(t.tag, t.digest) for t in cpu_after.tags] == [
+        (t.tag, t.digest) for t in cpu_before.tags
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sync_result_rows_carry_fresh_tags_on_first_sync(tmp_path: Path) -> None:
     """The SyncResult rows returned by sync_runner_images must already carry
     the freshly-probed tags — not the tag table's state from BEFORE this

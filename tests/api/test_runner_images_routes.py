@@ -358,6 +358,59 @@ class TestEnrichRow:
         assert row["in_use_by"] == ["agent", "utility"]
         assert row["is_default"] is None
 
+    def test_specialties_defaults_to_empty_list_when_omitted(self) -> None:
+        """``specialties`` is an opt-in kwarg (default ``{}``) — every
+        existing ``enrich_row`` call site in this file predates it and must
+        keep working unchanged."""
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-combined", "0824"),
+            defaults={},
+            slot_usage={},
+            local=None,
+        )
+        assert row["specialties"] == []
+
+    def test_specialties_matched_by_repo(self) -> None:
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-promptforge", "v2.3-qwen38"),
+            defaults={},
+            slot_usage={},
+            local=None,
+            specialties={"ghcr.io/hal0ai/hal0-promptforge": ["promptforge"]},
+        )
+        assert row["specialties"] == ["promptforge"]
+
+
+class TestSpecialtiesRoute:
+    """``specialties`` is the catalogue-v3 field the UI's ``groupRows``
+    (``ui/src/dash/runner-images.jsx``) reads to route a row into the
+    "Specialized" group — sourced from :data:`hal0.runners.RUNNER_IMAGES`'s
+    ``supports.specialties``, matched by repo (any tag), and hoisted once
+    per request (:func:`hal0.api.routes.runner_images._repo_specialties`)."""
+
+    def test_promptforge_row_carries_specialties_rocmfpx_row_does_not(
+        self, client: TestClient
+    ) -> None:
+        from hal0.api.routes.runner_images import _repo_of
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE, DEFAULT_ROCMFPX_IMAGE
+        from hal0.registry.runner_image import RunnerImage
+
+        store = client.app.state.runner_image_registry
+        pf_repo = _repo_of(DEFAULT_PROMPTFORGE_IMAGE)
+        rocm_repo = _repo_of(DEFAULT_ROCMFPX_IMAGE)
+        store.upsert(RunnerImage(id="pf", image=pf_repo, tag="v2.3-qwen38"))
+        store.upsert(RunnerImage(id="rocm", image=rocm_repo, tag="0826"))
+
+        rows = client.get("/api/runner-images").json()["images"]
+        pf_row = next(r for r in rows if r["id"] == "pf")
+        rocm_row = next(r for r in rows if r["id"] == "rocm")
+        assert pf_row["specialties"] == ["promptforge"]
+        assert rocm_row["specialties"] == []
+
 
 # ── per-tag pull (catalogue v2 follow-up to #2043/#2044) ────────────────────
 
@@ -1530,6 +1583,72 @@ class TestDeleteRunnerImageTag:
         rec = next(
             r for r in activity["records"] if r["target"] == "ghcr.io/hal0ai/hal0-combined:0824"
         )
+        assert rec["outcome"] == "error"
+
+    def _records(self, client: TestClient) -> list[dict[str, Any]]:
+        return client.get(
+            "/api/activity", params={"category": "runner_image", "action": "runner_image.rm"}
+        ).json()["records"]
+
+    def test_unknown_image_404_is_audited(self, client: TestClient) -> None:
+        """A refused delete on a completely unknown id is a real user-visible
+        outcome too — it must leave an audit row, not just the 404 response.
+        No ``image.image`` is known yet at this point, so the target falls
+        back to ``<image_id>:<tag>``."""
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 404
+
+        rec = next(r for r in self._records(client) if r["target"] == f"{self.IMAGE_ID}:0824")
+        assert rec["outcome"] == "error"
+
+    def test_unknown_tag_404_is_audited(self, client: TestClient) -> None:
+        self._seed(client)
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/9999")
+        assert resp.status_code == 404
+
+        rec = next(r for r in self._records(client) if r["target"] == f"{self.IMAGE_ID}:9999")
+        assert rec["outcome"] == "error"
+
+    def test_app_level_in_use_guard_409_is_audited(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-check application-level in-use guard (fires BEFORE the
+        seam is ever called) must also leave an audit row — this used to run
+        entirely outside the ``record_action`` block."""
+        self._seed(client)
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images._slot_image_usage",
+            lambda: {"brain": "ghcr.io/hal0ai/hal0-combined:0824"},
+        )
+
+        def _boom(ref: str):
+            raise AssertionError("seam must not be reached when app-level guard fires")
+
+        monkeypatch.setattr("hal0.providers.podman_mutate.remove_image", _boom)
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+
+        rec = next(
+            r for r in self._records(client) if r["target"] == "ghcr.io/hal0ai/hal0-combined:0824"
+        )
+        assert rec["outcome"] == "error"
+
+    def test_pull_in_progress_409_is_audited(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.registry.runner_pull import make_job
+
+        self._seed(client)
+        job = make_job(self.IMAGE_ID, "ghcr.io/hal0ai/hal0-combined:0824", tag="0824")
+        job.state = "running"
+        client.app.state.runner_image_pull_jobs[self.IMAGE_ID] = job
+
+        resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
+        assert resp.status_code == 409
+
+        rec = next(r for r in self._records(client) if r["target"] == f"{self.IMAGE_ID}:0824")
         assert rec["outcome"] == "error"
 
     # ── route ordering ───────────────────────────────────────────────────

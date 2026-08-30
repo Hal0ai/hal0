@@ -119,6 +119,7 @@ def enrich_row(
     defaults: Mapping[str, tuple[str, str]],
     slot_usage: Mapping[str, str],
     local: LocalImagesDigests | None,
+    specialties: Mapping[str, list[str]] = {},
 ) -> dict[str, Any]:
     """One catalogue row + the derived catalogue-v2/v3 contract fields. Pure.
 
@@ -142,8 +143,17 @@ def enrich_row(
     (``None`` when neither store answered) — store-truth (v3): ``store_state``
     ("present"/"missing"/"unknown"), per-tag ``downloaded`` (``None`` when
     the store is unknown), ``store_context``, and ``badges``.
+
+    ``specialties`` maps repo (``_repo_of`` shape) -> the sorted union of
+    every :data:`hal0.runners.RUNNER_IMAGES` entry's
+    ``supports.specialties`` whose image resolves to that repo (see
+    :func:`_repo_specialties`, hoisted once per request beside ``defaults``)
+    — the catalogue-v3 field the UI's ``groupRows`` (``runner-images.jsx``)
+    reads to route a row into the "Specialized" group. ``[]`` for a repo no
+    specialty runner claims — every plain toolbox image included.
     """
     row = _image_to_dict(image)
+    row["specialties"] = list(specialties.get(image.image, []))
     is_default: dict[str, str] | None = None
     for family, (ref, source) in defaults.items():
         if _repo_of(ref) == image.image:
@@ -181,6 +191,30 @@ def enrich_row(
     row["store_context"] = local.context if local else None
     row["badges"] = _tag_badges(image)
     return row
+
+
+def _repo_specialties() -> dict[str, list[str]]:
+    """Repo (``_repo_of`` shape) -> sorted union of every
+    :data:`hal0.runners.RUNNER_IMAGES` entry's ``supports.specialties``
+    whose ``runner.image`` resolves to that repo.
+
+    Computed ONCE per request (hoisted beside ``defaults``/``slot_usage`` in
+    :func:`_request_context`) — this is a pure fold over the in-process
+    ``RUNNER_IMAGES`` registry, no I/O, but the union-per-repo shape is worth
+    computing once rather than per row. A repo shared by more than one
+    runner key (e.g. ``rocmfpx``/``vulkanfpx`` both resolving to
+    ``DEFAULT_ROCMFPX_IMAGE``, neither of which carries a specialty today)
+    unions cleanly to the same result either way.
+    """
+    from hal0.runners import RUNNER_IMAGES
+
+    out: dict[str, set[str]] = {}
+    for runner in RUNNER_IMAGES.values():
+        specialties = runner.supports.specialties
+        if not specialties:
+            continue
+        out.setdefault(_repo_of(runner.image), set()).update(specialties)
+    return {repo: sorted(vals) for repo, vals in out.items()}
 
 
 def _effective_defaults() -> dict[str, tuple[str, str]]:
@@ -470,15 +504,18 @@ async def _restart_slot(name: str, request: Request) -> None:
 
 
 def _request_context() -> tuple[
-    dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None
+    dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None, dict[str, list[str]]
 ]:
-    """One ``defaults``/``slot_usage``/``local`` triple, shared by every row
-    AND the families payload for a single request — computed once each
-    (``_local_store`` is explicitly "one store read per request")."""
+    """One ``defaults``/``slot_usage``/``local``/``specialties`` quadruple,
+    shared by every row AND the families payload for a single request —
+    computed once each (``_local_store`` is explicitly "one store read per
+    request"; ``_repo_specialties`` is a pure in-process fold, hoisted here
+    for the same one-per-request discipline)."""
     defaults = _effective_defaults()
     slot_usage = _slot_image_usage()
     local = _local_store()
-    return defaults, slot_usage, local
+    specialties = _repo_specialties()
+    return defaults, slot_usage, local, specialties
 
 
 def _enrich_with(
@@ -486,21 +523,27 @@ def _enrich_with(
     defaults: Mapping[str, tuple[str, str]],
     slot_usage: Mapping[str, str],
     local: LocalImagesDigests | None,
+    specialties: Mapping[str, list[str]] = {},
 ) -> list[dict[str, Any]]:
     """Enrich every row against one already-computed request context.
 
     The shared tail of ``_enriched``, ``list_runner_images``, and
     ``sync_runner_images_route`` — each of the latter two already has its
-    own ``defaults``/``slot_usage``/``local`` on hand (to also feed
-    ``_safe_families_payload``), so this factors out the row-enrichment
-    list comprehension instead of repeating it three ways.
+    own ``defaults``/``slot_usage``/``local``/``specialties`` on hand (to
+    also feed ``_safe_families_payload``), so this factors out the
+    row-enrichment list comprehension instead of repeating it three ways.
     """
-    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+    return [
+        enrich_row(
+            i, defaults=defaults, slot_usage=slot_usage, local=local, specialties=specialties
+        )
+        for i in images
+    ]
 
 
 def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
-    defaults, slot_usage, local = _request_context()
-    return _enrich_with(images, defaults, slot_usage, local)
+    defaults, slot_usage, local, specialties = _request_context()
+    return _enrich_with(images, defaults, slot_usage, local, specialties)
 
 
 def _safe_families_payload(
@@ -525,8 +568,8 @@ async def list_runner_images(request: Request) -> dict[str, Any]:
     plus the launch-truth ``families`` summary (catalogue v3, task 9)."""
     store = request.app.state.runner_image_registry
     images = store.list()
-    defaults, slot_usage, local = _request_context()
-    rows = _enrich_with(images, defaults, slot_usage, local)
+    defaults, slot_usage, local, specialties = _request_context()
+    rows = _enrich_with(images, defaults, slot_usage, local, specialties)
     return {
         "images": rows,
         "families": _safe_families_payload(images, defaults, slot_usage, local),
@@ -575,8 +618,8 @@ async def sync_runner_images_route(request: Request) -> dict[str, Any]:
     """
     store = request.app.state.runner_image_registry
     result = await sync_runner_images(store)
-    defaults, slot_usage, local = _request_context()
-    rows = _enrich_with(result.images, defaults, slot_usage, local)
+    defaults, slot_usage, local, specialties = _request_context()
+    rows = _enrich_with(result.images, defaults, slot_usage, local, specialties)
     return {
         "images": rows,
         "families": _safe_families_payload(result.images, defaults, slot_usage, local),
@@ -699,53 +742,67 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
          update the catalogue via ``store.remove_tag`` and respond 200.
 
     Audited the same way ``restart-affected`` is: ``record_action`` with
-    category ``"runner_image"``, action ``"runner_image.rm"``, target the
-    ``image:tag`` ref — a raised 409/502 inside the block is recorded
-    ``outcome="error"`` and re-raised (``hal0.activity.audit_action``'s
-    confirmation guarantee), so the audit trail is honest either way.
+    category ``"runner_image"``, action ``"runner_image.rm"`` — but here
+    ``record_action`` wraps the WHOLE handler, pre-checks included, not
+    just the seam call. A refused delete (any of the five guards above) is
+    a real user-visible outcome and belongs in the trail exactly as much as
+    a successful one: ``hal0.activity.audit_action`` records
+    ``outcome="error"`` on any raised exception INSIDE the block (then
+    re-raises, so the normal error envelope is untouched) — that includes
+    an ``Hal0Error`` like ``NotFound``/``Conflict`` just as much as a bug,
+    which is exactly the behaviour this route now leans on for guards 1-4.
+    ``target`` starts as ``<image_id>:<tag>`` (the only ref this handler
+    can name before the catalogue lookup resolves ``image.image``) and is
+    upgraded to the real ``image:tag`` ref the moment ``image`` is known,
+    same target shape either way once past guard 1.
     """
-    store = request.app.state.runner_image_registry
-    image = store.get(image_id)
-    if image is None:
-        raise NotFound(
-            f"runner image {image_id!r} not in catalogue",
-            details={"image_id": image_id},
-            code="runner_image.not_found",
-        )
-    tag_known = (
-        tag == image.tag or any(t.tag == tag for t in image.tags) or tag in image.available_tags
-    )
-    if not tag_known:
-        raise NotFound(
-            f"tag {tag!r} not catalogued for {image_id!r}",
-            details={"image_id": image_id, "tag": tag},
-            code="runner_image.tag_not_found",
-        )
-
-    jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
-    job = jobs.get(image_id)
-    if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
-        raise Conflict(
-            f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
-            details={"image_id": image_id, "tag": tag},
-            code="runner_image.pull_in_progress",
-        )
-
-    ref = f"{image.image}:{tag}"
-    in_use_slots = _tag_in_use_by(image, tag, _slot_image_usage())
-    if in_use_slots:
-        raise Conflict(
-            f"runner image tag {ref!r} is in use",
-            details={"image_id": image_id, "tag": tag, "slots": in_use_slots},
-            code="runner_image.tag_in_use",
-        )
-
     from hal0.api._audit import record_action
     from hal0.providers import podman_mutate
 
+    store = request.app.state.runner_image_registry
+
     async with record_action(
-        request, category="runner_image", action="runner_image.rm", target=ref
+        request,
+        category="runner_image",
+        action="runner_image.rm",
+        target=f"{image_id}:{tag}",
     ) as rec:
+        image = store.get(image_id)
+        if image is None:
+            raise NotFound(
+                f"runner image {image_id!r} not in catalogue",
+                details={"image_id": image_id},
+                code="runner_image.not_found",
+            )
+        tag_known = (
+            tag == image.tag or any(t.tag == tag for t in image.tags) or tag in image.available_tags
+        )
+        if not tag_known:
+            raise NotFound(
+                f"tag {tag!r} not catalogued for {image_id!r}",
+                details={"image_id": image_id, "tag": tag},
+                code="runner_image.tag_not_found",
+            )
+
+        jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
+        job = jobs.get(image_id)
+        if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
+            raise Conflict(
+                f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
+                details={"image_id": image_id, "tag": tag},
+                code="runner_image.pull_in_progress",
+            )
+
+        ref = f"{image.image}:{tag}"
+        rec.target = ref
+        in_use_slots = _tag_in_use_by(image, tag, _slot_image_usage())
+        if in_use_slots:
+            raise Conflict(
+                f"runner image tag {ref!r} is in use",
+                details={"image_id": image_id, "tag": tag, "slots": in_use_slots},
+                code="runner_image.tag_in_use",
+            )
+
         outcome, reason = await asyncio.to_thread(podman_mutate.remove_image, ref)
         rec.after = {"outcome": outcome}
         if outcome == "in-use":

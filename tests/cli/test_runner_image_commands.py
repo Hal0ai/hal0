@@ -18,7 +18,8 @@ from typer.testing import CliRunner
 
 from hal0.cli.runner_image_commands import app as runner_images_app
 from hal0.providers import podman_mutate
-from hal0.registry.runner_image import RunnerImage
+from hal0.providers.podman_introspect import LocalImagesDigests
+from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_store import RunnerImageStore
 
 runner = CliRunner()
@@ -63,6 +64,47 @@ class TestLs:
 
         assert result.exit_code == 0, result.output
         assert "no runner images" in result.output.lower()
+
+    def test_digest_match_shows_present_even_when_ref_differs(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Store state must be derived from the row's per-tag digest facts
+        (``image.tags``, the ``runner_image_tag`` rows), not just an exact
+        ``image:tag`` ref match — the same digest-first rule
+        ``hal0.api.routes.runner_images.enrich_row`` uses (v3 store-truth).
+        Here the headline tag's own digest matches a LOCAL ref filed under a
+        completely different name, which an exact-ref-only check (the old
+        CLI behaviour, keyed off ``image.digest`` alone) would miss and
+        wrongly report "missing"."""
+        store.upsert(_image())
+        store.set_tags("x/a", [RunnerImageTag(tag="0826", digest="sha256:" + "a" * 64)])
+        monkeypatch.setattr(
+            "hal0.providers.podman_introspect.images_digests",
+            lambda: LocalImagesDigests(
+                refs={"ghcr.io/x/a:renamed": "sha256:" + "a" * 64}, context="rootful"
+            ),
+        )
+
+        result = runner.invoke(runner_images_app, ["ls"])
+
+        assert result.exit_code == 0, result.output
+        assert "present" in result.output.lower()
+        assert "missing" not in result.output.lower()
+
+    def test_badges_column_shown_when_any_row_has_a_badge(self, store: RunnerImageStore) -> None:
+        """A ``Badges`` column appears (reusing the same schema constants
+        the API's ``_tag_badges`` reads) when at least one catalogued row's
+        headline tag matches one — here the promptforge candidate ref."""
+        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
+
+        image_repo, _, tag = DEFAULT_PROMPTFORGE_IMAGE.rpartition(":")
+        store.upsert(_image(id="pf", image=image_repo, tag=tag, available_tags=[tag]))
+
+        result = runner.invoke(runner_images_app, ["ls"])
+
+        assert result.exit_code == 0, result.output
+        assert "badges" in result.output.lower()
+        assert "candidate" in result.output.lower()
 
 
 class TestPull:
