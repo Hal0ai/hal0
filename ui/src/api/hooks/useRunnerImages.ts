@@ -152,6 +152,14 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
   const [line, setLine] = useState<string | null>(null)
   const [error, setError] = useState<RunnerPullSnapshot['error']>(null)
   const esRef = useRef<EventSource | null>(null)
+  // Generation counter: bumped whenever the "current job" changes identity
+  // (reset/start a new pull, or cancel the running one). The onerror
+  // reconcile GET below is async and can resolve after the job it was
+  // launched for is no longer current — a late "running" snapshot must not
+  // resurrect a cancelled job, and a stale job's late reconcile must not
+  // clobber a newer job's state (#2120 fix-round-1). Same epoch/abort-guard
+  // idiom as useActivity.ts's epochRef.
+  const genRef = useRef(0)
   const qc = useQueryClient()
 
   const closeStream = () => {
@@ -180,6 +188,7 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
 
   const attachStream = (id: string) => {
     closeStream()
+    const gen = genRef.current
     try {
       esRef.current = new EventSource(ENDPOINTS.runnerImagePullStream(id))
     } catch (e: any) {
@@ -206,6 +215,10 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
       ;(async () => {
         try {
           const status = await apiGet<any>(ENDPOINTS.runnerImagePullStatus(id))
+          // The job this reconcile was launched for may no longer be current
+          // (cancelled, reset, or superseded by a new start() while the GET
+          // was in flight) — a late response must not resurrect or clobber.
+          if (genRef.current !== gen) return
           if (status && typeof status === 'object') applyPayload(status)
         } catch {
           /* keep last known state; the pulls-list poll will refresh */
@@ -215,6 +228,7 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
   }
 
   const reset = () => {
+    genRef.current += 1
     closeStream()
     setImageId(null)
     setJobId(null)
@@ -251,6 +265,7 @@ export function useRunnerImagePullJob(): RunnerPullSnapshot {
     if (!imageId || !(state === 'queued' || state === 'running')) return
     try {
       await apiPost(ENDPOINTS.runnerImagePullCancel(imageId))
+      genRef.current += 1
       setState('cancelled')
       closeStream()
       qc.invalidateQueries({ queryKey: ['runner-images'] })
