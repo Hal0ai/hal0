@@ -45,9 +45,7 @@ class TestSubuidAllocation:
         assert re.search(r"grep -q '\^hal0:' /etc/subuid", install_sh_text)
         assert re.search(r"grep -q '\^hal0:' /etc/subgid", install_sh_text)
 
-    def test_range_start_respects_existing_allocations(
-        self, install_sh_text: str
-    ) -> None:
+    def test_range_start_respects_existing_allocations(self, install_sh_text: str) -> None:
         """The chosen start must be computed from every range already present
         in both files, not hardcoded — overlapping another user's range makes
         two accounts share host uids, which is exactly what the namespace is
@@ -56,9 +54,7 @@ class TestSubuidAllocation:
         assert "/etc/subuid /etc/subgid" in block
         assert re.search(r"_sub_end > SUB_START", block)
 
-    def test_fallback_append_matches_usermod_format(
-        self, install_sh_text: str
-    ) -> None:
+    def test_fallback_append_matches_usermod_format(self, install_sh_text: str) -> None:
         """shadow-utils without --add-subuids: the direct append must write
         the exact ``user:start:count`` triple usermod would."""
         assert re.search(
@@ -70,20 +66,14 @@ class TestSubuidAllocation:
             install_sh_text,
         )
 
-    def test_storage_migrate_runs_for_existing_installs(
-        self, install_sh_text: str
-    ) -> None:
+    def test_storage_migrate_runs_for_existing_installs(self, install_sh_text: str) -> None:
         """An already-initialized single-uid podman store errors on the next
         operation after the mapping changes; the installer must run the
         one-time ``podman system migrate`` as hal0 (warn-only — a fresh
         install has no storage and must not fail the platform gate)."""
-        assert re.search(
-            r"runuser -u hal0 -- podman system migrate", install_sh_text
-        )
+        assert re.search(r"runuser -u hal0 -- podman system migrate", install_sh_text)
 
-    def test_allocation_happens_in_the_system_user_step(
-        self, install_sh_text: str
-    ) -> None:
+    def test_allocation_happens_in_the_system_user_step(self, install_sh_text: str) -> None:
         """The range belongs with user creation (before any hal0-user podman
         touch), not bolted on after service start."""
         user_step = install_sh_text.index('ui_step "System user"')
