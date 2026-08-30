@@ -14,8 +14,11 @@
 
 import { useServices, useServiceAction, useMdnsAdvertise, useUnitLogs } from '@/api/hooks/useServices'
 import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
+import { useComponents, useComponentConverge } from '@/api/hooks/useComponents'
+import { useUpdateJob } from '@/api/hooks/useUpdates'
+import { componentForService, componentCell, RETRYABLE_STATUSES } from './components-pure'
 
-const { useState } = React
+const { useState, useEffect, useRef } = React
 
 // ── Inline SVG icons (16×16, 1.5px stroke — hal0 thin-line family) ───────────
 function SIc({ d, children, size = 14, sw = 1.5 }) {
@@ -73,6 +76,82 @@ function StatePill({ svc }) {
   )
 }
 
+// ── Component version cell + retry (Task 12, spec 2026-08-30 §4) ─────────────
+// Joins the Services page to GET /api/updates/components via componentForService
+// (services.jsx passes each row's matching component down by service_id).
+// Retry (POST .../converge) is offered ONLY on RETRYABLE_STATUSES — a pending
+// row never gets an update-now button, per spec §4's explicit decision that
+// convergence is scheduled server-side, not operator-triggered from a pending
+// state. A retry's job id is tracked with the same useUpdateJob poller the
+// self-update apply flow uses (same backend job map — see updater.py's
+// converge_component_route, which reuses _update_jobs()).
+const TONE_COLOR = {
+  ok: 'var(--ok)',
+  pending: 'var(--warn)',
+  failed: 'var(--err)',
+  muted: 'var(--fg-4)',
+}
+
+function useComponentRetry(component) {
+  const convergeMut = useComponentConverge()
+  const [jobId, setJobId] = useState(null)
+  const lastTerminalJobRef = useRef(null)
+  const { job, terminal } = useUpdateJob(jobId)
+
+  useEffect(() => {
+    if (!terminal || !job || lastTerminalJobRef.current === job.id) return
+    lastTerminalJobRef.current = job.id
+    const label = component?.name || component?.id || 'component'
+    if (job.state === 'applied') {
+      window.__hal0Toast && window.__hal0Toast(`${label} converged`, 'ok')
+    } else {
+      const detail = job.error || job.error_code || 'unknown'
+      window.__hal0Toast && window.__hal0Toast(`${label} retry failed: ${detail}`, 'err')
+    }
+  }, [terminal, job, component])
+
+  const jobBusy = !!(job && (job.state === 'queued' || job.state === 'running'))
+
+  const retry = () => {
+    if (!component) return
+    convergeMut.mutate(component.id, {
+      onSuccess: (snap) => setJobId(snap?.id || null),
+      onError: (err) => {
+        window.__hal0Toast && window.__hal0Toast(`Retry failed to start — ${err?.message || 'see logs'}`, 'err')
+      },
+    })
+  }
+
+  return { retry, jobBusy, starting: convergeMut.isPending }
+}
+
+function ComponentVersionLine({ component }) {
+  const { retry, jobBusy, starting } = useComponentRetry(component)
+  const cell = componentCell(component)
+  const retryable = RETRYABLE_STATUSES.includes(component.status)
+
+  return (
+    <div className="svcp-detail" data-testid={`svcp-component-${component.id}`}>
+      <span className="mono" style={{ color: TONE_COLOR[cell.tone] }}>{cell.label}</span>
+      {retryable && (
+        <button
+          className="btn ghost sm svcp-act"
+          data-testid={`svcp-component-retry-${component.id}`}
+          disabled={starting || jobBusy}
+          onClick={retry}
+          style={{ marginLeft: 8 }}
+        >{jobBusy ? 'Retrying…' : 'Retry'}</button>
+      )}
+      {retryable && (component.error || component.remedy) && (
+        <div className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 2 }}>
+          {component.error && <div style={{ color: 'var(--err)' }}>{component.error}</div>}
+          {component.remedy && <div>{component.remedy}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Logs drawer (journald tail via /api/logs?unit=…) ─────────────────────────
 function LogsDrawer({ unit, open }) {
   const q = useUnitLogs(unit, open)
@@ -127,7 +206,7 @@ function ActionButtons({ svc, onAction, busy }) {
 }
 
 // ── One service card ──────────────────────────────────────────────────────────
-function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable }) {
+function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, component }) {
   const [logsOpen, setLogsOpen] = useState(false)
   const [queueOpen, setQueueOpen] = useState(false)
   const busy = busyId === svc.id
@@ -155,6 +234,7 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable }) {
 
       <div className="svcp-desc">{svc.description}</div>
       <div className="svcp-detail">{svc.detail}{svc.stat ? ` · ${svc.stat.value} ${svc.stat.label}` : ''}</div>
+      {component && <ComponentVersionLine component={component} />}
 
       <div className="svcp-meta mono">
         {svc.unit && <span className="svcp-meta-row">unit <b>{svc.unit}</b> · {svc.unit_state?.active_state ?? 'unknown'}{svc.unit_state?.unit_file_state && svc.unit_state.unit_file_state !== 'unknown' ? ` · ${svc.unit_state.unit_file_state}` : ''}</span>}
@@ -240,6 +320,50 @@ function DiscoveryCard({ mdns, services }) {
   )
 }
 
+// ── Runner images card (Task 12) ──────────────────────────────────────────────
+// `runner-images` is a component row with no `service_id` (it isn't a
+// systemd-managed service — see hal0.components.registry) so it never joins
+// to a ServiceCard. Its `detail[]` (per-runner-key resolved image, from
+// converge_runner_images) is rendered here instead, with the same retry
+// treatment as a per-service version cell.
+function RunnerImagesCard({ component }) {
+  if (!component) return null
+  const { retry, jobBusy, starting } = useComponentRetry(component)
+  const cell = componentCell(component)
+  const retryable = RETRYABLE_STATUSES.includes(component.status)
+  const detail = component.detail || []
+
+  return (
+    <DCard title="RUNNER IMAGES" data-testid="svcp-runner-images">
+      <div className="svcp-mdns">
+        <div className="svcp-mdns-row">
+          <span className="mono" style={{ color: TONE_COLOR[cell.tone] }}>{cell.label}</span>
+          <span className="vh-spacer" style={{ flex: 1 }} />
+          {retryable && (
+            <button
+              className="btn ghost sm svcp-act"
+              data-testid="svcp-component-retry-runner-images"
+              disabled={starting || jobBusy}
+              onClick={retry}
+            >{jobBusy ? 'Retrying…' : 'Retry'}</button>
+          )}
+        </div>
+        {detail.length > 0 && (
+          <div className="svcp-mdns-sub mono">
+            {detail.map(d => <div key={d.key}>{d.key} — {d.image}</div>)}
+          </div>
+        )}
+        {retryable && (component.error || component.remedy) && (
+          <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>
+            {component.error && <div style={{ color: 'var(--err)' }}>{component.error}</div>}
+            {component.remedy && <div style={{ color: 'var(--fg-3)' }}>{component.remedy}</div>}
+          </div>
+        )}
+      </div>
+    </DCard>
+  );
+}
+
 // ── ServicesView (page) ───────────────────────────────────────────────────────
 function ServicesView() {
   const { services, mdns, pending } = useServices()
@@ -247,6 +371,17 @@ function ServicesView() {
   const comfyQ = useComfyui({ active: false })
   const comfyReachable = (comfyQ.data ?? COMFYUI_FALLBACK).reachable
   const [actionMsg, setActionMsg] = useState(null)
+
+  // Task 12: fail-soft — an older daemon without GET /api/updates/components
+  // resolves to `data: null`, so `componentRows` stays [] and every
+  // componentForService() lookup below returns undefined (no version cells,
+  // no runner-images card) rather than throwing.
+  const componentsQ = useComponents()
+  const componentRows = componentsQ.data?.components ?? null
+  // `runner-images` carries `service_id: null` (it isn't a systemd-managed
+  // service — hal0.components.registry) so it never joins via
+  // componentForService; look it up by id instead.
+  const runnerImagesComponent = (componentRows ?? []).find(r => r.id === 'runner-images')
 
   const busyId = actionMut.isPending ? actionMut.variables?.id ?? null : null
 
@@ -275,9 +410,11 @@ function ServicesView() {
             {services.map(svc => (
               <ServiceCard key={svc.id} svc={svc}
                 onAction={onAction} busyId={busyId} actionMsg={actionMsg}
-                comfyReachable={comfyReachable} />
+                comfyReachable={comfyReachable}
+                component={componentForService(componentRows, svc.id)} />
             ))}
           </div>
+          <RunnerImagesCard component={runnerImagesComponent} />
         </>
       )}
     </div>

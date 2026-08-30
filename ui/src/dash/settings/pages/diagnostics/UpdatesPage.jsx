@@ -5,6 +5,8 @@
 // #settings/about aliases here.
 import { useState, useRef, useEffect } from 'react'
 import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel, useUpdateRollback } from '@/api/hooks/useUpdates'
+import { useComponents } from '@/api/hooks/useComponents'
+import { pendingCount } from '@/dash/components-pure'
 import { ConfirmDialog } from '../../../primitives.jsx'
 import { Icons } from '../../../chrome.jsx'
 import { SRow } from '../../shared/SRow.jsx'
@@ -65,6 +67,12 @@ export function UpdatesPage() {
     ? (job.state === 'queued' ? 'queued…' : 'installing…')
     : null;
 
+  // Task 12: "N updates pending" badge next to the hal0 version line — the
+  // same per-component pending count the Services page badges surface,
+  // fail-soft on an older daemon (useComponents() -> null -> pendingCount 0).
+  const componentsQ = useComponents();
+  const componentPending = pendingCount(componentsQ.data?.components ?? null);
+
   return (
     <div className="s-section">
       <h2>Updates</h2>
@@ -95,6 +103,15 @@ export function UpdatesPage() {
               ? <><span style={{color: "var(--accent)"}}>{u.hal0.available} available</span> <span style={{color: "var(--fg-4)"}}>· current <span data-testid="updates-hal0-version">{u.hal0.current}</span></span></>
               : <span>current <span data-testid="updates-hal0-version">{u.hal0?.current || "—"}</span></span>}
             {jobLabel && <span style={{marginLeft: 8, color: "var(--warn)", fontFamily: "var(--jbm)", fontSize: 11}}>· {jobLabel}</span>}
+            {componentPending > 0 && (
+              <a
+                href="#services"
+                className="chip"
+                data-testid="updates-components-pending"
+                style={{marginLeft: 8}}
+                title={`${componentPending} component update${componentPending === 1 ? "" : "s"} pending — see Services`}
+              >{componentPending} update{componentPending === 1 ? "" : "s"} pending</a>
+            )}
           </>}
           actions={<>
             <button
