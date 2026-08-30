@@ -6,11 +6,16 @@
 // mirroring useModels.ts's usePullJob() SSE pattern — progress here is
 // layers_done/layers_total (a whole OCI image pull via podman) instead of bytes.
 //
-// runner-catalogue-v2 additions: a Defaults strip (per-family effective image
-// ref + release/override badge + clear), a per-row tag picker over the
-// contract's `available_tags`, a "newer tag" chip when the headline lags the
-// registry, and Set-as-family-default (PUT /api/settings override map) with a
-// confirm dialog naming the `in_use_by` slots that will drift.
+// runner-catalogue-v2 additions: a per-row tag picker over the contract's
+// `available_tags`, a "newer tag" chip when the headline lags the registry,
+// and Set-as-family-default (PUT /api/settings override map) with a confirm
+// dialog naming the `in_use_by` slots that will drift.
+//
+// runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
+// FamilyStrip driven straight by the server's `families` summary (effective
+// ref, source tier, store state, newer-release marker), and the list groups
+// into "Default families" / "Specialized" / "Other catalogued" sections via
+// the pure groupRows() helper.
 
 import {
   useRunnerImages,
@@ -18,6 +23,7 @@ import {
   useRunnerImagePullJob,
   useRunnerImagePullsList,
   useSetDefaultImage,
+  useRestartAffected,
 } from '@/api/hooks/useRunnerImages'
 // Explicit import rather than the legacy window-global (primitives.jsx also
 // publishes ConfirmDialog on window) — the settings pages' idiom. Keeps this
@@ -37,23 +43,22 @@ function fmtBytesRI(b) {
 
 // ── Pure helpers (unit-tested in __tests__/runner-images-view.test.tsx) ──
 
-// Defaults-strip rows from the enriched /api/runner-images list: one
-// {family, ref, source} per family whose default resolves to a catalogued
-// row (`is_default` carries the family + whether it's the baked release
-// default or a [slots].default_images override). First row per family wins;
-// sorted by family for a stable strip order. Defensive against rows from a
-// pre-contract backend (no is_default field) — they're simply skipped.
-export function defaultsStripRows(images) {
-  const rows = [];
-  const seen = new Set();
+// Row grouping for the catalogue list (runner-catalogue-v3, Task 10):
+// default-family repos first, then specialty images (server-provided
+// `specialties` from RUNNER_IMAGES supports / images.json — read
+// defensively, since rows don't carry the field from every backend yet),
+// then referenced/uncatalogued-family rows. A row that IS a family default
+// lands in `defaults` even if it also carries specialties — the family strip
+// above already surfaces it, so the list shouldn't also branch it into
+// "Specialized".
+export function groupRows(images) {
+  const g = { defaults: [], specialized: [], other: [] };
   for (const img of images || []) {
-    const d = img && img.is_default;
-    if (!d || !d.family || seen.has(d.family)) continue;
-    seen.add(d.family);
-    rows.push({ family: d.family, ref: `${img.image}:${img.tag}`, source: d.source });
+    if (img.is_default) g.defaults.push(img);
+    else if ((img.specialties || img.extra?.specialties || []).length) g.specialized.push(img);
+    else g.other.push(img);
   }
-  rows.sort((a, b) => (a.family < b.family ? -1 : a.family > b.family ? 1 : 0));
-  return rows;
+  return g;
 }
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
@@ -87,24 +92,103 @@ export function newestComparableTag(image) {
   return tags.find(t => !isMutablePointerTag(t, image.tag));
 }
 
-// True when the registry knows a newer tag than the row's headline `tag`,
-// ignoring mutable/floating pointers (see MUTABLE_TAGS). False on probe
-// failure (empty list), missing fields, or when only mutable pointers lead
-// the list (no comparable candidate).
-export function newerTagAvailable(image) {
-  if (!image || !image.tag) return false;
-  const candidate = newestComparableTag(image);
-  if (!candidate) return false;
-  return candidate !== image.tag;
+// Release-shaped tag names (bare or `v`-prefixed dotted version numbers,
+// e.g. "0824", "v1.2.3") — the "releases" lane in tagLanes() below.
+const RELEASE_TAG_RE = /^(v?\d+(\.\d+)*)$/;
+
+// Lane buckets over the v3 per-tag payload (Task 5: `image.tags[].{tag,
+// digest,downloaded}` + `image.badges`) for the card's three-lane tag
+// <select> — replaces the old flat tagChoices(). Falls back to bare
+// `available_tags` strings (digestless: digest/downloaded/badge come back
+// null) against a pre-v3 backend or a failed tag probe.
+//
+// releases: dotted/bare version-number tags. pins: the row's headline tag,
+// guaranteed present even when the probe didn't carry it. other: everything
+// else (branch heads, `latest`, floating dev tags — see MUTABLE_TAGS above).
+// `aliasOf` names the first earlier tag in `image.tags`'/`available_tags`'
+// original array order sharing the same digest, so e.g. a `latest` that
+// just points at the newest release reads as "latest = 0826" instead of a
+// mystery duplicate.
+export function tagLanes(image) {
+  const infos = Array.isArray(image?.tags) && image.tags.length
+    ? image.tags
+    : (image?.available_tags || []).map(t => ({ tag: t, digest: null, downloaded: null }));
+  const seen = new Map(); // digest -> first tag carrying it
+  const decorate = (t) => {
+    const aliasOf = t.digest && seen.has(t.digest) ? seen.get(t.digest) : null;
+    if (t.digest && !seen.has(t.digest)) seen.set(t.digest, t.tag);
+    return { ...t, badge: image?.badges?.[t.tag] || null, aliasOf };
+  };
+  const lanes = { releases: [], pins: [], other: [] };
+  for (const t of infos.map(decorate)) {
+    if (RELEASE_TAG_RE.test(t.tag)) lanes.releases.push(t);
+    else if (t.tag === image.tag) lanes.pins.push(t);   // headline pin
+    else lanes.other.push(t);
+  }
+  if (!infos.some(t => t.tag === image.tag) && image?.tag) {
+    lanes.pins.unshift({ tag: image.tag, digest: image.digest || null, downloaded: null, badge: image?.badges?.[image.tag] || null, aliasOf: null });
+  }
+  return lanes;
 }
 
-// Tag choices for the card's tag <select>: the contract's newest-first
-// `available_tags` with the headline tag guaranteed present (prepended when
-// the probe failed or predates the contract).
-function tagChoices(image) {
-  const tags = Array.isArray(image?.available_tags) ? image.available_tags : [];
-  if (image?.tag && !tags.includes(image.tag)) return [image.tag, ...tags];
-  return tags.length ? tags : (image?.tag ? [image.tag] : []);
+// The tag name behind newerTagAvailable's verdict — shared so the "newer:
+// X" chip never names a tag the verdict didn't actually compare against
+// (a per-tag digest-probe failure can drop a tag from `image.tags` without
+// touching `available_tags`, so scanning the two lists independently could
+// disagree). Digest path: the newest release-shaped tag other than the
+// headline, from `image.tags`. Falls back to the pre-v3 name-based
+// newestComparableTag() heuristic (mutable-pointer aware, see
+// MUTABLE_TAGS) when the row predates the v3 per-tag payload. Returns
+// `undefined` when there's no candidate either way.
+export function newerTagCandidate(image) {
+  if (!image || !image.tag) return undefined;
+  const tags = Array.isArray(image.tags) ? image.tags : null;
+  if (tags && tags.length) {
+    // First release-shaped tag overall (not "first release-shaped tag other
+    // than the headline") — excluding the headline from the scan meant that
+    // when the headline WAS the newest release, an older release became the
+    // "candidate" and the newer: chip showed permanently on up-to-date rows.
+    // `tags` is already newest-first (sort_tags_newest_first), so the first
+    // release-shaped entry is the newest release known; if that's the
+    // headline itself (or there's no release-shaped tag at all), there's no
+    // newer candidate.
+    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag));
+    if (!cand || cand.tag === image.tag) return undefined;
+    return cand.tag;
+  }
+  return newestComparableTag(image);
+}
+
+// True when the registry knows a genuinely newer build than the row's
+// headline `tag` — a digest fact when the row carries the v3 `tags[]`
+// payload (the candidate's digest differs from the headline's; a probe
+// that didn't resolve a digest for either side still counts as "newer" by
+// name, same as the pre-v3 behavior). Falls back to the pre-v3 name-based
+// heuristic when the row predates the v3 payload. Uses the same candidate
+// as newerTagCandidate() above — see that comment for why that matters.
+export function newerTagAvailable(image) {
+  if (!image || !image.tag) return false;
+  const cand = newerTagCandidate(image);
+  if (!cand) return false;
+  const tags = Array.isArray(image.tags) ? image.tags : null;
+  if (tags && tags.length) {
+    const head = tags.find(t => t.tag === image.tag);
+    const candInfo = tags.find(t => t.tag === cand);
+    if (head?.digest && candInfo?.digest) return candInfo.digest !== head.digest;
+    return true;
+  }
+  return cand !== image.tag;               // pre-v3 fallback, unchanged
+}
+
+// Tag option label for the card's <select>: the tag name, its digest alias
+// (`= <earlier tag>`) when it points at the same manifest as one already
+// listed, a downloaded checkmark, and a trailing badge suffix.
+function tagOptionLabel(t) {
+  let label = t.tag;
+  if (t.aliasOf) label += ` = ${t.aliasOf}`;
+  if (t.downloaded) label += ' ✓';
+  if (t.badge) label += ` · ${t.badge}`;
+  return label;
 }
 
 // ── RunnerImagesSyncButton ──────────────────────────────────────────────
@@ -138,7 +222,8 @@ export function RunnerImagesView() {
   const [q, setQ] = useStateRI("");
 
   const imagesQuery = useRunnerImages();
-  const images = imagesQuery.data ?? [];
+  const images = imagesQuery.data?.images ?? [];
+  const families = imagesQuery.data?.families ?? [];
 
   useEffectRI(() => {
     if (!selId && images.length) setSelId(images[0].id);
@@ -151,12 +236,13 @@ export function RunnerImagesView() {
     return hay.includes(needle);
   });
 
+  const grouped = groupRows(filtered);
   const selected = images.find(i => i.id === selId) || images[0];
 
   return (
     <div className="models-layout" style={{marginTop: 18}}>
         <div className="mdl-list">
-          <DefaultsStrip images={images} />
+          <FamilyStrip families={families} />
           <div className="mdl-toolbar">
             <input
               className="input mono mdl-search"
@@ -190,9 +276,30 @@ export function RunnerImagesView() {
             </div>
           )}
 
-          {filtered.map(img => (
-            <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
-          ))}
+          {grouped.defaults.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Default families</span></div>
+              {grouped.defaults.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
+          {grouped.specialized.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Specialized</span></div>
+              {grouped.specialized.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
+          {grouped.other.length > 0 && (
+            <>
+              <div className="mdl-list-h"><span>Other catalogued</span></div>
+              {grouped.other.map(img => (
+                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+              ))}
+            </>
+          )}
         </div>
 
         <div className="models-sidebar">
@@ -203,24 +310,41 @@ export function RunnerImagesView() {
   );
 }
 
-// ── DefaultsStrip ───────────────────────────────────────────────────────
-// Per-family effective default images (from the rows' server-computed
-// `is_default` enrichment): family → effective ref + a release-default /
-// override badge. An override gets a clear button — clearing writes
-// `{family: null}` through the settings override map and falls back to the
-// baked release default, so the confirm names the slots that will drift.
-function DefaultsStrip({ images }) {
-  const rows = defaultsStripRows(images);
+// Source chip for a family row's effective ref (see FamilyStrip below):
+// override is the accent-colored chip with its clear button (unchanged from
+// the old DefaultsStrip); env/manifest are plain chips naming the tier;
+// release reads "release default" — the same label the strip has always
+// shown for a non-override default.
+function familySourceChip(source) {
+  if (source === "override") {
+    return <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>;
+  }
+  if (source === "release") {
+    return <span className="chip">release default</span>;
+  }
+  return <span className="chip">{source}</span>; // env | manifest
+}
+
+// ── FamilyStrip ─────────────────────────────────────────────────────────
+// Launch-truth per-family strip (runner-catalogue-v3, Task 10 — replaces
+// DefaultsStrip). Reads the server's `families` summary directly (Task 9's
+// GET /api/runner-images `families` entry) instead of re-deriving it from
+// image rows' `is_default` markers — the effective ref, its source tier,
+// the store state of THAT ref, which slots launch it now vs. a different
+// tag of the same repo, and whether the registry already has a newer
+// release-shaped tag. The override clear-confirm flow moves in verbatim
+// from DefaultsStrip: clearing writes `{family: null}` through the settings
+// override map and falls back to the baked release default, so the confirm
+// names the slots that will drift — now sourced from the family's own
+// `slots` list rather than a row's `in_use_by`.
+function FamilyStrip({ families }) {
+  const rows = families || [];
   const setDefault = useSetDefaultImage();
   const [clearFamily, setClearFamily] = useStateRI(null);
   if (rows.length === 0) return null;
 
-  const clearRow = rows.find(r => r.family === clearFamily) || null;
-  // Slots pinned to the override'd default — they fall back on clear.
-  const clearImg = clearRow
-    ? (images || []).find(i => i.is_default && i.is_default.family === clearRow.family)
-    : null;
-  const drifters = (clearImg?.in_use_by || []);
+  const clearRow = rows.find(f => f.family === clearFamily) || null;
+  const drifters = clearRow?.slots || [];
 
   const onClear = () => {
     const fam = clearFamily;
@@ -232,25 +356,38 @@ function DefaultsStrip({ images }) {
   };
 
   return (
-    <div className="ri-defaults" data-testid="ri-defaults" style={{padding: "10px 16px", borderBottom: "1px solid var(--line-soft)"}}>
+    <div className="ri-defaults" data-testid="ri-family-strip" style={{padding: "10px 16px", borderBottom: "1px solid var(--line-soft)"}}>
       <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6}}>
         Family defaults
       </div>
-      {rows.map(r => (
-        <div key={r.family} data-testid={`ri-default-${r.family}`} style={{display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12}}>
-          <span className="mono" style={{color: "var(--fg-2)", minWidth: 88}}>{r.family}</span>
-          <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{r.ref}</span>
-          {r.source === "override"
-            ? <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>
-            : <span className="chip">release default</span>}
-          {r.source === "override" && (
-            <button
-              className="btn ghost sm"
-              data-testid={`ri-clear-default-${r.family}`}
-              disabled={setDefault.isPending}
-              onClick={() => setClearFamily(r.family)}
-              title="Remove the operator override — the release default applies again"
-            >clear</button>
+      {rows.map(f => (
+        <div key={f.family} data-testid={`ri-family-${f.family}`} style={{padding: "3px 0"}}>
+          <div style={{display: "flex", alignItems: "center", gap: 8, fontSize: 12}}>
+            <span className="mono" style={{color: "var(--fg-2)", minWidth: 88}}>{f.family}</span>
+            <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{f.effective_ref}</span>
+            {familySourceChip(f.source)}
+            <StoreStateChip image={{ store_state: f.store_state, downloaded: f.store_state === "present" }} />
+            {f.update_available && f.newest_release && (
+              <span className="chip" data-testid="ri-family-newer" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
+                newer: {f.newest_release.tag}
+              </span>
+            )}
+            {f.source === "override" && (
+              <button
+                className="btn ghost sm"
+                data-testid={`ri-clear-default-${f.family}`}
+                disabled={setDefault.isPending}
+                onClick={() => setClearFamily(f.family)}
+                title="Remove the operator override — the release default applies again"
+              >clear</button>
+            )}
+          </div>
+          {(f.slots?.length > 0 || f.pinned_slots?.length > 0) && (
+            <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginTop: 2}}>
+              {f.slots?.length > 0 && `via slots: ${f.slots.join(", ")}`}
+              {f.slots?.length > 0 && f.pinned_slots?.length > 0 && " · "}
+              {f.pinned_slots?.length > 0 && `pinned: ${f.pinned_slots.join(", ")}`}
+            </div>
           )}
         </div>
       ))}
@@ -261,7 +398,7 @@ function DefaultsStrip({ images }) {
         title={`Clear ${clearRow?.family || ""} override`}
         message={
           clearRow
-            ? `Remove the ${clearRow.family} override (${clearRow.ref}) and fall back to the release default.` +
+            ? `Remove the ${clearRow.family} override (${clearRow.effective_ref}) and fall back to the release default.` +
               (drifters.length
                 ? ` Slots using it now: ${drifters.join(", ")} — they pick up the release image on their next restart.`
                 : " No slot currently references it.")
@@ -274,12 +411,40 @@ function DefaultsStrip({ images }) {
   );
 }
 
+// Badge chip color for a tag's validated/candidate/deprecated badge
+// (hal0.api.routes.runner_images._tag_badges).
+const BADGE_COLOR = {
+  validated: "var(--ok)",
+  candidate: "var(--accent)",
+  deprecated: "var(--err)",
+};
+
+function BadgeChip({ badge }) {
+  if (!badge) return null;
+  const color = BADGE_COLOR[badge] || "var(--fg-4)";
+  return (
+    <span className="chip" data-testid="ri-badge" style={{color, borderColor: color}}>{badge}</span>
+  );
+}
+
+// Store-truth state chip: store_state "unknown" (the store couldn't be
+// read this request) takes precedence over the downloaded verdict —
+// showing "not downloaded" there would be a claim the backend can't back.
+function StoreStateChip({ image }) {
+  if (image.store_state === "unknown") {
+    return <span className="chip" data-testid="ri-store-state" title="Could not read the image store">state unknown</span>;
+  }
+  return image.downloaded
+    ? <span className="chip ok" data-testid="ri-store-state">✓ downloaded</span>
+    : <span className="chip" data-testid="ri-store-state">not downloaded</span>;
+}
+
 // ── RunnerImageRow ──────────────────────────────────────────────────────
 function RunnerImageRow({ image, selected, onSelect }) {
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className="mdl-row-icon">
-        {image.downloaded || image.local_path
+        {image.downloaded
           ? <span style={{color: "var(--green)", display: "inline-flex"}}>{Icons.download}</span>
           : <span style={{color: "var(--fg-5)", display: "inline-flex"}}>{Icons.download}</span>}
       </span>
@@ -295,9 +460,10 @@ function RunnerImageRow({ image, selected, onSelect }) {
         )}
         {newerTagAvailable(image) && (
           <span className="chip" data-testid="ri-newer-tag" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-            newer: {newestComparableTag(image)}
+            newer: {newerTagCandidate(image)}
           </span>
         )}
+        <BadgeChip badge={image.badges?.[image.tag]} />
         {image.ownership && <span className="chip">{image.ownership}</span>}
         {image.publish && <span className="chip">{image.publish}</span>}
         {(image.extra?.features || []).map(f => (
@@ -306,7 +472,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
       </span>
       <span className="sz num">{fmtBytesRI(image.size_bytes)}</span>
       <span className="tg">
-        {image.local_path ? <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)"}}>✓ downloaded</span> : null}
+        <StoreStateChip image={image} />
       </span>
     </div>
   );
@@ -316,12 +482,18 @@ function RunnerImageRow({ image, selected, onSelect }) {
 function RunnerCard({ image }) {
   const pull = useRunnerImagePullJob();
   const setDefault = useSetDefaultImage();
+  const restartAffected = useRestartAffected();
+  const [confirmRestart, setConfirmRestart] = useStateRI(false);
   // Tag picker over the contract's available_tags (headline preselected).
   // null = "follow the headline"; reset whenever the selected row changes.
   const [pickedTag, setPickedTag] = useStateRI(null);
   const imageId = image?.id;
   useEffectRI(() => { setPickedTag(null); }, [imageId]);
   const [confirmDefault, setConfirmDefault] = useStateRI(false);
+  // "other" lane (branch heads, floating dev tags) is collapsed behind this
+  // toggle — resets alongside the tag pick whenever the selected row changes.
+  const [showAllTags, setShowAllTags] = useStateRI(false);
+  useEffectRI(() => { setShowAllTags(false); }, [imageId]);
 
   if (!image) {
     return (
@@ -331,21 +503,14 @@ function RunnerCard({ image }) {
     );
   }
 
-  const tags = tagChoices(image);
+  const lanes = tagLanes(image);
+  const tagCount = lanes.releases.length + lanes.pins.length + lanes.other.length;
   const selTag = pickedTag ?? image.tag;
-  // The pull job is id-keyed: POST /{id}/pull resolves the catalogued row's
-  // headline tag server-side (registry/runner_pull_jobs.enqueue) and takes no
-  // tag parameter. Pulling a non-headline tag therefore isn't wired yet — the
-  // button gates honestly instead of pretending, and setting a tag as the
-  // family default rolls the headline on the next sync, after which it IS the
-  // pullable tag. (Called out in the PR body; per-tag pull needs a backend
-  // pull-route change.)
-  const pullTagMismatch = selTag !== image.tag;
   const inFlight = pull.imageId === image.id && pull.inFlight;
   const onPull = async () => {
     try {
-      await pull.start(image.id);
-      window.__hal0Toast && window.__hal0Toast(`Pulling ${image.id}…`, "info");
+      await pull.start(image.id, selTag !== image.tag ? selTag : undefined);
+      window.__hal0Toast && window.__hal0Toast(`Pulling ${image.id}:${selTag}…`, "info");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Pull failed to start — ${e?.message || "see logs"}`, "err");
     }
@@ -366,6 +531,23 @@ function RunnerCard({ image }) {
     });
   };
 
+  // Restart-affected (#2096 page-side workaround, Task 12): `in_use_by` is
+  // matched server-side against this exact `image:tag` headline ref (see
+  // enrich_row's `row_ref`), not the tag picker's `selTag` — restarting
+  // targets what's actually launched right now, independent of whatever tag
+  // the operator has picked in the dropdown above.
+  const headlineRef = `${image.image}:${image.tag}`;
+  const onRestartAffected = () => {
+    setConfirmRestart(false);
+    restartAffected.mutate({ ref: headlineRef }, {
+      onSuccess: (res) => {
+        const n = res?.restarted?.length ?? 0;
+        window.__hal0Toast && window.__hal0Toast(`Restarted ${n} slot${n === 1 ? "" : "s"}`, "info");
+      },
+      onError: (e) => window.__hal0Toast && window.__hal0Toast(`Restart failed — ${e?.message || "see logs"}`, "err"),
+    });
+  };
+
   // Feature tags: the tag/pill component the Models page uses for capability
   // tags, reused here — images.json carries no `features` field today, so
   // this reads from `extra.features` (forward-compat: renders once a future
@@ -378,9 +560,7 @@ function RunnerCard({ image }) {
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
           <div className="nm mono">{image.id}</div>
           <span style={{marginLeft: "auto"}}>
-            {image.downloaded_at
-              ? <span className="chip ok">✓ downloaded</span>
-              : <span className="chip">not downloaded</span>}
+            <StoreStateChip image={image} />
           </span>
         </div>
         <div className="repo">{image.image}:{image.tag}</div>
@@ -413,8 +593,8 @@ function RunnerCard({ image }) {
       )}
 
       <div style={{padding: "0 16px 16px"}}>
-        {tags.length > 1 && (
-          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 10}}>
+        {tagCount > 1 && (
+          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap"}}>
             <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>tag</span>
             <select
               className="input mono"
@@ -423,13 +603,44 @@ function RunnerCard({ image }) {
               onChange={(e) => setPickedTag(e.target.value)}
               style={{fontSize: 11, padding: "3px 6px"}}
             >
-              {tags.map(t => (
-                <option key={t} value={t}>{t}{t === image.tag ? " · headline" : ""}</option>
-              ))}
+              {lanes.releases.length > 0 && (
+                <optgroup label="releases">
+                  {lanes.releases.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
+              {lanes.pins.length > 0 && (
+                <optgroup label="pins">
+                  {lanes.pins.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
+              {/* Rendered whenever toggled open OR the current pick lives in
+                  this lane — a controlled <select> whose value names an
+                  unmounted <option> falls back to the first rendered one,
+                  silently overriding React's own state (e.g. pick an
+                  other-lane tag, then toggle "show all tags" back off). */}
+              {(showAllTags || lanes.other.some(t => t.tag === selTag)) && lanes.other.length > 0 && (
+                <optgroup label="other">
+                  {lanes.other.map(t => (
+                    <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
+            {lanes.other.length > 0 && (
+              <button
+                type="button"
+                className="btn ghost sm"
+                data-testid="ri-show-all-tags"
+                onClick={() => setShowAllTags(s => !s)}
+              >{showAllTags ? "hide extra tags" : "show all tags"}</button>
+            )}
             {newerTagAvailable(image) && (
               <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-                newer: {newestComparableTag(image)}
+                newer: {newerTagCandidate(image)}
               </span>
             )}
           </div>
@@ -448,13 +659,9 @@ function RunnerCard({ image }) {
             <button
               className="btn"
               data-testid="ri-pull"
-              disabled={pullTagMismatch}
-              title={pullTagMismatch
-                ? `Pull is keyed to the headline tag (${image.tag}) — set ${selTag} as the ${family || "family"} default first; the catalogue rolls to it on sync`
-                : undefined}
               onClick={onPull}
             >
-              {Icons.download} {image.local_path ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{image.tag}</span>
+              {Icons.download} {image.local_path ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span>
             </button>
             {family && (
               <button
@@ -466,6 +673,15 @@ function RunnerCard({ image }) {
                   : `Pin ${defaultRef} as the ${family} family default via a settings override`}
                 onClick={() => setConfirmDefault(true)}
               >Set as {family} default</button>
+            )}
+            {inUseBy.length > 0 && (
+              <button
+                className="btn ghost"
+                data-testid="ri-restart-affected"
+                disabled={restartAffected.isPending}
+                title={`Restart the ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}`}
+                onClick={() => setConfirmRestart(true)}
+              >Restart {inUseBy.length} affected slot{inUseBy.length === 1 ? "" : "s"}</button>
             )}
           </div>
         )}
@@ -487,6 +703,18 @@ function RunnerCard({ image }) {
         }
         confirmLabel="Set default"
         footerNote="Applies on the next slot restart."
+      />
+
+      <ConfirmDialog
+        open={confirmRestart}
+        onCancel={() => setConfirmRestart(false)}
+        onConfirm={onRestartAffected}
+        title="Restart affected slots"
+        message={
+          `Restart ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}: ${inUseBy.join(", ")}.`
+        }
+        confirmLabel="Restart"
+        footerNote="A slot that fails to restart is skipped and logged — the rest still restart."
       />
     </div>
   );

@@ -15,10 +15,12 @@ import pytest
 
 from hal0.errors import NotFound
 from hal0.runners import (
+    CANONICAL_FAMILY,
     RUNNER_IMAGES,
     STALE_RUNNER_IMAGE_REFS,
     Runner,
     RunnerSupports,
+    canonical_family,
     get_runner,
     runner_for_backend,
     runner_matches,
@@ -160,3 +162,16 @@ def test_promptforge_shipped_pin_matches_the_gate_digest() -> None:
     assert entry["digest"] == (
         "sha256:370af6e9717e8c96742198a4b920888e6a248d447e21e3432de4d2c913703aea"
     )
+
+
+# --- canonical family keys (runner-image-catalogue v3, task 11) ------------ #
+
+
+def test_canonical_family_folds_vulkanfpx() -> None:
+    assert canonical_family("vulkanfpx") == "rocmfpx"
+    assert canonical_family("rocmfpx") == "rocmfpx"
+    assert canonical_family("comfyui") == "comfyui"
+
+
+def test_canonical_family_map_only_folds_the_fpx_twin() -> None:
+    assert CANONICAL_FAMILY == {"vulkanfpx": "rocmfpx"}

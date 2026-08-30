@@ -166,6 +166,21 @@ def test_default_images_config_load_failure_fails_soft(monkeypatch) -> None:
     assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
 
 
+def test_default_images_canonical_key_applies_when_effective_runner_is_alias(
+    monkeypatch,
+) -> None:
+    """runner-image-catalogue v3, task 11: a ``[slots].default_images`` map
+    with only the canonical ``rocmfpx`` key still applies when the effective
+    runner is the ``vulkanfpx`` alias (they share DEFAULT_ROCMFPX_IMAGE, so
+    one lever governs both)."""
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda: _fake_config({"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0999"}),
+    )
+    slot_cfg = {"binary": "vulkanfpx"}
+    assert _resolve_image_ref(slot_cfg, _profile()) == "ghcr.io/hal0ai/hal0-combined:0999"
+
+
 # --- _profile_image_and_flags integration ---------------------------------- #
 
 

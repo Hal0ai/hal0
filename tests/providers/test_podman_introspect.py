@@ -385,3 +385,68 @@ def test_is_valid_image_ref_accepts_double_separators(ref: str) -> None:
     """A ref this wrongly rejects never reaches the rootful store, so the
     caller degrades to the rootless one and #1889 returns for that image."""
     assert is_valid_image_ref(ref) is True
+
+
+# ── images_digests and image_digest mirrors ────────────────────────────────────
+
+
+def _cp(rc: int, out: str = "") -> MagicMock:
+    m = MagicMock()
+    m.returncode = rc
+    m.stdout = out
+    m.stderr = ""
+    return m
+
+
+def test_images_digests_parses_seam_output() -> None:
+    def fake_run(argv: object, **kw: object) -> MagicMock:
+        assert list(argv)[:3] == ["sudo", "-n", SEAM_BIN]  # type: ignore[arg-type]
+        assert list(argv)[3] == "images-digests"  # type: ignore[arg-type]
+        return _cp(0, "ghcr.io/x/a:0826 sha256:" + "a" * 64 + "\nlocalhost/b:dev <none>\n")
+
+    from hal0.providers.podman_introspect import images_digests
+
+    res = images_digests(run=fake_run, is_hal0_user=lambda: True)
+    assert res is not None and res.context == "rootful"
+    assert res.refs["ghcr.io/x/a:0826"] == "sha256:" + "a" * 64
+    assert res.refs["localhost/b:dev"] is None
+
+
+def test_images_digests_falls_back_rootless() -> None:
+    from hal0.providers.podman_introspect import images_digests
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: object, **kw: object) -> MagicMock:
+        argv_list = list(argv)  # type: ignore[arg-type]
+        calls.append(argv_list)
+        if next(iter(argv_list)) == "sudo":
+            return _cp(1)  # grant denied
+        return _cp(0, "ghcr.io/x/a:0826 sha256:" + "b" * 64 + "\n")
+
+    res = images_digests(run=fake_run, which=lambda _: "/usr/bin/podman", is_hal0_user=lambda: True)
+    assert res is not None and res.context == "rootless"
+
+
+def test_image_digest_negative_answer() -> None:
+    from hal0.providers.podman_introspect import image_digest
+
+    def fake_run(argv: object, **kw: object) -> MagicMock:
+        return _cp(0, "")  # rc 0, empty stdout = not in store
+
+    probe = image_digest("ghcr.io/x/a:0826", run=fake_run, is_hal0_user=lambda: True)
+    assert probe.state == "missing" and probe.digest is None
+
+
+def test_image_digest_unknown_when_not_service_user() -> None:
+    from hal0.providers.podman_introspect import image_digest
+
+    probe = image_digest("ghcr.io/x/a:0826", is_hal0_user=lambda: False)
+    assert probe.state == "unknown" and probe.reason == "not-service-user"
+
+
+def test_image_digest_rejects_bad_ref_without_sudo() -> None:
+    from hal0.providers.podman_introspect import image_digest
+
+    probe = image_digest("bad ref", is_hal0_user=lambda: True)
+    assert probe.state == "unknown" and probe.reason == "invalid-argument"
