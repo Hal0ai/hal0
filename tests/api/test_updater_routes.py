@@ -1330,3 +1330,12 @@ def test_component_converge_busy_409(isolated_client: TestClient) -> None:
     app.state.update_jobs = {"j1": {"id": "j1", "state": "running"}}
     resp = isolated_client.post("/api/updates/components/hindsight/converge")
     assert resp.status_code == 409
+
+
+# ── components_pending on /check (Task 10) ───────────────────────────────────
+
+
+def test_check_carries_components_pending(isolated_client: TestClient) -> None:
+    resp = isolated_client.get("/api/updates/check")
+    assert resp.status_code == 200
+    assert isinstance(resp.json()["components_pending"], int)

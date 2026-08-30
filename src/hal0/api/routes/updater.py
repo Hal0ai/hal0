@@ -690,6 +690,15 @@ async def check_updates(request: Request) -> dict[str, Any]:
 
     # A revoked (yanked) latest is never offered as an available update.
     update_available = bool(latest) and not revoked and _is_newer(latest, __version__)
+
+    def _components_pending() -> int:
+        try:
+            from hal0.components.status import component_status_snapshot
+
+            return int(component_status_snapshot()["pending"])
+        except Exception:
+            return 0  # courtesy field — never fail /check over it
+
     # #1585: the one-shot v1.0 profile-catalog reset runs inside commit(), so a
     # box updated 0.9.8→1.0 by the OLD daemon (which had no reset) lands
     # converged-except-for-this and then goes silent — `hal0 update` says
@@ -705,6 +714,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "manifest_url": url,
         "manifest": manifest if isinstance(manifest, dict) else {},
         "profile_reset": await asyncio.to_thread(profile_reset_status),
+        "components_pending": await asyncio.to_thread(_components_pending),
     }
 
 
