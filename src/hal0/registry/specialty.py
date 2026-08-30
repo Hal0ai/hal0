@@ -155,8 +155,7 @@ def detect_specialty(paths: Iterable[str], quant: str | None = None) -> str | No
             hits.append(kind.key)
             continue
         if any(
-            spec.required and any(spec.pattern.search(n) for n in names)
-            for spec in kind.companions
+            spec.required and any(spec.pattern.search(n) for n in names) for spec in kind.companions
         ):
             hits.append(kind.key)
     return hits[0] if len(hits) == 1 else None

@@ -43,9 +43,7 @@ def test_fileset_pull_stamps_specialty_metadata(tmp_hal0_home: str) -> None:
     entry_file = FileSetEntry(rel="promptforge-model.pfs", role="model", size_bytes=2048)
     ffn_file = FileSetEntry(rel="ffn.pfs", role="promptforge_ffn", size_bytes=1024)
     gdn_file = FileSetEntry(rel="gdn.pfs", role="promptforge_gdn", size_bytes=512)
-    output_k8_file = FileSetEntry(
-        rel="output-k8.pfs", role="promptforge_output_k8", size_bytes=256
-    )
+    output_k8_file = FileSetEntry(rel="output-k8.pfs", role="promptforge_output_k8", size_bytes=256)
     runtime_patch_file = FileSetEntry(rel="runtime.patch", role="runtime_patch", size_bytes=64)
 
     plan = FileSetPlan(

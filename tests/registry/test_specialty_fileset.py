@@ -40,8 +40,13 @@ class TestBuildPlanCompanions:
         ]
         plan = plan_fileset(entries, repo="jcbtc/qwen", revision="main")
         roles = {f.role for f in plan.files}
-        assert {"model", "promptforge_ffn", "promptforge_gdn",
-                "promptforge_output_k8", "runtime_patch"} <= roles
+        assert {
+            "model",
+            "promptforge_ffn",
+            "promptforge_gdn",
+            "promptforge_output_k8",
+            "runtime_patch",
+        } <= roles
         assert plan.specialty == "promptforge"
         # companion bytes counted
         assert plan.total_bytes == 15_000 + 17_100 + 4_000 + 700 + 10
@@ -133,9 +138,7 @@ class TestDetectionScopedToChosenUnit:
             _e("model-Q4_K_M.gguf", size=5_000, oid="e" * 64),
             _e("model-FFN.pfs", size=17_100, oid="b" * 64),
         ]
-        plan = plan_fileset(
-            entries, repo="x/y", revision="main", requested_variant="model-Q8.gguf"
-        )
+        plan = plan_fileset(entries, repo="x/y", revision="main", requested_variant="model-Q8.gguf")
         assert plan.specialty is None
         assert [f.role for f in plan.files] == ["model"]
 

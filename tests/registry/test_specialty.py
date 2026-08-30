@@ -36,16 +36,10 @@ class TestCompanionRoleOf:
     def test_pfs_files_classify(self):
         assert companion_role_of("Qwen3.8-27B-v3-FFN.pfs") == "promptforge_ffn"
         assert companion_role_of("Qwen3.8-27B-v3-GDN.pfs") == "promptforge_gdn"
-        assert (
-            companion_role_of("Qwen3.8-v3-Output-K8.pfs")
-            == "promptforge_output_k8"
-        )
+        assert companion_role_of("Qwen3.8-v3-Output-K8.pfs") == "promptforge_output_k8"
 
     def test_runtime_patch_classifies(self):
-        assert (
-            companion_role_of("qwen38-v3-output-k8-runtime.patch")
-            == "runtime_patch"
-        )
+        assert companion_role_of("qwen38-v3-output-k8-runtime.patch") == "runtime_patch"
 
     def test_near_miss_returns_none(self):
         assert companion_role_of("model-Q8.gguf") is None
