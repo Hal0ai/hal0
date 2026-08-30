@@ -267,5 +267,7 @@ def test_ro_wrapper_help_has_no_write_verbs() -> None:
 
 
 def test_ro_wrapper_still_parses() -> None:
-    proc = subprocess.run(["bash", "-n", str(RO_WRAPPER)], capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        ["bash", "-n", str(RO_WRAPPER)], capture_output=True, text=True, check=False
+    )
     assert proc.returncode == 0, proc.stderr
