@@ -56,7 +56,9 @@ enforces the ones marked **(gated)**.
    fails if the live count exceeds it. A de-scar PR *lowers* the baseline
    (`python scripts/check_sunset.py --update-baseline`, then commit the
    drop); new work must not raise it — a genuinely new shim carries a
-   `HAL0-SUNSET` marker instead (rule 4).
+   `HAL0-SUNSET` marker instead (rule 4). A false-positive line may be
+   waived inline with `# scar-ok: <reason>` (the reason is required; a
+   bare `# scar-ok` still counts) — waived lines are reported in CI output.
 
 6. **Deep modules, small interfaces.** Splitting a big file is only the
    first step. Each resulting module must expose a narrow, intent-oriented

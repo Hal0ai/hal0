@@ -12,6 +12,9 @@ Two checks, both baselined to pass green the day they're introduced:
    may only go DOWN. It's frozen in ``scripts/scar_baseline.txt``; CI fails if the
    live count exceeds the baseline. Each de-scar PR lowers the baseline; a newly
    introduced shim must instead carry a HAL0-SUNSET marker (which check #1 tracks).
+   A false-positive line may be waived inline with ``# scar-ok: <reason>`` (reason
+   required — bare ``# scar-ok`` does not waive); waived lines are reported so
+   drift stays visible in CI logs.
 
 Usage:
   python scripts/check_sunset.py                    # check (CI + `make check-sunset`)
@@ -33,6 +36,8 @@ BASELINE = Path(__file__).resolve().parent / "scar_baseline.txt"
 
 # Keep in lockstep with docs: this is the canonical scar-marker definition.
 SCAR_RE = re.compile(r"removed in #|DEPRECATED|deprecated|\blegacy\b|backward.compat|compat shim")
+# Inline ratchet waiver: requires a non-empty reason after the colon.
+SCAR_OK_RE = re.compile(r"#\s*scar-ok:\s*\S")
 SUNSET_RE = re.compile(r"HAL0-SUNSET:\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
 PROJECT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)$")
 PEP440_PRERELEASE_RE = re.compile(r"^\.?(?:a|alpha|b|beta|rc|pre|preview|dev)", re.IGNORECASE)
@@ -72,14 +77,19 @@ def _py_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 
 
-def scar_count() -> int:
-    n = 0
+def scar_count() -> tuple[int, int]:
+    """Return ``(counted, waived)`` scar-marker line totals across ``src/``."""
+    counted = waived = 0
     for f in _py_files():
         with suppress(OSError):
-            n += sum(
-                1 for line in f.read_text(errors="ignore").splitlines() if SCAR_RE.search(line)
-            )
-    return n
+            for line in f.read_text(errors="ignore").splitlines():
+                if not SCAR_RE.search(line):
+                    continue
+                if SCAR_OK_RE.search(line):
+                    waived += 1
+                else:
+                    counted += 1
+    return counted, waived
 
 
 def overdue_markers(cur: ProjectVersion) -> list[tuple[Path, int, tuple[int, int, int]]]:
@@ -105,7 +115,7 @@ def _fmt(v: tuple[int, int, int]) -> str:
 def main(argv: list[str]) -> int:
     cur = current_version()
     if "--update-baseline" in argv:
-        c = scar_count()
+        c, _ = scar_count()
         BASELINE.write_text(f"{c}\n")
         print(f"scar_baseline.txt <- {c}")
         return 0
@@ -126,7 +136,9 @@ def main(argv: list[str]) -> int:
             raise ValueError(f"invalid scar baseline: {BASELINE}") from exc
     else:
         base = 10**9
-    cnt = scar_count()
+    cnt, waived = scar_count()
+    if waived:
+        print(f"scar waivers in effect: {waived}")
     if cnt > base:
         fail = True
         print(
