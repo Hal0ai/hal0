@@ -17,11 +17,15 @@ from hal0.runners import RUNNER_IMAGES
 
 
 def _pf_model(companions=None):
-    comps = companions if companions is not None else {
-        "promptforge_ffn": "/var/lib/hal0/models/m/ffn.pfs",
-        "promptforge_gdn": "/var/lib/hal0/models/m/gdn.pfs",
-        "promptforge_output_k8": "/var/lib/hal0/models/m/k8.pfs",
-    }
+    comps = (
+        companions
+        if companions is not None
+        else {
+            "promptforge_ffn": "/var/lib/hal0/models/m/ffn.pfs",
+            "promptforge_gdn": "/var/lib/hal0/models/m/gdn.pfs",
+            "promptforge_output_k8": "/var/lib/hal0/models/m/k8.pfs",
+        }
+    )
     return {
         "_model_key": "qwen-pf",
         "metadata": {"specialty": "promptforge", "companions": comps},
@@ -94,6 +98,7 @@ def test_degraded_not_ok_raises_422(monkeypatch):
     import dataclasses
 
     import hal0.registry.specialty as sp
+
     strict = dataclasses.replace(sp.SPECIALTY_KINDS["promptforge"], degraded_ok=False)
     monkeypatch.setitem(sp.SPECIALTY_KINDS, "promptforge", strict)
     with pytest.raises(UnprocessableEntity) as exc:
@@ -113,9 +118,7 @@ def test_preview_call_does_not_warn(caplog):
 def test_launch_call_warns(caplog):
     # log_degraded=True — the real launch path — still logs once.
     with caplog.at_level("WARNING"):
-        reason = _guard_specialty_runner(
-            _pf_model(), RUNNER_IMAGES["rocmfpx"], log_degraded=True
-        )
+        reason = _guard_specialty_runner(_pf_model(), RUNNER_IMAGES["rocmfpx"], log_degraded=True)
     assert reason["code"] == "slot.specialty_degraded"
     assert any("specialty" in r.message for r in caplog.records)
 
@@ -129,9 +132,7 @@ def test_unknown_specialty_silent_by_default_warns_when_launch(caplog):
 
     caplog.clear()
     with caplog.at_level("WARNING"):
-        reason2 = _guard_specialty_runner(
-            model, RUNNER_IMAGES["rocmfpx"], log_degraded=True
-        )
+        reason2 = _guard_specialty_runner(model, RUNNER_IMAGES["rocmfpx"], log_degraded=True)
     assert reason2 == reason  # parity: identical dict regardless of log_degraded
     assert any(caplog.records)
 
@@ -167,9 +168,7 @@ def test_scalars_carry_specialty_env_only_when_accelerated():
     model = _pf_model()
     profile = ProfileConfig()
 
-    capable = _resolve_llama_scalars(
-        _pf_slot(binary="promptforge"), model, profile
-    )
+    capable = _resolve_llama_scalars(_pf_slot(binary="promptforge"), model, profile)
     assert capable["specialty_degraded"] is None
     assert capable["specialty_env"]["PROMPTFORGE_SIDECAR"] == "/var/lib/hal0/models/m/ffn.pfs"
     assert capable["specialty_env"]["PROMPTFORGE_GDN_SIDECAR"] == "/var/lib/hal0/models/m/gdn.pfs"
@@ -178,9 +177,7 @@ def test_scalars_carry_specialty_env_only_when_accelerated():
         == "/var/lib/hal0/models/m/k8.pfs"
     )
 
-    incapable = _resolve_llama_scalars(
-        _pf_slot(binary="rocmfpx"), model, profile
-    )
+    incapable = _resolve_llama_scalars(_pf_slot(binary="rocmfpx"), model, profile)
     assert incapable["specialty_env"] == {}
     assert incapable["specialty_degraded"]["code"] == "slot.specialty_degraded"
 

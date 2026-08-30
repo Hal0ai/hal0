@@ -1576,9 +1576,7 @@ def _resolve_context_size(
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
-        specialty_ctx = (
-            _specialty_default_ctx(model_info) if specialty_degraded is None else None
-        )
+        specialty_ctx = _specialty_default_ctx(model_info) if specialty_degraded is None else None
         if specialty_ctx is not None:
             resolved, source = specialty_ctx, "specialty.default_ctx"
         else:
@@ -1762,13 +1760,14 @@ def _guard_specialty_runner(
                 f"legitimate fallback mode; the resolved runner "
                 f"{getattr(runner, 'key', '?')!r} cannot serve it — {detail}",
                 code="slot.unsupported_specialty_for_runner",
-                details={"model": model_key, "specialty": key,
-                         "runner": getattr(runner, "key", None)},
+                details={
+                    "model": model_key,
+                    "specialty": key,
+                    "runner": getattr(runner, "key", None),
+                },
             )
         if log_degraded:
-            log.warning(
-                "slot launch degraded: model %s specialty %s — %s", model_key, key, detail
-            )
+            log.warning("slot launch degraded: model %s specialty %s — %s", model_key, key, detail)
         return {
             "code": "slot.specialty_degraded",
             "specialty": key,

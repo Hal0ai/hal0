@@ -180,16 +180,12 @@ def _pf_alias_cfg(binary: str) -> list[dict[str, Any]]:
     ("binary", "expected"),
     [("rocmfpx", _PLAIN_CTX), ("promptforge", _CARD_CTX)],
 )
-async def test_v1_models_context_matches_the_launch_resolution(
-    binary: str, expected: int
-) -> None:
+async def test_v1_models_context_matches_the_launch_resolution(binary: str, expected: int) -> None:
     """``/v1/models``' per-slot alias row advertises the window the slot really
     launches with — a client that sizes a request off the advertised (larger)
     number would otherwise overrun the real window and get truncated."""
     model_info = {"_model_key": "qwen-pf", "metadata": dict(_PF_META)}
-    with patch(
-        "hal0.providers.container._best_effort_model_info", return_value=model_info
-    ):
+    with patch("hal0.providers.container._best_effort_model_info", return_value=model_info):
         entries = await hal0_slot_alias_models(
             _FakeSlotManager(_pf_alias_cfg(binary)),
             _AliasRegistry(_PF_META),
