@@ -91,7 +91,13 @@ def test_remove_image_bad_ref_short_circuits_without_subprocess() -> None:
     assert (outcome, reason) == ("unknown", "invalid-argument")
 
 
-def test_remove_image_not_service_user_short_circuits_without_subprocess() -> None:
+def test_remove_image_not_service_user_short_circuits_without_subprocess(monkeypatch) -> None:
+    """Pins the persona explicitly: non-service-user AND non-root. Without
+    this pin, a CI runner that executes tests as root (euid 0) falls through
+    into the root fallback added for FIX 3 and calls podman directly instead
+    of short-circuiting — this test is specifically about the short-circuit,
+    so it must not depend on the ambient euid of whatever box runs it."""
+    monkeypatch.setattr(podman_mutate.os, "geteuid", lambda: 1000)
     calls, run = _recorder()
     outcome, reason = remove_image(_REF, run=run, is_hal0_user=lambda: False)
 
