@@ -209,6 +209,23 @@ class ImageProbe:
 
 
 @dataclass(frozen=True)
+class LocalImagesDigests:
+    """``podman images`` ref→digest map + which store it came from."""
+
+    refs: dict[str, str | None]
+    context: PodmanContext
+
+
+@dataclass(frozen=True)
+class DigestProbe:
+    """One image-digest question: tri-state like :class:`ImageProbe`."""
+
+    digest: str | None
+    state: ImagePresence
+    reason: SeamUnanswered | None = None
+
+
+@dataclass(frozen=True)
 class _SeamRead:
     """One argument-taking read verb's raw outcome.
 
@@ -271,6 +288,83 @@ def images(
     if proc is None or proc.returncode != 0:
         return None
     return PodmanImagesResult(repos=_parse_repos(proc.stdout), context="rootless")
+
+
+def _parse_ref_digests(stdout: str) -> dict[str, str | None]:
+    """Parse ``images-digests`` output into a ref→digest map.
+
+    Lines are ``<ref> <digest-or-"<none>">``; refs with <none> digests map to
+    None, and lines that don't parse correctly are skipped.
+    """
+    out: dict[str, str | None] = {}
+    for line in stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 2:
+            continue
+        ref, digest = parts
+        if ref.startswith("<none>"):
+            continue
+        out[ref] = digest if digest.startswith("sha256:") else None
+    return out
+
+
+def images_digests(
+    *,
+    run: _RunFn = subprocess.run,
+    which: Callable[[str], str | None] | None = None,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 10.0,
+) -> LocalImagesDigests | None:
+    """Ref→digest map, from root's store when reachable (contract of images())."""
+    if is_hal0_user():
+        proc = _run(run, _seam_argv("images-digests"), timeout=timeout)
+        if proc is not None and proc.returncode == 0:
+            return LocalImagesDigests(refs=_parse_ref_digests(proc.stdout), context="rootful")
+    which_fn = which or shutil.which
+    podman = which_fn("podman")
+    if podman is None:
+        return None
+    proc = _run(
+        run,
+        [podman, "images", "--format", "{{.Repository}}:{{.Tag}} {{.Digest}}"],
+        timeout=timeout,
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    return LocalImagesDigests(refs=_parse_ref_digests(proc.stdout), context="rootless")
+
+
+def image_digest(
+    image: str,
+    *,
+    run: _RunFn = subprocess.run,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 10.0,
+) -> DigestProbe:
+    """First RepoDigest of ``image`` in ROOT's store — tri-state, no fallback.
+
+    Returns a DigestProbe with the digest (sha256:…) if present, None if
+    missing, or unknown if the seam could not answer. ``state`` maps to
+    ImagePresence (present/missing/unknown) and ``reason`` names which
+    unanswerable case occurred.
+
+    Note: empty stdout on rc 0 indicates the image is not in the store OR is
+    present-but-digestless (format-guarded), both returning
+    DigestProbe(None, "missing").
+    """
+    if not is_valid_image_ref(image):
+        return DigestProbe(None, "unknown", "invalid-argument")
+    read = _seam_read(
+        "image-digest", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout
+    )
+    if read.reason is not None:
+        return DigestProbe(None, "unknown", read.reason)
+    if not read.stdout:
+        return DigestProbe(None, "missing")
+    _, _, digest = read.stdout.partition("@")
+    if digest.startswith("sha256:"):
+        return DigestProbe(digest, "present")
+    return DigestProbe(None, "unknown", "seam-error")
 
 
 # ── #1889: argument-taking read verbs ──────────────────────────────────────
@@ -438,15 +532,20 @@ __all__ = [
     "IMAGE_REF_RE",
     "SEAM_BIN",
     "SLOT_TOKEN_RE",
+    "DigestProbe",
     "ImagePresence",
     "ImageProbe",
+    "LocalImagesDigests",
     "PodmanContext",
     "PodmanImagesResult",
     "SeamUnanswered",
     "container_argv",
     "container_image",
+    "image_digest",
     "image_presence",
+    "image_user",
     "images",
+    "images_digests",
     "is_valid_image_ref",
     "is_valid_slot_token",
 ]
