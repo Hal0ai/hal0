@@ -14,12 +14,16 @@ groups use (e.g. ``hal0 registry``): ``ls`` must keep working even when
 service calls the API route handlers do, so behaviour (tag validation,
 store writes) is identical either way.
 
-``rm`` is deliberately absent — the delete story is still open (spec D2).
+``rm`` mirrors ``DELETE /api/runner-images/{id}/tags/{tag}`` (spec D2):
+same store, same seam, same guard order — see the ``rm`` command below for
+the one guard the CLI cannot offer (pull-in-progress).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -203,6 +207,107 @@ def pull(
         console.print("[yellow]![/yellow]  pull cancelled.")
         raise typer.Exit(1)
     console.print(f"[green]✓[/green]  pulled {image_ref} -> {job.local_path}")
+
+
+@app.command("rm")
+def rm(
+    image_id: str = typer.Argument(..., help="Catalogue id, e.g. hal0ai/hal0-toolbox-cpu."),
+    tag: str = typer.Option(
+        ...,
+        "--tag",
+        help="Tag to remove (required — no whole-image delete in this phase).",
+    ),
+) -> None:
+    """Delete one catalogued tag and reclaim its bytes from the local store.
+
+    Mirrors ``DELETE /api/runner-images/{id}/tags/{tag}``'s guard order
+    exactly (``hal0.api.routes.runner_images.delete_runner_image_tag``):
+
+      1. unknown id / unknown tag -> exit 1.
+      2. application-level "which slot launches this ref" guard -> exit 1,
+         naming the slot(s). Reuses the route's own
+         ``_slot_image_usage``/``_tag_in_use_by`` helpers directly rather
+         than re-deriving the same slot-config read here — both are pure,
+         request-independent functions (no ``request.app.state`` access),
+         so importing them costs nothing and keeps the guard's semantics
+         defined in exactly one place instead of two copies that could
+         drift.
+      3. ``podman_mutate.remove_image`` — the same seam-level guard the API
+         route calls: ``"in-use"`` (podman rc 67) -> exit 1;
+         ``"unknown"`` (seam absent/denied/erroring) -> exit 1 with the
+         seam's reason, catalogue left untouched (no fake delete).
+      4. ``"removed"``/``"missing"`` -> ``store.remove_tag`` updates the
+         catalogue (and unlinks the orphaned local-path marker, same as
+         the route) -> exit 0.
+
+    NOT guarded here: a concurrently in-flight ``hal0-api`` dashboard pull
+    for this same id/tag. The API route's pull-in-progress check reads
+    ``request.app.state.runner_image_pull_jobs`` — a live server process's
+    in-memory job table this standalone CLI invocation has no way to see.
+    An operator running this while the dashboard is mid-pull of the same
+    tag can race it; the printed note below is the honest posture rather
+    than a guard that doesn't actually exist.
+    """
+    from hal0.api.routes.runner_images import _slot_image_usage, _tag_in_use_by
+    from hal0.providers import podman_mutate
+
+    store = RunnerImageStore()
+    entry = store.get(image_id)
+    if entry is None:
+        console.print(
+            f"[red]✗[/red]  runner image {image_id!r} not in catalogue — "
+            "run `hal0 runner-images sync` first."
+        )
+        raise typer.Exit(1)
+
+    tag_known = (
+        tag == entry.tag or any(t.tag == tag for t in entry.tags) or tag in entry.available_tags
+    )
+    if not tag_known:
+        console.print(f"[red]✗[/red]  tag {tag!r} not catalogued for {image_id!r}.")
+        raise typer.Exit(1)
+
+    console.print(
+        "[dim]note: a concurrently running hal0-api dashboard pull for this "
+        "image/tag can race this delete — the CLI has no view of its job table.[/dim]"
+    )
+
+    ref = f"{entry.image}:{tag}"
+    in_use_slots = _tag_in_use_by(entry, tag, _slot_image_usage())
+    if in_use_slots:
+        console.print(
+            f"[red]✗[/red]  runner image tag {ref!r} is in use by: {', '.join(in_use_slots)}"
+        )
+        raise typer.Exit(1)
+
+    outcome, reason = podman_mutate.remove_image(ref)
+    if outcome == "in-use":
+        console.print(
+            f"[red]✗[/red]  runner image tag {ref!r} is in use by a container or has child images."
+        )
+        raise typer.Exit(1)
+    if outcome == "unknown":
+        console.print(f"[red]✗[/red]  image removal seam unavailable ({reason}).")
+        raise typer.Exit(1)
+
+    # "removed" or "missing": the seam agrees the bytes are gone (or already
+    # were) — update the catalogue to match, same as the API route.
+    old_local_path = entry.local_path
+    catalogue_removed = store.remove_tag(image_id, tag)
+    if not catalogue_removed:
+        console.print(
+            f"[yellow]![/yellow]  catalogue had no matching tag row for {ref!r} (already desynced)."
+        )
+    if old_local_path:
+        updated = store.get(image_id)
+        if updated is None or updated.local_path is None:
+            with contextlib.suppress(OSError):
+                Path(old_local_path).unlink(missing_ok=True)
+
+    if outcome == "removed":
+        console.print(f"[green]✓[/green]  removed {ref}")
+    else:  # "missing"
+        console.print(f"[green]✓[/green]  {ref} was not on disk — catalogue entry cleared")
 
 
 __all__ = ["app"]

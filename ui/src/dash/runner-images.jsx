@@ -24,6 +24,7 @@ import {
   useRunnerImagePullsList,
   useSetDefaultImage,
   useRestartAffected,
+  useDeleteTag,
 } from '@/api/hooks/useRunnerImages'
 // Explicit import rather than the legacy window-global (primitives.jsx also
 // publishes ConfirmDialog on window) — the settings pages' idiom. Keeps this
@@ -483,7 +484,9 @@ function RunnerCard({ image }) {
   const pull = useRunnerImagePullJob();
   const setDefault = useSetDefaultImage();
   const restartAffected = useRestartAffected();
+  const deleteTag = useDeleteTag();
   const [confirmRestart, setConfirmRestart] = useStateRI(false);
+  const [confirmDelete, setConfirmDelete] = useStateRI(false);
   // Tag picker over the contract's available_tags (headline preselected).
   // null = "follow the headline"; reset whenever the selected row changes.
   const [pickedTag, setPickedTag] = useStateRI(null);
@@ -545,6 +548,45 @@ function RunnerCard({ image }) {
         window.__hal0Toast && window.__hal0Toast(`Restarted ${n} slot${n === 1 ? "" : "s"}`, "info");
       },
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Restart failed — ${e?.message || "see logs"}`, "err"),
+    });
+  };
+
+  // Per-tag delete (D2, #2106, Task 5). `in_use_by` is only ever computed
+  // server-side for the row's HEADLINE ref (enrich_row's `row_ref`) — the
+  // same limitation `headlineRef`/`onRestartAffected` above already lean
+  // on — so the UX-level disable can only speak for the headline pick. A
+  // non-headline pick is NOT known to be safe either way; it's left
+  // enabled and the server's own guards (app-level slot check, then the
+  // seam's rc-67 backstop) are the real authority regardless of what this
+  // button allows.
+  const deleteDisabledReason =
+    selTag === image.tag && inUseBy.length > 0
+      ? `In use by ${inUseBy.join(", ")} — restart or repoint those slots first.`
+      : null;
+  const deleteRef = `${image.image}:${selTag}`;
+  const onDeleteTag = () => {
+    setConfirmDelete(false);
+    deleteTag.mutate({ id: image.id, tag: selTag }, {
+      onSuccess: (res) => {
+        const msg = res?.outcome === "missing"
+          ? `${deleteRef} was not on disk — catalogue entry cleared`
+          : `Removed ${deleteRef}`;
+        window.__hal0Toast && window.__hal0Toast(msg, "info");
+      },
+      onError: (e) => {
+        if (e?.code === "runner_image.tag_in_use") {
+          const slots = e?.details?.slots;
+          const suffix = Array.isArray(slots) && slots.length ? ` (${slots.join(", ")})` : "";
+          window.__hal0Toast && window.__hal0Toast(`Tag is in use${suffix} — not removed.`, "err");
+        } else if (e?.code === "runner_image.rm_unavailable") {
+          window.__hal0Toast && window.__hal0Toast(
+            `Image removal is unavailable on this box (${e?.details?.reason || "seam unreachable"}).`,
+            "err",
+          );
+        } else {
+          window.__hal0Toast && window.__hal0Toast(`Delete failed — ${e?.message || "see logs"}`, "err");
+        }
+      },
     });
   };
 
@@ -683,6 +725,13 @@ function RunnerCard({ image }) {
                 onClick={() => setConfirmRestart(true)}
               >Restart {inUseBy.length} affected slot{inUseBy.length === 1 ? "" : "s"}</button>
             )}
+            <button
+              className="btn ghost"
+              data-testid="ri-delete-tag"
+              disabled={deleteTag.isPending || !!deleteDisabledReason}
+              title={deleteDisabledReason || `Delete ${deleteRef} and reclaim its disk bytes`}
+              onClick={() => setConfirmDelete(true)}
+            >{Icons.trash} Delete <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span></button>
           </div>
         )}
         {pull.imageId === image.id && pull.error && (
@@ -715,6 +764,17 @@ function RunnerCard({ image }) {
         }
         confirmLabel="Restart"
         footerNote="A slot that fails to restart is skipped and logged — the rest still restart."
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={onDeleteTag}
+        title={`Delete ${deleteRef}`}
+        message={`Delete tag "${selTag}" of ${image.image} and reclaim its bytes on this box's local store. This cannot be undone.`}
+        confirmLabel="Delete"
+        destructive
+        footerNote="The server still refuses if a slot or container is using this image."
       />
     </div>
   );

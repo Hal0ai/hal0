@@ -110,6 +110,13 @@ export const ENDPOINTS = {
   runnerImagePullStatus: (id: string) => `/api/runner-images/${id}/pull/status`,
   runnerImagePullStream: (id: string) => `/api/runner-images/${id}/pull/stream`,
   runnerImagePullCancel: (id: string) => `/api/runner-images/${id}/pull/cancel`,
+  // DELETE — reclaim one catalogued tag's disk bytes (D2). `id` is NOT
+  // re-encoded (see the block comment above); `tag` IS encodeURIComponent'd
+  // — unlike catalogue ids, a tag never legitimately contains `/`, and this
+  // guards a mistyped/free-text tag from smuggling an extra path segment
+  // into the URL.
+  runnerImageDeleteTag: (id: string, tag: string) =>
+    `/api/runner-images/${id}/tags/${encodeURIComponent(tag)}`,
 
   // ── Backends ─────────────────────────────────────────────────────
   // There is NO generic install route — the only install-like operations

@@ -31,9 +31,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // side-effect-free. vi.mock factories are hoisted above imports, so the spy +
 // fixture rows they close over must be hoisted too (mirrors
 // runner-images-confirm-flow.test.tsx's `vi.hoisted` idiom).
-const { apiPostCalls, apiPostBodies, PULL_ROW, imagesOverride, familiesOverride } = vi.hoisted(() => ({
+const {
+  apiPostCalls,
+  apiPostBodies,
+  apiDeleteCalls,
+  deleteOutcome,
+  PULL_ROW,
+  imagesOverride,
+  familiesOverride,
+} = vi.hoisted(() => ({
   apiPostCalls: [] as string[],
   apiPostBodies: [] as unknown[],
+  apiDeleteCalls: [] as string[],
+  // Task 5 (per-tag delete): controls what the mocked apiDelete resolves/
+  // rejects with, per test — a mutable box (same idiom as imagesOverride)
+  // so vi.hoisted mock factories can close over it.
+  deleteOutcome: { current: 'removed' as 'removed' | 'missing' | 'tag_in_use' | 'rm_unavailable' },
   PULL_ROW: {
     id: 'rocmfpx-combined',
     image: 'ghcr.io/hal0ai/hal0-combined',
@@ -102,6 +115,34 @@ vi.mock('@/api/client', async () => {
       apiPostCalls.push(url)
       apiPostBodies.push(body)
       return Promise.resolve({ id: 'job-1', restarted: [] })
+    },
+    // Task 5 (per-tag delete): the real useDeleteTag mutation posts through
+    // apiDelete — mocked at the same client boundary as apiPost above so the
+    // URL it actually builds (encodeURIComponent'd tag, unencoded id) is
+    // what's asserted. `deleteOutcome` picks the response/rejection shape
+    // per test.
+    apiDelete: (url: string) => {
+      apiDeleteCalls.push(url)
+      const outcome = deleteOutcome.current
+      if (outcome === 'removed') return Promise.resolve({ removed: true, outcome: 'removed' })
+      if (outcome === 'missing') return Promise.resolve({ removed: false, outcome: 'missing' })
+      if (outcome === 'tag_in_use') {
+        return Promise.reject(
+          new actual.Hal0Error('runner image tag is in use', {
+            code: 'runner_image.tag_in_use',
+            status: 409,
+            details: { slots: ['brain'] },
+          }),
+        )
+      }
+      // rm_unavailable
+      return Promise.reject(
+        new actual.Hal0Error('image removal seam unavailable', {
+          code: 'runner_image.rm_unavailable',
+          status: 502,
+          details: { reason: 'grant-denied' },
+        }),
+      )
     },
   }
 })
@@ -664,6 +705,108 @@ describe('RunnerImagesView restart-affected-slots (Task 12)', () => {
     })
 
     expect(host.querySelector('[data-testid="ri-restart-affected"]')).toBeNull()
+
+    act(() => { root.unmount() })
+  })
+})
+
+// Task 5 (runner-images-v3 phase 4) — per-tag Delete button. A REAL render
+// (same idiom as Task 6/12 above): a ghost "Delete :<tag>" button sits next
+// to the pull controls, behind the shared ConfirmDialog; confirming DELETEs
+// the picked tag via the real useDeleteTag mutation. Disabled (server still
+// guards) whenever the picked tag IS the headline and the row's `in_use_by`
+// is non-empty — that's the only tag this list payload can name usage for.
+describe('RunnerImagesView per-tag delete (Task 5)', () => {
+  afterEach(() => {
+    apiDeleteCalls.length = 0
+    deleteOutcome.current = 'removed'
+    imagesOverride.current = null
+    document.body.innerHTML = ''
+  })
+
+  function mount() {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+    return { host, root }
+  }
+
+  it('renders the delete button and DELETEs the right URL on confirm', async () => {
+    imagesOverride.current = [{ ...PULL_ROW, in_use_by: [] }]
+    const { host, root } = mount()
+
+    const btn = host.querySelector('[data-testid="ri-delete-tag"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.textContent).toContain('Delete')
+    expect(btn.textContent).toContain(PULL_ROW.tag)
+    expect(btn.disabled).toBe(false)
+    expect(host.querySelector('.modal-backdrop')).toBeNull()
+
+    act(() => { btn.click() })
+    expect(host.querySelector('.modal-backdrop')).toBeTruthy()
+    expect(host.textContent).toContain(PULL_ROW.tag)
+
+    const confirmBtn = Array.from(host.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Delete',
+    ) as HTMLButtonElement
+    expect(confirmBtn).toBeTruthy()
+    await act(async () => {
+      confirmBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(apiDeleteCalls[apiDeleteCalls.length - 1]).toBe(
+      `/api/runner-images/${PULL_ROW.id}/tags/${PULL_ROW.tag}`,
+    )
+    expect(host.querySelector('.modal-backdrop')).toBeNull()
+
+    act(() => { root.unmount() })
+  })
+
+  it('is disabled with an explanatory title when the headline pick is in_use_by', () => {
+    imagesOverride.current = [{ ...PULL_ROW, in_use_by: ['brain', 'ops'] }]
+    const { host, root } = mount()
+
+    const btn = host.querySelector('[data-testid="ri-delete-tag"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.disabled).toBe(true)
+    expect(btn.title).toMatch(/brain/)
+    expect(btn.title).toMatch(/ops/)
+
+    act(() => { root.unmount() })
+  })
+
+  it('reports the "missing" outcome distinctly from "removed"', async () => {
+    imagesOverride.current = [{ ...PULL_ROW, in_use_by: [] }]
+    deleteOutcome.current = 'missing'
+    const { host, root } = mount()
+
+    const btn = host.querySelector('[data-testid="ri-delete-tag"]') as HTMLButtonElement
+    act(() => { btn.click() })
+    const confirmBtn = Array.from(host.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Delete',
+    ) as HTMLButtonElement
+    await act(async () => {
+      confirmBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(apiDeleteCalls.length).toBe(1)
+    expect(host.querySelector('.modal-backdrop')).toBeNull()
 
     act(() => { root.unmount() })
   })
