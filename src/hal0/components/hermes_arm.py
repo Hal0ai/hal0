@@ -33,17 +33,24 @@ def stamp_path() -> Path:
 def installed_hermes_pin(venv: Path | None = None) -> str | None:
     """The pin identifier stamped after the last successful converge.
 
-    ``venv`` is accepted for interface symmetry with the other component
-    getters but does not gate the read: the stamp is a single canonical
-    file (one hermes install per box, spec §1), not venv-relative, and
-    "is hermes provisioned at all" is already ``converge_hermes``'s own
-    concern via its own ``bin/python`` check. Gating this getter on
-    ``hermes.HERMES_VENV_DEFAULT`` (a hardcoded FHS path, not HAL0_HOME-aware
-    like :func:`stamp_path`) would make it blind to the stamp under any
-    HAL0_HOME sandbox — the dev/test posture this whole module is written
-    to run under.
+    Gated on the venv actually existing: a deprovisioned box (venv
+    removed, stamp file surviving under ``var_lib()`` — state is preserved
+    across uninstall unless ``--keep-data`` is dropped) must read as
+    ``None``, not as a stale "converged"/"pending" verdict, or the
+    component-status derivation (spec §1 / Task 8) misreports an
+    uninstalled component as still on some version.
+
+    The default is ``var_lib() / "venvs" / "hermes"`` rather than
+    ``hermes.HERMES_VENV_DEFAULT`` directly: in production ``HAL0_HOME`` is
+    unset and the two are the same path
+    (``/var/lib/hal0/venvs/hermes``), but under HAL0_HOME sandboxing (dev,
+    tests) this one follows the sandbox and the hardcoded FHS constant does
+    not — gating on the constant made this getter permanently blind to a
+    freshly-written, correctly-sandboxed stamp in exactly that posture.
     """
-    del venv
+    venv = venv or (var_lib() / "venvs" / "hermes")
+    if not (venv / "bin" / "python").exists():
+        return None
     try:
         value = stamp_path().read_text(encoding="utf-8").strip()
     except OSError:
