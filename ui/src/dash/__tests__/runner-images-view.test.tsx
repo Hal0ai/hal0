@@ -99,6 +99,7 @@ vi.mock('@/api/client', async () => {
 const {
   defaultsStripRows,
   newerTagAvailable,
+  newerTagCandidate,
   newestComparableTag,
   tagLanes,
   MUTABLE_TAGS,
@@ -256,6 +257,33 @@ describe('newerTagAvailable (digest-aware, v3 payload)', () => {
     const same = { ...V3_IMG, tags: V3_IMG.tags.map(t => ({ ...t, digest: 'sha256:b' })) }
     expect(newerTagAvailable(same)).toBe(false) // all aliases of headline
   })
+
+  // Fix round 1 (review): the verdict (newerTagAvailable) and the displayed
+  // name (newerTagCandidate, used by the "newer: X" chip) must agree even
+  // when `available_tags` and `tags[]` disagree — e.g. a per-tag digest
+  // probe that hasn't caught up with a registry-order listing yet. Before
+  // the fix, the chip's name came from a SEPARATE scan of `available_tags`
+  // (newestComparableTag) under a different filter than the verdict's
+  // `tags[]` scan, so it could name a tag that was never actually compared
+  // — here, a tag ('0827') that isn't even present in `tags[]`.
+  it('newerTagCandidate names the same tag the verdict actually compared, even when available_tags disagrees', () => {
+    const DIVERGENT = {
+      id: 'y',
+      image: 'ghcr.io/x/b',
+      tag: '0824',
+      // Registry-order listing already has 0827; the per-tag digest
+      // resolver hasn't caught up (tags[] below stops at 0826).
+      available_tags: ['0827', '0826', '0824'],
+      tags: [
+        { tag: '0826', digest: 'sha256:a', downloaded: false },
+        { tag: '0824', digest: 'sha256:b', downloaded: true },
+      ],
+    }
+    // Sanity: the two lists really do disagree on the "newest" name.
+    expect(newestComparableTag(DIVERGENT)).toBe('0827')
+    expect(newerTagAvailable(DIVERGENT)).toBe(true) // 0826 digest ≠ 0824's
+    expect(newerTagCandidate(DIVERGENT)).toBe('0826') // not '0827' — that tag was never compared
+  })
 })
 
 // Real render — proves the <select> groups tags into <optgroup>s (other
@@ -323,6 +351,74 @@ describe('RunnerCard tag picker + store-truth chips (Task 8)', () => {
     )
     expect(chips.length).toBeGreaterThan(0)
     expect(chips.every(t => t === '✓ downloaded')).toBe(true)
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  // Fix round 1 (review): the "other" optgroup used to be gated on
+  // `showAllTags` alone, so picking a tag from it and then toggling the
+  // "show all tags" button back OFF unmounted the very <option> the
+  // controlled <select>'s value pointed at — the browser silently falls
+  // back to the first rendered option while React's state still holds the
+  // now-invisible pick, desyncing the UI from what would actually get
+  // pulled. The "other" optgroup must stay rendered whenever the current
+  // pick lives there, toggle state notwithstanding.
+  it('keeps a picked other-lane tag selectable after toggling "show all tags" back off', async () => {
+    imagesOverride.current = [
+      {
+        ...V3_IMG,
+        digest: 'sha256:b',
+        size_bytes: 1000,
+        manifest_key: null,
+        ownership: 'owned',
+        publish: 'external',
+        notes: null,
+        build: null,
+        local_path: null,
+        downloaded_at: null,
+        discovered_at: null,
+        updated_at: null,
+        extra: {},
+        store_state: 'present',
+        downloaded: true,
+        store_context: 'rootful',
+        is_default: null,
+        in_use_by: [],
+      },
+    ]
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const root = createRoot(host)
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(RunnerImagesView),
+        ),
+      )
+    })
+
+    const select = host.querySelector('[data-testid="ri-tag-pick"]') as HTMLSelectElement
+    const showAllBtn = host.querySelector('[data-testid="ri-show-all-tags"]') as HTMLButtonElement
+
+    act(() => {
+      showAllBtn.click() // reveal "other" (latest, main)
+    })
+    act(() => {
+      select.value = 'latest'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    act(() => {
+      showAllBtn.click() // toggle back off — "latest" is still the pick
+    })
+
+    const groups = Array.from(select.querySelectorAll('optgroup')).map(g => g.label)
+    expect(groups).toContain('other') // stays rendered because the pick lives there
+    expect(select.value).toBe('latest') // controlled value survives the toggle
 
     act(() => {
       root.unmount()

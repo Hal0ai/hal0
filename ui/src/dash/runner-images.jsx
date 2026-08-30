@@ -100,10 +100,10 @@ const RELEASE_TAG_RE = /^(v?\d+(\.\d+)*)$/;
 // releases: dotted/bare version-number tags. pins: the row's headline tag,
 // guaranteed present even when the probe didn't carry it. other: everything
 // else (branch heads, `latest`, floating dev tags — see MUTABLE_TAGS above).
-// `aliasOf` names the first earlier tag (releases/pins win ties by lane
-// order below, then array order) sharing the same digest, so e.g. a
-// `latest` that just points at the newest release reads as "latest =
-// 0826" instead of a mystery duplicate.
+// `aliasOf` names the first earlier tag in `image.tags`'/`available_tags`'
+// original array order sharing the same digest, so e.g. a `latest` that
+// just points at the newest release reads as "latest = 0826" instead of a
+// mystery duplicate.
 export function tagLanes(image) {
   const infos = Array.isArray(image?.tags) && image.tags.length
     ? image.tags
@@ -126,25 +126,44 @@ export function tagLanes(image) {
   return lanes;
 }
 
+// The tag name behind newerTagAvailable's verdict — shared so the "newer:
+// X" chip never names a tag the verdict didn't actually compare against
+// (a per-tag digest-probe failure can drop a tag from `image.tags` without
+// touching `available_tags`, so scanning the two lists independently could
+// disagree). Digest path: the newest release-shaped tag other than the
+// headline, from `image.tags`. Falls back to the pre-v3 name-based
+// newestComparableTag() heuristic (mutable-pointer aware, see
+// MUTABLE_TAGS) when the row predates the v3 per-tag payload. Returns
+// `undefined` when there's no candidate either way.
+export function newerTagCandidate(image) {
+  if (!image || !image.tag) return undefined;
+  const tags = Array.isArray(image.tags) ? image.tags : null;
+  if (tags && tags.length) {
+    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag) && t.tag !== image.tag);
+    return cand?.tag;
+  }
+  return newestComparableTag(image);
+}
+
 // True when the registry knows a genuinely newer build than the row's
 // headline `tag` — a digest fact when the row carries the v3 `tags[]`
-// payload (the newest release-shaped tag's digest differs from the
-// headline's; a probe that didn't resolve a digest for either side still
-// counts as "newer" by name, same as the pre-v3 behavior). Falls back to
-// the pre-v3 name-based newestComparableTag() heuristic (mutable-pointer
-// aware, see MUTABLE_TAGS) when the row predates the v3 payload.
+// payload (the candidate's digest differs from the headline's; a probe
+// that didn't resolve a digest for either side still counts as "newer" by
+// name, same as the pre-v3 behavior). Falls back to the pre-v3 name-based
+// heuristic when the row predates the v3 payload. Uses the same candidate
+// as newerTagCandidate() above — see that comment for why that matters.
 export function newerTagAvailable(image) {
   if (!image || !image.tag) return false;
+  const cand = newerTagCandidate(image);
+  if (!cand) return false;
   const tags = Array.isArray(image.tags) ? image.tags : null;
   if (tags && tags.length) {
     const head = tags.find(t => t.tag === image.tag);
-    const cand = tags.find(t => RELEASE_TAG_RE.test(t.tag) && t.tag !== image.tag);
-    if (!cand) return false;
-    if (head?.digest && cand.digest) return cand.digest !== head.digest;
+    const candInfo = tags.find(t => t.tag === cand);
+    if (head?.digest && candInfo?.digest) return candInfo.digest !== head.digest;
     return true;
   }
-  const c = newestComparableTag(image);           // pre-v3 fallback, unchanged
-  return !!c && c !== image.tag;
+  return cand !== image.tag;               // pre-v3 fallback, unchanged
 }
 
 // Tag option label for the card's <select>: the tag name, its digest alias
@@ -374,7 +393,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
         )}
         {newerTagAvailable(image) && (
           <span className="chip" data-testid="ri-newer-tag" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-            newer: {newestComparableTag(image)}
+            newer: {newerTagCandidate(image)}
           </span>
         )}
         <BadgeChip badge={image.badges?.[image.tag]} />
@@ -512,7 +531,12 @@ function RunnerCard({ image }) {
                   ))}
                 </optgroup>
               )}
-              {showAllTags && lanes.other.length > 0 && (
+              {/* Rendered whenever toggled open OR the current pick lives in
+                  this lane — a controlled <select> whose value names an
+                  unmounted <option> falls back to the first rendered one,
+                  silently overriding React's own state (e.g. pick an
+                  other-lane tag, then toggle "show all tags" back off). */}
+              {(showAllTags || lanes.other.some(t => t.tag === selTag)) && lanes.other.length > 0 && (
                 <optgroup label="other">
                   {lanes.other.map(t => (
                     <option key={t.tag} value={t.tag}>{tagOptionLabel(t)}</option>
@@ -530,7 +554,7 @@ function RunnerCard({ image }) {
             )}
             {newerTagAvailable(image) && (
               <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-                newer: {newestComparableTag(image)}
+                newer: {newerTagCandidate(image)}
               </span>
             )}
           </div>
