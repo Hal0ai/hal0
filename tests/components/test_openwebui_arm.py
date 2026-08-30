@@ -89,6 +89,26 @@ def test_target_digest_writes_override_marker(tmp_path) -> None:
     assert res2["status"] == "override"
 
 
+def test_target_digest_matching_installed_persists_override(tmp_path) -> None:
+    # Installed digest is already the operator's --target — distinct from
+    # the release pin (NEW), so this can't be mistaken for the plain
+    # already-converged-to-the-release-pin case.
+    other = "sha256:" + "2" * 64
+    unit = tmp_path / "u.service"
+    unit.write_text(UNIT.replace(OLD, other), encoding="utf-8")
+    runner = _ok_runner()
+    res = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=runner, is_hal0_user=lambda: False, target_digest=other
+    )
+    assert res["status"] == "override"
+    assert openwebui_arm.read_pin_override() == other
+    runner.assert_not_called()
+    # A subsequent un-targeted converge holds the box at the override
+    # (NEW would otherwise pull it back to the release pin).
+    res2 = openwebui_arm.converge_openwebui(unit_path=unit, runner=_ok_runner(), is_hal0_user=lambda: False)
+    assert res2["status"] == "override"
+
+
 def test_clear_override(tmp_path) -> None:
     other = "sha256:" + "2" * 64
     unit = _unit(tmp_path)

@@ -12,7 +12,11 @@ dicts, the ``upgrade_memory_engine`` posture.
 Operator override: ``--target`` persists the digest to
 ``/var/lib/hal0/state/openwebui.pin-override``; while present, converge
 holds the box at the override (status ``override``) instead of the
-release pin. ``clear_override`` removes it.
+release pin. ``clear_override`` removes it. The marker is written
+whenever ``target_digest`` is supplied — including when it already
+matches the installed digest, so a subsequent un-targeted converge still
+holds the box at the operator's pin instead of drifting back to the
+release pin the moment nothing needs pulling.
 """
 
 from __future__ import annotations
@@ -102,6 +106,17 @@ def converge_openwebui(
 
     result: dict[str, Any] = {"installed": current, "pinned": desired}
     if current == desired:
+        if target_digest is not None:
+            # The operator's --target already matches what's installed —
+            # still persist the marker so a subsequent un-targeted converge
+            # holds the box here instead of drifting back to the release
+            # pin (spec §2: --target always writes the override marker).
+            try:
+                override_path().parent.mkdir(parents=True, exist_ok=True)
+                override_path().write_text(target_digest + "\n", encoding="utf-8")
+            except OSError as exc:
+                log.warning("components.owui_override_persist_failed", job_id=job_id, error=str(exc))
+            return {**result, "status": "override"}
         return {**result, "status": "override" if overridden else "converged"}
     if not apply:
         log.warning(
