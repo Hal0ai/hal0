@@ -126,6 +126,10 @@ full detail in the
 
 ### Added
 
+- PromptForge mode envs live: `SPECIALTY_KINDS["promptforge"].mode_env` now
+  carries the card's four validated values (non-IU4/no-ngram profile), so
+  accelerated launches synthesize the full gated env. Admitted by the #1891
+  ct150 gate (2026-08-30).
 - PromptForge runner digest pin: the #1891 ct150 gate passed (2026-08-30),
   so `manifest.json.toolbox_images.promptforge` now ships the gate-validated
   digest and the promptforge runner's `manifest_key` resolves it. Optional

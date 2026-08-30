@@ -71,8 +71,21 @@ SPECIALTY_KINDS: dict[str, SpecialtyKind] = {
                 required=False,
             ),
         ),
-        # Card's mode envs ride here once validated on ct150; empty until then.
-        mode_env={},
+        # Card-verbatim mode envs, admitted by the #1891 ct150 gate
+        # (2026-08-30; report at
+        # /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md,
+        # results on #1946). These exact four values ran the whole gate:
+        # temp-0 Paris probe green, HumanEval+ 0.939/0.909 with the card's
+        # disclosed task-130 regression reproducing precisely, MTP depth-4 at
+        # ~86% draft acceptance (+75% decode vs MTP-off). The non-IU4 /
+        # no-ngram qualified profile — the IU4/ngram env family stays out by
+        # design (the card qualifies only this combination).
+        mode_env={
+            "PROMPTFORGE_MODE": "m2048_fused_tail1476",
+            "PROMPTFORGE_ENABLE_SMALLM_W8": "1",
+            "PROMPTFORGE_MTP_OUTPUT_K8": "1",
+            "PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE": "0",
+        },
         degraded_ok=True,
         default_ctx=262_144,
         argv_profile="promptforge",
