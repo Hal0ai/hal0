@@ -1594,6 +1594,17 @@ def _register_pulled_fileset(
             merged_meta["specialty"] = fileset.specialty
             merged_meta["companions"] = companion_paths
             merged_meta["companion_sizes"] = companion_sizes
+        else:
+            # A plain re-pull over a previously-specialty model must CLEAR the
+            # three keys, not leave them merged over from ``existing.metadata``
+            # (fix wave, M1). Stale keys point at blobs GC has since reclaimed;
+            # the guard only checks key PRESENCE, so it would say "accelerated"
+            # and the launch would export PROMPTFORGE_SIDECAR=/…/ffn.pfs for a
+            # file that isn't there. Same rule as ``quant`` two blocks up: a
+            # re-pull that detects nothing clears the stale value along with
+            # the stale bytes.
+            for stale in ("specialty", "companions", "companion_sizes"):
+                merged_meta.pop(stale, None)
         updates["metadata"] = merged_meta
         registry.update(model_id, updates)
 

@@ -46,6 +46,39 @@ def test_missing_required_companion_degrades_even_on_capable_runner():
     assert "promptforge_gdn" in reason["detail"]
 
 
+def test_empty_companion_path_degrades_not_silently_accelerates():
+    """M2 (fix wave): the guard's completeness check was ``role not in
+    companions``, so a row whose path is ``""`` passed as ACCELERATED — while
+    ``specialty_env_for`` skips non-empty-str values and silently dropped the
+    env var. Guard and env synthesizer must agree on what "present" means."""
+    model = _pf_model(
+        companions={
+            "promptforge_ffn": "",  # present-but-empty
+            "promptforge_gdn": "/x/gdn.pfs",
+            "promptforge_output_k8": "/x/k8.pfs",
+        }
+    )
+    reason = _guard_specialty_runner(model, RUNNER_IMAGES["promptforge"])
+    assert reason["code"] == "slot.specialty_degraded"
+    assert "promptforge_ffn" in reason["detail"]
+    # the env synthesizer's view, which the guard now matches
+    assert "PROMPTFORGE_SIDECAR" not in specialty_env_for(model["metadata"])
+
+
+def test_non_str_companion_path_degrades():
+    """Same rule for a non-string value (a null/number that leaked in)."""
+    model = _pf_model(
+        companions={
+            "promptforge_ffn": None,
+            "promptforge_gdn": "/x/gdn.pfs",
+            "promptforge_output_k8": "/x/k8.pfs",
+        }
+    )
+    reason = _guard_specialty_runner(model, RUNNER_IMAGES["promptforge"])
+    assert reason["code"] == "slot.specialty_degraded"
+    assert "promptforge_ffn" in reason["detail"]
+
+
 def test_plain_model_is_untouched():
     model = {"_model_key": "plain", "metadata": {}}
     assert _guard_specialty_runner(model, RUNNER_IMAGES["cpu"]) is None

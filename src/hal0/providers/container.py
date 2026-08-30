@@ -1782,10 +1782,26 @@ def _guard_specialty_runner(
             f"{key!r}; launching GGUF-only"
         )
     companions = meta.get("companions") or {}
+
+    def _usable(role: str) -> bool:
+        """A companion counts as present only with a non-empty ``str`` path.
+
+        Fix wave, M2: the check used to be ``role not in companions``, so a row
+        whose path was ``""`` passed as ACCELERATED — while
+        :func:`hal0.registry.specialty.specialty_env_for` skips values that
+        aren't non-empty strings and silently drops the env var. That is the
+        #1888 class in miniature: a degrade with no reason attached. Pull never
+        writes an empty string today, but the guard is the one place that is
+        supposed to be paranoid, and it must agree with the env synthesizer
+        about what "present" means.
+        """
+        path = companions.get(role)
+        return isinstance(path, str) and bool(path.strip())
+
     missing = [
         spec.role
         for spec in kind.companions
-        if spec.required and spec.env is not None and spec.role not in companions
+        if spec.required and spec.env is not None and not _usable(spec.role)
     ]
     if missing:
         return _degrade_or_raise(

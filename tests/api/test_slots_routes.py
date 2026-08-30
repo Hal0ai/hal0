@@ -2684,3 +2684,25 @@ def test_fit_check_warning_paths() -> None:
     assert _fit_check_warning("gpu-rocm", None) is None
     # Unknown BINARY key → no check (launch path reports its own error).
     assert _fit_check_warning("gpu-rocm", "does-not-exist") is None
+
+
+def test_fit_check_refuses_promptforge_on_a_vulkan_device() -> None:
+    """Spec 2026-08-29 (#1946) testing list, M4: the promptforge runner is a
+    HIP-only build (``supported_backends == ("rocm",)``, GGML_VULKAN=OFF), so
+    the EXISTING fit-check must warn on a ``gpu-vulkan`` slot with no new code.
+    The runner registry test asserts the tuple's value; nothing exercised the
+    check itself, so the "no new code needed" claim was unpinned."""
+    from hal0.api.routes.slots import _fit_check_warning
+    from hal0.runners import RUNNER_IMAGES
+
+    assert RUNNER_IMAGES["promptforge"].supported_backends == ("rocm",)
+
+    warn = _fit_check_warning("gpu-vulkan", "promptforge")
+    assert warn is not None
+    assert "vulkan" in warn
+    assert "promptforge" in warn
+    assert "rocm" in warn  # names the backend it DOES support
+
+    # the sibling half: its own backend fits, and cpu is refused too
+    assert _fit_check_warning("gpu-rocm", "promptforge") is None
+    assert _fit_check_warning("cpu", "promptforge") is not None

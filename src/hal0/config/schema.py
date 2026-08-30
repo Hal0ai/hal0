@@ -1034,6 +1034,16 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
 #: item 4 and spec 2026-08-29). Candidate tag until the ct150 validation
 #: gate (#1891) passes; the pin only moves operator-gated.
+#:
+#: DELIBERATELY ABSENT from ``manifest.json``'s ``toolbox_images`` (fix wave,
+#: I3): the image isn't built yet, so the entry could only carry
+#: ``"digest": null`` — which is exactly what ``scripts/release-check.sh``
+#: step 4 hard-fails on ("manifest.json has unpinned toolbox image(s)"), and
+#: it buys nothing: ``manifest_image_ref()`` with a null digest falls through
+#: to the tag, which is byte-identical to this constant, so
+#: ``resolve_runner_image`` resolves the same string either way. The manifest
+#: entry gets ADDED, with a real digest, at the #1891 ct150 gate — the
+#: sequencing the spec's own image-build workstream already specifies.
 DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
 
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation

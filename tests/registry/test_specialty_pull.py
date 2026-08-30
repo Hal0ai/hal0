@@ -118,3 +118,71 @@ def test_plain_pull_stamps_nothing(tmp_hal0_home: str) -> None:
     assert "specialty" not in model.metadata
     assert "companions" not in model.metadata
     assert "companion_sizes" not in model.metadata
+
+
+def test_plain_repull_over_a_specialty_model_clears_the_stale_keys(
+    tmp_hal0_home: str,
+) -> None:
+    """M1 (fix wave): a re-pull whose plan detects NO specialty must strip
+    ``specialty`` / ``companions`` / ``companion_sizes`` from the merged
+    metadata.
+
+    The update branch merges over ``existing.metadata``, so before this the
+    three keys survived a plain re-pull and pointed at blobs GC had since
+    reclaimed. The guard only checks key PRESENCE, so it reported
+    "accelerated" and the launch exported ``PROMPTFORGE_SIDECAR=/…/ffn.pfs``
+    for a file that isn't there.
+    """
+    registry = ModelRegistry()
+    tmp_path = Path(tmp_hal0_home)
+    root = tmp_path / "fileset-models"
+    root.mkdir(parents=True, exist_ok=True)
+    model_id = "repulled-model"
+
+    # ── pull 1: a specialty file set ────────────────────────────────────
+    entry_dest = root / "model-ActiveFPX.pfs"
+    entry_dest.write_bytes(_payload(2048))
+    ffn_dest = root / "ffn.pfs"
+    ffn_dest.write_bytes(_payload(1024))
+    entry_file = FileSetEntry(rel="model-ActiveFPX.pfs", role="model", size_bytes=2048)
+    ffn_file = FileSetEntry(rel="ffn.pfs", role="promptforge_ffn", size_bytes=1024)
+    _register_pulled_fileset(
+        registry,
+        model_id=model_id,
+        fileset=FileSetPlan(
+            repo="org/pf",
+            revision="rev1",
+            entry_rel="model-ActiveFPX.pfs",
+            files=[entry_file, ffn_file],
+            specialty="promptforge",
+        ),
+        installed=[(entry_file, entry_dest), (ffn_file, ffn_dest)],
+        entry_dest=entry_dest,
+        mmproj_dest=None,
+    )
+    assert registry.get(model_id).metadata["specialty"] == "promptforge"
+
+    # ── pull 2: same id, a plain repo (no specialty detected) ───────────
+    plain_dest = root / "model-Q4_K_M.gguf"
+    plain_dest.write_bytes(_payload(2048))
+    plain_file = FileSetEntry(rel="model-Q4_K_M.gguf", role="model", size_bytes=2048)
+    _register_pulled_fileset(
+        registry,
+        model_id=model_id,
+        fileset=FileSetPlan(
+            repo="org/plain",
+            revision="rev2",
+            entry_rel="model-Q4_K_M.gguf",
+            files=[plain_file],
+            specialty=None,
+        ),
+        installed=[(plain_file, plain_dest)],
+        entry_dest=plain_dest,
+        mmproj_dest=None,
+    )
+
+    meta = registry.get(model_id).metadata
+    assert "specialty" not in meta
+    assert "companions" not in meta
+    assert "companion_sizes" not in meta
+    assert meta["pulled_at"]  # unrelated keys survive the strip
