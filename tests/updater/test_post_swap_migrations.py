@@ -316,7 +316,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True: (
+        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True: (
             1,
             2,
         ),
@@ -383,7 +383,7 @@ def test_never_calls_reset_profile_catalog(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True: (
+        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True: (
             1,
             1,
         ),
