@@ -1026,6 +1026,17 @@ async def set_channel(request: Request) -> dict[str, str]:
     return {"channel": channel}
 
 
+# ── /components (spec 2026-08-30 §3) ───────────────────────────────────────
+
+
+@router.get("/components")
+async def list_components(request: Request) -> dict[str, Any]:
+    """Per-component version/converge status (catalog × state × live probes)."""
+    from hal0.components.status import component_status_snapshot
+
+    return await asyncio.to_thread(component_status_snapshot)
+
+
 # ── /slot-drift + /restart-slots (installer-setup WS-J, #1111) ───────────────
 #
 # ``rerender_slot_units`` (updater) rewrites each on-disk slot unit through
