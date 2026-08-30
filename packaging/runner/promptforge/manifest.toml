@@ -55,7 +55,7 @@ rocm_version = "7.15"
 #: composable_kernel commit the toolchain was built against, so the card
 #: pins one explicitly rather than floating "whatever ROCm 7.15 shipped
 #: with." https://github.com/ROCm/composable_kernel
-composable_kernel_ref = "fdf4bb7fcc98"
+composable_kernel_ref = "fdf4bb7fcc984811cef48ce817d89aac064b984a"
 
 #: Same DEFERRED position rocmfpx takes on unpinned dnf packages (see that
 #: manifest's comment for the full rationale) — doubly provisional here
@@ -71,15 +71,12 @@ dnf_packages_pinned = false
 #: see [build] below), so ciru's Vulkan regression never executes, and
 #: ciru's tree is what the PromptForge v2.3 card actually specifies.
 repo = "https://github.com/ciru-ai/ROCmFPX.git"
-ref = "qwen3.8-activefpx-promptforge-v2.3"
-#: TODO(operator): resolve this tag to its full 40-char commit sha and pin
-#: that instead, matching rocmfpx's discipline (a tag/branch can move
-#: silently — see that manifest's [source] comment and build.sh's own
-#: "never a branch tip" checkout comment). Not resolved in this task: the
-#: brief specified this exact ref value and no network access to
-#: ciru-ai/ROCmFPX was available while writing this recipe to resolve it
-#: further.
-ref_description = "TODO(operator): fill in from `git log -1 --format=%s` on ciru-ai/ROCmFPX at this ref"
+#: The full commit sha the card's tag `qwen3.8-activefpx-promptforge-v2.3`
+#: peeled to on 2026-08-29 (`git ls-remote`, annotated tag object
+#: 93e78aeb71ae815b9e12530dce5651d0d715db55) — pinned as a sha, not the
+#: tag, matching rocmfpx's discipline: a tag can move silently, this can't.
+ref = "103af8b411dfe47fe9110a480a02341137c68246"
+ref_description = "release: fix Qwen structured output and small-row prefill (tag qwen3.8-activefpx-promptforge-v2.3)"
 #: TODO(operator): not verified for this tree/ref. Copied from rocmfpx as a
 #: starting assumption only, not a checked fact.
 submodules = false
@@ -103,10 +100,30 @@ cmake_flags = [
     "-DGGML_CUDA=OFF",
     "-DCMAKE_HIP_ARCHITECTURES=gfx1151",
     "-DGPU_TARGETS=gfx1151",
+    # Card-specified flags (fetched 2026-08-29 from the model card's build
+    # section, verbatim) — the card's exact gfx1151 configure line beyond
+    # the flags already above. PROMPTFORGE_CK_ROOT points build.sh's
+    # composable_kernel checkout (pinned in [base]) at the FPX kernels.
+    "-DAMDGPU_TARGETS=gfx1151",
+    "-DGPU_BUILD_TARGETS=gfx1151",
+    "-DGGML_HIP_GRAPHS=ON",
+    "-DGGML_HIP_MMQ_MFMA=ON",
+    "-DGGML_HIP_NO_VMM=ON",
+    "-DGGML_NATIVE=ON",
+    "-DPROMPTFORGE_CK_ROOT=../composable_kernel",
     "-DLLAMA_BUILD_SERVER=ON",
     "-DLLAMA_BUILD_WEBUI=OFF",
     "-DLLAMA_USE_PREBUILT_WEBUI=OFF",
 ]
+
+#: Card-specified runtime mode envs (beyond the three sidecar path vars the
+#: app synthesizes from SPECIALTY_KINDS). These enter the registry's
+#: `mode_env` ONLY after the ct150 gate (#1891) validates them on real
+#: silicon — recorded here so the gate run has the card's exact values:
+#:   PROMPTFORGE_MODE=m2048_fused_tail1476
+#:   PROMPTFORGE_ENABLE_SMALLM_W8=1
+#:   PROMPTFORGE_MTP_OUTPUT_K8=1
+#:   PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE=0
 
 #: Applied in order to a pristine checkout of [source]. Unlike rocmfpx's
 #: four patches (which patch charlie's llama.cpp tree itself and would not
@@ -119,8 +136,11 @@ cmake_flags = [
 file = "qwen38-v3-output-k8-runtime.patch"
 remote_source = "https://huggingface.co/jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge"
 remote_path = "runtime/qwen38-v3-output-k8-runtime.patch"
-# TODO(operator): pin sha256 from the model card digest table before first build
-sha256 = ""
+#: Verified 2026-08-29: fetched from the HF repo and hashed locally; matches
+#: the card's digest table exactly. Real patch bytes are now vendored at
+#: patches/qwen38-v3-output-k8-runtime.patch (627-line git patch), replacing
+#: the loud placeholder stub — remote_source above remains the provenance.
+sha256 = "8ba7d721ea380b060aeb0c7595b8b05f1582c0f7bf7a4b89e0910bc8e72465d5"
 why = """
 Tunes v2.3's output-K8 runtime companion path for this specific checkpoint
 (PROMPTFORGE_MTP_OUTPUT_K8_PROXY; see spec

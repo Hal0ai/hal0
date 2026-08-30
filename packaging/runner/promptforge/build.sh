@@ -233,7 +233,10 @@ LABEL org.opencontainers.image.source="${REPO}" \\
       dev.hal0.recipe.revision="${RECIPE_REV}" \\
       dev.hal0.runner.base="${BASE_REF}" \\
       dev.hal0.runner.patches="$(IFS=,; echo "${PATCHES[*]}")" \\
-      dev.hal0.runner.patches.sha256="${PATCH_SERIES_SHA}"
+      dev.hal0.runner.patches.sha256="${PATCH_SERIES_SHA}" \\
+      dev.hal0.runner.specialties="promptforge" \\
+      dev.hal0.runner.flavor="specialized" \\
+      org.opencontainers.image.description="PromptForge/ActiveFPX accelerated runner (HIP-only, GGML_VULKAN=OFF) for jcbtc Qwen3.8 CIRU distributions. NOT the general AMD default — use hal0-combined for ordinary GGUF serving."
 ENTRYPOINT ["/opt/promptforge/hal0-runner-entrypoint.sh"]
 EOF
 "$RUNTIME" build -f "${STAGE}/Containerfile" -t "$TAG" "$STAGE"

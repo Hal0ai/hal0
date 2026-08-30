@@ -1,24 +1,627 @@
-# PLACEHOLDER — this is NOT a real patch (#1946, task-12).
-#
-# The actual bytes live in the model repo, not here:
-#   https://huggingface.co/jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge
-#   path: runtime/qwen38-v3-output-k8-runtime.patch
-#
-# The task that wrote this recipe (packaging/runner/promptforge/, see the
-# task-12 brief under .superpowers/sdd/2026-08-29-specialty-distributions/)
-# tracked the manifest.toml reference and the sha256 pin FIELD for this file
-# (manifest.toml's [[patches]] entry) but had no network access to fetch the
-# model card here, so the real patch was never retrieved and this stub
-# stands in its place.
-#
-# TODO(operator): before first build —
-#   1. fetch the model card's digest table and fill in the sha256 in
-#      manifest.toml's [[patches]] entry for this file
-#   2. download runtime/qwen38-v3-output-k8-runtime.patch from the model
-#      repo at that pinned sha256 and overwrite this stub with the real
-#      diff
-#
-# `git apply --check` on this stub fails loudly, by design — it is not
-# valid diff syntax. A silently missing or wrong runtime patch is exactly
-# the failure class hal0 #1888 argues against: fail loud, never quietly
-# serve a degraded runner.
+From 5bd1ddbd0449b5ddf2fee1eae8182de0909e0217 Mon Sep 17 00:00:00 2001
+From: Ciru <ciru@ciru.ai>
+Date: Tue, 18 Aug 2026 19:25:45 -0400
+Subject: [PATCH] reconstruct qualified Qwen3.8 public runtime snapshot
+
+---
+ common/speculative.cpp             |  12 +
+ ggml/src/ggml-cuda/ggml-cuda.cu    |   3 +
+ ggml/src/ggml-cuda/promptforge.cu  | 422 ++++++++++++++++++++++++++++-
+ ggml/src/ggml-cuda/promptforge.cuh |   2 +
+ tools/server/server-context.cpp    |   7 +
+ tools/server/server-task.cpp       |   3 +
+ tools/server/server-task.h         |   1 +
+ 7 files changed, 445 insertions(+), 5 deletions(-)
+
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index a7d8f843745568a6d5bad2ff58024d5cfa595ba4..064e1ab48625ace05972aceb6953f435489cb933 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -998,12 +998,24 @@ struct common_speculative_state_draft_mtp : public common_speculative_impl {
+ 
+         const char * fastpath_env = std::getenv("LLAMA_MTP_CPU_ARGMAX_FASTPATH");
+         cpu_argmax_fastpath = fastpath_env != nullptr && std::strcmp(fastpath_env, "1") == 0;
++        const char * output_k8_env = std::getenv("PROMPTFORGE_MTP_OUTPUT_K8");
++        const bool output_k8 = output_k8_env != nullptr && std::strcmp(output_k8_env, "1") == 0;
++        if (output_k8_env && output_k8_env[0] && std::strcmp(output_k8_env, "0") != 0 && !output_k8) {
++            GGML_ABORT("PROMPTFORGE_MTP_OUTPUT_K8 must be 0 or 1");
++        }
++        if (output_k8 && (!this->params.backend_sampling || this->params.p_min != 0.0f || n_seq != 1 || cpu_argmax_fastpath)) {
++            GGML_ABORT("MTP output-k8 requires one sequence, backend sampling, p_min=0, and CPU argmax disabled");
++        }
+         if (cpu_argmax_fastpath && (!this->params.backend_sampling || this->params.p_min != 0.0f)) {
+             ++n_fastpath_fail;
+             GGML_ABORT("MTP CPU argmax fast path requires backend sampling and p_min=0");
+         }
+         LOG_INF("{\"record\":\"mtp_cpu_argmax_init\",\"enabled\":%d,\"p_min\":%.1f}\n",
+                 (int) cpu_argmax_fastpath, this->params.p_min);
++        LOG_INF("{\"record\":\"mtp_output_k8_init\",\"enabled\":%d,\"k\":8,"
++                "\"n_seq\":%u,\"backend_sampling\":%d,\"p_min\":%.1f,\"cpu_argmax\":%d}\n",
++                (int) output_k8, n_seq, (int) this->params.backend_sampling,
++                this->params.p_min, (int) cpu_argmax_fastpath);
+ 
+         LOG_INF("%s: adding speculative implementation 'draft-mtp'\n", __func__);
+         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f, n_embd=%d, backend_sampling=%d\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min, n_embd, (int) this->params.backend_sampling);
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index b4936556d8a10b527618680f9c9048f27c567f6b..d285fe9ba44c8c8831c89e346e195eb9833b49dd 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2632,6 +2632,9 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+ }
+ 
+ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
++    if (promptforge_try_mtp_output_k8(&ctx, src0, src1, dst)) {
++        return;
++    }
+     if (promptforge_try_gdn_qkvz(&ctx, src0, src1, dst)) {
+         return;
+     }
+diff --git a/ggml/src/ggml-cuda/promptforge.cu b/ggml/src/ggml-cuda/promptforge.cu
+index 0f8a792dbc855a2e6d72a444094914ee5c69a435..23905d0a6d81f1359e436329b275637505c1ea0c 100644
+--- a/ggml/src/ggml-cuda/promptforge.cu
++++ b/ggml/src/ggml-cuda/promptforge.cu
+@@ -2,6 +2,7 @@
+ 
+ #include "common.cuh"
+ #include "ggml.h"
++#include "mmvq.cuh"
+ 
+ #include <hip/hip_bfloat16.h>
+ #include <hip/hip_runtime.h>
+@@ -11,7 +12,9 @@
+ #include "ck/tensor_operation/gpu/device/device_gemm_multiple_d.hpp"
+ #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
+ 
++#include <algorithm>
+ #include <array>
++#include <climits>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -45,6 +48,30 @@ constexpr int PF_GDN_Z_N = 6144;
+ constexpr uint64_t PF_GDN_FILE_BYTES = 4029685760ULL;
+ constexpr uint32_t PF_GDN_ENTRY_COUNT = 96;
+ constexpr uint64_t PF_GDN_DATA_OFFSET = 8192;
++constexpr int PF_MTP_OUTPUT_K = 8;
++constexpr int PF_MTP_OUTPUT_H = 5120;
++constexpr int PF_MTP_OUTPUT_V = 248320;
++constexpr uint64_t PF_MTP_PROXY_FILE_BYTES = 715165696ULL;
++constexpr uint64_t PF_MTP_PROXY_DATA_OFFSET = 4096ULL;
++constexpr uint64_t PF_MTP_PROXY_BYTES = 715161600ULL;
++constexpr uint64_t PF_MTP_PROXY_SOURCE_OFFSET = 10994848ULL;
++constexpr uint32_t PF_MTP_PROXY_TYPE = 100; // GGML_TYPE_Q4_0_ROCMFP4
++constexpr char PF_MTP_PROXY_SOURCE_SHA256[] = "5bdf79130dd67c301c8df3ae8bf8dbf4991e481b278d45a3f9890cbf37497834";
++constexpr char PF_MTP_PROXY_PAYLOAD_SHA256[] = "0f1783e1e9565b4f25e09bd67975021ff89bb020260e5a7ce8b05dacecd7626f";
++constexpr char PF_MTP_PROXY_FILE_SHA256[] = "f6a2d9d1c33aebfe0ec9b92838193fe885fd3cdda0c9e8b9fb5acdfde4a942b7";
++
++constexpr std::array<uint8_t, 32> PF_MTP_PROXY_SOURCE_SHA256_BYTES = {
++    0x5b, 0xdf, 0x79, 0x13, 0x0d, 0xd6, 0x7c, 0x30,
++    0x1c, 0x8d, 0xf3, 0xae, 0x8b, 0xf8, 0xdb, 0xf4,
++    0x99, 0x1e, 0x48, 0x1b, 0x27, 0x8d, 0x45, 0xa3,
++    0xf9, 0x89, 0x0c, 0xbf, 0x37, 0x49, 0x78, 0x34,
++};
++constexpr std::array<uint8_t, 32> PF_MTP_PROXY_PAYLOAD_SHA256_BYTES = {
++    0x0f, 0x17, 0x83, 0xe1, 0xe9, 0x56, 0x5b, 0x4f,
++    0x25, 0xe0, 0x9b, 0xd6, 0x79, 0x75, 0x02, 0x1f,
++    0xf8, 0x9b, 0xb0, 0x20, 0x26, 0x0e, 0x5a, 0x7c,
++    0xe8, 0xb0, 0x5d, 0xac, 0xec, 0xd7, 0x62, 0x6f,
++};
+ 
+ constexpr uint16_t PF_GATE_W8 = 0;
+ constexpr uint16_t PF_DOWN_W8 = 1;
+@@ -81,10 +108,27 @@ struct PFEntry {
+     uint64_t length;
+     uint8_t reserved1[32];
+ };
++
++struct PFOutputK8Header {
++    char magic[8];
++    uint32_t version;
++    uint32_t header_bytes;
++    uint32_t tensor_type;
++    uint32_t n_embd;
++    uint32_t n_vocab;
++    uint32_t shortlist_k;
++    uint64_t data_offset;
++    uint64_t payload_bytes;
++    uint64_t file_bytes;
++    uint64_t source_data_offset;
++    uint8_t source_sha256[32];
++    uint8_t payload_sha256[32];
++};
+ #pragma pack(pop)
+ 
+ static_assert(sizeof(PFHeader) == 64, "PromptForge header size");
+ static_assert(sizeof(PFEntry) == 64, "PromptForge entry size");
++static_assert(sizeof(PFOutputK8Header) == 128, "PromptForge output K8 header size");
+ 
+ using Row = ck::tensor_layout::gemm::RowMajor;
+ using Col = ck::tensor_layout::gemm::ColumnMajor;
+@@ -141,6 +185,12 @@ struct PFState {
+     bool gdn_enabled = false;
+     uint8_t * gdn_device_file = nullptr;
+     bool smallm_w8_enabled = false;
++    bool mtp_output_k8_enabled = false;
++    bool mtp_output_k8_validate = false;
++    uint8_t * mtp_output_proxy = nullptr;
++    uint64_t mtp_output_k8_calls = 0;
++    uint64_t mtp_output_k8_validate_hits = 0;
++    uint64_t mtp_output_k8_validate_matches = 0;
+     std::mutex smallm_cache_mutex;
+     PFFFNRowRouteCache smallm_w8;
+ 
+@@ -225,6 +275,194 @@ bool hip_check(hipError_t status, const char * what) {
+     return false;
+ }
+ 
++bool load_mtp_output_proxy(PFState & s, const char * path) {
++    const int fd = open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        std::fprintf(stderr, "promptforge: cannot open MTP output proxy %s\n", path);
++        return false;
++    }
++
++    struct stat st {};
++    PFOutputK8Header header {};
++    const char expected_magic[8] = {'P', 'F', 'O', 'U', 'K', '8', 'Q', '4'};
++    const bool valid_file = fstat(fd, &st) == 0 &&
++                            uint64_t(st.st_size) == PF_MTP_PROXY_FILE_BYTES &&
++                            pread(fd, &header, sizeof(header), 0) == ssize_t(sizeof(header)) &&
++                            std::memcmp(header.magic, expected_magic, sizeof(expected_magic)) == 0 &&
++                            header.version == 1 &&
++                            header.header_bytes == PF_MTP_PROXY_DATA_OFFSET &&
++                            header.tensor_type == PF_MTP_PROXY_TYPE &&
++                            header.n_embd == PF_MTP_OUTPUT_H &&
++                            header.n_vocab == PF_MTP_OUTPUT_V &&
++                            header.shortlist_k == PF_MTP_OUTPUT_K &&
++                            header.data_offset == PF_MTP_PROXY_DATA_OFFSET &&
++                            header.payload_bytes == PF_MTP_PROXY_BYTES &&
++                            header.file_bytes == PF_MTP_PROXY_FILE_BYTES &&
++                            header.source_data_offset == PF_MTP_PROXY_SOURCE_OFFSET &&
++                            std::memcmp(header.source_sha256, PF_MTP_PROXY_SOURCE_SHA256_BYTES.data(),
++                                        PF_MTP_PROXY_SOURCE_SHA256_BYTES.size()) == 0 &&
++                            std::memcmp(header.payload_sha256, PF_MTP_PROXY_PAYLOAD_SHA256_BYTES.data(),
++                                        PF_MTP_PROXY_PAYLOAD_SHA256_BYTES.size()) == 0;
++    if (!valid_file) {
++        std::fprintf(stderr, "promptforge: MTP output K8 sidecar identity mismatch\n");
++        close(fd);
++        return false;
++    }
++
++    const long page_size_long = sysconf(_SC_PAGESIZE);
++    if (page_size_long <= 0) {
++        std::fprintf(stderr, "promptforge: cannot determine page size for MTP output proxy\n");
++        close(fd);
++        return false;
++    }
++    const uint64_t page_size = uint64_t(page_size_long);
++    const uint64_t map_offset = PF_MTP_PROXY_DATA_OFFSET / page_size * page_size;
++    const uint64_t map_delta = PF_MTP_PROXY_DATA_OFFSET - map_offset;
++    const uint64_t map_bytes = map_delta + PF_MTP_PROXY_BYTES;
++    void * mapping = mmap(nullptr, map_bytes, PROT_READ, MAP_PRIVATE, fd, off_t(map_offset));
++    if (mapping == MAP_FAILED) {
++        std::fprintf(stderr, "promptforge: MTP output proxy mmap failed\n");
++        close(fd);
++        return false;
++    }
++
++    const uint8_t * proxy_host = static_cast<const uint8_t *>(mapping) + map_delta;
++    const bool ok = hip_check(hipMalloc(&s.mtp_output_proxy, PF_MTP_PROXY_BYTES), "hipMalloc(mtp output proxy)") &&
++                    hip_check(hipMemcpy(s.mtp_output_proxy, proxy_host, PF_MTP_PROXY_BYTES, hipMemcpyHostToDevice),
++                              "hipMemcpy(mtp output proxy)");
++    madvise(mapping, map_bytes, MADV_DONTNEED);
++    munmap(mapping, map_bytes);
++    posix_fadvise(fd, off_t(PF_MTP_PROXY_DATA_OFFSET), off_t(PF_MTP_PROXY_BYTES), POSIX_FADV_DONTNEED);
++    close(fd);
++    if (!ok) {
++        return false;
++    }
++
++    std::fprintf(stderr,
++        "{\"record\":\"promptforge_mtp_output_k8_proxy\",\"type\":\"Q4_0_ROCMFP4\","
++        "\"shape\":[%d,%d],\"shortlist_k\":%d,\"file_bytes\":%llu,\"data_offset\":%llu,"
++        "\"tensor_bytes\":%llu,\"source_sha256\":\"%s\",\"payload_sha256\":\"%s\","
++        "\"package_sha256\":\"%s\"}\n",
++        PF_MTP_OUTPUT_H, PF_MTP_OUTPUT_V,
++        PF_MTP_OUTPUT_K,
++        (unsigned long long) PF_MTP_PROXY_FILE_BYTES,
++        (unsigned long long) PF_MTP_PROXY_DATA_OFFSET,
++        (unsigned long long) PF_MTP_PROXY_BYTES,
++        PF_MTP_PROXY_SOURCE_SHA256,
++        PF_MTP_PROXY_PAYLOAD_SHA256,
++        PF_MTP_PROXY_FILE_SHA256);
++    return true;
++}
++
++__global__ void gather_quantized_rows(const uint8_t * src, const int32_t * rows,
++                                      uint8_t * dst, size_t row_bytes, int n_rows) {
++    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
++    const size_t count = size_t(n_rows) * row_bytes;
++    if (i < count) {
++        const int row = int(i / row_bytes);
++        const size_t col = i - size_t(row) * row_bytes;
++        dst[i] = src[size_t(rows[row]) * row_bytes + col];
++    }
++}
++
++__global__ void fill_negative_infinity(float * dst, size_t count) {
++    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
++    if (i < count) {
++        dst[i] = -3.402823466e+38F;
++    }
++}
++
++__global__ void scatter_reranked_logits(float * dst, const int32_t * rows,
++                                        const float * logits, int n_rows) {
++    const int i = int(blockIdx.x) * blockDim.x + threadIdx.x;
++    if (i < n_rows) {
++        dst[rows[i]] = logits[i];
++    }
++}
++
++__device__ __forceinline__ bool mtp_output_better(float lhs_value, int32_t lhs_id,
++                                                   float rhs_value, int32_t rhs_id) {
++    return lhs_value > rhs_value || (lhs_value == rhs_value && lhs_id < rhs_id);
++}
++
++__global__ void mtp_output_top8(const float * src, int32_t n, int32_t * dst) {
++    constexpr int n_threads = 256;
++    constexpr int n_items = n_threads * PF_MTP_OUTPUT_K;
++    __shared__ float values[n_items];
++    __shared__ int32_t ids[n_items];
++
++    float local_values[PF_MTP_OUTPUT_K];
++    int32_t local_ids[PF_MTP_OUTPUT_K];
++#pragma unroll
++    for (int k = 0; k < PF_MTP_OUTPUT_K; ++k) {
++        local_values[k] = -3.402823466e+38F;
++        local_ids[k] = INT32_MAX;
++    }
++
++    for (int32_t i = int32_t(threadIdx.x); i < n; i += n_threads) {
++        const float value = src[i];
++        if (!mtp_output_better(value, i, local_values[PF_MTP_OUTPUT_K - 1],
++                               local_ids[PF_MTP_OUTPUT_K - 1])) {
++            continue;
++        }
++        int pos = PF_MTP_OUTPUT_K - 1;
++        while (pos > 0 && mtp_output_better(value, i, local_values[pos - 1], local_ids[pos - 1])) {
++            local_values[pos] = local_values[pos - 1];
++            local_ids[pos] = local_ids[pos - 1];
++            --pos;
++        }
++        local_values[pos] = value;
++        local_ids[pos] = i;
++    }
++
++#pragma unroll
++    for (int k = 0; k < PF_MTP_OUTPUT_K; ++k) {
++        const int out = int(threadIdx.x) * PF_MTP_OUTPUT_K + k;
++        values[out] = local_values[k];
++        ids[out] = local_ids[k];
++    }
++    __syncthreads();
++
++    for (int width = 2; width <= n_items; width <<= 1) {
++        for (int stride = width >> 1; stride > 0; stride >>= 1) {
++            for (int i = int(threadIdx.x); i < n_items; i += n_threads) {
++                const int peer = i ^ stride;
++                if (peer <= i) {
++                    continue;
++                }
++                const bool descending = (i & width) == 0;
++                const bool left_better = mtp_output_better(values[i], ids[i], values[peer], ids[peer]);
++                if ((descending && !left_better) || (!descending && left_better)) {
++                    const float value = values[i];
++                    const int32_t id = ids[i];
++                    values[i] = values[peer];
++                    ids[i] = ids[peer];
++                    values[peer] = value;
++                    ids[peer] = id;
++                }
++            }
++            __syncthreads();
++        }
++    }
++
++    if (threadIdx.x < PF_MTP_OUTPUT_K) {
++        dst[threadIdx.x] = ids[threadIdx.x];
++    }
++}
++
++void set_contiguous_2d(ggml_tensor & tensor, ggml_type type, int64_t ne0, int64_t ne1, void * data) {
++    tensor.type = type;
++    tensor.ne[0] = ne0;
++    tensor.ne[1] = ne1;
++    tensor.ne[2] = 1;
++    tensor.ne[3] = 1;
++    tensor.nb[0] = ggml_type_size(type);
++    tensor.nb[1] = ggml_row_size(type, ne0);
++    tensor.nb[2] = tensor.nb[1] * ne1;
++    tensor.nb[3] = tensor.nb[2];
++    tensor.data = data;
++}
++
+ bool exact_tensor(const ggml_tensor * tensor, ggml_type type, int64_t ne0, int64_t ne1) {
+     return tensor && tensor->type == type && tensor->ne[0] == ne0 && tensor->ne[1] == ne1 &&
+            tensor->ne[2] == 1 && tensor->ne[3] == 1 && ggml_is_contiguous(tensor);
+@@ -947,9 +1185,28 @@ bool promptforge_backend_init(int device) {
+     PFState & s = state();
+     std::lock_guard<std::mutex> lock(s.init_mutex);
+     if (s.initialized) {
+-        return s.ready && ((s.mode == PFMode::disabled && !s.gdn_enabled) || s.device == device);
++        const bool owns_device_state = s.mode != PFMode::disabled || s.gdn_enabled || s.mtp_output_k8_enabled;
++        return s.ready && (!owns_device_state || s.device == device);
+     }
+     s.initialized = true;
++    const char * mtp_output_k8 = std::getenv("PROMPTFORGE_MTP_OUTPUT_K8");
++    if (mtp_output_k8 && mtp_output_k8[0] && std::strcmp(mtp_output_k8, "0") != 0 &&
++        std::strcmp(mtp_output_k8, "1") != 0) {
++        std::fprintf(stderr, "promptforge: PROMPTFORGE_MTP_OUTPUT_K8 must be 0 or 1\n");
++        return false;
++    }
++    s.mtp_output_k8_enabled = mtp_output_k8 && std::strcmp(mtp_output_k8, "1") == 0;
++    const char * mtp_output_k8_validate = std::getenv("PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE");
++    if (mtp_output_k8_validate && mtp_output_k8_validate[0] &&
++        std::strcmp(mtp_output_k8_validate, "0") != 0 && std::strcmp(mtp_output_k8_validate, "1") != 0) {
++        std::fprintf(stderr, "promptforge: PROMPTFORGE_MTP_OUTPUT_K8_VALIDATE must be 0 or 1\n");
++        return false;
++    }
++    s.mtp_output_k8_validate = mtp_output_k8_validate && std::strcmp(mtp_output_k8_validate, "1") == 0;
++    if (s.mtp_output_k8_validate && !s.mtp_output_k8_enabled) {
++        std::fprintf(stderr, "promptforge: MTP output-k8 validation requires PROMPTFORGE_MTP_OUTPUT_K8=1\n");
++        return false;
++    }
+     const char * smallm_w8 = std::getenv("PROMPTFORGE_ENABLE_SMALLM_W8");
+     if (smallm_w8 && smallm_w8[0] && std::strcmp(smallm_w8, "0") != 0 &&
+         std::strcmp(smallm_w8, "1") != 0) {
+@@ -960,14 +1217,14 @@ bool promptforge_backend_init(int device) {
+     const char * gdn_sidecar = std::getenv("PROMPTFORGE_GDN_SIDECAR");
+     s.gdn_enabled = gdn_sidecar && gdn_sidecar[0];
+     const char * graph_opt = std::getenv("GGML_CUDA_GRAPH_OPT");
+-    if (s.gdn_enabled && graph_opt && std::strcmp(graph_opt, "1") == 0) {
+-        std::fprintf(stderr, "promptforge: PROMPTFORGE_GDN_SIDECAR rejects GGML_CUDA_GRAPH_OPT=1\n");
++    if ((s.gdn_enabled || s.mtp_output_k8_enabled) && graph_opt && std::strcmp(graph_opt, "1") == 0) {
++        std::fprintf(stderr, "promptforge: GDN and MTP output-k8 routes reject GGML_CUDA_GRAPH_OPT=1\n");
+         return false;
+     }
+     const char * mode = std::getenv("PROMPTFORGE_MODE");
+     if (!mode || !mode[0]) {
+         s.mode = PFMode::disabled;
+-        if (!s.gdn_enabled && !s.smallm_w8_enabled) {
++        if (!s.gdn_enabled && !s.smallm_w8_enabled && !s.mtp_output_k8_enabled) {
+             s.ready = true;
+             return true;
+         }
+@@ -996,15 +1253,170 @@ bool promptforge_backend_init(int device) {
+             "promptforge: PROMPTFORGE_ENABLE_SMALLM_W8=1 requires PROMPTFORGE_MODE and PROMPTFORGE_SIDECAR\n");
+         return false;
+     }
++    const char * mtp_output_proxy = std::getenv("PROMPTFORGE_MTP_OUTPUT_K8_PROXY");
++    if (s.mtp_output_k8_enabled && (!mtp_output_proxy || !mtp_output_proxy[0])) {
++        std::fprintf(stderr, "promptforge: PROMPTFORGE_MTP_OUTPUT_K8_PROXY is required\n");
++        return false;
++    }
+     s.device = device;
+     if (!hip_check(hipSetDevice(device), "hipSetDevice") ||
+         (s.mode != PFMode::disabled && !load_sidecar(s, sidecar)) ||
+-        !allocate_scratch(s) ||
++        (s.mtp_output_k8_enabled && !load_mtp_output_proxy(s, mtp_output_proxy)) ||
++        ((s.mode != PFMode::disabled || s.gdn_enabled) && !allocate_scratch(s)) ||
+         (s.mode != PFMode::disabled && !build_routes(s)) ||
+         (s.gdn_enabled && (!load_gdn_sidecar(s, gdn_sidecar) || !build_gdn_routes(s)))) {
+         return false;
+     }
+     s.ready = true;
++    std::fprintf(stderr,
++        "{\"record\":\"promptforge_mtp_output_k8_init\",\"enabled\":%s,\"validate\":%s,"
++        "\"scope\":\"mtp_shared_head_norm_one_row\",\"k\":%d,"
++        "\"proxy\":\"Q4_0_ROCMFP4\",\"rerank\":\"Q8_0_ROCMFPX\"}\n",
++        s.mtp_output_k8_enabled ? "true" : "false",
++        s.mtp_output_k8_validate ? "true" : "false", PF_MTP_OUTPUT_K);
++    std::fflush(stderr);
++    return true;
++}
++
++bool promptforge_try_mtp_output_k8(ggml_backend_cuda_context * ctx,
++                                   const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst) {
++    PFState & s = state();
++    if (!s.ready || !s.mtp_output_k8_enabled || !ctx || !weight || !input || !dst) {
++        return false;
++    }
++
++    if (std::strcmp(input->name, "mtp_shared_head_norm") != 0) {
++        return false;
++    }
++
++    const bool exact_route = std::strcmp(weight->name, "output.weight") == 0 &&
++                             weight->type == GGML_TYPE_Q8_0_ROCMFPX &&
++                             exact_tensor(weight, GGML_TYPE_Q8_0_ROCMFPX, PF_MTP_OUTPUT_H, PF_MTP_OUTPUT_V) &&
++                             exact_tensor(input, GGML_TYPE_F32, PF_MTP_OUTPUT_H, 1) &&
++                             exact_tensor(dst, GGML_TYPE_F32, PF_MTP_OUTPUT_V, 1);
++    if (!exact_route) {
++        std::fprintf(stderr,
++            "promptforge: MTP output-k8 route identity failed (weight=%s/%s input=%s/%s dst=%s/%s)\n",
++            weight->name, ggml_type_name(weight->type), input->name, ggml_type_name(input->type),
++            dst->name, ggml_type_name(dst->type));
++        std::abort();
++    }
++
++    ggml_tensor proxy_weight = *weight;
++    set_contiguous_2d(proxy_weight, GGML_TYPE_Q4_0_ROCMFP4,
++                      PF_MTP_OUTPUT_H, PF_MTP_OUTPUT_V, s.mtp_output_proxy);
++    ggml_cuda_mul_mat_vec_q(*ctx, &proxy_weight, input, nullptr, dst);
++
++    ggml_cuda_pool_alloc<int32_t> shortlist(ctx->pool(), PF_MTP_OUTPUT_K);
++    hipLaunchKernelGGL(mtp_output_top8, dim3(1), dim3(256), 0, ctx->stream(),
++        static_cast<const float *>(dst->data), PF_MTP_OUTPUT_V, shortlist.get());
++
++    std::vector<float> proxy_logits_host;
++    if (s.mtp_output_k8_validate && s.mtp_output_k8_calls == 0) {
++        proxy_logits_host.resize(PF_MTP_OUTPUT_V);
++        hip_check(hipMemcpyAsync(proxy_logits_host.data(), dst->data,
++                                 proxy_logits_host.size() * sizeof(float),
++                                 hipMemcpyDeviceToHost, ctx->stream()),
++                  "hipMemcpy(mtp proxy logits)");
++    }
++
++    const size_t exact_row_bytes = ggml_row_size(GGML_TYPE_Q8_0_ROCMFPX, PF_MTP_OUTPUT_H);
++    ggml_cuda_pool_alloc<uint8_t> exact_rows(ctx->pool(), size_t(PF_MTP_OUTPUT_K) * exact_row_bytes);
++    hipLaunchKernelGGL(gather_quantized_rows,
++        dim3((size_t(PF_MTP_OUTPUT_K) * exact_row_bytes + 255) / 256), dim3(256), 0, ctx->stream(),
++        static_cast<const uint8_t *>(weight->data), shortlist.get(), exact_rows.get(),
++        exact_row_bytes, PF_MTP_OUTPUT_K);
++
++    ggml_tensor exact_weight = *weight;
++    set_contiguous_2d(exact_weight, GGML_TYPE_Q8_0_ROCMFPX,
++                      PF_MTP_OUTPUT_H, PF_MTP_OUTPUT_K, exact_rows.get());
++    ggml_cuda_pool_alloc<float> exact_logits(ctx->pool(), PF_MTP_OUTPUT_K);
++    ggml_tensor exact_dst = *dst;
++    set_contiguous_2d(exact_dst, GGML_TYPE_F32, PF_MTP_OUTPUT_K, 1, exact_logits.get());
++    ggml_cuda_mul_mat_vec_q(*ctx, &exact_weight, input, nullptr, &exact_dst);
++
++    if (s.mtp_output_k8_validate) {
++        ggml_cuda_pool_alloc<float> reference_logits(ctx->pool(), PF_MTP_OUTPUT_V);
++        ggml_tensor reference_dst = *dst;
++        set_contiguous_2d(reference_dst, GGML_TYPE_F32, PF_MTP_OUTPUT_V, 1, reference_logits.get());
++        ggml_cuda_mul_mat_vec_q(*ctx, weight, input, nullptr, &reference_dst);
++
++        ggml_cuda_pool_alloc<int32_t> reference_top8(ctx->pool(), PF_MTP_OUTPUT_K);
++        hipLaunchKernelGGL(mtp_output_top8, dim3(1), dim3(256), 0, ctx->stream(),
++            reference_logits.get(), PF_MTP_OUTPUT_V, reference_top8.get());
++
++        std::array<int32_t, PF_MTP_OUTPUT_K> shortlist_host {};
++        std::array<float, PF_MTP_OUTPUT_K> exact_logits_host {};
++        int32_t reference_id = -1;
++        hip_check(hipMemcpyAsync(shortlist_host.data(), shortlist.get(), sizeof(shortlist_host),
++                                 hipMemcpyDeviceToHost, ctx->stream()), "hipMemcpy(mtp shortlist)");
++        hip_check(hipMemcpyAsync(exact_logits_host.data(), exact_logits.get(), sizeof(exact_logits_host),
++                                 hipMemcpyDeviceToHost, ctx->stream()), "hipMemcpy(mtp rerank logits)");
++        hip_check(hipMemcpyAsync(&reference_id, reference_top8.get(), sizeof(reference_id),
++                                 hipMemcpyDeviceToHost, ctx->stream()), "hipMemcpy(mtp reference id)");
++        hip_check(hipStreamSynchronize(ctx->stream()), "hipStreamSynchronize(mtp output validation)");
++
++        if (!proxy_logits_host.empty()) {
++            std::array<int32_t, PF_MTP_OUTPUT_K> cpu_top8 {};
++            std::vector<int32_t> order(PF_MTP_OUTPUT_V);
++            for (int32_t i = 0; i < PF_MTP_OUTPUT_V; ++i) {
++                order[i] = i;
++            }
++            std::partial_sort(order.begin(), order.begin() + PF_MTP_OUTPUT_K, order.end(),
++                [&](int32_t lhs, int32_t rhs) {
++                    return proxy_logits_host[lhs] > proxy_logits_host[rhs] ||
++                           (proxy_logits_host[lhs] == proxy_logits_host[rhs] && lhs < rhs);
++                });
++            std::copy_n(order.begin(), PF_MTP_OUTPUT_K, cpu_top8.begin());
++            if (shortlist_host != cpu_top8) {
++                std::fprintf(stderr, "promptforge: MTP output-k8 GPU reducer disagrees with CPU top-8\n");
++                std::abort();
++            }
++            std::fprintf(stderr,
++                "{\"record\":\"promptforge_mtp_output_k8_topk_check\",\"match\":true,\"k\":%d}\n",
++                PF_MTP_OUTPUT_K);
++        }
++
++        int candidate_pos = 0;
++        int reference_pos = -1;
++        for (int i = 0; i < PF_MTP_OUTPUT_K; ++i) {
++            if (exact_logits_host[i] > exact_logits_host[candidate_pos]) {
++                candidate_pos = i;
++            }
++            if (shortlist_host[i] == reference_id) {
++                reference_pos = i;
++            }
++        }
++        const int32_t candidate_id = shortlist_host[candidate_pos];
++        if (reference_pos >= 0) {
++            ++s.mtp_output_k8_validate_hits;
++        }
++        s.mtp_output_k8_validate_matches += candidate_id == reference_id ? 1 : 0;
++        std::fprintf(stderr,
++            "{\"record\":\"promptforge_mtp_output_k8_validate\",\"call\":%llu,"
++            "\"reference_id\":%d,\"candidate_id\":%d,\"contained\":%s,"
++            "\"match\":%s,\"contained_total\":%llu,\"match_total\":%llu}\n",
++            (unsigned long long) (s.mtp_output_k8_calls + 1), reference_id, candidate_id,
++            reference_pos >= 0 ? "true" : "false", candidate_id == reference_id ? "true" : "false",
++            (unsigned long long) s.mtp_output_k8_validate_hits,
++            (unsigned long long) s.mtp_output_k8_validate_matches);
++        std::fflush(stderr);
++    }
++
++    hipLaunchKernelGGL(fill_negative_infinity,
++        dim3((PF_MTP_OUTPUT_V + 255) / 256), dim3(256), 0, ctx->stream(),
++        static_cast<float *>(dst->data), size_t(PF_MTP_OUTPUT_V));
++    hipLaunchKernelGGL(scatter_reranked_logits, dim3(1), dim3(32), 0, ctx->stream(),
++        static_cast<float *>(dst->data), shortlist.get(), exact_logits.get(), PF_MTP_OUTPUT_K);
++
++    ++s.mtp_output_k8_calls;
++    if (s.mtp_output_k8_calls == 1) {
++        std::fprintf(stderr,
++            "{\"record\":\"promptforge_mtp_output_k8_route\",\"calls\":1,"
++            "\"input\":\"mtp_shared_head_norm\",\"rows\":1,\"k\":%d}\n",
++            PF_MTP_OUTPUT_K);
++        std::fflush(stderr);
++    }
+     return true;
+ }
+ 
+diff --git a/ggml/src/ggml-cuda/promptforge.cuh b/ggml/src/ggml-cuda/promptforge.cuh
+index eff40ec6866891ed338fd7bf7054bb4cffee0163..34760519b0fba6ed4f995525bf57190688029622 100644
+--- a/ggml/src/ggml-cuda/promptforge.cuh
++++ b/ggml/src/ggml-cuda/promptforge.cuh
+@@ -4,6 +4,8 @@ struct ggml_backend_cuda_context;
+ struct ggml_tensor;
+ 
+ bool promptforge_backend_init(int device);
++bool promptforge_try_mtp_output_k8(ggml_backend_cuda_context * ctx,
++                                   const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst);
+ bool promptforge_try_gdn_qkvz(ggml_backend_cuda_context * ctx,
+                               const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst);
+ bool promptforge_try_fuse_gate_up(ggml_backend_cuda_context * ctx,
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index eeff21eca6c084a4327889252d037a853607e834..dfe0b42bbbcaf725a8de353f74e408bc4cc62429 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -411,6 +411,13 @@ struct server_slot {
+         if (n_draft_total > 0) {
+             timings.draft_n          = n_draft_total;
+             timings.draft_n_accepted = n_draft_accepted;
++            if (n_draft_verif_steps > 0) {
++                timings.draft_acceptance_per_position.reserve(n_accepted_per_pos.size());
++                for (const int32_t accepted : n_accepted_per_pos) {
++                    timings.draft_acceptance_per_position.push_back(
++                        (double) accepted / (double) n_draft_verif_steps);
++                }
++            }
+         }
+ 
+         return timings;
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index 3738836b636ae48720f4b0b6ddda860dd926727b..81249c2006f7a10357fa9d1e32de26836108dce2 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -643,6 +643,9 @@ json result_timings::to_json() const {
+     if (draft_n > 0) {
+         base["draft_n"] = draft_n;
+         base["draft_n_accepted"] = draft_n_accepted;
++        if (!draft_acceptance_per_position.empty()) {
++            base["draft_acceptance_per_position"] = draft_acceptance_per_position;
++        }
+     }
+ 
+     return base;
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+index 64bdecd794f1e77892d81b4b3a0d8787ecb9253e..a6cad5ecd5bf62c89bdc4a54a106cf26f875c300 100644
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -275,6 +275,7 @@ struct result_timings {
+     // Optional speculative metrics - only included when > 0
+     int32_t draft_n = 0;
+     int32_t draft_n_accepted = 0;
++    std::vector<double> draft_acceptance_per_position;
+ 
+     json to_json() const;
+ };
+-- 
+2.53.0
+
