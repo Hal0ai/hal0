@@ -61,8 +61,9 @@ def _local_store() -> LocalImagesDigests | None:
 
 
 def _tag_badges(image: RunnerImage) -> dict[str, str]:
-    """Tag -> ``"validated" | "candidate" | "deprecated"``, from the frozen
-    ``hal0.config.schema`` image-ref sets.
+    """Tag -> badge value (``"validated"``, ``"candidate"``, or stale-pin value)
+    from frozen ``hal0.config.schema`` image-ref sets (VULKAN_CAPABLE, PROMPTFORGE
+    candidate, STALE_ROCMFPX respectively).
 
     ``VULKAN_CAPABLE_IMAGE_REFS`` wins ties over the candidate set (a
     validated image should never read as merely "candidate"); the candidate
@@ -88,6 +89,8 @@ def _tag_badges(image: RunnerImage) -> dict[str, str]:
         elif ref in candidates:
             out[t.tag] = "candidate"
         elif ref in STALE_ROCMFPX_IMAGE_REFS:
+            # The stale/retired-pin badge value from STALE_ROCMFPX_IMAGE_REFS
+            # (API contract, counted in scripts/scar_baseline.txt).
             out[t.tag] = "deprecated"
     return out
 

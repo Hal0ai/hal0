@@ -325,8 +325,8 @@ describe('tagLanes', () => {
   })
 
   it('collapses digest aliases', () => {
-    const lanes = tagLanes(V3_IMG)
-    expect(lanes.other.find((t: { tag: string }) => t.tag === 'latest').aliasOf).toBe('0826')
+    const lanes = tagLanes(V3_IMG) as any
+    expect(lanes.other.find((t: any) => t.tag === 'latest')?.aliasOf).toBe('0826')
   })
 })
 

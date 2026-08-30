@@ -331,24 +331,19 @@ async def probe_ghcr_package(
     for t in available:
         if t == resolved_tag:
             # Reuse the headline manifest result.
-            tag_rows.append(
-                RunnerImageTag(tag=t, digest=digest, size_bytes=size, last_seen=now)
-            )
+            tag_rows.append(RunnerImageTag(tag=t, digest=digest, size_bytes=size, last_seen=now))
             continue
         try:
             t_digest, t_size = await _ghcr_manifest_info(repo, t, token=token, client=client)
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             log.warning("runner_images.tag_probe_failed repo=%s tag=%s error=%s", repo, t, exc)
             t_digest, t_size = None, None
-        tag_rows.append(
-            RunnerImageTag(tag=t, digest=t_digest, size_bytes=t_size, last_seen=now)
-        )
+        tag_rows.append(RunnerImageTag(tag=t, digest=t_digest, size_bytes=t_size, last_seen=now))
 
     # If resolved_tag (pinned or fallback) is not in available, prepend it.
     if resolved_tag not in available:
         tag_rows.insert(
-            0,
-            RunnerImageTag(tag=resolved_tag, digest=digest, size_bytes=size, last_seen=now)
+            0, RunnerImageTag(tag=resolved_tag, digest=digest, size_bytes=size, last_seen=now)
         )
 
     return RunnerImage(

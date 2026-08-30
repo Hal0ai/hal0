@@ -354,9 +354,7 @@ def image_digest(
     """
     if not is_valid_image_ref(image):
         return DigestProbe(None, "unknown", "invalid-argument")
-    read = _seam_read(
-        "image-digest", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout
-    )
+    read = _seam_read("image-digest", image, run=run, is_hal0_user=is_hal0_user, timeout=timeout)
     if read.reason is not None:
         return DigestProbe(None, "unknown", read.reason)
     if not read.stdout:
