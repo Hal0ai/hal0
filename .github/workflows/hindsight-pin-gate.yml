@@ -1,0 +1,103 @@
+# Evidence gate for HINDSIGHT_API_PIN bumps (spec §5).
+#
+# src/hal0/memory/engine_upgrade.py is the single owner of the engine version
+# pin, and the upgrade it performs runs a ONE-WAY alembic migration on every
+# box's embedded postgres. Reviewing the diff cannot tell you whether the new
+# engine actually starts on a migrated .pg0, whether the data survives, whether
+# the rollback path still works, or whether the REST surface hal0 calls is
+# still there — only running it against the real engines can. So a PR that
+# changes the pin must prove it here before it can merge.
+#
+# The job is skipped (not failed) when the file changed but the pin did not,
+# so refactors of the pass stay cheap. Mark `engine-gate` a required check on
+# the protected branch — a job that never runs still reports success, which is
+# what makes "required" safe here.
+name: hindsight-pin-gate
+
+on:
+  pull_request:
+    paths:
+      - "src/hal0/memory/engine_upgrade.py"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      old_pin: ${{ steps.diff.outputs.old_pin }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so the base commit's copy of the file is fetchable.
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          pin() { grep -oP 'HINDSIGHT_API_PIN = "\K[^"]+' || true; }
+          # `|| true` inside the braces: under pipefail a missing base copy of
+          # the file would otherwise abort the step instead of reporting "no
+          # base pin" (the new-module case handled below).
+          old=$( { git show "origin/${BASE_REF}:src/hal0/memory/engine_upgrade.py" 2>/dev/null || true; } | pin )
+          new=$(pin < src/hal0/memory/engine_upgrade.py)
+          echo "base pin: '${old}' -> head pin: '${new}'"
+          echo "old_pin=${old}" >> "$GITHUB_OUTPUT"
+          # No base pin means the module is new on this PR: there is no prior
+          # engine version to upgrade FROM, so there is nothing to gate.
+          if [ -n "${old}" ] && [ "${old}" != "${new}" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  engine-gate:
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    # Two full hindsight-api installs (each pulls torch + the bundled BGE
+    # embedder) plus two embedded-postgres first boots and a one-way migration.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          # Inside engine_upgrade.PY_MIN_MINOR..PY_MAX_MINOR (3.11-3.13), and
+          # the same primary CI runs. The gate builds its throwaway engine
+          # venvs from this interpreter.
+          python-version: "3.12"
+          cache: pip
+      - name: Install uv
+        run: pip install uv
+      - name: Install
+        # Same --frozen/--python posture as ci.yml's python job.
+        run: uv sync --frozen --extra dev --python "$(which python)"
+      - name: Make room for the engine venvs
+        # A hindsight-api venv is a full torch install (CUDA wheels included —
+        # the engine forces CPU at runtime but pip still pulls them) plus the
+        # bundled BGE embedder, and the gate holds FOUR of them at once: per
+        # engine dir the pass keeps the superseded venv (.venv.old-* on the
+        # upgrade leg, .venv.failed-* on the rollback leg) beside the live one.
+        # ubuntu-latest's root volume does not fit that. So drop the
+        # preinstalled toolchains nothing here uses, and put pytest's tmp tree
+        # on the runner's large scratch disk. `df` output is the receipt when
+        # a future engine release outgrows even this.
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          sudo mkdir -p /mnt/gate-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/gate-tmp
+          df -h / /mnt
+      - name: upgrade / rollback / contract gate
+        env:
+          HAL0_ENGINE_GATE: "1"
+          HAL0_GATE_OLD_PIN: ${{ needs.detect.outputs.old_pin }}
+        run: uv run pytest tests/memory/test_engine_gate.py -v --basetemp=/mnt/gate-tmp
