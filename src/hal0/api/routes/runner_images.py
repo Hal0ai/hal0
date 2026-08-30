@@ -244,9 +244,18 @@ def _families_payload(
                 newest = {"tag": cand.tag, "digest": cand.digest}
         eff_digest = None
         if row is not None:
-            _, _, eff_tag = ref.rpartition(":")
-            eff = next((t for t in row.tags if t.tag == eff_tag), None)
-            eff_digest = eff.digest if eff else None
+            if "@" in ref:
+                # Digest-pinned ref (``repo@sha256:…`` — what
+                # ``manifest_image_ref`` returns with real digests, and any
+                # digest-form override/env value): the digest IS the ref,
+                # not something to look up by tag — ``ref.rpartition(":")``
+                # would otherwise split inside the digest and produce hex
+                # garbage as a fake "tag".
+                eff_digest = ref.rpartition("@")[2]
+            else:
+                _, _, eff_tag = ref.rpartition(":")
+                eff = next((t for t in row.tags if t.tag == eff_tag), None)
+                eff_digest = eff.digest if eff else None
         if local is None:
             store_state = "unknown"
         else:
@@ -342,9 +351,26 @@ def _request_context() -> tuple[
     return defaults, slot_usage, local
 
 
+def _enrich_with(
+    images: list[RunnerImage],
+    defaults: Mapping[str, tuple[str, str]],
+    slot_usage: Mapping[str, str],
+    local: LocalImagesDigests | None,
+) -> list[dict[str, Any]]:
+    """Enrich every row against one already-computed request context.
+
+    The shared tail of ``_enriched``, ``list_runner_images``, and
+    ``sync_runner_images_route`` — each of the latter two already has its
+    own ``defaults``/``slot_usage``/``local`` on hand (to also feed
+    ``_safe_families_payload``), so this factors out the row-enrichment
+    list comprehension instead of repeating it three ways.
+    """
+    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+
+
 def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
     defaults, slot_usage, local = _request_context()
-    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+    return _enrich_with(images, defaults, slot_usage, local)
 
 
 def _safe_families_payload(
@@ -370,7 +396,7 @@ async def list_runner_images(request: Request) -> dict[str, Any]:
     store = request.app.state.runner_image_registry
     images = store.list()
     defaults, slot_usage, local = _request_context()
-    rows = [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
+    rows = _enrich_with(images, defaults, slot_usage, local)
     return {
         "images": rows,
         "families": _safe_families_payload(images, defaults, slot_usage, local),
@@ -420,9 +446,7 @@ async def sync_runner_images_route(request: Request) -> dict[str, Any]:
     store = request.app.state.runner_image_registry
     result = await sync_runner_images(store)
     defaults, slot_usage, local = _request_context()
-    rows = [
-        enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in result.images
-    ]
+    rows = _enrich_with(result.images, defaults, slot_usage, local)
     return {
         "images": rows,
         "families": _safe_families_payload(result.images, defaults, slot_usage, local),

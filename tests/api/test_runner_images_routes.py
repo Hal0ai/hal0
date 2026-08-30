@@ -800,6 +800,41 @@ class TestFamiliesPayload:
         assert fam["slots"] == []
         assert fam["pinned_slots"] == []
 
+    def test_families_digest_pinned_ref_present_and_update_available(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manifest-tier effective ref pinned by digest (``repo@sha256:…``
+        — what ``manifest_image_ref`` returns with a real digest, and what a
+        digest-form override/env value would also look like) must resolve
+        store presence and ``update_available`` via digest match, not the
+        tag-lookup path — ``ref.rpartition(":")`` would otherwise split
+        inside the digest and produce hex garbage as a fake "tag" (review
+        finding #1, fix round 1). ``flm`` is the family exercised: it has a
+        real ``manifest_key`` (unlike rocmfpx/vulkanfpx/cuda/cpu, which are
+        deliberately unwired — see the ``hal0.runners`` module docstring)."""
+        from hal0.providers import podman_introspect as pi
+
+        self._seed_repo_x(client)  # repo ghcr.io/x/a, tags 0826/DIGEST_A, 0824/DIGEST_B
+        pinned_ref = f"ghcr.io/x/a@{self.DIGEST_B}"
+        monkeypatch.setattr(
+            "hal0.config.loader.manifest_image_ref",
+            lambda key: pinned_ref if key == "flm" else None,
+        )
+        monkeypatch.setattr(
+            "hal0.api.routes.runner_images.images_digests",
+            lambda: pi.LocalImagesDigests(
+                refs={"docker.io/y/alias:zz": self.DIGEST_B}, context="rootful"
+            ),
+        )
+
+        body = client.get("/api/runner-images").json()
+        fam = next(f for f in body["families"] if f["family"] == "flm")
+        assert fam["source"] == "manifest"
+        assert fam["effective_ref"] == pinned_ref
+        assert fam["store_state"] == "present"  # digest match, name irrelevant
+        assert fam["newest_release"] == {"tag": "0826", "digest": self.DIGEST_A}
+        assert fam["update_available"] is True
+
     def test_families_store_state_unknown_when_store_unreadable(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
