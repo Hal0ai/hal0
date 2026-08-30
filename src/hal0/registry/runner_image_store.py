@@ -60,6 +60,22 @@ def _row_to_runner_image(row: sqlite3.Row) -> RunnerImage:
     )
 
 
+def _load_provenance(raw: str | None) -> dict[str, Any] | None:
+    """Decode a ``runner_image_tag.provenance_json`` cell, fail-soft.
+
+    A malformed or non-object cell reads back as ``None`` (the same value
+    an unprobed tag carries) rather than raising — provenance is display
+    metadata and must never break a catalogue read.
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _marker_matches_ref(local_path: str, ref: str) -> bool:
     """Best-effort: does the marker JSON at ``local_path`` record ``ref``?
 
@@ -127,8 +143,8 @@ class RunnerImageStore:
     def _tags_by_image(self, conn: sqlite3.Connection) -> dict[str, list[RunnerImageTag]]:
         """Fetch all tags grouped by image_id, in insertion order."""
         tag_rows = conn.execute(
-            "SELECT image_id, tag, digest, size_bytes, last_seen FROM runner_image_tag "
-            "ORDER BY image_id, ord"
+            "SELECT image_id, tag, digest, size_bytes, last_seen, provenance_json "
+            "FROM runner_image_tag ORDER BY image_id, ord"
         ).fetchall()
         tags_by_image: dict[str, list[RunnerImageTag]] = {}
         for tag_row in tag_rows:
@@ -141,6 +157,7 @@ class RunnerImageStore:
                     digest=tag_row["digest"],
                     size_bytes=tag_row["size_bytes"],
                     last_seen=tag_row["last_seen"],
+                    provenance=_load_provenance(tag_row["provenance_json"]),
                 )
             )
         return tags_by_image
@@ -195,11 +212,20 @@ class RunnerImageStore:
         with self._connect() as conn:
             self._ensure_migrated(conn)
             rows = conn.execute(
-                "SELECT tag, digest, size_bytes, last_seen FROM runner_image_tag "
-                "WHERE image_id = ? ORDER BY ord",
+                "SELECT tag, digest, size_bytes, last_seen, provenance_json "
+                "FROM runner_image_tag WHERE image_id = ? ORDER BY ord",
                 (image_id,),
             ).fetchall()
-        return [RunnerImageTag(**dict(r)) for r in rows]
+        return [
+            RunnerImageTag(
+                tag=r["tag"],
+                digest=r["digest"],
+                size_bytes=r["size_bytes"],
+                last_seen=r["last_seen"],
+                provenance=_load_provenance(r["provenance_json"]),
+            )
+            for r in rows
+        ]
 
     # ── writes ───────────────────────────────────────────────────────────
 
@@ -296,10 +322,18 @@ class RunnerImageStore:
                 conn.execute("DELETE FROM runner_image_tag WHERE image_id = ?", (image_id,))
                 conn.executemany(
                     "INSERT INTO runner_image_tag "
-                    "(image_id, tag, digest, size_bytes, last_seen, ord) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(image_id, tag, digest, size_bytes, last_seen, ord, provenance_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
-                        (image_id, t.tag, t.digest, t.size_bytes, t.last_seen, i)
+                        (
+                            image_id,
+                            t.tag,
+                            t.digest,
+                            t.size_bytes,
+                            t.last_seen,
+                            i,
+                            json.dumps(t.provenance) if t.provenance is not None else None,
+                        )
                         for i, t in enumerate(tags)
                     ],
                 )

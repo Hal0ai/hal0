@@ -9,7 +9,7 @@ is stubbed via the ``runner_pull_jobs.provider_factory`` monkeypatch seam.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -383,6 +383,91 @@ class TestEnrichRow:
             specialties={"ghcr.io/hal0ai/hal0-promptforge": ["promptforge"]},
         )
         assert row["specialties"] == ["promptforge"]
+
+    def test_provenance_passthrough_and_headline_hoist(self) -> None:
+        """h0/runner-provenance: every tags[] entry carries its sync-probed
+        provenance, and the HEADLINE tag's is hoisted to row["provenance"]."""
+        from hal0.api.routes.runner_images import enrich_row
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        prov = {
+            "source_repo": "https://github.com/hal0ai/ROCmFPX.git",
+            "revision": "0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708",
+            "patch_count": 4,
+        }
+        image = RunnerImage(
+            id="rocmfpx",
+            image="ghcr.io/hal0ai/hal0-rocmfpx",
+            tag="0826",
+            tags=[
+                RunnerImageTag(tag="0826", digest="sha256:a", provenance=prov),
+                RunnerImageTag(tag="0824", digest="sha256:b", provenance=None),
+            ],
+        )
+        row = enrich_row(image, defaults={}, slot_usage={}, local=None)
+        assert row["tags"][0]["provenance"] == prov
+        assert row["tags"][1]["provenance"] is None
+        assert row["provenance"] == prov
+
+    def test_provenance_none_when_headline_has_no_tag_row(self) -> None:
+        """Absent provenance stays null — the contract is 'render nothing',
+        never a placeholder dict."""
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-combined", "0824"),
+            defaults={},
+            slot_usage={},
+            local=None,
+        )
+        assert row["provenance"] is None
+
+
+class TestProvenanceForRef:
+    """Pure lookup the system-info route uses to stamp each runner's
+    effective image with its sync-cached provenance — no live registry
+    call, so anything unsynced answers None."""
+
+    _PROV: ClassVar[dict[str, Any]] = {
+        "source_repo": "https://github.com/ggml-org/llama.cpp.git",
+        "revision": "c841aee",
+        "patch_count": 0,
+    }
+
+    def _catalogue(self):
+        from hal0.registry.runner_image import RunnerImage, RunnerImageTag
+
+        return [
+            RunnerImage(
+                id="vulkan",
+                image="ghcr.io/hal0ai/hal0-toolbox-vulkan",
+                tag="0826",
+                tags=[
+                    RunnerImageTag(tag="0826", digest="sha256:aaa", provenance=self._PROV),
+                    RunnerImageTag(tag="0824", digest="sha256:bbb", provenance=None),
+                ],
+            )
+        ]
+
+    def test_tag_ref_matches(self) -> None:
+        from hal0.api.routes.runner_images import provenance_for_ref
+
+        got = provenance_for_ref("ghcr.io/hal0ai/hal0-toolbox-vulkan:0826", self._catalogue())
+        assert got == self._PROV
+
+    def test_digest_pinned_ref_matches_by_digest(self) -> None:
+        from hal0.api.routes.runner_images import provenance_for_ref
+
+        got = provenance_for_ref("ghcr.io/hal0ai/hal0-toolbox-vulkan@sha256:aaa", self._catalogue())
+        assert got == self._PROV
+
+    def test_unsynced_tag_or_unknown_repo_is_none(self) -> None:
+        from hal0.api.routes.runner_images import provenance_for_ref
+
+        cat = self._catalogue()
+        assert provenance_for_ref("ghcr.io/hal0ai/hal0-toolbox-vulkan:9999", cat) is None
+        assert provenance_for_ref("ghcr.io/hal0ai/hal0-toolbox-vulkan:0824", cat) is None
+        assert provenance_for_ref("ghcr.io/hal0ai/other:0826", cat) is None
 
 
 class TestSpecialtiesRoute:

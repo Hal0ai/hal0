@@ -27,6 +27,14 @@ Fetch failures degrade gracefully at every layer: a malformed/unreachable
 ``images.json`` still lets already-known GHCR packages sync (tag/digest/size
 only, no metadata); a single package's GHCR probe failing doesn't abort the
 whole sync run.
+
+Per-tag build provenance (h0/runner-provenance): alongside each tag's
+manifest probe, the image CONFIG BLOB (manifest → ``config.digest`` → blob
+GET) is fetched and its OCI labels (``org.opencontainers.image.source`` /
+``.revision``, ``dev.hal0.runner.patches``) are folded into
+``RunnerImageTag.provenance`` — so an operator can tell the upstream
+llama.cpp Vulkan/ROCm build apart from the ROCmFPX fork one. A failed blob
+fetch degrades that tag to ``provenance=None``, never fails the sync.
 """
 
 from __future__ import annotations
@@ -55,6 +63,14 @@ _OCI_MANIFEST_ACCEPT = (
     "application/vnd.docker.distribution.manifest.v2+json"
 )
 _HTTP_TIMEOUT_S = 15.0
+
+#: OCI labels the runner-image builds stamp into the image CONFIG blob —
+#: the llama.cpp build provenance an operator needs to tell the upstream
+#: Vulkan/ROCm build apart from the ROCmFPX one (verified live on the
+#: published ghcr.io/hal0ai packages).
+_LABEL_SOURCE = "org.opencontainers.image.source"
+_LABEL_REVISION = "org.opencontainers.image.revision"
+_LABEL_PATCHES = "dev.hal0.runner.patches"
 
 
 @dataclass
@@ -205,6 +221,45 @@ async def _ghcr_list_tags(repo: str, *, token: str, client: httpx.AsyncClient) -
     return [t for t in raw if not is_noise_tag(t)]
 
 
+def provenance_from_labels(labels: Any) -> dict[str, Any] | None:
+    """Build-provenance dict from an image config blob's ``config.Labels``.
+
+    Pure and exported (tested directly, same discipline as
+    :func:`sort_tags_newest_first`). Returns
+    ``{"source_repo", "revision", "patch_count"}`` with each field ``None``
+    when its label is absent; ``patch_count`` is the count of non-empty
+    entries in the comma-split ``dev.hal0.runner.patches`` value (``0`` for
+    a present-but-empty label — pristine upstream). Returns ``None`` when
+    ``labels`` isn't a dict or carries none of the three labels, so a
+    labelless image reads exactly like an unprobed one.
+    """
+    if not isinstance(labels, dict):
+        return None
+    source = labels.get(_LABEL_SOURCE)
+    revision = labels.get(_LABEL_REVISION)
+    patches = labels.get(_LABEL_PATCHES)
+    if not any(isinstance(v, str) for v in (source, revision, patches)):
+        return None
+    patch_count: int | None = None
+    if isinstance(patches, str):
+        patch_count = len([p for p in patches.split(",") if p.strip()])
+    return {
+        "source_repo": source if isinstance(source, str) and source else None,
+        "revision": revision if isinstance(revision, str) and revision else None,
+        "patch_count": patch_count,
+    }
+
+
+def _manifest_config_digest(payload: Any) -> str | None:
+    """``config.digest`` of one image manifest (never of an index)."""
+    if not isinstance(payload, dict):
+        return None
+    config = payload.get("config")
+    if isinstance(config, dict) and isinstance(config.get("digest"), str):
+        return config["digest"]
+    return None
+
+
 def _manifest_content_size(payload: Any) -> int | None:
     """Sum ``config.size`` + every ``layers[].size`` of one image manifest."""
     if not isinstance(payload, dict):
@@ -252,15 +307,18 @@ def _pick_index_manifest(payload: dict[str, Any]) -> str | None:
 
 async def _ghcr_manifest_info(
     repo: str, ref: str, *, token: str, client: httpx.AsyncClient
-) -> tuple[str | None, int | None]:
-    """Return ``(digest, size_bytes)`` for one tag; either may be None.
+) -> tuple[str | None, int | None, str | None]:
+    """Return ``(digest, size_bytes, config_digest)`` for one tag; any may
+    be None.
 
     Unlike a bare HEAD (whose ``content-length`` is the size of the manifest
     *document*, a couple of KB), this GETs the manifest body and sums the
     config + layer blob sizes — the actual compressed image size, matching
     what GHCR's package UI reports. Multi-arch indexes are followed one
     level down to the linux/amd64 image manifest. The digest reported is
-    the top-level one (what ``podman pull repo@digest`` would resolve).
+    the top-level one (what ``podman pull repo@digest`` would resolve);
+    ``config_digest`` is the IMAGE manifest's ``config.digest`` (the child's
+    for an index) — what the provenance blob probe fetches.
     """
     resp = await client.get(
         f"https://ghcr.io/v2/{repo}/manifests/{ref}",
@@ -276,6 +334,7 @@ async def _ghcr_manifest_info(
         payload = None
 
     size = _manifest_content_size(payload)
+    config_digest = _manifest_config_digest(payload)
     if size is None and isinstance(payload, dict):
         child_digest = _pick_index_manifest(payload)
         if child_digest:
@@ -286,13 +345,50 @@ async def _ghcr_manifest_info(
             )
             if child.status_code < 400:
                 try:
-                    size = _manifest_content_size(child.json())
+                    child_payload = child.json()
                 except ValueError:
-                    size = None
+                    child_payload = None
+                size = _manifest_content_size(child_payload)
+                config_digest = _manifest_config_digest(child_payload)
     if size is None:
         length = resp.headers.get("content-length")
         size = int(length) if length and length.isdigit() else None
-    return digest, size
+    return digest, size, config_digest
+
+
+async def _ghcr_tag_provenance(
+    repo: str, config_digest: str | None, *, token: str, client: httpx.AsyncClient
+) -> dict[str, Any] | None:
+    """Fetch one tag's config blob and extract its provenance labels.
+
+    Fail-soft by contract: any failure (no config digest resolved, HTTP
+    error, non-JSON blob) degrades to ``None`` — provenance never fails a
+    tag row, let alone the sync run.
+    """
+    if not config_digest:
+        return None
+    try:
+        resp = await client.get(
+            f"https://ghcr.io/v2/{repo}/blobs/{config_digest}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_HTTP_TIMEOUT_S,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        payload = resp.json()
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        log.warning(
+            "runner_images.config_blob_probe_failed repo=%s digest=%s error=%s",
+            repo,
+            config_digest,
+            exc,
+        )
+        return None
+    if not isinstance(payload, dict):
+        return None
+    config = payload.get("config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    return provenance_from_labels(labels)
 
 
 async def probe_ghcr_package(
@@ -321,7 +417,18 @@ async def probe_ghcr_package(
         tags = []
     available = sort_tags_newest_first(tags)
     resolved_tag = tag if tag is not None else (available[0] if available else "latest")
-    digest, size = await _ghcr_manifest_info(repo, resolved_tag, token=token, client=client)
+    digest, size, config_digest = await _ghcr_manifest_info(
+        repo, resolved_tag, token=token, client=client
+    )
+    # Build provenance from the config blob's OCI labels — but never for a
+    # noise-tag headline (an images.json pin should never name one, but the
+    # per-tag blob GET is real registry traffic worth gating anyway;
+    # `available` is already noise-filtered at _ghcr_list_tags).
+    provenance = (
+        None
+        if is_noise_tag(resolved_tag)
+        else await _ghcr_tag_provenance(repo, config_digest, token=token, client=client)
+    )
 
     # Resolve a digest for every catalogued tag (catalogue v3).
     now = datetime.now(UTC).isoformat()
@@ -331,19 +438,37 @@ async def probe_ghcr_package(
     for t in available:
         if t == resolved_tag:
             # Reuse the headline manifest result.
-            tag_rows.append(RunnerImageTag(tag=t, digest=digest, size_bytes=size, last_seen=now))
+            tag_rows.append(
+                RunnerImageTag(
+                    tag=t, digest=digest, size_bytes=size, last_seen=now, provenance=provenance
+                )
+            )
             continue
         try:
-            t_digest, t_size = await _ghcr_manifest_info(repo, t, token=token, client=client)
+            t_digest, t_size, t_config = await _ghcr_manifest_info(
+                repo, t, token=token, client=client
+            )
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             log.warning("runner_images.tag_probe_failed repo=%s tag=%s error=%s", repo, t, exc)
-            t_digest, t_size = None, None
-        tag_rows.append(RunnerImageTag(tag=t, digest=t_digest, size_bytes=t_size, last_seen=now))
+            t_digest, t_size, t_config = None, None, None
+        t_prov = await _ghcr_tag_provenance(repo, t_config, token=token, client=client)
+        tag_rows.append(
+            RunnerImageTag(
+                tag=t, digest=t_digest, size_bytes=t_size, last_seen=now, provenance=t_prov
+            )
+        )
 
     # If resolved_tag (pinned or fallback) is not in available, prepend it.
     if resolved_tag not in available:
         tag_rows.insert(
-            0, RunnerImageTag(tag=resolved_tag, digest=digest, size_bytes=size, last_seen=now)
+            0,
+            RunnerImageTag(
+                tag=resolved_tag,
+                digest=digest,
+                size_bytes=size,
+                last_seen=now,
+                provenance=provenance,
+            ),
         )
 
     return RunnerImage(
@@ -456,6 +581,7 @@ __all__ = [
     "fetch_images_json",
     "is_noise_tag",
     "probe_ghcr_package",
+    "provenance_from_labels",
     "sort_tags_newest_first",
     "sync_runner_images",
 ]

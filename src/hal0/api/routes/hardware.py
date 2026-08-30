@@ -878,7 +878,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     means neither context could reach podman at all.
     """
     from hal0.api.routes.health import list_features
-    from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+    from hal0.runners import RUNNER_IMAGES, canonical_family, resolve_runner_image
 
     hardware = await get_hardware(request)
     features = await list_features(request)
@@ -886,12 +886,37 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     local_repos = images_result.repos if images_result is not None else None
     podman_context = images_result.context if images_result is not None else "unavailable"
 
+    # Build provenance for each runner's EFFECTIVE image (h0/runner-provenance):
+    # the effective ref comes from the runner-image routes' defaults map (the
+    # override tier included — what a slot actually launches), and provenance
+    # is looked up in the SYNC-CACHED catalogue only. No live registry call on
+    # this request path: an unsynced tag degrades to provenance=None, and any
+    # failure here degrades the whole lookup the same way (never a 500 —
+    # provenance is display metadata).
+    effective_defaults: dict[str, tuple[str, str]] = {}
+    catalogue: list[Any] = []
+    try:
+        from hal0.api.routes.runner_images import _effective_defaults
+
+        effective_defaults = _effective_defaults()
+        catalogue = request.app.state.runner_image_registry.list()
+    except Exception:
+        log.warning("system_info.provenance_context_failed", exc_info=True)
+
     backends: dict[str, Any] = {}
     for key, runner in RUNNER_IMAGES.items():
         try:
             image = resolve_runner_image(runner)
         except Exception:
             image = runner.image
+        provenance = None
+        try:
+            from hal0.api.routes.runner_images import provenance_for_ref
+
+            eff = effective_defaults.get(canonical_family(key))
+            provenance = provenance_for_ref(eff[0] if eff else image, catalogue)
+        except Exception:
+            log.warning("system_info.provenance_lookup_failed", key=key, exc_info=True)
         backends[key] = {
             "image": image,
             "runtime_family": runner.runtime_family,
@@ -922,6 +947,11 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
                 # degrade it to GGUF-only.
                 "specialties": list(runner.supports.specialties),
             },
+            # llama.cpp build provenance of the runner's effective image
+            # ({"source_repo", "revision", "patch_count"} | null) — see the
+            # provenance block above. The slot drawer's Runner select and
+            # RunnerCard render it; null renders nothing.
+            "provenance": provenance,
             "state": _backend_state(image, local_repos),
         }
 

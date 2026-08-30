@@ -23,6 +23,13 @@ class RunnerImageTag(BaseModel):
     digest: str | None = None
     size_bytes: int | None = None
     last_seen: str | None = None
+    #: llama.cpp build provenance read from the image config blob's OCI
+    #: labels during sync (``hal0.registry.runner_image_sync``):
+    #: ``{"source_repo": str|None, "revision": str|None,
+    #: "patch_count": int|None}``. ``None`` when the blob probe failed,
+    #: hasn't run, or the image carries none of the labels — consumers
+    #: render nothing in that case rather than a placeholder.
+    provenance: dict[str, Any] | None = None
 
 
 class RunnerImage(BaseModel):

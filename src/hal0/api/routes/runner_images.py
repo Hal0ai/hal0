@@ -151,6 +151,13 @@ def enrich_row(
     — the catalogue-v3 field the UI's ``groupRows`` (``runner-images.jsx``)
     reads to route a row into the "Specialized" group. ``[]`` for a repo no
     specialty runner claims — every plain toolbox image included.
+
+    Build provenance (h0/runner-provenance): every ``tags[]`` entry carries
+    ``provenance`` (``{"source_repo", "revision", "patch_count"}`` | null —
+    :class:`hal0.registry.runner_image.RunnerImageTag`, populated by the
+    sync's config-blob label probe), and the HEADLINE tag's provenance is
+    hoisted to ``row["provenance"]`` (null when the headline has no tag row
+    or its probe failed).
     """
     row = _image_to_dict(image)
     row["specialties"] = list(specialties.get(image.image, []))
@@ -176,6 +183,11 @@ def enrich_row(
     tag_list = image.tags or []
     row["tags"] = [{**t.model_dump(), "downloaded": _tag_state(t)} for t in tag_list]
     headline = next((t for t in tag_list if t.tag == image.tag), None)
+    # Build provenance (h0/runner-provenance): every ``tags[]`` entry carries
+    # its own sync-probed ``provenance`` via ``model_dump()`` above; the
+    # HEADLINE tag's is additionally hoisted to the row so list/card readers
+    # don't re-scan the tag list. None when the probe failed/hasn't run.
+    row["provenance"] = headline.provenance if headline is not None else None
     if local is None:
         row["store_state"] = "unknown"
         row["downloaded"] = bool(image.local_path)  # marker only as last resort
@@ -191,6 +203,33 @@ def enrich_row(
     row["store_context"] = local.context if local else None
     row["badges"] = _tag_badges(image)
     return row
+
+
+def provenance_for_ref(ref: str, images: list[RunnerImage]) -> dict[str, Any] | None:
+    """Sync-cached build provenance for one image ref, or None. Pure.
+
+    Resolves ``ref`` against the already-read catalogue rows only — the
+    slot-drawer request path (``GET /api/system-info``) must never make a
+    live registry call, so a tag the sync hasn't probed simply answers
+    ``None``. A ``repo:tag`` ref matches a row of that repo carrying a tag
+    row of that name (bare-repo refs read as ``latest``, podman's own
+    default); a digest-pinned ``repo@sha256:...`` ref matches by the tag
+    row's resolved digest instead — the ref shape ``manifest_image_ref``
+    produces (see :func:`_families_payload`'s digest-pin note).
+    """
+    repo = _repo_of(ref)
+    body, _, digest = ref.partition("@")
+    tag: str | None = None
+    if not digest:
+        _head, sep, tail = body.rpartition(":")
+        tag = tail if sep and "/" not in tail else "latest"
+    for image in images:
+        if image.image != repo:
+            continue
+        for t in image.tags:
+            if (digest and t.digest == digest) or (tag is not None and t.tag == tag):
+                return t.provenance
+    return None
 
 
 def _repo_specialties() -> dict[str, list[str]]:
@@ -864,4 +903,4 @@ async def get_runner_image(image_id: str, request: Request) -> dict[str, Any]:
     return _enriched([image])[0]
 
 
-__all__ = ["enrich_row", "router"]
+__all__ = ["enrich_row", "provenance_for_ref", "router"]
