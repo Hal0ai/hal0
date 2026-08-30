@@ -1,0 +1,274 @@
+"""podman_mutate — the WRITE-side twin of :mod:`hal0.providers.podman_introspect`
+(runner-images v3, D1(a)/D2).
+
+``podman_introspect`` routes reads through the ``hal0-podman-ro`` seam so
+hal0-api (running as the unprivileged ``hal0`` service user) can see the
+ROOTFUL podman store slots actually launch from. This module is the mirror
+for WRITES against that same store, through the separate, narrower
+``hal0-podman-rw`` seam (``installer/wrappers/hal0-podman-rw`` +
+``packaging/sudoers/hal0-podman-rw``) — two verbs only, independently
+revocable from the read grant:
+
+    from hal0.providers import podman_mutate
+
+    async for event in podman_mutate.pull_image_stream_rootful(image):
+        ...
+
+    outcome, reason = podman_mutate.remove_image(image)
+
+Same gating idiom as ``podman_introspect``/``hal0.system.seam.SystemCtlSeam``:
+the seam is only ever ATTEMPTED when this process is literally the ``hal0``
+service account (:func:`hal0.system.seam.is_hal0_service_user`) — a dev
+shell, CI runner or unit test is almost always non-root too, but none of
+those have the seam installed, so a bare "attempt sudo" would make every such
+process try (and noisily fail) a grant that doesn't exist there.
+
+Both entry points validate the image reference on THIS side first
+(:func:`hal0.providers.podman_introspect.is_valid_image_ref`, byte-identical
+to the wrapper's own validator) so a bad ref fails fast and readably instead
+of burning a sudo round-trip for an rc 64 the wrapper would reject anyway —
+and, for :func:`remove_image`, so a caller can never even reach ``sudo`` with
+an unvalidated operand.
+
+``remove_image``'s exit-code mapping extends ``podman_introspect._RC_REASON``
+with rc 67 (see the wrapper's EXIT-CODE CONTRACT): unlike every other
+non-zero rc, 67 is a DEFINITIVE answer ("refused: in use by a container, or
+has child images"), not an unanswered question, so it maps to the
+``"in-use"`` outcome rather than into the ``SeamUnanswered`` reason
+vocabulary.
+
+``pull_image_stream_rootful`` shares its line-progress heuristic with
+:meth:`hal0.providers.container.ContainerProvider.pull_image_stream` (the
+rootless pull path) via :class:`PullLineParser` below, so both pull paths
+report byte-identical event shapes to callers regardless of which store they
+targeted. The parser lives here rather than in ``container.py`` because
+``container.py`` already imports from this package's ``podman_introspect``
+sibling with no cycle back the other way, so ``container.py`` importing this
+module too costs nothing new; keeping the parser out of ``container.py``
+(a large, heavy module) also means a caller who only wants the pure
+line→event logic — this module, or a future rootful test double — never
+pulls in podman-run/quadlet/GPU machinery to get it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import subprocess
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
+from typing import Any, Literal
+
+from hal0.providers.podman_introspect import SeamUnanswered, is_valid_image_ref
+from hal0.system.seam import is_hal0_service_user
+
+#: Installed path of the write seam (D1(a)/D2). See
+#: installer/wrappers/hal0-podman-rw + packaging/sudoers/hal0-podman-rw.
+RW_SEAM_BIN = "/usr/lib/hal0/bin/hal0-podman-rw"
+
+#: Wrapper/sudo exit code -> :data:`SeamUnanswered`, for the codes that are
+#: genuinely "the question went unanswered" (as opposed to rc 67, a real
+#: answer). Byte-identical to ``podman_introspect._RC_REASON`` — kept as its
+#: own copy rather than imported so this module's exit-code contract stands
+#: on its own the same way the wrapper documents standing alone as its own
+#: privileged binary; ``tests/providers/test_podman_mutate.py`` and
+#: ``tests/providers/test_podman_introspect.py`` both pin their respective
+#: wrapper's documented contract, so a drift between the two wrappers would
+#: surface as a test failure here, not a silent divergence.
+_RC_REASON: dict[int, SeamUnanswered] = {
+    1: "grant-denied",
+    64: "invalid-argument",
+    65: "podman-absent",
+    66: "podman-failed",
+}
+
+#: Outcome of a guarded ``image-rm``. ``"unknown"`` pairs with a
+#: :data:`SeamUnanswered` reason (see :func:`remove_image`); the other three
+#: are definitive answers from the seam and carry no reason.
+RemoveOutcome = Literal["removed", "missing", "in-use", "unknown"]
+
+_RunFn = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+class PullLineParser:
+    """Turns raw ``podman pull`` progress lines into ``"pulling"`` events.
+
+    Shared by :meth:`hal0.providers.container.ContainerProvider.pull_image_stream`
+    (rootless pull) and :func:`pull_image_stream_rootful` (rootful pull, via
+    the ``hal0-podman-rw`` seam) so both report identical progress shapes.
+
+    Layer-counting heuristic, unchanged from the pre-extraction logic
+    (docker/podman non-TTY pull output):
+      - Each ``Pulling fs layer`` / ``Waiting`` / ``Verifying Checksum`` /
+        ``Already exists`` line discovers a new layer (``total_layers`` +=1).
+      - Each ``Pull complete`` / ``Download complete`` / ``Already exists``
+        line finishes a layer (``done_layers`` +=1, capped at
+        ``max(total_layers, 1)``).
+
+    Callers are expected to skip blank lines themselves before calling
+    :meth:`feed` — a blank line carries no signal and both pull paths already
+    filter it out of the raw stream before this ever sees it.
+    """
+
+    def __init__(self) -> None:
+        self.total_layers = 0
+        self.done_layers = 0
+
+    def feed(self, line: str) -> dict[str, Any]:
+        """Update layer counters from one non-empty output line, return its event."""
+        if any(
+            kw in line
+            for kw in (
+                "Pulling fs layer",
+                "Waiting",
+                "Verifying Checksum",
+                "Already exists",
+            )
+        ):
+            self.total_layers += 1
+        if "Pull complete" in line or "Download complete" in line or "Already exists" in line:
+            self.done_layers = min(self.done_layers + 1, max(self.total_layers, 1))
+        return {
+            "state": "pulling",
+            "layer": self.done_layers,
+            "total_layers": self.total_layers,
+            "line": line,
+        }
+
+
+def rw_seam_available(*, is_hal0_user: Callable[[], bool] = is_hal0_service_user) -> bool:
+    """Is the write seam usable from here, cheaply?
+
+    Service-account gate (same idiom as every other seam in this package)
+    AND the binary actually exists on disk. Deliberately does NOT probe
+    ``sudo -n`` itself — that costs a subprocess round-trip and the grant can
+    still be denied even when the binary is present (mid-upgrade race,
+    sudoers not yet installed); this is a cheap upfront check for callers
+    that want to skip offering a rootful action at all, not a guarantee the
+    seam will actually answer.
+    """
+    return is_hal0_user() and Path(RW_SEAM_BIN).is_file()
+
+
+async def pull_image_stream_rootful(image: str) -> AsyncIterator[dict[str, Any]]:
+    """Async generator: ``hal0-podman-rw image-pull <image>``, streamed.
+
+    Mirrors :meth:`hal0.providers.container.ContainerProvider.pull_image_stream`
+    exactly (same event shapes, via the shared :class:`PullLineParser`) but
+    execs the write seam instead of a bare ``podman pull``, so progress lands
+    in ROOT's store — the one slots actually launch from — rather than
+    hal0-api's own rootless store.
+
+    Yields::
+
+        {"state": "pulling",   "layer": N, "total_layers": M, "line": "<raw line>"}
+        {"state": "completed", "layer": N, "total_layers": M}
+        {"state": "failed",    "error": "<message>"}
+
+    A bad image reference is rejected HERE, before any subprocess is
+    spawned — no ``sudo`` round-trip is spent on a ref the wrapper would
+    reject anyway.
+    """
+    if not is_valid_image_ref(image):
+        yield {"state": "failed", "error": f"invalid image reference: {image}"}
+        return
+
+    proc = await asyncio.create_subprocess_exec(
+        "sudo",
+        "-n",
+        RW_SEAM_BIN,
+        "image-pull",
+        image,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    parser = PullLineParser()
+
+    try:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+            yield parser.feed(line)
+    except Exception as exc:
+        yield {"state": "failed", "error": str(exc)}
+        return
+    finally:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+
+    exit_code = await proc.wait()
+    if exit_code == 0:
+        yield {
+            "state": "completed",
+            "layer": parser.done_layers,
+            "total_layers": parser.total_layers,
+        }
+    else:
+        yield {"state": "failed", "error": f"pull exited with code {exit_code}"}
+
+
+def remove_image(
+    image: str,
+    *,
+    run: _RunFn = subprocess.run,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 60.0,
+) -> tuple[RemoveOutcome, str | None]:
+    """Guarded ``hal0-podman-rw image-rm <image>`` — never force-removes.
+
+    Returns ``(outcome, reason)``; ``reason`` is set if and only if
+    ``outcome == "unknown"`` (same tri-state discipline as
+    :class:`hal0.providers.podman_introspect.ImageProbe`):
+
+      * ``("removed", None)``   — rc 0, wrapper printed ``removed``.
+      * ``("missing", None)``   — rc 0, wrapper printed ``missing`` (no such
+        image — a real negative answer, not a failure).
+      * ``("in-use", None)``    — rc 67: podman refused because the image is
+        in use by a container, or has child images (podman's rc 2 covers
+        both; the wrapper does not distinguish them, so neither do we).
+      * ``("unknown", reason)`` — every other case: a bad ref rejected before
+        any subprocess ran (``"invalid-argument"``), this process is not the
+        ``hal0`` service account (``"not-service-user"``), ``sudo -n`` denied
+        (``"grant-denied"``), the wrapper's rc 64/65/66
+        (``"invalid-argument"``/``"podman-absent"``/``"podman-failed"``), or
+        the call raising / an rc or stdout the contract does not define
+        (``"seam-error"``).
+    """
+    if not is_valid_image_ref(image):
+        return ("unknown", "invalid-argument")
+    if not is_hal0_user():
+        return ("unknown", "not-service-user")
+    try:
+        proc = run(
+            ["sudo", "-n", RW_SEAM_BIN, "image-rm", image],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ("unknown", "seam-error")
+    if proc.returncode == 0:
+        stdout = proc.stdout.strip()
+        if stdout == "removed":
+            return ("removed", None)
+        if stdout == "missing":
+            return ("missing", None)
+        # rc 0 with a word the contract does not define: the wrapper and
+        # this mirror have drifted.
+        return ("unknown", "seam-error")
+    if proc.returncode == 67:
+        return ("in-use", None)
+    return ("unknown", _RC_REASON.get(proc.returncode, "seam-error"))
+
+
+__all__ = [
+    "RW_SEAM_BIN",
+    "PullLineParser",
+    "RemoveOutcome",
+    "pull_image_stream_rootful",
+    "remove_image",
+    "rw_seam_available",
+]

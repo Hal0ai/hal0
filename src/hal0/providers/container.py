@@ -86,6 +86,7 @@ from hal0.providers._gpu import (
     runtime_lane_for_provider,
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.providers.podman_mutate import PullLineParser
 from hal0.slot_lifecycle_budget import HEALTH_TIMEOUT_S
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, resolve_argv
@@ -3131,11 +3132,10 @@ class ContainerProvider(Provider):
             {"state": "completed"}
             {"state": "failed",   "error": "<message>"}
 
-        Layer counting heuristic (docker non-TTY output):
-          - Each ``Pulling fs layer`` / ``Waiting`` / ``Verifying Checksum`` /
-            ``Already exists`` lines indicate a discovered layer (M increments).
-          - Each ``Pull complete`` / ``Download complete`` line indicates a
-            finished layer (N increments, capped at M).
+        Layer counting heuristic lives in :class:`hal0.providers.podman_mutate.PullLineParser`,
+        shared with the rootful pull path
+        (:func:`hal0.providers.podman_mutate.pull_image_stream_rootful`) so both
+        report identical event shapes regardless of which store they target.
         """
         import asyncio as _asyncio
 
@@ -3153,8 +3153,7 @@ class ContainerProvider(Provider):
             stderr=_asyncio.subprocess.STDOUT,
         )
 
-        total_layers = 0
-        done_layers = 0
+        parser = PullLineParser()
 
         try:
             assert proc.stdout is not None
@@ -3162,30 +3161,7 @@ class ContainerProvider(Provider):
                 line = raw.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
-                # Discover new layers.
-                if any(
-                    kw in line
-                    for kw in (
-                        "Pulling fs layer",
-                        "Waiting",
-                        "Verifying Checksum",
-                        "Already exists",
-                    )
-                ):
-                    total_layers += 1
-                # Count finished layers.
-                if (
-                    "Pull complete" in line
-                    or "Download complete" in line
-                    or "Already exists" in line
-                ):
-                    done_layers = min(done_layers + 1, max(total_layers, 1))
-                yield {
-                    "state": "pulling",
-                    "layer": done_layers,
-                    "total_layers": total_layers,
-                    "line": line,
-                }
+                yield parser.feed(line)
         except Exception as exc:
             yield {"state": "failed", "error": str(exc)}
             return
@@ -3195,7 +3171,11 @@ class ContainerProvider(Provider):
 
         exit_code = await proc.wait()
         if exit_code == 0:
-            yield {"state": "completed", "layer": done_layers, "total_layers": total_layers}
+            yield {
+                "state": "completed",
+                "layer": parser.done_layers,
+                "total_layers": parser.total_layers,
+            }
         else:
             yield {"state": "failed", "error": f"pull exited with code {exit_code}"}
 
