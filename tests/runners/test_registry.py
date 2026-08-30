@@ -105,15 +105,16 @@ def test_runner_matches_device_class_gate() -> None:
 
 def test_runner_matches_backend_gate_only_when_both_declare_one() -> None:
     rocm_runner = RUNNER_IMAGES["rocmfpx"]
-    # Both sides declare a backend and disagree -> reject.
-    assert runner_matches(rocm_runner, device_class="gpu", backend="vulkan") is False
-    # Same backend -> accept.
+    # When runner.supported_backends is declared, backend membership is checked.
+    assert runner_matches(rocm_runner, device_class="gpu", backend="vulkan") is True
     assert runner_matches(rocm_runner, device_class="gpu", backend="rocm") is True
+    assert runner_matches(rocm_runner, device_class="gpu", backend="cuda") is False
     # Caller has no opinion on backend -> never vetoes over it.
     assert runner_matches(rocm_runner, device_class="gpu", backend=None) is True
-    # Backend-agnostic runner (kokoro) never vetoes on backend either.
+    # Runner with supported_backends only accepts those backends.
     kokoro_runner = RUNNER_IMAGES["kokoro"]
-    assert runner_matches(kokoro_runner, device_class="cpu", backend="rocm") is True
+    assert runner_matches(kokoro_runner, device_class="cpu", backend="cpu") is True
+    assert runner_matches(kokoro_runner, device_class="cpu", backend="rocm") is False
 
 
 def test_stale_runner_image_refs_alias_matches_schema() -> None:
@@ -166,3 +167,17 @@ def test_runner_for_backend_vulkan_is_rocmfpx() -> None:
 
 def test_fpx_guard_covers_only_the_canonical_key() -> None:
     assert frozenset({"rocmfpx"}) == FPX_RUNNER_KEYS
+
+
+def test_runner_matches_consults_supported_backends() -> None:
+    """The vulkan lane must match rocmfpx now that the vulkanfpx row is gone.
+
+    The single `backend` field is the default lane, not a veto —
+    `supported_backends` is the membership test when declared (§4).
+    """
+    rocmfpx = RUNNER_IMAGES["rocmfpx"]
+    assert runner_matches(rocmfpx, device_class="gpu", backend="vulkan")
+    assert runner_matches(rocmfpx, device_class="gpu", backend="rocm")
+    assert not runner_matches(rocmfpx, device_class="gpu", backend="cuda")
+    # backend-agnostic runner (empty supported_backends, backend=None) never vetoes
+    assert runner_matches(RUNNER_IMAGES["comfyui"], device_class="img", backend=None)

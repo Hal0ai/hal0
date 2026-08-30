@@ -326,8 +326,9 @@ FPX_RUNNER_KEYS = frozenset({"rocmfpx"})
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
-    ``device_class`` is matched exactly when provided; ``backend`` is only
-    checked when BOTH the runner and the caller declare one (npu/cpu/img
+    ``device_class`` is matched exactly when provided; ``backend`` is checked against
+    ``supported_backends`` when the runner declares any (the single ``backend`` field is only
+    the default lane); otherwise against ``backend`` when both sides declare one (npu/cpu/img
     runners are backend-agnostic, and a caller with no opinion on backend
     never vetoes a runner over it). Shared "does this runner fit this device/
     backend lane" predicate — used by the slot ``binary`` fit-check
@@ -335,7 +336,11 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
     """
     if device_class and runner.device_class != device_class:
         return False
-    return not (runner.backend and backend and runner.backend != backend)
+    if not backend:
+        return True
+    if runner.supported_backends:
+        return backend in runner.supported_backends
+    return not (runner.backend and runner.backend != backend)
 
 
 __all__ = [
