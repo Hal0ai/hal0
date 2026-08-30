@@ -94,3 +94,74 @@ def test_main_overdue_branch_reports_full_prerelease_version(
 
     assert check_sunset.main([]) == 1
     assert "OVERDUE HAL0-SUNSET shims (current v1.0.0-alpha.0)" in capsys.readouterr().out
+
+
+def test_scar_ok_waiver_excludes_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_project(
+        tmp_path,
+        monkeypatch,
+        version="1.0.0",
+        source="x = 1  # DEPRECATED  # scar-ok: false positive, name of an upstream field\n",
+    )
+
+    assert check_sunset.scar_count() == (0, 1)
+
+
+def test_bare_scar_ok_does_not_waive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_project(
+        tmp_path,
+        monkeypatch,
+        version="1.0.0",
+        source="x = 1  # DEPRECATED  # scar-ok\ny = 2  # DEPRECATED  # scar-ok:\n",
+    )
+
+    assert check_sunset.scar_count() == (2, 0)
+
+
+def test_main_reports_waiver_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_project(
+        tmp_path,
+        monkeypatch,
+        version="1.0.0",
+        source=(
+            "x = 1  # DEPRECATED  # scar-ok: false positive\n"
+            "y = 2  # compat shim  # scar-ok: waived with reason\n"
+        ),
+    )
+
+    assert check_sunset.main([]) == 0
+    out = capsys.readouterr().out
+    assert "scar waivers in effect: 2" in out
+    assert "scar markers: 0 <= baseline 0" in out
+
+
+def test_main_silent_when_no_waivers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_project(tmp_path, monkeypatch, version="1.0.0")
+
+    assert check_sunset.main([]) == 0
+    assert "scar waivers" not in capsys.readouterr().out
+
+
+def test_update_baseline_uses_waiver_aware_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_project(
+        tmp_path,
+        monkeypatch,
+        version="1.0.0",
+        source="x = 1  # legacy field\ny = 2  # DEPRECATED  # scar-ok: false positive\n",
+    )
+
+    assert check_sunset.main(["--update-baseline"]) == 0
+    assert "scar_baseline.txt <- 1" in capsys.readouterr().out
+    assert (tmp_path / "scar_baseline.txt").read_text() == "1\n"
