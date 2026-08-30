@@ -912,3 +912,58 @@ class TestFamiliesPayload:
         resp = client.get("/api/runner-images")
         assert resp.status_code == 200
         assert resp.json()["families"]
+
+
+# ── canonical family keys (runner-image-catalogue v3, task 11) ──────────────
+#
+# ``vulkanfpx`` shares DEFAULT_ROCMFPX_IMAGE with ``rocmfpx`` — one lever
+# (rocmfpx) governs the shared image lineage; vulkanfpx never emits its own
+# families row or defaults entry, and an override written under the alias
+# key folds into the canonical family.
+
+
+class TestCanonicalFamilyFold:
+    def test_vulkanfpx_absent_from_families(self, client: TestClient) -> None:
+        body = client.get("/api/runner-images").json()
+        fams = [f["family"] for f in body["families"]]
+        assert "vulkanfpx" not in fams
+        assert "rocmfpx" in fams
+
+    def test_alias_override_key_applies_to_rocmfpx_family_row(
+        self, isolated_client: TestClient
+    ) -> None:
+        """An override written under the alias key ``vulkanfpx`` applies to
+        the canonical ``rocmfpx`` family row — both keys never produce two
+        strip rows for the same image lineage."""
+        r = isolated_client.put(
+            "/api/settings",
+            json={"slots": {"default_images": {"vulkanfpx": "ghcr.io/x/a:0999"}}},
+        )
+        assert r.status_code == 200, r.text
+
+        body = isolated_client.get("/api/runner-images").json()
+        fams = [f["family"] for f in body["families"]]
+        assert "vulkanfpx" not in fams
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:0999"
+        assert rocm["source"] == "override"
+
+    def test_canonical_key_wins_when_both_present(self, isolated_client: TestClient) -> None:
+        """When both the exact canonical key and the alias key are set, the
+        canonical key wins (``folded.setdefault`` semantics)."""
+        r = isolated_client.put(
+            "/api/settings",
+            json={
+                "slots": {
+                    "default_images": {
+                        "rocmfpx": "ghcr.io/x/a:canonical",
+                        "vulkanfpx": "ghcr.io/x/a:alias",
+                    }
+                }
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        body = isolated_client.get("/api/runner-images").json()
+        rocm = next(f for f in body["families"] if f["family"] == "rocmfpx")
+        assert rocm["effective_ref"] == "ghcr.io/x/a:canonical"

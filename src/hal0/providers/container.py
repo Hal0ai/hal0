@@ -334,10 +334,16 @@ def _resolve_image_ref(
             return pin  # escape hatch — honored verbatim, never re-resolved
 
     # image_default = RUNNER_IMAGES[slot.BINARY] (or the HW-gated default).
-    from hal0.runners import resolve_runner_image
+    from hal0.runners import canonical_family, resolve_runner_image
 
     runner = _effective_runner(slot_cfg, profile)
-    override = _slot_default_images().get(runner.key)
+    defaults_map = _slot_default_images()
+    # Exact key first (an existing ``vulkanfpx`` override keeps working
+    # during deprecation), then the canonical family (runner-image-catalogue
+    # v3, task 11) — ``vulkanfpx`` shares DEFAULT_ROCMFPX_IMAGE with
+    # ``rocmfpx``, so an override set under the canonical ``rocmfpx`` key
+    # also applies when the effective runner is the ``vulkanfpx`` alias.
+    override = defaults_map.get(runner.key) or defaults_map.get(canonical_family(runner.key))
     if isinstance(override, str) and override:
         return override  # [slots].default_images — operator family default
     return resolve_runner_image(runner)

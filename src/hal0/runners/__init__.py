@@ -334,6 +334,19 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 FPX_RUNNER_KEYS = frozenset({"rocmfpx", "vulkanfpx"})
 
 
+#: Family-key aliases for surfaces keyed "one lever per image lineage"
+#: ([slots].default_images, the family strip). ``vulkanfpx`` shares
+#: DEFAULT_ROCMFPX_IMAGE with ``rocmfpx`` (see runner_for_backend's docstring)
+#: — two override keys for one image would let them contradict each other.
+#: The runner KEYS both stay: slots still select either for launch.
+CANONICAL_FAMILY: dict[str, str] = {"vulkanfpx": "rocmfpx"}
+
+
+def canonical_family(key: str) -> str:
+    """The default-images/strip family a runner key belongs to."""
+    return CANONICAL_FAMILY.get(key, key)
+
+
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
@@ -350,12 +363,14 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
 
 
 __all__ = [
+    "CANONICAL_FAMILY",
     "FPX_RUNNER_KEYS",
     "RUNNER_IMAGES",
     "STALE_RUNNER_IMAGE_REFS",
     "Runner",
     "RunnerSupports",
     "RuntimeFamily",
+    "canonical_family",
     "get_runner",
     "resolve_runner_image",
     "runner_for_backend",

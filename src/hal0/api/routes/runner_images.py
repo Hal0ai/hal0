@@ -172,10 +172,18 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
 
     Fail-soft throughout: an unreadable config or manifest degrades to the
     next tier, never a 500.
+
+    Family-key canonicalization (runner-image-catalogue v3, task 11):
+    ``vulkanfpx`` shares ``DEFAULT_ROCMFPX_IMAGE`` with ``rocmfpx`` — one
+    lever per image lineage, so an override written under the alias key
+    folds into the canonical family (``canonical_family`` wins over the
+    alias when both are set — ``folded.setdefault``), and the alias family
+    is skipped entirely from the per-family iteration below so it never
+    emits its own defaults entry (or, downstream, a families row).
     """
     import os
 
-    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners import RUNNER_IMAGES, canonical_family
 
     overrides: Mapping[str, str] = {}
     try:
@@ -186,8 +194,19 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
             overrides = raw
     except Exception:
         log.warning("runner_images.default_images_load_failed", exc_info=True)
+
+    folded: dict[str, str] = {}
+    for k, v in overrides.items():
+        canon = canonical_family(k)
+        if canon != k:
+            log.warning("runner_images.default_images_alias_key key=%s canonical=%s", k, canon)
+        folded.setdefault(canon, v)
+    overrides = folded
+
     out: dict[str, tuple[str, str]] = {}
     for key, runner in RUNNER_IMAGES.items():
+        if canonical_family(key) != key:
+            continue  # alias family — folded into its canonical entry above
         ref = overrides.get(key)
         if isinstance(ref, str) and ref:
             out[key] = (ref, "override")
