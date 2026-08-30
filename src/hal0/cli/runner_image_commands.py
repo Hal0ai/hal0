@@ -63,13 +63,21 @@ def _store_state(image: RunnerImage, local: LocalImagesDigests | None) -> str:
     """``present``/``missing``/``unknown`` for one row.
 
     Same rule as ``hal0.api.routes.runner_images.enrich_row``'s headline
-    fallback: digest match first, then an exact ``image:tag`` match in the
-    local refs. ``unknown`` when neither podman store answered at all.
+    fallback (v3 store-truth): digest-set membership FIRST, using the
+    headline tag's own per-tag digest fact from ``image.tags`` (the
+    ``runner_image_tag`` rows) rather than the row's scalar ``image.digest``
+    column — a headline whose ``runner_image_tag`` row carries a fresher
+    digest than the scalar column (or whose scalar column was never
+    backfilled) still matches correctly. Exact ``image:tag`` ref match is
+    the fallback when no digest is known either way. ``unknown`` when
+    neither podman store answered at all.
     """
     if local is None:
         return "unknown"
     local_digests = set(filter(None, local.refs.values()))
-    if image.digest and image.digest in local_digests:
+    headline = next((t for t in image.tags if t.tag == image.tag), None)
+    digest = headline.digest if headline is not None else image.digest
+    if digest and digest in local_digests:
         return "present"
     ref = f"{image.image}:{image.tag}"
     return "present" if ref in local.refs else "missing"
@@ -82,6 +90,22 @@ _STATE_BADGE = {
 }
 
 
+def _headline_badge(image: RunnerImage) -> str:
+    """The headline tag's badge value (``"validated"``/``"candidate"``/
+    ``"deprecated"``), or ``""`` — reuses
+    ``hal0.api.routes.runner_images._tag_badges`` (same frozen
+    ``hal0.config.schema`` image-ref sets the API's catalogue rows read) so
+    the CLI never re-derives its own copy of the badge rule. Import stays
+    fail-soft: a future rename/removal of that helper degrades the CLI's
+    ``Badges`` column to always-empty rather than crashing ``ls``.
+    """
+    try:
+        from hal0.api.routes.runner_images import _tag_badges
+    except ImportError:
+        return ""
+    return _tag_badges(image).get(image.tag, "")
+
+
 @app.command("ls")
 def ls() -> None:
     """List every catalogued runner image."""
@@ -89,20 +113,28 @@ def ls() -> None:
     images = store.list()
     local = _local_store()
 
+    badges = {image.id: _headline_badge(image) for image in images}
+    show_badges = any(badges.values())
+
     table = Table(title="Runner images")
     table.add_column("ID", style="bold")
     table.add_column("Image:Tag")
     table.add_column("Store")
     table.add_column("Tags", justify="right")
+    if show_badges:
+        table.add_column("Badges")
     for image in images:
         state = _store_state(image, local)
         tag_count = len(image.available_tags) if image.available_tags else 1
-        table.add_row(
+        row = [
             image.id,
             f"{image.image}:{image.tag}",
             _STATE_BADGE[state],
             str(tag_count),
-        )
+        ]
+        if show_badges:
+            row.append(badges[image.id] or "[dim]—[/dim]")
+        table.add_row(*row)
     console.print(table)
     if not images:
         console.print("[dim]no runner images catalogued yet — run `hal0 runner-images sync`.[/dim]")
