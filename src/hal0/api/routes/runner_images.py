@@ -11,14 +11,17 @@ converter rather than a plain string segment.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.error_codes import BadRequest, NotFound
+from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error, NotFound
 from hal0.providers.podman_introspect import LocalImagesDigests, images_digests, is_valid_image_ref
 from hal0.registry import runner_pull_jobs as _pull_jobs
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
@@ -28,6 +31,21 @@ from hal0.registry.runner_pull import RunnerPullJob
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class RunnerImageRmUnavailable(Hal0Error):
+    """502 — ``podman_mutate.remove_image``'s write seam couldn't answer.
+
+    ``details["reason"]`` carries the ``SeamUnanswered`` reason (e.g.
+    ``"grant-denied"``, ``"podman-absent"``, ``"not-service-user"``). The
+    catalogue row is deliberately left untouched on this outcome: an
+    unanswered seam call is not the same as "removal failed", and faking a
+    delete would desync the catalogue from the real podman store — honesty
+    over a fake delete, same discipline as the pull side's fail-soft reads.
+    """
+
+    code = "runner_image.rm_unavailable"
+    status = 502
 
 
 def _image_to_dict(image: RunnerImage) -> dict[str, Any]:
@@ -376,6 +394,49 @@ def _slot_image_usage() -> dict[str, str]:
     return usage
 
 
+def _tag_in_use_by(image: RunnerImage, tag: str, slot_usage: Mapping[str, str]) -> list[str]:
+    """Slot names whose launched ref guards the ``(image, tag)`` about to be
+    deleted — the DELETE tag route's application-level in-use guard.
+
+    Deliberately simpler than ``enrich_row``/``_families_payload``'s
+    catalogue-wide digest reconciliation (that's for display; this is a
+    safety gate that must stay cheap and easy to reason about). Covers two
+    matches only:
+
+      1. Exact ref match — the slot's launched ref is literally
+         ``image:tag``.
+      2. Same-row digest match — the tag being deleted has a known digest
+         (from THIS row's own ``tags``, the ``runner_image_tag`` facts) and
+         some slot is pinned to a DIFFERENT tag of the same image repo whose
+         digest (again, from this row's own ``tags``) is identical — i.e.
+         two tag names that are secretly the same bytes (a re-tag) both
+         guard the shared image.
+
+    NOT covered: a slot ref pinned by digest (``repo@sha256:...``) is never
+    unpacked here — it can only ever match case 1, and never will (that ref
+    shape has no ``:tag`` suffix to equal). Accepted gap: digest-pinned
+    slots are rare (manifest-tier defaults only) and
+    ``podman_mutate.remove_image``'s seam-level rc-67 "in-use" outcome is
+    the real backstop that stops bytes a running container actually holds
+    from being removed regardless of what this application-level guard
+    missed.
+    """
+    ref = f"{image.image}:{tag}"
+    tag_digest = next((t.digest for t in image.tags if t.tag == tag), None)
+    hits: set[str] = set()
+    prefix = f"{image.image}:"
+    for name, usage_ref in slot_usage.items():
+        if usage_ref == ref:
+            hits.add(name)
+        elif tag_digest and usage_ref.startswith(prefix):
+            other_digest = next(
+                (t.digest for t in image.tags if t.tag == usage_ref[len(prefix) :]), None
+            )
+            if other_digest and other_digest == tag_digest:
+                hits.add(name)
+    return sorted(hits)
+
+
 async def _restart_slot(name: str, request: Request) -> None:
     """Restart one slot via the exact same service call the per-slot
     ``POST /api/slots/{name}/restart`` button makes today.
@@ -594,6 +655,135 @@ async def pull_runner_image_cancel(image_id: str, request: Request) -> dict[str,
     """Request cancellation of an in-flight runner-image pull."""
     jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
     return _pull_jobs.cancel(image_id, jobs)
+
+
+@router.delete("/{image_id:path}/tags/{tag}")
+async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> dict[str, Any]:
+    """Delete one catalogued tag and reclaim its bytes from the local store.
+
+    Grouped here with the other explicit-suffix routes (ahead of the
+    ``/{image_id:path}`` GET catch-all below) for readability, matching the
+    file's convention — but unlike the GET suffix routes, ordering here
+    isn't load-bearing: Starlette matches on (path, METHOD) together, so a
+    DELETE request never falls into a GET-only route no matter where this
+    is declared. ``test_delete_tag_route_ordering`` in
+    ``tests/api/test_runner_images_routes.py`` pins that both directions
+    (GET-single-image, DELETE-tag) resolve to the right handler.
+
+    Guards, in order:
+      1. 404 ``runner_image.not_found`` — unknown id.
+      2. 404 ``runner_image.tag_not_found`` — id known, but ``tag`` is
+         neither the headline tag, a ``runner_image_tag`` fact, nor an
+         ``available_tags`` entry.
+      3. 409 ``runner_image.pull_in_progress`` — a pull job for this id is
+         ``queued``/``running`` and targets this tag (or has no tag at
+         all — an older untagged job record, which always pulls the
+         headline). Fix round 1 (#2106): a pull racing this DELETE could
+         otherwise complete AFTER ``store.remove_tag`` and re-stamp
+         ``local_path``/``downloaded_at`` via ``set_local_state``, leaving
+         the row ``downloaded=True`` with zero tag rows. Mirrors
+         ``RunnerPullConflict``'s discipline (``runner_pull.py``): an
+         in-flight mutation on the same id wins, the caller is told to
+         cancel first rather than racing silently.
+      4. 409 ``runner_image.tag_in_use`` — application-level guard naming
+         the slot(s) responsible (see :func:`_tag_in_use_by`).
+      5. ``podman_mutate.remove_image`` — the seam-level guard, a second
+         independent barrier: outcome ``"in-use"`` (podman rc 67) also 409s
+         the same code but names no slots (the app-level guard above didn't
+         catch it, e.g. an unmanaged container holding the image);
+         ``"unknown"`` (seam absent/denied/erroring) is 502
+         ``runner_image.rm_unavailable`` with the seam's reason, catalogue
+         left untouched (no fake delete); ``"removed"``/``"missing"``
+         update the catalogue via ``store.remove_tag`` and respond 200.
+
+    Audited the same way ``restart-affected`` is: ``record_action`` with
+    category ``"runner_image"``, action ``"runner_image.rm"``, target the
+    ``image:tag`` ref — a raised 409/502 inside the block is recorded
+    ``outcome="error"`` and re-raised (``hal0.activity.audit_action``'s
+    confirmation guarantee), so the audit trail is honest either way.
+    """
+    store = request.app.state.runner_image_registry
+    image = store.get(image_id)
+    if image is None:
+        raise NotFound(
+            f"runner image {image_id!r} not in catalogue",
+            details={"image_id": image_id},
+            code="runner_image.not_found",
+        )
+    tag_known = (
+        tag == image.tag or any(t.tag == tag for t in image.tags) or tag in image.available_tags
+    )
+    if not tag_known:
+        raise NotFound(
+            f"tag {tag!r} not catalogued for {image_id!r}",
+            details={"image_id": image_id, "tag": tag},
+            code="runner_image.tag_not_found",
+        )
+
+    jobs: dict[str, RunnerPullJob] = request.app.state.runner_image_pull_jobs
+    job = jobs.get(image_id)
+    if job is not None and job.state in ("queued", "running") and job.tag in (tag, None):
+        raise Conflict(
+            f"a pull for {image_id!r} tag {tag!r} is in progress; cancel it first",
+            details={"image_id": image_id, "tag": tag},
+            code="runner_image.pull_in_progress",
+        )
+
+    ref = f"{image.image}:{tag}"
+    in_use_slots = _tag_in_use_by(image, tag, _slot_image_usage())
+    if in_use_slots:
+        raise Conflict(
+            f"runner image tag {ref!r} is in use",
+            details={"image_id": image_id, "tag": tag, "slots": in_use_slots},
+            code="runner_image.tag_in_use",
+        )
+
+    from hal0.api._audit import record_action
+    from hal0.providers import podman_mutate
+
+    async with record_action(
+        request, category="runner_image", action="runner_image.rm", target=ref
+    ) as rec:
+        outcome, reason = await asyncio.to_thread(podman_mutate.remove_image, ref)
+        rec.after = {"outcome": outcome}
+        if outcome == "in-use":
+            raise Conflict(
+                f"runner image tag {ref!r} is in use by a container or has child images",
+                details={"image_id": image_id, "tag": tag},
+                code="runner_image.tag_in_use",
+            )
+        if outcome == "unknown":
+            raise RunnerImageRmUnavailable(
+                f"image removal seam unavailable ({reason})",
+                details={"image_id": image_id, "tag": tag, "reason": reason},
+            )
+        # "removed" or "missing": the seam agrees the bytes are gone (or
+        # already were) — update the catalogue to match.
+        old_local_path = image.local_path
+        catalogue_removed = store.remove_tag(image_id, tag)
+        rec.after = {"outcome": outcome, "catalogue_removed": catalogue_removed}
+        if not catalogue_removed:
+            # The seam agrees the bytes are gone, but the catalogue had no
+            # matching tag row to delete — a desync worth a log line (the
+            # 200 response is still honest: the bytes really are gone/
+            # already-absent, this just flags the catalogue disagreeing).
+            log.warning(
+                "runner_image.rm_catalogue_desync image_id=%s tag=%s outcome=%s",
+                image_id,
+                tag,
+                outcome,
+            )
+        if old_local_path:
+            updated = store.get(image_id)
+            if updated is None or updated.local_path is None:
+                # remove_tag cleared the marker (or the row is gone
+                # entirely) — unlink the now-orphaned marker file.
+                # Fail-soft: a filesystem hiccup here must not turn an
+                # already-successful removal into a 500.
+                with contextlib.suppress(OSError):
+                    Path(old_local_path).unlink(missing_ok=True)
+
+    return {"removed": outcome == "removed", "outcome": outcome}
 
 
 @router.get("/{image_id:path}")

@@ -435,6 +435,10 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # here (r5-sync-assessment §6.3): a root sudoers grant for a
     # re-creatable principal left behind on every uninstall.
     rm_path "/etc/sudoers.d/hal0-podman-ro"
+    # runner-images v3 (D1(a)/D2): hal0-podman-rw (the podman WRITE seam,
+    # install.sh's PODMAN_RW_SUDOERS_DST) — same shape as hal0-podman-ro
+    # above, swept here from day one rather than repeating the O12 gap.
+    rm_path "/etc/sudoers.d/hal0-podman-rw"
     # hal0.bench units (timer + scheduled session + run-queue worker). The
     # result store /var/lib/hal0-bench is data, kept unless --purge.
     systemctl disable --now hal0-bench.timer hal0-bench-worker.service >/dev/null 2>&1 || true

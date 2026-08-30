@@ -1457,12 +1457,12 @@ resolve_node() {
 #
 # Every privileged op hal0 performs post-P3-perms goes through a narrow
 # `sudo -n /usr/lib/hal0/bin/hal0-*` wrapper: slot lifecycle (hal0-systemctl)
-# and self-update (hal0-update) are load-bearing; agentenv/benchctl/podman-ro
-# are optional. install.sh used to install each best-effort — a `visudo -cf`
-# failure produced only a mid-log warn and the run still printed its success
-# box — and NOTHING verified the result afterwards, so a box where that warn
-# fired reported all-green from every surface while every slot start failed
-# undiagnosably.
+# and self-update (hal0-update) are load-bearing; agentenv/benchctl/
+# podman-ro/podman-rw are optional. install.sh used to install each
+# best-effort — a `visudo -cf` failure produced only a mid-log warn and the
+# run still printed its success box — and NOTHING verified the result
+# afterwards, so a box where that warn fired reported all-green from every
+# surface while every slot start failed undiagnosably.
 #
 # DELIBERATELY NOT IN preflight_all: preflight runs BEFORE the seams are
 # installed, where asserting them would fail every fresh install. This is a
@@ -1470,7 +1470,7 @@ resolve_node() {
 # down, and `hal0 doctor all` carries the same predicate in Python
 # (src/hal0/system/seam_check.py). Keep the two inventories in lock-step.
 HAL0_REQUIRED_SEAMS=("hal0-systemctl" "hal0-update")
-HAL0_OPTIONAL_SEAMS=("hal0-agentenv" "hal0-benchctl" "hal0-podman-ro")
+HAL0_OPTIONAL_SEAMS=("hal0-agentenv" "hal0-benchctl" "hal0-podman-ro" "hal0-podman-rw")
 
 # Probe verbs that are provably side-effect-free (`help` prints usage,
 # `check` only proves the interpreter loads). Seams absent from this map are
@@ -1487,6 +1487,12 @@ _hal0_seam_probe() {
         # side-effect-free (validates, prints the name it would build, never
         # calls podman). Keep in lock-step with src/hal0/system/seam_check.py.
         hal0-podman-ro) printf 'check-slot-token hal0probe\n' ;;
+        # runner-images v3: the podman WRITE seam. `check-image-ref` is its
+        # side-effect-free validator probe (never touches podman), same
+        # shape as podman-ro's `check-slot-token` — presence alone would let
+        # a stale wrapper missing image-pull/image-rm probe green. Keep in
+        # lock-step with src/hal0/system/seam_check.py.
+        hal0-podman-rw) printf 'check-image-ref hal0probe\n' ;;
         *)              return 1 ;;
     esac
 }

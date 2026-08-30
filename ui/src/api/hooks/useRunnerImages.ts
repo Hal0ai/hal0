@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
+import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // Which family default (if any) resolves to this row's image, and where that
@@ -176,6 +176,31 @@ export function useRestartAffected() {
       apiPost<RestartAffectedResult>(ENDPOINTS.runnerImagesRestartAffected, { ref }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['slots'] })
+      qc.invalidateQueries({ queryKey: ['runner-images'] })
+    },
+  })
+}
+
+// ─── useDeleteTag ────────────────────────────────────────────────────
+// DELETE /api/runner-images/{id}/tags/{tag} (D2, #2106): reclaim one
+// catalogued tag's disk bytes. Mirrors useRestartAffected's shape — thrown
+// Hal0Error carries the route's structured codes (`runner_image.tag_in_use`
+// with `details.slots`, `runner_image.pull_in_progress`,
+// `runner_image.rm_unavailable`) for the caller to branch a toast message
+// on. Invalidates `['runner-images']` same as every other mutating hook
+// here — the row's `store_state`/`tags`/`in_use_by` all shift on a
+// successful delete.
+export interface DeleteTagResult {
+  removed: boolean
+  outcome: 'removed' | 'missing'
+}
+
+export function useDeleteTag() {
+  const qc = useQueryClient()
+  return useMutation<DeleteTagResult, Hal0Error, { id: string; tag: string }>({
+    mutationFn: ({ id, tag }) =>
+      apiDelete<DeleteTagResult>(ENDPOINTS.runnerImageDeleteTag(id, tag)),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['runner-images'] })
     },
   })

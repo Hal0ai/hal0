@@ -93,6 +93,10 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
     isPending: false,
     mutate: () => {},
   }),
+  useDeleteTag: () => ({
+    isPending: false,
+    mutate: () => {},
+  }),
 }))
 
 const { RunnerImagesView } = await import('../runner-images.jsx')

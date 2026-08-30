@@ -336,15 +336,18 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 
 ## `hal0 runner-images` — manage the runner-image catalogue
 
-Talks to the runner-image store/sync/pull service layer directly (not the
-API), so `ls` keeps working even when `hal0-api` is down. `rm` is
-deliberately absent pending a delete-story spec.
+Talks to the runner-image store/sync/pull/rm service layer directly (not
+the API), so `ls` keeps working even when `hal0-api` is down. `rm` mirrors
+`DELETE /api/runner-images/{id}/tags/{tag}`'s guard order, but cannot see
+a dashboard pull job's in-memory state — a concurrently running `hal0-api`
+pull of the same tag can race it.
 
 | Command | Args | Flags |
 |---|---|---|
 | `runner-images ls` | — | — |
 | `runner-images sync` | — | — |
 | `runner-images pull <id>` | `id` (catalogue id) | `--tag` (default: the row's headline tag) |
+| `runner-images rm <id>` | `id` (catalogue id) | `--tag` (required) |
 
 ## `hal0 profile` — inspect launch-flag profiles
 

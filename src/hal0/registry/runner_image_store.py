@@ -60,6 +60,24 @@ def _row_to_runner_image(row: sqlite3.Row) -> RunnerImage:
     )
 
 
+def _marker_matches_ref(local_path: str, ref: str) -> bool:
+    """Best-effort: does the marker JSON at ``local_path`` record ``ref``?
+
+    ``local_path`` is expected to be a ``hal0.registry.runner_pull.write_local_marker``
+    file (``{"image_id": ..., "image": "<ref pulled>", "pulled_at": ...}``),
+    but this is read directly (rather than importing that module, which
+    itself imports :class:`RunnerImageStore` — a cycle) and fail-soft on
+    anything else: a missing file, non-JSON content, or an unexpected shape
+    all answer False rather than raising, so a store mutation is never
+    blocked by a stale or foreign ``local_path`` value.
+    """
+    try:
+        data = json.loads(Path(local_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("image") == ref
+
+
 def _runner_image_to_row(image: RunnerImage, *, discovered_at: str | None = None) -> dict[str, Any]:
     now = datetime.now(UTC).isoformat()
     row: dict[str, Any] = {k: getattr(image, k) for k in _SCALAR_FIELDS if k != "discovered_at"}
@@ -286,6 +304,77 @@ class RunnerImageStore:
                     ],
                 )
         self._notify_change()
+
+    def remove_tag(self, image_id: str, tag: str) -> bool:
+        """Delete one ``(image_id, tag)`` row from ``runner_image_tag``.
+
+        One transaction. Returns False (nothing committed) if the row
+        didn't exist — a caller can't tell an already-absent tag from a
+        freshly-deleted one otherwise. When a row IS deleted:
+
+          * ``tag`` is pruned from the parent row's ``available_tags``
+            list, if present there (the images.json-sourced string list,
+            tracked separately from the ``runner_image_tag`` digest facts
+            this method deletes from).
+          * The parent row's ``local_path``/``downloaded_at`` (pull
+            provenance) are cleared when EITHER no ``runner_image_tag``
+            rows remain for this id, OR the marker file at ``local_path``
+            (fail-soft JSON read, see :func:`_marker_matches_ref`) recorded
+            pulling exactly the removed ``<image>:<tag>``. Any other case
+            (the marker belongs to a different, still-catalogued tag)
+            leaves the marker untouched — deleting one tag must not erase
+            proof that a sibling tag is still downloaded.
+
+        Deliberate non-fix: deleting the row's own HEADLINE tag (``image.tag``)
+        does not update that scalar column — ``row.tag`` is left pointing at
+        a now-untagged value until the next sync rewrites it. Self-heals on
+        the next successful sync pass; not fixed here to keep this method a
+        single, narrow concern (the tag-row/available-tags/marker triple).
+
+        Notifies ``on_change`` only when a row was actually deleted.
+        """
+        with self._connect() as conn:
+            self._ensure_migrated(conn)
+            with tx(conn):
+                cur = conn.execute(
+                    "DELETE FROM runner_image_tag WHERE image_id = ? AND tag = ?",
+                    (image_id, tag),
+                )
+                if cur.rowcount == 0:
+                    return False
+                image_row = conn.execute(
+                    "SELECT image, available_tags_json, local_path FROM runner_image WHERE id = ?",
+                    (image_id,),
+                ).fetchone()
+                if image_row is not None:
+                    available = (
+                        json.loads(image_row["available_tags_json"])
+                        if image_row["available_tags_json"]
+                        else []
+                    )
+                    if tag in available:
+                        pruned = [t for t in available if t != tag]
+                        conn.execute(
+                            "UPDATE runner_image SET available_tags_json = ? WHERE id = ?",
+                            (json.dumps(pruned) if pruned else None, image_id),
+                        )
+                    local_path = image_row["local_path"]
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM runner_image_tag WHERE image_id = ?",
+                        (image_id,),
+                    ).fetchone()[0]
+                    clear_marker = bool(local_path) and (
+                        remaining == 0
+                        or _marker_matches_ref(local_path, f"{image_row['image']}:{tag}")
+                    )
+                    if clear_marker:
+                        conn.execute(
+                            "UPDATE runner_image SET local_path = NULL, downloaded_at = NULL, "
+                            "updated_at = ? WHERE id = ?",
+                            (datetime.now(UTC).isoformat(), image_id),
+                        )
+        self._notify_change()
+        return True
 
     def reload(self) -> None:
         """No-op — kept for interface symmetry with SqliteModelRegistry."""

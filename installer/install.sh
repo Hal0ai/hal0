@@ -2003,6 +2003,44 @@ PYEOF
             warn "${PODMAN_RO_SUDOERS_SRC} not found — podman introspection sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #7 (runner-images v3, D1(a)/D2): hal0-podman-rw covers
+    # the FIRST write surface into ROOT's podman store — image-pull (the
+    # manifest gate materializing a verified recipe) and image-rm (evicting a
+    # stale/failed image) — against the SAME rootful store hal0-podman-ro
+    # reports on and slots actually launch from, NOT hal0-api's own rootless
+    # store. Separate and independently revocable from the read-only seam
+    # above: narrow + hardcoded (no shell, no wildcards, no operator-supplied
+    # podman flags), and `image-rm` never passes `-f`. Both argument-taking
+    # verbs validate their image ref root-side against the same closed regex
+    # hal0-podman-ro uses before podman is ever invoked. See the wrapper
+    # source for the full argument doctrine.
+    PODMAN_RW_SRC="${REPO_ROOT}/installer/wrappers/hal0-podman-rw"
+    if [[ -f "${PODMAN_RW_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${PODMAN_RW_SRC}" "${LIB_DIR}/bin/hal0-podman-rw"
+        info "wrote ${LIB_DIR}/bin/hal0-podman-rw"
+    else
+        warn "${PODMAN_RW_SRC} not found — podman write seam helper not installed"
+    fi
+
+    # sudoers grant for the podman write seam. Real installs only;
+    # visudo-validate before activating so a malformed drop-in can never wedge
+    # sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        PODMAN_RW_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-podman-rw"
+        PODMAN_RW_SUDOERS_DST="/etc/sudoers.d/hal0-podman-rw"
+        if [[ -f "${PODMAN_RW_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${PODMAN_RW_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${PODMAN_RW_SUDOERS_SRC}" "${PODMAN_RW_SUDOERS_DST}"
+                info "wrote ${PODMAN_RW_SUDOERS_DST}"
+            else
+                warn "${PODMAN_RW_SUDOERS_SRC} failed visudo check — podman write sudoers grant not installed"
+            fi
+        else
+            warn "${PODMAN_RW_SUDOERS_SRC} not found — podman write sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi

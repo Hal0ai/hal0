@@ -95,7 +95,14 @@ def test_root_refreshes_every_wrapper_present_in_the_release_tree(
     monkeypatch.setattr("hal0.updater.updater.subprocess.run", fake_run)
     target = _release_tree(
         tmp_path,
-        seams=("hal0-systemctl", "hal0-update", "hal0-agentenv", "hal0-benchctl", "hal0-podman-ro"),
+        seams=(
+            "hal0-systemctl",
+            "hal0-update",
+            "hal0-agentenv",
+            "hal0-benchctl",
+            "hal0-podman-ro",
+            "hal0-podman-rw",
+        ),
     )
 
     result = refresh_privileged_wrappers(target, job_id="job-1")
@@ -106,10 +113,11 @@ def test_root_refreshes_every_wrapper_present_in_the_release_tree(
         "hal0-agentenv",
         "hal0-benchctl",
         "hal0-podman-ro",
+        "hal0-podman-rw",
     }
     assert result["errors"] == {}
     install_calls = [c for c in fake_run.calls if c[0] == "install"]
-    assert len(install_calls) == 5
+    assert len(install_calls) == 6
     for call in install_calls:
         assert call[:3] == ["install", "-m", "0755"]
         assert "-o" in call and "root" in call
