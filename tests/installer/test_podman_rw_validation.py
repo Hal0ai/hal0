@@ -246,7 +246,7 @@ def test_image_pull_execs_podman_directly() -> None:
     podman's own exit code passes straight through — no intermediate
     run_podman capture for this verb."""
     src = WRAPPER.read_text()
-    assert 'exec "$PODMAN" pull "$1"' in src
+    assert 'exec "$PODMAN" pull -- "$1"' in src
 
 
 def test_no_caller_supplied_format_string() -> None:
