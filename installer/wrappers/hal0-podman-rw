@@ -37,6 +37,11 @@
 #   * `image-rm` never passes `-f`: a caller can only remove an image that is
 #     NOT in use, never force-evict one out from under a running slot.
 #
+# A repo-prefix allowlist inside this wrapper was considered and judged not
+# required: the wrapper enforces argument GRAMMAR, and the callers (the hal0
+# catalogue layer) enforce repo POLICY — which registries/repos a ref may
+# name. A second policy point here would drift against the first.
+#
 # EXIT-CODE CONTRACT (extends hal0-podman-ro's with one NEW code):
 #
 #   * rc 0   — the verb completed and produced a DEFINITIVE, on-purpose
