@@ -175,9 +175,7 @@ def test_memory_engine_probe_skips_when_engine_not_installed(tmp_path: Path) -> 
     installed) — the probe must skip, not fail: curl faked dead proves it
     never even probes."""
     _write_exec(tmp_path / "curl", "exit 7")
-    res = _drive(
-        tmp_path, f'HINDSIGHT_UNIT_DST="{tmp_path}/missing"\nsmoke_memory_engine_version'
-    )
+    res = _drive(tmp_path, f'HINDSIGHT_UNIT_DST="{tmp_path}/missing"\nsmoke_memory_engine_version')
     assert res.returncode == 0, res.stderr
 
 

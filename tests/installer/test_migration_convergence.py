@@ -47,9 +47,9 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
     seq_src = inspect.getsource(updater.run_post_activation_migrations)
     assert "upgrade_memory_engine(" in seq_src
     assert "updater.memory_engine_upgrade_failed" in seq_src
-    assert (
-        "updater.memory_engine_upgrade_failed" in updater._NON_FATAL_MIGRATION_FAILURE_EVENTS
-    ), "a swallowed engine-pass failure must surface in commit()'s convergence report"
+    assert "updater.memory_engine_upgrade_failed" in updater._NON_FATAL_MIGRATION_FAILURE_EVENTS, (
+        "a swallowed engine-pass failure must surface in commit()'s convergence report"
+    )
 
 
 def test_install_sh_no_longer_hand_picks_a_migration_subset() -> None:

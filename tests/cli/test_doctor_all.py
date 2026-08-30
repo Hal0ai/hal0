@@ -1016,7 +1016,12 @@ def test_memory_engine_version_passes_on_pin_match() -> None:
     from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
 
     check = da.check_memory_engine_version(
-        memory={"enabled": True, "engine": "hindsight", "reachable": True, "version": HINDSIGHT_API_PIN}
+        memory={
+            "enabled": True,
+            "engine": "hindsight",
+            "reachable": True,
+            "version": HINDSIGHT_API_PIN,
+        }
     )
     assert check.status == "pass"
 
