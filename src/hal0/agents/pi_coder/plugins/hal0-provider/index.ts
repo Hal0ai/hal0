@@ -3,8 +3,11 @@
  *
  * Connects pi to a local hal0 inference box by auto-discovering active
  * slots/models from the hal0 API and registering them as an OpenAI-compatible
- * provider. Re-fetches on session start so newly-loaded slots appear without
- * a restart; a fetch failure keeps the last-known list (slots cycle through
+ * provider at extension load. Also re-fetches on session start and notifies
+ * the UI with the current slot list — a fresh-slots signal for the operator
+ * to see, not a live re-registration (the provider's model list is fixed at
+ * load; picking up newly-loaded slots still needs a restart/respawn). A
+ * fetch failure keeps the last-known list either way (slots cycle through
  * offline/warming/idle/running — an empty list would brick the session).
  */
 

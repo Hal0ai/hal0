@@ -40,6 +40,7 @@ writes under a temp ``HOME`` via ``monkeypatch.setenv``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -53,9 +54,13 @@ from hal0.config import paths as _paths
 # MCP endpoints. Both ride the existing hal0-api process per ADR-0004 §4
 # (admin) and ADR-0005 (memory). 127.0.0.1 is intentional: the bundled
 # agent runs on the same box as the API; LAN-exposed MCP is Phase 9
-# ("MCP client side of hal0").
+# ("MCP client side of hal0"). The memory server is mounted at
+# ``/mcp/memory`` (src/hal0/api/mcp_mount.py) but the FastMCP
+# streamable-HTTP transport it serves lives one level deeper, at
+# ``<mount>/mcp`` — Hermes wires the identical server the same way
+# (``hermes_provision.py:1424``: "http://127.0.0.1:8080/mcp/memory/mcp").
 _HAL0_API_BASE_DEFAULT = "http://127.0.0.1:8080"
-_MCP_MEMORY_PATH = "/mcp/memory"
+_MCP_MEMORY_PATH = "/mcp/memory/mcp"
 
 # Vendored extension + theme sources, deployed into pi's config tree at
 # install time. These live inside the hal0 repo, not the operator's
@@ -118,9 +123,10 @@ class PiDriver(AgentDriver):
         env["HAL0_AGENT_DATA_DIR"] = str(data_dir)
         env["HAL0_API_URL"] = _api_base()
         if bearer_token:
-            # Script consults this for adapter config wiring. Empty =
-            # "the dev install has auth-disabled, skip the Authorization
-            # header" — the script handles that branch.
+            # Passed through for any manual/operator invocation of the
+            # script that wants it; installer/agents/pi.sh itself no
+            # longer consults it — the driver owns all token wiring
+            # (see _write_mcp_config / _resolve_service_token below).
             env["HAL0_BEARER_TOKEN"] = bearer_token
 
         try:
@@ -132,9 +138,12 @@ class PiDriver(AgentDriver):
         except Exception as exc:  # subprocess.CalledProcessError or others
             raise AgentError(
                 f"pi install failed ({type(exc).__name__}: {exc}). "
-                "Upstream pi-mono may have shipped a breaking change — the "
-                "nightly smoke test exists to catch this; check "
-                "https://github.com/Hal0ai/hal0/actions for the latest run."
+                "installer/agents/pi.sh pins exact upstream versions (see its "
+                "header for the pin policy) — this is not a track-latest "
+                "surface, so a failure here usually means the pinned "
+                "package itself is broken or unreachable, not a new "
+                "upstream release. Check npm registry status / connectivity "
+                "before bumping the pin."
             ) from exc
 
         # Model provider (autodiscovers hal0 slots) + hindsight memory
@@ -157,6 +166,21 @@ class PiDriver(AgentDriver):
         self._write_hindsight_config()
 
     def uninstall(self) -> None:
+        # Best-effort: run the uninstall companion installer/agents/pi.sh
+        # wrote into the data dir at install time (npm uninstall -g of
+        # both packages). Must happen BEFORE the config teardown below —
+        # the manager rmtree's the data dir (and this companion script
+        # with it) right after this method returns, so this is the only
+        # chance to invoke it. A missing/failing companion (e.g. a
+        # half-uninstalled agent, or npm gone from PATH) must not block
+        # the rest of uninstall — the on-disk config truth still has to
+        # come clean.
+        with contextlib.suppress(Exception):
+            self._runner.run(  # type: ignore[attr-defined]
+                ["sh", str(self._data_dir() / "uninstall.sh")],
+                check=False,
+            )
+
         # Extensions + theme deployed at install time.
         for dst in (self._provider_ext_dst(), self._hindsight_ext_dst()):
             if dst.exists():
@@ -307,10 +331,41 @@ class PiDriver(AgentDriver):
         tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         tmp.replace(settings_file)
 
+    def _resolve_service_token(self) -> str | None:
+        """Best-effort self-resolve the box service key when the caller
+        (``POST /api/agents/install``) didn't pass one — the production
+        path currently never does (src/hal0/api/routes/agents.py). Same
+        helper Hermes provisioning uses to wire its own MCP servers
+        (``hermes_provision.py`` around ``_probe_mcp_server`` / the
+        overlay-build ``bearer = service_key(prefer="admin")`` call).
+        Tolerates absence — dev boxes with auth disabled, a missing key
+        file — by returning ``None``; the caller then writes the MCP
+        entry without an Authorization header rather than failing the
+        install."""
+        try:
+            from hal0.service_identity import service_key
+
+            return service_key(prefer="admin")
+        except Exception:
+            return None
+
     def _write_mcp_config(self, *, bearer_token: str | None) -> None:
         """Upsert the hal0-memory MCP server into ~/.pi/agent/mcp.json
         (pi-mcp-adapter's Pi-global override file). Preserves every other
-        server the operator configured."""
+        server the operator configured.
+
+        Identity always rides the ``X-hal0-Agent`` header (mirrors
+        ``hermes_provision.py``'s MCP wiring and the ``_AGENT_HEADER`` the
+        memory mount reads — src/hal0/api/mcp_mount.py:44-46), independent
+        of whether a bearer token is available. When ``bearer_token`` is
+        falsy, best-effort self-resolve the box service token via
+        :meth:`_resolve_service_token` before giving up on
+        Authorization.
+
+        The file may hold a bearer token, so the tmp file is created
+        with mode 0600 before the atomic rename — never world-readable,
+        even momentarily.
+        """
         path = self._mcp_config_path()
         existing: dict[str, Any] = {}
         if path.exists():
@@ -319,13 +374,19 @@ class PiDriver(AgentDriver):
             except (OSError, json.JSONDecodeError):
                 existing = {}
         servers = existing.setdefault("mcpServers", {})
-        entry: dict[str, Any] = {"url": f"{_api_base()}{_MCP_MEMORY_PATH}"}
-        if bearer_token:
-            entry["headers"] = {"Authorization": f"Bearer {bearer_token}"}
+        token = bearer_token or self._resolve_service_token()
+        headers: dict[str, str] = {"X-hal0-Agent": self.name}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        entry: dict[str, Any] = {"url": f"{_api_base()}{_MCP_MEMORY_PATH}", "headers": headers}
         servers["hal0-memory"] = entry
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(existing, indent=2) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
         tmp.replace(path)
 
     def _remove_mcp_config(self) -> None:

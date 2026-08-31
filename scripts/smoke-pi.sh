@@ -14,7 +14,7 @@ AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 
 # 1. Binary + pin
 v="$(pi --version 2>/dev/null || true)"
-case "$v" in *"$PI_PIN"*) ok "pi binary at pin $PI_PIN";; *) bad "pi version '$v' != $PI_PIN";; esac
+case "$v" in *"$PI_PIN") ok "pi binary at pin $PI_PIN";; *) bad "pi version '$v' != $PI_PIN";; esac
 
 # 2. Adapter pin
 a="$(npm ls -g pi-mcp-adapter 2>/dev/null | grep -o 'pi-mcp-adapter@[0-9.]*' || true)"
@@ -51,7 +51,7 @@ case "$h" in *"@$HINDSIGHT_PIN") ok "hindsight-coding-agents at pin $HINDSIGHT_P
 python3 - "$AGENT_DIR/mcp.json" <<'EOF' && ok "hal0-memory MCP entry" || bad "hal0-memory MCP entry"
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-assert cfg["mcpServers"]["hal0-memory"]["url"].endswith("/mcp/memory")
+assert cfg["mcpServers"]["hal0-memory"]["url"].endswith("/mcp/memory/mcp")
 EOF
 
 # 8. Hindsight client config present (seeded or operator-owned)

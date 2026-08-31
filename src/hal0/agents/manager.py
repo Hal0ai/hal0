@@ -293,7 +293,9 @@ class AgentManager:
     def install(
         self, name: str, *, switch: bool = False, bearer_token: str | None = None
     ) -> AgentRecord:
-        """Install ``name``. Single-pick enforced.
+        """Install ``name``. Single-pick enforced between daemon-kind
+        agents only (spec D1) — a cli-kind agent (e.g. pi) installs
+        alongside anything; see :func:`agent_kind`.
 
         ``switch=True`` performs atomic uninstall-then-install when a
         different agent is already bundled. ``switch=True`` with the

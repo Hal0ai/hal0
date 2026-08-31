@@ -2,6 +2,8 @@
 operator-state preservation, and the two memory wires."""
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -70,10 +72,60 @@ def test_install_writes_memory_mcp_config(home: Path) -> None:
     drv, _ = _driver()
     drv.install(bearer_token="tok123")
 
+    mcp_path = home / ".pi" / "agent" / "mcp.json"
+    mcp = json.loads(mcp_path.read_text())
+    server = mcp["mcpServers"]["hal0-memory"]
+    assert server["url"] == "http://127.0.0.1:8080/mcp/memory/mcp"
+    assert server["headers"]["Authorization"] == "Bearer tok123"
+    assert server["headers"]["X-hal0-Agent"] == "pi"
+
+
+def test_mcp_config_written_mode_0600(home: Path) -> None:
+    drv, _ = _driver()
+    drv.install(bearer_token="tok123")
+
+    mcp_path = home / ".pi" / "agent" / "mcp.json"
+    assert oct(stat.S_IMODE(os.stat(mcp_path).st_mode)) == "0o600"
+
+
+def test_mcp_config_self_resolves_token_when_none_passed(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No bearer_token from the caller (the production /api/agents/install
+    path never passes one) — the driver best-effort self-resolves the box
+    service key the same way hermes_provision.py does."""
+    from hal0 import service_identity
+
+    monkeypatch.setattr(service_identity, "service_key", lambda prefer="admin": "resolved-tok")
+
+    drv, _ = _driver()
+    drv.install()
+
     mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
     server = mcp["mcpServers"]["hal0-memory"]
-    assert server["url"] == "http://127.0.0.1:8080/mcp/memory"
-    assert server["headers"]["Authorization"] == "Bearer tok123"
+    assert server["headers"]["Authorization"] == "Bearer resolved-tok"
+    assert server["headers"]["X-hal0-Agent"] == "pi"
+
+
+def test_mcp_config_tolerates_resolver_failure(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing self-resolver (e.g. auth disabled, key file unreadable)
+    must not block the install — the entry is written without an
+    Authorization header, and X-hal0-Agent is always present."""
+
+    def _boom(prefer: str = "admin") -> str | None:
+        raise RuntimeError("no key on this box")
+
+    monkeypatch.setattr("hal0.service_identity.service_key", _boom)
+
+    drv, _ = _driver()
+    drv.install()
+
+    mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
+    server = mcp["mcpServers"]["hal0-memory"]
+    assert "Authorization" not in server["headers"]
+    assert server["headers"]["X-hal0-Agent"] == "pi"
 
 
 def test_install_writes_hindsight_config_only_if_absent(home: Path) -> None:
@@ -133,4 +185,30 @@ def test_status_and_uninstall(home: Path) -> None:
     assert settings.get("defaultProvider") != "hal0"
     mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
     assert "hal0-memory" not in mcp.get("mcpServers", {})
+    assert drv.status() == "broken"
+
+
+def test_uninstall_runs_companion_script(home: Path) -> None:
+    """The manager rmtree's the data dir (destroying uninstall.sh) right
+    after uninstall() returns — this is the only chance to run the npm
+    uninstall companion installer/agents/pi.sh wrote at install time."""
+    drv, runner = _driver()
+    drv.install()
+    data_dir = driver_mod._paths.var_lib() / "agents" / "pi"
+    companion = data_dir / "uninstall.sh"
+    companion.parent.mkdir(parents=True, exist_ok=True)
+    companion.write_text("#!/bin/sh\nexit 0\n")
+
+    runner.calls.clear()
+    drv.uninstall()
+
+    assert ["sh", str(companion)] in runner.calls
+
+
+def test_uninstall_tolerates_missing_companion(home: Path) -> None:
+    """No uninstall.sh on disk (e.g. install failed before the script
+    wrote it) must not raise — uninstall() still tears down config."""
+    drv, _ = _driver()
+    drv.install()
+    drv.uninstall()  # must not raise
     assert drv.status() == "broken"

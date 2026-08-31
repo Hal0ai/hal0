@@ -12,7 +12,12 @@
 # override for manual invocation):
 #   HAL0_AGENT_DATA_DIR  per-agent data dir (default: /var/lib/hal0/agents/pi)
 #   HAL0_API_URL         hal0 API base URL (default: http://127.0.0.1:8080)
-#   HAL0_BEARER_TOKEN    Bearer token (default: lifted from /etc/hal0/tokens.toml)
+#   HAL0_BEARER_TOKEN    Bearer token, passed through only — this script
+#                        does not consult it. The driver owns all token +
+#                        identity wiring (PiDriver._write_mcp_config /
+#                        _resolve_service_token in hal0.agents.pi_coder.driver),
+#                        writing the MCP adapter config directly rather than
+#                        through this shell script.
 #
 # NOTE: pi's real config surface is $HOME/.pi/agent/settings.json plus
 # extensions in $HOME/.pi/agent/extensions/ — NOT a ~/.pi/config.toml
@@ -31,14 +36,6 @@ die()   { printf '[pi] ERROR: %s\n' "$*" >&2; exit 1; }
 
 HAL0_AGENT_DATA_DIR="${HAL0_AGENT_DATA_DIR:-/var/lib/hal0/agents/pi}"
 HAL0_API_URL="${HAL0_API_URL:-http://127.0.0.1:8080}"
-HAL0_BEARER_TOKEN="${HAL0_BEARER_TOKEN:-}"
-
-if [ -z "$HAL0_BEARER_TOKEN" ] && [ -r /etc/hal0/tokens.toml ]; then
-    HAL0_BEARER_TOKEN="$(
-        awk '/^wire_token *= */ {gsub(/"/,"",$0); print $3; exit}' \
-            /etc/hal0/tokens.toml 2>/dev/null || true
-    )"
-fi
 
 mkdir -p "$HAL0_AGENT_DATA_DIR"
 
