@@ -18,6 +18,27 @@
 #   (v1.0.0) is published, and `release: published` re-runs it at that instant.
 #   Override with the `force` input only if you know the gate is stale.
 #
+# Why the gate and the publish are separate jobs (#2057):
+#   They used to be one job, and a closed gate was a `::warning::` annotation
+#   on a run that still concluded `success`. The workflow list therefore looked
+#   healthy for weeks while the served installer sat at its 2026-07-11 copy and
+#   `bootstrap-parity` went red daily. Splitting them makes the refusal a
+#   `skipped` conclusion on the `mirror` job — a distinguishable outcome in the
+#   run's job list, in `gh run view`, and in the Actions API — and the `gate`
+#   job writes what it decided, and why, into the run summary.
+#
+#   The gate is *correct* and stays. The alarm for a rotting front door is not
+#   this workflow going red; it is `bootstrap-parity` alerting on N consecutive
+#   reds (see .github/workflows/bootstrap-parity.yml).
+#
+# Rehearsing the publish path before GA (#2101 gate 4):
+#   GA day should not be the first execution of the push path. Dispatch this
+#   workflow with `gate_channel: preview` (already signed) and `dry_run: true`
+#   to run checkout → sync → `bash -n` → diff and stop short of the push. A
+#   rehearsal channel is refused outside a dry run: bootstrap.sh installs from
+#   `stable` by default, so publishing on the strength of a signed *preview*
+#   manifest would break the one-liner exactly as publishing unsigned would.
+#
 # `release: published` never actually fires for a release hal0 cuts itself:
 # release.yml creates the release via `gh release create` running under the
 # default GITHUB_TOKEN, and GitHub suppresses workflow-triggering events
@@ -38,13 +59,29 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Publish even if the stable manifest has no sibling Sigstore bundle"
+        description: "Publish even if the gate channel manifest has no sibling Sigstore bundle"
+        type: boolean
+        default: false
+      gate_channel:
+        description: "Channel manifest the gate probes (rehearsal only; non-stable requires dry_run)"
+        type: string
+        default: stable
+      dry_run:
+        description: "Run the whole publish path but stop before pushing to hal0-web"
         type: boolean
         default: false
   workflow_call:
     inputs:
       force:
-        description: "Publish even if the stable manifest has no sibling Sigstore bundle"
+        description: "Publish even if the gate channel manifest has no sibling Sigstore bundle"
+        type: boolean
+        default: false
+      gate_channel:
+        description: "Channel manifest the gate probes (rehearsal only; non-stable requires dry_run)"
+        type: string
+        default: stable
+      dry_run:
+        description: "Run the whole publish path but stop before pushing to hal0-web"
         type: boolean
         default: false
 
@@ -52,40 +89,135 @@ concurrency:
   group: mirror-bootstrap
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  mirror:
+  # ── 1. Decide, and say so out loud ──────────────────────────────────────
+  gate:
+    name: Gate the mirror on a signed channel manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+      outcome: ${{ steps.gate.outputs.outcome }}
+      channel: ${{ steps.gate.outputs.channel }}
+      status_code: ${{ steps.gate.outputs.status_code }}
+
+    steps:
+      # `inputs` is null for `push` and `release`, so these collapse to the
+      # documented defaults on the two automatic triggers.
+      - name: Reject a rehearsal channel outside a dry run
+        env:
+          CHANNEL: ${{ inputs.gate_channel || 'stable' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          case "${CHANNEL}" in
+            stable | preview | nightly) ;;
+            *)
+              echo "::error::unsupported gate_channel '${CHANNEL}' (stable|preview|nightly)"
+              exit 1
+              ;;
+          esac
+
+          # `stable` is the only channel bootstrap.sh installs from by default,
+          # so it is the only channel whose signature authorizes a real push.
+          if [[ "${CHANNEL}" != "stable" && "${DRY_RUN}" != "true" ]]; then
+            echo "::error::gate_channel '${CHANNEL}' is a rehearsal channel and requires dry_run: true. Publishing the canonical fail-closed bootstrap on the strength of a non-stable manifest would break the one-line install."
+            exit 1
+          fi
+
+      - name: Gate on a signed channel manifest
+        id: gate
+        env:
+          CHANNEL: ${{ inputs.gate_channel || 'stable' }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+
+          bundle_url="https://releases.hal0.dev/${CHANNEL}.json.bundle"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -L --retry 3 --retry-delay 2 "${bundle_url}" || echo 000)"
+
+          {
+            echo "channel=${CHANNEL}"
+            echo "status_code=${code}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${code}" = "200" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "outcome=published" >> "$GITHUB_OUTPUT"
+            echo "${bundle_url} -> 200. The ${CHANNEL} channel is signed; publishing."
+            exit 0
+          fi
+
+          if [ "${FORCE}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "outcome=forced" >> "$GITHUB_OUTPUT"
+            echo "::warning::${bundle_url} -> ${code}, but force=true. Publishing anyway."
+            exit 0
+          fi
+
+          # Deliberately NOT a ::warning:: (#2057). The refusal is reported by
+          # the `mirror` job's `skipped` conclusion and by the run summary
+          # below; an annotation on a green run is what hid this for weeks.
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          echo "outcome=skipped" >> "$GITHUB_OUTPUT"
+          printf '::notice::%s\n' "${bundle_url} -> ${code}. The ${CHANNEL} channel is not signed yet, so publishing the canonical fail-closed bootstrap would break the one-line install. The mirror job is skipped. This gate opens by itself once a signed stable release is published."
+
+      - name: Record the gate outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.gate.outputs.outcome }}
+          CHANNEL: ${{ steps.gate.outputs.channel }}
+          CODE: ${{ steps.gate.outputs.status_code }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          case "${OUTCOME:-unknown}" in
+            published) headline="PUBLISHING — the ${CHANNEL} channel manifest is signed." ;;
+            forced)    headline="PUBLISHING (forced) — the gate was closed and \`force\` overrode it." ;;
+            skipped)   headline="SKIPPED — the ${CHANNEL} channel has no sibling Sigstore bundle. hal0.dev/install.sh stays at its previous copy." ;;
+            *)         headline="UNKNOWN — the gate did not complete." ;;
+          esac
+
+          {
+            echo "## mirror-bootstrap"
+            echo ""
+            echo "**Outcome: ${OUTCOME:-unknown}** — ${headline}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Gate channel | \`${CHANNEL:-?}\` |"
+            echo "| \`${CHANNEL:-?}.json.bundle\` | HTTP \`${CODE:-?}\` |"
+            echo "| Dry run | \`${DRY_RUN}\` |"
+            echo ""
+            if [ "${OUTCOME:-}" = "skipped" ]; then
+              echo "The publish gate is working as designed — see the workflow header."
+              echo "The alarm for a stale live installer is \`bootstrap-parity\`, which"
+              echo "opens a tracking issue after N consecutive reds."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. Publish (or rehearse the publish) ────────────────────────────────
+  mirror:
+    name: Mirror bootstrap.sh to hal0-web
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [gate]
+    # A closed gate leaves this job `skipped`, which is the distinguishable
+    # outcome #2057 asked for. Do not turn it into an `always()` job.
+    if: needs.gate.outputs.publish == 'true'
+
     steps:
       - name: Checkout hal0 (source)
         uses: actions/checkout@v4
         with:
           path: hal0
 
-      - name: Gate on a signed stable manifest
-        id: gate
-        env:
-          FORCE: ${{ inputs.force }}
-        run: |
-          bundle_url="https://releases.hal0.dev/stable.json.bundle"
-          code="$(curl -sS -o /dev/null -w '%{http_code}' -L --retry 3 --retry-delay 2 "${bundle_url}" || echo 000)"
-
-          if [ "${code}" = "200" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Stable manifest is signed (${bundle_url} → 200). Publishing."
-            exit 0
-          fi
-
-          if [ "${FORCE}" = "true" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::${bundle_url} → ${code}, but force=true. Publishing anyway."
-            exit 0
-          fi
-
-          echo "publish=false" >> "$GITHUB_OUTPUT"
-          printf '::warning::%s\n' "${bundle_url} -> ${code}. The stable channel is not signed yet, so publishing the canonical fail-closed bootstrap would break the one-line install. Skipping. This gate opens by itself once a signed stable release is published."
-
       - name: Checkout Hal0ai/hal0-web (target)
-        if: steps.gate.outputs.publish == 'true'
         uses: actions/checkout@v4
         with:
           repository: Hal0ai/hal0-web
@@ -93,29 +225,55 @@ jobs:
           path: hal0-web
 
       - name: Sync bootstrap.sh → public/install.sh
-        if: steps.gate.outputs.publish == 'true'
         run: |
+          set -euo pipefail
           install -m 0644 hal0/installer/bootstrap.sh hal0-web/public/install.sh
           # A syntax error here is served to every new user's shell.
           bash -n hal0-web/public/install.sh
 
       - name: Commit + push
-        if: steps.gate.outputs.publish == 'true'
         working-directory: hal0-web
+        env:
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          OUTCOME: ${{ needs.gate.outputs.outcome }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
+
           git config user.name  "hal0-docs-mirror[bot]"
           git config user.email "hal0-docs-mirror@users.noreply.github.com"
 
           if [ -z "$(git status --porcelain public/install.sh)" ]; then
             echo "public/install.sh already matches bootstrap.sh. Nothing to push."
+            {
+              echo ""
+              echo "Mirror result: **already in sync** — no push was needed."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          source_sha="${{ github.sha }}"
-          git add public/install.sh
-          git commit -m "chore: mirror install.sh from hal0@${source_sha:0:7}
+          git --no-pager diff --stat -- public/install.sh
 
-          Auto-synced from Hal0ai/hal0:installer/bootstrap.sh at ${source_sha}.
+          # The rehearsal exit. Everything above this line — checkout of both
+          # repos, the copy, `bash -n`, and the diff — is the real publish path.
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "::notice::dry_run=true — the publish path ran to completion; stopping before the push."
+            {
+              echo ""
+              echo "Mirror result: **dry run** — the publish path executed and stopped before \`git push\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git add public/install.sh
+          git commit -m "chore: mirror install.sh from hal0@${SOURCE_SHA:0:7}
+
+          Auto-synced from Hal0ai/hal0:installer/bootstrap.sh at ${SOURCE_SHA}.
           See .github/workflows/mirror-bootstrap.yml in hal0."
 
           git push origin HEAD:master
+
+          {
+            echo ""
+            echo "Mirror result: **pushed** (\`${OUTCOME}\`) from hal0@\`${SOURCE_SHA:0:7}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

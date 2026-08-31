@@ -409,3 +409,314 @@ def test_release_tree_pins_installer_and_updater_runtime_inputs() -> None:
     assert 'cp -a ui/dist            "${STAGE}/ui/dist"' in stage
     assert '"${STAGE}/ui/package.json"' in stage
     assert '"${STAGE}/ui/node_modules"' in stage
+
+
+# ── Delivery gates: the installer mirror and the stable channel pointer ──
+#
+# Two failure modes stayed invisible for weeks (#2057, #2101 gates 2 and 4):
+#
+#   1. `mirror-bootstrap` refuses to publish while the stable channel has no
+#      sibling Sigstore bundle. That refusal was a `::warning::` on an
+#      otherwise-green run, so the workflow list looked healthy while the live
+#      one-liner rotted. The gate is correct; only its reporting was not.
+#   2. Tagging a GA release does not advance the stable channel pointer, and
+#      nothing ever noticed that it had not. `release.yml` deliberately cannot
+#      look — its `authorize-pointer` job is read-only, and its executable
+#      surface may not name an external pointer system at all (see
+#      `test_global_executable_surface_has_no_external_pointer_or_mutation_markers`).
+#      A post-tag deadline is also not something a job in the tagging run can
+#      observe: it completes in minutes and the deadline is hours out. The
+#      watch therefore lives in its own scheduled workflow.
+
+MIRROR = Path(".github/workflows/mirror-bootstrap.yml")
+PARITY = Path(".github/workflows/bootstrap-parity.yml")
+POINTER = Path(".github/workflows/stable-pointer-watch.yml")
+
+MIRROR_INPUTS = {"force", "gate_channel", "dry_run"}
+
+CANONICAL_LABELS = {
+    "bug",
+    "needs-triage",
+    "needs-info",
+    "ready-for-agent",
+    "ready-for-human",
+    "wontfix",
+}
+
+
+def _load(path: Path) -> Any:
+    return yaml.safe_load(path.read_text())
+
+
+def _on(path: Path) -> Any:
+    # PyYAML resolves a bare `on:` key to the boolean True.
+    return _load(path)[True]
+
+
+def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
+def _alert_script(path: Path, job: str, step: str) -> str:
+    return _named_step(_load(path)["jobs"][job], step)["with"]["script"]
+
+
+def _script_labels(script: str) -> set[str]:
+    match = re.search(r"const labels = \[([^\]]*)\]", script)
+    assert match is not None, "alert script must declare `const labels = [...]`"
+    return {label.strip().strip("'\"") for label in match.group(1).split(",") if label.strip()}
+
+
+# ── mirror-bootstrap: the skip must be a distinguishable outcome ─────────
+
+
+def test_mirror_gate_and_publish_are_separate_jobs_so_a_skip_is_visible() -> None:
+    """A closed gate must not read as a green publish.
+
+    Splitting the probe from the publish makes the refusal show up as a
+    `skipped` job conclusion in the run's job list and in the Actions API,
+    instead of a `::warning::` annotation buried inside a successful run.
+    """
+    jobs = _load(MIRROR)["jobs"]
+    assert set(jobs) == {"gate", "mirror"}
+    assert jobs["mirror"]["needs"] == ["gate"]
+    assert "needs.gate.outputs.publish == 'true'" in jobs["mirror"]["if"]
+    for output in ("publish", "outcome", "channel", "status_code"):
+        assert output in jobs["gate"]["outputs"], output
+
+
+def test_mirror_gate_records_every_outcome_in_the_job_summary() -> None:
+    gate = _load(MIRROR)["jobs"]["gate"]
+    summary = _named_step(gate, "Record the gate outcome")["run"]
+    assert "$GITHUB_STEP_SUMMARY" in summary
+    assert "## mirror-bootstrap" in summary
+    probe = _named_step(gate, "Gate on a signed channel manifest")["run"]
+    for outcome in ("outcome=published", "outcome=forced", "outcome=skipped"):
+        assert outcome in probe, outcome
+    skip_branch = probe.split("outcome=skipped")[1]
+    assert "::warning::" not in skip_branch
+    assert "::notice::" in skip_branch
+
+
+def test_mirror_publish_gate_still_refuses_an_unsigned_stable_channel() -> None:
+    """The gate itself is correct and has to survive this change."""
+    probe = _named_step(_load(MIRROR)["jobs"]["gate"], "Gate on a signed channel manifest")["run"]
+    assert "https://releases.hal0.dev/${CHANNEL}.json.bundle" in probe
+    assert 'echo "publish=false"' in probe
+    assert 'echo "publish=true"' in probe
+
+
+def test_mirror_force_and_rehearsal_inputs_are_wired_to_both_entrypoints() -> None:
+    """GA day must not be the first execution of the publish path.
+
+    `gate_channel` lets an operator point the probe at an already-signed
+    channel (`preview`), and `dry_run` runs the whole publish path — checkout,
+    sync, `bash -n`, diff — while stopping short of the push.
+    """
+    triggers = _on(MIRROR)
+    for entrypoint in ("workflow_dispatch", "workflow_call"):
+        assert set(triggers[entrypoint]["inputs"]) == MIRROR_INPUTS, entrypoint
+        assert triggers[entrypoint]["inputs"]["gate_channel"]["default"] == "stable"
+        assert triggers[entrypoint]["inputs"]["force"]["default"] is False
+        assert triggers[entrypoint]["inputs"]["dry_run"]["default"] is False
+
+
+def test_mirror_rehearsal_channel_cannot_publish_for_real() -> None:
+    """`gate_channel: preview` proves the path works; it must never push.
+
+    bootstrap.sh installs from `stable` by default, so mirroring the canonical
+    fail-closed script on the strength of a signed *preview* manifest would
+    break the one-line install exactly as publishing against an unsigned
+    stable channel would.
+    """
+    gate = _load(MIRROR)["jobs"]["gate"]
+    guard = _named_step(gate, "Reject a rehearsal channel outside a dry run")["run"]
+    assert '"${CHANNEL}" != "stable"' in guard
+    assert '"${DRY_RUN}" != "true"' in guard
+    assert "::error::" in guard
+    assert "exit 1" in guard
+
+
+def test_mirror_dry_run_stops_before_the_push() -> None:
+    mirror = _load(MIRROR)["jobs"]["mirror"]
+    push = _named_step(mirror, "Commit + push")["run"]
+    assert '"${DRY_RUN}" == "true"' in push
+    assert "git push" in push
+    assert push.index('"${DRY_RUN}" == "true"') < push.index("git push")
+
+
+# ── bootstrap-parity: N consecutive reds must page someone ──────────────
+
+
+def test_parity_exports_its_exit_code_for_the_alerting_job() -> None:
+    parity = _load(PARITY)["jobs"]["parity"]
+    assert parity["outputs"]["rc"] == "${{ steps.parity.outputs.rc }}"
+    run = _named_step(parity, "Run bootstrap-parity check")["run"]
+    assert 'echo "rc=${rc}" >> "$GITHUB_OUTPUT"' in run
+
+
+def test_parity_alert_job_files_an_owned_issue_after_n_consecutive_reds() -> None:
+    """Watching `mirror-bootstrap` for red never fires — it goes green and
+    skips. The daily parity red is the signal that actually tracks the live
+    installer rotting, so that is the one that has to grow an owner.
+    """
+    alert = _load(PARITY)["jobs"]["alert"]
+    assert alert["needs"] == ["parity"]
+    assert "always()" in alert["if"]
+    assert alert["permissions"]["issues"] == "write"
+    assert alert["permissions"]["contents"] == "read"
+    step = _named_step(alert, "Open, update, or close the parity tracking issue")
+    assert step["uses"] == "actions/github-script@v9"
+    assert step["env"]["ALERT_STREAK"] == "3"
+    script = step["with"]["script"]
+    assert "MARKER" in script
+    assert "issues.createComment" in script
+    assert "issues.create" in script
+    assert "state: 'closed'" in script
+
+
+def test_parity_alert_never_counts_an_operational_error_as_drift() -> None:
+    """exit 2 is a fetch failure, not drift (scripts/check-bootstrap-parity.sh
+    exit-code contract). Counting it would page the installer team for a
+    transient Cloudflare blip."""
+    script = _alert_script(PARITY, "alert", "Open, update, or close the parity tracking issue")
+    assert "rc === 2" in script
+    assert "conclusion === 'failure'" in script
+
+
+def test_parity_alert_does_not_read_a_missing_exit_code_as_green() -> None:
+    """If the parity job dies before running the check, `outputs.rc` is the
+    empty string — and `Number('')` is 0, the *success* code. Parsing it
+    naively would close a live drift issue on the strength of a bad checkout,
+    which is the exact class of silent failure this whole change is about."""
+    script = _alert_script(PARITY, "alert", "Open, update, or close the parity tracking issue")
+    assert "rawRc === '' ? NaN" in script
+    assert "Number.isNaN(rc)" in script
+    # ...and the naive parse must not survive anywhere in the script.
+    assert "Number(process.env.PARITY_RC)" not in script
+
+
+def test_parity_alert_uses_only_canonical_labels() -> None:
+    """CLAUDE.md: use the canonical labels unmodified rather than inventing new
+    ones. The tracking issue is located by a body marker, not a bespoke label."""
+    script = _alert_script(PARITY, "alert", "Open, update, or close the parity tracking issue")
+    assert _script_labels(script) <= CANONICAL_LABELS
+
+
+# ── stable-pointer-watch: a GA tag with no pointer must not stay silent ──
+
+
+def test_pointer_watch_runs_on_a_schedule_and_on_demand() -> None:
+    triggers = _on(POINTER)
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    assert triggers["schedule"][0]["cron"]
+
+
+def test_pointer_watch_derives_the_expected_channel_from_release_policy() -> None:
+    """`ReleasePolicy.manifest_targets` is the authority on which tags emit
+    stable.json. The watch reads it; it does not restate it."""
+    resolve = _named_step(_load(POINTER)["jobs"]["watch"], "Resolve the newest GA tag")["run"]
+    assert "hal0.release.policy" in resolve
+    assert "manifest_targets" in resolve
+    assert '"stable" in' in resolve
+
+
+def test_pointer_watch_probes_both_the_manifest_and_its_sibling_bundle() -> None:
+    """`stable.json` alone is not delivery: bootstrap.sh is fail-closed and
+    authenticates the manifest against `stable.json.bundle` before parsing it,
+    so a manifest without a bundle still breaks every one-line install."""
+    probe = _named_step(_load(POINTER)["jobs"]["watch"], "Probe the live stable pointer")["run"]
+    assert "https://releases.hal0.dev/stable.json" in probe
+    assert "https://releases.hal0.dev/stable.json.bundle" in probe
+    assert "EXPECTED_VERSION" in probe
+    assert "::error::" in probe
+
+
+def test_pointer_watch_grace_window_is_explicit_and_bounded() -> None:
+    """'Silent and indefinite' is the defect. A named grace window makes the
+    wait finite, rather than nobody ever looking."""
+    resolve = _named_step(_load(POINTER)["jobs"]["watch"], "Resolve the newest GA tag")
+    assert resolve["env"]["GRACE_HOURS"] == "6"
+    assert "GRACE_HOURS" in resolve["run"]
+
+
+def test_pointer_watch_failure_has_an_owner_not_just_a_red_run() -> None:
+    alert = _load(POINTER)["jobs"]["alert"]
+    assert alert["needs"] == ["watch"]
+    assert "always()" in alert["if"]
+    assert alert["permissions"]["issues"] == "write"
+    step = _named_step(alert, "Open, update, or close the stable-pointer issue")
+    assert step["uses"] == "actions/github-script@v9"
+    script = step["with"]["script"]
+    assert "MARKER" in script
+    assert "issues.create" in script
+    assert "state: 'closed'" in script
+    assert _script_labels(script) <= CANONICAL_LABELS
+
+
+def test_pointer_watch_observes_the_pointer_and_never_advances_it() -> None:
+    """Advancing the stable pointer stays an owned human step in the runbook
+    (CONTRIBUTING.md, "Release delivery"). This workflow only observes it."""
+    workflow = _load(POINTER)
+    assert workflow["permissions"] == {"contents": "read"}
+    surface = "\n".join(value for _, value in _executable_scalars(workflow)).lower()
+    for marker in (
+        r"\bcloudflare\b",
+        r"\bwrangler\b",
+        r"\b(?:aws\s+s3|gsutil|rclone)\b",
+        r"\bgh release (?:create|upload|edit|delete)\b",
+        r"\bgit push\b",
+        r"\bcurl -x\b",
+    ):
+        assert re.search(marker, surface) is None, marker
+
+
+# ── the runbook step itself (#2101 gate 2) ──────────────────────────────
+
+
+def test_release_delivery_runbook_names_an_owner_and_both_probes() -> None:
+    """#2101 gate 2: "Runbook states who performs the pointer advance and how
+    it is verified." A runbook that names neither is decoration, so the two
+    load-bearing facts are pinned here.
+
+    The runbook lives in CONTRIBUTING.md rather than docs/operate/: everything
+    under the five published `docs/` sections is auto-synced to the public
+    forum by sync-docs-discourse.yml, and #2116 deliberately moved
+    operator-internal material out of the published tree.
+    """
+    runbook = Path("CONTRIBUTING.md").read_text()
+    assert "## Release delivery" in runbook
+    section = runbook.split("## Release delivery", 1)[1].split("\n## ", 1)[0]
+
+    # Who.
+    assert "Owner: whoever cut the tag" in section
+    assert "authorize-pointer" in section and "read-only" in section
+
+    # How it is verified — both halves, because a manifest without its
+    # sibling bundle still breaks every fail-closed one-line install.
+    assert "https://releases.hal0.dev/stable.json" in section
+    assert "https://releases.hal0.dev/stable.json.bundle" in section
+    assert "scripts/check-bootstrap-parity.sh" in section
+
+    # The automated backstops point back at the owned step, not away from it.
+    assert "stable-pointer-watch.yml" in section
+    assert "bootstrap-parity.yml" in section
+
+    # And the pre-GA rehearsal of the publish path (#2101 gate 4).
+    assert "gate_channel: preview" in section
+    assert "dry_run: true" in section
+
+
+def test_runbook_does_not_widen_which_tags_emit_a_stable_manifest() -> None:
+    """`ReleasePolicy.manifest_targets` stays the one authority. A runbook that
+    told an operator to hand-publish `stable.json` for an rc would route around
+    it, so the section says the opposite in as many words."""
+    from hal0.release.policy import ReleasePolicy
+
+    assert ReleasePolicy.from_tag("v1.0.0").manifest_targets == ("stable", "preview")
+    assert ReleasePolicy.from_tag("v1.0.0-rc.1").manifest_targets == ("preview",)
+
+    section = (
+        Path("CONTRIBUTING.md").read_text().split("## Release delivery", 1)[1].split("\n## ", 1)[0]
+    )
+    assert "do not widen it" in section
