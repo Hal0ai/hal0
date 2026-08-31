@@ -35,6 +35,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         driver_mod, "installer_script_path", lambda name: _touch_script(tmp_path, name)
     )
     monkeypatch.setattr(driver_mod._paths, "var_lib", lambda: tmp_path / "var_lib")
+    # status() also probes for the pi binary; the fake runner never
+    # installs one, so pretend PATH has it (the marker/file checks stay
+    # real). Tests for the binary-missing branch override this.
+    monkeypatch.setattr(driver_mod, "_pi_binary_on_path", lambda: True)
     return tmp_path
 
 
@@ -176,8 +180,12 @@ def test_install_runs_script_and_npm_install_for_hindsight_ext(home: Path) -> No
 def test_status_and_uninstall(home: Path) -> None:
     drv, _ = _driver()
     drv.install()
+    # Install stamps the daemon-readable marker in the data dir.
+    marker = driver_mod._paths.var_lib() / "agents" / "pi" / "profile.json"
+    assert json.loads(marker.read_text())["home"] == str(home)
     assert drv.status() == "installed"
     drv.uninstall()
+    assert not marker.exists()
     assert not (home / ".pi" / "agent" / "extensions" / "hal0-provider").exists()
     assert not (home / ".pi" / "agent" / "extensions" / "hindsight").exists()
     assert not (home / ".pi" / "agent" / "themes" / "hal0.json").exists()
@@ -211,4 +219,31 @@ def test_uninstall_tolerates_missing_companion(home: Path) -> None:
     drv, _ = _driver()
     drv.install()
     drv.uninstall()  # must not raise
+    assert drv.status() == "broken"
+
+
+def test_status_from_daemon_perspective(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hal0-api daemon (User=hal0) cannot read the operator's 0700
+    home — status() must answer "installed" from the data-dir marker +
+    PATH probe alone when the profiled home is unreadable."""
+    drv, _ = _driver()
+    drv.install()
+
+    real_access = driver_mod.os.access
+
+    def _deny_home(path, mode):  # noqa: ANN001 — mirrors os.access
+        if Path(path) == home:
+            return False
+        return real_access(path, mode)
+
+    monkeypatch.setattr(driver_mod.os, "access", _deny_home)
+    assert drv.status() == "installed"
+
+
+def test_status_broken_without_pi_binary(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Marker present but the pi binary gone from PATH (npm uninstalled
+    behind our back) is broken — the profile points at nothing runnable."""
+    drv, _ = _driver()
+    drv.install()
+    monkeypatch.setattr(driver_mod, "_pi_binary_on_path", lambda: False)
     assert drv.status() == "broken"

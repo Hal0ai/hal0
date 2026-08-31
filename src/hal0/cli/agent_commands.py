@@ -120,11 +120,13 @@ def agent_install(
     or standalone) has NO downside vs. the install-time provision — issue
     #1102 / decision Q9.
 
-    pi is cli-kind (a terminal coding tool with no daemon/systemd unit), so
-    it rides the thin API-driven path above like any non-hermes agent —
-    ``install`` POSTs straight to ``/api/agents/install`` and returns. Being
-    cli-kind rather than daemon-kind, it coexists with Hermes: single-pick
-    (``--switch``) only applies between daemon-kind agents.
+    pi is cli-kind (a terminal coding tool with no daemon/systemd unit) and,
+    like hermes, provisions LOCALLY in the CLI foreground — its profile
+    lands in the invoking user's home (``~/.pi``) plus the global npm
+    prefix, which the hal0-api daemon (a system user with home
+    ``/var/lib/hal0``) cannot write. Being cli-kind rather than
+    daemon-kind, it coexists with Hermes: single-pick (``--switch``) only
+    applies between daemon-kind agents.
     """
     if name == "hermes":
         _install_hermes(
@@ -133,6 +135,10 @@ def agent_install(
             reset_personas=reset_personas,
             terminal_tool=terminal_tool,
         )
+        return
+
+    if name == "pi":
+        _install_pi()
         return
 
     url = _api_base()
@@ -269,6 +275,46 @@ def _install_hermes(
         Panel(
             "[bold green]Installed[/bold green] hermes  "
             "[dim](managed venv: /var/lib/hal0/venvs/hermes)[/dim]",
+            border_style="green",
+        )
+    )
+
+
+def _install_pi() -> None:
+    """Foreground, CLI-local pi install (spec D1 cli-kind).
+
+    pi provisions the INVOKING user's home (``~/.pi``) and the global npm
+    prefix, so the work cannot ride the daemon: hal0-api runs as the
+    ``hal0`` system user, whose home is ``/var/lib/hal0`` and who can
+    write neither ``/root/.pi`` nor ``npm install -g``'s prefix — and
+    whose 0700-blindness to the operator's home is also why
+    :meth:`PiDriver.status` reads a data-dir marker instead of the home.
+    The manager runs in-process instead, with identical semantics (seed
+    TOML, registry bookkeeping, data dir); the daemon lists pi afterwards
+    because ``AgentManager.list()`` re-reads ``/etc`` on every query.
+    ``--switch`` is irrelevant here — cli-kind agents never block nor
+    swap (see ``AGENT_KINDS`` in :mod:`hal0.agents.manager`).
+    """
+    if os.geteuid() != 0:
+        die(
+            "pi installs into the invoking user's home and the global npm "
+            "prefix — run as root (sudo hal0 agent install pi)."
+        )
+        return
+
+    from hal0.agents.manager import AgentError, AgentManager
+
+    console.print(
+        "[bold]Provisioning pi[/bold] → ~/.pi (theme · hal0 provider · memory wiring) …"
+    )
+    try:
+        rec = AgentManager().install("pi")
+    except AgentError as exc:
+        die(f"pi install failed: {exc}")
+        return
+    console.print(
+        Panel(
+            f"[bold green]Installed[/bold green] pi  [dim](data: {rec.data_dir})[/dim]",
             border_style="green",
         )
     )
@@ -969,6 +1015,22 @@ def agent_uninstall(
             f"Uninstall agent {name!r}? {memory_note} — this cannot be undone.",
             abort=True,
         )
+
+    # pi tears down locally for the same reason it installs locally (see
+    # _install_pi): the profile lives in the invoking user's home, out of
+    # the daemon's reach. No memory branch — pi has no private-namespace
+    # identity card (it talks to the shared memory MCP surface only).
+    if name == "pi":
+        if os.geteuid() != 0:
+            die("pi was provisioned into the invoking user's home — run as root to uninstall.")
+            return
+        from hal0.agents.manager import AgentManager
+
+        if AgentManager().uninstall("pi"):
+            console.print("[bold]Uninstalled[/bold] pi.")
+        else:
+            console.print("[dim]pi was not installed.[/dim]")
+        return
 
     url = _api_base()
     if _api_unreachable(url):

@@ -45,6 +45,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 — required for shim
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +100,21 @@ _HINDSIGHT_API_URL = "http://127.0.0.1:9177"
 _UPSTREAM_DEFAULT_PROVIDER = "openrouter"
 _UPSTREAM_DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 
+# Marker stamped into the (world-readable) data dir at install time. pi's
+# profile lands in the INVOKING user's 0700 home (~root/.pi on a stock
+# box), which the hal0-api daemon (User=hal0) can never read — the marker
+# is what lets the daemon's status()/list() answer without that access.
+_PROFILE_MARKER = "profile.json"
+
 
 def _api_base() -> str:
     """Honour HAL0_API_URL the same way the CLI does."""
     return os.environ.get("HAL0_API_URL", _HAL0_API_BASE_DEFAULT).rstrip("/")
+
+
+def _pi_binary_on_path() -> bool:
+    """Module-level seam so tests can monkeypatch the PATH probe."""
+    return shutil.which("pi") is not None
 
 
 class PiDriver(AgentDriver):
@@ -176,6 +188,10 @@ class PiDriver(AgentDriver):
         # Hindsight client config — seeded iff absent (spec D4).
         self._write_hindsight_config()
 
+        # Last: stamp the daemon-readable marker (see _write_profile_marker).
+        # Ordering matters — the marker asserts the profile above landed.
+        self._write_profile_marker()
+
     def uninstall(self) -> None:
         # Best-effort: run the uninstall companion installer/agents/pi.sh
         # wrote into the data dir at install time (npm uninstall -g of
@@ -213,13 +229,38 @@ class PiDriver(AgentDriver):
         # untouched — it's shared state with other harnesses on the box,
         # not exclusively hal0's to remove.
 
+        # Marker last: its absence is what flips status() to "broken",
+        # so it only disappears once the teardown above ran. The manager
+        # rmtree's the whole data dir right after, but a driver-only
+        # uninstall (tests, partial recovery) must converge too.
+        self._profile_marker_path().unlink(missing_ok=True)
+
     def status(self) -> str:
-        """Return ``"installed"`` when the provider extension, the
-        hindsight extension, and the theme file are all present."""
+        """Return ``"installed"`` when the profile marker is present, the
+        ``pi`` binary is on PATH, and — where the profiled home is
+        readable — the deployed files are all still there.
+
+        The marker indirection exists because status() runs in two
+        privilege contexts: the root CLI, and the hal0-api daemon
+        (``User=hal0``), whose ``Path.home()`` is /var/lib/hal0 and who
+        cannot read the operator's 0700 home. The marker (in the
+        world-readable data dir) plus the PATH probe is the daemon-side
+        contract; the deep file check only runs when the profiled home is
+        actually readable (see :meth:`_write_profile_marker`)."""
+        marker = self._profile_marker_path()
+        if not marker.exists() or not _pi_binary_on_path():
+            return "broken"
+        try:
+            home = Path(json.loads(marker.read_text(encoding="utf-8"))["home"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return "broken"
+        if not os.access(home, os.R_OK | os.X_OK):
+            return "installed"  # daemon context — marker + binary is the contract
+        agent_dir = home / ".pi" / "agent"
         if (
-            self._provider_extension_deployed()
-            and self._hindsight_extension_deployed()
-            and self._theme_dst().exists()
+            (agent_dir / "extensions" / "hal0-provider" / "index.ts").exists()
+            and (agent_dir / "extensions" / "hindsight" / "index.ts").exists()
+            and (agent_dir / "themes" / "hal0.json").exists()
         ):
             return "installed"
         return "broken"
@@ -260,6 +301,28 @@ class PiDriver(AgentDriver):
 
     def _data_dir(self) -> Path:
         return _paths.var_lib() / "agents" / self.name
+
+    def _profile_marker_path(self) -> Path:
+        return self._data_dir() / _PROFILE_MARKER
+
+    def _write_profile_marker(self) -> None:
+        """Stamp the data dir with where the profile was written.
+
+        The data dir is world-readable while the profiled home (~root on
+        a stock box) is 0700 — this marker is what lets the hal0-api
+        daemon (``User=hal0``) answer :meth:`status` without read access
+        to the operator's home. Holds no secret: just the home path and
+        a timestamp."""
+        payload = {
+            "version": 1,
+            "home": str(Path.home()),
+            "profiled_at": datetime.now(UTC).isoformat(),
+        }
+        marker = self._profile_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(marker)
 
     def _npm_install_hindsight_ext(self) -> None:
         """Resolve the pinned @vectorize-io/hindsight-coding-agents dependency

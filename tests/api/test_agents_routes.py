@@ -144,3 +144,26 @@ def test_delete_agent_clean_uninstall_returns_200(
     res = client.delete("/api/agents/hermes")
     assert res.status_code == 200
     assert res.json() == {"name": "hermes", "status": "uninstalled"}
+
+
+# ── cli-kind agents are local-only on the wire (pi daemon-home bug) ──────
+
+
+def test_install_refuses_cli_kind_agent(client: TestClient) -> None:
+    """The daemon runs as a system user whose home is /var/lib/hal0 — a
+    cli-kind agent (pi) provisions the invoking user's home + the global
+    npm prefix, so the wire path must refuse with the CLI hint instead of
+    silently provisioning the wrong HOME."""
+    res = client.post("/api/agents/install", json={"name": "pi"})
+    assert res.status_code == 400
+    body = res.json()
+    assert body["error"]["code"] == "agent.cli_kind_local_only"
+    assert "hal0 agent install pi" in body["error"]["message"]
+
+
+def test_uninstall_refuses_cli_kind_agent(client: TestClient) -> None:
+    res = client.delete("/api/agents/pi")
+    assert res.status_code == 400
+    body = res.json()
+    assert body["error"]["code"] == "agent.cli_kind_local_only"
+    assert "hal0 agent uninstall pi" in body["error"]["message"]
