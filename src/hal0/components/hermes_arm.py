@@ -129,7 +129,10 @@ def converge_hermes(
         return {**result, "status": "converged"}
     if not apply:
         log.warning(
-            "components.hermes_stale", job_id=job_id, installed=installed, pinned=pinned,
+            "components.hermes_stale",
+            job_id=job_id,
+            installed=installed,
+            pinned=pinned,
             remedy="run 'hal0 update'",
         )
         return {**result, "status": "stale"}
@@ -145,7 +148,8 @@ def converge_hermes(
         return {**result, "status": "build_failed", "error": f"post-install probe failed: {exc}"}
     if not probe.get("ok"):
         return {
-            **result, "status": "build_failed",
+            **result,
+            "status": "build_failed",
             "error": f"rebuilt venv fails its own probe: {probe.get('error')}",
             "remedy": "run 'sudo hal0 agent provision hermes --repair'",
         }
@@ -160,15 +164,23 @@ def converge_hermes(
     # up the rebuilt venv — same reason repair_hermes_mcp_client bounces
     # hermes-gateway. Best-effort.
     for argv in (
-        (["sudo", "-n", SEAM_BIN, "try-restart-agent", "hermes"]
-         if is_hal0_user() else ["systemctl", "try-restart", "hal0-agent@hermes.service"]),
-        (["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"]
-         if is_hal0_user() else ["systemctl", "try-restart", "hermes-gateway.service"]),
+        (
+            ["sudo", "-n", SEAM_BIN, "try-restart-agent", "hermes"]
+            if is_hal0_user()
+            else ["systemctl", "try-restart", "hal0-agent@hermes.service"]
+        ),
+        (
+            ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"]
+            if is_hal0_user()
+            else ["systemctl", "try-restart", "hermes-gateway.service"]
+        ),
     ):
         try:
             runner(argv, capture_output=True, text=True, timeout=_CTL_TIMEOUT_S)
         except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("components.hermes_restart_failed", job_id=job_id, argv=argv[0], error=str(exc))
+            log.warning(
+                "components.hermes_restart_failed", job_id=job_id, argv=argv[0], error=str(exc)
+            )
 
     log.info("components.hermes_upgraded", job_id=job_id, installed=installed, pinned=pinned)
     return {**result, "status": "upgraded", "from": installed, "to": pinned}

@@ -836,14 +836,18 @@ def _print_component_table(rows: list[dict]) -> bool:
         pinned = row.get("pinned") or "—"
         if row.get("pin_label"):
             pinned = f"{pinned} ({row['pin_label']})"
-        table.add_row(row.get("name", row.get("id", "?")), str(row.get("installed") or "—"), str(pinned), status_txt)
+        table.add_row(
+            row.get("name", row.get("id", "?")),
+            str(row.get("installed") or "—"),
+            str(pinned),
+            status_txt,
+        )
     console.print(table)
     for row in rows:
         if row.get("status") in _COMPONENT_PENDING and (row.get("error") or row.get("remedy")):
             remedy = row.get("remedy") or f"retry with: hal0 update component {row['id']}"
             console.print(
-                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} "
-                f"[dim]{remedy}[/dim]"
+                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} [dim]{remedy}[/dim]"
             )
     return all_ok
 
@@ -861,8 +865,10 @@ def update_status_cmd() -> None:
         return
     _print_check(body)
     if not _print_component_table(_component_rows()):
-        console.print("[dim](exit 2 = components not converged — run `hal0 update` "
-                      "or `hal0 update component <id>`)[/dim]")
+        console.print(
+            "[dim](exit 2 = components not converged — run `hal0 update` "
+            "or `hal0 update component <id>`)[/dim]"
+        )
         raise typer.Exit(2)
 
 
@@ -899,14 +905,22 @@ def _converge_component(component_id: str, body: dict | None = None) -> None:
     final = _poll_job(job_id, terminal=("applied", "failed"))
     result = final.get("component_result") or {}
     if final.get("state") == "applied":
-        console.print(Panel(
-            f"[green]{component_id} {result.get('status', 'converged')}[/green]"
-            + (f" [dim]{result.get('from')} → {result.get('to')}[/dim]" if result.get("to") else ""),
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                f"[green]{component_id} {result.get('status', 'converged')}[/green]"
+                + (
+                    f" [dim]{result.get('from')} → {result.get('to')}[/dim]"
+                    if result.get("to")
+                    else ""
+                ),
+                border_style="green",
+            )
+        )
         return
-    die(f"{component_id} converge failed: {final.get('error') or 'unknown error'}"
-        + (f" — {result.get('remedy')}" if result.get("remedy") else ""))
+    die(
+        f"{component_id} converge failed: {final.get('error') or 'unknown error'}"
+        + (f" — {result.get('remedy')}" if result.get("remedy") else "")
+    )
 
 
 # ── hal0 update owui — converge the OpenWebUI companion to its release pin ────
@@ -924,11 +938,14 @@ def _converge_component(component_id: str, body: dict | None = None) -> None:
 def update_owui(
     check: bool = typer.Option(False, "--check", help="Status only; don't converge."),
     target: str | None = typer.Option(
-        None, "--target",
+        None,
+        "--target",
         help="Pin an explicit digest override (sha256:… or bare 64-hex) instead of the release pin.",
     ),
     clear_override: bool = typer.Option(
-        False, "--clear-override", help="Drop a --target override; converge back to the release pin.",
+        False,
+        "--clear-override",
+        help="Drop a --target override; converge back to the release pin.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:

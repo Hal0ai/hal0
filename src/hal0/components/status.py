@@ -12,7 +12,9 @@ from hal0.components.registry import COMPONENTS
 from hal0.components.state import load_component_state
 
 _FAILURE_STATUSES = frozenset({"build_failed", "snapshot_failed", "rolled_back"})
-_PENDING_STATUSES = frozenset({"pending", "stale", "build_failed", "snapshot_failed", "rolled_back"})
+_PENDING_STATUSES = frozenset(
+    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back"}
+)
 
 log = structlog.get_logger(__name__)
 

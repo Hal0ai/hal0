@@ -156,9 +156,7 @@ def test_a_malformed_digest_is_refused_and_the_unit_is_untouched(
         "sha256:aaaa; rm -rf /",  # shell metacharacters
     ],
 )
-def test_malformed_digests_are_all_refused(
-    seam: tuple[Path, Path, Path, Path], bad: str
-) -> None:
+def test_malformed_digests_are_all_refused(seam: tuple[Path, Path, Path, Path], bad: str) -> None:
     _, _, _, unit_dir = seam
     unit_path = unit_dir / "hal0-openwebui.service"
     unit_path.write_text(_UNIT_BODY, encoding="utf-8")

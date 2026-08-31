@@ -878,7 +878,9 @@ def test_update_component_converges_and_prints_result(
         posted["json"] = json
         return {"id": "job1", "state": "queued"}
 
-    def fake_poll(job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object) -> dict:
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
         assert job_id == "job1"
         return {
             "id": job_id,
@@ -924,7 +926,9 @@ def test_update_owui_target_posts_normalized_digest(monkeypatch: pytest.MonkeyPa
         posted["json"] = json
         return {"id": "job2", "state": "queued"}
 
-    def fake_poll(job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object) -> dict:
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
         return {"id": job_id, "state": "applied", "component_result": {"status": "converged"}}
 
     monkeypatch.setattr(uc, "api_get", fake_get)

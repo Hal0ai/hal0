@@ -50,8 +50,13 @@ def _resolve_converge(comp: ComponentDef) -> Callable[..., dict[str, Any]]:
 
 
 def _arm_kwargs(
-    comp: ComponentDef, *, job_id: str | None, apply: bool,
-    image_retag: bool, engine: bool, hermes_install: bool,
+    comp: ComponentDef,
+    *,
+    job_id: str | None,
+    apply: bool,
+    image_retag: bool,
+    engine: bool,
+    hermes_install: bool,
 ) -> dict[str, Any]:
     if comp.id == "hindsight":
         # engine_upgrade's own kwarg spelling; boot passes upgrade=False.
@@ -119,8 +124,12 @@ def converge_components(
     results: dict[str, dict[str, Any]] = {}
     for comp in COMPONENTS:
         kwargs = _arm_kwargs(
-            comp, job_id=job_id, apply=apply,
-            image_retag=image_retag, engine=engine, hermes_install=hermes_install,
+            comp,
+            job_id=job_id,
+            apply=apply,
+            image_retag=image_retag,
+            engine=engine,
+            hermes_install=hermes_install,
         )
         diagnose_only = _is_diagnose_only(comp, kwargs)
         results[comp.id] = converge_component(comp, diagnose_only=diagnose_only, **kwargs)

@@ -17,6 +17,7 @@ def _home(tmp_path, monkeypatch):
 def _probe_patches(installed_map, pinned_map):
     def fake_rows():
         return installed_map, pinned_map
+
     return fake_rows
 
 

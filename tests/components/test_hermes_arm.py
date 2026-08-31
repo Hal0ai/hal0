@@ -56,7 +56,11 @@ def test_drift_rebuilds_probes_and_stamps(tmp_path) -> None:
         patch("hal0.agents.hermes_provision._install_venv") as install,
         patch("hal0.agents.hermes_provision._probe_mcp_client", return_value={"ok": True}),
     ):
-        res = hermes_arm.converge_hermes(venv=venv, runner=MagicMock(return_value=MagicMock(returncode=0)), is_hal0_user=lambda: False)
+        res = hermes_arm.converge_hermes(
+            venv=venv,
+            runner=MagicMock(return_value=MagicMock(returncode=0)),
+            is_hal0_user=lambda: False,
+        )
     assert res["status"] == "upgraded"
     install.assert_called_once()
     assert hermes_arm.installed_hermes_pin() == "v2"
@@ -67,7 +71,10 @@ def test_failed_probe_is_build_failed_and_unstamped(tmp_path) -> None:
     with (
         patch("hal0.agents.hermes_provision._hermes_version_pin", return_value="v2"),
         patch("hal0.agents.hermes_provision._install_venv"),
-        patch("hal0.agents.hermes_provision._probe_mcp_client", return_value={"ok": False, "error": "no mcp"}),
+        patch(
+            "hal0.agents.hermes_provision._probe_mcp_client",
+            return_value={"ok": False, "error": "no mcp"},
+        ),
     ):
         res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False)
     assert res["status"] == "build_failed"

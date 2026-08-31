@@ -1134,8 +1134,12 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
-        "id": job_id, "state": "queued", "phase": f"converge:{component_id}",
-        "created_at": time.time(), "updated_at": time.time(), "error": None,
+        "id": job_id,
+        "state": "queued",
+        "phase": f"converge:{component_id}",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
     }
     _persist_job(jobs[job_id])
     _spawn_update_task(request, _run_component_job(jobs, job_id, component_id, arm_kwargs))

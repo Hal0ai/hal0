@@ -59,7 +59,9 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["hermes_venv"].append((job_id, install))
         return False
 
-    def _converge_components(*, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True):
+    def _converge_components(
+        *, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+    ):
         calls["converge_components"].append(
             {
                 "job_id": job_id,
@@ -145,7 +147,9 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
     assert _stub_every_pass["seed_profiles"] == ["j2"]
     assert _stub_every_pass["vulkan_migration"] == ["j2"]  # ran despite mtp's failure
     assert _stub_every_pass["extra_args"] == ["j2"]
-    assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == ["j2"]  # ran despite mtp's failure
+    assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == [
+        "j2"
+    ]  # ran despite mtp's failure
 
 
 def test_schema_migration_failure_propagates(

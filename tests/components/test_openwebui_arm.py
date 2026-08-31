@@ -49,7 +49,9 @@ def test_already_pinned_converges(tmp_path) -> None:
 
 
 def test_drift_diagnose_only_reports_stale(tmp_path) -> None:
-    res = openwebui_arm.converge_openwebui(unit_path=_unit(tmp_path), apply=False, runner=_ok_runner())
+    res = openwebui_arm.converge_openwebui(
+        unit_path=_unit(tmp_path), apply=False, runner=_ok_runner()
+    )
     assert res["status"] == "stale"
     assert res["installed"] == OLD and res["pinned"] == NEW
 
@@ -71,7 +73,9 @@ def test_pull_failure_leaves_unit_untouched(tmp_path) -> None:
     runner = MagicMock()
     runner.return_value = MagicMock(returncode=1, stdout="", stderr="no route")
     unit = _unit(tmp_path)
-    res = openwebui_arm.converge_openwebui(unit_path=unit, runner=runner, is_hal0_user=lambda: False)
+    res = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=runner, is_hal0_user=lambda: False
+    )
     assert res["status"] == "build_failed"
     assert OLD in unit.read_text(encoding="utf-8")
 
@@ -85,7 +89,9 @@ def test_target_digest_writes_override_marker(tmp_path) -> None:
     assert res["status"] == "upgraded"
     assert openwebui_arm.read_pin_override() == other
     # Subsequent pin-converge respects the override and reports it.
-    res2 = openwebui_arm.converge_openwebui(unit_path=unit, runner=_ok_runner(), is_hal0_user=lambda: False)
+    res2 = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=_ok_runner(), is_hal0_user=lambda: False
+    )
     assert res2["status"] == "override"
 
 
@@ -105,7 +111,9 @@ def test_target_digest_matching_installed_persists_override(tmp_path) -> None:
     runner.assert_not_called()
     # A subsequent un-targeted converge holds the box at the override
     # (NEW would otherwise pull it back to the release pin).
-    res2 = openwebui_arm.converge_openwebui(unit_path=unit, runner=_ok_runner(), is_hal0_user=lambda: False)
+    res2 = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=_ok_runner(), is_hal0_user=lambda: False
+    )
     assert res2["status"] == "override"
 
 

@@ -1294,7 +1294,12 @@ def test_components_returns_catalog_rows(isolated_client: TestClient) -> None:
     resp = isolated_client.get("/api/updates/components")
     assert resp.status_code == 200
     body = resp.json()
-    assert {r["id"] for r in body["components"]} == {"openwebui", "runner-images", "hermes", "hindsight"}
+    assert {r["id"] for r in body["components"]} == {
+        "openwebui",
+        "runner-images",
+        "hermes",
+        "hindsight",
+    }
     assert isinstance(body["pending"], int)
 
 

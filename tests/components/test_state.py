@@ -13,7 +13,9 @@ def _isolated_var_lib(tmp_path, monkeypatch):
 
 
 def test_record_then_load_roundtrip() -> None:
-    state.record_component_result("openwebui", {"status": "converged", "installed": "sha256:" + "a" * 64})
+    state.record_component_result(
+        "openwebui", {"status": "converged", "installed": "sha256:" + "a" * 64}
+    )
     loaded = state.load_component_state()
     assert loaded["openwebui"]["status"] == "converged"
     assert "ts" in loaded["openwebui"]
@@ -47,5 +49,7 @@ def test_record_over_corrupt_file_recovers() -> None:
 
 def test_record_never_raises_on_unwritable_dir(monkeypatch) -> None:
     # Fail-soft posture: bookkeeping failure must not fail an update.
-    monkeypatch.setattr(state, "components_state_path", lambda: state.Path("/proc/nope/components.json"))
+    monkeypatch.setattr(
+        state, "components_state_path", lambda: state.Path("/proc/nope/components.json")
+    )
     state.record_component_result("openwebui", {"status": "converged"})  # must not raise

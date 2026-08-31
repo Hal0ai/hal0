@@ -116,12 +116,17 @@ def converge_openwebui(
                 override_path().parent.mkdir(parents=True, exist_ok=True)
                 override_path().write_text(target_digest + "\n", encoding="utf-8")
             except OSError as exc:
-                log.warning("components.owui_override_persist_failed", job_id=job_id, error=str(exc))
+                log.warning(
+                    "components.owui_override_persist_failed", job_id=job_id, error=str(exc)
+                )
             return {**result, "status": "override"}
         return {**result, "status": "override" if overridden else "converged"}
     if not apply:
         log.warning(
-            "components.owui_stale", job_id=job_id, installed=current, pinned=desired,
+            "components.owui_stale",
+            job_id=job_id,
+            installed=current,
+            pinned=desired,
             remedy="run 'hal0 update' or 'hal0 update owui'",
         )
         return {**result, "status": "override" if overridden else "stale"}
@@ -129,9 +134,7 @@ def converge_openwebui(
     # ── Pull first ──
     ref = image_pin.pinned_ref(desired)
     pull_argv = (
-        ["sudo", "-n", _PODMAN_RW, "image-pull", ref]
-        if is_hal0_user()
-        else ["podman", "pull", ref]
+        ["sudo", "-n", _PODMAN_RW, "image-pull", ref] if is_hal0_user() else ["podman", "pull", ref]
     )
     try:
         proc = runner(pull_argv, capture_output=True, text=True, timeout=_PULL_TIMEOUT_S)
@@ -150,13 +153,16 @@ def converge_openwebui(
         try:
             proc = runner(
                 ["sudo", "-n", SEAM_BIN, "repin-owui", desired],
-                capture_output=True, text=True, timeout=_CTL_TIMEOUT_S,
+                capture_output=True,
+                text=True,
+                timeout=_CTL_TIMEOUT_S,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return {**result, "status": "build_failed", "error": f"repin failed: {exc}"}
         if proc.returncode != 0:
             return {
-                **result, "status": "build_failed",
+                **result,
+                "status": "build_failed",
                 "error": f"repin failed: {(proc.stderr or '').strip() or f'exit {proc.returncode}'}",
             }
     else:
@@ -189,7 +195,8 @@ def converge_openwebui(
         restarted = False
     if not restarted:
         log.warning(
-            "components.owui_restart_failed", job_id=job_id,
+            "components.owui_restart_failed",
+            job_id=job_id,
             remedy=f"repinned; run 'systemctl restart {image_pin.OPENWEBUI_UNIT_NAME}' and check its journal",
         )
     log.info("components.owui_repinned", job_id=job_id, from_=current, to=desired)
