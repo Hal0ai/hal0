@@ -15,6 +15,7 @@ from hal0.config.schema import (
     FALLBACK_VULKAN_IMAGE,
     resolve_default_image,
 )
+from hal0.runners import get_runner, resolve_runner_image
 
 
 @pytest.mark.parametrize("backend", ["rocm", "vulkan"])
@@ -32,7 +33,12 @@ def test_cuda_lane_gets_cuda_image() -> None:
     assert resolve_default_image("cuda", "gpu") == FALLBACK_CUDA_IMAGE
 
 
-def test_cpu_lane_gets_lean_toolbox() -> None:
-    # A 7.5 GB ROCm image is pointless for CPU-only; use the lean toolbox.
-    assert resolve_default_image("vulkan", "cpu") == FALLBACK_VULKAN_IMAGE
-    assert resolve_default_image("cpu", None) == FALLBACK_VULKAN_IMAGE
+def test_cpu_lane_gets_the_cpu_toolbox() -> None:
+    """A 7.5 GB ROCm image is pointless for CPU-only, so this lane has always
+    had its own leaner image — but until #2126 that image was
+    :data:`FALLBACK_VULKAN_IMAGE`, a GPU build, which SIGILLs at model load on
+    a box with no GPU. It now resolves the ``cpu`` runner's own image."""
+    cpu_image = resolve_runner_image(get_runner("cpu"))
+    assert resolve_default_image("vulkan", "cpu") == cpu_image
+    assert resolve_default_image("cpu", None) == cpu_image
+    assert cpu_image != FALLBACK_VULKAN_IMAGE

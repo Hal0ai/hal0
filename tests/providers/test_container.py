@@ -579,7 +579,7 @@ class TestRenderUnit:
 
     def test_restart_prevent_exit_status_lands_in_service_section(self) -> None:
         """#2037: the runner entrypoint translates died-during-load into exit
-        64; ``RestartPreventExitStatus=64`` lets systemd fail-fast a doomed
+        64; ``RestartPreventExitStatus=`` lets systemd fail-fast a doomed
         model instead of burning the whole backoff ramp. Old images never emit
         64, so the directive is inert against them — safe version skew.
         """
@@ -587,7 +587,45 @@ class TestRenderUnit:
         flags = resolve_profile_flags(profile)
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
-        assert "RestartPreventExitStatus=64" in service_section
+        assert "RestartPreventExitStatus=64 132" in service_section
+
+    def test_sigill_is_terminal_host_side(self) -> None:
+        """#2126: exit 64 only exists inside images that SHIP the runner
+        entrypoint. The `cpu` runner resolves to a foreign GPU toolbox, which
+        has no entrypoint to translate anything — podman propagates 128+signal
+        and systemd sees a plain ``status=132``. Naming 132 host-side is the
+        version-skew-proof half, and it is the reason #2126's brain slot
+        crash-looped instead of parking.
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
+        statuses = [
+            line.partition("=")[2].split()
+            for line in service_section.splitlines()
+            if line.startswith("RestartPreventExitStatus=")
+        ]
+        assert statuses == [["64", "132"]]
+
+    def test_transient_signal_deaths_keep_the_restart_runway(self) -> None:
+        """The line #2126 does NOT cross host-side. ``RestartPreventExitStatus``
+        is unconditional — it applies to a slot that has served for days, not
+        just one dying at load. SIGKILL (137) is the OOM-killer, and SIGSEGV
+        (139) / SIGABRT (134) can be a single bad request post-load; all three
+        can recover on a restart, so they must not be listed here. Their
+        load-phase (deterministic) case is handled in the runner entrypoint.
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
+        line = next(
+            ln for ln in service_section.splitlines() if ln.startswith("RestartPreventExitStatus=")
+        )
+        statuses = line.partition("=")[2].split()
+        for transient in ("134", "137", "139", "143"):
+            assert transient not in statuses
 
     def test_numeric_group_add_present(self) -> None:
         """GroupAdd= must use numeric GIDs (toolbox images lack group names)."""

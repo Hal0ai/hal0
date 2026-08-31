@@ -1206,6 +1206,116 @@ _hal0_vulkan_lane_serves_default_image() {
     [[ -n "${default_ref}" && -n "${fixed_ref}" && "${default_ref}" == "${fixed_ref}" ]]
 }
 
+# -- CPU-lane runner-image gate (shell mirror of hal0.runners, #2126) --------
+# Answers the SAME question `cpu_lane_has_runner_image()` answers in Python:
+# does the `cpu` runner resolve to an image that can actually serve CPU
+# inference, or is it still carrying the Vulkan GPU toolbox as a placeholder?
+#
+# This is the gate behind HAL0_ALLOW_CPU_ONLY. That flag selects
+# `device = "cpu"` on every seeded slot; it does NOT conjure a CPU image. On
+# #2126's box the two combined produced an install that completed, reported
+# ready, and crash-looped the brain slot with SIGILL forever — the whole
+# hardware class broken on first run, visible only in the slot journal.
+#
+# Same mirror posture as _hal0_vulkan_lane_serves_default_image above (and for
+# the same reason: preflight runs in Stage 1, before hal0 is pip-installed).
+# It reads the `cpu` Runner's image literal straight out of the source tree it
+# is about to install, so it sees neither the release manifest -- irrelevant
+# here, the `cpu` entry carries manifest_key=None and can never take a pin --
+# nor any config-level default_images override, which does not exist yet on a
+# fresh box. It DOES honour HAL0_TOOLBOX_IMAGE_CPU, because that is the tier
+# an operator who has built their own CPU llama-server would use, and it is
+# the one escape hatch this gate must not close.
+#
+# FAILS CLOSED, and the asymmetry is the opposite of the Vulkan mirror's: a
+# false "yes" ships the broken box #2126 reported, while a false "no" refuses
+# an install with a message naming the exact override that reopens it. So
+# anything it cannot parse answers "no".
+#
+# Test seams: HAL0_CPU_RUNNER_IMAGE_OVERRIDE (1/0, decides outright),
+# HAL0_RUNNERS_PY_OVERRIDE (path to the runners/__init__.py to read).
+_hal0_cpu_lane_has_runner_image() {
+    local override="${HAL0_CPU_RUNNER_IMAGE_OVERRIDE:-}"
+    if [[ -n "${override}" ]]; then
+        [[ "${override}" != "0" ]]
+        return
+    fi
+
+    # Tier 1 of resolve_runner_image(): the env override wins outright.
+    [[ -n "${HAL0_TOOLBOX_IMAGE_CPU:-}" ]] && return 0
+
+    local runners="${HAL0_RUNNERS_PY_OVERRIDE:-}"
+    if [[ -z "${runners}" ]]; then
+        local here
+        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+        runners="${here}/../../src/hal0/runners/__init__.py"
+    fi
+    [[ -r "${runners}" ]] || return 1
+
+    # The `cpu` entry's second positional argument is its image. The registry
+    # is one-argument-per-line, so: find `"cpu": Runner(`, skip the key
+    # positional, take the next non-comment line and strip the trailing comma.
+    local image_arg
+    image_arg="$(awk '
+        /^[[:space:]]*"cpu"[[:space:]]*:[[:space:]]*Runner\(/ { seen = 1; next }
+        seen && /^[[:space:]]*#/ { next }
+        seen == 1 { seen = 2; next }
+        seen == 2 {
+            sub(/^[[:space:]]+/, "", $0)
+            sub(/[[:space:]]*,[[:space:]]*$/, "", $0)
+            print
+            exit
+        }
+    ' "${runners}")"
+
+    [[ -n "${image_arg}" && "${image_arg}" != "FALLBACK_VULKAN_IMAGE" ]]
+}
+
+# Called at the TOP of every CPU-only branch in install.sh's Stage-1 GPU gate,
+# BEFORE anything tells the operator the install is proceeding.
+# HAL0_ALLOW_CPU_ONLY=1 (and the TTY confirm) chooses `device = "cpu"` for
+# every seeded slot — it does not choose a CPU IMAGE, and this build does not
+# have one. On a GPU-less box that combination installs cleanly, reports
+# itself ready, and then crash-loops the brain slot with SIGILL forever
+# (#2126).
+#
+# So: refuse, rather than complete an install that cannot serve a token. The
+# refusal names the one thing that actually reopens the path —
+# HAL0_TOOLBOX_IMAGE_CPU pointing at a CPU-built llama-server — and the gate
+# stands aside on its own the day the `cpu` runner is wired to a published CPU
+# toolbox, with no edit here.
+_cpu_only_image_gate() {
+    _hal0_cpu_lane_has_runner_image && return 0
+    err "This build has no CPU runner image — a CPU-only install cannot serve a model."
+    err "  The 'cpu' runner still resolves to the Vulkan GPU toolbox, so a device=cpu slot"
+    err "  launches a GPU llama-server build. On a box with no GPU that dies with SIGILL"
+    err "  (systemd status=132) about a second into model load and crash-loops, while"
+    err "  'hal0 slot list' keeps reporting the slot as 'warming'. See hal0 issue #2126."
+    err "  HAL0_ALLOW_CPU_ONLY=1 cannot change this: it selects device=cpu, not a CPU image."
+    err "Your options:"
+    err "  * forward a GPU into this container (the remedy printed above) — the supported path;"
+    err "  * if you have a CPU-built llama-server image, name it and re-run:"
+    err "      HAL0_TOOLBOX_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
+    return 1
+}
+
+# The CPU-only remedy the GPU-gate refusals print. Honest in both worlds: it
+# only offers HAL0_ALLOW_CPU_ONLY=1 on its own when that flag can actually
+# produce a working box (#2126). The old unconditional
+# "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." was the
+# installer's own printed remedy for a GPU-less box, and following it is
+# exactly how #2126's reporter got a crash-looping brain slot.
+_cpu_only_remedy_lines() {
+    if _hal0_cpu_lane_has_runner_image; then
+        err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+    else
+        err "There is no working CPU-only path in this build: the 'cpu' runner has no CPU image,"
+        err "  so HAL0_ALLOW_CPU_ONLY=1 on its own would install a box that crash-loops (#2126)."
+        err "  With your own CPU-built llama-server image:"
+        err "      HAL0_TOOLBOX_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
+    fi
+}
+
 # ── Bootstrap-prereq parity (#1098) ────────────────────────────────────────
 # bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
 # curl/tar/sha256sum in its own preflight() before it ever fetches the

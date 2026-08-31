@@ -1,6 +1,6 @@
 {
   "_schema": "hal0.manifest.v1",
-  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release — the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See docs/.devdocs/PLAN.md §12 and §17 (maintainer-local).",
+  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, cpu, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release — the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See docs/.devdocs/PLAN.md §12 and §17 (maintainer-local).",
   "version": "1.0.0",
   "channel": "stable",
   "toolbox_images": {
@@ -13,6 +13,11 @@
       "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
       "digest": "sha256:a47ca05ea08bc895e355d28153aa60873f1a13919eb40b16876bf9f2827499fd",
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
+    },
+    "cpu": {
+      "tag": "ghcr.io/hal0ai/hal0-toolbox-cpu:v1",
+      "digest": "sha256:eab70d0355981c08133a6fff28e472690c7091f6e968da1a2f269bdfa29311a1",
+      "_notes": "llama.cpp CPU-only backend (GGML_VULKAN/CUDA/HIP=OFF), built GGML_NATIVE=OFF so the binary is portable across x86_64 rather than tuned to the builder — that portability is the point: the `cpu` runner previously carried the Vulkan GPU toolbox and SIGILLed at model load on GPU-less boxes (#2126). Built from packaging/toolbox/cpu.Dockerfile by the `cpu` row of .github/workflows/toolbox.yml; linux/amd64 only. Digest is the GHCR registry content digest for :v1 (confirmed 2026-08-31 via scripts/update-toolbox-digests.sh). The pinned image was pulled and exercised at that digest: `llama-server --version` reports llama.cpp 571d0d5 built with GNU 13.3.0 for Linux x86_64, `--list-devices` is empty (no GPU backend registered), ENTRYPOINT is /opt/llama-vulkan/llama-server and USER is hal0. cpu.Dockerfile's LLAMA_CPP_REF is unpinned (master), so this digest is what makes the shipped build reproducible."
     },
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
