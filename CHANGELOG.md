@@ -24,6 +24,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-31
+
 ### Highlights
 
 - **The `pi` coding agent is installable alongside Hermes** — a cli-kind
