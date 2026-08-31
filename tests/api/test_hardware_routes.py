@@ -648,3 +648,36 @@ class TestLiveUptime:
         resp = client.get("/api/hardware")
         assert resp.status_code == 200, resp.text
         assert resp.json()["uptime_s"] == 4110
+
+
+def test_flatten_uma_carries_live_gtt_used_and_free() -> None:
+    """UMA flatten surfaces the live host-truth GTT occupancy (feat: GTT
+    feasibility). The sysfs counters are host truth even inside an LXC
+    container, where the cgroup-shaped meminfo lies about what a GTT
+    allocation can actually get."""
+    info = HardwareInfo(
+        cpu_model="AMD Ryzen AI Max+ PRO 395",
+        ram_mb=128 * 1024,
+        gpus=[GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=96 * 1024)],
+        npu=NPUInfo(present=False),
+        platform="strix-halo",
+    ).model_dump(mode="python")
+    sample = _uma_sample(gtt_total_mb=96.0 * 1024, gtt_used_mb=30.0 * 1024)
+    flat = _flatten_for_ui(info, sample)
+    assert flat["gtt_used_mb"] == 30.0 * 1024
+    assert flat["gtt_free_mb"] == 66.0 * 1024
+
+
+def test_flatten_non_uma_gtt_occupancy_is_none() -> None:
+    """Discrete / no-sample shapes report None (unknown), not a fake 0."""
+    info = HardwareInfo(
+        cpu_model="AMD Ryzen 9 7950X",
+        ram_mb=32 * 1024,
+        gpus=[GPUInfo(vendor="amd", name="Radeon RX 7900 XTX", vram_mb=24 * 1024)],
+        npu=NPUInfo(present=False),
+        platform="bare-metal-amd-gpu",
+    ).model_dump(mode="python")
+    assert _flatten_for_ui(info, _discrete_sample())["gtt_used_mb"] is None
+    assert _flatten_for_ui(info, _discrete_sample())["gtt_free_mb"] is None
+    assert _flatten_for_ui(info)["gtt_used_mb"] is None
+    assert _flatten_for_ui(info)["gtt_free_mb"] is None

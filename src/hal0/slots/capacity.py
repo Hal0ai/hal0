@@ -205,6 +205,51 @@ def estimate_file_size_kv_mb(
     return round(model_mb + companion_mb + kv_mb, 1)
 
 
+def gtt_fit_warning(
+    needed_mb: float,
+    *,
+    gtt_free_mb: float | None,
+    gtt_total_mb: float | None,
+) -> str | None:
+    """WARN-only GTT feasibility check: does ``needed_mb`` fit in free GTT?
+
+    Pure function — no I/O. Returns a human-readable warning string when the
+    incoming model's weights (``needed_mb``, MiB) exceed the free GTT pool
+    (``gtt_total - gtt_used`` from the amdgpu ``mem_info_gtt_*`` sysfs
+    counters, see :attr:`hal0.hardware.gpu_view.GPUMemorySample.gtt_free_mb`),
+    ``None`` otherwise.
+
+    Why this exists (field finding, LXC on a UMA Proxmox host): GTT
+    allocations draw from the HOST's free RAM, so the container's
+    lxcfs-shaped ``/proc/meminfo`` can show tens of GiB "available" while
+    the actual weight allocation fails with ``cudaMalloc failed: out of
+    memory``. The amdgpu sysfs counters are host truth and readable inside
+    the container, so a pre-load comparison against free GTT catches the
+    clearly-infeasible case the cgroup view lies about.
+
+    Deliberately NEVER blocks — the GTT counters can lag (amdgpu grows the
+    GART limit dynamically, evictions land asynchronously), so this is an
+    operator signal, not an admission gate. The blocking admission path
+    stays :mod:`hal0.slots.preload_evict`.
+
+    ``None`` is also returned when either counter is missing (non-AMD /
+    no-GPU host — fail-soft, matching the sample's own contract) or when
+    ``needed_mb`` is not a positive number ("unknown size" never warns).
+    """
+    if gtt_free_mb is None or gtt_total_mb is None:
+        return None
+    if not needed_mb or needed_mb <= 0:
+        return None
+    if needed_mb <= gtt_free_mb:
+        return None
+    return (
+        f"model needs ~{needed_mb / 1024.0:.1f} GiB but only "
+        f"{gtt_free_mb / 1024.0:.1f} GiB of the {gtt_total_mb / 1024.0:.1f} GiB "
+        f"GTT pool is free on the host — the load will likely fail to "
+        f"allocate; free host memory or evict a resident model first"
+    )
+
+
 def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     """Resolve the effective context window (tokens) for a model.
 
@@ -767,4 +812,5 @@ __all__ = [
     "_host_has_capable_gpu",
     "build_per_slot",
     "estimate_file_size_kv_mb",
+    "gtt_fit_warning",
 ]

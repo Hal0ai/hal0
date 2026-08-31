@@ -24,6 +24,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Host-truth GTT feasibility signal.** `GET /api/hardware` now carries live
+  `gtt_used_mb`/`gtt_free_mb` from the amdgpu `mem_info_gtt_*` sysfs counters
+  (host truth even inside an LXC container, where the cgroup-shaped meminfo
+  can show tens of GiB "available" while a GTT weight allocation fails), the
+  slot load path emits an advisory `slot.gtt_feasibility` warning — never a
+  block — when a model's weights exceed the free GTT pool, and the dashboard's
+  Detected-hardware panel shows the live free-GTT figure.
+
 ## [1.1.0] — 2026-08-31
 
 ### Highlights
