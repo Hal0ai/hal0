@@ -339,6 +339,20 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
+    // Pin the catalogue empty via the #1498 passthrough hatch (forced-mock
+    // otherwise substitutes the baked fixture, whose downloaded catalogue
+    // row would add a "catalogued · downloaded" option and break the exact
+    // catalog-count assertion below — that lane has its own test).
+    await page.addInitScript(() => {
+      ;(window as unknown as { __hal0MockPassthrough: string[] }).__hal0MockPassthrough = ['/api/runner-images']
+    })
+    await page.route('**/api/runner-images', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ images: [], families: [] }),
+      }),
+    )
     await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx', image_pin: null }, EMBED])
     await page.goto('/#slots/primary')
 
@@ -360,6 +374,81 @@ test.describe('Slot edit controls (/slots)', () => {
     await imageSel.selectOption('ghcr.io/hal0ai/tb:cuda')
     await expect(binarySel).toHaveValue('cuda::cuda')
     await expect(binarySel.locator('option')).toHaveCount(1)
+  })
+
+  test('HW grid — downloaded catalogue image outside the release catalog is offerable as a pin', async ({ page }) => {
+    // #2118: combined-upstream is wired to slots ONLY via per-slot
+    // image_pin — it has no RUNNER_IMAGES family, so it must surface in the
+    // "catalogued · downloaded" optgroup instead of hiding behind the
+    // free-text custom hatch.
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          hardware: {},
+          features: {},
+          podman_context: 'rootless',
+          backends: {
+            rocmfpx: {
+              image: 'ghcr.io/hal0ai/tb:dual',
+              runtime_family: 'llamacpp',
+              device_class: 'gpu',
+              backend: 'rocm',
+              supported_backends: ['rocm', 'vulkan'],
+              format_arch: 'gguf',
+              state: 'installed',
+            },
+          },
+        }),
+      }),
+    )
+    await page.addInitScript(() => {
+      ;(window as unknown as { __hal0MockPassthrough: string[] }).__hal0MockPassthrough = ['/api/runner-images']
+    })
+    await page.route('**/api/runner-images', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          images: [
+            {
+              id: 'combined-upstream',
+              image: 'ghcr.io/hal0ai/hal0-combined-upstream',
+              tag: '0829',
+              downloaded: true,
+              store_state: 'present',
+              notes: 'pin-only upstream variant',
+            },
+            {
+              // Not downloaded — must NOT be offered.
+              id: 'rocm',
+              image: 'ghcr.io/hal0ai/hal0-toolbox-rocm',
+              tag: 'v1',
+              downloaded: false,
+              store_state: 'missing',
+              notes: '',
+            },
+          ],
+          families: [],
+        }),
+      }),
+    )
+    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx', image_pin: null }, EMBED])
+    await page.goto('/#slots/primary')
+
+    const imageSel = page.getByTestId('slot-hw-image-pin')
+    await expect(imageSel).toBeVisible()
+    // default + 1 catalog image + 1 catalogued·downloaded + custom hatch.
+    await expect(imageSel.locator('option')).toHaveCount(4)
+    const grouped = imageSel.locator('optgroup[label="catalogued · downloaded"] option')
+    await expect(grouped).toHaveCount(1)
+    await expect(grouped).toHaveText(/combined-upstream/)
+
+    // Picking it lands on the out-of-catalog pin path (fallback Backend
+    // union) — the form never dead-ends.
+    await imageSel.selectOption('ghcr.io/hal0ai/hal0-combined-upstream:0829')
+    await expect(imageSel).toHaveValue('ghcr.io/hal0ai/hal0-combined-upstream:0829')
   })
 
   test('HW grid — fit-check warns on a persisted pair the catalog does not offer (§4)', async ({ page }) => {
