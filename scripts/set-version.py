@@ -2,11 +2,12 @@
 """Rollback-capable version synchronisation across hal0 release artifacts.
 
 Updates all top-level version fields (pyproject.toml, ui/package.json,
-ui/package-lock.json, manifest.json) and the PEP 440 version of the
-editable ``hal0ai`` package in uv.lock. Every candidate is validated before
-per-file atomic replacement via ``os.replace``. Originals are retained in a
+ui/package-lock.json, manifest.json), the PEP 440 version of the editable
+``hal0ai`` package in uv.lock, and the version token in README.md's
+front-page status blockquote. Every candidate is validated before per-file
+atomic replacement via ``os.replace``. Originals are retained in a
 repository-local transaction directory. Replacement, ``uv lock``, and
-postvalidation failures trigger per-file atomic restoration; the five-file
+postvalidation failures trigger per-file atomic restoration; the six-file
 update is not globally atomic.
 
 Usage::
@@ -144,6 +145,32 @@ def _update_uv_lock_version(lock_text: str, new_version_pep440: str) -> str:
     return "\n".join(result)
 
 
+_README_STATUS_LINE_RE = re.compile(
+    r"(^> \*\*v)(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?)\b",
+    re.MULTILINE,
+)
+
+
+def _update_readme_status_line(text: str, version: str) -> str:
+    """Rewrite the version token in README.md's front-page status blockquote.
+
+    The blockquote is the public repo's front page — it has gone stale on
+    every version cut that skipped it (#1992). A silent no-op here would
+    recreate exactly that bug, so this raises loudly instead of leaving the
+    text untouched when the anchor pattern is not found: the pattern must be
+    updated in lockstep whenever that blockquote's wording changes.
+    """
+    new_text, count = _README_STATUS_LINE_RE.subn(rf"\g<1>{version}", text, count=1)
+    if count == 0:
+        raise ValueError(
+            "README.md: could not locate the front-page status blockquote's "
+            "version token (expected a line matching '> **vX.Y.Z ...') to "
+            "update — update _README_STATUS_LINE_RE in scripts/set-version.py "
+            "rather than skipping the README"
+        )
+    return new_text
+
+
 def _update_file_atomic(dst: Path, content: str, tmpdir: Path) -> Path:
     """Write *content* to a tempfile in *tmpdir*, return the temp path."""
     fd, tmp_path = tempfile.mkstemp(
@@ -246,6 +273,12 @@ def set_version(root: Path, version: str) -> None:
             )
     candidates.append((lock_path, lock_text_new))
 
+    # README.md — front-page status blockquote version token
+    readme_path = root / "README.md"
+    readme_text = readme_path.read_text(encoding="utf-8")
+    readme_new = _update_readme_status_line(readme_text, version)
+    candidates.append((readme_path, readme_new))
+
     # 3. Write every candidate to a shared transaction directory under the
     # repository root.  Keeping candidates beside their destinations guarantees
     # os.replace() stays on one filesystem (and cannot fail with EXDEV).
@@ -272,6 +305,11 @@ def set_version(root: Path, version: str) -> None:
                         f"validation error: {dst} channel mismatch "
                         f"({re_parsed_json.get('channel')!r} != {channel!r})"
                     )
+            # Validate: README.md — status blockquote carries the new version
+            if dst == readme_path:
+                re_matched = _README_STATUS_LINE_RE.search(content)
+                if not re_matched or re_matched.group(2) != version:
+                    raise ValueError(f"validation error: {dst} version mismatch after rewrite")
             # Validate: uv.lock
             if dst == lock_path:
                 import tomllib
