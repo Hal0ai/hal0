@@ -18,7 +18,7 @@ class _FakeRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
-    def run(self, argv, **kwargs):  # noqa: ANN001 — mirrors subprocess.run
+    def run(self, argv, **kwargs):
         self.calls.append(list(argv))
 
         class _Done:
@@ -231,7 +231,7 @@ def test_status_from_daemon_perspective(home: Path, monkeypatch: pytest.MonkeyPa
 
     real_access = driver_mod.os.access
 
-    def _deny_home(path, mode):  # noqa: ANN001 — mirrors os.access
+    def _deny_home(path, mode):
         if Path(path) == home:
             return False
         return real_access(path, mode)
