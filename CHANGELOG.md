@@ -55,28 +55,44 @@ applying. Add those subsections to a version's section to surface them; see
   reported as success. Still never fatal — the install continues. A failed
   structured-output probe now also names an unbound brain slot when that is the
   actual shape on disk.
-- **A CPU-only install no longer completes green and then crash-loops.**
-  `HAL0_ALLOW_CPU_ONLY=1` selects `device = "cpu"`; it does not select a CPU
-  image, and the `cpu` runner still resolves to the Vulkan GPU toolbox, so the
-  brain slot died with SIGILL (`status=132`) a second into model load and
-  restarted forever while `hal0 slot list` reported `warming` (#2126). Three
-  changes, none of which presumes the open product call about what the `cpu`
-  runner should point at:
-  - the slot unit's `RestartPreventExitStatus=` now also names `132`, so a
-    SIGILL parks the unit instead of burning the restart ramp — SIGILL only,
-    because a restart can never fix an instruction this CPU cannot execute,
-    while SIGSEGV/SIGABRT/SIGKILL can be transient after load and keep their
-    runway;
-  - the runner entrypoint translates a load-phase SIGILL/SIGABRT/SIGSEGV into
-    the existing exit 64 with a diagnostic naming the signal, and
-    `unit_failure_reason` now reads `ExecMainStatus` so `hal0 status` and the
+- **CPU-only installs work.** `HAL0_ALLOW_CPU_ONLY=1` — the installer's own
+  printed remedy for a box with no GPU — produced an install that completed,
+  reported itself ready, and crash-looped the brain slot with SIGILL
+  (`status=132`) forever, while `hal0 slot list` showed `warming` (#2126). The
+  `cpu` runner carried `FALLBACK_VULKAN_IMAGE`, the **GPU** toolbox, so a
+  correctly derived `device = "cpu"` slot launched a GPU llama-server build.
+
+  The `cpu` runner now resolves `ghcr.io/hal0ai/hal0-toolbox-cpu:v1` — a real
+  CPU-only llama.cpp build (`GGML_VULKAN/CUDA/HIP=OFF`, and `GGML_NATIVE=OFF`
+  so the binary is portable rather than tuned to the build machine) — with a
+  `cpu` entry in `manifest.json`'s `toolbox_images`, so it takes a digest pin
+  like every other runner. The image was already built and published by
+  `.github/workflows/toolbox.yml`; it had simply never been wired to the
+  runner. GPU boxes are untouched: they resolve `rocmfpx`, a different image
+  lineage.
+
+  Shipped alongside it, as hardening that stands whatever a slot's image turns
+  out to be:
+  - the slot unit's `RestartPreventExitStatus=` also names `132`, so a SIGILL
+    parks the unit instead of burning the restart ramp. SIGILL only: a restart
+    can never fix an instruction this CPU cannot execute, while
+    SIGSEGV/SIGABRT/SIGKILL can be transient after load and keep their runway;
+  - both runner entrypoints translate a load-phase SIGILL/SIGABRT/SIGSEGV into
+    the existing exit 64 (#2037) with a diagnostic naming the signal, and
+    `unit_failure_reason` now reads `ExecMainStatus`, so `hal0 status` and the
     dashboard say "SIGILL — the image's CPU/ISA baseline does not match this
     host's CPU" instead of a bare `result=exit-code`;
-  - install.sh refuses the CPU-only path while no CPU runner image exists,
-    naming `HAL0_TOOLBOX_IMAGE_CPU` as the way through, and no longer prints
-    "To install CPU-only anyway, re-run with `HAL0_ALLOW_CPU_ONLY=1`" as a
-    remedy it cannot deliver. The gate lifts on its own the day the `cpu`
-    runner is wired to a real CPU toolbox.
+  - the installer verifies the `cpu` runner actually has an image before it
+    announces that a CPU-only install is proceeding. It passes on a shipped
+    build; if that runner ever loses its image again the install refuses,
+    naming `HAL0_TOOLBOX_IMAGE_CPU` as the way through, rather than repeating
+    the "To install CPU-only anyway, re-run with `HAL0_ALLOW_CPU_ONLY=1`"
+    remedy that produced this report.
+
+  Not covered: the bench harness's `cpu` lane still uses the GPU image, because
+  it needs `llama-bench`, which `hal0-toolbox-cpu` does not build. And
+  `cpu.Dockerfile` still builds llama.cpp from `master` rather than a pinned
+  ref — the manifest digest is what holds the shipped surface steady today.
 
 ### Changed
 

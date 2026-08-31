@@ -251,7 +251,7 @@ def test_the_cpu_lane_mirror_agrees_with_the_python_predicate() -> None:
     ``hal0.runners.cpu_lane_has_runner_image`` (preflight runs before hal0 is
     pip-installed, so it cannot just call it). Two implementations of one
     predicate drift; this is the tripwire — and the one that fires the day
-    somebody wires the ``cpu`` runner to a real image and forgets the mirror.
+    somebody moves the ``cpu`` runner and forgets the mirror.
     """
     from hal0.runners import cpu_lane_has_runner_image
 
@@ -263,44 +263,70 @@ def test_the_cpu_lane_mirror_agrees_with_the_python_predicate() -> None:
     )
 
 
-def test_the_cpu_lane_has_no_image_in_this_checkout() -> None:
-    """The premise of #2126, pinned so the fix's blast radius stays visible:
-    the ``cpu`` runner is still the Vulkan GPU toolbox. When somebody
-    publishes a CPU toolbox and wires it, this is the test that says "the
-    install gate just turned itself off" — the intended behaviour, but it
-    should be acknowledged here rather than discovered on a box.
+def test_the_cpu_lane_has_a_published_image_in_this_checkout() -> None:
+    """The state #2126 was closed in: the ``cpu`` runner names
+    hal0-toolbox-cpu (a real CPU llama-server, GGML_NATIVE=OFF) and carries a
+    manifest key, rather than the Vulkan GPU toolbox with no pin.
+
+    Both halves matter. If a future edit reverts either, the install gate
+    below starts refusing CPU-only installs — which is the safe outcome, but
+    this is the test that says WHY, instead of leaving someone to work it out
+    from a refusal message on a box.
     """
     from hal0.config.schema import FALLBACK_VULKAN_IMAGE
     from hal0.runners import RUNNER_IMAGES, cpu_lane_has_runner_image
 
-    assert RUNNER_IMAGES["cpu"].image == FALLBACK_VULKAN_IMAGE
-    assert RUNNER_IMAGES["cpu"].manifest_key is None
-    assert cpu_lane_has_runner_image() is False
+    assert RUNNER_IMAGES["cpu"].image != FALLBACK_VULKAN_IMAGE
+    assert RUNNER_IMAGES["cpu"].image == "ghcr.io/hal0ai/hal0-toolbox-cpu:v1"
+    assert RUNNER_IMAGES["cpu"].manifest_key == "cpu"
+    assert cpu_lane_has_runner_image() is True
 
 
-def test_the_cpu_lane_mirror_honours_the_env_override() -> None:
-    """``HAL0_TOOLBOX_IMAGE_CPU`` is tier 1 of ``resolve_runner_image`` and the
-    single escape hatch the gate must not close: an operator who built their
-    own CPU llama-server names it and the install proceeds."""
-    proc = _run_preflight(_ASK, HAL0_TOOLBOX_IMAGE_CPU="ghcr.io/example/llama-cpu:v1")
+def test_the_cpu_lane_mirror_reads_the_real_registry() -> None:
+    """The mirror's job: parse the shipped registry entry, not a fixture. It
+    reads the ``cpu`` Runner's image literal out of the source tree preflight
+    is about to install."""
+    proc = _run_preflight(_ASK)
     assert proc.stdout.strip() == "yes", proc.stderr
 
 
-def test_the_cpu_lane_mirror_reads_a_repointed_registry(tmp_path: Path) -> None:
-    """The gate lifts on its own the day the registry entry is repointed — no
-    edit in preflight.sh, no second place to remember."""
+def test_the_cpu_lane_mirror_says_no_on_a_registry_reverted_to_the_fallback(
+    tmp_path: Path,
+) -> None:
+    """The #2126 world, reconstructed through the documented seam: a registry
+    whose ``cpu`` entry is back on ``FALLBACK_VULKAN_IMAGE``. The mirror must
+    recognise the placeholder by name, which is what lets the gate below
+    refuse rather than ship a crash-looping box."""
     fake = tmp_path / "runners.py"
     fake.write_text(
         "RUNNER_IMAGES = {\n"
         '    "cpu": Runner(\n'
         "        # a comment ahead of the key positional\n"
         '        "cpu",\n'
-        '        "ghcr.io/hal0ai/hal0-toolbox-cpu:v1",\n'
+        "        FALLBACK_VULKAN_IMAGE,\n"
         '        "llama-server",\n'
         "    ),\n"
         "}\n"
     )
     proc = _run_preflight(_ASK, HAL0_RUNNERS_PY_OVERRIDE=str(fake))
+    assert proc.stdout.strip() == "no", proc.stderr
+
+
+def test_the_cpu_lane_mirror_honours_the_env_override(tmp_path: Path) -> None:
+    """``HAL0_TOOLBOX_IMAGE_CPU`` is tier 1 of ``resolve_runner_image`` and the
+    escape hatch the gate must never close: an operator running their own CPU
+    llama-server build names it and the install proceeds — even from the
+    reverted-registry world, which is the only world where it matters."""
+    fake = tmp_path / "runners.py"
+    fake.write_text(
+        'RUNNER_IMAGES = {\n    "cpu": Runner(\n        "cpu",\n'
+        "        FALLBACK_VULKAN_IMAGE,\n    ),\n}\n"
+    )
+    proc = _run_preflight(
+        _ASK,
+        HAL0_RUNNERS_PY_OVERRIDE=str(fake),
+        HAL0_TOOLBOX_IMAGE_CPU="ghcr.io/example/llama-cpu:v1",
+    )
     assert proc.stdout.strip() == "yes", proc.stderr
 
 
@@ -312,10 +338,22 @@ def test_the_cpu_lane_mirror_fails_closed_on_an_unreadable_registry(tmp_path: Pa
     assert proc.stdout.strip() == "no", proc.stderr
 
 
-def test_cpu_only_image_gate_refuses_and_says_why() -> None:
-    """The gate itself: non-zero, and the message names the fault (SIGILL /
-    132), the lie it replaces ("warming" forever), and the override."""
-    proc = _run_preflight("if _cpu_only_image_gate; then echo pass; else echo refused; fi")
+_GATE = "if _cpu_only_image_gate; then echo pass; else echo refused; fi"
+
+
+def test_cpu_only_image_gate_passes_on_a_shipped_build() -> None:
+    """With hal0-toolbox-cpu wired, `HAL0_ALLOW_CPU_ONLY=1` is a supported
+    path again and the gate stands aside."""
+    proc = _run_preflight(_GATE)
+    assert proc.stdout.strip() == "pass", proc.stderr
+
+
+def test_cpu_only_image_gate_refuses_and_says_why_without_a_cpu_image() -> None:
+    """The regression guard, driven through the decides-outright seam: if the
+    CPU lane ever loses its image again, the install stops here with a message
+    naming the fault (SIGILL / 132), the lie it replaces ("warming" forever),
+    and the override that reopens the path."""
+    proc = _run_preflight(_GATE, HAL0_CPU_RUNNER_IMAGE_OVERRIDE="0")
     assert proc.stdout.strip() == "refused", proc.stdout
     assert "SIGILL" in proc.stderr
     assert "132" in proc.stderr
@@ -326,30 +364,22 @@ def test_cpu_only_image_gate_refuses_and_says_why() -> None:
     assert "To install CPU-only anyway" not in proc.stderr
 
 
-def test_cpu_only_image_gate_passes_once_an_image_exists() -> None:
-    proc = _run_preflight(
-        "if _cpu_only_image_gate; then echo pass; else echo refused; fi",
-        HAL0_TOOLBOX_IMAGE_CPU="ghcr.io/example/llama-cpu:v1",
-    )
-    assert proc.stdout.strip() == "pass", proc.stderr
+def test_cpu_only_remedy_offers_the_flag_on_a_shipped_build() -> None:
+    """The GPU-gate refusal's CPU-only remedy. Honest again now that following
+    it produces a working box."""
+    proc = _run_preflight("_cpu_only_remedy_lines")
+    assert "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." in proc.stderr
 
 
 def test_cpu_only_remedy_is_honest_when_there_is_no_cpu_image() -> None:
-    """install.sh's GPU-gate refusals used to say "To install CPU-only anyway,
-    re-run with HAL0_ALLOW_CPU_ONLY=1." unconditionally. Following that
-    printed remedy is exactly how #2126 happened, so it may not be printed
-    while the CPU lane has no image."""
-    proc = _run_preflight("_cpu_only_remedy_lines")
+    """The other half of the same helper. install.sh's GPU-gate refusals used
+    to print "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+    UNCONDITIONALLY — following that printed remedy is exactly how #2126
+    happened — so it must never be printed while the CPU lane has no image."""
+    proc = _run_preflight("_cpu_only_remedy_lines", HAL0_CPU_RUNNER_IMAGE_OVERRIDE="0")
     assert "To install CPU-only anyway" not in proc.stderr
     assert "no working CPU-only path" in proc.stderr
     assert "HAL0_TOOLBOX_IMAGE_CPU" in proc.stderr
-
-
-def test_cpu_only_remedy_returns_when_a_cpu_image_exists() -> None:
-    proc = _run_preflight(
-        "_cpu_only_remedy_lines", HAL0_TOOLBOX_IMAGE_CPU="ghcr.io/example/llama-cpu:v1"
-    )
-    assert "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." in proc.stderr
 
 
 def test_every_cpu_only_optin_in_install_sh_runs_the_gate_first() -> None:

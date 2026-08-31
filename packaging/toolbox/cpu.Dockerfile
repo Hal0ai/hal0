@@ -1,36 +1,57 @@
-# hal0-toolbox-cpu — llama.cpp CPU-only backend for CI smoke
+# hal0-toolbox-cpu — llama.cpp CPU-only backend, the `cpu` runner's image
 #
-# Target image:    hal0-toolbox-cpu:ci  (built in-workflow; never published)
-# Local dev tag:   hal0-toolbox-cpu:dev
+# Published image:  ghcr.io/hal0ai/hal0-toolbox-cpu:v1
+# Local dev tag:    hal0-toolbox-cpu:dev
 #
-# Why a separate image:
-#   The Vulkan toolbox (vulkan.Dockerfile) builds llama.cpp with
-#   -DGGML_VULKAN=ON and depends on a Vulkan ICD at runtime.  On a
-#   GitHub-hosted runner with no GPU and no Vulkan ICD that actually
-#   serves model layers (Mesa's llvmpipe loads but doesn't usefully back
-#   ggml-vulkan tensor allocations), llama-server cannot complete model
-#   load — the slot lands in IDLE rather than READY because
-#   /v1/models stays empty (see src/hal0/slots/manager.py:1422).  This
-#   broke tier β integration on every commit since 2026-05-18 once the
-#   modelless-READY adoption guard (commit dc71fcf) landed.
+# Built and pushed by the `cpu` row of .github/workflows/toolbox.yml on every
+# push to main that touches packaging/toolbox/**, and digest-pinned in
+# manifest.json under toolbox_images.cpu.
 #
-#   PLAN.md §10.2 names the CI tier "Vulkan-CPU baseline".  This image
-#   is that baseline — same llama.cpp, same provider contract, just
-#   compiled without the Vulkan backend so a model actually loads on a
-#   plain Ubuntu runner.  Production stays on vulkan.Dockerfile / Strix
-#   Halo iGPU; rocm.Dockerfile is unchanged.
+# WHAT THIS IMAGE IS FOR (updated on #2126):
+#   It began life as the CI slot-integration baseline (#75) — the Vulkan
+#   toolbox built llama.cpp with -DGGML_VULKAN=ON and needs a Vulkan ICD that
+#   really backs ggml tensor allocations, which a GitHub-hosted runner does
+#   not have (Mesa's llvmpipe loads but does not usefully serve model layers),
+#   so llama-server never finished model load and the slot stuck in IDLE.
 #
-# Provider contract (matches vulkan.Dockerfile so the LlamaServerProvider
-# treats it identically when HAL0_TOOLBOX_IMAGE_VULKAN points here):
-#   - binary path:      /opt/llama-vulkan/llama-server   (same path as the
-#                       vulkan image — keeps provider/env defaults intact)
+#   It is now ALSO the production image for the `cpu` runner
+#   (hal0.runners.RUNNER_IMAGES["cpu"]). Before #2126 that runner carried
+#   FALLBACK_VULKAN_IMAGE — the GPU toolbox — so a correctly derived
+#   `device = "cpu"` slot launched a GPU llama-server build and died with
+#   SIGILL a second into model load, crash-looping forever while `hal0 slot
+#   list` reported `warming`. This image is the one that actually runs there.
+#
+#   GGML_NATIVE=OFF below is load-bearing for that role, not just a CI
+#   convenience: it keeps the binary portable across x86_64 instead of tuned
+#   to whatever CPU the builder drew, which is exactly the property whose
+#   absence produces a SIGILL on someone else's box.
+#
+#   GPU boxes are unaffected — they resolve `rocmfpx`
+#   (DEFAULT_ROCMFPX_IMAGE), a different lineage entirely.
+#
+# Provider contract:
+#   - ENTRYPOINT MUST be llama-server itself. The quadlet renderer emits the
+#     slot's argv as `Exec=` AFTER the image (see _render_quadlet_from_plan in
+#     src/hal0/providers/container.py), i.e. ARGS ONLY — never prepend
+#     "llama-server" to command[0] or the binary sees its own name as a flag.
+#     This is the ONE thing the host side depends on.
+#   - binary path:      /opt/llama-vulkan/llama-server
 #   - lib path:         /opt/llama-vulkan/lib
-#   - ENTRYPOINT MUST be llama-server itself; ContainerSpec.command[] is
-#     ARGS ONLY (see llama_server.py:326 — never prepend "llama-server"
-#     to command[0] or the binary sees its own name as a flag).
+#     Both are INTERNAL to this image and no longer referenced anywhere under
+#     src/ (checked 2026-08-31 — nothing outside this file mentions
+#     /opt/llama-vulkan). The prefix is historical: it was chosen for path
+#     parity with a vulkan.Dockerfile that no longer exists in this tree, back
+#     when the provider hardcoded a binary path per backend. Renaming it is
+#     therefore safe but pointless churn; it is kept so the built image and
+#     its ENTRYPOINT/PATH/LD_LIBRARY_PATH lines stay self-consistent.
 #   - runtime devices:  none (--device flags from ContainerSpec are
-#                       harmless: docker accepts them, the CPU build
+#                       harmless: podman accepts them, the CPU build
 #                       simply ignores GPU hardware).
+#   - NOT included: the #2037 fail-fast entrypoint
+#     (packaging/runner/rocmfpx/entrypoint.sh), which supervises llama-server
+#     and translates a died-during-load into exit 64. A slot on this image
+#     therefore relies on the HOST-side half — the quadlet's
+#     RestartPreventExitStatus=64 132 (#2126) — to fail fast on SIGILL.
 #
 # Build:
 #   docker build -t hal0-toolbox-cpu:dev -f packaging/toolbox/cpu.Dockerfile .
@@ -43,8 +64,16 @@
 # ─── Stage 1 — builder ────────────────────────────────────────────────────────
 FROM ubuntu:24.04 AS builder
 
-# llama.cpp git ref.  Keep in lockstep with vulkan.Dockerfile so the CPU
-# baseline reflects the same upstream version we ship to users.
+# llama.cpp git ref.
+#
+# UNPINNED, and knowingly so as of #2126: toolbox.yml passes no build-args, so
+# a :v1 push captures whatever llama.cpp master was at build time. That was
+# acceptable while this was a CI smoke image and is a known gap now that it is
+# the `cpu` runner's production image. What holds the shipped surface still is
+# the DIGEST pin in manifest.json (toolbox_images.cpu) — installs resolve the
+# exact image that was validated, not "whatever :v1 points at today" — so an
+# unreviewed upstream never reaches a box without a manifest change. Pinning a
+# ref here is the follow-up that makes the BUILD reproducible too.
 ARG LLAMA_CPP_REF=master
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -87,12 +116,11 @@ RUN cmake -S . -B build -G Ninja \
         -DLLAMA_BUILD_SERVER=ON \
     && cmake --build build --config Release --target llama-server -j"$(nproc)"
 
-# Stage the install layout the Provider expects.  We deliberately reuse
-# /opt/llama-vulkan/ (not /opt/llama-cpu/) so HAL0_TOOLBOX_IMAGE_VULKAN
-# can swap this image in without touching provider path resolution
-# (LlamaServerProvider.build_env at llama_server.py:162 hardcodes
-# /opt/llama-vulkan/llama-server as the default binary for backend=vulkan
-# AND backend=cpu).
+# Stage the install layout.  /opt/llama-vulkan/ (not /opt/llama-cpu/) is
+# historical — see the "Provider contract" note in the header: the provider no
+# longer resolves a binary path per backend, so nothing outside this image
+# depends on the prefix, and it is kept only so ENTRYPOINT / PATH /
+# LD_LIBRARY_PATH below stay self-consistent.
 RUN mkdir -p /out/opt/llama-vulkan/bin /out/opt/llama-vulkan/lib \
     && cp build/bin/llama-server /out/opt/llama-vulkan/llama-server \
     && (find build -name '*.so*' -exec cp -av {} /out/opt/llama-vulkan/lib/ \; || true) \
@@ -118,13 +146,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the built binary + any shared libs from the builder.
 COPY --from=builder /out/opt/llama-vulkan /opt/llama-vulkan
 
-# Wire the lib path the Provider hands to systemd via HAL0_LD_PATH.
+# Baked into the image, so the binary finds its libs with no host cooperation.
 ENV LD_LIBRARY_PATH=/opt/llama-vulkan/lib \
     PATH=/opt/llama-vulkan:${PATH}
 
 # Non-root user matching the systemd unit (User=hal0, Group=hal0).
-# Mirrors vulkan.Dockerfile — 1000:1000 lines up with the host hal0 user
-# when bind-mounted model paths are owned by 1000:1000.
+# 1000:1000 lines up with the host hal0 user when bind-mounted model paths
+# are owned by 1000:1000.
 RUN userdel --remove ubuntu 2>/dev/null || true \
     && groupadd --system --gid 1000 hal0 \
     && useradd  --system --uid 1000 --gid 1000 --shell /usr/sbin/nologin hal0
@@ -139,7 +167,8 @@ WORKDIR /var/lib/hal0
 # the slot range default (8081) as documentation.
 EXPOSE 8081
 
-# Healthcheck mirrors vulkan.Dockerfile.
+# Image-level healthcheck. Informational only for hal0 slots — the quadlet
+# renders its own Health* directives from the launch plan.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${HAL0_PORT:-8081}/v1/models" || exit 1
 

@@ -34,7 +34,7 @@ DIFFERENT image lineage from :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE`.
 Wiring ``rocmfpx`` to those manifest keys would silently
 downgrade every fresh/updated install's GPU runner to the old toolbox the
 day a manifest ships with real digests. So — unlike the spec's illustrative
-pseudocode — the ``rocmfpx``/``cuda``/``cpu`` entries below
+pseudocode — the ``rocmfpx``/``cuda`` entries below
 carry ``manifest_key=None`` (env override still applies; the manifest tier
 is simply skipped, exactly matching the OLD :func:`resolve_default_image`
 behaviour, which never consulted the manifest either). ``flm`` / ``kokoro``
@@ -42,6 +42,9 @@ behaviour, which never consulted the manifest either). ``flm`` / ``kokoro``
 keys and are wired accordingly — and ``promptforge`` joined them once the
 #1891 ct150 gate passed (2026-08-30): its manifest entry was created fresh
 for this image lineage, so the wrong-lineage trap above does not apply.
+``cpu`` joined them for the same reason on #2126: ``toolbox_images.cpu`` was
+created for the hal0-toolbox-cpu lineage this Runner names, so there is no
+older per-backend entry for the pin to resolve to by mistake.
 """
 
 from __future__ import annotations
@@ -91,6 +94,10 @@ RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine"
 #: constants live HERE (not duplicated in each provider module) — a
 #: provider that needs its old ``_DEFAULT_*_IMAGE`` name for back-compat
 #: imports it from :data:`RUNNER_IMAGES` instead of redefining the string.
+#: CPU llama-server (hal0#2126). Built from packaging/toolbox/cpu.Dockerfile
+#: by the ``cpu`` row of .github/workflows/toolbox.yml; GGML_NATIVE=OFF, so the
+#: binary is portable across x86_64 rather than tuned to the build machine.
+_CPU_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-cpu:v1"
 _FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 _KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 _MOONSHINE_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1"
@@ -193,20 +200,28 @@ RUNNER_IMAGES: dict[str, Runner] = {
     ),
     "cpu": Runner(
         "cpu",
-        # KNOWN PLACEHOLDER, not a CPU image (hal0#2126): this is the Vulkan
-        # GPU toolbox, so a correctly-derived `device = "cpu"` slot launches a
-        # Vulkan llama-server build and SIGILLs at model load on a GPU-less
-        # host. Picking the replacement is an open product call on #2126 (wire
-        # a published CPU toolbox here + a manifest_key, vs. refuse CPU-only
-        # installs outright). Until it is made, the CPU lane is gated at
-        # install time and diagnosed at runtime rather than silently crash-
-        # looping — see cpu_lane_has_runner_image() below.
-        FALLBACK_VULKAN_IMAGE,
+        # A REAL CPU image as of hal0#2126. This key carried
+        # FALLBACK_VULKAN_IMAGE — the Vulkan GPU toolbox — so a correctly
+        # derived `device = "cpu"` slot launched a GPU llama-server build and
+        # SIGILLed a second into model load on a GPU-less host, crash-looping
+        # forever while the slot read `warming`.
+        #
+        # hal0-toolbox-cpu was already built and published (packaging/toolbox/
+        # cpu.Dockerfile, the `cpu` row of .github/workflows/toolbox.yml since
+        # #1565); it had simply never been wired here. It builds llama.cpp with
+        # GGML_VULKAN/CUDA/HIP=OFF and — the property that matters for #2126 —
+        # GGML_NATIVE=OFF, i.e. a portable -march rather than one tuned to
+        # whatever CPU the builder happened to be.
+        _CPU_IMAGE,
         "llama-server",
         RunnerSupports(mtp=False, jinja=True, mmproj=True),
         "cpu",
         None,
-        None,
+        # Real key: manifest.json's toolbox_images.cpu was created for THIS
+        # image lineage (unlike the rocmfpx/vulkan wrong-lineage trap in the
+        # module docstring), so the pin resolves the same image this Runner's
+        # bundled tag names, and the release gate keeps the digest honest.
+        "cpu",
         supported_backends=("cpu",),
         format_arch="gguf",
     ),
@@ -369,19 +384,24 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
 def cpu_lane_has_runner_image() -> bool:
     """Does the ``cpu`` runner resolve to an image that can serve CPU inference?
 
-    ``False`` means the CPU lane is a PLACEHOLDER, not a lane: the ``cpu``
-    runner still carries :data:`~hal0.config.schema.FALLBACK_VULKAN_IMAGE` —
-    the GPU toolbox — as its bundled default, so a correctly-derived
-    ``device = "cpu"`` slot launches a Vulkan llama-server build, which SIGILLs
-    at model load on a GPU-less host (hal0#2126). No published CPU toolbox is
-    wired to this key, and ``manifest_key=None`` means no digest pin can
-    arrive through the manifest tier either.
+    ``True`` on a shipped build: the ``cpu`` runner names :data:`_CPU_IMAGE`
+    (hal0-toolbox-cpu, built GGML_NATIVE=OFF) and carries a manifest pin. This
+    predicate is the REGRESSION GUARD for how #2126 happened, not a
+    description of a known-broken state.
 
-    ``True`` means SOMETHING repointed it — the ``HAL0_TOOLBOX_IMAGE_CPU`` env
-    override (an operator who built their own CPU llama-server), or the
-    registry entry itself once a real CPU image is published and wired. This
-    goes through :func:`resolve_runner_image`, so it answers about the image
-    that would ACTUALLY be pulled, not about the literal in the table.
+    ``False`` means the CPU lane has fallen back to a placeholder — the entry
+    carrying :data:`~hal0.config.schema.FALLBACK_VULKAN_IMAGE`, the GPU
+    toolbox, which is what shipped before #2126. A correctly-derived
+    ``device = "cpu"`` slot then launches a Vulkan llama-server build, which
+    SIGILLs a second into model load on a GPU-less host and crash-loops while
+    the slot reads ``warming``. Any future edit that reverts the registry entry
+    (or a build whose manifest pin resolves back to it) fails the install gate
+    with a message instead of shipping that box again.
+
+    Resolution goes through :func:`resolve_runner_image`, so it answers about
+    the image that would ACTUALLY be pulled — including the
+    ``HAL0_TOOLBOX_IMAGE_CPU`` env override, which is how an operator with
+    their own CPU llama-server build satisfies the gate.
 
     Deliberately a predicate about the IMAGE, not about the hardware: whether
     this box has a GPU is :func:`hal0.providers._gpu`'s question. The
