@@ -283,7 +283,7 @@ def _do_import_backup(path: Path, force: bool, dest: Path) -> None:
     )
 
 
-# HAL0-SUNSET: v1.1.0 — alias for `hal0 model import-backup`; drop the alias.
+# HAL0-SUNSET: v1.2.0 — alias for `hal0 model import-backup`; drop the alias.
 @app.command("import", hidden=True)
 def import_backup(
     path: Path = typer.Argument(

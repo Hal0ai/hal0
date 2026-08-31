@@ -250,7 +250,7 @@ def persisted_job_files(image_id: str) -> list[Path]:
     if not jobs_dir.is_dir():
         return []
     stem = _sanitise_id(image_id)
-    # HAL0-SUNSET: v1.1 — the bare <id>.json lookup reads snapshots written
+    # HAL0-SUNSET: v1.2 — the bare <id>.json lookup reads snapshots written
     # before per-tag files (#2048); drop it once those have aged out of the
     # 14-day sweep_pull_jobs window.
     out = [p for p in (_contained_jobs_path(f"{stem}.json"),) if p.is_file()]

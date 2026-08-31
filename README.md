@@ -31,7 +31,7 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.0.0 is the GA release.** It is what the `stable` channel has been
+> **v1.1.0 is the GA release.** It is what the `stable` channel has been
 > waiting for since 0.9.8 shipped on 2026-07-13: the 1.0 line ran rc.1
 > through rc.12 on `preview`, each candidate validated on a real-hardware
 > fleet. From v1.0.0 the project follows semver proper. If you are upgrading

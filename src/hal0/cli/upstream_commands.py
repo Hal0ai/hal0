@@ -537,7 +537,7 @@ def credentials_set(
     _do_set_credentials(name, key, env_var)
 
 
-# HAL0-SUNSET: v1.1.0 — alias for `upstream credentials set`; drop the alias.
+# HAL0-SUNSET: v1.2.0 — alias for `upstream credentials set`; drop the alias.
 @app.command("set-credentials", hidden=True)
 def set_credentials(
     name: str = typer.Argument(..., help="Provider name."),
