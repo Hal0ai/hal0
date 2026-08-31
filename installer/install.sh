@@ -2166,14 +2166,26 @@ ui_step "Container slot seeds"
 # that touches installer/.
 #
 # ORDERING IS LOAD-BEARING (v1.0). This loop MUST run BEFORE the first-run
-# scaffold pass below. It used to run after it, and the two then fought:
-# the scaffold wrote a generic model-less `agent`/`brain` toml (with a
-# derived profile like plain "vulkan"), and this loop's `[[ -f ]]` guard
-# then said "exists — left alone" and silently discarded the CURATED seeds.
-# Net effect on every fresh box: agent.toml never got `profile =
-# "chadrock-moe"` and brain.toml never got `profile = "brain"` or its
-# `[model].default`. Seeding first inverts it correctly with no special
-# case — `build_auto_selections` already skips any slot whose config exists
+# scaffold pass below. It used to run after it (v0.9.8 install.sh:1249 ran
+# `hal0 setup --auto` at :1249 and reached this loop only at :1487), and the
+# two then fought: the scaffold wrote a generic model-less `agent`/`brain`
+# toml — `_build_slot_cfg`, which in v0.9.8 also stamped `enabled = false` —
+# and this loop's `[[ -f ]]` guard then said "exists — left alone" and
+# silently discarded the CURATED seeds. Net effect on every box installed
+# that way: agent.toml never got `profile = "chadrock-moe"`, and brain.toml
+# never got `profile = "brain"` — it kept the scaffold's derived profile
+# (plain "vulkan") and the scaffold's `enabled = false`.
+#
+# That is still the shape every stable-channel box carries into a 1.0
+# upgrade, and it is why the `enabled` sweep has to run before the brain
+# model step (#2131 — see the ordering note at that call site). The seeds
+# themselves no longer pin a `[model].default` at all: the brain's is stamped
+# by the installer only once the bytes land (installer/etc-hal0/slots/
+# brain.toml, "WHO SETS [model].default"), so a missing default is no longer
+# part of what this ordering protects.
+#
+# Seeding first inverts it correctly with no special case —
+# `build_auto_selections` already skips any slot whose config exists
 # (`existing_slots`, setup_command.py), so the scaffold pass sees the
 # curated files and leaves them alone, while still scaffolding the slots
 # that have NO static seed (e.g. `vision`).
@@ -2310,10 +2322,87 @@ else
         || warn "first-run seeding failed — slots can still be created from the dashboard; see the output above"
 fi
 
+# ── SlotConfig.enabled sweep (#1369) ──────────────────────────────────────────
+# `enabled` is gone — a non-empty [model].default IS the activation signal — and
+# `enabled = false` alongside a bound model would silently switch a deliberately
+# disabled slot back ON, so for that shape the sweep clears the model instead.
+# The identical idempotent sweep runs at hal0-api boot, but only into
+# `journalctl -u hal0-api`, which nobody watching an install ever sees. Run it
+# here so the result lands in the install transcript.
+#
+# ORDERING IS LOAD-BEARING (#2131). This MUST run BEFORE the brain model step
+# below. It used to run with the config-convergence migrations further down,
+# and on every 0.9.8 upgrade the two fought:
+#
+#   * v0.9.8's install.sh ran `hal0 setup --auto` (:1249) BEFORE its seed loop
+#     (:1487), so the generic scaffold won and the curated brain seed was
+#     skipped as "already present". `_build_slot_cfg(..., enabled=False)` wrote
+#     the shape every stable box therefore carries: `enabled = false` with a
+#     model-less `[model]` table.
+#   * the brain step below then bound the freshly pulled default into it, and
+#     THIS sweep — reading `enabled = false` next to a now-bound model — did
+#     exactly what it is designed to do and cleared the model again. The box
+#     ended the install with the 2.87 GB on disk and a model-less brain slot.
+#
+# Sweeping first restores the migration's OWN semantics for that shape: a
+# `enabled = false` slot with no model bound "already said off with both
+# signals", so the sweep drops the stale key and touches nothing else. The
+# brain step then binds into a clean slot, and every later boot-time sweep
+# (hal0.api._boot_slot_reconcile) finds no `enabled` key and no-ops, so the
+# binding is stable rather than reverted on the next restart.
+#
+# A slot an operator DELIBERATELY disabled (`enabled = false` WITH a model
+# bound) still has its model cleared here, exactly as before — that is the
+# deactivation the migration exists to carry forward. For the brain slot
+# specifically that then reads as model-less, which the step below re-binds:
+# the steward is not a normal user slot (it must work out of the box), and
+# re-running install.sh has re-bound a model-less brain since v1.0.0 anyway.
+#
+# This file runs under `set -euo pipefail` (:17), so a bare heredoc aborts the
+# WHOLE install on any raise — before start_or_restart_api is ever reached.
+# hal0_migration_step contains that: report the failure, keep going, let the
+# service start (`if ! cmd` also suppresses `set -e` for the call itself).
+# Defined HERE rather than with the other convergence steps further down
+# because the sweep below is the first migration step in the script (#2131);
+# the rest of the rationale lives at the "config-convergence migrations"
+# banner. Every heredoc-fed migration in this file must go through it —
+# tests/installer/test_migration_step_containment.py pins that.
+hal0_migration_step() {
+    # $1 = human label for the warning; python source arrives on stdin.
+    local label="$1"
+    if "${VENV_DIR}/bin/python" -; then
+        return 0
+    fi
+    warn "${label}: migration step failed — continuing with the install"
+    warn "  this is non-fatal; hal0-api still starts. Re-run 'sudo bash install.sh'"
+    warn "  after fixing the reported problem, or check 'journalctl -u hal0-api'."
+    return 0
+}
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping slot 'enabled' sweep (no system writes)"
+else
+    hal0_migration_step "slot 'enabled' key sweep" <<'PYEOF'
+from hal0.updater.updater import sweep_slot_enabled_keys
+swept = sweep_slot_enabled_keys()
+if swept:
+    print(f"  swept the removed 'enabled' key off {len(swept)} slot(s): {', '.join(swept)}")
+    print("    (a slot that was 'enabled = false' WITH a bound model is now model-less,")
+    print("     which is how 'off' is expressed in v1.0 — re-bind a model to turn it on)")
+else:
+    print("  no slot carries the removed 'enabled' key")
+PYEOF
+fi
+
 # ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
 # The brain is the platform steward: the dashboard's sidebar chat targets the
 # virtual model `hal0/brain`, so unlike every other slot it must WORK out of
 # the box rather than ship as a grey model-less tile. Pull its weights here.
+#
+# The `enabled` sweep immediately above is a PREREQUISITE, not a neighbour:
+# binding a model into a slot that still carries a stale `enabled = false` is
+# undone by the next sweep, whether that is the one in this script or the one
+# hal0-api runs at every boot (#2131).
 #
 # Fail-soft by construction (ruling: never hard-fail an install over an
 # optional model pull) — no network, no disk, an unsupported device or a
@@ -2672,19 +2761,14 @@ fi
 #
 # Updater.commit() already wraps the identical calls in try/except-and-warn.
 # hal0_migration_step gives install.sh the same posture: report the failure,
-# keep going, let the service start. `if ! cmd` also suppresses `set -e` for the
-# call itself.
-hal0_migration_step() {
-    # $1 = human label for the warning; python source arrives on stdin.
-    local label="$1"
-    if "${VENV_DIR}/bin/python" -; then
-        return 0
-    fi
-    warn "${label}: migration step failed — continuing with the install"
-    warn "  this is non-fatal; hal0-api still starts. Re-run 'sudo bash install.sh'"
-    warn "  after fixing the reported problem, or check 'journalctl -u hal0-api'."
-    return 0
-}
+# keep going, let the service start.
+#
+# The helper itself is DEFINED EARLIER — just above the "Steward + agent
+# models" step — because the SlotConfig.enabled sweep has to run before the
+# brain model is bound (#2131) and needs the same containment. Every migration
+# heredoc in this file, there and here, goes through it; a stdin-fed python
+# invocation may appear exactly once in the whole script, inside the helper
+# body (tests/installer/test_migration_step_containment.py enforces that).
 
 # ── profile catalog: one-shot v1.0 reset ──────────────────────────────────────
 # v1.0 makes profiles tuning-only. A pre-v1.0 /etc/hal0/profiles.toml can hold
@@ -2821,26 +2905,10 @@ print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args clea
 PYEOF
 fi
 
-# ── SlotConfig.enabled sweep (#1369) ──────────────────────────────────────────
-# `enabled` is gone — a non-empty [model].default IS the activation signal — and
-# `enabled = false` alongside a bound model would silently switch a deliberately
-# disabled slot back ON. The identical idempotent sweep runs at hal0-api boot,
-# but only into `journalctl -u hal0-api`, which nobody watching an install ever
-# sees. Run it here so the result lands in the install transcript.
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping slot 'enabled' sweep (no system writes)"
-else
-    hal0_migration_step "slot 'enabled' key sweep" <<'PYEOF'
-from hal0.updater.updater import sweep_slot_enabled_keys
-swept = sweep_slot_enabled_keys()
-if swept:
-    print(f"  swept the removed 'enabled' key off {len(swept)} slot(s): {', '.join(swept)}")
-    print("    (a slot that was 'enabled = false' WITH a bound model is now model-less,")
-    print("     which is how 'off' is expressed in v1.0 — re-bind a model to turn it on)")
-else:
-    print("  no slot carries the removed 'enabled' key")
-PYEOF
-fi
+# The SlotConfig.enabled sweep (#1369) used to live HERE. It now runs in the
+# "Hardware probe" step, BEFORE the brain model is pulled and bound — see the
+# ordering note at that call site (#2131). Running it after the brain step is
+# what blanked the freshly bound brain model on every 0.9.8 upgrade.
 
 # Stale former-default runner-image pins and hal0-managed flags in model
 # defaults.extra_args (parity with Updater.commit() steps 7d/7e) are handled
@@ -3278,6 +3346,22 @@ run_post_install_smoke() {
         SMOKE_FAILED+=("structured-output")
         warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
         warn "  extraction/structured-output consumers are likely broken even if plain chat works — check 'hal0 status' for a loaded model, then 'journalctl -u hal0-api -n 40'"
+        # #2131: on an upgraded box the commonest cause is a brain slot the
+        # seeding pass downloaded a model for but never bound — the gateway
+        # then has nothing to answer with, and a bare probe failure reads like
+        # a runner bug. `--check-binding` prints the exact fix, and prints
+        # NOTHING when the slot is bound (or when the venv/daemon can't be
+        # reached), so a fresh-install failure reads exactly as before.
+        # `${VENV_DIR:-}` + the -x test, not a bare expansion: this block runs
+        # under `set -euo pipefail`, where an unbound VENV_DIR would abort the
+        # install from inside a diagnostic.
+        _brain_hint=""
+        if [[ -n "${VENV_DIR:-}" && -x "${VENV_DIR}/bin/python" ]]; then
+            _brain_hint="$("${VENV_DIR}/bin/python" -m hal0.install.brain_model --check-binding 2>/dev/null || true)"
+        fi
+        if [[ -n "${_brain_hint}" ]]; then
+            warn "  ${_brain_hint}"
+        fi
     fi
     if smoke_update_check; then
         info "update-check probe ok ('hal0 update --check' exits cleanly)"
