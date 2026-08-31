@@ -78,7 +78,18 @@ _ADAPTER_PIN = "npm:pi-mcp-adapter@2.31.0"
 # Packages hal0 manages in pi's settings.json ``packages`` array.
 # Dedup'd against operator entries on every install; removed (only
 # these entries) on uninstall.
-_MANAGED_PACKAGES = ("extensions/hal0-provider", "extensions/hindsight", _ADAPTER_PIN)
+#
+# The deployed extensions must NOT be listed here: pi (verified on
+# 0.84.4, CT105 acceptance) auto-discovers every directory under
+# ``~/.pi/agent/extensions/``, and an explicit ``extensions/<name>``
+# packages entry loads the same extension a second time — the duplicate
+# ``registerTool`` calls then fail the whole extension with
+# "Tool ... conflicts with .../extensions/hindsight/index.ts".
+_MANAGED_PACKAGES = (_ADAPTER_PIN,)
+
+# Older installs (and the pre-fix revision of this driver) wrote these
+# double-loading entries; strip them on install and uninstall.
+_LEGACY_PACKAGE_ENTRIES = ("extensions/hal0-provider", "extensions/hindsight")
 
 # Hindsight's self-hosted server, colocated on the box (spec D4).
 _HINDSIGHT_API_URL = "http://127.0.0.1:9177"
@@ -292,7 +303,11 @@ class PiDriver(AgentDriver):
         existing["defaultProvider"] = "hal0"
         existing["defaultModel"] = "agent"
         existing["theme"] = "hal0"
-        packages = [p for p in existing.get("packages", []) if isinstance(p, str)]
+        packages = [
+            p
+            for p in existing.get("packages", [])
+            if isinstance(p, str) and p not in _LEGACY_PACKAGE_ENTRIES
+        ]
         for managed in _MANAGED_PACKAGES:
             if managed not in packages:
                 packages.append(managed)
@@ -325,7 +340,11 @@ class PiDriver(AgentDriver):
             settings.pop("theme", None)
         packages = settings.get("packages")
         if isinstance(packages, list):
-            settings["packages"] = [p for p in packages if p not in _MANAGED_PACKAGES]
+            settings["packages"] = [
+                p
+                for p in packages
+                if p not in _MANAGED_PACKAGES and p not in _LEGACY_PACKAGE_ENTRIES
+            ]
 
         tmp = settings_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")

@@ -26,8 +26,10 @@ import json, sys
 s = json.load(open(sys.argv[1]))
 assert s["theme"] == "hal0" and s["defaultProvider"] == "hal0" and s["defaultModel"] == "agent"
 pkgs = s["packages"]
-for p in ("extensions/hal0-provider", "extensions/hindsight", "npm:pi-mcp-adapter@2.31.0"):
-    assert p in pkgs, p
+assert "npm:pi-mcp-adapter@2.31.0" in pkgs, pkgs
+# pi auto-discovers ~/.pi/agent/extensions/; explicit entries double-load.
+for p in ("extensions/hal0-provider", "extensions/hindsight"):
+    assert p not in pkgs, p
 EOF
 
 # 4. No sprawl packages

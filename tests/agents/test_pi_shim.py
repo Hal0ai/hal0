@@ -58,11 +58,9 @@ def test_install_writes_minimal_profile(home: Path) -> None:
     assert settings["theme"] == "hal0"
     assert settings["defaultProvider"] == "hal0"
     assert settings["defaultModel"] == "agent"
-    assert settings["packages"] == [
-        "extensions/hal0-provider",
-        "extensions/hindsight",
-        "npm:pi-mcp-adapter@2.31.0",
-    ]
+    # Extensions are NOT listed: pi auto-discovers ~/.pi/agent/extensions/,
+    # and an explicit entry double-loads them (registerTool conflicts).
+    assert settings["packages"] == ["npm:pi-mcp-adapter@2.31.0"]
     assert (home / ".pi" / "agent" / "themes" / "hal0.json").exists()
     assert (home / ".pi" / "agent" / "extensions" / "hal0-provider" / "index.ts").exists()
     assert (home / ".pi" / "agent" / "extensions" / "hindsight" / "index.ts").exists()
@@ -158,10 +156,12 @@ def test_install_preserves_operator_settings(home: Path) -> None:
     drv.install()
     settings = json.loads(settings_file.read_text())
     assert settings["editorPaddingX"] == 3  # untouched operator key
-    # Managed packages present exactly once, operator package preserved.
-    assert settings["packages"].count("extensions/hal0-provider") == 1
+    # Operator package preserved; legacy double-loading extension entries
+    # stripped (pi auto-discovers the extensions dir); adapter pin added.
     assert "npm:their-own-thing" in settings["packages"]
-    assert "extensions/hindsight" in settings["packages"]
+    assert "extensions/hal0-provider" not in settings["packages"]
+    assert "extensions/hindsight" not in settings["packages"]
+    assert "npm:pi-mcp-adapter@2.31.0" in settings["packages"]
 
 
 def test_install_runs_script_and_npm_install_for_hindsight_ext(home: Path) -> None:
