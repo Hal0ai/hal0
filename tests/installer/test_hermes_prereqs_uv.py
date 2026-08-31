@@ -125,7 +125,7 @@ class TestUvInstallVerifiedByPathNotPATH:
 
         env = {
             "PATH": str(base_bin_dir),  # excludes pipx_bin_dir entirely
-            "PIPX_BIN_DIR": str(pipx_bin_dir),
+            "HAL0_UV_PIPX_BIN_DIR": str(pipx_bin_dir),
         }
         proc = subprocess.run(
             ["bash", str(_PREREQS)], env=env, capture_output=True, text=True, check=False
@@ -146,25 +146,81 @@ class TestUvInstallVerifiedByPathNotPATH:
         pipx_bin_dir = tmp_path / "pipx-bin"
         _write_exe(base_bin_dir / "pipx", "#!/usr/bin/env bash\nexit 0\n")  # no-op, writes nothing
 
-        env = {"PATH": str(base_bin_dir), "PIPX_BIN_DIR": str(pipx_bin_dir)}
+        env = {"PATH": str(base_bin_dir), "HAL0_UV_PIPX_BIN_DIR": str(pipx_bin_dir)}
         proc = subprocess.run(
             ["bash", str(_PREREQS)], env=env, capture_output=True, text=True, check=False
         )
         assert proc.returncode != 0
         assert "uv could not be installed" in (proc.stdout + proc.stderr)
 
+    def test_ambient_pipx_bin_dir_does_not_redirect_the_uv_install_target(
+        self, base_bin_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2151 finding 2: an operator's ambient PIPX_BIN_DIR (pipx's own,
+        general-purpose env var) must NOT move where this script installs uv
+        — only the namespaced HAL0_UV_PIPX_BIN_DIR may do that. Otherwise an
+        operator's unrelated pipx config silently desyncs the bash install
+        target from the Python-side fallback
+        (hermes_provision._UV_PIPX_FALLBACK_BIN), reproducing #2124 one phase
+        later.
+        """
+        ambient_pipx_bin_dir = tmp_path / "ambient-pipx-bin"  # decoy — must be ignored
+        real_target = tmp_path / "usr-local-bin-stand-in"
+        marker = base_bin_dir / "pipx.called"
+        _write_exe(base_bin_dir / "pipx", _fake_pipx_that_writes_uv(marker))
+
+        env = {
+            "PATH": str(base_bin_dir),
+            "PIPX_BIN_DIR": str(ambient_pipx_bin_dir),  # ambient — must be ignored
+            "HAL0_UV_PIPX_BIN_DIR": str(real_target),  # namespaced override — must win
+        }
+        proc = subprocess.run(
+            ["bash", str(_PREREQS)], env=env, capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (real_target / "uv").is_file(), "uv should land at HAL0_UV_PIPX_BIN_DIR"
+        assert not ambient_pipx_bin_dir.exists(), (
+            "ambient PIPX_BIN_DIR must not redirect the install target"
+        )
+
+
+class TestToolchainCompleteFastPathHonorsFixedUvLocation:
+    """#2151 review nit: the top-level "toolchain already complete" gate
+    (`have_system_hermes_py || have_uv`) is as PATH-blind as the old
+    post-install check was — a box where a prior run already installed uv to
+    the fixed pipx location, but whose PATH doesn't carry it (same non-login
+    exec context #2124 covers), would fail the fast path and redo the
+    pipx-install dance every single invocation even though nothing needs
+    doing. The gate must also accept uv already sitting at the fixed
+    location.
+    """
+
+    def test_skips_pipx_when_uv_already_at_fixed_location_but_off_path(
+        self, base_bin_dir: Path, tmp_path: Path
+    ) -> None:
+        pipx_bin_dir = tmp_path / "pipx-bin"  # deliberately NOT on PATH
+        pipx_bin_dir.mkdir()
+        _write_exe(pipx_bin_dir / "uv", "#!/usr/bin/env bash\necho 'uv 0.12.7'\n")
+        marker = base_bin_dir / "pipx.called"
+        _write_exe(base_bin_dir / "pipx", _fake_pipx_that_writes_uv(marker))
+
+        env = {"PATH": str(base_bin_dir), "HAL0_UV_PIPX_BIN_DIR": str(pipx_bin_dir)}
+        proc = subprocess.run(
+            ["bash", str(_PREREQS)], env=env, capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "toolchain already present" in proc.stdout
+        assert not marker.exists(), "pipx must not run — uv was already usable"
+
 
 class TestStaticWiring:
     _TEXT = _PREREQS.read_text(encoding="utf-8")
 
     def test_ensure_uv_verifies_the_written_path_not_command_dash_v(self) -> None:
-        assert 'if [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then' in self._TEXT
+        assert (
+            'if [ -f "${UV_PIPX_BIN_DIR}/uv" ] && [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then'
+            in self._TEXT
+        )
 
     def test_pipx_bin_dir_is_overridable_for_tests_defaults_to_usr_local_bin(self) -> None:
-        assert 'UV_PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"' in self._TEXT
-
-    def test_have_uv_fast_path_still_path_based(self) -> None:
-        # have_uv stays `command -v uv` — correct as the pre-install fast
-        # path (a box that already has uv on PATH needs no reinstall); only
-        # the post-install verification must not rely on it.
-        assert "have_uv() { command -v uv >/dev/null 2>&1; }" in self._TEXT
+        assert 'UV_PIPX_BIN_DIR="${HAL0_UV_PIPX_BIN_DIR:-/usr/local/bin}"' in self._TEXT

@@ -62,9 +62,19 @@ have_system_hermes_py() {
 }
 
 # Where pipx drops the uv shim. Hardcoded to /usr/local/bin in production;
-# overridable via an already-exported PIPX_BIN_DIR so tests can redirect it
-# without writing into a real system directory.
-UV_PIPX_BIN_DIR="${PIPX_BIN_DIR:-/usr/local/bin}"
+# overridable via an already-exported HAL0_UV_PIPX_BIN_DIR so tests can
+# redirect it without writing into a real system directory. Deliberately
+# namespaced instead of reading the ambient PIPX_BIN_DIR: that name is
+# pipx's own general-purpose contract (an operator may already export it to
+# steer every pipx install on the box), and reading it here would let it
+# silently move this specific install target while the Python-side fallback
+# (hermes_provision._UV_PIPX_FALLBACK_BIN) stayed hardcoded to
+# /usr/local/bin — reproducing #2124 one phase later with the two halves
+# desynced (#2151 review). ${UV_PIPX_BIN_DIR} is still passed to pipx as its
+# own PIPX_BIN_DIR explicitly on the invocation below, so the install target
+# is controlled by exactly this variable regardless of what else is in the
+# ambient environment.
+UV_PIPX_BIN_DIR="${HAL0_UV_PIPX_BIN_DIR:-/usr/local/bin}"
 
 # Install uv to a fixed location (pipx → ${UV_PIPX_BIN_DIR}) so the
 # provisioner's managed-interpreter fallback
@@ -86,7 +96,7 @@ ensure_uv() {
     # success, also fold ${UV_PIPX_BIN_DIR} onto PATH for the rest of this
     # script's own run, so subsequent `command -v uv` calls here (e.g. the log
     # line in ensure_interpreter_path) see it consistently.
-    if [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then
+    if [ -f "${UV_PIPX_BIN_DIR}/uv" ] && [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then
         case ":${PATH}:" in
             *":${UV_PIPX_BIN_DIR}:"*) ;;
             *) PATH="${UV_PIPX_BIN_DIR}:${PATH}"; export PATH ;;
@@ -112,8 +122,15 @@ uv could not be installed for the managed-interpreter fallback. Install uv
 }
 
 # Toolchain is "complete" only when the interpreter fallback is also satisfiable:
-# venv+pip+pipx+git AND (a system Python in range OR uv for the managed fallback).
-if have_venv && have_pip && have_pipx && have_git && { have_system_hermes_py || have_uv; }; then
+# venv+pip+pipx+git AND (a system Python in range OR uv reachable — either on
+# PATH or already installed at the fixed pipx location, since `have_uv` alone
+# is PATH-based and would false-negative on a non-login exec context where a
+# prior run already installed uv to ${UV_PIPX_BIN_DIR} but PATH doesn't carry
+# it — the same blind spot #2124 fixed for the post-install check in
+# ensure_uv, extended here so the "nothing to do" fast path doesn't redo that
+# work every invocation).
+if have_venv && have_pip && have_pipx && have_git \
+    && { have_system_hermes_py || have_uv || { [ -f "${UV_PIPX_BIN_DIR}/uv" ] && [ -x "${UV_PIPX_BIN_DIR}/uv" ]; }; }; then
     info "toolchain already present (python venv + pip + pipx + git + interpreter path) — nothing to do"
     exit 0
 fi

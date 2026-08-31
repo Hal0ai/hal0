@@ -586,6 +586,39 @@ class TestUvAvailableFallsBackToFixedPipxPath:
         monkeypatch.setattr(hp, "_UV_PIPX_FALLBACK_BIN", tmp_path / "no-such-uv")
         assert hp._uv_available(prober=lambda _name: None) is None
 
+    def test_returns_none_when_fallback_location_is_a_directory_not_a_file(
+        self, tmp_path: Path
+    ) -> None:
+        # A directory can satisfy os.access(..., os.X_OK) (traversable) without
+        # being anything uv could execute — the fallback must require a
+        # regular file, not just "some access bit is set" (#2151 review nit).
+        bogus = tmp_path / "uv"
+        bogus.mkdir()
+        assert hp._uv_available(prober=lambda _name: None, fallback_bin=bogus) is None
+
+    def test_fallback_bin_kwarg_overrides_the_module_default(self, tmp_path: Path) -> None:
+        fake_uv = tmp_path / "uv"
+        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+        out = hp._uv_available(prober=lambda _name: None, fallback_bin=fake_uv)
+        assert out == str(fake_uv)
+
+    def test_honors_hal0_uv_pipx_bin_dir_env_for_symmetry_with_the_installer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # hermes-prereqs.sh's UV_PIPX_BIN_DIR honors HAL0_UV_PIPX_BIN_DIR
+        # (#2151 finding 2); the Python-side default fallback should resolve
+        # the same override for symmetry, so an operator who redirects the
+        # bash installer's pipx target doesn't desync from this side too.
+        pipx_bin_dir = tmp_path / "custom-pipx-bin"
+        pipx_bin_dir.mkdir()
+        fake_uv = pipx_bin_dir / "uv"
+        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+        monkeypatch.setenv("HAL0_UV_PIPX_BIN_DIR", str(pipx_bin_dir))
+        out = hp._uv_available(prober=lambda _name: None)
+        assert out == str(fake_uv)
+
 
 def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
     # A qualifying system Python 3.12 must win without uv ever being invoked.
@@ -738,8 +771,16 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     assert modes_at_run and modes_at_run[0] == 0o755
 
 
-def test_ensure_python_returns_none_without_uv() -> None:
-    out = hp._ensure_supported_python(prober=lambda _name: None, running=(3, 14))
+def test_ensure_python_returns_none_without_uv(tmp_path: Path) -> None:
+    # #2151 review: a prober that reports "no uv" must not still fall through
+    # to whatever /usr/local/bin/uv happens to exist on the box actually
+    # running this test — pin fallback_bin somewhere guaranteed absent so the
+    # assertion holds on a fleet box with a real uv install, not just in CI.
+    out = hp._ensure_supported_python(
+        prober=lambda _name: None,
+        running=(3, 14),
+        fallback_bin=tmp_path / "no-such-uv",
+    )
     assert out is None
 
 

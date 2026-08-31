@@ -489,8 +489,12 @@ def resolve_hermes_python(
     env_path: Path = HERMES_PYTHON_ENV,
     prober: Callable[[str], str | None] = shutil.which,
     runner: Any = subprocess,
+    fallback_bin: Path | None = None,
 ) -> str:
-    """Resolve exact Python 3.12 using the documented precedence order."""
+    """Resolve exact Python 3.12 using the documented precedence order.
+
+    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
+    """
     environ = os.environ if env is None else env
     source = "environment"
     candidate = environ.get("HAL0_HERMES_PYTHON")
@@ -501,7 +505,7 @@ def resolve_hermes_python(
         candidate = prober("python3.12")
         source = "system"
     if candidate is None:
-        candidate = _provision_python_via_uv(prober, runner)
+        candidate = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
         source = "uv-managed"
     if candidate is None:
         raise RuntimeError("Python 3.12 is unavailable; install python3.12 or uv and retry")
@@ -558,12 +562,40 @@ def _hal0_subprocess_env(**overrides: str) -> dict[str, str]:
 _UV_PIPX_FALLBACK_BIN = Path("/usr/local/bin/uv")
 
 
-def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | None:
+def _uv_pipx_fallback_bin() -> Path:
+    """Resolve the default uv-fallback path.
+
+    Honors ``HAL0_UV_PIPX_BIN_DIR`` for symmetry with
+    installer/agents/hermes-prereqs.sh's namespaced pipx-bin-dir override
+    (#2124/#2151 review) — an operator who redirects the bash installer's
+    pipx target gets the same redirection here instead of the two halves
+    silently desyncing. Falls back to the ``_UV_PIPX_FALLBACK_BIN`` module
+    attribute (read here, not captured as a default, so tests that
+    monkeypatch it keep working) when the env var is unset.
+    """
+    override = os.environ.get("HAL0_UV_PIPX_BIN_DIR")
+    return Path(override) / "uv" if override else _UV_PIPX_FALLBACK_BIN
+
+
+def _uv_available(
+    prober: Callable[[str], str | None] = shutil.which,
+    *,
+    fallback_bin: Path | None = None,
+) -> str | None:
+    """Probe PATH first, then the fixed pipx-install location (#2124).
+
+    ``fallback_bin`` is injectable — defaulting to
+    :func:`_uv_pipx_fallback_bin` — so a caller simulating a uv-less host (an
+    absent ``prober``) can also pin the fixed-path fallback to a location
+    guaranteed not to exist, instead of it unconditionally consulting
+    whatever `/usr/local/bin/uv` happens to be on the actual machine running
+    the test (#2151 review).
+    """
     found = prober("uv")
     if found:
         return found
-    fallback = _UV_PIPX_FALLBACK_BIN
-    if os.access(fallback, os.X_OK):
+    fallback = fallback_bin if fallback_bin is not None else _uv_pipx_fallback_bin()
+    if fallback.is_file() and os.access(fallback, os.X_OK):
         return str(fallback)
     return None
 
@@ -571,6 +603,8 @@ def _uv_available(prober: Callable[[str], str | None] = shutil.which) -> str | N
 def _provision_python_via_uv(
     prober: Callable[[str], str | None] = shutil.which,
     runner: Any = subprocess,
+    *,
+    fallback_bin: Path | None = None,
 ) -> str | None:
     """Fetch a uv-managed Python as the last resort (#1250).
 
@@ -579,9 +613,10 @@ def _provision_python_via_uv(
     ``UV_PYTHON_INSTALL_DIR`` — so repeat runs and ``--repair`` deterministically
     reuse the interpreter from the first provisioning instead of hunting anew.
     Returns ``None`` when uv is absent or the fetch fails (offline) — callers
-    fall through to the actionable range error.
+    fall through to the actionable range error. ``fallback_bin`` passes
+    through to :func:`_uv_available` (see there).
     """
-    uv = _uv_available(prober)
+    uv = _uv_available(prober, fallback_bin=fallback_bin)
     if uv is None:
         return None
     # Sanitize HOME + pin uv's cache to hal0-owned paths (O15): as hal0 with a
@@ -635,11 +670,13 @@ def _ensure_supported_python(
     *,
     runner: Any = subprocess,
     running: tuple[int, int] | None = None,
+    fallback_bin: Path | None = None,
 ) -> str | None:
     """Resolve the exact Python 3.12 interpreter for the Hermes venv.
 
     A qualifying system ``python3.12`` wins before uv downloads a managed 3.12;
     explicit and persisted overrides are validated before either fallback.
+    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
     """
     configured = os.environ.get("HAL0_HERMES_PYTHON")
     if configured is None:
@@ -650,7 +687,7 @@ def _ensure_supported_python(
     found = _resolve_supported_python(prober, running=running)
     if found is not None:
         return found
-    return _provision_python_via_uv(prober, runner)
+    return _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
 
 
 def _resolve_supported_python(
