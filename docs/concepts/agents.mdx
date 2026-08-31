@@ -18,11 +18,11 @@ thing, and the steward has its own concept page: see [Brain](/docs/concepts/brai
 
 ## Hermes: the bundled agent runtime
 
-As of v1.0, **Hermes is the only bundled agent** — `BUNDLED_AGENTS = ("hermes",)`.
-Earlier speculative bundles (pi-coder, opencode) were removed; the codebase
-still carries the machinery to install-by-shelling-out to
-`installer/agents/<name>.sh` the way those did, in case a future bundle is
-added the same way, but nothing currently populates that beyond Hermes.
+Hermes is hal0's bundled, sandboxed agent runtime —
+`BUNDLED_AGENTS = ("hermes", "pi")`. Earlier speculative bundles (pi-coder,
+opencode) were removed before v1.0; the codebase still carries the machinery
+to install-by-shelling-out to `installer/agents/<name>.sh` the way those did,
+and `pi` (below) is the bundle that now uses that path.
 
 The agent runs as a systemd template unit, `hal0-agent@<id>.service` (so
 Hermes is `hal0-agent@hermes`). It runs as the unprivileged **`hal0`** system
@@ -43,6 +43,26 @@ it (the API URL and the admin/memory MCP URLs).
 "Bundle, don't build" is the explicit design stance. hal0 governs and wires
 the agent runtime; it doesn't reimplement one.
 </Aside>
+
+## pi: the optional terminal coding agent
+
+`pi` is a second bundled agent, but a different *kind* — `kind="cli"` rather
+than Hermes' `kind="daemon"`. It's a third-party terminal coding tool
+(CLI/TUI), not a service: no systemd unit, no daemon, no health-check probe.
+Because single-pick only applies between daemon-kind agents, installing `pi`
+never displaces Hermes — the two coexist. Install it with
+`hal0 agent install pi` **run as root on the box**: unlike other agents it
+does not go through the API — the profile lands in the invoking user's home
+(`~/.pi`) and the global npm prefix, which the `hal0` service user can
+write to neither, so the CLI provisions locally (the daemon's install
+route refuses cli-kind agents with that hint). The driver provisions a
+minimal profile: the `hal0` theme, a hal0 model-slot provider
+(auto-discovered from `/v1/models`) set as the default, and memory wiring —
+the `hal0-memory` MCP server plus hindsight coding-agent memory (auto
+recall/retain, per-repo banks). Status in `hal0 agent list` derives from a
+marker in the agent's data dir plus a `pi`-on-PATH probe — the daemon
+cannot read the operator's `0700` home, so it never inspects `~/.pi`
+directly.
 
 ## hal0-brain: the steward that drives hal0 itself
 

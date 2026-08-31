@@ -32,7 +32,7 @@ from hal0.agents import (
     AgentUninstallIncompleteError,
     HermesNotHal0AwareError,
 )
-from hal0.agents.manager import BUNDLED_AGENTS
+from hal0.agents.manager import BUNDLED_AGENTS, agent_kind
 from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
 from hal0.api.agents import restart as agent_restart
 from hal0.errors import BadRequest, Conflict, Hal0Error, MultiStatus, NotFound
@@ -145,6 +145,19 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
     if not isinstance(name, str) or not name.strip():
         raise BadRequest("'name' is required (non-empty string)", code="agent.name_required")
     switch = bool(body.get("switch", False)) if isinstance(body, dict) else False
+
+    if agent_kind(name) == "cli":
+        # A cli-kind agent provisions the INVOKING user's home and the
+        # global npm prefix — this daemon runs as a system user (home
+        # /var/lib/hal0) that can do neither, and it could never verify
+        # the result either. The CLI runs the same manager in-process
+        # instead (see hal0.cli.agent_commands._install_pi).
+        raise BadRequest(
+            f"{name!r} is a cli-kind agent and cannot be installed through the "
+            f"daemon (it provisions the invoking user's home). Run on the box: "
+            f"hal0 agent install {name}",
+            code="agent.cli_kind_local_only",
+        )
 
     mgr = _manager()
     try:
@@ -345,6 +358,17 @@ async def uninstall_agent(name: str) -> dict[str, str]:
     half-uninstalled agent whose seed was already gone reported
     ``not_installed`` even while ``rm -rf``'ing its data + state dirs.
     """
+    if agent_kind(name) == "cli":
+        # Mirror of the install-route guard: the profile lives in the
+        # invoking user's home, which this daemon can neither remove nor
+        # even read. The CLI tears down locally.
+        raise BadRequest(
+            f"{name!r} is a cli-kind agent and cannot be uninstalled through "
+            f"the daemon (its profile lives in the invoking user's home). Run "
+            f"on the box: hal0 agent uninstall {name}",
+            code="agent.cli_kind_local_only",
+        )
+
     mgr = _manager()
     try:
         removed = mgr.uninstall(name)

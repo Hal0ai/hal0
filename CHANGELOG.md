@@ -24,6 +24,14 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **`pi` is installable as a cli-kind bundled agent — coexists with Hermes.**
+  `hal0 agent install pi` provisions a minimal profile: the `hal0` theme, a
+  hal0 slot model provider, and memory wiring (the memory MCP server plus
+  hindsight coding-agent memory). Being cli-kind rather than daemon-kind, it
+  sits outside single-pick, so it can be installed alongside Hermes.
+
 ### Fixed
 
 - **The 0.9.8 → 1.0.0 upgrade no longer blanks the brain model it just bound**
