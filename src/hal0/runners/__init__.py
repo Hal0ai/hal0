@@ -193,6 +193,14 @@ RUNNER_IMAGES: dict[str, Runner] = {
     ),
     "cpu": Runner(
         "cpu",
+        # KNOWN PLACEHOLDER, not a CPU image (hal0#2126): this is the Vulkan
+        # GPU toolbox, so a correctly-derived `device = "cpu"` slot launches a
+        # Vulkan llama-server build and SIGILLs at model load on a GPU-less
+        # host. Picking the replacement is an open product call on #2126 (wire
+        # a published CPU toolbox here + a manifest_key, vs. refuse CPU-only
+        # installs outright). Until it is made, the CPU lane is gated at
+        # install time and diagnosed at runtime rather than silently crash-
+        # looping — see cpu_lane_has_runner_image() below.
         FALLBACK_VULKAN_IMAGE,
         "llama-server",
         RunnerSupports(mtp=False, jinja=True, mmproj=True),
@@ -358,6 +366,34 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
     return get_runner("rocmfpx")
 
 
+def cpu_lane_has_runner_image() -> bool:
+    """Does the ``cpu`` runner resolve to an image that can serve CPU inference?
+
+    ``False`` means the CPU lane is a PLACEHOLDER, not a lane: the ``cpu``
+    runner still carries :data:`~hal0.config.schema.FALLBACK_VULKAN_IMAGE` —
+    the GPU toolbox — as its bundled default, so a correctly-derived
+    ``device = "cpu"`` slot launches a Vulkan llama-server build, which SIGILLs
+    at model load on a GPU-less host (hal0#2126). No published CPU toolbox is
+    wired to this key, and ``manifest_key=None`` means no digest pin can
+    arrive through the manifest tier either.
+
+    ``True`` means SOMETHING repointed it — the ``HAL0_TOOLBOX_IMAGE_CPU`` env
+    override (an operator who built their own CPU llama-server), or the
+    registry entry itself once a real CPU image is published and wired. This
+    goes through :func:`resolve_runner_image`, so it answers about the image
+    that would ACTUALLY be pulled, not about the literal in the table.
+
+    Deliberately a predicate about the IMAGE, not about the hardware: whether
+    this box has a GPU is :func:`hal0.providers._gpu`'s question. The
+    installer's Stage-1 CPU-only gate pairs the two — no GPU lane AND no CPU
+    image is the combination that installs cleanly and can never serve a
+    token. ``installer/lib/preflight.sh`` mirrors this in shell (preflight
+    runs before hal0 is pip-installed); ``tests/installer/
+    test_runner_entrypoint.py`` pins the two implementations in agreement.
+    """
+    return resolve_runner_image(get_runner("cpu")) != FALLBACK_VULKAN_IMAGE
+
+
 #: The only runner key whose image is :data:`DEFAULT_ROCMFPX_IMAGE` — the
 #: single fork build that understands the custom GGML tensor type ids (100 /
 #: 103) a ROCmFPX-family GGUF (``hal0-brain-sft-q8-rocmfpx`` and friends) is
@@ -417,6 +453,7 @@ __all__ = [
     "RuntimeFamily",
     "canonical_family",
     "canonical_runner_key",
+    "cpu_lane_has_runner_image",
     "get_runner",
     "resolve_runner_image",
     "runner_for_backend",

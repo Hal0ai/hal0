@@ -241,6 +241,15 @@ def test_podman_args_allows_only_the_rendered_compat_flags() -> None:
     _accepts(body, "chat")
 
 
+def test_restart_prevent_exit_status_list_is_accepted() -> None:
+    """#2126 widened the renderer from `64` to `64 132`, so the root-side
+    allow-list has to accept a bounded space-separated list of bare exit
+    statuses. The reconstruction is byte-for-byte (``_accepts`` asserts it),
+    so the space survives into /etc rather than being re-quoted."""
+    body = f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 132\n"
+    _accepts(body, "chat")
+
+
 def test_live_container_provider_render_is_accepted() -> None:
     """End-to-end through the production path: ``ContainerProvider.container_spec``
     → ``_render_quadlet_from_plan``, not a hand-built plan."""
@@ -333,13 +342,30 @@ ESCALATIONS = {
     "service-standardoutput-file": f"{_HEAD}\n[Service]\nStandardOutput=file:/root/.ssh/authorized_keys\n",
     "service-syslogidentifier-free": f"{_HEAD}\n[Service]\nSyslogIdentifier=../evil\n",
     "service-restart-free": f"{_HEAD}\n[Service]\nRestart=/bin/sh\n",
-    # #2037: RestartPreventExitStatus= is pinned to a single uint (the renderer
-    # emits exactly `64`); signal names / lists / ranges are refused.
+    # #2037 / #2126: RestartPreventExitStatus= is pinned to a bounded
+    # space-separated list of bare exit statuses (the renderer emits `64 132`);
+    # the signal NAMES and ranges systemd would also accept are refused, as is
+    # anything wider than three digits or eight entries.
     "service-restartpreventexitstatus-signal": (
         f"{_HEAD}\n[Service]\nRestartPreventExitStatus=SIGKILL\n"
     ),
-    "service-restartpreventexitstatus-list": (
-        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 78\n"
+    "service-restartpreventexitstatus-mixed-signal": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 SIGILL\n"
+    ),
+    "service-restartpreventexitstatus-range": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64-132\n"
+    ),
+    "service-restartpreventexitstatus-too-wide": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=1234\n"
+    ),
+    "service-restartpreventexitstatus-too-many": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=1 2 3 4 5 6 7 8 9\n"
+    ),
+    "service-restartpreventexitstatus-double-space": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64  132\n"
+    ),
+    "service-restartpreventexitstatus-trailing-space": (
+        f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 \n"
     ),
     "service-workingdirectory": f"{_HEAD}\n[Service]\nWorkingDirectory=/root\n",
     "service-environmentfile": f"{_HEAD}\n[Service]\nEnvironmentFile=/tmp/evil.env\n",

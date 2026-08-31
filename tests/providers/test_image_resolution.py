@@ -198,3 +198,41 @@ def test_profile_image_and_flags_default_when_nothing_set() -> None:
     )
     image, _flags = _profile_image_and_flags(profile)
     assert image == DEFAULT_ROCMFPX_IMAGE
+
+
+# --- the CPU lane has no image of its own (#2126) --------------------------- #
+
+
+def test_cpu_lane_has_no_runner_image_by_default() -> None:
+    """#2126: a correctly-derived ``device = "cpu"`` slot resolves to the
+    VULKAN GPU toolbox, because that is what the ``cpu`` runner carries. On a
+    GPU-less host that image SIGILLs about a second into model load.
+
+    :func:`cpu_lane_has_runner_image` is the predicate that says so out loud —
+    the installer's CPU-only gate and its shell mirror both key off it.
+    """
+    from hal0.runners import cpu_lane_has_runner_image
+
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert cpu_lane_has_runner_image() is False
+
+
+def test_cpu_lane_has_a_runner_image_once_the_env_override_names_one(monkeypatch) -> None:
+    """Tier 1 of ``resolve_runner_image``. This is the escape hatch the
+    installer gate leaves open for an operator who built their own CPU
+    llama-server — the predicate has to see it, so it must resolve rather than
+    read the registry literal."""
+    from hal0.runners import cpu_lane_has_runner_image
+
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_CPU", "ghcr.io/example/llama-cpu:v1")
+    assert cpu_lane_has_runner_image() is True
+
+
+def test_cpu_lane_predicate_ignores_a_slot_level_image_pin() -> None:
+    """``image_pin`` fixes ONE slot; the predicate is about the LANE, which is
+    what an install-time gate can reason about (no slots exist yet)."""
+    from hal0.runners import cpu_lane_has_runner_image
+
+    pinned = {"image_pin": "ghcr.io/example/llama-cpu:v1", "binary": "cpu"}
+    assert _resolve_image_ref(pinned, _profile()) == "ghcr.io/example/llama-cpu:v1"
+    assert cpu_lane_has_runner_image() is False

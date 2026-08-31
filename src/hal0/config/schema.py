@@ -1075,7 +1075,9 @@ MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 #: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe rebuilt for the
 #: #2037 fail-fast entrypoint (supervises llama-server, translates a
 #: non-signal death before /health ever answered 200 into exit 64 so the
-#: template's RestartPreventExitStatus=64 can park a doomed model).
+#: template's RestartPreventExitStatus= can park a doomed model; #2126 widened
+#: both halves — the entrypoint also translates a load-phase SIGILL/SIGABRT/
+#: SIGSEGV, and the template names 132 directly for images that predate it).
 DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 
 #: ``DEFAULT_PROMPTFORGE_IMAGE`` — the PromptForge-flavor runner (HIP-only
