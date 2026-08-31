@@ -3816,6 +3816,18 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 
 
+#: Where the enabled unit lives. A module-level constant (not inlined in the
+#: function) so tests can redirect it the same way ``seam_dirs`` redirects
+#: :data:`hal0.system.seam_check.SEAM_BIN_DIR` — the real path needs root to
+#: write and must never be touched by a unit test.
+GPU_PERMS_UNIT_DST = Path("/etc/systemd/system/hal0-gpu-perms.service")
+
+#: The FHS default venv path baked into the bundled unit (matches
+#: ``installer/systemd/hal0-gpu-perms.service``'s ``ExecStart`` and
+#: ``install.sh``'s own ``VENV_DIR`` default — installer/install.sh:184).
+_DEFAULT_VENV_DIR = "/usr/lib/hal0/venv"
+
+
 def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
     """Install/refresh ``hal0-gpu-perms.service`` from the activated release (#1953).
 
@@ -3832,6 +3844,16 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
     failed ``systemctl enable`` is logged rather than raised. A missing
     permissions tidy-up must never fail an otherwise-successful activate.
 
+    #1982: a non-default ``HAL0_PREFIX`` moves the venv, and the bundled unit
+    hardcodes the FHS ``ExecStart`` interpreter path — copying it verbatim
+    clobbers the rewrite ``install.sh`` performs at install time
+    (installer/install.sh:1630-1645) and the unit dies ``203/EXEC`` on the
+    next activation. This process is itself running from the ACTUAL venv
+    (``sys.prefix`` — the same signal :func:`_is_editable_install` already
+    trusts for "where does this venv live"), so the same string rewrite
+    ``install.sh`` does is applied here before the unit is written, keeping
+    every subsequent update self-healing instead of re-breaking the box.
+
     Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
     """
     if os.geteuid() != 0:
@@ -3840,9 +3862,12 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
     if not src.is_file():
         log.info("updater.gpu_perms_unit_absent", job_id=job_id, src=str(src))
         return "skipped"
-    dst = Path("/etc/systemd/system/hal0-gpu-perms.service")
+    dst = GPU_PERMS_UNIT_DST
     try:
         desired = src.read_text(encoding="utf-8")
+        venv_dir = sys.prefix
+        if venv_dir != _DEFAULT_VENV_DIR:
+            desired = desired.replace(_DEFAULT_VENV_DIR, venv_dir)
         # NOT an early return on identical content: enable/start still re-run
         # below so a previously-failed enable self-heals on the next activate.
         up_to_date = dst.is_file() and dst.read_text(encoding="utf-8") == desired
