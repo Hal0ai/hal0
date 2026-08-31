@@ -1497,6 +1497,94 @@ _hal0_seam_probe() {
     esac
 }
 
+# ── grant probe (#2084) ─────────────────────────────────────────────────────
+#
+# install.sh calls preflight_seams IMMEDIATELY after writing the wrappers and
+# the sudoers drop-ins, on a box whose `hal0` user was itself created minutes
+# earlier. A single failed probe in that window is therefore not evidence that
+# the grant is broken — rc.10/ct151 warned on hal0-podman-ro in the same log
+# second as "wrote /etc/sudoers.d/hal0-podman-ro", and the identical
+# invocation succeeded on the untouched box minutes later. An operator who
+# believes that warning re-runs install.sh for nothing; a validation agent
+# files a regression that does not exist.
+#
+# So: retry, and — the part that actually matters — REPORT WHAT HAPPENED
+# instead of asserting a cause we never observed. The old message threw the
+# probe's stderr away and then named a diagnosis ("the grant does not apply,
+# or the wrapper is stale") it had no evidence for. src/hal0/system/seam_check.py
+# has kept the rc + stderr tail since #1465; this is the shell copy catching
+# up, and the two are meant to stay in lock-step.
+#
+# Every probe verb in _hal0_seam_probe is side-effect-free by construction
+# (`help` prints usage; `check`/`check-slot-token`/`check-image-ref` validate
+# and print), which is exactly what makes re-running one safe.
+HAL0_SEAM_PROBE_ATTEMPTS="${HAL0_SEAM_PROBE_ATTEMPTS:-3}"
+HAL0_SEAM_PROBE_DELAY="${HAL0_SEAM_PROBE_DELAY:-1}"
+# Bounds ONE attempt. Load-bearing now that there are up to three of them: an
+# unbounded sudo that hangs would wedge the installer for good. Mirrors the
+# timeout=20 seam_check.py already passes to subprocess.run.
+HAL0_SEAM_PROBE_TIMEOUT="${HAL0_SEAM_PROBE_TIMEOUT:-20}"
+
+# Run the grant probe ONCE, as the hal0 user. Prints whatever the probe wrote
+# to STDERR on our stdout (its stdout is discarded) and returns the probe's
+# rc. Split out so the retry/report logic below is exercisable in tests
+# without root, without sudo and without a provisioned box.
+_hal0_seam_probe_run() {
+    local bin="$1"; shift
+    # The grant is written for the hal0 user, so the only honest test runs AS
+    # that user. -n keeps both hops non-interactive: a missing grant fails
+    # immediately instead of prompting.
+    local -a cmd=(sudo -n -u hal0 sudo -n "${bin}" "$@")
+    if command -v timeout >/dev/null 2>&1; then
+        cmd=(timeout "${HAL0_SEAM_PROBE_TIMEOUT}" "${cmd[@]}")
+    fi
+    # Order matters: 2>&1 first duplicates the capture pipe onto fd 2, THEN
+    # fd 1 is discarded — so we keep stderr and drop stdout.
+    "${cmd[@]}" 2>&1 >/dev/null
+}
+
+# Prove ONE seam's grant end-to-end, retrying a transient failure.
+# Args: <name> <bin> <grant> <report-fn> <probe word>...
+# Returns 0 when the grant works, 1 once the last attempt has failed.
+_hal0_seam_grant() {
+    local name="$1" bin="$2" grant="$3" report="$4"; shift 4
+    local attempt=0 probe_rc=0 probe_err='' last=''
+
+    while :; do
+        attempt=$(( attempt + 1 ))
+        probe_rc=0
+        probe_err="$(_hal0_seam_probe_run "${bin}" "$@")" || probe_rc=$?
+        (( probe_rc == 0 )) && break
+        (( attempt >= HAL0_SEAM_PROBE_ATTEMPTS )) && break
+        sleep "${HAL0_SEAM_PROBE_DELAY}"
+    done
+
+    if (( probe_rc == 0 )); then
+        if (( attempt > 1 )); then
+            info "seam ${name}: grant verified on attempt ${attempt}/${HAL0_SEAM_PROBE_ATTEMPTS} — the first probe ran before the grant was live, not a fault"
+        fi
+        return 0
+    fi
+
+    # Last non-empty stderr line, capped — the evidence the old message
+    # discarded. `sudo: a password is required` and `hal0-podman-ro: bad slot
+    # token` are entirely different bugs and used to print identically.
+    last="$(printf '%s\n' "${probe_err}" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+    last="${last:0:160}"
+    # Quote the command we ACTUALLY ran, full path and both sudo hops
+    # included. The old text printed the bare wrapper name, so an operator who
+    # pasted it hit "command not found" (the wrapper is not on sudo's
+    # secure_path) and mis-diagnosed a second time.
+    #
+    # Facts first, then a HEDGED reading — the whole point of #2084 is not to
+    # name a cause we did not observe. Three different bugs land here (grant
+    # broken, wrapper stale, transient that outlasted the retry window) and
+    # this line cannot tell them apart. Keep the wording in lock-step with
+    # src/hal0/system/seam_check.py.
+    "${report}" "seam ${name}: 'sudo -n -u hal0 sudo -n ${bin} $*' exited ${probe_rc} after ${attempt} attempt(s)${last:+ (${last})} — usually the ${grant} grant not applying or a stale wrapper, though a transient outlasting the retry window reports identically"
+    return 1
+}
+
 # Verify ONE seam: wrapper present + root-owned + 0755, sudoers drop-in
 # present + root-owned + 0440, and — the fact that actually matters — the
 # grant works when exercised AS the hal0 user. Returns non-zero on any
@@ -1538,13 +1626,7 @@ _preflight_seam() {
         # current one).
         local -a probe_argv=()
         read -r -a probe_argv <<< "${probe}"
-        # The grant is written for the hal0 user, so the only honest test runs
-        # AS that user. -n keeps it non-interactive: a missing grant fails
-        # immediately instead of prompting.
-        if ! sudo -n -u hal0 sudo -n "${bin}" "${probe_argv[@]}" >/dev/null 2>&1; then
-            "${report}" "seam ${name}: 'sudo -n ${name} ${probe}' failed as the hal0 user — the ${grant} grant does not apply, or the wrapper is stale"
-            rc=1
-        fi
+        _hal0_seam_grant "${name}" "${bin}" "${grant}" "${report}" "${probe_argv[@]}" || rc=1
     fi
     return "${rc}"
 }
