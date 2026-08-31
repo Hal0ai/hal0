@@ -179,6 +179,7 @@ markers = [
   "podman: needs a real container runtime (podman/docker) reachable on the host",
   "systemd: needs a live systemd/journald (systemctl, journalctl)",
   "network: needs outbound network access (registry pulls, live HTTP endpoints)",
+  "engine_gate: hindsight pin-bump evidence gate (network + embedded pg; HAL0_ENGINE_GATE=1)",
 ]
 
 [tool.mypy]

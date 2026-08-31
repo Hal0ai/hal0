@@ -11,6 +11,16 @@ name: Bootstrap parity (daily)
 #   installer team can reconcile hal0-web in a follow-up. The header of
 #   bootstrap.sh promises the two stay mirrored; this is the safety net.
 #
+# Why a red run is not enough (#2057):
+#   It was. Parity went red every day from 2026-08-16 to 2026-08-28 and nobody
+#   noticed, because a red run in a list of workflow runs pages no one. The
+#   obvious watch — "alert when `mirror-bootstrap` fails" — can never fire:
+#   mirror-bootstrap concludes green and declines to publish, by design. This
+#   daily check is therefore the only signal that actually tracks the live
+#   installer rotting, so it is the one that has to carry an owner. The `alert`
+#   job below opens (and later closes) exactly one tracking issue once the red
+#   streak reaches ALERT_STREAK.
+#
 # The script is the contract (scripts/check-bootstrap-parity.sh):
 #   exit 0 — in sync.   exit 1 — drift (unified diff printed).
 #   exit 2 — operational error (fetch failed / empty) — NOT read as drift.
@@ -34,6 +44,8 @@ jobs:
     name: Diff in-tree bootstrap.sh against live install.sh
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      rc: ${{ steps.parity.outputs.rc }}
 
     steps:
       - name: Checkout hal0
@@ -43,12 +55,15 @@ jobs:
         id: parity
         # Exit 0 = in sync, 1 = drift, 2 = operational error. We surface the
         # script's stdout/stderr (the unified diff lives there) into the step
-        # summary so a glance at the run page tells the whole story.
+        # summary so a glance at the run page tells the whole story, and export
+        # the raw code so the `alert` job can tell drift from a fetch blip.
         run: |
           set +e
           bash scripts/check-bootstrap-parity.sh > parity.out 2>&1
           rc=$?
           set -e
+
+          echo "rc=${rc}" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Bootstrap parity check"
@@ -72,3 +87,158 @@ jobs:
               ;;
           esac
           exit "$rc"
+
+  # ── Give the daily red an owner ─────────────────────────────────────────
+  # One open tracking issue for the whole drift episode: opened when the red
+  # streak reaches ALERT_STREAK, commented on each further red, and closed
+  # when parity comes back green. The loop has to end as well as start, or the
+  # next episode files on top of a stale issue nobody trusts.
+  alert:
+    name: Open/update the parity drift issue
+    needs: [parity]
+    if: always() && needs.parity.result != 'cancelled' && needs.parity.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Open, update, or close the parity tracking issue
+        uses: actions/github-script@v9
+        env:
+          # Three consecutive daily reds ≈ 48 h of a stale front door. One red
+          # is routinely a same-day sync still in flight; three is an episode.
+          ALERT_STREAK: "3"
+          PARITY_RC: ${{ needs.parity.outputs.rc }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Body marker, not a bespoke label: CLAUDE.md asks for the five
+            // canonical triage labels used unmodified rather than new ones.
+            const MARKER = '<!-- hal0:bootstrap-parity-drift -->';
+            const labels = ['bug'];
+            const streakThreshold = Number(process.env.ALERT_STREAK);
+            const runUrl = process.env.RUN_URL;
+            const today = new Date().toISOString().slice(0, 10);
+
+            // An empty rc means the parity job died before the check ran (bad
+            // checkout, runner loss). `Number('')` is 0, so parsing it naively
+            // would read an infrastructure failure as "green" and close a
+            // live drift issue. Treat a missing code as no evidence at all.
+            const rawRc = (process.env.PARITY_RC || '').trim();
+            const rc = rawRc === '' ? NaN : Number(rawRc);
+
+            // exit 2 is a fetch failure, not drift (see the script's exit-code
+            // contract). Counting it would page the installer team for a
+            // transient Cloudflare blip, so this run is simply not evidence.
+            if (rc === 2 || Number.isNaN(rc)) {
+              core.info(`parity rc='${rawRc}' is not a drift verdict; ignoring this run.`);
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const tracking = openIssues.find(
+              (issue) => !issue.pull_request && (issue.body || '').includes(MARKER),
+            );
+
+            if (rc === 0) {
+              if (!tracking) {
+                core.info('parity is green and no tracking issue is open.');
+                return;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                body: [
+                  `Parity is green again as of ${today}: \`installer/bootstrap.sh\` matches`,
+                  `the live \`hal0.dev/install.sh\`.`,
+                  ``,
+                  `- Run: ${runUrl}`,
+                  ``,
+                  `Closing automatically. A future drift episode opens a fresh issue.`,
+                ].join('\n'),
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                state: 'closed',
+              });
+              core.info(`closed issue #${tracking.number}`);
+              return;
+            }
+
+            // rc === 1 — drift. Count how far back the reds run, this run
+            // included, so a single red does not file an issue.
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'bootstrap-parity.yml',
+              status: 'completed',
+              per_page: 50,
+            });
+            let streak = 1;
+            for (const run of runs.data.workflow_runs) {
+              if (run.id === context.runId) continue;
+              if (run.conclusion === 'failure') {
+                streak += 1;
+              } else if (run.conclusion === 'success') {
+                break;
+              }
+              // Cancelled/skipped runs are not evidence; step over them.
+            }
+            core.info(`consecutive parity reds (this run included): ${streak}`);
+
+            if (streak < streakThreshold && !tracking) {
+              core.info(`streak ${streak} < ${streakThreshold}; not filing yet.`);
+              return;
+            }
+
+            const detail = [
+              `- Consecutive red parity runs: **${streak}**`,
+              `- Latest run: ${runUrl}`,
+              ``,
+              `\`mirror-bootstrap\` will not publish while the stable channel has no`,
+              `sibling Sigstore bundle, and it reports that refusal as a *skipped*`,
+              `mirror job rather than a failure — so this check is the signal that`,
+              `the live one-liner is stale. See #2057 and #2101 gate 4.`,
+            ].join('\n');
+
+            if (tracking) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                body: [`Still drifting on ${today}.`, ``, detail].join('\n'),
+              });
+              core.info(`updated issue #${tracking.number}`);
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `installer: hal0.dev/install.sh has drifted from installer/bootstrap.sh (${streak} consecutive parity reds)`,
+              labels,
+              body: [
+                MARKER,
+                `The daily bootstrap-parity check has been red for ${streak} consecutive runs.`,
+                `The audited in-tree \`installer/bootstrap.sh\` and the live one-liner served`,
+                `at \`https://hal0.dev/install.sh\` have diverged, so a fresh install today`,
+                `does not run the code this repository reviewed.`,
+                ``,
+                detail,
+                ``,
+                `This issue is opened, updated, and closed automatically by`,
+                `\`.github/workflows/bootstrap-parity.yml\`.`,
+              ].join('\n'),
+            });
+            core.info(`opened issue #${created.data.number}`);

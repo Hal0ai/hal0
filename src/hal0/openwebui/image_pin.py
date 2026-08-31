@@ -32,11 +32,27 @@ OPENWEBUI_GHCR_REPO = "open-webui/open-webui"
 
 #: Tag we resolve against when checking for a newer image. OWUI publishes the
 #: multi-arch container under ``:main`` (the tag its own docs recommend for the
-#: self-hosted container). Overridable via ``hal0 update owui --tag``.
+#: self-hosted container). No longer operator-overridable — the pin now rides
+#: hal0 releases; use ``hal0 update owui --target`` for an explicit digest
+#: override instead.
 OPENWEBUI_DEFAULT_TAG = "main"
 
 #: systemd unit that runs the container.
 OPENWEBUI_UNIT_NAME = "hal0-openwebui.service"
+
+#: The digest every box converges on — the release-carried pin (spec
+#: 2026-08-30 §2, same single-owner posture as
+#: hal0.memory.engine_upgrade.HINDSIGHT_API_PIN). Three declaration sites
+#: by design, and this is only one of them: this constant, the shipped
+#: unit (packaging/systemd/hal0-openwebui.service — pins the digest twice,
+#: ExecStartPre pull + ExecStart run), and installer/install.sh. Bump all
+#: three together; tests/installer/test_owui_pin_lockstep.py fails naming
+#: whichever site is stale.
+OPENWEBUI_IMAGE_PIN = "sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e"
+
+#: Human-readable label for the pin, shown next to the digest in status
+#: surfaces. Informational only — the digest is the authority.
+OPENWEBUI_PIN_LABEL = "7f1b0a1a50cf"
 
 #: Matches the pinned ref in the unit / install.sh, capturing the digest.
 #: e.g. ``ghcr.io/open-webui/open-webui@sha256:7f1b0a…`` → ``sha256:7f1b0a…``.
@@ -126,7 +142,9 @@ def repin_unit_text(text: str, new_digest: str) -> tuple[str, int]:
 __all__ = [
     "OPENWEBUI_DEFAULT_TAG",
     "OPENWEBUI_GHCR_REPO",
+    "OPENWEBUI_IMAGE_PIN",
     "OPENWEBUI_IMAGE_REPO",
+    "OPENWEBUI_PIN_LABEL",
     "OPENWEBUI_UNIT_NAME",
     "find_owui_digests",
     "installed_unit_path",

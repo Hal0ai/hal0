@@ -263,6 +263,55 @@ def test_post_apply_shows_drift_banner(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--restart-slots" in result.output
 
 
+def test_bare_update_exits_2_when_a_component_is_still_pending_after_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The applied branch folds component convergence into its exit-2 rule.
+
+    A hal0 self-update can swap the tree cleanly while a component (e.g.
+    hindsight) is still mid-converge or stuck — that must not be reported as
+    a clean "update applied.", same as an outstanding ownership migration.
+    """
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {"count": 0, "slots": []}
+        if path == "/api/updates/components":
+            return {"components": [_component_row(status="pending")], "pending": 1}
+        return {
+            "current": "0.0.0",
+            "latest": "9.9.9",
+            "channel": "stable",
+            "update_available": True,
+            "manifest": {},
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/prepare":
+            return {"id": "p1", "state": "queued"}
+        if path == "/api/updates/commit":
+            return {"id": "c1", "state": "queued"}
+        return {}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        if "prepared" in terminal:
+            return {"id": job_id, "state": "prepared", "resolved_version": "9.9.9", "notes": {}}
+        return {"id": job_id, "state": "applied"}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 2, result.output
+    assert "NOT fully converged" in result.output
+    assert "update applied." not in result.output
+
+
 def test_target_strips_leading_v(stub_api: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--target v0.1.1`` is normalized to ``0.1.1`` before hitting /prepare."""
     result = runner.invoke(app, ["update", "--target", "v0.1.1"])
@@ -750,3 +799,147 @@ def test_print_check_real_manifest_renders_normally(capsys: pytest.CaptureFixtur
     out = capsys.readouterr().out
     assert "no release published" not in out
     assert "1.0.0" in out
+
+
+# ── `hal0 update status` / `hal0 update component` (spec 2026-08-30 §3) ────────
+
+
+def _component_row(**overrides: object) -> dict:
+    row = {
+        "id": "hindsight",
+        "name": "Hindsight",
+        "installed": "1.0.0",
+        "pinned": "1.1.0",
+        "pin_label": None,
+        "status": "pending",
+        "error": None,
+        "remedy": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_update_status_exits_2_when_a_component_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": [_component_row(status="pending")], "pending": 1}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 2, result.output
+    assert "Hindsight" in result.output
+
+
+def test_update_status_exits_0_when_all_components_converged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": [_component_row(status="converged")], "pending": 0}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Hindsight" in result.output
+
+
+def test_update_component_converges_and_prints_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    posted: dict = {}
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        assert path == "/api/updates/components"
+        return {"components": [_component_row(id="hindsight", status="pending")], "pending": 1}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted["path"] = path
+        posted["json"] = json
+        return {"id": "job1", "state": "queued"}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        assert job_id == "job1"
+        return {
+            "id": job_id,
+            "state": "applied",
+            "component_result": {"status": "converged", "from": "1.0.0", "to": "1.1.0"},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    result = runner.invoke(app, ["update", "component", "hindsight"])
+    assert result.exit_code == 0, result.output
+    assert posted["path"] == "/api/updates/components/hindsight/converge"
+    assert "converged" in result.output
+
+
+def test_update_component_unknown_id_dies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        return {"components": [_component_row(id="hindsight")], "pending": 1}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "component", "nope"])
+    assert result.exit_code == 1, result.output
+    assert "nope" in result.output
+
+
+# ── `hal0 update owui` (thin client rework; --tag GONE) ─────────────────────────
+
+
+def test_update_owui_target_posts_normalized_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    posted: dict = {}
+    digest_hex = "a" * 64
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        return {"components": [_component_row(id="openwebui", status="pending")], "pending": 1}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted["path"] = path
+        posted["json"] = json
+        return {"id": "job2", "state": "queued"}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        return {"id": job_id, "state": "applied", "component_result": {"status": "converged"}}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    result = runner.invoke(app, ["update", "owui", "--target", digest_hex])
+    assert result.exit_code == 0, result.output
+    assert posted["path"] == "/api/updates/components/openwebui/converge"
+    assert posted["json"] == {"target": f"sha256:{digest_hex}"}
+
+
+def test_update_owui_tag_flag_no_longer_parses() -> None:
+    result = runner.invoke(app, ["update", "owui", "--tag", "x"])
+    assert result.exit_code == 2, result.output

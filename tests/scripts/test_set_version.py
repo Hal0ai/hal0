@@ -115,6 +115,17 @@ def _populate_project(tmp_path: Path, version: str) -> dict[str, Path]:
     p.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     paths["manifest.json"] = p
 
+    # README.md — front-page status blockquote (mirrors the real shipped shape)
+    readme = textwrap.dedent(f"""\
+    # hal0
+
+    > **v{version} is the GA release.** It is what the `stable` channel has
+    > been waiting for.
+    """)
+    p = tmp_path / "README.md"
+    p.write_text(readme, encoding="utf-8")
+    paths["README.md"] = p
+
     return paths
 
 
@@ -199,6 +210,11 @@ class TestSetVersion:
         lock_data = tomllib.loads(lock_text)
         hal0ai = next(p for p in lock_data["package"] if p["name"] == "hal0ai")
         assert hal0ai["version"] == "1.0.0a2"
+
+        # README.md — front-page status blockquote version token
+        readme_text = (tmp_path / "README.md").read_text(encoding="utf-8")
+        assert "v1.0.0-alpha.2 is the GA release" in readme_text
+        assert "v1.0.0-alpha.0 is the GA release" not in readme_text
 
     def test_transaction_temps_share_repository_filesystem(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

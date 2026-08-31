@@ -111,6 +111,255 @@ def test_preflight_seams_is_not_in_preflight_all() -> None:
     assert "preflight_seams()" in text
 
 
+# ── the grant probe: transients, and honest reporting (#2084) ─────────────────
+#
+# install.sh runs preflight_seams in the same log second as "wrote
+# /etc/sudoers.d/hal0-podman-ro", on a box whose hal0 user was created minutes
+# earlier. rc.10/ct151 warned there; the identical invocation succeeded on the
+# untouched box minutes later. These pin the retry AND the message, because
+# the message is what an operator (or a validation agent) acts on.
+
+
+def _call_probe(
+    tmp_path: Path,
+    *,
+    fail_attempts: int,
+    stderr_line: str = "",
+    attempts: int = 3,
+    delay: str = "0",
+    name: str = "hal0-podman-ro",
+    required: str = "optional",
+    set_e: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Drive `_preflight_seam` past its stat checks with a stubbed grant probe.
+
+    Shell-level stubs, all installed *after* sourcing so they shadow the real
+    definitions: ``stat`` (tmp files belong to the test user, and the ownership
+    check would otherwise short-circuit before the probe), ``sleep`` (logs the
+    delay it was handed) and ``_hal0_seam_probe_run`` (no root, no sudo, no
+    provisioned box in CI).
+
+    Stubbing ``_hal0_seam_probe_run`` buys hermetic retry/report coverage at
+    the cost of the one thing that lives *inside* it — which stream the probe
+    keeps. ``test_the_probe_keeps_stderr_drops_stdout_and_returns_the_rc``
+    stubs the layer below instead and covers exactly that.
+
+    ``set -e`` is on by default because install.sh runs ``set -euo pipefail``:
+    a retry loop that aborts the installer on its first failed attempt would
+    be a worse bug than the one being fixed.
+    """
+    bin_dir, sudoers_dir = _seam_dirs(tmp_path, names=(name,))
+    counter = tmp_path / "attempts"
+    argv_log = tmp_path / "argv"
+    sleep_log = tmp_path / "slept"
+    flags = "set -euo pipefail" if set_e else "set -uo pipefail"
+    script = f"""
+{flags}
+source "{REPO}/installer/lib/ui.sh"
+source "{PREFLIGHT}"
+
+# Logs what the loop asked to sleep for, then really sleeps it — the delay is
+# a knob install.sh ships at 1s, so it has to be a value that reaches `sleep`,
+# not just a variable that exists.
+sleep() {{
+    printf '%s\\n' "$1" >> "{sleep_log}"
+    command sleep "$1"
+}}
+
+stat() {{
+    case "$2" in
+        '%a')    case "$3" in *sudoers.d*) echo 440 ;; *) echo 755 ;; esac ;;
+        '%U:%G') echo root:root ;;
+        '%U')    echo root ;;
+    esac
+}}
+
+echo 0 > "{counter}"
+_hal0_seam_probe_run() {{
+    local n
+    n=$(( $(cat "{counter}") + 1 ))
+    echo "$n" > "{counter}"
+    printf '%s\\n' "$*" >> "{argv_log}"
+    if (( n <= {fail_attempts} )); then
+        printf '%s\\n' "{stderr_line}"
+        return 1
+    fi
+    return 0
+}}
+
+HAL0_SEAM_PROBE_ATTEMPTS={attempts}
+HAL0_SEAM_PROBE_DELAY={delay}
+rc=0
+_preflight_seam "{name}" "{required}" "{bin_dir}" "{sudoers_dir}" || rc=$?
+echo "rc=$rc"
+echo "attempts=$(cat "{counter}")"
+echo "argv=$(cat "{argv_log}" 2>/dev/null | head -1)"
+echo "slept=$(cat "{sleep_log}" 2>/dev/null | tr '\\n' ',')"
+"""
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+    )
+
+
+def test_a_transient_grant_probe_failure_is_retried(tmp_path: Path) -> None:
+    """The rc.10/ct151 false negative: one failed probe, healthy seam."""
+    proc = _call_probe(tmp_path, fail_attempts=1)
+
+    assert "rc=0" in proc.stdout, proc.stderr
+    assert "attempts=2" in proc.stdout
+    assert "does not apply" not in proc.stderr
+
+
+def test_a_retried_probe_says_so_rather_than_passing_silently(tmp_path: Path) -> None:
+    """A seam that needed a second look is worth one line in the log."""
+    proc = _call_probe(tmp_path, fail_attempts=1)
+
+    assert "grant verified on attempt 2/3" in proc.stdout
+
+
+def test_the_probe_is_not_retried_when_it_passes_first_time(tmp_path: Path) -> None:
+    proc = _call_probe(tmp_path, fail_attempts=0)
+
+    assert "rc=0" in proc.stdout
+    assert "attempts=1" in proc.stdout
+    assert "grant verified on attempt" not in proc.stdout  # nothing to report
+
+
+def test_a_genuinely_broken_grant_still_fails_after_every_attempt(tmp_path: Path) -> None:
+    """Retrying must not turn a real breakage into a pass."""
+    proc = _call_probe(tmp_path, fail_attempts=99)
+
+    assert "rc=1" in proc.stdout
+    assert "attempts=3" in proc.stdout
+    assert "3 attempt" in proc.stderr
+
+
+def test_the_failure_quotes_the_command_it_actually_ran(tmp_path: Path) -> None:
+    """Nit 1 on #2084: the old text printed the bare wrapper name.
+
+    `sudo -n hal0-podman-ro …` is not what the check runs and fails for an
+    unrelated reason when pasted — the wrapper is not on sudo's secure_path —
+    so the printed command sent operators down a second wrong path.
+    """
+    proc = _call_probe(tmp_path, fail_attempts=99)
+
+    bin_path = str(tmp_path / "bin" / "hal0-podman-ro")
+    assert f"sudo -n -u hal0 sudo -n {bin_path} check-slot-token hal0probe" in proc.stderr
+    assert "'sudo -n hal0-podman-ro" not in proc.stderr
+
+
+def test_the_failure_reports_the_probe_rc_and_its_stderr(tmp_path: Path) -> None:
+    """Report the evidence, don't assert a cause we never observed.
+
+    seam_check.py has carried rc + stderr tail since #1465; the shell copy
+    threw both away, so "sudo: a password is required" (grant broken) and
+    "bad slot token" (wrapper stale) printed identically.
+    """
+    proc = _call_probe(tmp_path, fail_attempts=99, stderr_line="sudo: a password is required")
+
+    assert "exited 1" in proc.stderr
+    assert "sudo: a password is required" in proc.stderr
+
+
+def test_the_retry_loop_does_not_abort_an_installer_running_set_e(tmp_path: Path) -> None:
+    """install.sh is `set -euo pipefail`; a failing attempt must not kill it."""
+    proc = _call_probe(tmp_path, fail_attempts=2, set_e=True)
+
+    assert "rc=0" in proc.stdout, proc.stderr
+    assert "attempts=3" in proc.stdout
+
+
+def test_required_seams_get_the_same_retry(tmp_path: Path) -> None:
+    """The transient is not podman-ro's; a load-bearing seam must not die on it."""
+    proc = _call_probe(tmp_path, fail_attempts=1, name="hal0-systemctl", required="required")
+
+    assert "rc=0" in proc.stdout, proc.stderr
+    assert "attempts=2" in proc.stdout
+
+
+def test_the_configured_delay_is_what_the_loop_actually_sleeps(tmp_path: Path) -> None:
+    """The knob has to reach `sleep`; install.sh ships it at 1s, not 0."""
+    proc = _call_probe(tmp_path, fail_attempts=1, delay="0.25")
+
+    assert "rc=0" in proc.stdout, proc.stderr
+    assert "attempts=2" in proc.stdout
+    assert "slept=0.25," in proc.stdout  # once, between the two attempts
+
+
+def _stub_sudo_probe(
+    tmp_path: Path, *, rc: int, stdout_line: str, stderr_line: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the REAL `_hal0_seam_probe_run` against a `sudo` stub on PATH.
+
+    A real executable, not a shell function: the probe may wrap the command in
+    `timeout`, which execs its child itself and would never see a function.
+    """
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    argv_log = tmp_path / "sudo-argv"
+    sudo = stub_dir / "sudo"
+    sudo.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" > "{argv_log}"\n'
+        f'printf "%s\\n" "{stdout_line}"\n'
+        f'printf "%s\\n" "{stderr_line}" >&2\n'
+        f"exit {rc}\n"
+    )
+    sudo.chmod(0o755)
+    script = f"""
+set -uo pipefail
+source "{REPO}/installer/lib/ui.sh"
+source "{PREFLIGHT}"
+export PATH="{stub_dir}:$PATH"
+rc=0
+captured="$(_hal0_seam_probe_run /usr/lib/hal0/bin/hal0-podman-ro check-slot-token hal0probe)" || rc=$?
+echo "rc=${{rc}}"
+echo "captured=${{captured}}"
+echo "argv=$(cat "{argv_log}")"
+"""
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+    )
+
+
+def test_the_probe_keeps_stderr_drops_stdout_and_returns_the_rc(tmp_path: Path) -> None:
+    """The headline of #2084, at the only layer that can show it.
+
+    `sudo … >/dev/null 2>&1` threw the evidence away; the fix is `2>&1 >/dev/null`,
+    which keeps the probe's stderr (`sudo: a password is required` vs `bad slot
+    token` — different bugs) and drops its chatty stdout. Every other test here
+    stubs `_hal0_seam_probe_run` itself, so this redirection is invisible to
+    them: flipping it back leaves them green.
+    """
+    proc = _stub_sudo_probe(
+        tmp_path,
+        rc=7,
+        stdout_line="hal0probe-slot-token-that-must-not-be-captured",
+        stderr_line="sudo: a password is required",
+    )
+
+    assert "rc=7" in proc.stdout, proc.stderr  # the probe's own rc, not sudo's or 1
+    assert "captured=sudo: a password is required" in proc.stdout
+    assert "hal0probe-slot-token-that-must-not-be-captured" not in proc.stdout
+    # …and it is the two-hop command that ran, not the bare wrapper name.
+    assert (
+        "argv=-n -u hal0 sudo -n /usr/lib/hal0/bin/hal0-podman-ro check-slot-token hal0probe"
+        in proc.stdout
+    )
+
+
+def test_one_probe_attempt_is_bounded_by_a_timeout() -> None:
+    """Retrying an unbounded sudo would wedge the installer for 3x as long.
+
+    seam_check.py already passes timeout=20 to subprocess.run; keep the shell
+    copy in lock-step.
+    """
+    text = PREFLIGHT.read_text()
+    body = text.split("_hal0_seam_probe_run() {", 1)[1].split("\n}", 1)[0]
+    assert "timeout" in body
+    assert 'HAL0_SEAM_PROBE_TIMEOUT="${HAL0_SEAM_PROBE_TIMEOUT:-20}"' in text
+
+
 # ── inventory parity ───────────────────────────────────────────────────────────
 
 

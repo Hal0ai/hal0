@@ -307,6 +307,44 @@ re-run it — this whole section is a one-time migration concern, not an
 ongoing behavior of `hal0 update`.
 </Aside>
 
+## Component updates
+
+Four components carry their own release-pinned version alongside hal0
+itself: OpenWebUI (the companion container), runner images, Hermes, and
+Hindsight. None of them float independently — each pin travels *inside*
+the hal0 release, so a normal `hal0 update` converges all four as part of
+applying. Reach for `hal0 update status` and `hal0 update component <id>`
+for a narrower view, or to retry just the piece that's stuck.
+
+```sh
+hal0 update status
+```
+
+Prints the same hal0 version/channel check as `hal0 update --check`, plus
+a table of installed / pinned / status for each component. `status` is
+`converged` once the box matches the release pin; anything else
+(`pending`, `stale`, or a failure status) still needs to catch up. Exits
+**2** when a component is outstanding — useful for scripting a gate on
+full convergence, not just "hal0 itself is current."
+
+```sh
+hal0 update component runner-images
+hal0 update component hermes --check
+```
+
+Re-runs one component's converge arm without a full `hal0 update` — a
+retry surface for a component that's stuck (e.g. `build_failed` after a
+transient pull failure). `--check` prints the status row without
+converging.
+
+<Aside type="note">
+An apply that leaves the profile-catalog reset (see above) or a component
+unconverged still reports the update as applied, but exits **2** —
+distinct from a failed update (exit 1). `hal0 update` prints the same
+convergence report and component table inline after an apply, so you
+don't need a separate `hal0 update status` call to see what's left.
+</Aside>
+
 ## Roll back
 
 If an update misbehaves, revert to the previously installed tree:
@@ -333,12 +371,24 @@ decoupled.
 
 ```sh
 hal0 update owui --check
-hal0 update owui --target <digest>
-hal0 update owui --yes --force
+hal0 update owui --yes
+hal0 update owui --target <digest> --yes
+hal0 update owui --clear-override --yes
 ```
 
-Independent of the main `hal0 update` flow — repins the bundled
-OpenWebUI container by SHA-256 digest.
+`hal0 update owui` is a thin alias for `hal0 update component openwebui`
+(see [Component updates](#component-updates) above) — it converges the
+bundled OpenWebUI container to whatever pin hal0 carries for it, the same
+as a plain `hal0 update` would. There is no independent `--tag`
+float-to-upstream flag any more; the pin rides hal0 releases like every
+other component.
+
+`--target <digest>` (`sha256:…` or bare 64-hex) pins an explicit digest
+override instead, for holding OWUI outside the release cadence. The
+override persists across future converges — including a plain `hal0
+update` — until you drop it with `--clear-override`, which converges the
+container back to the release pin. `--check` prints the status row only;
+`--yes`/`-y` skips the confirmation prompt.
 
 ## See also
 

@@ -33,7 +33,20 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
     network op and the first start of a newer engine triggers its one-way DB
     migration, neither of which belongs outside an operator-visible update
     (the ``skip_image_retag``/``repair_hermes_venv`` posture, one step
-    further)."""
+    further).
+
+    Since the 2026-08-30 component-updates spec, the engine pass rides in
+    via the component catalog (:func:`hal0.components.runner.converge_components`,
+    ``engine=upgrade_memory_engine_venv``) rather than a direct
+    ``upgrade_memory_engine(...)`` call inline in the sequence — the
+    catalog also covers openwebui/runner-images/hermes convergence in one
+    best-effort pass. ``updater.memory_engine_upgrade_failed`` is now
+    logged from inside :func:`hal0.memory.engine_upgrade.upgrade_memory_engine`
+    itself, not from ``run_post_activation_migrations``, but stays in
+    :data:`updater._NON_FATAL_MIGRATION_FAILURE_EVENTS` for the stderr-relay
+    scan; the pass's own genuine-bug isolation now logs the new
+    ``updater.components_converge_failed`` event instead.
+    """
     import inspect
 
     from hal0.updater import updater
@@ -43,12 +56,42 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
 
     boot_src = inspect.getsource(updater.check_outstanding_migrations)
     assert "upgrade_memory_engine_venv=False" in boot_src
+    assert "converge_companions=False" in boot_src
 
     seq_src = inspect.getsource(updater.run_post_activation_migrations)
-    assert "upgrade_memory_engine(" in seq_src
-    assert "updater.memory_engine_upgrade_failed" in seq_src
+    assert "converge_components(" in seq_src
+    assert "engine=upgrade_memory_engine_venv" in seq_src
+    assert "updater.components_converge_failed" in seq_src
+    assert "updater.components_converge_failed" in updater._NON_FATAL_MIGRATION_FAILURE_EVENTS, (
+        "a swallowed component-convergence failure must surface in commit()'s convergence report"
+    )
     assert "updater.memory_engine_upgrade_failed" in updater._NON_FATAL_MIGRATION_FAILURE_EVENTS, (
         "a swallowed engine-pass failure must surface in commit()'s convergence report"
+    )
+
+
+def test_the_enabled_sweep_runs_before_the_brain_model_is_bound() -> None:
+    """#2131 — the ordering the 0.9.8 upgrade turns on.
+
+    Every v0.9.8 box carries `enabled = false` on a model-less brain.toml (its
+    install.sh ran `hal0 setup --auto` at :1249 before the curated seed loop at
+    :1487, so `_build_slot_cfg(..., enabled=False)`'s scaffold won). With the
+    sweep AFTER the brain step, install.sh bound the freshly pulled default and
+    the sweep then read `enabled = false` beside a bound model and cleared it —
+    the documented upgrade path finished with the model on disk and the slot
+    model-less.
+
+    Sweeping FIRST hits the migration's own "no model bound, just drop the key"
+    branch, so the brain step binds into a clean slot and the identical
+    boot-time sweep (`hal0.api._boot_slot_reconcile`) no-ops forever after.
+    """
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    pull = "-m hal0.install.brain_model \\"
+    assert text.count(pull) == 1, "expected exactly one brain-model pull invocation"
+    assert "sweep_slot_enabled_keys" in text, "install.sh no longer runs the enabled sweep"
+    assert text.index("sweep_slot_enabled_keys") < text.index(pull), (
+        "the SlotConfig.enabled sweep must run BEFORE the brain model step — "
+        "after it, the sweep blanks the binding it just made (#2131)"
     )
 
 

@@ -42,6 +42,7 @@ than silently implied.
 from __future__ import annotations
 
 import os
+import shlex
 import stat as stat_mod
 import subprocess
 from collections.abc import Callable
@@ -250,10 +251,18 @@ def probe_seam(
                 if not grant_ok:
                     stderr = (proc.stderr or "").strip().splitlines()
                     tail = stderr[-1][:160] if stderr else ""
+                    # Quote the command we ACTUALLY ran — full wrapper path,
+                    # both sudo hops (#2084). The old text printed the bare
+                    # `sudo -n <name> <probe>`, which an operator cannot paste:
+                    # the wrapper is not on sudo's secure_path, so it fails for
+                    # an unrelated reason and mis-diagnoses a second time.
+                    # Hedged, and worded to match installer/lib/preflight.sh:
+                    # a broken grant and a stale wrapper are different bugs and
+                    # this probe cannot tell them apart.
                     grant_detail = (
-                        f"{spec.name}: `sudo -n {spec.name} {' '.join(spec.probe)}` exited "
-                        f"{proc.returncode} as {SERVICE_USER} — the {grant} grant does not "
-                        f"apply{f' ({tail})' if tail else ''}"
+                        f"{spec.name}: `{shlex.join(argv)}` exited "
+                        f"{proc.returncode}{f' ({tail})' if tail else ''} — usually the "
+                        f"{grant} grant not applying or a stale wrapper"
                     )
 
     return SeamStatus(

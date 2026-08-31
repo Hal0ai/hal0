@@ -30,9 +30,9 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "seed_profiles": [],
         "mtp": [],
         "vulkan_migration": [],
-        "image_retag": [],
         "extra_args": [],
         "hermes_venv": [],
+        "converge_components": [],
     }
 
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
@@ -51,10 +51,6 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["vulkan_migration"].append(job_id)
         return 0
 
-    def _image_retag(*, job_id=None):
-        calls["image_retag"].append(job_id)
-        return 0
-
     def _extra_args(*, job_id=None, registry=None):
         calls["extra_args"].append(job_id)
         return 0
@@ -63,13 +59,27 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["hermes_venv"].append((job_id, install))
         return False
 
+    def _converge_components(
+        *, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+    ):
+        calls["converge_components"].append(
+            {
+                "job_id": job_id,
+                "apply": apply,
+                "image_retag": image_retag,
+                "engine": engine,
+                "hermes_install": hermes_install,
+            }
+        )
+        return {}
+
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
-    monkeypatch.setattr("hal0.updater.updater.retag_stale_slot_images", _image_retag)
     monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
     monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
+    monkeypatch.setattr("hal0.components.runner.converge_components", _converge_components)
     return calls
 
 
@@ -80,21 +90,38 @@ def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
-    assert _stub_every_pass["image_retag"] == ["j1"]
     assert _stub_every_pass["extra_args"] == ["j1"]
+    assert _stub_every_pass["converge_components"] == [
+        {
+            "job_id": "j1",
+            "apply": True,
+            "image_retag": True,
+            "engine": True,
+            "hermes_install": True,
+        }
+    ]
 
 
 def test_skip_image_retag_omits_only_that_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     """#1960 N2: check_outstanding_migrations passes skip_image_retag=True
-    so the boot-time safety net never runs retag_stale_slot_images — every
-    OTHER pass must still run unaffected."""
+    so the boot-time safety net never runs retag_stale_slot_images (now the
+    runner-images arm inside converge_components) — every OTHER pass must
+    still run unaffected."""
     result = run_post_activation_migrations(job_id="j1", skip_image_retag=True)
     assert result == (1, 2)
     assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
-    assert _stub_every_pass["image_retag"] == []
     assert _stub_every_pass["extra_args"] == ["j1"]
+    assert _stub_every_pass["converge_components"] == [
+        {
+            "job_id": "j1",
+            "apply": True,
+            "image_retag": False,
+            "engine": True,
+            "hermes_install": True,
+        }
+    ]
 
 
 def test_min_data_version_defaults_to_1(_stub_every_pass: dict[str, list[Any]]) -> None:
@@ -119,8 +146,10 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
     assert result == (1, 2)  # schema migration still reported
     assert _stub_every_pass["seed_profiles"] == ["j2"]
     assert _stub_every_pass["vulkan_migration"] == ["j2"]  # ran despite mtp's failure
-    assert _stub_every_pass["image_retag"] == ["j2"]  # ran despite mtp's failure
     assert _stub_every_pass["extra_args"] == ["j2"]
+    assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == [
+        "j2"
+    ]  # ran despite mtp's failure
 
 
 def test_schema_migration_failure_propagates(
@@ -143,8 +172,8 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["seed_profiles"] == []
     assert _stub_every_pass["mtp"] == []
     assert _stub_every_pass["vulkan_migration"] == []
-    assert _stub_every_pass["image_retag"] == []
     assert _stub_every_pass["extra_args"] == []
+    assert _stub_every_pass["converge_components"] == []
 
 
 def test_update_path_repairs_a_drifted_hermes_venv(
@@ -174,3 +203,31 @@ def test_boot_safety_net_diagnoses_the_venv_without_installing(
     check_outstanding_migrations(job_id="boot")
 
     assert _stub_every_pass["hermes_venv"] == [("boot", False)]
+    assert _stub_every_pass["converge_components"] == [
+        {
+            "job_id": "boot",
+            "apply": False,
+            "image_retag": False,
+            "engine": False,
+            "hermes_install": False,
+        }
+    ]
+
+
+def test_converge_companions_flag_gates_the_apply_kwarg(
+    _stub_every_pass: dict[str, list[Any]],
+) -> None:
+    """``converge_companions=False`` is the explicit, non-inferred way to
+    make the whole component catalog diagnose-only — see the controller
+    ruling in the component-updates spec: inferring "diagnose-only" from
+    the other three flags being off was rejected as fragile."""
+    run_post_activation_migrations(job_id="j4", converge_companions=False)
+    assert _stub_every_pass["converge_components"] == [
+        {
+            "job_id": "j4",
+            "apply": False,
+            "image_retag": True,
+            "engine": True,
+            "hermes_install": True,
+        }
+    ]

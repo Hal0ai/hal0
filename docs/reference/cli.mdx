@@ -81,6 +81,9 @@ hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slot
 ```sh
 hal0 update [--channel stable|preview|nightly] [--check] [--rollback]
             [--target VERSION] [--yes|-y] [--restart-slots]
+hal0 update status
+hal0 update component <id> [--check]
+hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 ```
 
 | Flag | Meaning |
@@ -92,10 +95,34 @@ hal0 update [--channel stable|preview|nightly] [--check] [--rollback]
 | `--yes` / `-y` | Skip the confirmation prompt. |
 | `--restart-slots` | Bounce only drifted slots after update. |
 
-`hal0 update owui` manages the bundled OpenWebUI container separately:
-`--check`, `--tag` (upstream tag, default `:main`; ignored if `--target` set), `--target`
-(pin an explicit digest), `--yes`/`-y`, `--force` (repin/pull/restart even if the digest
-already matches).
+An apply that leaves any operator-facing convergence outstanding (the
+one-shot v1.0 profile-catalog reset, or a component below still `pending`)
+exits **2** rather than reporting a clean success — distinct from a failed
+update (`die()` → exit 1).
+
+`hal0 update status` prints the same hal0 version/channel check plus a
+per-component table (installed / pinned / status) for the four
+release-pinned components — OpenWebUI, runner images, Hermes, and
+Hindsight; their pins ride hal0 releases rather than updating
+independently. Exits **2** if any component isn't converged yet
+(`pending`, `stale`, or a failure status), so it doubles as a scriptable
+convergence gate.
+
+`hal0 update component <id>` re-runs one component's converge arm — a
+per-component alternative to a full `hal0 update` for retrying just the
+piece that's stuck. `--check` prints that component's status row without
+converging it. `<id>` is one of `openwebui`, `runner-images`, `hermes`,
+`hindsight` (see `hal0 update status` for the live list).
+
+`hal0 update owui` converges the bundled OpenWebUI companion container to
+its release-carried pin — a thin alias for `hal0 update component
+openwebui`. There is no more independent `--tag` float-to-upstream flag:
+the pin now rides hal0 releases like every other component. `--target
+DIGEST` (`sha256:…` or bare 64-hex) pins an explicit digest override
+instead, which persists across future converges until cleared;
+`--clear-override` drops it and converges back to the release pin.
+`--check` prints the status row only; `--yes`/`-y` skips the confirmation
+prompt.
 
 <Aside type="caution">
 On a v1.0 update, the profile catalog is reset once (gated on a schema-version

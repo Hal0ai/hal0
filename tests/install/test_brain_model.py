@@ -21,6 +21,7 @@ huggingface.co.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,12 +36,18 @@ from hal0.install.brain_model import (
     BRAIN_MODEL_SMALL,
     BRAIN_SLOT_NAME,
     already_pulled,
+    bind_brain_model,
     brain_model_for_hardware,
+    check_binding,
+    current_brain_binding,
     main,
     provision_brain_model,
+    remediation_command,
     rocmfpx_capable,
 )
 from hal0.registry.curated import get_curated
+
+_INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 
 # ── quant choice ────────────────────────────────────────────────────────────
 
@@ -402,3 +409,503 @@ def test_provisioning_still_pulls_when_the_prior_file_is_untrustworthy(
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
     assert landed == BRAIN_MODEL_DEFAULT
+
+
+# ── #2131: the 0.9.8 → 1.0.0 upgrade — model on disk, slot never bound ──────
+#
+# The documented upgrade path ended at "Verify FAILED: structured-output probe
+# failed" on every stable-channel box: the 2.87 GB default landed and was
+# registered, but `/etc/hal0/slots/brain.toml` kept a `[model]` table naming
+# nothing, so the gateway had nothing to answer with. The seeding pass reported
+# success throughout — `_activate_slot_model` wraps its write in
+# `contextlib.suppress(Exception)`, so a write that never landed is
+# indistinguishable from one that did.
+#
+# The semantics these pin: an existing-but-UNBOUND `[model]` table is the
+# shipped seed state, not operator config, so the default is bound into it; a
+# NON-EMPTY `[model].default` is an operator pick and is never touched; and a
+# binding that genuinely cannot be made is REPORTED (exit 1 + the exact
+# remediation command) instead of reported as success.
+
+
+class _ConfiguredSlotManager:
+    """A slot manager backed by one in-memory brain config.
+
+    Unlike :class:`_FakeSlotManager` it can be READ, which is what the binding
+    contract turns on: "" (an empty ``[model].default``) is the seed state,
+    a non-empty one is an operator pick.
+    """
+
+    def __init__(self, bound: str = "", *, persist: bool = True) -> None:
+        self.cfg: dict[str, Any] = {
+            "name": BRAIN_SLOT_NAME,
+            "type": "llm",
+            "device": "gpu-vulkan",
+            "port": 8089,
+            "model": {"default": bound, "context_size": 65536},
+        }
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+        self._persist = persist
+
+    async def get_config(self, slot: str) -> dict[str, Any]:
+        assert slot == BRAIN_SLOT_NAME
+        return {**self.cfg, "model": dict(self.cfg["model"])}
+
+    async def update_config(self, slot: str, updates: dict[str, Any]) -> None:
+        self.updates.append((slot, updates))
+        if not self._persist:  # a write that silently does not land
+            return
+        model = updates.get("model")
+        if isinstance(model, dict):
+            self.cfg["model"] = {**self.cfg["model"], **model}
+
+
+class _WriteFailsSlotManager(_ConfiguredSlotManager):
+    """Every config write raises — a read-only /etc, a lock we lost, a
+    validation refusal on a config shape this release no longer accepts."""
+
+    async def update_config(self, slot: str, updates: dict[str, Any]) -> None:
+        self.updates.append((slot, updates))
+        raise RuntimeError("failed to rewrite /etc/hal0/slots/brain.toml")
+
+
+def test_an_unbound_model_table_is_seed_state_and_gets_the_default_bound(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact #2131 shape: brain.toml exists, `[model]` names nothing, and
+    the bytes are already on disk (the upgrade re-run / already-pulled path)."""
+    _place(store, BRAIN_MODEL_DEFAULT)
+    sm, reg = _ConfiguredSlotManager(bound=""), _FakeRegistry()
+    landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert landed == BRAIN_MODEL_DEFAULT
+    assert sm.cfg["model"]["default"] == BRAIN_MODEL_DEFAULT
+    # Binding is a merge, never a reset of the slot's tuning.
+    assert sm.cfg["model"]["context_size"] == 65536
+
+
+def test_an_unbound_model_table_gets_bound_on_the_pull_path_too(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_run_pull(monkeypatch, state="completed")
+    sm, reg = _ConfiguredSlotManager(bound=""), _FakeRegistry()
+    landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert landed == BRAIN_MODEL_DEFAULT
+    assert sm.cfg["model"]["default"] == BRAIN_MODEL_DEFAULT
+
+
+def test_an_operator_set_default_is_never_overwritten(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the rule. A non-empty `[model].default` is a pick —
+    a re-run of install.sh must not revert it to the shipped default."""
+    _place(store, BRAIN_MODEL_DEFAULT)
+    sm, reg = _ConfiguredSlotManager(bound="my-own-brain"), _FakeRegistry()
+    landed = asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert landed == BRAIN_MODEL_DEFAULT  # the pull still reports what it has
+    assert sm.cfg["model"]["default"] == "my-own-brain"
+    assert sm.updates == [], "an operator's pick must not be written over"
+
+
+def test_an_operator_set_default_survives_the_pull_path(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_run_pull(monkeypatch, state="completed")
+    sm, reg = _ConfiguredSlotManager(bound="my-own-brain"), _FakeRegistry()
+    asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert sm.cfg["model"]["default"] == "my-own-brain"
+    assert sm.updates == []
+
+
+def test_binding_is_idempotent_across_re_runs(store, monkeypatch: pytest.MonkeyPatch) -> None:
+    _place(store, BRAIN_MODEL_DEFAULT)
+    sm, reg = _ConfiguredSlotManager(bound=""), _FakeRegistry()
+    asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    first = len(sm.updates)
+    asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+    assert len(sm.updates) == first, "a converged slot must be re-read, not re-written"
+    assert sm.cfg["model"]["default"] == BRAIN_MODEL_DEFAULT
+
+
+def test_a_binding_write_that_fails_is_reported_not_swallowed(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #2131 silence. Before this, the suppressed write left the slot
+    model-less while the module printed "brain model ready" and exited 0."""
+    _place(store, BRAIN_MODEL_DEFAULT)
+    sm, reg = _WriteFailsSlotManager(bound=""), _FakeRegistry()
+    with pytest.raises(RuntimeError, match="could not be bound"):
+        asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+
+
+def test_a_binding_write_that_does_not_land_is_reported_not_swallowed(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that raises nothing but changes nothing is the same failure —
+    "it did not raise" is not proof the slot is bound."""
+    _place(store, BRAIN_MODEL_DEFAULT)
+    sm, reg = _ConfiguredSlotManager(bound="", persist=False), _FakeRegistry()
+    with pytest.raises(RuntimeError, match="could not be bound"):
+        asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
+
+
+def test_an_unbindable_slot_exits_nonzero_with_the_remediation(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """install.sh's ``|| warn`` needs a non-zero exit to fire at all, and the
+    operator needs the command that recovers the box (ruling 7: still not
+    fatal — the install continues)."""
+    import hal0.install.brain_model as bm
+
+    _place(store, BRAIN_MODEL_DEFAULT)
+    monkeypatch.setattr(bm, "_load_hardware", lambda: _hw())
+    monkeypatch.setattr(
+        "hal0.cli.setup_command._build_offline_deps",
+        lambda: (_WriteFailsSlotManager(bound=""), _FakeRegistry()),
+    )
+    assert main([]) == 1
+    err = capsys.readouterr().err
+    assert f"hal0 slot edit {BRAIN_SLOT_NAME} --model {BRAIN_MODEL_DEFAULT}" in err
+    assert f"hal0 slot load {BRAIN_SLOT_NAME}" in err
+
+
+def test_main_reports_the_model_the_slot_actually_names(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transcript that says "bound to the 'brain' slot" while the slot names
+    the operator's own model is exactly the misreport #2131 was made of."""
+    import hal0.install.brain_model as bm
+
+    _place(store, BRAIN_MODEL_DEFAULT)
+    monkeypatch.setattr(bm, "_load_hardware", lambda: _hw())
+    monkeypatch.setattr(
+        "hal0.cli.setup_command._build_offline_deps",
+        lambda: (_ConfiguredSlotManager(bound="my-own-brain"), _FakeRegistry()),
+    )
+    assert main([]) == 0
+    out = capsys.readouterr().out
+    assert "keeps its existing model my-own-brain" in out
+
+
+# ── the binding helpers, directly ───────────────────────────────────────────
+
+
+def test_current_binding_distinguishes_unbound_from_unreadable() -> None:
+    """`""` (readable, unbound → bindable) must never be confused with `None`
+    (unreadable → we know nothing, so a write is trusted)."""
+    assert asyncio.run(current_brain_binding(_ConfiguredSlotManager(bound=""))) == ""
+    assert asyncio.run(current_brain_binding(_ConfiguredSlotManager(bound="x"))) == "x"
+    assert asyncio.run(current_brain_binding(_FakeSlotManager())) is None
+
+
+def test_bind_trusts_a_clean_write_on_an_unreadable_slot() -> None:
+    """A slot manager with no read surface must not turn "cannot check" into
+    "did not work" — that would fail every install for a missing accessor."""
+    sm = _FakeSlotManager()
+    assert asyncio.run(bind_brain_model(sm, BRAIN_MODEL_DEFAULT)) == BRAIN_MODEL_DEFAULT
+    assert sm.updates == [(BRAIN_SLOT_NAME, {"model": {"default": BRAIN_MODEL_DEFAULT}})]
+
+
+def test_bind_does_not_restamp_an_unreadable_slot_the_gate_already_stamped() -> None:
+    """The pull path's activation gate writes first. When the slot cannot be
+    read there is no evidence to act on, so re-writing would just be a second
+    identical stamp — the readable case is where the repair earns its keep."""
+    sm = _FakeSlotManager()
+    bound = asyncio.run(bind_brain_model(sm, BRAIN_MODEL_DEFAULT, already_stamped=True))
+    assert bound == BRAIN_MODEL_DEFAULT
+    assert sm.updates == []
+
+
+def test_remediation_command_names_the_id_that_was_pulled() -> None:
+    assert remediation_command(BRAIN_MODEL_ROCMFPX).startswith(
+        f"hal0 slot edit {BRAIN_SLOT_NAME} --model {BRAIN_MODEL_ROCMFPX}"
+    )
+
+
+# ── --check-binding: the hint install.sh prints beside a failed probe ────────
+
+
+def _stub_check_binding_deps(monkeypatch: pytest.MonkeyPatch, slot_manager) -> None:
+    import hal0.install.brain_model as bm
+
+    monkeypatch.setattr(bm, "_load_hardware", lambda: _hw())
+    monkeypatch.setattr(
+        "hal0.cli.setup_command._build_offline_deps",
+        lambda: (slot_manager, _FakeRegistry()),
+    )
+
+
+def test_check_binding_names_the_fix_when_the_model_is_on_disk_but_unbound(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _place(store, BRAIN_MODEL_DEFAULT)
+    _stub_check_binding_deps(monkeypatch, _ConfiguredSlotManager(bound=""))
+    assert check_binding([]) == 0
+    out = capsys.readouterr().out
+    assert remediation_command(BRAIN_MODEL_DEFAULT) in out
+
+
+def test_check_binding_is_silent_when_the_slot_is_bound(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Empty stdout is the contract — install.sh splices the hint in with a
+    plain `[[ -n ... ]]`, so a bound slot must add nothing to the transcript."""
+    _place(store, BRAIN_MODEL_DEFAULT)
+    _stub_check_binding_deps(monkeypatch, _ConfiguredSlotManager(bound=BRAIN_MODEL_DEFAULT))
+    assert check_binding([]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_check_binding_is_silent_when_no_model_is_on_disk(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No bytes means the unbound slot is not the story — a failed pull has
+    already printed its own warning."""
+    _stub_check_binding_deps(monkeypatch, _ConfiguredSlotManager(bound=""))
+    assert check_binding([]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_check_binding_never_fails_the_installer(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It runs while install.sh is ALREADY reporting a failure, under
+    `set -euo pipefail`. A diagnostic that aborts the install it is explaining
+    is worse than no diagnostic."""
+    import hal0.install.brain_model as bm
+
+    def _boom() -> None:
+        raise RuntimeError("hardware probe exploded")
+
+    monkeypatch.setattr(bm, "_load_hardware", _boom)
+    assert check_binding([]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_module_entry_point_routes_the_check_binding_flag(
+    store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """install.sh invokes it as `python -m hal0.install.brain_model
+    --check-binding`, which lands in ``main`` — it must not run a pull."""
+    import hal0.install.brain_model as bm
+    import hal0.registry.pull as pull_mod
+
+    async def _explode(job, **kwargs):
+        raise AssertionError("--check-binding must never pull")
+
+    monkeypatch.setattr(pull_mod, "run_pull", _explode)
+    _place(store, BRAIN_MODEL_DEFAULT)
+    _stub_check_binding_deps(monkeypatch, _ConfiguredSlotManager(bound=""))
+    assert main([bm.CHECK_BINDING_FLAG]) == 0
+    assert remediation_command(BRAIN_MODEL_DEFAULT) in capsys.readouterr().out
+
+
+# ── the reverting sweep: what actually broke the 0.9.8 upgrade ──────────────
+#
+# The binding was never missing — it was REVERTED. v0.9.8's install.sh ran
+# `hal0 setup --auto` (:1249) BEFORE its curated seed loop (:1487), so the
+# generic scaffold won and `_build_slot_cfg(..., enabled=False)` left
+# `enabled = false` beside a model-less `[model]` table on every stable box.
+# install.sh then bound the pulled default into it and the SlotConfig.enabled
+# sweep, reading `enabled = false` next to a now-bound model, cleared the model
+# exactly as it is designed to (slot_enabled_removal.py:86). The same sweep runs
+# at every hal0-api boot, so even a hand-repaired box lost it again on restart.
+
+#: The shape every v0.9.8 stable box carries into the upgrade.
+_V098_SCAFFOLD_BRAIN_TOML = (
+    'name = "brain"\n'
+    'type = "llm"\n'
+    'device = "gpu-vulkan"\n'
+    'runtime = "container"\n'
+    'profile = "vulkan"\n'
+    "enabled = false\n"
+    "port = 8089\n"
+    "\n"
+    "[model]\n"
+    'default = ""\n'
+    "context_size = 65536\n"
+)
+
+
+@pytest.fixture()
+def upgraded_box(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A v0.9.8 box mid-upgrade: scaffold brain.toml + the bytes already pulled.
+
+    Yields the path of the live ``brain.toml`` so a test can read back exactly
+    what the installer left on disk.
+    """
+    import hal0.config.store as store_mod
+
+    home = tmp_path / "home"
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True)
+    brain_toml = slots_dir / "brain.toml"
+    brain_toml.write_text(_V098_SCAFFOLD_BRAIN_TOML, encoding="utf-8")
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path / "store")
+    _place(tmp_path / "store", BRAIN_MODEL_DEFAULT)
+    return brain_toml
+
+
+def _bind_step() -> str:
+    """install.sh's brain step: `python -m hal0.install.brain_model`."""
+    from hal0.cli.setup_command import _build_offline_deps
+
+    slot_manager, registry = _build_offline_deps()
+    return asyncio.run(
+        provision_brain_model(hw=_hw(), slot_manager=slot_manager, registry=registry)
+    )
+
+
+def _sweep_step() -> list[str]:
+    """install.sh's `enabled` sweep — the same call hal0-api makes at boot."""
+    from hal0.updater.updater import sweep_slot_enabled_keys
+
+    return sweep_slot_enabled_keys()
+
+
+def _model_default_on_disk(brain_toml) -> str:
+    import tomllib
+
+    raw = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    return str(raw.get("model", {}).get("default") or "")
+
+
+def _install_sh_runs_sweep_before_the_brain_pull() -> bool:
+    """The order install.sh actually declares, read out of the script."""
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    pull = "-m hal0.install.brain_model \\"
+    assert text.count(pull) == 1, "expected exactly one brain-model pull invocation"
+    return text.index("sweep_slot_enabled_keys") < text.index(pull)
+
+
+def test_binding_survives_the_enabled_sweep_in_the_order_install_sh_runs_them(
+    upgraded_box,
+) -> None:
+    """Drives the REAL order — taken from install.sh, not hardcoded here.
+
+    This is the whole bug: with the sweep after the brain step the binding is
+    blanked minutes later, so the assertion below fails on the shipped order
+    that produced #2131 and passes on the corrected one.
+    """
+    steps = (
+        [_sweep_step, _bind_step]
+        if _install_sh_runs_sweep_before_the_brain_pull()
+        else [_bind_step, _sweep_step]
+    )
+    for step in steps:
+        step()
+    assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT, (
+        "the brain slot lost its binding to the SlotConfig.enabled sweep — "
+        "install.sh must run the sweep BEFORE the brain model step (#2131)"
+    )
+
+
+def test_the_binding_then_survives_every_later_api_boot_sweep(upgraded_box) -> None:
+    """`hal0.api._boot_slot_reconcile` runs the identical sweep on every start.
+
+    Sweeping first is what makes those boot passes no-ops: the stale `enabled`
+    key is already gone, so `migrate_slot_toml` returns None and the file is
+    left byte-identical. Without that, a hand-repaired box lost its binding
+    again at the next restart.
+    """
+    _sweep_step()
+    _bind_step()
+    assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT
+
+    for _ in range(3):  # three more service restarts
+        assert _sweep_step() == [], "a converged slot must not be rewritten again"
+        assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT
+
+
+def test_the_sweep_only_drops_the_key_on_the_model_less_scaffold(upgraded_box) -> None:
+    """Why sweeping first is the migration's OWN semantics, not a workaround.
+
+    `enabled = false` with NO model bound is the documented "both signals
+    already said off" case — the key is dropped and nothing else changes. The
+    model-clearing branch is for a slot that had a model to deactivate.
+    """
+    import tomllib
+
+    assert _sweep_step() == ["brain"]
+    raw = tomllib.loads(upgraded_box.read_text(encoding="utf-8"))
+    assert "enabled" not in raw
+    assert raw["model"]["context_size"] == 65536
+
+
+def test_a_deliberately_disabled_slot_still_has_its_model_cleared(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carve-out the reorder must not break: `enabled = false` WITH a bound
+    model is an operator deactivation, and the sweep still carries it forward.
+
+    The brain step also declines to touch it — a non-empty `[model].default` is
+    operator config — so the two passes agree instead of fighting.
+    """
+    import tomllib
+
+    import hal0.config.store as store_mod
+
+    home = tmp_path / "home"
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True)
+    brain_toml = slots_dir / "brain.toml"
+    brain_toml.write_text(
+        _V098_SCAFFOLD_BRAIN_TOML.replace('default = ""', 'default = "operator-pick"'),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path / "store")
+    _place(tmp_path / "store", BRAIN_MODEL_DEFAULT)
+
+    raw_before = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    assert raw_before["model"]["default"] == "operator-pick"
+
+    _sweep_step()
+    raw = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    assert raw["model"]["default"] == "", "a deliberate deactivation must survive the upgrade"
+    assert "enabled" not in raw
+
+
+# ── end to end on a real slot TOML: the shape the box actually had ───────────
+
+
+def test_the_upgrade_shape_binds_against_a_real_slot_manager(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fakes cannot prove the TOML on disk changed. This drives the REAL
+    SlotManager over a real `/etc/hal0/slots/brain.toml` in the 0.9.8 shape
+    the reporter found: `[model]` present, nothing bound."""
+    import hal0.config.store as store_mod
+
+    home = tmp_path / "home"
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True)
+    (slots_dir / "brain.toml").write_text(
+        'name = "brain"\n'
+        'type = "llm"\n'
+        'device = "gpu-vulkan"\n'
+        'runtime = "container"\n'
+        'profile = "vulkan"\n'
+        "port = 8089\n"
+        "\n"
+        "[model]\n"
+        "context_size = 65536\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path / "store")
+    _place(tmp_path / "store", BRAIN_MODEL_DEFAULT)  # bytes already on disk
+
+    from hal0.cli.setup_command import _build_offline_deps
+
+    slot_manager, registry = _build_offline_deps()
+    landed = asyncio.run(
+        provision_brain_model(hw=_hw(), slot_manager=slot_manager, registry=registry)
+    )
+    assert landed == BRAIN_MODEL_DEFAULT
+
+    import tomllib
+
+    raw = tomllib.loads((slots_dir / "brain.toml").read_text(encoding="utf-8"))
+    assert raw["model"]["default"] == BRAIN_MODEL_DEFAULT
+    assert raw["model"]["context_size"] == 65536, "binding must not reset the slot's tuning"

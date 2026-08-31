@@ -179,6 +179,66 @@ def test_memory_engine_probe_skips_when_engine_not_installed(tmp_path: Path) -> 
     assert res.returncode == 0, res.stderr
 
 
+# ── #2131: a failed probe must name the unbound brain slot, not just fail ───
+#
+# The 0.9.8 → 1.0.0 upgrade ended at a bare "structured-output probe failed"
+# while the cause — the default brain model downloaded but never bound — was
+# one command away from a fix and mentioned nowhere. The probe's failure branch
+# now asks `brain_model --check-binding`, which prints the remediation when
+# (and only when) that is actually the shape on disk.
+
+
+def test_probe_failure_asks_for_the_brain_binding_diagnosis() -> None:
+    func = _extract("run_post_install_smoke")
+    assert "hal0.install.brain_model --check-binding" in func, (
+        "a failed structured-output probe must check for the #2131 unbound-brain "
+        "shape instead of leaving 'check hal0 status' as the only lead"
+    )
+
+
+def _fake_venv(tmp_path: Path, body: str) -> Path:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    _write_exec(venv / "bin" / "python", body)
+    return venv
+
+
+def test_probe_failure_prints_the_brain_remediation_when_one_is_offered(
+    tmp_path: Path,
+) -> None:
+    venv = _fake_venv(tmp_path, "echo 'bind it: hal0 slot edit brain --model lfm2.5-2.6b'")
+    _write_exec(tmp_path / "curl", "exit 7")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, f'VENV_DIR="{venv}"\nrun_post_install_smoke\nexit 0')
+    assert res.returncode == 0, res.stderr
+    assert "hal0 slot edit brain --model lfm2.5-2.6b" in res.stderr
+
+
+def test_probe_failure_says_nothing_extra_when_the_slot_is_bound(tmp_path: Path) -> None:
+    """`--check-binding` prints nothing when the binding is fine, so a
+    fresh-install probe failure reads exactly as it did before."""
+    venv = _fake_venv(tmp_path, "exit 0")
+    _write_exec(tmp_path / "curl", "exit 7")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, f'VENV_DIR="{venv}"\nrun_post_install_smoke\nexit 0')
+    assert res.returncode == 0, res.stderr
+    assert "slot edit brain" not in res.stderr
+
+
+def test_probe_failure_survives_a_missing_venv(tmp_path: Path) -> None:
+    """The hint runs under `set -euo pipefail` while the installer is ALREADY
+    reporting a failure — an absent venv (or an unset VENV_DIR) must not turn
+    a warning into an aborted install."""
+    _write_exec(tmp_path / "curl", "exit 7")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(
+        tmp_path,
+        'set -e\nrun_post_install_smoke\nprintf "%s\\n" "${SMOKE_FAILED[@]}"\nexit 0',
+    )
+    assert res.returncode == 0, res.stderr
+    assert "structured-output" in res.stdout
+
+
 def test_smoke_failures_surface_in_the_summary_box() -> None:
     """The summary builder must fold SMOKE_FAILED into SUMMARY_LINES so an
     rc-validate run catches failures without scrolling the warn stream."""
