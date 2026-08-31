@@ -36,9 +36,9 @@
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
     "comfyui": {
-      "tag": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
-      "digest": "sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
-      "_notes": "live-validated on CT105 2026-06-11 (Wan2.2/Qwen-Image/Flux/SDXL on gfx1151); repinned from unpublished hal0-toolbox-comfyui (Phase D)",
+      "tag": "ghcr.io/hal0ai/hal0-comfyui:latest",
+      "digest": "sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b",
+      "_notes": "hal0-owned image (published 2026-07-19, digest-pinned in this change; same digest as Hal0ai/hal0-runner-images images.json). Layout mirrors the previously-pinned kyuz0 Strix Halo build by construction (ComfyUI at /opt/ComfyUI, venv at /opt/venv). Prior kyuz0 validation history (CT105 2026-06-11, Wan2.2/Qwen-Image/Flux/SDXL on gfx1151; Phase D repin) preserved in git.",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
     },
     "qwen3tts": {

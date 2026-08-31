@@ -1,7 +1,8 @@
 """ComfyUI container spec — live-parity with the validated CT105 deployment.
 
 Phase D task D2. The spec must replicate what `docker inspect comfyui`
-showed working on CT105: kyuz0 image (ComfyUI at /opt/ComfyUI, venv at
+showed working on CT105: the kyuz0 image layout that hal0's own
+ghcr.io/hal0ai/hal0-comfyui mirrors (ComfyUI at /opt/ComfyUI, venv at
 /opt/venv), bash -lc cd+exec argv, /mnt/ai-models/comfyui data mounts,
 --ipc=host (host /dev/shm serves Wan/Hunyuan video; podman rejects
 --shm-size with host IPC, unlike docker), host networking,
@@ -139,9 +140,13 @@ def test_comfyui_slot_port_override_flows_into_argv() -> None:
     assert "--port 8189" in spec.command[2]
 
 
-def test_comfyui_fallback_image_is_kyuz0() -> None:
-    """D1 review: the last-resort fallback must not point at an unpublished image."""
-    assert _HAL0_COMFYUI_IMAGE == "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
+def test_comfyui_fallback_image_is_hal0_published() -> None:
+    """D1 review: the last-resort fallback must not point at an unpublished image.
+
+    ghcr.io/hal0ai/hal0-comfyui:latest is live (anonymous registry v2 HEAD
+    200, digest sha256:fd8c8930...) — pull-evidence in the flip commit.
+    """
+    assert _HAL0_COMFYUI_IMAGE == "ghcr.io/hal0ai/hal0-comfyui:latest"
 
 
 # ── renderer integration ──────────────────────────────────────────────────────
@@ -193,7 +198,7 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
     ref = ComfyUIProvider().image_ref(cfg)
     assert isinstance(ref, str)
     assert "idle_restore_minutes" not in ref
-    assert "kyuz0/amd-strix-halo-comfyui" in ref  # manifest pin or fallback tag
+    assert "hal0ai/hal0-comfyui" in ref  # manifest pin or fallback tag
 
 
 def test_comfyui_container_spec_provisions_data_dirs(

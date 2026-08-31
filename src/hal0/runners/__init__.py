@@ -102,7 +102,7 @@ _FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44"
 _KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 _MOONSHINE_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1"
 _QWEN3TTS_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
-_COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
+_COMFYUI_IMAGE = "ghcr.io/hal0ai/hal0-comfyui:latest"
 
 
 @dataclass(frozen=True, slots=True)

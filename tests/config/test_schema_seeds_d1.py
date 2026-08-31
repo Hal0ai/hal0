@@ -129,10 +129,10 @@ def test_load_slot_config_string_image_survives_in_extra(tmp_path: Path) -> None
     assert reloaded.extra["image"] == "ghcr.io/foo:v1"
 
 
-def test_manifest_comfyui_pinned_to_kyuz0() -> None:
+def test_manifest_comfyui_pinned_to_hal0_image() -> None:
     manifest = load_manifest(_REPO_ROOT / "manifest.json")
     ref = manifest_image_ref("comfyui", manifest=manifest)
     assert ref == (
-        "docker.io/kyuz0/amd-strix-halo-comfyui"
-        "@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
+        "ghcr.io/hal0ai/hal0-comfyui"
+        "@sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b"
     )
