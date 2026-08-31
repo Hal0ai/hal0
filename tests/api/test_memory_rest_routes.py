@@ -181,7 +181,7 @@ def test_add_private_mode_wins_over_body_dataset(
 def test_add_explicit_shared_dataset_passthrough_no_private(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    """Non-private callers can name ``shared`` explicitly (ADR 0004: the
+    """Non-private callers can name ``shared`` explicitly (ADR 0005: the
     only non-private namespace; the Hermes identity cards write here)."""
     r = client.post(
         "/api/memory/add",
@@ -195,7 +195,7 @@ def test_add_explicit_shared_dataset_passthrough_no_private(
 
 
 def test_add_retired_dataset_rejected(client: TestClient, stub_wrapper: StubWrapper) -> None:
-    """ADR 0004: writes naming the retired ``agents``/``project:<id>``
+    """ADR 0005: writes naming the retired ``agents``/``project:<id>``
     namespaces are a 400 with a pointed remedy, never a passthrough."""
     r = client.post(
         "/api/memory/add",

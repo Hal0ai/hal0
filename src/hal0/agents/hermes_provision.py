@@ -3455,7 +3455,7 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
 
 AGENT_IDENTITY_TAG = "agent-identity"
 # Identity cards live in the shared dataset, scoped by AGENT_IDENTITY_TAG —
-# the dedicated ``agents`` namespace was retired (ADR 0004).
+# the dedicated ``agents`` namespace was retired (ADR 0005).
 AGENTS_DATASET = "shared"
 
 

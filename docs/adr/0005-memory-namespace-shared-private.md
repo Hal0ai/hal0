@@ -1,4 +1,4 @@
-# ADR-0004: Memory namespace grammar cut to `shared` + `private:<agent>`
+# ADR-0005: Memory namespace grammar cut to `shared` + `private:<agent>`
 
 ## Status
 
