@@ -89,6 +89,13 @@ applying. Add those subsections to a version's section to surface them; see
     the "To install CPU-only anyway, re-run with `HAL0_ALLOW_CPU_ONLY=1`"
     remedy that produced this report.
 
+  **Existing broken boxes heal on `hal0 update`.** A CPU slot installed before
+  this fix carries `image = "…amd-strix-halo-toolboxes:vulkan-radv-server"` in
+  its TOML. That ref is already a known former default, so the updater's
+  `retag_stale_slot_images` re-resolves it through the hardware gate — which
+  used to land back on the same GPU image (a no-op that left the box
+  crash-looping) and now lands on the CPU toolbox. No TOML editing required.
+
   Not covered: the bench harness's `cpu` lane still uses the GPU image, because
   it needs `llama-bench`, which `hal0-toolbox-cpu` does not build. And
   `cpu.Dockerfile` still builds llama.cpp from `master` rather than a pinned

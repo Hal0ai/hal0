@@ -1146,8 +1146,11 @@ STALE_ROCMFPX_IMAGE_REFS = frozenset(
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
         # Former basic-lane seed defaults (pre HW-gated default). A slot pinned to
         # one of these is materialised-default debris — the updater re-resolves it
-        # through the HW gate (:func:`resolve_default_image`): Strix boxes migrate
-        # to the rocmfpx runner, other hosts stay on the same toolbox (no-op).
+        # through the HW gate (:func:`resolve_default_image`): GPU boxes migrate to
+        # the rocmfpx runner, and since #2126 a `device = "cpu"` slot migrates to
+        # the CPU toolbox rather than resolving back to this GPU image (which is
+        # what left an already-installed CPU-only box crash-looping on SIGILL
+        # across an upgrade).
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
     }
