@@ -6,7 +6,7 @@ WORK out of the box instead of shipping as a grey model-less tile. This module
 is what makes that true — ``installer/install.sh`` runs it as
 ``python -m hal0.install.brain_model`` right after the first-run seeding step.
 
-Four properties are deliberate:
+Five properties are deliberate:
 
 **Never fatal.** No network, no disk, an unreadable ``hardware.json``, a
 missing curated entry — every failure path returns a non-zero exit code with a
@@ -36,6 +36,25 @@ already-on-disk short circuit — ``run_pull``/``_download_one`` stream from HF
 unconditionally, and a COMPLETED pull leaves no ``.part`` for the resume path
 to reuse. :func:`already_pulled` is the guard that stops a re-run from
 re-downloading gigabytes it already has.
+
+**An unbound ``[model]`` table is not operator config (#2131).** The activation
+gate above is *best-effort by construction*:
+:func:`~hal0.install.orchestrate._activate_slot_model` wraps its write in
+``contextlib.suppress(Exception)`` so a config-rewrite failure can never abort
+the pull driver. That is right for the driver and wrong for this module — a
+swallowed write left the brain slot MODEL-LESS while this module still printed
+"brain model ready" and exited 0, so install.sh had no signal, and the
+documented 0.9.8 → 1.0.0 path ended at "Verify FAILED: structured-output probe
+failed" with the 2.87 GB already on disk and nothing pointing at the cause.
+:func:`bind_brain_model` closes that: it reads the slot back and, when the
+``[model]`` table exists but names nothing, binds the default into it — a
+model-less slot is the shipped seed state (``installer/etc-hal0/slots/
+brain.toml`` ships no ``[model].default``), not a pick to protect. The guard is
+the other half of the rule: a NON-EMPTY ``[model].default`` is an operator pick
+and is never touched, even when it names something other than the default. When
+the binding genuinely cannot be made the failure is now *reported* (warning +
+exit 1 + the exact remediation command) instead of being reported as success —
+still never fatal, exactly as ruling 7 requires.
 """
 
 from __future__ import annotations
@@ -190,6 +209,112 @@ def already_pulled(model_id: str, *, capability: str = "chat") -> Path | None:
     return dest
 
 
+def remediation_command(model_id: str = BRAIN_MODEL_DEFAULT) -> str:
+    """The two commands that bind + start the brain slot by hand.
+
+    Verbatim from the #2131 report, where they were verified to recover the
+    box. Printed by :func:`main` when the seeding pass could not land the
+    binding itself, and by ``--check-binding`` when the installer's
+    structured-output probe fails with the model on disk but unbound — a bare
+    probe failure gave the operator no lead at all.
+    """
+    return (
+        f"hal0 slot edit {BRAIN_SLOT_NAME} --model {model_id} && hal0 slot load {BRAIN_SLOT_NAME}"
+    )
+
+
+async def current_brain_binding(slot_manager) -> str | None:
+    """What the brain slot's ``[model].default`` names right now.
+
+    Three outcomes, and the difference between the last two is the whole
+    point:
+
+      * a non-empty id — an operator pick (or a binding we already made),
+        which :func:`bind_brain_model` must not overwrite;
+      * ``""`` — the slot is readable and UNBOUND. That is the shipped seed
+        state, not a pick, so the default may be bound into it;
+      * ``None`` — the slot could not be read at all (no such slot, an
+        unreadable TOML, a slot manager with no read surface). "Unknown" is
+        deliberately not folded into "unbound": a caller must not treat an
+        unreadable slot as proof that a write failed to land.
+
+    Never raises — this is a read taken during an optional install step.
+    """
+    getter = getattr(slot_manager, "get_config", None)
+    if getter is None:
+        return None
+    try:
+        cfg = await getter(BRAIN_SLOT_NAME)
+    except Exception as exc:
+        log.info("install.brain_binding_unreadable slot=%s err=%s", BRAIN_SLOT_NAME, exc)
+        return None
+    try:
+        from hal0.slots._cfg_helpers import _model_default
+
+        return _model_default(cfg)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.info("install.brain_binding_unparseable slot=%s err=%s", BRAIN_SLOT_NAME, exc)
+        return None
+
+
+async def bind_brain_model(slot_manager, model_id: str, *, already_stamped: bool = False) -> str:
+    """Ensure the brain slot names a model. Returns the id it names afterwards.
+
+    ``""`` means the slot is still model-less — the caller turns that into a
+    warning with :func:`remediation_command`, never into a failed install.
+
+    The semantics (#2131):
+
+      * a NON-EMPTY existing ``[model].default`` is operator config and wins,
+        even when it names something other than *model_id*. Nothing is
+        written, so a re-run of install.sh can never revert an operator's pick;
+      * an existing-but-EMPTY (or absent) ``[model].default`` is not a pick at
+        all — the seed ships model-less on purpose (#1369) — so *model_id* is
+        bound into it. This is the upgrade case: the 0.9.8 slot had no model
+        bound either, so there was nothing to protect;
+      * the write is NOT blanket-suppressed the way
+        :func:`~hal0.install.orchestrate._activate_slot_model` suppresses it.
+        A failure returns ``""`` so the caller can say so.
+
+    *already_stamped* says the activation gate already ran its own stamp for
+    this slot in this pass. It only matters when the slot cannot be READ
+    (``None``): with no evidence either way, a stamped slot is trusted rather
+    than written a second time, while an unstamped one still gets the single
+    write that is its only chance. A readable slot ignores the flag entirely —
+    what the file says beats what we think we did.
+
+    Idempotent: a second call reads the id it just bound and writes nothing.
+    """
+    existing = await current_brain_binding(slot_manager)
+    if existing:
+        if existing != model_id:
+            log.info(
+                "install.brain_model_operator_default_kept slot=%s bound=%s pulled=%s",
+                BRAIN_SLOT_NAME,
+                existing,
+                model_id,
+            )
+        return existing
+    if existing is None and already_stamped:
+        return model_id
+    try:
+        await slot_manager.update_config(BRAIN_SLOT_NAME, {"model": {"default": model_id}})
+    except Exception as exc:
+        log.warning(
+            "install.brain_bind_write_failed slot=%s id=%s err=%s", BRAIN_SLOT_NAME, model_id, exc
+        )
+        return ""
+    confirmed = await current_brain_binding(slot_manager)
+    if confirmed is None:
+        # Unreadable slot, successful write: trust the write. Failing here
+        # would turn "we cannot check" into "it did not work".
+        return model_id
+    if not confirmed:
+        log.warning("install.brain_bind_not_persisted slot=%s id=%s", BRAIN_SLOT_NAME, model_id)
+        return ""
+    return confirmed
+
+
 def _load_hardware() -> HardwareInfo:
     """Prefer the ``hardware.json`` the first-run seeding step just wrote.
 
@@ -222,6 +347,12 @@ async def provision_brain_model(
     Returns the curated id that landed. Raises on failure — the caller
     (:func:`main`) turns that into a warning + non-zero exit so install.sh's
     ``|| warn`` keeps the install alive.
+
+    "Bind it" is an assertion, not a hope (#2131): the pull's own activation
+    write is best-effort and silently suppressed, so this function reads the
+    slot back through :func:`bind_brain_model` and raises when the bytes
+    landed but the slot is still model-less. An operator's own
+    ``[model].default`` is left exactly where it is.
     """
     from hal0.install.orchestrate import PullPlan, run_pull_and_activate
     from hal0.registry.curated import get_curated
@@ -241,14 +372,18 @@ async def provision_brain_model(
     if hasattr(registry, "ensure"):
         registry.ensure(model_id)
 
+    # What (if anything) the slot already names, read BEFORE the pull. A
+    # non-empty id here is operator config and decides two things: the pull
+    # must not stamp over it, and a failed pull must not park a slot that is
+    # not model-less in the first place.
+    pre_existing = await current_brain_binding(slot_manager)
+
     # Already on disk from an earlier install run? Bind it and stop. Nothing
     # below dedupes, so without this a re-run re-downloads the whole file.
     existing = already_pulled(model_id)
     if existing is not None:
-        from hal0.install.orchestrate import _activate_slot_model
-
         log.info("install.brain_model_already_present id=%s path=%s", model_id, existing)
-        await _activate_slot_model(slot_manager, BRAIN_SLOT_NAME, model_id, failed=False)
+        _require_binding(await bind_brain_model(slot_manager, model_id), model_id)
         return model_id
 
     plan = PullPlan(
@@ -261,7 +396,12 @@ async def provision_brain_model(
             hf_token=hf_token or None,
             capability="chat",
         ),
-        slot_names=[BRAIN_SLOT_NAME],
+        # The activation gate applies to a MODEL-LESS slot: stamp on success,
+        # mark [meta].pull_failed on failure. A slot that already names an
+        # operator's model is not in that state machine — it is neither ours
+        # to stamp nor parked when the pull fails — so it rides the pull with
+        # no slot attached and bind_brain_model below leaves it alone.
+        slot_names=[BRAIN_SLOT_NAME] if not pre_existing else [],
     )
     # run_pull_and_activate stamps [model].default only on success and marks
     # [meta].pull_failed otherwise — the model-less-on-failure guarantee.
@@ -271,7 +411,64 @@ async def provision_brain_model(
             f"brain model pull ended in state {getattr(plan.job, 'state', '?')!r}: "
             f"{getattr(plan.job, 'error', None)}"
         )
+    # The bytes are on disk. Read the slot back: the stamp above is wrapped in
+    # contextlib.suppress, so "it did not raise" proves nothing (#2131).
+    _require_binding(
+        await bind_brain_model(slot_manager, model_id, already_stamped=bool(plan.slot_names)),
+        model_id,
+    )
     return model_id
+
+
+def _require_binding(bound: str, model_id: str) -> None:
+    """Raise when the bytes landed but the brain slot still names nothing.
+
+    Reported, never fatal: :func:`main` turns this into a warning + exit 1 and
+    install.sh's ``|| warn`` keeps the install alive. Before #2131 this state
+    was indistinguishable from success.
+    """
+    if bound:
+        return
+    raise RuntimeError(
+        f"{model_id} is on disk but the '{BRAIN_SLOT_NAME}' slot could not be bound to it "
+        f"— bind it by hand: {remediation_command(model_id)}"
+    )
+
+
+#: ``python -m hal0.install.brain_model --check-binding`` — the diagnosis
+#: install.sh prints next to a failed structured-output probe (#2131).
+CHECK_BINDING_FLAG = "--check-binding"
+
+
+def check_binding(argv: list[str] | None = None) -> int:
+    """``--check-binding``: is the brain model on disk but unbound?
+
+    Prints the remediation line and NOTHING else — an empty stdout means
+    "nothing to say here", which is what lets install.sh splice the hint into
+    its probe-failure warning with a plain ``[[ -n ... ]]`` test. Always exits
+    0: this is a diagnostic printed while the installer is already reporting a
+    failure, and a non-zero exit under ``set -euo pipefail`` would be a
+    diagnostic that breaks the install it is trying to explain.
+    """
+    del argv
+    try:
+        override = (os.environ.get("HAL0_BRAIN_MODEL") or "").strip() or None
+        chosen = brain_model_for_hardware(_load_hardware(), override=override)
+        if already_pulled(chosen) is None:
+            return 0  # no bytes on disk — an unbound slot is not the story
+        from hal0.cli.setup_command import _build_offline_deps
+
+        slot_manager, _ = _build_offline_deps()
+        if asyncio.run(current_brain_binding(slot_manager)):
+            return 0  # bound — the probe failed for some other reason
+        print(
+            f"the '{BRAIN_SLOT_NAME}' slot has no model bound although {chosen} is on disk "
+            f"— bind it and retry: {remediation_command(chosen)}"
+        )
+    except BaseException:
+        # A diagnostic must never become the problem it is describing.
+        return 0
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,11 +479,18 @@ def main(argv: list[str] | None = None) -> int:
     under ``set -euo pipefail``, and a traceback escaping this module would
     abort the whole install over an optional model — the exact failure mode
     ruling 7 forbids.
+
+    The only option is :data:`CHECK_BINDING_FLAG`; everything else is
+    configured via env (see install.sh).
     """
-    del argv  # no options; configuration is via env (see install.sh)
+    if argv is None:
+        argv = sys.argv[1:]
+    if CHECK_BINDING_FLAG in argv:
+        return check_binding(argv)
     logging.basicConfig(level=logging.WARNING, format="  %(message)s")
     override = (os.environ.get("HAL0_BRAIN_MODEL") or "").strip() or None
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+    chosen = BRAIN_MODEL_DEFAULT
     try:
         from hal0.cli.setup_command import _build_offline_deps
 
@@ -317,8 +521,18 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException as exc:
         print(f"  brain model pull failed ({type(exc).__name__}: {exc})", file=sys.stderr)
         print("  the brain slot stays model-less; the install continues", file=sys.stderr)
+        print(f"  once the model is on disk: {remediation_command(chosen)}", file=sys.stderr)
         return 1
-    print(f"  brain model ready: {landed} bound to the '{BRAIN_SLOT_NAME}' slot")
+    # Report what the slot ACTUALLY names, not what we pulled — the two differ
+    # when an operator's own [model].default was found and left alone.
+    bound = asyncio.run(current_brain_binding(slot_manager)) or landed
+    if bound != landed:
+        print(
+            f"  brain model ready: {landed} is on disk; the '{BRAIN_SLOT_NAME}' slot keeps "
+            f"its existing model {bound}"
+        )
+    else:
+        print(f"  brain model ready: {landed} bound to the '{BRAIN_SLOT_NAME}' slot")
     return 0
 
 

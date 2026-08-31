@@ -3278,6 +3278,22 @@ run_post_install_smoke() {
         SMOKE_FAILED+=("structured-output")
         warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
         warn "  extraction/structured-output consumers are likely broken even if plain chat works — check 'hal0 status' for a loaded model, then 'journalctl -u hal0-api -n 40'"
+        # #2131: on an upgraded box the commonest cause is a brain slot the
+        # seeding pass downloaded a model for but never bound — the gateway
+        # then has nothing to answer with, and a bare probe failure reads like
+        # a runner bug. `--check-binding` prints the exact fix, and prints
+        # NOTHING when the slot is bound (or when the venv/daemon can't be
+        # reached), so a fresh-install failure reads exactly as before.
+        # `${VENV_DIR:-}` + the -x test, not a bare expansion: this block runs
+        # under `set -euo pipefail`, where an unbound VENV_DIR would abort the
+        # install from inside a diagnostic.
+        _brain_hint=""
+        if [[ -n "${VENV_DIR:-}" && -x "${VENV_DIR}/bin/python" ]]; then
+            _brain_hint="$("${VENV_DIR}/bin/python" -m hal0.install.brain_model --check-binding 2>/dev/null || true)"
+        fi
+        if [[ -n "${_brain_hint}" ]]; then
+            warn "  ${_brain_hint}"
+        fi
     fi
     if smoke_update_check; then
         info "update-check probe ok ('hal0 update --check' exits cleanly)"

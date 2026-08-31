@@ -24,6 +24,26 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **The brain slot is now verified bound, not assumed bound** (#2131). The
+  documented 0.9.8 → 1.0.0 upgrade downloaded the default brain model, left
+  `/etc/hal0/slots/brain.toml` with a `[model]` table naming nothing, and ended
+  at `Verify FAILED: structured-output probe failed` — with no hint that one
+  `hal0 slot edit brain --model <id>` recovered the box. The activation write
+  is best-effort by design (`_activate_slot_model` suppresses every exception
+  so a config rewrite can never abort a pull), so a write that never landed was
+  indistinguishable from one that did: the installer printed
+  `brain model ready: … bound to the 'brain' slot` and exited 0 either way.
+  `hal0.install.brain_model` now reads the slot back: an existing-but-UNBOUND
+  `[model]` table is the shipped seed state and gets the default bound into it,
+  a NON-EMPTY `[model].default` is an operator pick and is never touched (a
+  re-run can no longer revert one), and a binding that genuinely cannot be made
+  is reported with the exact remediation command instead of reported as
+  success. Still never fatal — the install continues. A failed
+  structured-output probe now also names an unbound brain slot when that is the
+  actual shape on disk.
+
 ### Changed
 
 - **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
