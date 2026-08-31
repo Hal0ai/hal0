@@ -175,7 +175,7 @@ def test_is_gated_memory_delete_single_id_gates_on_dataset() -> None:
         admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "shared"}, client_id="pi")
         is False
     )
-    # Retired namespaces (ADR 0004) are unknown now — they gate like any
+    # Retired namespaces (ADR 0005) are unknown now — they gate like any
     # foreign namespace instead of running unattended.
     assert (
         admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "project:apollo"}, client_id="pi")

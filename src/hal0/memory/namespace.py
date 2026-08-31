@@ -19,7 +19,7 @@ The rule:
     without having to opt in per-call.
   - Requesting ``private`` without an authenticated ``client_id`` is
     a usage error — the namespace promotion has no identity to scope to.
-  - The namespace set is CLOSED and two-valued (ADR 0004): ``shared`` |
+  - The namespace set is CLOSED and two-valued (ADR 0005): ``shared`` |
     the caller's own ``private:<client_id>``. Free-form names used to
     pass through verbatim, which let any caller read/write arbitrary
     engine banks (and made the items undeletable through the id-scoped
@@ -28,7 +28,7 @@ The rule:
     least one addressable namespace, so a multi-namespace read keeps
     working instead of erroring.
   - ``agents`` and ``project:<id>`` were retired from the grammar
-    (ADR 0004): scoping within ``shared`` is done with tags (the
+    (ADR 0005): scoping within ``shared`` is done with tags (the
     agent-identity cards carry the ``agent-identity`` tag; project
     provenance is a ``project:<id>`` *tag*), and per-repository coding
     memory lives outside this namespace system entirely, in
@@ -53,7 +53,7 @@ from __future__ import annotations
 DEFAULT_DATASET = "shared"
 PRIVATE_PREFIX = "private:"
 
-# Retired namespaces (ADR 0004). Kept as named constants only so the
+# Retired namespaces (ADR 0005). Kept as named constants only so the
 # rejection messages and tests can refer to them without magic strings.
 RETIRED_AGENTS_DATASET = "agents"
 RETIRED_PROJECT_PREFIX = "project:"
@@ -72,7 +72,7 @@ class MemoryNamespaceError(ValueError):
 
 
 def is_known_namespace(name: str, *, client_id: str | None = None) -> bool:
-    """ADR 0004 table membership: ``shared`` | the caller's own
+    """ADR 0005 table membership: ``shared`` | the caller's own
     ``private:<client_id>``."""
     if name == DEFAULT_DATASET:
         return True
@@ -101,7 +101,7 @@ def resolve_write_dataset(
         namespace by passing the prefix in the body — the toggle is
         the only path in. Surfaces as 400 at the transport layer
         instead of silently being forwarded to the wrapper.
-      - ``requested`` outside the namespace table (ADR 0004) →
+      - ``requested`` outside the namespace table (ADR 0005) →
         ``MemoryNamespaceError`` (closed-set hardening; see module
         docstring).
     """
@@ -121,7 +121,7 @@ def resolve_write_dataset(
         if requested == RETIRED_AGENTS_DATASET or requested.startswith(RETIRED_PROJECT_PREFIX):
             hint = (
                 " ('agents' and 'project:<id>' were retired — write to 'shared' "
-                "with a scoping tag instead; see ADR 0004)"
+                "with a scoping tag instead; see ADR 0005)"
             )
         raise MemoryNamespaceError(
             f"unknown namespace {requested!r}; writes accept 'shared' "
@@ -141,7 +141,7 @@ def resolve_read_datasets(
     Mirrors the read branch from :func:`hal0.mcp.memory._memory_search`:
 
       - ``requested`` already a non-empty list → filtered against the
-        namespace table of ADR 0004 (unknown / foreign-private entries are
+        namespace table of ADR 0005 (unknown / foreign-private entries are
         dropped — the provider applies the same rule, this keeps the
         contract visible at the front door). If **every** entry is
         dropped the call raises ``MemoryNamespaceError`` rather than

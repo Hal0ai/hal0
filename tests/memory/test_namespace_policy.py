@@ -1,11 +1,11 @@
-"""Closed-namespace policy (ADR 0004) — :mod:`hal0.memory.namespace`.
+"""Closed-namespace policy (ADR 0005) — :mod:`hal0.memory.namespace`.
 
 Free-form dataset names used to pass through verbatim, which let any
 caller read/write arbitrary engine banks (live-verified on CT105:
 a probe wrote into a stale smoke-test bank, and the item was then
 unreachable by the id-scoped delete sweep). The namespace set is now
 closed and two-valued: ``shared`` | own private. ``agents`` and
-``project:<id>`` were retired (ADR 0004) — scoping inside ``shared``
+``project:<id>`` were retired (ADR 0005) — scoping inside ``shared``
 is done with tags, and per-repo coding memory lives in client-side
 ``coding-agent::<repo>`` banks outside this grammar.
 """
@@ -31,8 +31,8 @@ def test_known_namespaces_table() -> None:
 
 def test_unknown_namespaces_rejected() -> None:
     assert not is_known_namespace("smoke-gemma4-e4b-v2")
-    assert not is_known_namespace("agents")  # retired (ADR 0004)
-    assert not is_known_namespace("project:apollo")  # retired (ADR 0004)
+    assert not is_known_namespace("agents")  # retired (ADR 0005)
+    assert not is_known_namespace("project:apollo")  # retired (ADR 0005)
     assert not is_known_namespace("private:hermes", client_id="other")  # foreign private
     assert not is_known_namespace("private:hermes")  # private without identity
 
@@ -45,7 +45,7 @@ def test_write_allows_table_names() -> None:
 
 
 def test_write_rejects_retired_namespaces_with_hint() -> None:
-    # ADR 0004: the retired names get a pointed remedy, not just "unknown".
+    # ADR 0005: the retired names get a pointed remedy, not just "unknown".
     with pytest.raises(MemoryNamespaceError, match="retired"):
         resolve_write_dataset("agents", private=False, client_id="a")
     with pytest.raises(MemoryNamespaceError, match="retired"):

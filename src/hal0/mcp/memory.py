@@ -473,7 +473,7 @@ async def _memory_delete(
 
     Returns the count of deleted rows. ``ids`` must be
     non-empty. ``dataset`` optionally directs the engine's bank sweep
-    (``shared`` or your own ``private:<client_id>``; ADR 0004).
+    (``shared`` or your own ``private:<client_id>``; ADR 0005).
 
     Approval-gating for bulk deletes (>1 id) is classified by
     :func:`hal0.mcp.admin.is_gated` and enforced one layer up — by
