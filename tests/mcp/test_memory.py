@@ -169,9 +169,9 @@ async def test_memory_search_private_mode_reads_both_datasets(
 
 @pytest.mark.asyncio
 async def test_memory_search_accepts_dataset_list(wrapper: _FakeWrapper, dispatcher: Any) -> None:
-    """Known-namespace list entries (spec §3 closed table) pass through."""
-    await dispatcher("memory_search", {"query": "x", "dataset": ["agents", "project:apollo"]})
-    assert wrapper.search_calls[0]["dataset"] == ["agents", "project:apollo"]
+    """Known-namespace list entries (ADR 0004 closed table) pass through."""
+    await dispatcher("memory_search", {"query": "x", "dataset": ["shared", "private:pi-coder"]})
+    assert wrapper.search_calls[0]["dataset"] == ["shared", "private:pi-coder"]
 
 
 @pytest.mark.asyncio
@@ -310,11 +310,11 @@ async def test_memory_add_surfaces_async_operation_id(dispatcher_factory: Any = 
 
 @pytest.mark.asyncio
 async def test_memory_delete_dataset_directs_sweep(wrapper: _FakeWrapper, dispatcher: Any) -> None:
-    """An explicit dataset narrows/widens the engine's bank sweep (e.g.
-    project items live outside the default shared+own-private sweep)."""
-    out = await dispatcher("memory_delete", {"ids": ["d1"], "dataset": "project:apollo"})
+    """An explicit dataset directs the engine's bank sweep (ADR 0004:
+    ``shared`` or the caller's own private namespace)."""
+    out = await dispatcher("memory_delete", {"ids": ["d1"], "dataset": "shared"})
     assert out["status"] == "ok"
-    assert wrapper.delete_calls[0]["dataset"] == "project:apollo"
+    assert wrapper.delete_calls[0]["dataset"] == "shared"
 
 
 @pytest.mark.asyncio
@@ -324,10 +324,10 @@ async def test_memory_delete_dataset_list_filters_foreign_namespace(
     """Diagnosis #8: same closed-namespace filtering as memory_search/
     memory_recall applies to memory_delete's dataset list."""
     out = await dispatcher(
-        "memory_delete", {"ids": ["d1"], "dataset": ["agents", "not-a-real-bank"]}
+        "memory_delete", {"ids": ["d1"], "dataset": ["shared", "not-a-real-bank"]}
     )
     assert out["status"] == "ok"
-    assert wrapper.delete_calls[0]["dataset"] == ["agents"]
+    assert wrapper.delete_calls[0]["dataset"] == ["shared"]
 
 
 @pytest.mark.asyncio

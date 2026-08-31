@@ -122,9 +122,16 @@ memory is inert only once you (or the installer) have written
 ## Namespaces and banks: who a fact belongs to
 
 Every memory operation is scoped to a namespace, and the grammar is a closed
-set: `shared`, `agents`, `project:<id>`, or the caller's own
-`private:<client_id>`. A write with no explicit namespace defaults to
-`shared`. Setting the `X-hal0-Private` header over REST (or `private=true`
+two-value set: `shared` or the caller's own `private:<client_id>`
+([ADR-0004](/docs/adr/0004-memory-namespace-shared-private)). `shared` is the
+default for every write; `private:<agent>` is for memories an agent — or the
+operator — explicitly wants scoped to one identity. Scoping *within* `shared`
+is done with tags (the agent identity cards carry `agent-identity`; project
+provenance is a `project:<id>` tag), and per-repository **coding** memory
+lives outside this grammar entirely, in `coding-agent::<repo>` engine banks
+written by the coding-agent clients. The retired `agents` and `project:<id>`
+namespaces are rejected on write with a pointed remedy. A write with no
+explicit namespace defaults to `shared`. Setting the `X-hal0-Private` header over REST (or `private=true`
 over MCP) promotes the write to `private:<client_id>` and **wins over an
 explicit `dataset` field in the request body** — so a private-mode client
 can't smuggle data into `shared` by naming it directly in the payload. An
@@ -146,8 +153,8 @@ Namespaces map onto Hindsight **banks** — `shared` is the `shared` bank,
 forking a separate `private:<agent>` bank, the write still lands in `shared`
 but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
 recall stays single-bank (no cross-bank fan-out). Set it `false` to restore
-the pre-unified model — real `private:<agent>` / `project:<id>` banks and
-fan-out recall across them.
+the pre-unified model — real `private:<agent>` banks and fan-out recall
+across them.
 
 ## Fact types: world, experience, observation
 

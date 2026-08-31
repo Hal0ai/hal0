@@ -144,14 +144,16 @@ def test_is_gated_memory_delete_single_id_gates_on_dataset() -> None:
     # No dataset at all — unaffected, stays autonomous.
     assert admin.is_gated("memory_delete", {"ids": ["a"]}) is False
     # Known, closed-set namespace (not private) — autonomous regardless of
-    # client_id ownership (shared/agents/project are not identity-scoped).
+    # client_id ownership (shared is not identity-scoped).
     assert (
         admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "shared"}, client_id="pi")
         is False
     )
+    # Retired namespaces (ADR 0004) are unknown now — they gate like any
+    # foreign namespace instead of running unattended.
     assert (
         admin.is_gated("memory_delete", {"ids": ["a"], "dataset": "project:apollo"}, client_id="pi")
-        is False
+        is True
     )
     # The caller's own private namespace — autonomous.
     assert (

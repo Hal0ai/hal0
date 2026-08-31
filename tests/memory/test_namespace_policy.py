@@ -1,10 +1,13 @@
-"""Spec §3 closed-namespace policy — :mod:`hal0.memory.namespace`.
+"""Closed-namespace policy (ADR 0004) — :mod:`hal0.memory.namespace`.
 
 Free-form dataset names used to pass through verbatim, which let any
 caller read/write arbitrary engine banks (live-verified on CT105:
 a probe wrote into a stale smoke-test bank, and the item was then
 unreachable by the id-scoped delete sweep). The namespace set is now
-closed: ``shared`` | ``agents`` | ``project:<id>`` | own private.
+closed and two-valued: ``shared`` | own private. ``agents`` and
+``project:<id>`` were retired (ADR 0004) — scoping inside ``shared``
+is done with tags, and per-repo coding memory lives in client-side
+``coding-agent::<repo>`` banks outside this grammar.
 """
 
 from __future__ import annotations
@@ -23,17 +26,13 @@ from hal0.memory.namespace import (
 
 def test_known_namespaces_table() -> None:
     assert is_known_namespace("shared")
-    assert is_known_namespace("agents")
-    assert is_known_namespace("project:apollo")
-    assert is_known_namespace("project:a-b_c42")
     assert is_known_namespace("private:hermes", client_id="hermes")
 
 
 def test_unknown_namespaces_rejected() -> None:
     assert not is_known_namespace("smoke-gemma4-e4b-v2")
-    assert not is_known_namespace("project:")  # empty scoped id
-    assert not is_known_namespace("project:has space")
-    assert not is_known_namespace("project:" + "x" * 65)  # over identity bound
+    assert not is_known_namespace("agents")  # retired (ADR 0004)
+    assert not is_known_namespace("project:apollo")  # retired (ADR 0004)
     assert not is_known_namespace("private:hermes", client_id="other")  # foreign private
     assert not is_known_namespace("private:hermes")  # private without identity
 
@@ -41,10 +40,16 @@ def test_unknown_namespaces_rejected() -> None:
 # ── resolve_write_dataset ────────────────────────────────────────────────────
 
 
-def test_write_allows_spec_table_names() -> None:
+def test_write_allows_table_names() -> None:
     assert resolve_write_dataset("shared", private=False, client_id="a") == "shared"
-    assert resolve_write_dataset("agents", private=False, client_id="a") == "agents"
-    assert resolve_write_dataset("project:apollo", private=False, client_id="a") == "project:apollo"
+
+
+def test_write_rejects_retired_namespaces_with_hint() -> None:
+    # ADR 0004: the retired names get a pointed remedy, not just "unknown".
+    with pytest.raises(MemoryNamespaceError, match="retired"):
+        resolve_write_dataset("agents", private=False, client_id="a")
+    with pytest.raises(MemoryNamespaceError, match="retired"):
+        resolve_write_dataset("project:apollo", private=False, client_id="a")
 
 
 def test_write_rejects_free_form_names() -> None:
@@ -75,13 +80,13 @@ def test_write_private_rejects_missing_or_anonymous_client_id() -> None:
 # ── resolve_read_datasets ────────────────────────────────────────────────────
 
 
-def test_read_list_drops_unknown_and_foreign_private() -> None:
+def test_read_list_drops_unknown_retired_and_foreign_private() -> None:
     out = resolve_read_datasets(
         ["shared", "agents", "project:apollo", "private:me", "private:other", "junk-bank"],
         private=False,
         client_id="me",
     )
-    assert out == ["shared", "agents", "project:apollo", "private:me"]
+    assert out == ["shared", "private:me"]
 
 
 def test_read_default_expansion_unchanged() -> None:
