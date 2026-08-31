@@ -141,6 +141,54 @@ export function backendOptions({ backends, pinnedImage, device, slotType }) {
 	};
 }
 
+// Repo part of an image ref — strips a @sha256 digest, then a trailing tag
+// (a ':' segment with no '/', so a registry port like localhost:5000/x
+// survives). FE mirror of the backend's `_repo_of` (api/routes/runner_images).
+function repoOfRef(ref) {
+	const body = String(ref || "").split("@")[0];
+	const i = body.lastIndexOf(":");
+	return i > -1 && !body.slice(i + 1).includes("/") ? body.slice(0, i) : body;
+}
+
+/**
+ * Catalogue rows offerable as an image pin beyond the release catalog.
+ *
+ * The Runner Image dropdown historically listed ONLY the RUNNER_IMAGES
+ * release-catalog refs (system-info `backends`), so a catalogued image with
+ * no runner family — e.g. hal0-combined-upstream, which #2118 says is wired
+ * to slots ONLY via per-slot image_pin — was reachable solely through the
+ * free-text "Custom image ref…" hatch. This enumerates the catalogue rows
+ * that are actually pinnable right now:
+ *
+ * - downloaded on this box (a pin to a missing image just crash-loops), and
+ * - not a repo the release catalog already lists (those rows are the same
+ *   lineage the catalog options resolve — offering both would show one image
+ *   twice under two spellings).
+ *
+ * Catalogue rows carry no runtime_family, so they're assumed llama-server
+ * (every uncatalogued-family row today is a llama.cpp fork) and offered only
+ * for the slot types that family serves. A wrong pick degrades to the
+ * existing out-of-catalog pin path (cascade fallback + caution), never a
+ * dead end.
+ *
+ * @param rows          GET /api/runner-images rows (RunnerImage[])
+ * @param catalogImages the release-catalog refs already in the dropdown
+ * @param slotType      slot.type — gates via FAMILY_SLOT_TYPES["llama-server"]
+ * @returns [{id, ref, notes}] — ref is the pinnable `repo:tag`
+ */
+export function cataloguePinOptions({ rows, catalogImages, slotType }) {
+	if (slotType && !FAMILY_SLOT_TYPES["llama-server"].includes(slotType))
+		return [];
+	const catalogRepos = new Set((catalogImages || []).map(repoOfRef));
+	const out = [];
+	for (const r of rows || []) {
+		if (!r || !r.downloaded || !r.image || !r.tag) continue;
+		if (catalogRepos.has(r.image)) continue;
+		out.push({ id: r.id, ref: `${r.image}:${r.tag}`, notes: r.notes || "" });
+	}
+	return out;
+}
+
 /**
  * Resolve a Backend dropdown pick to the state it drives.
  * Unknown values (the out-of-vocab persisted pair rendered as its own option)

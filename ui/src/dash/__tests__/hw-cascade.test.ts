@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyBackendChoice,
   backendOptions,
+  cataloguePinOptions,
   optionValue,
   selectedBackendValue,
 } from '../hw-cascade.js'
@@ -163,5 +164,66 @@ describe('selectedBackendValue', () => {
   })
   it('returns empty string when no binary is pinned (auto)', () => {
     expect(selectedBackendValue({ binary: '', device: 'gpu-rocm', options: res.options })).toBe('')
+  })
+})
+
+describe('cataloguePinOptions — downloaded catalogue rows beyond the release catalog', () => {
+  // GET /api/runner-images rows (RunnerImage shape, the fields the helper reads).
+  const rows = [
+    // The motivating case (#2118): catalogued + downloaded, repo outside the
+    // release catalog — must surface as a pinnable option.
+    {
+      id: 'combined-upstream',
+      image: 'ghcr.io/hal0ai/hal0-combined-upstream',
+      tag: '0829',
+      downloaded: true,
+      notes: 'pin-only upstream variant',
+    },
+    // Same lineage the release catalog already lists (digest-pinned there) —
+    // offering it again would show one image under two spellings.
+    { id: 'cpu', image: 'ghcr.io/hal0ai/hal0-toolbox-cpu', tag: 'v1', downloaded: true },
+    // Catalogued but not on this box — a pin would just crash-loop.
+    { id: 'rocm', image: 'ghcr.io/hal0ai/hal0-toolbox-rocm', tag: 'v1', downloaded: false },
+  ]
+  // Release-catalog refs as system-info hands them out: tag AND digest shapes.
+  const catalogImages = [
+    'ghcr.io/hal0ai/hal0-combined:0826',
+    'ghcr.io/hal0ai/hal0-toolbox-cpu@sha256:eab70d0355981c08133a6fff28e472690c7091f6e968da1a2f269bdfa29311a1',
+  ]
+
+  it('offers downloaded rows the release catalog does not list, as repo:tag', () => {
+    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
+    expect(out).toEqual([
+      {
+        id: 'combined-upstream',
+        ref: 'ghcr.io/hal0ai/hal0-combined-upstream:0829',
+        notes: 'pin-only upstream variant',
+      },
+    ])
+  })
+
+  it('dedupes against catalog refs by repo, digest-pinned refs included', () => {
+    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
+    expect(out.some((o) => o.ref.includes('toolbox-cpu'))).toBe(false)
+  })
+
+  it('drops rows that are not downloaded', () => {
+    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
+    expect(out.some((o) => o.ref.includes('toolbox-rocm'))).toBe(false)
+  })
+
+  it('offers nothing for slot types llama-server does not serve', () => {
+    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'tts' })).toEqual([])
+    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'image' })).toEqual([])
+  })
+
+  it('serves every llama-server slot type', () => {
+    for (const t of ['llm', 'embedding', 'reranking']) {
+      expect(cataloguePinOptions({ rows, catalogImages, slotType: t }).length).toBe(1)
+    }
+  })
+
+  it('tolerates missing rows/catalog', () => {
+    expect(cataloguePinOptions({ rows: undefined, catalogImages: undefined, slotType: 'llm' })).toEqual([])
   })
 })

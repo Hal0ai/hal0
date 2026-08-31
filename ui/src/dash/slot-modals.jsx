@@ -22,9 +22,11 @@ import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyBackendChoice,
 	backendOptions,
+	cataloguePinOptions,
 	optionValue,
 	selectedBackendValue,
 } from "./hw-cascade.js";
+import { useRunnerImages } from "@/api/hooks/useRunnerImages";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
 // the Runner Images page so option labels and the RunnerCard can't drift.
 import { formatProvenanceShort } from "./runner-images.jsx";
@@ -274,6 +276,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// it is the UI's only rocm↔vulkan switch, since BINARY is metadata-gated
 	// to the same image and profiles carry backend only as an inert fit hint.
 	const systemInfoQuery = useSystemInfo();
+	// Catalogue rows for the Runner Image dropdown's "downloaded · catalogue"
+	// group (cataloguePinOptions): images synced+downloaded on this box that
+	// the release catalog doesn't list — e.g. the per-slot-pin-only
+	// combined-upstream variant (#2118). useQuery dedupes against the Runner
+	// Images page's identical key, so an open drawer adds no extra polling.
+	const runnerImagesQuery = useRunnerImages();
 
 	// Seed from the PERSISTED context window (slot.ctx_max, from
 	// [model].context_size) first — NOT the live runtime metric, which is 0
@@ -1490,6 +1498,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							imageKeysByRef.get(img).push(k);
 						}
 						const catalogImages = [...imageKeysByRef.keys()];
+						// Downloaded catalogue rows outside the release catalog —
+						// pinnable without the free-text hatch (see
+						// cataloguePinOptions in hw-cascade.js / #2118).
+						const cataloguePins = cataloguePinOptions({
+							rows: runnerImagesQuery.data?.images,
+							catalogImages,
+							slotType: slot.type,
+						});
 						// Image → Backend cascade (hw-cascade.js): one dropdown of
 						// (binary · backend) pairs enumerated from the pinned image (or
 						// the release-catalog union when nothing is pinned). Picking a
@@ -1618,7 +1634,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												{/* A persisted pin outside the catalog (older release,
 												    hand-edited TOML) keeps its own option so opening the
 												    drawer never silently rewrites it. */}
-												{pinnedImage && !catalogImages.includes(pinnedImage) && (
+												{pinnedImage &&
+													!catalogImages.includes(pinnedImage) &&
+													!cataloguePins.some((o) => o.ref === pinnedImage) && (
 													<option value={pinnedImage}>
 														{pinnedImage} · custom
 													</option>
@@ -1628,6 +1646,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														{(imageKeysByRef.get(img) || []).join(" / ")} · {img}
 													</option>
 												))}
+												{/* Catalogued + downloaded images the release catalog
+												    doesn't list (e.g. combined-upstream, #2118) — the
+												    per-slot-pin lane without the free-text hatch. */}
+												{cataloguePins.length > 0 && (
+													<optgroup label="catalogued · downloaded">
+														{cataloguePins.map((o) => (
+															<option
+																key={o.ref}
+																value={o.ref}
+																title={o.notes || o.ref}
+															>
+																{o.id} · {o.ref}
+															</option>
+														))}
+													</optgroup>
+												)}
 												<option value="__custom__">Custom image ref…</option>
 											</select>
 										)}

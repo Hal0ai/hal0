@@ -728,15 +728,27 @@ async def container_enrichment(
         profile_name = str(cfg.get("profile") or "")
         entry["profile"] = profile_name
         image: str | None = None
-        if profile_name:
+        image_pin = str(cfg.get("image_pin") or "").strip()
+        if profile_name or image_pin:
             try:
-                if profiles is None:
-                    raise RuntimeError("profiles catalogue unreadable")
-                prof = profiles.get(profile_name)
-                if prof is not None:
-                    from hal0.providers.container import _resolve_image_ref
+                prof = None
+                if profile_name:
+                    if profiles is None:
+                        raise RuntimeError("profiles catalogue unreadable")
+                    prof = profiles.get(profile_name)
+                # Resolve through the SAME chain the launch uses (image_pin →
+                # [slots].default_images → runner default) — _resolve_image_ref
+                # tolerates prof=None, which is exactly the two cases that used
+                # to fall through to image=None here: a profile name the
+                # catalogue can't resolve (custom/stale id), and a profileless
+                # slot whose image_pin alone declares the image. Both launched
+                # a real ref while this view answered "not-configured" (#1226's
+                # no-expected-image state) — a claim about config the config
+                # contradicts. The truly-undeclared slot (no profile, no pin)
+                # still takes the else-branch below.
+                from hal0.providers.container import _resolve_image_ref
 
-                    image = _resolve_image_ref(cfg, prof)
+                image = _resolve_image_ref(cfg, prof)
                 entry["image"] = image
                 # Lift device_class + backend from the resolved profile so the
                 # UI groups by silicon class and colours by GPU runtime without

@@ -721,6 +721,37 @@ class TestContainerEnrichment:
         )
         assert out["gpu-chat"]["image_status"] == "not-configured"
 
+    async def test_pin_only_slot_reports_pin_and_probed_status(self) -> None:
+        # A profileless slot whose image_pin declares the image used to answer
+        # image=None / image_status="not-configured" while its unit launched
+        # the pin (observed live: a pinned slot rendering "IMAGE STATUS —").
+        # The view now resolves the same chain the launch does.
+        sv_mod._image_present_cache.clear()
+        out = await container_enrichment(
+            [_container_cfg(image_pin=_PINNED_IMAGE)],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False, present=True),
+        )
+        e = out["gpu-chat"]
+        assert e["image"] == _PINNED_IMAGE
+        assert e["image_status"] == "present"
+
+    async def test_unresolvable_profile_still_resolves_launch_image(
+        self, tmp_hal0_home: str
+    ) -> None:
+        # A profile id the catalogue can't resolve (custom/stale) doesn't stop
+        # the launch — _resolve_image_ref falls through to the pin/default —
+        # so it must not stop the view either.
+        sv_mod._image_present_cache.clear()
+        out = await container_enrichment(
+            [_container_cfg(profile="ghost-profile", image_pin=_PINNED_IMAGE)],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False, present=True),
+        )
+        e = out["gpu-chat"]
+        assert e["image"] == _PINNED_IMAGE
+        assert e["image_status"] == "present"
+
     # ── #1939: the four-state block is a five-state block ──────────────────
     #
     # `missing` is reserved for "podman was asked and said no". Every way of
