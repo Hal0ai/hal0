@@ -1782,6 +1782,10 @@ class SlotManager:
                 # eviction estimate and _spawn_locked below so a load never
                 # hits the model registry twice for the same model_id.
                 model_info = await self._resolve_model_info(resolved_model)
+                # Advisory GTT feasibility signal (host-truth sysfs vs the
+                # lying container meminfo) — warns, never blocks. See
+                # _warn_gtt_feasibility.
+                await self._warn_gtt_feasibility(slot_name, resolved_model, model_info)
                 # Pre-load eviction (O26): estimate resolved_model's
                 # footprint and, if projected free memory is short, evict
                 # idle, non-pinned resident slots (lowest `priority` first,
@@ -3556,6 +3560,69 @@ class SlotManager:
     async def _sweep_idle_once(self) -> None:
         """See :meth:`hal0.slots.reaper.SlotReaper.sweep_idle_once`."""
         await self._reaper.sweep_idle_once()
+
+    async def _warn_gtt_feasibility(
+        self, slot_name: str, model_id: str, model_info: dict[str, Any] | None
+    ) -> None:
+        """WARN (never block) when a model's weights exceed free HOST GTT.
+
+        Field finding (LXC slot container on a UMA Proxmox host): GTT
+        allocations draw from the HOST's free RAM, so the container's
+        lxcfs-shaped ``/proc/meminfo`` can show tens of GiB "available"
+        while the actual weight allocation dies with ``cudaMalloc failed:
+        out of memory``. The amdgpu ``mem_info_gtt_*`` sysfs counters ARE
+        host truth and readable inside the container, so compare the
+        incoming weights against free GTT
+        (:attr:`hal0.hardware.gpu_view.GPUMemorySample.gtt_free_mb`) and
+        surface a warning the operator can act on BEFORE the slow failure.
+
+        Deliberately advisory: the load proceeds regardless (the counters
+        can lag; :mod:`hal0.slots.preload_evict` stays the blocking gate).
+        Fail-soft everywhere — no GPU / non-AMD / unknown model size all
+        degrade to silence, and no exception ever escapes into ``load()``.
+        """
+        try:
+            size_bytes = float((model_info or {}).get("size_bytes") or 0)
+            if size_bytes <= 0:
+                return
+            from hal0.hardware import gpu_view
+            from hal0.slots.capacity import gtt_fit_warning
+
+            gpu = await asyncio.to_thread(gpu_view.sample)
+            warning = gtt_fit_warning(
+                size_bytes / (1024.0 * 1024.0),
+                gtt_free_mb=gpu.gtt_free_mb,
+                gtt_total_mb=gpu.gtt_total_mb,
+            )
+            if warning is None:
+                return
+            log.warning(
+                "slot.gtt_feasibility: %s: %s",
+                slot_name,
+                warning,
+                extra={
+                    "slot": slot_name,
+                    "model_id": model_id,
+                    "model_mb": round(size_bytes / (1024.0 * 1024.0), 1),
+                    "gtt_free_mb": gpu.gtt_free_mb,
+                    "gtt_total_mb": gpu.gtt_total_mb,
+                },
+            )
+            if self._event_bus is not None:
+                await self._event_bus.emit(
+                    "slot.gtt_feasibility",
+                    "warn",
+                    f"slot:{slot_name}",
+                    f"{slot_name}: {warning}",
+                    data={
+                        "model_id": model_id,
+                        "model_mb": round(size_bytes / (1024.0 * 1024.0), 1),
+                        "gtt_free_mb": gpu.gtt_free_mb,
+                        "gtt_total_mb": gpu.gtt_total_mb,
+                    },
+                )
+        except Exception:  # advisory only — never let the warn path sink a load
+            log.debug("slot.gtt_feasibility_probe_failed", exc_info=True)
 
     def _probe_host_free_mb(self) -> float:
         """Return free host memory in MiB, GTT-aware where possible (§21.10).

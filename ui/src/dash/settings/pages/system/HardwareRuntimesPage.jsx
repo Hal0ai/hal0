@@ -59,7 +59,7 @@ function DetectedHardwarePanel() {
           <SRow k="GPU" sub="Discrete / integrated graphics adapter" mono v={<span style={{ color: 'var(--fg-2)' }}>{H.gpu || '—'}{H.gpuVendor ? ` · ${H.gpuVendor}` : ''}</span>} />
           <SRow k="ROCm / compute capable" sub="HIP compute stack present (drives the rocm runner)" v={_yn(H.computeCapable)} />
           <SRow k="Vulkan capable" sub="Vulkan runtime present (drives the vulkan runner)" v={_yn(H.vulkanCapable)} />
-          <SRow k="Unified / GTT memory" sub="Shared GPU memory pool (APU) · GTT ceiling" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.unifiedMb)} unified · {_mb(H.gttTotalMb)} GTT{H.memoryKind ? ` · ${H.memoryKind}` : ''}</span>} />
+          <SRow k="Unified / GTT memory" sub="Shared GPU memory pool (APU) · GTT ceiling · host-truth free" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.unifiedMb)} unified · {_mb(H.gttTotalMb)} GTT{H.gttFreeMb != null ? ` · ${_mb(H.gttFreeMb)} free` : ''}{H.memoryKind ? ` · ${H.memoryKind}` : ''}</span>} />
           <SRow
             k="NPU"
             sub="AMD XDNA / FastFlowLM accelerator"

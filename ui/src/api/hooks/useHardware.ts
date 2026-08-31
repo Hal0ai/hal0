@@ -23,6 +23,10 @@ export interface Hardware {
   ram: { total: number; used: number; free: number }
   unifiedMb: number
   gttTotalMb: number
+  // Live host-truth GTT occupancy (amdgpu sysfs). null = counter not
+  // available on this host (non-AMD / no GPU) — distinct from 0.
+  gttUsedMb: number | null
+  gttFreeMb: number | null
   memoryKind: string
   npu: {
     present: boolean
@@ -89,6 +93,8 @@ function normalizeHardware(raw: any): Hardware {
     },
     unifiedMb: Number(raw?.unified_memory_mb ?? 0),
     gttTotalMb: Number(raw?.gtt_total_mb ?? 0),
+    gttUsedMb: raw?.gtt_used_mb == null ? null : Number(raw.gtt_used_mb),
+    gttFreeMb: raw?.gtt_free_mb == null ? null : Number(raw.gtt_free_mb),
     // Authoritative UMA signal is backend memory_kind; fall back to a
     // populated unified_memory_mb (Strix Halo UMA reports it, discrete
     // GPUs don't) so the memory-map pool label is right even on older

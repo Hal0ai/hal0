@@ -142,6 +142,12 @@ def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) ->
         "gpu_vendor": vendor,
         "vram_total_mb": 0 if is_uma else vram_mb,
         "gtt_total_mb": (live_gtt_total_mb or vram_mb) if is_uma else 0,
+        # Live HOST-truth GTT occupancy (amdgpu mem_info_gtt_* sysfs — real
+        # even inside an LXC container, where the cgroup-shaped meminfo lies
+        # about what a GTT allocation can actually get). None = counter not
+        # available on this host (non-AMD / no GPU), distinguishable from 0.
+        "gtt_used_mb": gpu.gtt_used_mb if (gpu is not None and is_uma) else None,
+        "gtt_free_mb": gpu.gtt_free_mb if (gpu is not None and is_uma) else None,
         "ram_total_mb": ram_mb,
         "ram_available_mb": info.get("ram_available_mb", 0),
         "unified_memory_mb": unified_mb,
