@@ -60,7 +60,9 @@ def test_pi_install_is_idempotent(mgr: AgentManager) -> None:
     assert second.name == first.name == "pi"
 
 
-def test_daemon_single_pick_still_enforced(mgr: AgentManager, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_daemon_single_pick_still_enforced(
+    mgr: AgentManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Simulate a second daemon-kind agent to prove the guard survives.
     monkeypatch.setattr(manager_mod, "BUNDLED_AGENTS", ("hermes", "pi", "otherd"))
     monkeypatch.setattr(

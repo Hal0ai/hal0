@@ -304,9 +304,7 @@ def _install_pi() -> None:
 
     from hal0.agents.manager import AgentError, AgentManager
 
-    console.print(
-        "[bold]Provisioning pi[/bold] → ~/.pi (theme · hal0 provider · memory wiring) …"
-    )
+    console.print("[bold]Provisioning pi[/bold] → ~/.pi (theme · hal0 provider · memory wiring) …")
     try:
         rec = AgentManager().install("pi")
     except AgentError as exc:

@@ -109,9 +109,7 @@ def test_mcp_config_self_resolves_token_when_none_passed(
     assert server["headers"]["X-hal0-Agent"] == "pi"
 
 
-def test_mcp_config_tolerates_resolver_failure(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mcp_config_tolerates_resolver_failure(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failing self-resolver (e.g. auth disabled, key file unreadable)
     must not block the install — the entry is written without an
     Authorization header, and X-hal0-Agent is always present."""
@@ -172,9 +170,9 @@ def test_install_runs_script_and_npm_install_for_hindsight_ext(home: Path) -> No
     drv, runner = _driver()
     drv.install()
     assert runner.calls[0][0] == "bash"  # installer script first
-    assert any(
-        c[:3] == ["npm", "install", "--omit=dev"] for c in runner.calls
-    ), f"expected npm install in deployed hindsight extension, got {runner.calls}"
+    assert any(c[:3] == ["npm", "install", "--omit=dev"] for c in runner.calls), (
+        f"expected npm install in deployed hindsight extension, got {runner.calls}"
+    )
 
 
 def test_status_and_uninstall(home: Path) -> None:
