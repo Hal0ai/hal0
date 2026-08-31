@@ -682,7 +682,64 @@ _UNIT_SHOW_PROPS: tuple[str, ...] = (
     "SubState",
     "Result",
     "NRestarts",
+    # #2126: the exit status of the last main process. podman propagates a
+    # container's signal death as 128+signal, so this is where SIGILL shows
+    # up as a plain `132` and the reason string can name the fault instead of
+    # making an operator open the journal to find out what "result=exit-code"
+    # meant.
+    "ExecMainStatus",
 )
+
+#: 128+signal statuses podman propagates for a container killed by a
+#: deterministic fault, mapped to the operator-facing diagnosis (#2126).
+#: These are the faults where "restart it" is never the answer: the same
+#: instruction stream meets the same CPU and dies the same way.
+_FAULT_EXIT_STATUS: dict[int, str] = {
+    132: (
+        "the runner binary hit an illegal instruction (SIGILL) — the image's "
+        "CPU/ISA baseline does not match this host's CPU"
+    ),
+    134: "the runner binary aborted (SIGABRT)",
+    139: "the runner binary segfaulted (SIGSEGV)",
+}
+
+#: The hint appended to a SIGILL diagnosis. SIGILL on a slot is almost always
+#: an image that was never built for the device the slot is on — #2126's shape
+#: is a ``device = "cpu"`` slot launched from a GPU toolbox.
+_SIGILL_HINT = (
+    "This is an image/hardware mismatch, not a model problem: the slot's "
+    "runner image is not built for the CPU it was launched on. `hal0 slot "
+    "show <slot>` reports the slot's device and resolved image. "
+    "See hal0 issue #2126."
+)
+
+
+def _fault_diagnosis(props: Mapping[str, str]) -> str:
+    """Name the deterministic fault behind a failed unit, or ``""`` (#2126).
+
+    Reads ``ExecMainStatus`` from a :meth:`ContainerProvider.unit_status`
+    property bag. podman propagates a container killed by a signal as its own
+    ``128+signal`` exit status, so systemd records ``status=132/n/a`` for a
+    SIGILL — the exact shape #2126 reported, where the operator's only clue
+    was an unexplained ``result=exit-code`` on a slot the dashboard still
+    painted as ``warming``.
+
+    Only :data:`_FAULT_EXIT_STATUS` members produce a string. Everything else
+    (a real exit code, a missing/unparseable property, the OOM-killer's 137)
+    returns ``""`` so the caller's generic reason stands unchanged — this
+    ANNOTATES a failure, it never decides one.
+    """
+    raw = str(props.get("ExecMainStatus", "")).strip()
+    try:
+        status = int(raw)
+    except ValueError:
+        return ""
+    diagnosis = _FAULT_EXIT_STATUS.get(status)
+    if diagnosis is None:
+        return ""
+    if status == 132:
+        return f"{diagnosis}. {_SIGILL_HINT}"
+    return diagnosis
 
 
 def _resolve_model_path(model_info: dict[str, Any]) -> str:
@@ -907,7 +964,29 @@ def _render_quadlet_from_plan(
             # load" — corrupt GGUF, bogus flag), which would otherwise burn
             # the whole ramp above on a doomed model. Old images never exit
             # 64, so this is inert against them — safe version skew.
-            "RestartPreventExitStatus=64",
+            #
+            # #2126 adds 132 (128+SIGILL) as a SECOND terminal status, and it
+            # is deliberately the only signal death here. The entrypoint's
+            # exit-64 translation only exists inside images that SHIP that
+            # entrypoint; a slot launched from a foreign or older image (the
+            # `cpu` runner still resolves to the Vulkan toolbox — #2126) has
+            # nothing in the container to translate anything, so podman
+            # propagates 128+signal and systemd sees a plain `status=132`.
+            # This host-side directive is the version-skew-proof half.
+            #
+            # Why ONLY SIGILL host-side: RestartPreventExitStatus is
+            # unconditional — it applies to a slot that has been serving for
+            # days exactly as it does to one dying at load. An illegal
+            # instruction is the one fault where that is safe: it means the
+            # binary contains opcodes this CPU cannot execute, which no
+            # restart can ever change. SIGSEGV (139) and SIGABRT (134) are
+            # not in that class post-load (a bad request, a driver reset, an
+            # allocator abort can all recover on restart), and SIGKILL (137)
+            # is the OOM-killer, which is transient by definition. Those keep
+            # the backoff runway here and are handled load-phase-only, where
+            # "before /health ever answered" makes them deterministic, in
+            # packaging/runner/rocmfpx/entrypoint.sh.
+            "RestartPreventExitStatus=64 132",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
@@ -2911,16 +2990,19 @@ class ContainerProvider(Provider):
         active_state = props.get("ActiveState", "")
         result = props.get("Result", "") or "failure"
         restarts = props.get("NRestarts", "") or "0"
+        fault = _fault_diagnosis(props)
         if active_state == "failed":
             if result == "start-limit-hit":
-                return (
+                base = (
                     f"{unit} is crash-looping: systemd stopped retrying after "
                     f"{restarts} restarts (start-limit-hit). Fix the cause, then "
                     f"`hal0 slot load {token}`"
                 )
-            return (
+                return f"{base} — {fault}" if fault else base
+            base = (
                 f"{unit} failed (result={result}, restarts={restarts}) — see `journalctl -u {unit}`"
             )
+            return f"{base}. {fault}" if fault else base
         if load_state == "not-found":
             return (
                 f"{unit} no longer exists — the slot's unit was removed while it "

@@ -178,20 +178,33 @@ def test_add_private_mode_wins_over_body_dataset(
     assert call["dataset"] == "private:hermes-agent"
 
 
-def test_add_custom_dataset_passthrough_no_private(
+def test_add_explicit_shared_dataset_passthrough_no_private(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    """Non-private callers can address custom datasets (e.g. the
-    Hermes bootstrap ``agents`` dataset) explicitly."""
+    """Non-private callers can name ``shared`` explicitly (ADR 0005: the
+    only non-private namespace; the Hermes identity cards write here)."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "ident card", "dataset": "shared"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 200, r.text
+    call = stub_wrapper.add_calls[0]
+    assert call["dataset"] == "shared"
+    assert call["source"] == "hermes-agent"
+
+
+def test_add_retired_dataset_rejected(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    """ADR 0005: writes naming the retired ``agents``/``project:<id>``
+    namespaces are a 400 with a pointed remedy, never a passthrough."""
     r = client.post(
         "/api/memory/add",
         json={"text": "ident card", "dataset": "agents"},
         headers={"X-hal0-Agent": "hermes-agent"},
     )
-    assert r.status_code == 200, r.text
-    call = stub_wrapper.add_calls[0]
-    assert call["dataset"] == "agents"
-    assert call["source"] == "hermes-agent"
+    assert r.status_code == 400, r.text
+    assert "retired" in r.text
+    assert not stub_wrapper.add_calls
 
 
 def test_add_private_without_agent_header_rejected(
@@ -310,10 +323,10 @@ def test_list_private_mode_expands_to_both_namespaces(
 
 def test_list_explicit_dataset_query_param(client: TestClient, stub_wrapper: StubWrapper) -> None:
     """The ``?dataset=`` query param still wins for non-private listers."""
-    r = client.get("/api/memory/list?dataset=agents")
+    r = client.get("/api/memory/list?dataset=shared")
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
-    assert call["dataset"] == "agents"
+    assert call["dataset"] == "shared"
 
 
 # ── /api/memory/list?bank= (#1669) ───────────────────────────────────────────
@@ -644,11 +657,11 @@ def test_add_unknown_namespace_rejected(client: TestClient, stub_wrapper: StubWr
 def test_delete_dataset_directs_sweep(client: TestClient, stub_wrapper: StubWrapper) -> None:
     r = client.post(
         "/api/memory/delete",
-        json={"ids": ["d1"], "dataset": "project:apollo"},
+        json={"ids": ["d1"], "dataset": "shared"},
         headers={"X-hal0-Agent": "hermes-agent"},
     )
     assert r.status_code == 200, r.text
-    assert stub_wrapper.delete_calls[0]["dataset"] == "project:apollo"
+    assert stub_wrapper.delete_calls[0]["dataset"] == "shared"
 
 
 def test_delete_without_dataset_keeps_default_sweep(

@@ -19,14 +19,20 @@ The rule:
     without having to opt in per-call.
   - Requesting ``private`` without an authenticated ``client_id`` is
     a usage error — the namespace promotion has no identity to scope to.
-  - The namespace set is CLOSED (spec §3 table): ``shared`` | ``agents``
-    | ``project:<id>`` | the caller's own ``private:<client_id>``.
-    Free-form names used to pass through verbatim, which let any caller
-    read/write arbitrary engine banks (and made the items undeletable
-    through the id-scoped delete sweep). Writes to unknown namespaces
-    now raise; reads *degrade* — an unaddressable entry is dropped from a
-    list that still names at least one addressable namespace, so a
-    multi-namespace read keeps working instead of erroring.
+  - The namespace set is CLOSED and two-valued (ADR 0005): ``shared`` |
+    the caller's own ``private:<client_id>``. Free-form names used to
+    pass through verbatim, which let any caller read/write arbitrary
+    engine banks (and made the items undeletable through the id-scoped
+    delete sweep). Writes to unknown namespaces raise; reads *degrade* —
+    an unaddressable entry is dropped from a list that still names at
+    least one addressable namespace, so a multi-namespace read keeps
+    working instead of erroring.
+  - ``agents`` and ``project:<id>`` were retired from the grammar
+    (ADR 0005): scoping within ``shared`` is done with tags (the
+    agent-identity cards carry the ``agent-identity`` tag; project
+    provenance is a ``project:<id>`` *tag*), and per-repository coding
+    memory lives outside this namespace system entirely, in
+    ``coding-agent::<repo>`` banks written by the coding-agent clients.
   - A read request that names namespaces and resolves to NONE of them
     fails CLOSED (#1451). Dropping the last entry used to yield ``[]``,
     which every downstream ``requested or [DEFAULT_DATASET]`` read back
@@ -44,23 +50,19 @@ in the active provider — this layer is for transport-side resolution.
 
 from __future__ import annotations
 
-import re
-
 DEFAULT_DATASET = "shared"
-AGENTS_DATASET = "agents"
 PRIVATE_PREFIX = "private:"
-PROJECT_PREFIX = "project:"
+
+# Retired namespaces (ADR 0005). Kept as named constants only so the
+# rejection messages and tests can refer to them without magic strings.
+RETIRED_AGENTS_DATASET = "agents"
+RETIRED_PROJECT_PREFIX = "project:"
 
 # Sentinel the MCP/REST identity resolvers emit for an absent/malformed
 # ``X-hal0-Agent`` header. It is NOT a real identity: a private write under it
 # must be rejected, not mis-scoped into a ``private:anonymous`` bank. See
 # ``mcp_mount.client_id_resolver`` whose contract delegates that rejection here.
 ANONYMOUS_CLIENT_ID = "anonymous"
-
-# Spec §3 namespace grammar — the scoped suffix after ``project:`` follows
-# the same identity rules as agent ids: alnum + ``-`` + ``_``,
-# ≤64 chars, so bank names derived from it stay path-traversal-free.
-_SCOPED_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 
 class MemoryNamespaceError(ValueError):
@@ -70,12 +72,10 @@ class MemoryNamespaceError(ValueError):
 
 
 def is_known_namespace(name: str, *, client_id: str | None = None) -> bool:
-    """Spec §3 table membership: ``shared`` | ``agents`` | ``project:<id>``
-    | the caller's own ``private:<client_id>``."""
-    if name in (DEFAULT_DATASET, AGENTS_DATASET):
+    """ADR 0005 table membership: ``shared`` | the caller's own
+    ``private:<client_id>``."""
+    if name == DEFAULT_DATASET:
         return True
-    if name.startswith(PROJECT_PREFIX):
-        return bool(_SCOPED_ID_PATTERN.match(name[len(PROJECT_PREFIX) :]))
     if name.startswith(PRIVATE_PREFIX):
         return client_id is not None and name == f"{PRIVATE_PREFIX}{client_id}"
     return False
@@ -101,7 +101,7 @@ def resolve_write_dataset(
         namespace by passing the prefix in the body — the toggle is
         the only path in. Surfaces as 400 at the transport layer
         instead of silently being forwarded to the wrapper.
-      - ``requested`` outside the spec §3 namespace table →
+      - ``requested`` outside the namespace table (ADR 0005) →
         ``MemoryNamespaceError`` (closed-set hardening; see module
         docstring).
     """
@@ -117,9 +117,15 @@ def resolve_write_dataset(
             "send X-hal0-Private: 1 (REST) or private=true (MCP) instead"
         )
     if not is_known_namespace(requested, client_id=client_id):
+        hint = ""
+        if requested == RETIRED_AGENTS_DATASET or requested.startswith(RETIRED_PROJECT_PREFIX):
+            hint = (
+                " ('agents' and 'project:<id>' were retired — write to 'shared' "
+                "with a scoping tag instead; see ADR 0005)"
+            )
         raise MemoryNamespaceError(
-            f"unknown namespace {requested!r}; writes accept 'shared', 'agents', "
-            "or 'project:<id>' (private goes through the private-mode toggle)"
+            f"unknown namespace {requested!r}; writes accept 'shared' "
+            f"(private goes through the private-mode toggle){hint}"
         )
     return requested
 
@@ -135,7 +141,7 @@ def resolve_read_datasets(
     Mirrors the read branch from :func:`hal0.mcp.memory._memory_search`:
 
       - ``requested`` already a non-empty list → filtered against the
-        spec §3 namespace table (unknown / foreign-private entries are
+        namespace table of ADR 0005 (unknown / foreign-private entries are
         dropped — the provider applies the same rule, this keeps the
         contract visible at the front door). If **every** entry is
         dropped the call raises ``MemoryNamespaceError`` rather than
@@ -146,7 +152,7 @@ def resolve_read_datasets(
       - ``requested`` an empty list → no namespace was named at all, so it
         is treated exactly like ``None`` (below), not as a rejection.
       - ``requested`` empty/``None`` + ``private`` + ``client_id`` →
-        expand to ``[shared, private:<client_id>]`` per §3.
+        expand to ``[shared, private:<client_id>]``.
       - ``requested`` empty/``None`` otherwise → :data:`DEFAULT_DATASET`.
       - ``requested`` non-empty string → resolved via
         :func:`resolve_write_dataset` (same rule applies; e.g. an explicit
@@ -169,8 +175,7 @@ def resolve_read_datasets(
         if not kept:
             raise MemoryNamespaceError(
                 "no addressable namespace in the requested scope "
-                f"{names!r}; reads accept 'shared', 'agents', 'project:<id>', "
-                "or your own 'private:<client_id>'"
+                f"{names!r}; reads accept 'shared' or your own 'private:<client_id>'"
             )
         return kept
     if requested is None or isinstance(requested, list) or not requested.strip():
@@ -181,10 +186,10 @@ def resolve_read_datasets(
 
 
 __all__ = [
-    "AGENTS_DATASET",
     "DEFAULT_DATASET",
     "PRIVATE_PREFIX",
-    "PROJECT_PREFIX",
+    "RETIRED_AGENTS_DATASET",
+    "RETIRED_PROJECT_PREFIX",
     "MemoryNamespaceError",
     "is_known_namespace",
     "resolve_read_datasets",

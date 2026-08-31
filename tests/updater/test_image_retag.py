@@ -3,10 +3,11 @@
 Covers :func:`hal0.updater.updater.retag_stale_slot_images` — slot ``image``
 pins exactly equal to a KNOWN former default roll to the current default
 (:func:`hal0.config.schema.resolve_default_image`): AMD GPU lanes migrate to the
-universal ``hal0-rocmfpx`` runner, while a CPU-only lane stays on the lean
-toolbox (a no-op). Any non-default pin is a deliberate operator override and
-must survive untouched, as must the ``[image]`` TOML table (image-gen settings)
-that shares the key.
+universal ``hal0-rocmfpx`` runner, and — since #2126 — a CPU-only lane migrates
+to the CPU toolbox instead of staying on the GPU image it used to resolve back
+to. Any non-default pin is a deliberate operator override and must survive
+untouched, as must the ``[image]`` TOML table (image-gen settings) that shares
+the key.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from hal0.config.schema import (
     FALLBACK_VULKAN_IMAGE,
     STALE_ROCMFPX_IMAGE_REFS,
 )
+from hal0.runners import get_runner, resolve_runner_image
 from hal0.updater.updater import retag_stale_slot_images
 
 STALE = "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5"
@@ -106,9 +108,27 @@ def test_gpu_slot_on_old_toolbox_migrates_to_rocmfpx(tmp_hal0_home: str) -> None
     assert _image_of("g") == DEFAULT_ROCMFPX_IMAGE
 
 
-def test_cpu_slot_on_toolbox_pin_is_noop(tmp_hal0_home: str) -> None:
-    """A CPU-only slot already on the lean vulkan toolbox resolves back to
-    itself → no rewrite, not counted (rocmfpx is wasteful for CPU)."""
+def test_cpu_slot_on_the_gpu_toolbox_pin_migrates_to_the_cpu_toolbox(
+    tmp_hal0_home: str,
+) -> None:
+    """The upgrade repair for #2126.
+
+    This used to be a no-op: a ``device = "cpu"`` slot pinned to
+    ``FALLBACK_VULKAN_IMAGE`` re-resolved back to itself, because that GPU
+    image was also what the ``cpu`` runner carried. That is exactly the on-disk
+    shape #2126 reported — a slot whose image SIGILLs at model load — so
+    resolving back to itself meant `hal0 update` left an already-broken CPU box
+    broken.
+
+    With the ``cpu`` runner wired to hal0-toolbox-cpu, the same pin (still a
+    known former default, so still not a deliberate operator choice) now
+    re-resolves through the HW gate to the CPU image, and the box heals on
+    update without an operator touching a TOML. Never rocmfpx: that 7.5 GB GPU
+    runner remains wasteful and wrong for a CPU lane.
+    """
     _write_slot("c", f'image = "{FALLBACK_VULKAN_IMAGE}"\nname = "c"\ndevice = "cpu"\n')
-    assert retag_stale_slot_images() == 0
-    assert _image_of("c") == FALLBACK_VULKAN_IMAGE
+    assert retag_stale_slot_images() == 1
+    migrated = _image_of("c")
+    assert migrated == resolve_runner_image(get_runner("cpu"))
+    assert migrated != FALLBACK_VULKAN_IMAGE
+    assert migrated != DEFAULT_ROCMFPX_IMAGE

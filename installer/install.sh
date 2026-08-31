@@ -377,6 +377,12 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 #     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
 #     otherwise stop with the passthrough remedy.
 #   0 → GPU present + wired, or a genuine bare-metal CPU box: proceed silently.
+# Every CPU-only opt-in is itself gated on there BEING a CPU runner image
+# (_cpu_only_image_gate, #2126). The opt-in only picks device=cpu; until the
+# `cpu` runner is wired to a real CPU toolbox, device=cpu still lands on the
+# Vulkan GPU image, which SIGILLs at model load and crash-loops. Consenting to
+# a CPU-only install is not consenting to a box that installs green and never
+# serves a token.
 # Skipped in dev mode (no system slots there). This block is self-contained so
 # later install.sh edits merge around it cleanly.
 _confirm_cpu_only() {
@@ -388,6 +394,10 @@ _confirm_cpu_only() {
     IFS= read -r reply </dev/tty 2>/dev/null || return 1
     [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
+
+# The CPU-only image gate (_cpu_only_image_gate) and the honest CPU-only
+# remedy text (_cpu_only_remedy_lines) both live in lib/preflight.sh next to
+# the runner-image mirror they consult — sourced at the top of this file.
 
 # ── Interactive-input gate (v1.0) ───────────────────────────────────────────
 # The installer is the single user-facing entry point, so the two answers it
@@ -459,8 +469,10 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         # honestly say "no GPU lane" — the derivation ladders agree, and will
         # write device=cpu for every seeded slot on exactly this box.
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            _cpu_only_image_gate || exit 1
             warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
         elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
         else
             err "No usable GPU lane inside this container."
@@ -468,7 +480,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             err "  Vulkan needs a render node AND a runner image validated for that lane (#1888/#1948);"
             err "  this box has neither combination available."
             err "Forward /dev/kfd, or update to a runner whose Vulkan backend is validated, then re-run install.sh."
-            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            _cpu_only_remedy_lines
             exit 1
         fi
     elif (( gpu_rc == HAL0_GPU_RC_KFD_GID )); then
@@ -501,12 +513,14 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
+            _cpu_only_image_gate || exit 1
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
         elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+            _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt)."
         else
             err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
-            err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
+            _cpu_only_remedy_lines
             exit 1
         fi
     fi

@@ -15,11 +15,23 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE, FALLBACK_VULKAN_IMAGE
+from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
 from hal0.providers.container import (
     _profile_image_and_flags,
     _resolve_image_ref,
 )
+from hal0.runners import get_runner, resolve_runner_image
+
+
+def _cpu_image() -> str:
+    """The image the ``cpu`` runner resolves to right now.
+
+    Computed rather than hard-coded: tier 3 of ``_resolve_image_ref`` IS
+    ``resolve_runner_image``, so an env override or a manifest digest pin
+    (the ``cpu`` runner took one on #2126) moves both sides together and
+    these tests keep asserting the tier, not a literal.
+    """
+    return resolve_runner_image(get_runner("cpu"))
 
 
 def _profile(image: str | None = None, *, backend: str = "vulkan") -> SimpleNamespace:
@@ -41,13 +53,13 @@ def test_image_pin_is_honored_verbatim() -> None:
 def test_empty_image_pin_falls_through_to_binary() -> None:
     """An empty-string image_pin is treated as 'no pin'."""
     slot_cfg = {"image_pin": "", "binary": "cpu"}
-    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref(slot_cfg, _profile()) == _cpu_image()
 
 
 def test_non_string_image_pin_ignored() -> None:
     """A non-string image_pin (e.g. a stray table) never becomes str(dict)."""
     slot_cfg = {"image_pin": {"oops": 1}, "binary": "cpu"}
-    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref(slot_cfg, _profile()) == _cpu_image()
 
 
 # --- BINARY-resolved default (tier 2) -------------------------------------- #
@@ -55,7 +67,7 @@ def test_non_string_image_pin_ignored() -> None:
 
 def test_binary_resolves_the_image() -> None:
     """slot.binary is a RUNNER_IMAGES key → its resolved image."""
-    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == _cpu_image()
 
 
 def test_unknown_binary_falls_back_to_hw_default() -> None:
@@ -72,7 +84,7 @@ def test_no_binary_uses_hw_gated_default_gpu() -> None:
 def test_no_binary_cpu_lane_uses_lean_toolbox() -> None:
     """No pin, no binary, CPU lane → the lean toolbox, not the big GPU runner."""
     profile = SimpleNamespace(image=None, backend=None, device_class="cpu")
-    assert _resolve_image_ref(None, profile) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref(None, profile) == _cpu_image()
 
 
 # --- DELETED tiers: profile.image + raw slot.image are NOT read ------------ #
@@ -102,7 +114,7 @@ def test_image_gen_dict_does_not_break_resolution() -> None:
     """The [image] image-gen table (#599) shares no key with image_pin, so it
     can never be mis-read as a ref (the prior str(dict) overload is gone)."""
     slot_cfg = {"image": {"idle_restore_minutes": 0, "default_steps": 30}, "binary": "cpu"}
-    assert _resolve_image_ref(slot_cfg, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref(slot_cfg, _profile()) == _cpu_image()
 
 
 # --- [slots] default_images override (runner-image-catalogue v2) ------------ #
@@ -153,7 +165,7 @@ def test_default_images_absent_family_keeps_baked_default(monkeypatch) -> None:
         "hal0.config.loader.load_hal0_config",
         lambda: _fake_config({"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"}),
     )
-    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == _cpu_image()
 
 
 def test_default_images_config_load_failure_fails_soft(monkeypatch) -> None:
@@ -163,7 +175,7 @@ def test_default_images_config_load_failure_fails_soft(monkeypatch) -> None:
         raise OSError("permission denied")
 
     monkeypatch.setattr("hal0.config.loader.load_hal0_config", _boom)
-    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == FALLBACK_VULKAN_IMAGE
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == _cpu_image()
 
 
 def test_default_images_canonical_key_applies_when_effective_runner_is_alias(
@@ -198,3 +210,86 @@ def test_profile_image_and_flags_default_when_nothing_set() -> None:
     )
     image, _flags = _profile_image_and_flags(profile)
     assert image == DEFAULT_ROCMFPX_IMAGE
+
+
+# --- the CPU lane resolves to a real CPU image (#2126) ---------------------- #
+
+
+def test_cpu_lane_resolves_to_the_cpu_toolbox_not_the_gpu_fallback() -> None:
+    """#2126: a correctly-derived ``device = "cpu"`` slot used to resolve to
+    ``FALLBACK_VULKAN_IMAGE`` — the GPU toolbox — because that is what the
+    ``cpu`` runner carried, and on a GPU-less host that image SIGILLs about a
+    second into model load. It now resolves to hal0-toolbox-cpu, which is
+    built ``GGML_NATIVE=OFF`` and therefore portable.
+
+    Asserted against the constants rather than the resolved string so the test
+    survives the digest pin (which makes the resolved ref a ``@sha256:`` form
+    in an install that can read manifest.json, and the bare tag otherwise).
+    """
+    from hal0.config.schema import FALLBACK_VULKAN_IMAGE
+    from hal0.runners import RUNNER_IMAGES
+
+    runner = RUNNER_IMAGES["cpu"]
+    assert runner.image != FALLBACK_VULKAN_IMAGE
+    assert runner.image == "ghcr.io/hal0ai/hal0-toolbox-cpu:v1"
+    # …and it can take a digest pin like every other runner, which the
+    # placeholder deliberately could not.
+    assert runner.manifest_key == "cpu"
+    assert _resolve_image_ref({"binary": "cpu"}, _profile()) == _cpu_image()
+
+
+def test_cpu_lane_predicate_passes_on_a_shipped_build() -> None:
+    """:func:`cpu_lane_has_runner_image` is the installer gate's predicate. On
+    a shipped build it answers True; it exists as the regression guard for a
+    revert to the GPU fallback, not as a description of a broken state."""
+    from hal0.runners import cpu_lane_has_runner_image
+
+    assert cpu_lane_has_runner_image() is True
+
+
+def test_cpu_lane_predicate_fails_if_the_runner_reverts_to_the_gpu_fallback(
+    monkeypatch,
+) -> None:
+    """The #2126 world, reconstructed: point the ``cpu`` runner back at the
+    Vulkan toolbox and the predicate must say so, so the installer refuses
+    instead of shipping a box that crash-loops."""
+    from dataclasses import replace
+
+    from hal0.config.schema import FALLBACK_VULKAN_IMAGE
+    from hal0.runners import RUNNER_IMAGES, cpu_lane_has_runner_image
+
+    reverted = replace(RUNNER_IMAGES["cpu"], image=FALLBACK_VULKAN_IMAGE, manifest_key=None)
+    monkeypatch.setitem(RUNNER_IMAGES, "cpu", reverted)
+    assert cpu_lane_has_runner_image() is False
+
+
+def test_cpu_lane_env_override_still_satisfies_the_predicate(monkeypatch) -> None:
+    """Tier 1 of ``resolve_runner_image``, and the escape hatch the installer
+    gate leaves open for an operator running their own CPU llama-server build.
+    It has to keep working even from the reverted world, so the predicate must
+    RESOLVE rather than read the registry literal."""
+    from dataclasses import replace
+
+    from hal0.config.schema import FALLBACK_VULKAN_IMAGE
+    from hal0.runners import RUNNER_IMAGES, cpu_lane_has_runner_image
+
+    reverted = replace(RUNNER_IMAGES["cpu"], image=FALLBACK_VULKAN_IMAGE, manifest_key=None)
+    monkeypatch.setitem(RUNNER_IMAGES, "cpu", reverted)
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_CPU", "ghcr.io/example/llama-cpu:v1")
+    assert cpu_lane_has_runner_image() is True
+
+
+def test_cpu_lane_predicate_ignores_a_slot_level_image_pin(monkeypatch) -> None:
+    """``image_pin`` fixes ONE slot; the predicate is about the LANE, which is
+    what an install-time gate can reason about (no slots exist yet). Driven
+    from the reverted world so the pin has something to fail to rescue."""
+    from dataclasses import replace
+
+    from hal0.config.schema import FALLBACK_VULKAN_IMAGE
+    from hal0.runners import RUNNER_IMAGES, cpu_lane_has_runner_image
+
+    reverted = replace(RUNNER_IMAGES["cpu"], image=FALLBACK_VULKAN_IMAGE, manifest_key=None)
+    monkeypatch.setitem(RUNNER_IMAGES, "cpu", reverted)
+    pinned = {"image_pin": "ghcr.io/example/llama-cpu:v1", "binary": "cpu"}
+    assert _resolve_image_ref(pinned, _profile()) == "ghcr.io/example/llama-cpu:v1"
+    assert cpu_lane_has_runner_image() is False

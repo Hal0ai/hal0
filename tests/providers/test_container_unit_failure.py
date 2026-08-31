@@ -104,6 +104,129 @@ def test_plain_failure_is_distinguished_from_the_start_limit(
     assert "journalctl" in reason
 
 
+# ── #2126: naming the deterministic fault behind a failed unit ─────────────
+
+
+def test_sigill_failure_names_the_image_hardware_mismatch(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2126's exact shape: podman propagates the container's SIGILL as its
+    own 128+signal exit, so systemd records ``status=132/n/a``. The old reason
+    string said only ``result=exit-code`` — an operator's only clue that the
+    runner image was built for a CPU this box does not have was the raw
+    journal. Say it in the reason.
+    """
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nNRestarts=1\nExecMainStatus=132\n",
+    )
+
+    reason = provider.unit_failure_reason("chat")
+
+    assert "SIGILL" in reason
+    assert "ISA baseline" in reason
+    assert "#2126" in reason
+    # The generic reason survives underneath — this ANNOTATES, never replaces.
+    assert "result=exit-code" in reason
+    assert "journalctl" in reason
+
+
+def test_sigill_annotation_also_reaches_the_crash_loop_reason(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash-looped slot is where an operator actually looks, so the fault
+    must be named there too — that is the surface #2126 reported as showing
+    nothing but ``warming`` and then ``start-limit-hit``."""
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\n"
+        "NRestarts=5\nExecMainStatus=132\n",
+    )
+
+    reason = provider.unit_failure_reason("chat")
+
+    assert "crash-looping" in reason
+    assert "SIGILL" in reason
+    assert "hal0 slot load chat" in reason
+
+
+@pytest.mark.parametrize(
+    ("status", "needle"),
+    [("134", "SIGABRT"), ("139", "SIGSEGV")],
+)
+def test_other_deterministic_faults_are_named_without_the_sigill_hint(
+    provider: ContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    needle: str,
+) -> None:
+    """SIGSEGV/SIGABRT get named, but not the ISA-mismatch diagnosis — a
+    segfault is far more often a model the build cannot parse (#1790)."""
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\n"
+        f"NRestarts=1\nExecMainStatus={status}\n",
+    )
+
+    reason = provider.unit_failure_reason("chat")
+
+    assert needle in reason
+    assert "ISA baseline" not in reason
+
+
+@pytest.mark.parametrize("status", ["", "1", "78", "137", "not-a-number"])
+def test_non_fault_statuses_leave_the_reason_untouched(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """A real exit code, the OOM-killer's 137, an absent or unparseable
+    property: no annotation. This must never invent a fault it did not read.
+    """
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\n"
+        f"NRestarts=1\nExecMainStatus={status}\n",
+    )
+
+    reason = provider.unit_failure_reason("chat")
+
+    assert reason == (
+        "hal0-slot@chat.service failed (result=exit-code, restarts=1) — "
+        "see `journalctl -u hal0-slot@chat.service`"
+    )
+
+
+def test_exec_main_status_is_actually_requested_from_systemd(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The annotation is worthless if the property is never asked for."""
+    calls: list[tuple[str, ...]] = []
+    _stub_run(monkeypatch, provider, "LoadState=loaded\nActiveState=failed\n", calls)
+
+    provider.unit_status("chat")
+
+    assert "--property=ExecMainStatus" in calls[0]
+
+
+def test_a_healthy_unit_with_a_stale_fault_status_stays_silent(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ExecMainStatus`` lingers on a unit that has since been restarted
+    successfully. Only a terminal ActiveState earns a reason at all — the
+    annotation must not create one."""
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=active\nSubState=running\n"
+        "Result=success\nExecMainStatus=132\n",
+    )
+
+    assert provider.unit_failure_reason("chat") == ""
+
+
 def test_a_removed_unit_is_a_failure_reason_not_silence(
     provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
