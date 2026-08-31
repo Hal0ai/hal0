@@ -212,7 +212,7 @@ describe('cataloguePinOptions — downloaded catalogue rows beyond the release c
     expect(out.some((o) => o.ref.includes('toolbox-rocm'))).toBe(false)
   })
 
-  it('offers nothing for slot types llama-server does not serve', () => {
+  it('offers nothing for slot types llama-server does not serve (family-less rows)', () => {
     expect(cataloguePinOptions({ rows, catalogImages, slotType: 'tts' })).toEqual([])
     expect(cataloguePinOptions({ rows, catalogImages, slotType: 'image' })).toEqual([])
   })
@@ -220,6 +220,58 @@ describe('cataloguePinOptions — downloaded catalogue rows beyond the release c
   it('serves every llama-server slot type', () => {
     for (const t of ['llm', 'embedding', 'reranking']) {
       expect(cataloguePinOptions({ rows, catalogImages, slotType: t }).length).toBe(1)
+    }
+  })
+
+  it('gates per row on runtime_family when the backend supplies it', () => {
+    // feat/catalogue-runtime-metadata: a comfyui-family row belongs in the
+    // image-slot drawer and NOT in the llm one — and vice versa for the
+    // llama-server row, all from one rows payload.
+    const mixed = [
+      {
+        id: 'comfyui',
+        image: 'ghcr.io/hal0ai/hal0-comfyui',
+        tag: 'latest',
+        downloaded: true,
+        runtime_family: 'comfyui',
+        supported_backends: ['rocm'],
+      },
+      {
+        id: 'combined-upstream',
+        image: 'ghcr.io/hal0ai/hal0-combined-upstream',
+        tag: '0829',
+        downloaded: true,
+        runtime_family: 'llama-server',
+        supported_backends: ['rocm', 'vulkan'],
+      },
+    ]
+    const forImage = cataloguePinOptions({ rows: mixed, catalogImages, slotType: 'image' })
+    expect(forImage.map((o) => o.id)).toEqual(['comfyui'])
+    const forLlm = cataloguePinOptions({ rows: mixed, catalogImages, slotType: 'llm' })
+    expect(forLlm.map((o) => o.id)).toEqual(['combined-upstream'])
+  })
+
+  it('assumes llama-server when runtime_family is absent (pre-contract backend)', () => {
+    // `rows` above carries no runtime_family — the historical assumption
+    // must keep holding: offered for llm, hidden for tts.
+    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'llm' }).length).toBe(1)
+    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'tts' })).toEqual([])
+  })
+
+  it('never vetoes a family FAMILY_SLOT_TYPES does not know', () => {
+    // Same rule as backendOptions: a new runtime shows up rather than
+    // vanishing; a wrong pick degrades to the out-of-catalog pin path.
+    const novel = [
+      {
+        id: 'novel',
+        image: 'ghcr.io/hal0ai/hal0-novel-runtime',
+        tag: 'v1',
+        downloaded: true,
+        runtime_family: 'novel-runtime',
+      },
+    ]
+    for (const t of ['llm', 'tts', 'image']) {
+      expect(cataloguePinOptions({ rows: novel, catalogImages, slotType: t }).length).toBe(1)
     }
   })
 

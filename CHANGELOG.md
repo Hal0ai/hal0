@@ -34,6 +34,12 @@ applying. Add those subsections to a version's section to surface them; see
   #2037/#2126) and stamps it on the slot state (`metadata.last_crash_line`);
   the crash-breaker chip's tooltip carries it, so "trial pending" finally
   says why instead of pointing at `journalctl -u hal0-slot@<name>`.
+- Runner-image catalogue rows now carry `runtime_family` and
+  `supported_backends` runtime metadata merged from the
+  `hal0.runner-images.v1` manifest, and the slot drawer's
+  "catalogued · downloaded" pin lane gates each row on its declared
+  runtime family instead of assuming every catalogue row is a
+  llama-server fork (#2174).
 
 ## [1.1.0] — 2026-08-31
 

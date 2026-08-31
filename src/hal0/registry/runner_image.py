@@ -63,6 +63,16 @@ class RunnerImage(BaseModel):
     publish: str | None = None  # "ci" | "external" | "manual"
     notes: str | None = None
     build: dict[str, Any] | None = None
+    #: Runtime the image's entrypoint serves — same vocabulary as
+    #: ``hal0.runners.RuntimeFamily`` (``"llama-server"``, ``"comfyui"``, …).
+    #: ``None`` when the matched ``images.json`` entry predates the field (or
+    #: no entry matched at all) — consumers fall back to their own assumption
+    #: rather than treating absence as a veto.
+    runtime_family: str | None = None
+    #: Backends the image's runner binary can execute (``"rocm"``/``"vulkan"``/
+    #: ``"cpu"``/…). Same semantics as ``hal0.runners.Runner.supported_backends``:
+    #: metadata, not a selector, and ``[]`` means "not declared" (no veto).
+    supported_backends: list[str] = Field(default_factory=list)
 
     # Local download state — set by hal0.registry.runner_pull once an
     # image has actually been pulled onto this host.

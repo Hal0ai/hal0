@@ -165,25 +165,28 @@ function repoOfRef(ref) {
  *   lineage the catalog options resolve — offering both would show one image
  *   twice under two spellings).
  *
- * Catalogue rows carry no runtime_family, so they're assumed llama-server
- * (every uncatalogued-family row today is a llama.cpp fork) and offered only
- * for the slot types that family serves. A wrong pick degrades to the
- * existing out-of-catalog pin path (cascade fallback + caution), never a
- * dead end.
+ * Slot-type gating is per row: a row's `runtime_family` (images.json runtime
+ * metadata, feat/catalogue-runtime-metadata) picks its FAMILY_SLOT_TYPES
+ * entry; a row without the field (pre-contract backend, or a manifest entry
+ * that predates it) is assumed llama-server — the historical assumption,
+ * kept as the fallback. A family missing from FAMILY_SLOT_TYPES never
+ * vetoes (same rule as backendOptions: a new runtime shows up rather than
+ * vanishing). A wrong pick degrades to the existing out-of-catalog pin path
+ * (cascade fallback + caution), never a dead end.
  *
  * @param rows          GET /api/runner-images rows (RunnerImage[])
  * @param catalogImages the release-catalog refs already in the dropdown
- * @param slotType      slot.type — gates via FAMILY_SLOT_TYPES["llama-server"]
+ * @param slotType      slot.type — gates each row via FAMILY_SLOT_TYPES
  * @returns [{id, ref, notes}] — ref is the pinnable `repo:tag`
  */
 export function cataloguePinOptions({ rows, catalogImages, slotType }) {
-	if (slotType && !FAMILY_SLOT_TYPES["llama-server"].includes(slotType))
-		return [];
 	const catalogRepos = new Set((catalogImages || []).map(repoOfRef));
 	const out = [];
 	for (const r of rows || []) {
 		if (!r || !r.downloaded || !r.image || !r.tag) continue;
 		if (catalogRepos.has(r.image)) continue;
+		const served = FAMILY_SLOT_TYPES[r.runtime_family || "llama-server"];
+		if (slotType && served && !served.includes(slotType)) continue;
 		out.push({ id: r.id, ref: `${r.image}:${r.tag}`, notes: r.notes || "" });
 	}
 	return out;
