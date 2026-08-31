@@ -114,9 +114,20 @@ HermesNotHal0AwareError = HermesUpstreamMissingError
 
 # ── Bundled catalog ──────────────────────────────────────────────────────────
 
-BUNDLED_AGENTS: tuple[str, ...] = ("hermes",)
+BUNDLED_AGENTS: tuple[str, ...] = ("hermes", "pi")
 """Canonical names for bundled agents. Adding to this list requires a
 matching driver module + ``installer/agents/<name>.sh``."""
+
+# Agent kinds (spec 2026-08-31 pi-agent D1). "daemon" agents own the
+# gateway/persona/approval surface and are single-pick among themselves.
+# "cli" agents are operator-invoked tools with no daemon claim — they
+# install alongside anything. Unknown names default to "daemon" so a
+# future agent added without a kind gets the stricter rule.
+AGENT_KINDS: dict[str, str] = {"hermes": "daemon", "pi": "cli"}
+
+
+def agent_kind(name: str) -> str:
+    return AGENT_KINDS.get(name, "daemon")
 
 
 # Marker file the Hermes provisioner stamps into ``$HERMES_HOME`` to
@@ -139,15 +150,8 @@ _AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
 # (see :func:`installer_script_path`) and therefore need the
 # installer-script-exists precondition in
 # :meth:`AgentManager._verify_installable` run before a ``--switch`` tears
-# down an incumbent. Empty as of P1-drivers: the two agents that used to
-# populate this set (pi-coder, opencode) were speculative bundles that
-# could never actually be installed in v0.3 and have been deleted along
-# with their drivers + installer scripts. Hermes provisions through a
-# separate bootstrap pipeline (:mod:`hal0.agents.hermes_provision`) and
-# has no matching shell script, so it doesn't belong here either. Left in
-# place (rather than removed) as the seam a future script-installed
-# bundled agent would register itself into.
-_SCRIPT_INSTALLED_AGENTS: frozenset[str] = frozenset()
+# down an incumbent. Pi re-registered as script-installed.
+_SCRIPT_INSTALLED_AGENTS: frozenset[str] = frozenset({"pi"})
 
 
 def _removal_failure(path: Path, exc: BaseException) -> dict[str, str]:
@@ -213,6 +217,10 @@ def _driver_for(name: str) -> AgentDriver:
         from hal0.agents.hermes import HermesDriver
 
         return HermesDriver()
+    if name == "pi":
+        from hal0.agents.pi_coder import PiDriver
+
+        return PiDriver()
     raise AgentNotFoundError(
         f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
     )
@@ -315,10 +323,14 @@ class AgentManager:
             # Already installed — return the existing record. Idempotent.
             return self._read_record(name)
 
-        # Single-pick: only one bundled agent may be installed at a time.
-        # ``blocking`` == ``current`` — anything already installed conflicts
-        # with a fresh install.
-        blocking = current
+        # Single-pick applies to daemon-kind agents only (spec D1): the
+        # guard exists for the gateway/persona surface, which cli-kind
+        # agents never touch. A cli install is never blocked; a daemon
+        # install is blocked only by other daemons.
+        if agent_kind(name) == "cli":
+            blocking = []
+        else:
+            blocking = [n for n in current if agent_kind(n) == "daemon"]
 
         if not blocking:
             # Fresh install — nothing to swap.
