@@ -32,6 +32,8 @@ _IMAGES_JSON = {
             "publish": "ci",
             "build": {"context": ".", "dockerfile": "Dockerfile.cpu"},
             "notes": "CPU-only toolbox image.",
+            "runtime_family": "llama-server",
+            "supported_backends": ["cpu"],
         },
         {
             # no "id" — exercises the repo-path fallback
@@ -172,11 +174,63 @@ async def test_sync_merges_ghcr_and_images_json(tmp_path: Path) -> None:
     assert cpu.publish == "ci"
     assert cpu.notes == "CPU-only toolbox image."
     assert cpu.build == {"context": ".", "dockerfile": "Dockerfile.cpu"}
+    assert cpu.runtime_family == "llama-server"
+    assert cpu.supported_backends == ["cpu"]
 
     flm = store.get("hal0ai/hal0-toolbox-flm")  # no "id" — repo-path fallback
     assert flm is not None
     assert flm.tag == "v2"
     assert flm.ownership == "referenced"
+    # Entry carries no runtime metadata — reads back as "not declared".
+    assert flm.runtime_family is None
+    assert flm.supported_backends == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_runtime_metadata_degrades_to_not_declared(tmp_path: Path) -> None:
+    """Bad runtime_family/supported_backends shapes never fail the row.
+
+    Same fail-soft discipline as every other images.json field: a non-string
+    runtime_family is dropped; a non-list supported_backends (or one whose
+    members aren't non-empty strings) degrades to [].
+    """
+    images_json = {
+        "schema": "hal0.runner-images.v1",
+        "images": [
+            {
+                "id": "cpu",
+                "image": "ghcr.io/hal0ai/hal0-toolbox-cpu",
+                "tag": "latest",
+                "runtime_family": 42,
+                "supported_backends": "rocm,vulkan",
+            },
+            {
+                "id": "flm",
+                "image": "ghcr.io/hal0ai/hal0-toolbox-flm",
+                "tag": "v2",
+                "runtime_family": "flm",
+                "supported_backends": [None, "", "  ", "npu"],
+            },
+        ],
+    }
+    store = RunnerImageStore(db_path=tmp_path / "hal0.db")
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_route_handler(images_json=images_json))
+    )
+    try:
+        result = await sync_runner_images(store, client=client)
+    finally:
+        await client.aclose()
+
+    assert result.probe_errors == {}
+    cpu = store.get("cpu")
+    assert cpu is not None
+    assert cpu.runtime_family is None
+    assert cpu.supported_backends == []
+    flm = store.get("flm")
+    assert flm is not None
+    assert flm.runtime_family == "flm"
+    assert flm.supported_backends == ["npu"]  # junk members filtered, order kept
 
 
 @pytest.mark.asyncio

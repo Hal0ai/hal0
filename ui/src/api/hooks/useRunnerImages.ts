@@ -34,6 +34,15 @@ export interface RunnerImage {
   publish: 'ci' | 'external' | 'manual' | string | null
   notes: string | null
   build: Record<string, unknown> | null
+  // Catalogue runtime metadata (feat/catalogue-runtime-metadata): which
+  // runtime the image's entrypoint serves (backend RuntimeFamily vocabulary —
+  // "llama-server", "comfyui", …) and which backends its runner binary can
+  // execute ("rocm"/"vulkan"/"cpu"/…, [] = not declared). Optional so rows
+  // from a pre-contract backend still type-check; readers fall back (see
+  // cataloguePinOptions in dash/hw-cascade.js) rather than treating absence
+  // as a veto.
+  runtime_family?: string | null
+  supported_backends?: string[]
   local_path: string | null
   downloaded_at: string | null
   discovered_at: string | null

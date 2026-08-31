@@ -41,6 +41,7 @@ _SCALAR_FIELDS = (
     "ownership",
     "publish",
     "notes",
+    "runtime_family",
     "local_path",
     "downloaded_at",
     "discovered_at",
@@ -52,11 +53,13 @@ def _row_to_runner_image(row: sqlite3.Row) -> RunnerImage:
     build_raw = row["build_json"]
     extra_raw = row["extra"]
     tags_raw = row["available_tags_json"]
+    backends_raw = row["supported_backends_json"]
     return RunnerImage(
         **{k: row[k] for k in _SCALAR_FIELDS},
         build=json.loads(build_raw) if build_raw else None,
         extra=json.loads(extra_raw) if extra_raw else {},
         available_tags=json.loads(tags_raw) if tags_raw else [],
+        supported_backends=json.loads(backends_raw) if backends_raw else [],
     )
 
 
@@ -102,6 +105,9 @@ def _runner_image_to_row(image: RunnerImage, *, discovered_at: str | None = None
     row["build_json"] = json.dumps(image.build) if image.build is not None else None
     row["extra"] = json.dumps(image.extra) if image.extra else None
     row["available_tags_json"] = json.dumps(image.available_tags) if image.available_tags else None
+    row["supported_backends_json"] = (
+        json.dumps(image.supported_backends) if image.supported_backends else None
+    )
     return row
 
 

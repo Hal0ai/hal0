@@ -62,6 +62,25 @@ class TestUpsert:
         assert got.build == {"context": ".", "dockerfile": "Dockerfile"}
         assert got.extra == {"foo": "bar"}
 
+    def test_runtime_metadata_round_trips(self, store: RunnerImageStore) -> None:
+        # feat/catalogue-runtime-metadata: runtime_family is a scalar column,
+        # supported_backends a JSON column (supported_backends_json,
+        # migration 010) — both must survive a write/read cycle.
+        store.upsert(_image(runtime_family="comfyui", supported_backends=["rocm"]))
+        got = store.get("hal0ai/hal0-toolbox-cpu")
+        assert got is not None
+        assert got.runtime_family == "comfyui"
+        assert got.supported_backends == ["rocm"]
+
+    def test_runtime_metadata_defaults_when_absent(self, store: RunnerImageStore) -> None:
+        # A row written without the fields (pre-010 shape) reads back as
+        # "not declared", never as a veto.
+        store.upsert(_image())
+        got = store.get("hal0ai/hal0-toolbox-cpu")
+        assert got is not None
+        assert got.runtime_family is None
+        assert got.supported_backends == []
+
     def test_persists_across_instances(self, store: RunnerImageStore, tmp_path: Path) -> None:
         store.upsert(_image())
         store2 = RunnerImageStore(db_path=tmp_path / "hal0.db")

@@ -20,8 +20,9 @@ see PR description):
 2. **``images.json`` fetch.** ``raw.githubusercontent.com/Hal0ai/hal0-runner-images/main/images.json``
    (schema ``hal0.runner-images.v1``) — anonymous, CDN-backed, no auth. Gives
    display metadata (``ownership``/``publish``/``manifest_key``/``build``/
-   ``notes``) per image. Fetched live at sync time, never baked into a
-   release.
+   ``notes``) plus runtime metadata (``runtime_family``/
+   ``supported_backends``) per image. Fetched live at sync time, never baked
+   into a release.
 
 Fetch failures degrade gracefully at every layer: a malformed/unreachable
 ``images.json`` still lets already-known GHCR packages sync (tag/digest/size
@@ -496,13 +497,22 @@ def _match_key(entry: dict[str, Any]) -> str | None:
 def _apply_manifest_metadata(image: RunnerImage, entry: dict[str, Any]) -> RunnerImage:
     """Overlay images.json display metadata onto a GHCR-discovered row."""
     update: dict[str, Any] = {}
-    for field_name in ("manifest_key", "ownership", "publish", "notes"):
+    for field_name in ("manifest_key", "ownership", "publish", "notes", "runtime_family"):
         val = entry.get(field_name)
         if isinstance(val, str) and val.strip():
             update[field_name] = val.strip()
     build = entry.get("build")
     if isinstance(build, dict):
         update["build"] = build
+    # Runtime metadata (feat/catalogue-runtime-metadata): a list of backend
+    # strings, filtered fail-soft — a malformed value (non-list, or non-string
+    # members) degrades to "not declared" rather than failing the row, same
+    # discipline as every other images.json field here.
+    backends = entry.get("supported_backends")
+    if isinstance(backends, list):
+        cleaned = [b.strip() for b in backends if isinstance(b, str) and b.strip()]
+        if cleaned:
+            update["supported_backends"] = cleaned
     tag = entry.get("tag")
     if isinstance(tag, str) and tag.strip():
         update["tag"] = tag.strip()

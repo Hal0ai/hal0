@@ -66,6 +66,8 @@ def test_sync_route_populates_catalogue(
                 "ownership": "owned",
                 "publish": "ci",
                 "notes": "CPU-only toolbox image.",
+                "runtime_family": "llama-server",
+                "supported_backends": ["cpu"],
             }
         ],
     }
@@ -101,10 +103,16 @@ def test_sync_route_populates_catalogue(
     assert listed[0]["id"] == "hal0ai/hal0-toolbox-cpu"
     assert listed[0]["digest"] == "sha256:abc"
     assert listed[0]["notes"] == "CPU-only toolbox image."
+    # Runtime metadata (feat/catalogue-runtime-metadata) flows through
+    # _image_to_dict (model_dump) into every row untouched.
+    assert listed[0]["runtime_family"] == "llama-server"
+    assert listed[0]["supported_backends"] == ["cpu"]
 
     detail = client.get("/api/runner-images/hal0ai/hal0-toolbox-cpu")
     assert detail.status_code == 200
     assert detail.json()["ownership"] == "owned"
+    assert detail.json()["runtime_family"] == "llama-server"
+    assert detail.json()["supported_backends"] == ["cpu"]
 
 
 def test_pull_unknown_image_404s(client: TestClient) -> None:
