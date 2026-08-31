@@ -101,18 +101,6 @@ applying. Add those subsections to a version's section to surface them; see
   `cpu.Dockerfile` still builds llama.cpp from `master` rather than a pinned
   ref — the manifest digest is what holds the shipped surface steady today.
 
-### Changed
-
-- **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
-  binary; the runner is ROCmFPX and its image serves both GPU backends.
-  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
-  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
-  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
-  honored forever via a permanent alias (warned at load; TOML is never
-  rewritten in place).
-
-### Fixed
-
 - **A freshly booted box could finish the installer with Hermes silently
   unprovisioned.** If `unattended-upgrades` or `apt-daily` still held the
   dpkg lock — routine in the first minutes after boot — the preflight
@@ -144,6 +132,45 @@ applying. Add those subsections to a version's section to surface them; see
   genuine failure reports the command it actually ran, its exit code, the
   attempt count and the probe's last stderr line rather than asserting a
   diagnosis (#2084).
+- **`hal0 update` no longer re-breaks `hal0-gpu-perms.service` on
+  custom-prefix boxes.** The updater copied the bundled unit verbatim on
+  every activate, reverting the `ExecStart` interpreter path `install.sh`
+  rewrites for a non-default `HAL0_PREFIX`; the unit then died `203/EXEC`
+  on every boot until the next hand-fix, silently disabling the boot-time
+  GPU device-permission convergence. The updater now applies the same
+  venv-path rewrite the installer does, using the venv the updater itself
+  runs from, so the unit survives every subsequent update (#1982).
+- **`scripts/set-version.py` now rewrites the README status line.** The
+  front-page version blockquote was the one version-bearing file the
+  release script skipped, so it shipped stale on every cut and was
+  hand-fixed twice. It is now part of the same validated, rollback-capable
+  transaction as the other five files, and the script fails loudly if the
+  blockquote pattern is ever missing instead of silently skipping it
+  (#1992).
+
+### Added
+
+- **The two release-delivery failure modes that stayed invisible for weeks
+  now have owners** (#2057, #2101). `mirror-bootstrap` splits its signed-
+  manifest gate from the publish, so a refusal is a `skipped` job
+  conclusion instead of a `::warning::` on a green run, and gains
+  `gate_channel`/`dry_run` inputs so the publish path can be rehearsed
+  before a GA cut. `bootstrap-parity` opens a single tracking issue after
+  three consecutive daily reds and closes it when parity returns. A new
+  daily `stable-pointer-watch` workflow fails loudly and files an issue
+  when a GA tag is older than its grace window and the live `stable.json`
+  /`stable.json.bundle` pair still does not deliver it. CONTRIBUTING.md
+  gains the post-tag "Release delivery" runbook.
+
+### Changed
+
+- **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
+  binary; the runner is ROCmFPX and its image serves both GPU backends.
+  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
+  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
+  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
+  honored forever via a permanent alias (warned at load; TOML is never
+  rewritten in place).
 
 ## [1.0.0] — 2026-08-29
 
