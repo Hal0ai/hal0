@@ -21,6 +21,7 @@ import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyBackendChoice,
+	archFitWarning,
 	backendOptions,
 	cataloguePinOptions,
 	optionValue,
@@ -1963,6 +1964,40 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												that change (or revert the profile) before swapping.
 											</div>
 										)}
+										{(() => {
+											// Model↔runner GGUF-arch fit-check (hal0#2118) — warn,
+											// never block, same idiom as the HW-grid fit warning
+											// below the Backend select. Reads the bound model's
+											// detected `architecture` against the effective
+											// runner's `unsupported_archs` denylist (system-info);
+											// an image_pin disarms it (the pin IS the escape
+											// hatch). Previews the post-save device/binary/pin so
+											// a live HW edit updates the verdict before Save.
+											const archWarn = archFitWarning({
+												arch: curModelRow?.architecture,
+												device: pendingDevice,
+												binary,
+												imagePin,
+												backends: systemInfoQuery.data?.backends ?? {},
+											});
+											if (!archWarn) return null;
+											return (
+												<div
+													className="hint"
+													data-testid="slot-model-arch-fit-warning"
+													style={{
+														marginTop: 6,
+														padding: "6px 10px",
+														borderRadius: "var(--rad-sm)",
+														color: "var(--warn)",
+														border: "1px solid var(--warn-line)",
+														background: "var(--warn-soft)",
+													}}
+												>
+													{archWarn}
+												</div>
+											);
+										})()}
 									</div>
 								</div>
 							);

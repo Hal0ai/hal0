@@ -381,3 +381,24 @@ class TestRocmfpxQuant:
             _build_gguf(3, kvs),
         )
         assert detect(p).quant == "ROCmFPX"
+
+
+class TestDetectedArchitecture:
+    """detected_architecture() — the one seam registration paths read the
+    GGUF ``general.architecture`` hint through (model↔runner arch
+    fit-check, hal0#2118)."""
+
+    def test_returns_header_arch(self, tmp_path: Path) -> None:
+        from hal0.registry.detect import detected_architecture
+
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen4exp")),
+        ]
+        p = _write_fixture(tmp_path, "qwen3.8-flash-next.gguf", _build_gguf(3, kvs))
+        assert detected_architecture(detect(p)) == "qwen4exp"
+
+    def test_none_for_heuristic_only_detection(self, tmp_path: Path) -> None:
+        from hal0.registry.detect import detected_architecture
+
+        p = _write_fixture(tmp_path, "not-gguf.gguf", b"NOPE" + b"\x00" * 64)
+        assert detected_architecture(detect(p)) is None

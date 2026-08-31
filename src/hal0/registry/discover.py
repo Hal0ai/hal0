@@ -376,6 +376,12 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             hf_filename=curated.hf_file,
             tags=list(curated.tags),
             metadata={"discovered": True, "source": "auto-scan"},
+            # Curated arch id (§7.1d) — feeds the model↔runner arch
+            # fit-check (hal0#2118). The auto-scan path deliberately reads
+            # no GGUF header (it may walk thousands of files), so the
+            # uncurated branch below leaves ``architecture`` unset; those
+            # rows pick it up if re-registered via scan-commit/add-from-path.
+            architecture=curated.architecture,
         )
     else:
         model = Model(

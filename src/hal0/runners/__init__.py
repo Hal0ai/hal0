@@ -151,6 +151,23 @@ class Runner:
     #: Carries the lxc105 finding — GGUF forks can reject newer GGUF arch
     #: versions — as a coarse first-class marker for the §4 fit-check to refine.
     format_arch: str | None = None
+    #: The §4 refinement of ``format_arch``: GGUF ``general.architecture``
+    #: ids this runner's llama.cpp build is KNOWN to reject at model load
+    #: (``unknown model architecture: '<arch>'`` → instant crash-loop).
+    #:
+    #: A DENYLIST, deliberately not a supported-archs allowlist: a fork
+    #: lineage supports every arch upstream knew at its sync point, so an
+    #: allowlist would duplicate llama.cpp's whole arch table (hundreds of
+    #: entries, stale on every fork sync), while the archs a fork *lacks*
+    #: are exactly the known post-sync-point additions — a small, finite
+    #: set discovered per incident (the lxc105 finding above) and DELETED
+    #: when the fork syncs past the upstream merge (each entry pairs with a
+    #: retirement checklist like hal0#2118's). That maintenance shape also
+    #: matches this module's layout: ``RUNNER_IMAGES`` is a hand-maintained
+    #: code registry, and a one-line deny tuple is reviewable next to the
+    #: image bump that removes it. Empty ``()`` = no known gaps (which is
+    #: NOT a support guarantee — the fit-check stays a WARN, never a block).
+    unsupported_archs: tuple[str, ...] = ()
 
 
 RUNNER_IMAGES: dict[str, Runner] = {
@@ -164,6 +181,14 @@ RUNNER_IMAGES: dict[str, Runner] = {
         None,
         supported_backends=("rocm", "vulkan"),
         format_arch="gguf",
+        # hal0#2118: Qwen3.8-Flash-Next ships arch `qwen4exp`, merged into
+        # upstream llama.cpp 2026-08-27/28 (ggml-org/llama.cpp#27742/#27880);
+        # this image builds from charlie12345/ROCmFPX @ c49ebdbd (2026-08-22),
+        # which predates the merge — the model fails at load with
+        # `unknown model architecture: 'qwen4exp'`. Serving it needs the
+        # pin-only combined-upstream image (see ARCH_ALTERNATIVE_IMAGES).
+        # DELETE this entry when the fork syncs qwen4exp (#2118's checklist).
+        unsupported_archs=("qwen4exp",),
     ),
     "promptforge": Runner(
         "promptforge",
@@ -295,6 +320,32 @@ STALE_RUNNER_IMAGE_REFS = STALE_ROCMFPX_IMAGE_REFS
 #: real binary: the runner is ROCmFPX, whose image happens to ship a
 #: working Vulkan backend (see the collapse spec, 2026-08-30).
 RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
+
+#: Denylisted arch → the runner-image CATALOGUE id (``RunnerImage.id``, the
+#: GHCR repo path with the host stripped) of an image that IS known to load
+#: it. Consulted by the model↔runner arch fit-check so the WARN can name a
+#: concrete escape hatch (the slot's ``image_pin``) instead of a dead end.
+#: ``qwen4exp`` → the pin-only combined-upstream variant (pristine upstream
+#: llama.cpp @ c841aeeb, no fork patches — packaging/runner/upstream/
+#: manifest.toml, hal0#2118). The hint only renders when the catalogue
+#: actually carries the id, so a box that never synced it degrades to the
+#: bare warning. Entries retire together with the matching
+#: ``unsupported_archs`` entry.
+ARCH_ALTERNATIVE_IMAGES: dict[str, str] = {"qwen4exp": "hal0ai/hal0-combined-upstream"}
+
+
+def runner_supports_arch(runner: Runner, arch: str | None) -> bool:
+    """Is ``arch`` (a GGUF ``general.architecture`` id) loadable by ``runner``?
+
+    ``True`` is "not known-broken", not a guarantee: only archs on the
+    runner's ``unsupported_archs`` denylist return ``False``. An unknown /
+    ``None`` arch (header unreadable, pre-detection registry row, non-GGUF
+    format) never vetoes — the caller WARNS on ``False`` and stays silent
+    otherwise, mirroring the §4 (device, BINARY) fit-check contract.
+    """
+    if not arch:
+        return True
+    return arch not in runner.unsupported_archs
 
 
 def canonical_runner_key(key: str) -> str:
@@ -463,6 +514,7 @@ def runner_matches(runner: Runner, *, device_class: str | None, backend: str | N
 
 
 __all__ = [
+    "ARCH_ALTERNATIVE_IMAGES",
     "CANONICAL_FAMILY",
     "FPX_RUNNER_KEYS",
     "RUNNER_ALIASES",
@@ -478,4 +530,5 @@ __all__ = [
     "resolve_runner_image",
     "runner_for_backend",
     "runner_matches",
+    "runner_supports_arch",
 ]

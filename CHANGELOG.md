@@ -40,6 +40,25 @@ applying. Add those subsections to a version's section to surface them; see
   "catalogued · downloaded" pin lane gates each row on its declared
   runtime family instead of assuming every catalogue row is a
   llama-server fork (#2174).
+- **Host-truth GTT feasibility signal.** `GET /api/hardware` now carries live
+  `gtt_used_mb`/`gtt_free_mb` from the amdgpu `mem_info_gtt_*` sysfs counters
+  (host truth even inside an LXC container, where the cgroup-shaped meminfo
+  can show tens of GiB "available" while a GTT weight allocation fails), the
+  slot load path emits an advisory `slot.gtt_feasibility` warning — never a
+  block — when a model's weights exceed the free GTT pool, and the dashboard's
+  Detected-hardware panel shows the live free-GTT figure.
+- **Arch-aware model↔runner fit-check** (#2118 follow-up). GGUF
+  `general.architecture` is now detected and persisted at model
+  registration (scan commit, add-from-path, pull, curated auto-scan), and
+  runner registry entries can denylist archs their llama.cpp build rejects
+  (`Runner.unsupported_archs` — `qwen4exp` on the default ROCmFPX image).
+  Binding such a model to a slot now WARNS at assignment — API
+  `model_fit_warning` on slot create/config/swap, plus a notice by the slot
+  drawer's Model select — naming the catalogued image that can serve the
+  arch, instead of the operator meeting a silent crash-loop at load. An
+  `image_pin` disarms the check (the pin is the documented escape hatch);
+  nothing is ever blocked and no image is auto-switched.
+
 ### Changed
 
 - The ComfyUI runner family now defaults to hal0's own published image
@@ -48,15 +67,6 @@ applying. Add those subsections to a version's section to surface them; see
   the kyuz0 layout by construction, so existing img slots need no
   reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
   upgraded boxes (#2171).
-||||||| parent of 993ea3b6 (feat(hardware): host-truth GTT feasibility signal (warn, never block))
-- **Host-truth GTT feasibility signal.** `GET /api/hardware` now carries live
-  `gtt_used_mb`/`gtt_free_mb` from the amdgpu `mem_info_gtt_*` sysfs counters
-  (host truth even inside an LXC container, where the cgroup-shaped meminfo
-  can show tens of GiB "available" while a GTT weight allocation fails), the
-  slot load path emits an advisory `slot.gtt_feasibility` warning — never a
-  block — when a model's weights exceed the free GTT pool, and the dashboard's
-  Detected-hardware panel shows the live free-GTT figure.
-
 ## [1.1.0] — 2026-08-31
 
 ### Highlights

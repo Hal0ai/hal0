@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.model_meta import classify
-from hal0.registry.detect import DetectionResult, detect
+from hal0.registry.detect import DetectionResult, detect, detected_architecture
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
 
@@ -406,6 +406,11 @@ async def commit_scan_rows(
                 backends=[str(b) for b in backends],
                 defaults=defaults_obj,
                 metadata=metadata,
+                # GGUF general.architecture from the header read detect()
+                # already performed — persisted so the model↔runner arch
+                # fit-check (hal0#2118) can warn at slot assignment instead
+                # of the operator discovering a crash-loop at load.
+                architecture=detected_architecture(detection),
             )
         except (TypeError, ValueError) as exc:
             skipped.append({"path": str(resolved), "reason": f"invalid_model:{exc}"})
@@ -1118,6 +1123,10 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
             metadata=metadata,
+            # GGUF general.architecture from the header read above — see
+            # commit_scan_rows' matching stamp (model↔runner arch fit-check,
+            # hal0#2118).
+            architecture=detected_architecture(detection),
         )
     except (TypeError, ValueError) as exc:
         raise BadRequest(f"invalid Model payload: {exc}") from exc

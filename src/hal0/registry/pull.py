@@ -1221,16 +1221,23 @@ def _register_pulled(
     # window backfills an unreadable header.
     from hal0.registry.detect import (
         detect,
+        detected_architecture,
         quant_from_filename,
         quant_from_rocmfpx_filename,
     )
 
     ctx_len: int | None = None
     detected_quant: str | None = None
+    detected_arch: str | None = None
     try:
         detection = detect(Path(path))
         ctx_len = detection.context_length
         detected_quant = detection.quant
+        # GGUF general.architecture — persisted so the model↔runner arch
+        # fit-check (hal0#2118) can warn at slot assignment. The header is
+        # authoritative; the curated catalogue backfills an unreadable one
+        # (same tiering as context_length above).
+        detected_arch = detected_architecture(detection)
     except Exception:  # header parse must never fail a completed pull
         ctx_len = None
     # #1890: capability-grouped installs (``_final_path_for_entry``) rename the
@@ -1246,6 +1253,8 @@ def _register_pulled(
         )
     if not ctx_len and curated is not None and curated.context_length:
         ctx_len = int(curated.context_length)
+    if not detected_arch and curated is not None and curated.architecture:
+        detected_arch = str(curated.architecture)
     if ctx_len:
         fresh_meta["context_length"] = int(ctx_len)
         # #1657: mark this value as auto-detected (GGUF header or curated
@@ -1268,6 +1277,13 @@ def _register_pulled(
         "metadata": fresh_meta,
         "quant": detected_quant,
     }
+    # Unlike ``quant`` (written unconditionally, see above), the arch is
+    # written only when this pull actually read/backfilled one — an
+    # unreadable replacement header must not CLEAR an arch a prior read (or
+    # an operator edit) already established, since a missing arch merely
+    # disarms the fit-check rather than mis-arming it.
+    if detected_arch:
+        updates["architecture"] = detected_arch
     if mmproj is not None:
         updates["mmproj"] = mmproj
     try:
@@ -1300,6 +1316,7 @@ def _register_pulled(
                 backends=backends,
                 mmproj=mmproj,
                 metadata=dict(fresh_meta),
+                architecture=detected_arch,
                 defaults=ModelDefaults(**new_defaults_kwargs) if new_defaults_kwargs else None,
                 capability_flags=ModelCapabilities(tool_calling=curated_tool_calling)
                 if curated_tool_calling is not None

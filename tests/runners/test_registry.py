@@ -225,3 +225,42 @@ def test_canonical_family_folds_vulkanfpx() -> None:
 
 def test_canonical_family_map_only_folds_the_fpx_twin() -> None:
     assert CANONICAL_FAMILY == {"vulkanfpx": "rocmfpx"}
+
+
+# --- arch denylist (model↔runner arch fit-check, hal0#2118) ---------------- #
+
+
+def test_rocmfpx_denylists_qwen4exp() -> None:
+    """hal0#2118: the default ROCmFPX fork build (charlie12345/ROCmFPX @
+    c49ebdbd, 2026-08-22) predates upstream's qwen4exp merge (2026-08-27/28),
+    so Qwen3.8-Flash-Next fails at load with `unknown model architecture:
+    'qwen4exp'`. The denylist entry retires with the fork sync (#2118's
+    checklist)."""
+    assert "qwen4exp" in RUNNER_IMAGES["rocmfpx"].unsupported_archs
+
+
+def test_runner_supports_arch_semantics() -> None:
+    from hal0.runners import runner_supports_arch
+
+    rocmfpx = RUNNER_IMAGES["rocmfpx"]
+    assert not runner_supports_arch(rocmfpx, "qwen4exp")
+    # Not on the denylist = not known-broken (never a guarantee).
+    assert runner_supports_arch(rocmfpx, "llama")
+    # Unknown / unset arch never vetoes — the fit-check stays silent.
+    assert runner_supports_arch(rocmfpx, None)
+    assert runner_supports_arch(rocmfpx, "")
+    # Empty denylist (stock builds) refuses nothing.
+    assert runner_supports_arch(RUNNER_IMAGES["cpu"], "qwen4exp")
+
+
+def test_arch_alternative_images_pair_with_a_denylist_entry() -> None:
+    """Every alternative-image hint must correspond to an arch some runner
+    actually denylists — a dangling hint is dead weight that outlived its
+    retirement (the two tables retire together, see ARCH_ALTERNATIVE_IMAGES)."""
+    from hal0.runners import ARCH_ALTERNATIVE_IMAGES
+
+    denylisted = {a for r in RUNNER_IMAGES.values() for a in r.unsupported_archs}
+    for arch in ARCH_ALTERNATIVE_IMAGES:
+        assert arch in denylisted
+    # And the #2118 pairing concretely: qwen4exp → the combined-upstream id.
+    assert ARCH_ALTERNATIVE_IMAGES["qwen4exp"] == "hal0ai/hal0-combined-upstream"

@@ -264,6 +264,19 @@ class DetectionResult:
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
+def detected_architecture(detection: DetectionResult) -> str | None:
+    """The GGUF ``general.architecture`` id a detection carried, or ``None``.
+
+    ONE accessor over ``raw_hints["architecture"]`` so the registration
+    paths that persist ``Model.architecture`` (scan commit, add-from-path,
+    the pull upsert) read the hint through a single seam instead of each
+    re-spelling the raw dict key. ``None`` for non-GGUF files, unreadable
+    headers, and headers that drop the key.
+    """
+    arch = detection.raw_hints.get("architecture")
+    return arch if isinstance(arch, str) and arch.strip() else None
+
+
 def _filename_capability(name: str) -> str | None:
     """Best-effort capability inferred from filename tokens. ``None`` if no hit.
 
@@ -559,6 +572,7 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
 __all__ = [
     "DetectionResult",
     "detect",
+    "detected_architecture",
     "quant_from_file_type",
     "quant_from_filename",
     "quant_from_rocmfpx_filename",
