@@ -1,7 +1,7 @@
 {
   "name": "hal0-pi-hindsight",
   "private": true,
-  "description": "hal0 vendored Pi extension: binds Pi's extension API to hindsight-coding-agents RuntimeCore (spec 2026-08-31 pi-agent D4).",
+  "description": "hal0 vendored Pi extension: fail-open delegation to hindsight-coding-agents' upstream Pi (prime-agent) memory binding (spec 2026-08-31 pi-agent D4).",
   "dependencies": {
     "@vectorize-io/hindsight-coding-agents": "0.4.3"
   }
