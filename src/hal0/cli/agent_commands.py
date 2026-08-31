@@ -62,7 +62,7 @@ app.add_typer(personas_app, name="personas")
 def agent_install(
     name: str = typer.Argument(
         ...,
-        help="Bundled agent name (hermes).",
+        help="Bundled agent name (hermes, pi).",
     ),
     switch: bool = typer.Option(
         False,
@@ -119,6 +119,12 @@ def agent_install(
     this "deferred" path (run after ``HAL0_SKIP_HERMES=1`` at install time,
     or standalone) has NO downside vs. the install-time provision — issue
     #1102 / decision Q9.
+
+    pi is cli-kind (a terminal coding tool with no daemon/systemd unit), so
+    it rides the thin API-driven path above like any non-hermes agent —
+    ``install`` POSTs straight to ``/api/agents/install`` and returns. Being
+    cli-kind rather than daemon-kind, it coexists with Hermes: single-pick
+    (``--switch``) only applies between daemon-kind agents.
     """
     if name == "hermes":
         _install_hermes(

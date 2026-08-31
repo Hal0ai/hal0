@@ -3798,6 +3798,33 @@ else
         info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
     fi
 
+    # ── Optional: pi coding agent (cli-kind bundled agent; spec 2026-08-31) ──
+    # pi is a terminal coding tool (CLI/TUI), not a daemon — it has no systemd
+    # unit and coexists with Hermes (single-pick only applies between
+    # daemon-kind agents). Unlike Hermes it rides the thin API-driven install
+    # path (`hal0 agent install pi` → POST /api/agents/install), so it must
+    # run AFTER hal0-api is up (start_or_restart_api + wait_active above),
+    # not merely after the Hermes block. Skipped on --dev / --no-start (no
+    # daemon listening) and non-interactively (HAL0_SKIP_PI=1 is the
+    # unattended opt-out, mirroring HAL0_SKIP_HERMES/HAL0_SKIP_OPENWEBUI).
+    if [[ "${DEV_MODE}" -eq 0 ]] \
+       && [[ "${NO_START}" -eq 0 ]] \
+       && [[ "${HAL0_SKIP_PI:-0}" -ne 1 ]] \
+       && ! command -v pi >/dev/null 2>&1 \
+       && _interactive; then
+        _pi_answer=""
+        printf '\n' >/dev/tty 2>/dev/null || true
+        info "pi is an optional terminal coding agent (CLI/TUI, no daemon). Installing it wires"
+        info "it to this box's model slots and memory. It coexists with Hermes."
+        _tty_read _pi_answer "Install the pi coding agent? [y/N]" "N"
+        if [[ "${_pi_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            "${HAL0_BIN}" agent install pi || warn "pi install failed — retry later with: ${HAL0_BIN} agent install pi"
+        else
+            info "Skipped. Install later with: ${HAL0_BIN} agent install pi"
+        fi
+        unset _pi_answer
+    fi
+
     # Last verify action before the summary (#2066): everything the probes
     # depend on — hal0-api, slots, the steward/agent model pulls — is as up
     # as this install will get it. Fail-soft by construction (see the probe
