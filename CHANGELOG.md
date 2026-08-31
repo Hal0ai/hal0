@@ -24,13 +24,26 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Added
+### Highlights
 
-- **`pi` is installable as a cli-kind bundled agent — coexists with Hermes.**
-  `hal0 agent install pi` provisions a minimal profile: the `hal0` theme, a
-  hal0 slot model provider, and memory wiring (the memory MCP server plus
-  hindsight coding-agent memory). Being cli-kind rather than daemon-kind, it
-  sits outside single-pick, so it can be installed alongside Hermes.
+- **The `pi` coding agent is installable alongside Hermes** — a cli-kind
+  bundled agent with hal0 slot models and memory wired in (#2163).
+
+- **Everything hal0 ships now updates as one system.** A component catalog
+  (OpenWebUI, runner images, Hermes, the Hindsight memory engine) with
+  release-carried pins, auto-converge as the final pass of `hal0 update`, and
+  a status/retry surface across `hal0 update status`, the dashboard services
+  page, and the admin MCP (#2150).
+- **The bundled Hindsight memory engine upgrades to 0.9.2** on every upgrade
+  path, with build-aside/swap/verify/rollback safety (#2146).
+- **Specialty model distributions** — a declarative registry for models that
+  ship more than a GGUF; first consumer is the PromptForge distribution with
+  its gate-validated runner pin (#2129, #2132, #2133).
+- **Runner-image catalogue v3**: rows tell the truth about what is on the box
+  and what a slot would launch, and pull/delete lifecycle verbs are wired end
+  to end, including a new `hal0 runner-images` CLI (#2134, #2135, #2137).
+- **CPU-only installs actually work** — the `cpu` runner now launches a real
+  CPU-only llama.cpp build instead of crash-looping the GPU one (#2126).
 
 ### Fixed
 
@@ -155,9 +168,107 @@ applying. Add those subsections to a version's section to surface them; see
   transaction as the other five files, and the script fails loudly if the
   blockquote pattern is ever missing instead of silently skipping it
   (#1992).
+- **Rootless image pulls work on fresh installs** (#2119, #2121). The
+  installer's system-user step never allocated a subordinate uid/gid range
+  for the `hal0` service user (`useradd --system` doesn't), so every
+  dashboard runner-image pull failed at layer unpack with podman exit 125.
+  The installer now allocates a 65536-wide range past every existing claim
+  in `/etc/subuid`/`/etc/subgid`, idempotently, and runs a one-time
+  `podman system migrate` on existing installs so a store initialized
+  single-uid converges on the next upgrade.
+- **The runner-image tag picker no longer floods with CI debris, and the
+  "newer" chip no longer fires on mutable tags** (#2123). Cosign
+  signature/attestation objects (`sha256-….sig`/`.att`) and per-commit CI
+  tags are filtered at the single GHCR fetch point so they never enter the
+  catalogue, and the newer-build chip skips mutable pointers (`main`,
+  `latest`, `nightly`, …) instead of comparing the headline against
+  whatever the registry listed first.
+- **The slot drawer heals superseded runner-key spellings** (#2141, #2142).
+  A slot TOML carrying `binary = "vulkanfpx"` launched correctly through
+  the permanent alias but the drawer showed the raw spelling as
+  out-of-vocab with a warning; the view now folds it to the canonical
+  `rocmfpx` selection, warns once per key in the journal, and still
+  surfaces genuinely unknown keys verbatim.
+- **A cancelled rootful image pull can no longer leave a wedged
+  `podman pull` behind** (#2140). The teardown now escalates
+  SIGTERM → SIGKILL after a 10-second grace, and `podman rmi` return codes
+  are reported faithfully instead of collapsed into one bucket.
 
 ### Added
 
+- **`pi` is installable as a cli-kind bundled agent — coexists with Hermes.**
+  `hal0 agent install pi` provisions a minimal profile: the `hal0` theme, a
+  hal0 slot model provider, and memory wiring (the memory MCP server plus
+  hindsight coding-agent memory). Being cli-kind rather than daemon-kind, it
+  sits outside single-pick, so it can be installed alongside Hermes.
+- **Component update system** (#2150). One `ComponentDef` catalog covers
+  every companion hal0 ships — OpenWebUI, runner images, Hermes, the
+  Hindsight memory engine — with release-carried pins and auto-converge as
+  the final pass of `hal0 update` (boot stays diagnose-only). New surfaces:
+  `hal0 update status` and `hal0 update component <id>`, a component summary
+  and extended exit-2 contract on bare `hal0 update`,
+  `GET /api/updates/components` + job-based per-component converge retry,
+  `components_pending` on `/check`, version cells and failure retry on the
+  dashboard services page, and `component_status`/`component_converge` on
+  the admin MCP (converge owner-approval gated; self-update deliberately
+  not exposed). OpenWebUI moves from floating upstream `:main` to a
+  release-carried digest pin — `hal0 update owui --tag` is removed,
+  `--target`/`--clear-override` added.
+- **The bundled Hindsight memory engine converges to 0.9.2 on every upgrade
+  path** (#2146). The engine venv was pinned 0.8.4 and upgrade-blind —
+  install.sh only built a *missing* venv and `hal0 update` never touched
+  the engine tree, so every box stayed on 0.8.4 forever, without the
+  `/knowledge-base/*` API 0.9.x carries. A new convergence pass builds
+  `.venv.new` aside while the old engine keeps serving, snapshots `.pg0`
+  before the new engine's one-way alembic migration runs, requires
+  `/health` + `/version` == pin after the swap, and restores both venv and
+  data dir on any postcheck failure. Staleness at boot is logged with the
+  remedy instead of pip-ing behind the operator's back; a new doctor row
+  and an install.sh smoke probe watch the pin. `hal0 update --rollback`
+  intentionally leaves the engine on the newer version (wire-compatible;
+  reverting a one-way DB migration silently would be worse).
+- **Specialty model distributions** (#1946, #2129). Some distributions ship
+  more than a GGUF — companion files, required env vars, an argv envelope,
+  a runner built a specific way. A declarative `SPECIALTY_KINDS` registry
+  now carries that: pulls classify and SHA-verify companion sidecars,
+  launches are accelerated only on a runner that declares the specialty
+  with all companions present and otherwise run **loud degraded GGUF-only**
+  (stamped on slot detail, `slot status`, and the launch log — never
+  silent). First consumer: the PromptForge distribution, with a HIP-only
+  `promptforge` runner. After the on-silicon validation gate passed, the
+  manifest digest pin (#2132) and the four card-verbatim
+  `PROMPTFORGE_*` mode envs (#2133) shipped; promptforge remains an
+  optional runner — defaults are untouched.
+- **Runner-image catalogue v3** (#2106, #2134, #2135, #2137). Rows now
+  compute store state from the image store slots actually launch from
+  (digest-first, so retagged images still show present) instead of a
+  marker file only the dashboard's own pulls wrote; a digest is resolved
+  per tag so "newer" is a digest fact, not a tag-name heuristic; and a new
+  `families` payload shows, per runner family, the effective ref from the
+  real resolve chain with its source and store state. Lifecycle verbs are
+  wired end to end: per-tag pull, honest failed-pull surfacing (#2120),
+  restart-affected-slots, and — through the new `hal0-podman-rw` write
+  seam (exactly two verbs, same doctrine as `-ro`) — **rootful pulls into
+  the store slots launch from** plus a guarded per-tag **delete** with
+  real disk reclaim (never forced; refuses tags in use, naming the slots).
+  New CLI: `hal0 runner-images ls|sync|pull|rm`. A v1.0.0 box gets the
+  write seam automatically on `hal0 update`.
+- **Per-image llama.cpp build provenance** (#2144). Catalogue rows and
+  `/api/system-info` backends now carry `provenance` (source repo,
+  revision, patch count) read from OCI labels, so an operator can tell the
+  upstream image's build apart from the ROCmFPX one — e.g.
+  `rocmfpx — ROCmFPX @0a59add (+4 patches)` vs `upstream — llama.cpp
+  @c841aee` in the backend picker.
+- **Upstream llama.cpp runner-image variant** (#2118, #2122).
+  `hal0-combined-upstream` — pristine `ggml-org/llama.cpp` (carrying
+  qwen4exp) on the byte-identical base digest, cmake flags, and shared
+  entrypoint of the default rocmfpx recipe. Reached only through a slot's
+  `image_pin`; the default image and every existing slot are untouched.
+- **Machine-readable runner-image pin export** (#2139).
+  `exports/runner-image-pins.json` carries every ghcr ref shipped hal0
+  code still pulls, for the runner-images repo's retention sweep to fetch;
+  an equality test recomputes it from the schema constants so a pin bump
+  fails CI until the export is regenerated.
 - **The two release-delivery failure modes that stayed invisible for weeks
   now have owners** (#2057, #2101). `mirror-bootstrap` splits its signed-
   manifest gate from the publish, so a refusal is a `skipped` job
@@ -179,6 +290,29 @@ applying. Add those subsections to a version's section to surface them; see
   `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
   honored forever via a permanent alias (warned at load; TOML is never
   rewritten in place).
+- **The memory-namespace grammar shrinks to `shared` | `private:<client_id>`**
+  (ADR-0004, #2161). The `agents` and `project:<id>` namespaces are
+  retired: `shared` is the default for every write, `private:<agent>`
+  stays behind the private-mode toggle, and scoping *within* shared is
+  tags (agent identity cards keep their `agent-identity` tag and move to
+  `shared`; project provenance is a `project:<id>` tag). Writes naming a
+  retired namespace get a 400 with a pointed remedy; reads keep the
+  established contract (unknown entries dropped, all-unknown lists fail
+  closed); a single-id delete aimed at a retired namespace now gates for
+  operator approval like any foreign namespace. Per-repo coding memory
+  already lives outside this grammar in `coding-agent::<repo>` engine
+  banks.
+
+### Migrations
+
+- Deployments with data still in an `agents` memory bank must
+  document-transfer it to `shared` by hand — nothing recreates or reads
+  that bank after the namespace-grammar cut (#2161).
+- The first `hal0 update` on a provisioned box stamps the Hermes venv pin
+  (one-time; the provision-checkpoint fallback prevents a gratuitous
+  rebuild), and the Hindsight engine's `.pg0` is migrated one-way to
+  0.9.2 — `hal0 update --rollback` deliberately leaves the engine on the
+  newer, wire-compatible version (#2146, #2150).
 
 ## [1.0.0] — 2026-08-29
 
