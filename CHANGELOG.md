@@ -26,21 +26,33 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
-- **The brain slot is now verified bound, not assumed bound** (#2131). The
-  documented 0.9.8 → 1.0.0 upgrade downloaded the default brain model, left
+- **The 0.9.8 → 1.0.0 upgrade no longer blanks the brain model it just bound**
+  (#2131). The documented upgrade path downloaded the default brain model, left
   `/etc/hal0/slots/brain.toml` with a `[model]` table naming nothing, and ended
   at `Verify FAILED: structured-output probe failed` — with no hint that one
-  `hal0 slot edit brain --model <id>` recovered the box. The activation write
-  is best-effort by design (`_activate_slot_model` suppresses every exception
-  so a config rewrite can never abort a pull), so a write that never landed was
-  indistinguishable from one that did: the installer printed
-  `brain model ready: … bound to the 'brain' slot` and exited 0 either way.
-  `hal0.install.brain_model` now reads the slot back: an existing-but-UNBOUND
-  `[model]` table is the shipped seed state and gets the default bound into it,
-  a NON-EMPTY `[model].default` is an operator pick and is never touched (a
-  re-run can no longer revert one), and a binding that genuinely cannot be made
-  is reported with the exact remediation command instead of reported as
-  success. Still never fatal — the install continues. A failed
+  `hal0 slot edit brain --model <id>` recovered the box. The binding was not
+  missing, it was **reverted**: v0.9.8's installer ran `hal0 setup --auto`
+  before its curated seed loop, so every stable box carries the generic
+  scaffold's `enabled = false` beside a model-less `[model]` table; install.sh
+  bound the freshly pulled default into it, and the `SlotConfig.enabled` sweep
+  — which ran *after* the brain step — read `enabled = false` next to a bound
+  model and cleared it, exactly as that migration is designed to. The same
+  sweep runs at every `hal0-api` boot, so even a hand-repaired box lost the
+  binding again on the next restart. install.sh now runs that sweep **before**
+  the brain model step, which hits the migration's own "no model bound, just
+  drop the stale key" branch; the binding then survives every later boot sweep.
+  A slot an operator deliberately disabled (`enabled = false` *with* a model
+  bound) still has its model cleared, as before.
+- **The brain binding is now verified rather than assumed** (#2131). The
+  activation write is best-effort by design (`_activate_slot_model` suppresses
+  every exception so a config rewrite can never abort a pull), so the installer
+  printed `brain model ready: … bound to the 'brain' slot` and exited 0 whether
+  or not the write landed. `hal0.install.brain_model` now reads the slot back:
+  an existing-but-UNBOUND `[model]` table is the shipped seed state and gets
+  the default bound into it, a NON-EMPTY `[model].default` is an operator pick
+  and is never touched (a re-run can no longer revert one), and a binding that
+  cannot be made is reported with the exact remediation command instead of
+  reported as success. Still never fatal — the install continues. A failed
   structured-output probe now also names an unbound brain slot when that is the
   actual shape on disk.
 

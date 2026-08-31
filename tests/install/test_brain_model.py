@@ -21,6 +21,7 @@ huggingface.co.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -45,6 +46,8 @@ from hal0.install.brain_model import (
     rocmfpx_capable,
 )
 from hal0.registry.curated import get_curated
+
+_INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 
 # ── quant choice ────────────────────────────────────────────────────────────
 
@@ -694,6 +697,173 @@ def test_module_entry_point_routes_the_check_binding_flag(
     _stub_check_binding_deps(monkeypatch, _ConfiguredSlotManager(bound=""))
     assert main([bm.CHECK_BINDING_FLAG]) == 0
     assert remediation_command(BRAIN_MODEL_DEFAULT) in capsys.readouterr().out
+
+
+# ── the reverting sweep: what actually broke the 0.9.8 upgrade ──────────────
+#
+# The binding was never missing — it was REVERTED. v0.9.8's install.sh ran
+# `hal0 setup --auto` (:1249) BEFORE its curated seed loop (:1487), so the
+# generic scaffold won and `_build_slot_cfg(..., enabled=False)` left
+# `enabled = false` beside a model-less `[model]` table on every stable box.
+# install.sh then bound the pulled default into it and the SlotConfig.enabled
+# sweep, reading `enabled = false` next to a now-bound model, cleared the model
+# exactly as it is designed to (slot_enabled_removal.py:86). The same sweep runs
+# at every hal0-api boot, so even a hand-repaired box lost it again on restart.
+
+#: The shape every v0.9.8 stable box carries into the upgrade.
+_V098_SCAFFOLD_BRAIN_TOML = (
+    'name = "brain"\n'
+    'type = "llm"\n'
+    'device = "gpu-vulkan"\n'
+    'runtime = "container"\n'
+    'profile = "vulkan"\n'
+    "enabled = false\n"
+    "port = 8089\n"
+    "\n"
+    "[model]\n"
+    'default = ""\n'
+    "context_size = 65536\n"
+)
+
+
+@pytest.fixture()
+def upgraded_box(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A v0.9.8 box mid-upgrade: scaffold brain.toml + the bytes already pulled.
+
+    Yields the path of the live ``brain.toml`` so a test can read back exactly
+    what the installer left on disk.
+    """
+    import hal0.config.store as store_mod
+
+    home = tmp_path / "home"
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True)
+    brain_toml = slots_dir / "brain.toml"
+    brain_toml.write_text(_V098_SCAFFOLD_BRAIN_TOML, encoding="utf-8")
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path / "store")
+    _place(tmp_path / "store", BRAIN_MODEL_DEFAULT)
+    return brain_toml
+
+
+def _bind_step() -> str:
+    """install.sh's brain step: `python -m hal0.install.brain_model`."""
+    from hal0.cli.setup_command import _build_offline_deps
+
+    slot_manager, registry = _build_offline_deps()
+    return asyncio.run(
+        provision_brain_model(hw=_hw(), slot_manager=slot_manager, registry=registry)
+    )
+
+
+def _sweep_step() -> list[str]:
+    """install.sh's `enabled` sweep — the same call hal0-api makes at boot."""
+    from hal0.updater.updater import sweep_slot_enabled_keys
+
+    return sweep_slot_enabled_keys()
+
+
+def _model_default_on_disk(brain_toml) -> str:
+    import tomllib
+
+    raw = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    return str(raw.get("model", {}).get("default") or "")
+
+
+def _install_sh_runs_sweep_before_the_brain_pull() -> bool:
+    """The order install.sh actually declares, read out of the script."""
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    pull = "-m hal0.install.brain_model \\"
+    assert text.count(pull) == 1, "expected exactly one brain-model pull invocation"
+    return text.index("sweep_slot_enabled_keys") < text.index(pull)
+
+
+def test_binding_survives_the_enabled_sweep_in_the_order_install_sh_runs_them(
+    upgraded_box,
+) -> None:
+    """Drives the REAL order — taken from install.sh, not hardcoded here.
+
+    This is the whole bug: with the sweep after the brain step the binding is
+    blanked minutes later, so the assertion below fails on the shipped order
+    that produced #2131 and passes on the corrected one.
+    """
+    steps = (
+        [_sweep_step, _bind_step]
+        if _install_sh_runs_sweep_before_the_brain_pull()
+        else [_bind_step, _sweep_step]
+    )
+    for step in steps:
+        step()
+    assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT, (
+        "the brain slot lost its binding to the SlotConfig.enabled sweep — "
+        "install.sh must run the sweep BEFORE the brain model step (#2131)"
+    )
+
+
+def test_the_binding_then_survives_every_later_api_boot_sweep(upgraded_box) -> None:
+    """`hal0.api._boot_slot_reconcile` runs the identical sweep on every start.
+
+    Sweeping first is what makes those boot passes no-ops: the stale `enabled`
+    key is already gone, so `migrate_slot_toml` returns None and the file is
+    left byte-identical. Without that, a hand-repaired box lost its binding
+    again at the next restart.
+    """
+    _sweep_step()
+    _bind_step()
+    assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT
+
+    for _ in range(3):  # three more service restarts
+        assert _sweep_step() == [], "a converged slot must not be rewritten again"
+        assert _model_default_on_disk(upgraded_box) == BRAIN_MODEL_DEFAULT
+
+
+def test_the_sweep_only_drops_the_key_on_the_model_less_scaffold(upgraded_box) -> None:
+    """Why sweeping first is the migration's OWN semantics, not a workaround.
+
+    `enabled = false` with NO model bound is the documented "both signals
+    already said off" case — the key is dropped and nothing else changes. The
+    model-clearing branch is for a slot that had a model to deactivate.
+    """
+    import tomllib
+
+    assert _sweep_step() == ["brain"]
+    raw = tomllib.loads(upgraded_box.read_text(encoding="utf-8"))
+    assert "enabled" not in raw
+    assert raw["model"]["context_size"] == 65536
+
+
+def test_a_deliberately_disabled_slot_still_has_its_model_cleared(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carve-out the reorder must not break: `enabled = false` WITH a bound
+    model is an operator deactivation, and the sweep still carries it forward.
+
+    The brain step also declines to touch it — a non-empty `[model].default` is
+    operator config — so the two passes agree instead of fighting.
+    """
+    import tomllib
+
+    import hal0.config.store as store_mod
+
+    home = tmp_path / "home"
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True)
+    brain_toml = slots_dir / "brain.toml"
+    brain_toml.write_text(
+        _V098_SCAFFOLD_BRAIN_TOML.replace('default = ""', 'default = "operator-pick"'),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setattr(store_mod, "store_root", lambda: tmp_path / "store")
+    _place(tmp_path / "store", BRAIN_MODEL_DEFAULT)
+
+    raw_before = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    assert raw_before["model"]["default"] == "operator-pick"
+
+    _sweep_step()
+    raw = tomllib.loads(brain_toml.read_text(encoding="utf-8"))
+    assert raw["model"]["default"] == "", "a deliberate deactivation must survive the upgrade"
+    assert "enabled" not in raw
 
 
 # ── end to end on a real slot TOML: the shape the box actually had ───────────

@@ -70,6 +70,31 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
     )
 
 
+def test_the_enabled_sweep_runs_before_the_brain_model_is_bound() -> None:
+    """#2131 — the ordering the 0.9.8 upgrade turns on.
+
+    Every v0.9.8 box carries `enabled = false` on a model-less brain.toml (its
+    install.sh ran `hal0 setup --auto` at :1249 before the curated seed loop at
+    :1487, so `_build_slot_cfg(..., enabled=False)`'s scaffold won). With the
+    sweep AFTER the brain step, install.sh bound the freshly pulled default and
+    the sweep then read `enabled = false` beside a bound model and cleared it —
+    the documented upgrade path finished with the model on disk and the slot
+    model-less.
+
+    Sweeping FIRST hits the migration's own "no model bound, just drop the key"
+    branch, so the brain step binds into a clean slot and the identical
+    boot-time sweep (`hal0.api._boot_slot_reconcile`) no-ops forever after.
+    """
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    pull = "-m hal0.install.brain_model \\"
+    assert text.count(pull) == 1, "expected exactly one brain-model pull invocation"
+    assert "sweep_slot_enabled_keys" in text, "install.sh no longer runs the enabled sweep"
+    assert text.index("sweep_slot_enabled_keys") < text.index(pull), (
+        "the SlotConfig.enabled sweep must run BEFORE the brain model step — "
+        "after it, the sweep blanks the binding it just made (#2131)"
+    )
+
+
 def test_install_sh_no_longer_hand_picks_a_migration_subset() -> None:
     """The old two-heredoc block imported ensure_seed_profiles and
     clear_stale_mtp_overrides directly, skipping _maybe_run_config_migrations,

@@ -10,9 +10,17 @@ Five properties are deliberate:
 
 **Never fatal.** No network, no disk, an unreadable ``hardware.json``, a
 missing curated entry — every failure path returns a non-zero exit code with a
-warning and leaves the brain slot MODEL-LESS. The install still succeeds. This
-mirrors the absent-``HF_TOKEN`` posture in install.sh: an optional model pull
-must not be able to fail a platform install.
+warning and leaves the brain slot NO WORSE THAN IT FOUND IT. The install still
+succeeds. This mirrors the absent-``HF_TOKEN`` posture in install.sh: an
+optional model pull must not be able to fail a platform install.
+
+"No worse", not "model-less": a failure only ever *withholds* a binding, it
+never removes one. ``_activate_slot_model``'s failure path writes
+``{"meta": {"pull_failed": True}}`` and no ``model`` key at all, and
+``merge_slot_config`` merges one level deep, so a slot that already carried a
+``[model].default`` keeps it. An already-model-less slot — the fresh-seed and
+0.9.8-scaffold case, and the only one this module ever binds into — does stay
+model-less, which is where the shorter phrasing came from.
 
 **One default, hardware-blind (rc.10).** The default is
 :data:`BRAIN_MODEL_DEFAULT` (LFM2.5-2.6B Q8_0) on every box: plain GGUF, no
@@ -37,24 +45,49 @@ unconditionally, and a COMPLETED pull leaves no ``.part`` for the resume path
 to reuse. :func:`already_pulled` is the guard that stops a re-run from
 re-downloading gigabytes it already has.
 
-**An unbound ``[model]`` table is not operator config (#2131).** The activation
-gate above is *best-effort by construction*:
+**An unbound ``[model]`` table is not operator config (#2131).** A NON-EMPTY
+``[model].default`` is an operator pick and is never touched, even when it
+names something other than the default — so an install.sh re-run can no longer
+revert one. An EMPTY or absent one is not a pick at all: the seed ships
+model-less on purpose (``installer/etc-hal0/slots/brain.toml``, "WHO SETS
+[model].default"), so :func:`bind_brain_model` binds the default into it.
+
+THE ORDERING THIS DEPENDS ON — read before moving anything in install.sh.
+The 0.9.8 → 1.0.0 upgrade ended at "Verify FAILED: structured-output probe
+failed" on every stable-channel box, with the 2.87 GB on disk and the brain
+slot model-less. The binding was not missing; it was **reverted**:
+
+  * v0.9.8's install.sh ran ``hal0 setup --auto`` (:1249) BEFORE its curated
+    seed loop (:1487), so the generic scaffold won and the curated brain seed
+    was skipped as already-present. ``_build_slot_cfg(..., enabled=False)``
+    therefore left ``enabled = false`` next to a model-less ``[model]`` table
+    on every one of those boxes;
+  * install.sh bound the freshly pulled default into that slot, and the
+    ``SlotConfig.enabled`` sweep — which ran AFTER the brain step — read
+    ``enabled = false`` beside a now-bound model and did exactly what it is
+    designed to do (:mod:`hal0.config.migrations.slot_enabled_removal`,
+    ``out["model"] = {**model, "default": ""}``). The same sweep runs at every
+    hal0-api boot (``hal0.api._boot_slot_reconcile``), so even a hand-repaired
+    box lost the binding again on the next restart.
+
+install.sh now runs that sweep BEFORE this module. For a model-less
+``enabled = false`` slot the migration's own rule is "both signals already said
+off — only the key needs dropping", so the stale key goes and the model is
+untouched; this module then binds into a clean slot and every later boot-time
+sweep no-ops. A slot an operator DELIBERATELY disabled (``enabled = false``
+WITH a model bound) still has its model cleared by that sweep, which is the
+deactivation the migration exists to carry forward.
+
+**Reported, not assumed.** Independently of the ordering above, the activation
+gate is *best-effort by construction*:
 :func:`~hal0.install.orchestrate._activate_slot_model` wraps its write in
 ``contextlib.suppress(Exception)`` so a config-rewrite failure can never abort
-the pull driver. That is right for the driver and wrong for this module — a
-swallowed write left the brain slot MODEL-LESS while this module still printed
-"brain model ready" and exited 0, so install.sh had no signal, and the
-documented 0.9.8 → 1.0.0 path ended at "Verify FAILED: structured-output probe
-failed" with the 2.87 GB already on disk and nothing pointing at the cause.
-:func:`bind_brain_model` closes that: it reads the slot back and, when the
-``[model]`` table exists but names nothing, binds the default into it — a
-model-less slot is the shipped seed state (``installer/etc-hal0/slots/
-brain.toml`` ships no ``[model].default``), not a pick to protect. The guard is
-the other half of the rule: a NON-EMPTY ``[model].default`` is an operator pick
-and is never touched, even when it names something other than the default. When
-the binding genuinely cannot be made the failure is now *reported* (warning +
-exit 1 + the exact remediation command) instead of being reported as success —
-still never fatal, exactly as ruling 7 requires.
+the pull driver. That is right for the driver and wrong for this module, which
+otherwise reports "brain model ready" and exits 0 whether or not the write
+landed. :func:`bind_brain_model` reads the slot back and, when the binding
+genuinely cannot be made, the failure is *reported* — warning, exit 1, and the
+exact remediation command — instead of being reported as success. Still never
+fatal, exactly as ruling 7 requires.
 """
 
 from __future__ import annotations
