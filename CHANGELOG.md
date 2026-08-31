@@ -24,6 +24,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard now surfaces the decisive crash line when a slot container
+  dies during model load. On a load failure the slot manager tails the
+  unit's journal, extracts the one line that names the fault (e.g.
+  `llama_model_load: error loading model: unknown model architecture`,
+  `unable to allocate ROCm0 buffer`, or the hal0-runner death summary from
+  #2037/#2126) and stamps it on the slot state (`metadata.last_crash_line`);
+  the crash-breaker chip's tooltip carries it, so "trial pending" finally
+  says why instead of pointing at `journalctl -u hal0-slot@<name>`.
+
 ## [1.1.0] — 2026-08-31
 
 ### Highlights
