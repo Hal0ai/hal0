@@ -3454,7 +3454,9 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
 
 
 AGENT_IDENTITY_TAG = "agent-identity"
-AGENTS_DATASET = "agents"
+# Identity cards live in the shared dataset, scoped by AGENT_IDENTITY_TAG —
+# the dedicated ``agents`` namespace was retired (ADR 0004).
+AGENTS_DATASET = "shared"
 
 
 def _hermes_version_pin() -> str:
@@ -3829,7 +3831,8 @@ def _build_brain_identity_card() -> dict[str, Any]:
 def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
     """Register the hal0-brain profile as a first-class agent identity.
 
-    Writes the brain identity card to the ``agents`` dataset (search → delete
+    Writes the brain identity card to the ``shared`` dataset under the
+    ``agent-identity`` tag (search → delete
     stale → add), keyed on the ``hermes__hal0-brain`` agent-id so its private
     bank is provisioned rather than left to lazy first-write. Idempotent;
     warn-as-OK so bootstrap never blocks on the memory layer.

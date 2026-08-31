@@ -385,9 +385,9 @@ async def test_tags_list_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> N
 
 @pytest.mark.asyncio
 async def test_bank_stats_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> None:
-    out = await dispatcher("memory_bank_stats", {"dataset": "agents"})
+    out = await dispatcher("memory_bank_stats", {"dataset": "shared"})
     assert out["status"] == "ok"
-    assert wrapper._last("bank_stats")["dataset"] == "agents"
+    assert wrapper._last("bank_stats")["dataset"] == "shared"
 
 
 @pytest.mark.asyncio

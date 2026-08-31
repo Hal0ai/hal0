@@ -973,9 +973,9 @@ async def memory_delete(request: Request) -> dict[str, int]:
     an alias and resolved to its owning document; the engine only ever
     deletes documents. See #1456.
 
-    ``dataset`` optionally directs the engine's bank sweep (e.g.
-    ``project:<id>`` items live outside the default shared + own-private
-    sweep). It goes through the same ``resolve_read_datasets`` closed-set
+    ``dataset`` optionally directs the engine's bank sweep (``shared`` or
+    the caller's own ``private:<client_id>``; ADR 0004). It goes through
+    the same ``resolve_read_datasets`` closed-set
     resolver the MCP surface uses — a list that names no addressable
     namespace is a 400, never a silent widening to ``shared`` (#1451).
 

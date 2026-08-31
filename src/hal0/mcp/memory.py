@@ -473,8 +473,7 @@ async def _memory_delete(
 
     Returns the count of deleted rows. ``ids`` must be
     non-empty. ``dataset`` optionally directs the engine's bank sweep
-    (e.g. ``project:<id>`` items live outside the default
-    shared + own-private sweep).
+    (``shared`` or your own ``private:<client_id>``; ADR 0004).
 
     Approval-gating for bulk deletes (>1 id) is classified by
     :func:`hal0.mcp.admin.is_gated` and enforced one layer up — by
@@ -1540,7 +1539,7 @@ def build_server(
             "Delete one or more memory items by id. Deleting >1 id is a bulk "
             "delete and returns {status: pending_approval} — it runs only "
             "after the operator approves it. dataset optionally directs the "
-            "sweep (e.g. project:<id>)."
+            "sweep (shared or your own private:<client_id>)."
         ),
         annotations=_ANNOTATIONS["memory_delete"],
     )

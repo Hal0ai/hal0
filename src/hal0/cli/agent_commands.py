@@ -1071,7 +1071,7 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
             {
                 "query": agent_id,
                 "tags": ["agent-identity"],
-                "dataset": "agents",
+                "dataset": "shared",
                 "limit": 50,
             }
         ).encode("utf-8")
@@ -1364,7 +1364,7 @@ def agent_peers() -> None:
         {
             "query": "agent identity",
             "tags": ["agent-identity"],
-            "dataset": "agents",
+            "dataset": "shared",
             "limit": 50,
         }
     ).encode("utf-8")

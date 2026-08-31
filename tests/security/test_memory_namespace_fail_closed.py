@@ -3,7 +3,7 @@ to the default shared sweep.
 
 The defect. ``resolve_read_datasets`` documented its list branch as
 "fail-open-empty": unknown / foreign-private entries are dropped. That is
-right for a *partial* list (``["agents", "nope"]`` → ``["agents"]``) and
+right for a *partial* list (``["shared", "nope"]`` → ``["shared"]``) and
 catastrophically wrong for a list that filters to nothing, because every
 downstream consumer read ``[]`` as falsy and substituted the default:
 
@@ -104,8 +104,8 @@ def test_partial_list_still_fails_open_on_the_dropped_entries() -> None:
     """Unchanged behaviour: a list with at least one addressable namespace
     keeps degrading rather than erroring (the multi-namespace read contract)."""
     assert resolve_read_datasets(
-        ["agents", "not-a-real-bank"], private=False, client_id="agent-x"
-    ) == ["agents"]
+        ["shared", "not-a-real-bank"], private=False, client_id="agent-x"
+    ) == ["shared"]
 
 
 def test_empty_list_is_an_unspecified_request_not_a_foreign_one() -> None:
@@ -226,9 +226,9 @@ async def test_rest_delete_still_forwards_an_addressable_list() -> None:
             captured["dataset"] = dataset
             return {"deleted": len(ids)}
 
-    request = _FakeRequest({"ids": ["d1"], "dataset": ["agents", "nope"]}, wrapper=_Wrapper())
+    request = _FakeRequest({"ids": ["d1"], "dataset": ["shared", "nope"]}, wrapper=_Wrapper())
     assert await memory_routes.memory_delete(request) == {"deleted": 1}
-    assert captured["dataset"] == ["agents"]
+    assert captured["dataset"] == ["shared"]
 
 
 class _FakeRequest:

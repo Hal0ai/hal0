@@ -66,6 +66,40 @@ applying. Add those subsections to a version's section to surface them; see
   honored forever via a permanent alias (warned at load; TOML is never
   rewritten in place).
 
+### Fixed
+
+- **A freshly booted box could finish the installer with Hermes silently
+  unprovisioned.** If `unattended-upgrades` or `apt-daily` still held the
+  dpkg lock — routine in the first minutes after boot — the preflight
+  install of git failed immediately rather than waiting, and Hermes
+  provisioning was skipped without a hard error. Every `apt-get` in the
+  preflight library now waits for the lock
+  (`-o DPkg::Lock::Timeout=120`), the convention `install.sh` already
+  applied to its own calls. The git install was the reported case, but all
+  six package installs preflight performs — the Python floor, the venv,
+  podman, git and Node — had the same gap and all six are fixed (#2125).
+- **The installer could abort with "uv could not be installed" on a box
+  where uv had installed perfectly.** `hermes-prereqs.sh` installed uv with
+  pipx and then looked for it on `PATH`; in a non-login exec context
+  (`pct exec`, `lxc-attach`, `docker exec`, cloud-init) `PATH` can lack
+  `/usr/local/bin`, so a successful install read as a failure. The script
+  now checks the location it just wrote to. The same install-here,
+  verify-through-`PATH` shape sat one step downstream in the provisioner,
+  where the root privilege drop through `runuser`/`setpriv`/`sudo` can
+  replace `PATH` outright; that path falls back to the fixed location too,
+  so a box that got past the script no longer fails a step later with a
+  more confusing error (#2124).
+- **A post-install seam check could report a working permission grant as
+  broken.** The verifier probed each grant once, so a probe that lost a
+  race with the grant becoming live was reported as a permanent fault —
+  and named a cause it had never actually observed, because it discarded
+  the probe's own stderr. The probe now retries (three attempts, a second
+  apart, each bounded by a 20-second timeout), says so plainly when a grant
+  only came up on a later attempt instead of passing silently, and on a
+  genuine failure reports the command it actually ran, its exit code, the
+  attempt count and the probe's last stderr line rather than asserting a
+  diagnosis (#2084).
+
 ## [1.0.0] — 2026-08-29
 
 The first stable release. hal0 stops being a box you configure and starts
