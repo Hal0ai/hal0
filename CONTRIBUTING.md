@@ -215,6 +215,94 @@ tag. It walks the per-release gate:
 
 If any of these fail, fix and re-run before `git tag`.
 
+## Release delivery
+
+Tagging is not delivering. The tag publishes immutable, signed assets;
+what reaches a user is a *channel pointer* and a *live installer*, and
+both have sat stale behind a green tag before (#2057, #2101). This
+section is the post-tag half of the ritual: who owns each step, and the
+probe that says it worked.
+
+**Owner: whoever cut the tag**, until every probe below passes. It is
+not the CI system's job — `release.yml`'s `authorize-pointer` job
+(`.github/workflows/release.yml:773`) is deliberately read-only
+re-verification of what GitHub and PyPI already hold, and it mutates no
+external pointer. Nothing in this repository can advance a channel on
+your behalf.
+
+### 1. The stable pointer
+
+`releases.hal0.dev` is not a file you edit. `hal0-web`'s middleware
+resolves each channel by scanning GitHub releases for an asset of that
+name, so **publishing `stable.json` + `stable.json.bundle` as assets on
+the GA release is the pointer advance.** `release.yml` uploads exactly
+the manifests that `ReleasePolicy.manifest_targets` names
+(`src/hal0/release/policy.py:92` — a final `vX.Y.Z` emits `stable` and
+`preview`), generated at `release.yml:436`, signed at `:501`, uploaded
+at `:637`.
+
+So the *mechanism* is automatic and the *verification* is yours:
+
+```
+curl -s  https://releases.hal0.dev/stable.json | jq -r .version   # → X.Y.Z
+curl -sI https://releases.hal0.dev/stable.json.bundle             # → 200
+```
+
+Both must pass. `stable.json` alone is not a delivered channel:
+`installer/bootstrap.sh` is fail-closed and authenticates the manifest
+against its sibling bundle before parsing it, so a manifest without a
+bundle breaks every one-line install exactly as a 404 would.
+
+If the manifest 404s or serves an older version, the release did not
+emit it — check `manifest_targets` for the tag you actually cut
+(a `-rc.N` tag emits `preview` only, by design; do not widen it to make
+a probe pass) and confirm the assets are on the GitHub release.
+
+`.github/workflows/stable-pointer-watch.yml` runs these two probes daily
+and opens a tracking issue once a GA tag is more than six hours old with
+no matching pointer. It is a backstop for a forgotten release, not a
+substitute for checking on the day.
+
+### 2. The live installer
+
+`https://hal0.dev/install.sh` must become byte-identical to
+`installer/bootstrap.sh` at the GA tag. `mirror-bootstrap` publishes it,
+but only once `stable.json.bundle` returns 200 — publishing the
+canonical fail-closed script against an unsigned channel would break
+every new install, so the gate refuses until step 1 is done. It opens by
+itself: `release.yml:1137` re-arms the mirror after the release is
+verified.
+
+```
+bash scripts/check-bootstrap-parity.sh    # exit 0 = in sync
+```
+
+A closed gate shows up as a **skipped** `mirror` job, not a failure —
+read the run summary, which names the outcome. If the gate is genuinely
+stale, dispatch `mirror-bootstrap` with `force: true`.
+
+Daily drift is watched by `.github/workflows/bootstrap-parity.yml`,
+which opens one tracking issue after three consecutive reds and closes
+it when parity returns.
+
+### 3. Rehearse the mirror before GA day
+
+GA day should not be the first execution of the push path. Dispatch
+`mirror-bootstrap` with `gate_channel: preview` (already signed) and
+`dry_run: true`: it runs checkout → sync → `bash -n` → diff and stops
+short of the push. A non-`stable` gate channel is *refused* outside a
+dry run, because bootstrap.sh installs from `stable` by default.
+
+### 4. From a user's position
+
+The probes above prove the infrastructure moved. They do not prove an
+upgrade works. Before calling a release delivered, on a real box:
+
+- a fresh install using the published one-liner verbatim, on the stable
+  channel, with no `HAL0_RELEASES_URL` override and no pinned asset URL
+- `hal0 update --check` from the *previous* stable release reports the
+  new version rather than "up to date"
+
 ## E2E tests
 
 The `ui/tests/e2e/` Playwright suite covers the seven critical paths

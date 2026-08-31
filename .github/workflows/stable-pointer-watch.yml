@@ -1,0 +1,334 @@
+name: Stable pointer watch
+
+# Tagging `v1.0.0` is not the release. The tag publishes immutable assets; it
+# does not advance the `stable` channel pointer. Nothing in this repository
+# ever noticed the difference, so "GA tagged, stable channel never moved" was a
+# silent and indefinite failure mode (#2101 gate 2). This workflow makes it
+# finite: once a GA tag is older than GRACE_HOURS, the live stable manifest is
+# expected to name that version, and a mismatch fails loudly and files an
+# issue that someone owns.
+#
+# Why this is not a job inside release.yml:
+#   1. release.yml completes in minutes; the condition it would need to assert
+#      is only meaningful hours later. A job cannot outlive its run.
+#   2. release.yml's executable surface deliberately never names an external
+#      pointer system — its `authorize-pointer` job is read-only
+#      re-verification of what GitHub and PyPI already hold, and
+#      `tests/release/test_workflow_contract.py::
+#      test_global_executable_surface_has_no_external_pointer_or_mutation_markers`
+#      enforces that. Reaching out to releases.hal0.dev from the workflow that
+#      cuts the tag would erase the very boundary that test protects.
+#
+# This workflow OBSERVES the pointer. It never advances it. Advancing the
+# stable pointer is an owned human step — see "Release delivery" in
+# CONTRIBUTING.md for who does it and how it is verified.
+
+on:
+  schedule:
+    # 07:00 UTC daily, an hour after bootstrap-parity, so the two delivery
+    # checks report within the same window at the start of the day.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: stable-pointer-watch
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: Compare the newest GA tag against the live stable pointer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.probe.outputs.status }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      detail: ${{ steps.probe.outputs.detail }}
+
+    steps:
+      - name: Checkout hal0 (full tag history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the newest GA tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # How long a GA tag may exist before its stable pointer is overdue.
+          # Long enough for a human to finish the runbook in one sitting;
+          # short enough that "nobody looked" is caught the next morning.
+          GRACE_HOURS: "6"
+        run: |
+          set -euo pipefail
+
+          # `ReleasePolicy.manifest_targets` is the single authority on which
+          # tags emit stable.json. Read it; do not restate it here.
+          TAG="$(git tag --list 'v*' --sort=-creatordate | PYTHONPATH=src python3 -c '
+          import sys
+
+          from hal0.release.policy import ReleasePolicy, ReleaseTagError
+
+          for line in sys.stdin:
+              tag = line.strip()
+              if not tag:
+                  continue
+              try:
+                  policy = ReleasePolicy.from_tag(tag)
+              except ReleaseTagError:
+                  continue
+              if "stable" in policy.manifest_targets and policy.kind == "stable":
+                  print(tag)
+                  break
+          ')"
+
+          if [ -z "${TAG}" ]; then
+            echo "::notice::no GA tag emits a stable manifest yet; nothing to watch."
+            {
+              echo "expected=false"
+              echo "tag="
+              echo "version="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="${TAG#v}"
+          echo "newest GA tag: ${TAG} (version ${VERSION})"
+
+          # The release publication time is the clock that matters — a tag can
+          # be pushed long after its commit was authored.
+          PUBLISHED_AT="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            --jq '.published_at // empty' 2>/dev/null || true)"
+          if [ -z "${PUBLISHED_AT}" ]; then
+            PUBLISHED_AT="$(git log -1 --format=%cI "${TAG}")"
+            echo "::notice::no published GitHub release for ${TAG}; using the tagged commit date ${PUBLISHED_AT}."
+          fi
+
+          AGE_HOURS="$(PUBLISHED_AT="${PUBLISHED_AT}" python3 -c '
+          import datetime as dt
+          import os
+
+          published = dt.datetime.fromisoformat(os.environ["PUBLISHED_AT"].replace("Z", "+00:00"))
+          now = dt.datetime.now(dt.timezone.utc)
+          print(f"{(now - published).total_seconds() / 3600:.2f}")
+          ')"
+          echo "release age: ${AGE_HOURS}h (grace ${GRACE_HOURS}h)"
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "age_hours=${AGE_HOURS}"
+          } >> "$GITHUB_OUTPUT"
+
+          if python3 -c "import sys; sys.exit(0 if float('${AGE_HOURS}') >= float('${GRACE_HOURS}') else 1)"; then
+            echo "expected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "expected=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} is ${AGE_HOURS}h old, still inside the ${GRACE_HOURS}h grace window."
+          fi
+
+      - name: Probe the live stable pointer
+        id: probe
+        if: steps.resolve.outputs.expected == 'true'
+        env:
+          EXPECTED_VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          AGE_HOURS: ${{ steps.resolve.outputs.age_hours }}
+        run: |
+          set -uo pipefail
+
+          MANIFEST_URL="https://releases.hal0.dev/stable.json"
+          BUNDLE_URL="https://releases.hal0.dev/stable.json.bundle"
+
+          BODY="$(mktemp)"
+          MANIFEST_CODE="$(curl -sS -L --retry 3 --retry-delay 2 --max-time 30 \
+            -o "${BODY}" -w '%{http_code}' "${MANIFEST_URL}" || echo 000)"
+          BUNDLE_CODE="$(curl -sS -L --retry 3 --retry-delay 2 --max-time 30 \
+            -o /dev/null -w '%{http_code}' "${BUNDLE_URL}" || echo 000)"
+
+          SERVED_VERSION=""
+          if [ "${MANIFEST_CODE}" = "200" ]; then
+            SERVED_VERSION="$(python3 -c '
+          import json
+          import sys
+
+          try:
+              print(json.load(open(sys.argv[1])).get("version", ""))
+          except Exception:
+              print("")
+          ' "${BODY}")"
+          fi
+          rm -f "${BODY}"
+
+          echo "${MANIFEST_URL} -> ${MANIFEST_CODE} (version '${SERVED_VERSION}')"
+          echo "${BUNDLE_URL} -> ${BUNDLE_CODE}"
+
+          # bootstrap.sh is fail-closed: it authenticates the manifest against
+          # its sibling bundle before parsing it. A manifest without a bundle
+          # is not a delivered channel — it breaks every one-line install.
+          PROBLEMS=()
+          [ "${MANIFEST_CODE}" = "200" ] || PROBLEMS+=("\`stable.json\` returned HTTP ${MANIFEST_CODE}")
+          [ "${BUNDLE_CODE}" = "200" ] || PROBLEMS+=("\`stable.json.bundle\` returned HTTP ${BUNDLE_CODE}")
+          if [ "${MANIFEST_CODE}" = "200" ] && [ "${SERVED_VERSION}" != "${EXPECTED_VERSION}" ]; then
+            PROBLEMS+=("\`stable.json\` serves \`${SERVED_VERSION:-<unparseable>}\`, expected \`${EXPECTED_VERSION}\`")
+          fi
+
+          {
+            echo "## Stable pointer watch"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Newest GA tag | \`${TAG}\` (${AGE_HOURS}h old) |"
+            echo "| \`stable.json\` | HTTP ${MANIFEST_CODE}, version \`${SERVED_VERSION:-—}\` |"
+            echo "| \`stable.json.bundle\` | HTTP ${BUNDLE_CODE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${#PROBLEMS[@]}" -eq 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "detail=" >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**The stable channel points at ${TAG}.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::stable channel is delivering ${TAG}."
+            exit 0
+          fi
+
+          DETAIL="$(printf '%s; ' "${PROBLEMS[@]}")"
+          DETAIL="${DETAIL%; }"
+          echo "status=stale" >> "$GITHUB_OUTPUT"
+          echo "detail=${DETAIL}" >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "**The stable pointer has NOT been advanced to ${TAG}:** ${DETAIL}"
+            echo ""
+            echo "See \"Release delivery\" in CONTRIBUTING.md — advancing the stable"
+            echo "pointer is an owned step, not a consequence of tagging."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${TAG} was published ${AGE_HOURS}h ago and the stable channel still does not deliver it: ${DETAIL}"
+          exit 1
+
+  # ── Give the overdue pointer an owner ───────────────────────────────────
+  alert:
+    name: Open/update the stable-pointer issue
+    needs: [watch]
+    if: always() && needs.watch.result != 'cancelled' && needs.watch.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Open, update, or close the stable-pointer issue
+        uses: actions/github-script@v9
+        env:
+          WATCH_STATUS: ${{ needs.watch.outputs.status }}
+          WATCH_RESULT: ${{ needs.watch.result }}
+          TAG: ${{ needs.watch.outputs.tag }}
+          DETAIL: ${{ needs.watch.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Body marker, not a bespoke label: CLAUDE.md asks for the five
+            // canonical triage labels used unmodified rather than new ones.
+            const MARKER = '<!-- hal0:stable-pointer-overdue -->';
+            const labels = ['bug'];
+            const status = process.env.WATCH_STATUS || '';
+            const result = process.env.WATCH_RESULT;
+            const tag = process.env.TAG;
+            const detail = process.env.DETAIL || 'see the run log';
+            const runUrl = process.env.RUN_URL;
+            const today = new Date().toISOString().slice(0, 10);
+
+            // No probe ran (no GA tag yet, or still inside the grace window),
+            // or the job broke for an unrelated reason. Neither is evidence.
+            if (status === '') {
+              core.info(`no probe verdict (job result: ${result}); nothing to report.`);
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const tracking = openIssues.find(
+              (issue) => !issue.pull_request && (issue.body || '').includes(MARKER),
+            );
+
+            if (status === 'ok') {
+              if (!tracking) {
+                core.info(`stable channel delivers ${tag}; nothing open.`);
+                return;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                body: [
+                  `The stable channel now delivers \`${tag}\` as of ${today}:`,
+                  `\`stable.json\` and \`stable.json.bundle\` both return 200 and the`,
+                  `manifest names the GA version.`,
+                  ``,
+                  `- Run: ${runUrl}`,
+                  ``,
+                  `Closing automatically.`,
+                ].join('\n'),
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                state: 'closed',
+              });
+              core.info(`closed issue #${tracking.number}`);
+              return;
+            }
+
+            const detailBlock = [
+              `- Newest GA tag: \`${tag}\``,
+              `- Problem: ${detail}`,
+              `- Run: ${runUrl}`,
+              ``,
+              `Tagging does not advance the channel pointer — \`release.yml\`'s`,
+              `\`authorize-pointer\` job is read-only re-verification by design. The`,
+              `advance is an owned step: see "Release delivery" in CONTRIBUTING.md.`,
+              ``,
+              `Until \`stable.json.bundle\` returns 200, \`mirror-bootstrap\` also`,
+              `refuses to publish the canonical installer, so \`hal0.dev/install.sh\``,
+              `stays stale as well (#2057).`,
+            ].join('\n');
+
+            if (tracking) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                body: [`Still overdue on ${today}.`, ``, detailBlock].join('\n'),
+              });
+              core.info(`updated issue #${tracking.number}`);
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `release: ${tag} is tagged but the stable channel pointer has not been advanced`,
+              labels,
+              body: [
+                MARKER,
+                `\`${tag}\` has been published longer than the grace window and the live`,
+                `stable channel still does not deliver it. Every box on the stable`,
+                `channel is therefore not being offered the GA release.`,
+                ``,
+                detailBlock,
+                ``,
+                `This issue is opened, updated, and closed automatically by`,
+                `\`.github/workflows/stable-pointer-watch.yml\`.`,
+              ].join('\n'),
+            });
+            core.info(`opened issue #${created.data.number}`);
