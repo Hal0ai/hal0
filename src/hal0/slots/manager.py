@@ -1287,6 +1287,10 @@ class SlotManager:
             self._load_failures.pop(key, None)
             carried_extra.pop("parked", None)
             carried_extra.pop("load_failures", None)
+            # …and the crash-line evidence: it explains the failures the
+            # breaker counted, so it retires with them.
+            carried_extra.pop("last_crash_line", None)
+            carried_extra.pop("last_crash_line_at", None)
             # …and the output-sanity verdict (#1922). Reaching READY/IDLE means
             # a load ran the gate and the model answered (or the operator
             # switched the gate off for this slot) — the one piece of evidence
@@ -1508,6 +1512,34 @@ class SlotManager:
         # stamping a healthy slot ERROR with "<MagicMock ...>" as the operator-
         # facing message. Only a real ``str`` is evidence.
         return reason if isinstance(reason, str) else ""
+
+    async def _read_last_crash_line(self, slot_name: str, cfg: Any) -> str | None:
+        """Decisive crash line from the slot unit's journal, or ``None``.
+
+        Called on the load-failure path so the WHY (``llama_model_load: error
+        loading model: …``, ``unable to allocate ROCm0 buffer``, or the
+        hal0-runner death summary) reaches the dashboard instead of living
+        only in ``journalctl -u hal0-slot@<name>``. Best-effort by contract:
+        any problem reading or parsing the journal answers ``None`` — a
+        diagnostic capture must never make the failure it is diagnosing worse.
+        The unit name goes through the naming seam (#1417), so id-keyed boxes
+        tail the journal of the unit that actually ran.
+        """
+        try:
+            cfg_dict = _cfg_to_dict(cfg) if cfg else {"name": slot_name}
+            if is_npu_trio_shadow(cfg_dict):
+                return None  # no unit (and so no journal) of its own
+            from hal0.slots import logs as slot_logs
+            from hal0.slots.naming import slot_instance_token, slot_unit_name
+
+            unit = slot_unit_name(slot_instance_token(cfg_dict))
+            return await slot_logs.read_crash_line(unit)
+        except Exception as exc:
+            log.debug(
+                "slot.crash_line_capture_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return None
 
     # ── crash-loop breaker (issue i4) ────────────────────────────────────────
 
@@ -1891,6 +1923,17 @@ class SlotManager:
                 err_extra: dict[str, Any] = {"load_failures": failures, **gate_extra}
                 if failures >= _CRASH_LOOP_PARK_AFTER:
                     err_extra["parked"] = True
+                # Surface the decisive crash line: the reason a container died
+                # during model load (unknown architecture, buffer alloc, …)
+                # lives only in the unit's journal, so tail it now and stamp
+                # the one line that names the fault onto the state extra —
+                # metadata carries it to /api/slots and the breaker chip.
+                # Best-effort: an unreadable journal answers None and the
+                # failure path proceeds exactly as before.
+                crash_line = await self._read_last_crash_line(slot_name, cfg)
+                if crash_line:
+                    err_extra["last_crash_line"] = crash_line
+                    err_extra["last_crash_line_at"] = time.time()
                 # TIER1: never swallow — record ERROR with details, re-raise.
                 await self._transition(
                     slot_name,

@@ -82,3 +82,53 @@ describe('breakerChip', () => {
     ).toBeNull()
   })
 })
+
+// The backend stamps metadata.last_crash_line — the decisive journal line a
+// failed model load died on — alongside the breaker view. The chip's tooltip
+// carries it so the operator sees WHY, not just "trial pending".
+describe('breakerChip crash line', () => {
+  const CRASH =
+    'llama_model_load: error loading model: unknown model architecture'
+
+  function withCrash(state: string, line: unknown): Slot {
+    return {
+      ...BASE,
+      metadata: {
+        breaker: { state, failures: 2, retry_after_s: 30 },
+        last_crash_line: line,
+      },
+    } as Slot
+  }
+
+  it('appends the decisive line to every breaker tooltip', () => {
+    for (const state of ['backoff', 'parked', 'half-open']) {
+      const chip = breakerChip(withCrash(state, CRASH))
+      expect(chip).not.toBeNull()
+      expect(chip!.tooltip).toContain(`Last crash: ${CRASH}`)
+      // one line in the label area is untouched — the reason is tooltip-only
+      expect(chip!.label).not.toContain('llama_model_load')
+    }
+  })
+
+  it('truncates a long crash line to one readable line', () => {
+    const long = 'unable to allocate ROCm0 buffer ' + 'x'.repeat(400)
+    const chip = breakerChip(withCrash('parked', long))
+    expect(chip).not.toBeNull()
+    const suffix = chip!.tooltip.split('Last crash: ')[1]
+    expect(suffix.length).toBeLessThanOrEqual(161) // 160 + ellipsis
+    expect(suffix.endsWith('…')).toBe(true)
+  })
+
+  it('tolerates an absent, empty, or non-string crash line', () => {
+    expect(
+      breakerChip(withBreaker({ state: 'parked', failures: 2, retry_after_s: 30 }))!
+        .tooltip
+    ).not.toContain('Last crash')
+    expect(breakerChip(withCrash('parked', '   '))!.tooltip).not.toContain(
+      'Last crash'
+    )
+    expect(breakerChip(withCrash('parked', 42))!.tooltip).not.toContain(
+      'Last crash'
+    )
+  })
+})

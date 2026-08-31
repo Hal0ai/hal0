@@ -12,6 +12,10 @@ Interface contract:
 
     is_log_noise(line) -> bool
         True for high-frequency heartbeat lines with no diagnostic value.
+    extract_crash_line(text) -> str | None
+        Pure: the single decisive error line out of a journal tail, or None.
+    read_crash_line(unit, lines=120) -> str | None
+        One-shot tail + extraction + redaction. Never raises.
     read_tail(unit, lines, quiet=True) -> tuple[str, str | None]
         One-shot ``journalctl -n`` tail. Returns ``(logs_text, hint)`` where
         ``hint`` is a non-None reason string when the tail is empty/best-effort
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import shutil
 from collections.abc import AsyncIterator
 
@@ -50,6 +55,104 @@ LOG_NOISE_MARKERS: tuple[str, ...] = (
 def is_log_noise(line: str) -> bool:
     """True for high-frequency heartbeat lines with no diagnostic value."""
     return any(marker in line for marker in LOG_NOISE_MARKERS)
+
+
+# ── decisive crash line extraction ───────────────────────────────────────────
+#
+# When a slot container dies during model load, the WHY lives only in
+# ``journalctl -u hal0-slot@<name>`` — the dashboard showed a crash-breaker
+# chip with no reason. On a load failure the manager tails the unit's journal
+# and stamps the single decisive line onto the slot's state extra
+# (``last_crash_line``), which rides slot metadata to ``GET /api/slots`` and
+# the breaker chip's tooltip. Everything here is best-effort: an unreadable
+# journal yields ``None``, never an exception.
+
+#: ``journalctl -o short-iso`` line prefix: ``<iso-ts> <host> <ident>[pid]: ``
+#: (the pid suffix is optional — kernel/systemd lines omit it).
+_JOURNAL_PREFIX_RE = re.compile(r"^\S+ \S+ \S+?(?:\[\d+\])?: ")
+
+#: Substrings (matched case-insensitively on the prefix-stripped message) that
+#: mark an ENGINE error line — the actual reason a model load died. Ordered
+#: for readers, not priority: the LAST matching line in the tail wins, since
+#: the tail ends at the death.
+_CRASH_LINE_MARKERS: tuple[str, ...] = (
+    "error loading model",  # llama_model_load: error loading model: …
+    "failed to load model",
+    "error while loading",
+    "unable to allocate",  # unable to allocate ROCm0 buffer
+    "failed to allocate",
+    "out of memory",
+)
+
+#: The in-container hal0-runner wrapper's own summary lines (#2037/#2126/#1936)
+#: are a good FALLBACK when the engine printed no recognisable error — but its
+#: exit-translation/remediation boilerplate is not the reason itself.
+_RUNNER_PREFIX = "hal0-runner: "
+_RUNNER_BOILERPLATE: tuple[str, ...] = (
+    "translating to exit 64",
+    "refusing to start rather than crashing",
+    "expected /dev/kfd",
+    "pass the devices through",
+)
+
+#: Stored-line cap. One journal line can be a multi-KB dump (llama.cpp prints
+#: whole tensor lists); the state extra / API payload only needs the head.
+CRASH_LINE_MAX = 300
+
+
+def _strip_journal_prefix(line: str) -> str:
+    """Drop the ``short-iso`` timestamp/host/ident prefix, if present."""
+    return _JOURNAL_PREFIX_RE.sub("", line, count=1)
+
+
+def extract_crash_line(text: str) -> str | None:
+    """The single decisive error line out of a journal tail, or ``None``. Pure.
+
+    Preference order:
+
+      1. the LAST engine error line (``error loading model``, ``unable to
+         allocate …``, or an explicit ``E ``-level line) — the engine names
+         the actual fault;
+      2. else the last ``hal0-runner:`` summary line that isn't exit-code
+         translation boilerplate — the wrapper at least names the failure
+         shape (died during load, killed by SIGILL, no GPU devices, …);
+      3. else ``None`` — no line is better than a guessed one.
+    """
+    messages = [_strip_journal_prefix(ln).strip() for ln in text.splitlines()]
+    messages = [m for m in messages if m]
+    for msg in reversed(messages):
+        lowered = msg.lower()
+        if msg.startswith("E ") or any(marker in lowered for marker in _CRASH_LINE_MARKERS):
+            return msg[:CRASH_LINE_MAX]
+    for msg in reversed(messages):
+        if msg.startswith(_RUNNER_PREFIX) and not any(
+            marker in msg for marker in _RUNNER_BOILERPLATE
+        ):
+            return msg[:CRASH_LINE_MAX]
+    return None
+
+
+async def read_crash_line(unit: str, lines: int = 120) -> str | None:
+    """Tail *unit*'s journal and return the decisive crash line, redacted.
+
+    Best-effort by contract — the caller is a load-failure path that must
+    never fail harder because the journal is unreadable: any problem here
+    (journalctl missing/timed out, empty journal, no recognisable line)
+    answers ``None``. Redacted with the same text scrubber the ``/api/logs``
+    surfaces use, since the line lands in state.json and the slots API.
+    """
+    try:
+        text, _hint = await read_tail(unit, lines, quiet=True)
+        if not text:
+            return None
+        line = extract_crash_line(text)
+        if line is None:
+            return None
+        from hal0.redaction import redact_log_line
+
+        return redact_log_line(line)
+    except Exception:
+        return None
 
 
 def _suppress_proc():

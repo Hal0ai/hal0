@@ -293,10 +293,32 @@ export function imageStatusChip(slot) {
  *   parked    → err     (red — refusing loads until the trial; needs an eye)
  *   half-open → neutral (a trial will run on the next request; nothing to fix)
  *
+ * The backend also stamps `metadata.last_crash_line` — the decisive line the
+ * manager pulled from the slot unit's journal when the load died (e.g.
+ * `llama_model_load: error loading model: unknown model architecture`).
+ * When present, it is appended to the tooltip (one line, truncated) so the
+ * chip finally answers WHY instead of only "trial pending".
+ *
  * @param {object|null|undefined} slot
  * @param {number} [elapsedS] - seconds since the snapshot was fetched
  * @returns {{tone: string, label: string, tooltip: string}|null}
  */
+
+// Tooltip budget for the crash line — one readable line, not a log dump.
+const CRASH_LINE_TOOLTIP_MAX = 160;
+
+function crashLineSuffix(slot) {
+  const raw = slot?.metadata?.last_crash_line;
+  if (typeof raw !== "string") return "";
+  const line = raw.trim();
+  if (!line) return "";
+  const shown =
+    line.length > CRASH_LINE_TOOLTIP_MAX
+      ? `${line.slice(0, CRASH_LINE_TOOLTIP_MAX - 1)}…`
+      : line;
+  return ` Last crash: ${shown}`;
+}
+
 export function breakerChip(slot, elapsedS = 0) {
   const b = slot?.metadata?.breaker;
   if (!b || typeof b !== "object") return null;
@@ -306,6 +328,7 @@ export function breakerChip(slot, elapsedS = 0) {
     0,
     Math.round((Number(b.retry_after_s) || 0) - elapsedS),
   );
+  const crash = crashLineSuffix(slot);
   switch (b.state) {
     case "backoff":
       return {
@@ -313,7 +336,8 @@ export function breakerChip(slot, elapsedS = 0) {
         label: `retry in ${remaining}s`,
         tooltip:
           `Crash-loop breaker: the last load failed (${failTxt} in a row). ` +
-          `Next automatic retry in ${remaining}s.`,
+          `Next automatic retry in ${remaining}s.` +
+          crash,
       };
     case "parked":
       return {
@@ -322,7 +346,8 @@ export function breakerChip(slot, elapsedS = 0) {
         tooltip:
           `Crash-loop breaker: parked after ${failTxt} — the slot is ` +
           `deliberately refusing loads. Next automatic trial in ${remaining}s; ` +
-          `a manual Start/Restart attempts a load immediately.`,
+          `a manual Start/Restart attempts a load immediately.` +
+          crash,
       };
     case "half-open":
       return {
@@ -330,7 +355,8 @@ export function breakerChip(slot, elapsedS = 0) {
         label: "trial pending",
         tooltip:
           "Crash-loop breaker half-open: the next load request runs a single " +
-          "trial. Success closes the breaker; failure parks it again.",
+          "trial. Success closes the breaker; failure parks it again." +
+          crash,
       };
     default:
       // Unknown state (schema drift): render nothing rather than guess a
