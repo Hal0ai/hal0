@@ -1575,7 +1575,13 @@ _hal0_seam_grant() {
     # included. The old text printed the bare wrapper name, so an operator who
     # pasted it hit "command not found" (the wrapper is not on sudo's
     # secure_path) and mis-diagnosed a second time.
-    "${report}" "seam ${name}: 'sudo -n -u hal0 sudo -n ${bin} $*' exited ${probe_rc} after ${attempt} attempt(s) — the ${grant} grant does not apply, or the wrapper is stale${last:+ (${last})}"
+    #
+    # Facts first, then a HEDGED reading — the whole point of #2084 is not to
+    # name a cause we did not observe. Three different bugs land here (grant
+    # broken, wrapper stale, transient that outlasted the retry window) and
+    # this line cannot tell them apart. Keep the wording in lock-step with
+    # src/hal0/system/seam_check.py.
+    "${report}" "seam ${name}: 'sudo -n -u hal0 sudo -n ${bin} $*' exited ${probe_rc} after ${attempt} attempt(s)${last:+ (${last})} — usually the ${grant} grant not applying or a stale wrapper, though a transient outlasting the retry window reports identically"
     return 1
 }
 

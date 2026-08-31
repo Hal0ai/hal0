@@ -180,6 +180,55 @@ def test_grant_failure_is_surfaced_with_the_sudo_error(tmp_path: Path) -> None:
     assert status.ok is False
 
 
+def test_grant_failure_quotes_the_command_it_actually_ran(tmp_path: Path) -> None:
+    """#2084: the detail printed `sudo -n <name> <probe>` — a command nothing ran.
+
+    :func:`grant_probe_argv` builds two sudo hops through the wrapper's full
+    path. The bare-name form fails for an *unrelated* reason when an operator
+    pastes it (the wrapper is not on sudo's ``secure_path``), so the row sent
+    them down a second wrong path — and this detail is what ``hal0 doctor``
+    prints.
+    """
+    bin_dir, sudoers = _install(tmp_path, "hal0-update")
+    run = FakeRun(returncode=1, stderr="sudo: a password is required")
+
+    status = probe_seam(
+        _UPDATE, bin_dir=bin_dir, sudoers_dir=sudoers, euid=0, run=run, stat=_stat_as_root
+    )
+
+    assert " ".join(run.calls[0]) in status.grant_detail
+    assert f"sudo -n -u hal0 sudo -n {bin_dir / 'hal0-update'} check" in status.grant_detail
+    assert "sudo -n hal0-update check" not in status.grant_detail
+
+
+def test_grant_failure_wording_stays_in_lock_step_with_the_shell_copy(tmp_path: Path) -> None:
+    """Same finding, same words. The two copies are meant to agree (#1465, #2084).
+
+    Both hedge, too: a probe can fail because the grant is broken, because the
+    wrapper is stale, or — installer side — because the write→verify transient
+    outlasted the retry window. All three print the same line, so neither copy
+    may claim to have told them apart.
+    """
+    bin_dir, sudoers = _install(tmp_path, "hal0-update")
+
+    status = probe_seam(
+        _UPDATE,
+        bin_dir=bin_dir,
+        sudoers_dir=sudoers,
+        euid=0,
+        run=FakeRun(returncode=1, stderr="sudo: a password is required"),
+        stat=_stat_as_root,
+    )
+
+    shared = "grant not applying or a stale wrapper"
+    preflight = (
+        Path(__file__).resolve().parents[2] / "installer" / "lib" / "preflight.sh"
+    ).read_text()
+    assert shared in status.grant_detail
+    assert shared in preflight
+    assert "does not apply" not in status.grant_detail  # unhedged; we never observed it
+
+
 def test_working_grant_passes_every_fact(tmp_path: Path) -> None:
     bin_dir, sudoers = _install(tmp_path, "hal0-update")
 
