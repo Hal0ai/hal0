@@ -97,6 +97,8 @@ src/hal0/
 ├── memory/          # Hindsight engine client/provider + MemoryRecord
 ├── mcp/             # hal0-admin + hal0-memory FastMCP servers
 ├── omni_router/     # client-side OpenAI tool-calling loop
+├── components/      # release-pinned component catalog + converge arms
+│                    #   (spec: update system)
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
 ├── voice/           # emptied in #620 (in-process Moonshine/Kokoro
@@ -109,6 +111,18 @@ src/hal0/
 The dedicated auth packages (`auth/`, `api/auth/`,
 `api/middleware/auth.py`) were removed: hal0-api binds `0.0.0.0:8080`
 open, and LAN trust plus an upstream reverse proxy own authentication.
+
+**Component updates.** `components/` catalogs the four hal0-shipped
+components that converge alongside a `hal0 update`: OpenWebUI (the
+podman companion container), runner images (slot toolbox images),
+Hermes, and Hindsight. None of them float independently — each
+component's pin travels *inside* the hal0 release, so converging a
+box to a release converges its components too (the final pass of
+`Updater.commit`'s post-swap migrations, `hal0.components.runner.
+converge_components`). `hal0 update status` reports installed vs.
+pinned version and convergence state per component; `hal0 update
+component <id>` re-runs one component's converge arm without a full
+update.
 
 The capabilities layer remains a **thin overlay** on the flat slot
 layer as a UX surface, not a replacement. Slot configs under
@@ -341,10 +355,14 @@ and the composite `hal0` upstream config — all idempotently.
   lifespan-scoped `ApprovalQueue`. Audit rows flow through journald via
   the `hal0.mcp.audit` logger; `GET /api/agents/{name}/activity` reads
   them back for the dashboard Activity tab.
-* **Skills catalog** — `GET /api/agents/skills` returns the static
-  catalog (`HERMES_TOOL_CATALOG` + `HAL0_MCP_TOOL_CATALOG`) the
-  dashboard sidebar renders. Bumps ride the weekly `hermes-sdk-diff`
-  drift PRs (see [Upstream pin](#upstream-pin)).
+* **Skills catalog** — `GET /api/agents/skills`
+  (`src/hal0/api/routes/agents.py`) returns the dashboard's Agent →
+  Skills tab catalogue, sourced from the static `AGENT_SKILLS` tuple in
+  `hal0.agents.persona` (a v0.3 UI listing; per-skill call counts still
+  stub to zero pending a registry-backed follow-up, #227). This is not
+  the MCP tool list: the admin MCP server's real tool catalog lives in
+  `src/hal0/mcp/admin.py`, documented in
+  [`docs/reference/mcp-tools.mdx`](./docs/reference/mcp-tools.mdx).
 * **Identity** — an agent identity card is published once into the
   `agents` memory namespace during first-run bootstrap and cleaned on
   uninstall. `X-hal0-Agent` is the header the proxy injects on every
@@ -362,9 +380,8 @@ and the composite `hal0` upstream config — all idempotently.
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
 | `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
-| `src/hal0/api/agents/skills.py`                | `GET /api/agents/skills`                     |
 | `src/hal0/api/agents/memory_stats.py`          | `GET /api/agents/{id}/memory/stats`          |
-| `src/hal0/api/routes/agents.py`                | install / uninstall / activity               |
+| `src/hal0/api/routes/agents.py`                | list / persona-enums / `GET /skills` / install / uninstall / activity |
 | `src/hal0/api/routes/approvals.py`             | approval inbox                               |
 | `src/hal0/api/plugins/`                        | plugin host (manifest + static assets)       |
 | `src/hal0/cli/agent_shim.py`                   | `/usr/local/bin/hal0-agent` (unit ExecStart) |

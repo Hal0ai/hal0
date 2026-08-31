@@ -1868,6 +1868,7 @@ def run_post_activation_migrations(
     skip_image_retag: bool = False,
     repair_hermes_venv: bool = True,
     upgrade_memory_engine_venv: bool = True,
+    converge_companions: bool = True,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1942,6 +1943,19 @@ def run_post_activation_migrations(
     post-swap subprocess (an actual update) always passes the default
     ``False``, so the pass still gets its shot every time a release ships.
 
+    ``converge_companions`` gates whether the component catalog
+    (:func:`hal0.components.runner.converge_components`, the final pass
+    below) is even allowed to mutate. It maps straight to that call's
+    ``apply`` kwarg: ``True`` (the default, what an actual update passes)
+    lets each arm converge; ``False`` (what :func:`check_outstanding_migrations`
+    passes) makes every arm diagnose-only, matching the boot-time posture
+    the other three flags (``skip_image_retag``, ``repair_hermes_venv``,
+    ``upgrade_memory_engine_venv``) already hold at boot. Without this flag
+    the openwebui arm — which has no dedicated "install" toggle of its own —
+    would still mutate at boot; adding an explicit kwarg here instead of
+    inferring "diagnose-only" from the other three being off keeps that
+    behaviour legible rather than implicit.
+
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned.
     """
@@ -1983,13 +1997,6 @@ def run_post_activation_migrations(
         # Non-fatal: an affected slot keeps refusing to load (the #1923
         # preflight guard) until the operator manually relabels its device.
 
-    if not skip_image_retag:
-        try:
-            retag_stale_slot_images(job_id=job_id)
-        except Exception as exc:
-            log.warning("updater.image_retag_failed", job_id=job_id, error=str(exc))
-            # Non-fatal: a stale pin just keeps the previous runner image.
-
     try:
         sanitize_model_extra_args(job_id=job_id)
     except Exception as exc:
@@ -1997,16 +2004,28 @@ def run_post_activation_migrations(
         # Non-fatal: an affected model keeps failing to launch until the
         # operator removes the managed flag in the model drawer.
 
+    # ── Component convergence (spec 2026-08-30): the catalog runs LAST for
+    # the same reason the engine pass did — hindsight (inside it) is the
+    # slowest pass and stops a companion service; every cheap pass above
+    # must land even when a component wedges. Flags carry the callers'
+    # existing semantics: boot (check_outstanding_migrations) passes
+    # engine/hermes-install/retag all off, an actual update passes them on.
     try:
-        from hal0.memory.engine_upgrade import upgrade_memory_engine
+        from hal0.components.runner import converge_components
 
-        upgrade_memory_engine(job_id=job_id, upgrade=upgrade_memory_engine_venv)
+        converge_components(
+            job_id=job_id,
+            apply=converge_companions,
+            image_retag=not skip_image_retag,
+            engine=upgrade_memory_engine_venv,
+            hermes_install=repair_hermes_venv,
+        )
     except Exception as exc:
-        log.warning("updater.memory_engine_upgrade_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: the pass itself reports operational failures as status
-        # dicts (and logs this same event with a remedy); reaching here means
-        # a genuine bug, and the box keeps its current working engine either
-        # way — never a reason to fail an update.
+        log.warning("updater.components_converge_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: each arm reports operational failures as status dicts
+        # (and logs its own event with a remedy); reaching here means a
+        # genuine bug, and the box keeps its current working components
+        # either way — never a reason to fail an update.
 
     return migration_info
 
@@ -2065,6 +2084,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
             skip_image_retag=True,
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
+            converge_companions=False,
         )
     except Exception as exc:
         log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
@@ -4180,9 +4200,9 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.seed_profiles_prune_failed",
     "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",
-    "updater.image_retag_failed",
     "updater.extra_args_sanitize_failed",
     "updater.memory_engine_upgrade_failed",
+    "updater.components_converge_failed",
 )
 
 

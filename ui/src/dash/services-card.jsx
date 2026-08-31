@@ -15,6 +15,8 @@
 
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
+import { useComponents } from '@/api/hooks/useComponents'
+import { pendingCount } from './components-pure'
 import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState, useEffect, useRef, useCallback } = React
@@ -300,13 +302,26 @@ export function ServicesCard() {
 
   const [comfyExpanded, setComfyExpanded] = useState(false)
 
+  // Task 12: "N updates pending" badge — fail-soft (older daemon without
+  // GET /api/updates/components → componentRows null → pendingCount 0, no
+  // badge, rest of the card unaffected).
+  const componentsQ = useComponents()
+  const componentRows = componentsQ.data?.components ?? null
+  const pendingN = pendingCount(componentRows)
+  const pendingBadge = pendingN > 0
+    ? <a className="chip" href="#services" data-testid="svc-pending-badge"
+        title={`${pendingN} component update${pendingN === 1 ? '' : 's'} pending`}>
+        {pendingN} update{pendingN === 1 ? '' : 's'} pending
+      </a>
+    : null
+
   // If services health pending (404 not built yet) but comfyui/status IS
   // reachable, we still show the ComfyUI row from what we know.
   const showPendingGate = pending && !comfyReachable
 
   if (showPendingGate) {
     return (
-      <DCard title="SERVICES">
+      <DCard title="SERVICES" right={pendingBadge}>
         <div className="svc-pending">source pending</div>
       </DCard>
     )
@@ -335,14 +350,14 @@ export function ServicesCard() {
 
   if (rows.length === 0 && pending) {
     return (
-      <DCard title="SERVICES">
+      <DCard title="SERVICES" right={pendingBadge}>
         <div className="svc-pending">source pending</div>
       </DCard>
     )
   }
 
   return (
-    <DCard title="SERVICES">
+    <DCard title="SERVICES" right={pendingBadge}>
       <div className="svc-list">
         {rows.map((svc) => {
           const isComfy = svc.id === 'comfyui'

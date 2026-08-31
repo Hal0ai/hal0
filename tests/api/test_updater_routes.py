@@ -11,6 +11,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -1284,3 +1285,62 @@ def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
         "convergence was not durable on disk before the restart that can kill this "
         f"process; convergence persisted by then was {convergence_at_restart_time!r}"
     )
+
+
+# ── /components (Task 8) ─────────────────────────────────────────────────────
+
+
+def test_components_returns_catalog_rows(isolated_client: TestClient) -> None:
+    resp = isolated_client.get("/api/updates/components")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {r["id"] for r in body["components"]} == {
+        "openwebui",
+        "runner-images",
+        "hermes",
+        "hindsight",
+    }
+    assert isinstance(body["pending"], int)
+
+
+# ── /components/{id}/converge (Task 9) ───────────────────────────────────────
+
+
+def test_component_converge_unknown_id_404(isolated_client: TestClient) -> None:
+    resp = isolated_client.post("/api/updates/components/nope/converge")
+    assert resp.status_code == 404
+
+
+def test_component_converge_returns_job_and_completes(isolated_client: TestClient) -> None:
+    with patch(
+        "hal0.components.runner.converge_component",
+        return_value={"status": "upgraded", "from": "a", "to": "b"},
+    ):
+        resp = isolated_client.post("/api/updates/components/openwebui/converge")
+        assert resp.status_code == 202
+        job_id = resp.json()["id"]
+        # in-process task: poll until terminal
+        for _ in range(50):
+            job = isolated_client.get(f"/api/updates/status/{job_id}").json()
+            if job["state"] in ("applied", "failed"):
+                break
+            time.sleep(0.05)
+    assert job["state"] == "applied"
+    assert job["component_result"]["status"] == "upgraded"
+
+
+def test_component_converge_busy_409(isolated_client: TestClient) -> None:
+    # Seed a running job into the registry the route reads.
+    app = isolated_client.app
+    app.state.update_jobs = {"j1": {"id": "j1", "state": "running"}}
+    resp = isolated_client.post("/api/updates/components/hindsight/converge")
+    assert resp.status_code == 409
+
+
+# ── components_pending on /check (Task 10) ───────────────────────────────────
+
+
+def test_check_carries_components_pending(isolated_client: TestClient) -> None:
+    resp = isolated_client.get("/api/updates/check")
+    assert resp.status_code == 200
+    assert isinstance(resp.json()["components_pending"], int)

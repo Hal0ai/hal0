@@ -129,6 +129,32 @@ def test_classification_buckets_match_adr_0004() -> None:
         assert t in read
 
 
+def test_component_update_tools_classified_per_spec_1b() -> None:
+    """Component-updates spec (2026-08-30 §1b): three MCP tools ride the
+    admin route-alias map — component_status/update_check (autonomous read)
+    and component_converge (gated). `update_apply` was ruled OUT during
+    implementation: EXCLUDED_TOOLS["updater_apply"] stands as-is (self-update
+    needs its own POLICY_NO_LOOSEN + operator-confirmation design), so no
+    tool or alias by that name should ever appear."""
+    alias_tools = {t for names in admin.TOOL_NAME_ALIASES.values() for t in names}
+    for t in ("component_status", "update_check", "component_converge"):
+        assert t in alias_tools, f"{t} missing a TOOL_NAME_ALIASES entry"
+
+    assert {"component_status", "update_check"} <= admin.AUTONOMOUS_READ_TOOLS
+    assert "component_converge" in admin.GATED_TOOLS
+
+    # No tool lives in two tiers.
+    assert admin.AUTONOMOUS_READ_TOOLS.isdisjoint(admin.GATED_TOOLS)
+    assert admin.AUTONOMOUS_READ_TOOLS.isdisjoint(admin.AUTONOMOUS_WRITE_TOOLS)
+    assert admin.GATED_TOOLS.isdisjoint(admin.AUTONOMOUS_WRITE_TOOLS)
+
+    # update_apply intentionally never shipped as a tool or a route alias.
+    catalog = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
+    assert "update_apply" not in alias_tools
+    assert "update_apply" not in catalog
+    assert "updater_apply" in admin.EXCLUDED_TOOLS
+
+
 def test_is_gated_memory_delete_branches_on_id_count() -> None:
     assert admin.is_gated("memory_delete", {"ids": ["a"]}) is False
     assert admin.is_gated("memory_delete", {"ids": ["a", "b"]}) is True
@@ -248,6 +274,9 @@ def test_open_world_tools_are_the_documented_set() -> None:
     runner_image_sync (GHCR discovery probe), mcp_server_install
     (may fetch a manifest from an arbitrary URL), and profile_generate
     (reaches HuggingFace when given hf_repo, like model_inspect).
+    Component-updates spec (2026-08-30 §1b) adds update_check — same
+    GET /api/updates/check route as updater_check, so the same release-
+    manifest fetch applies.
     Anything else with openWorldHint=True needs a deliberate ADR update."""
     open_world = {name for name, ann in admin._ANNOTATIONS.items() if ann.openWorldHint}
     assert open_world == {
@@ -255,6 +284,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
         "model_update",
         "model_inspect",
         "updater_check",
+        "update_check",
         "hf_search",
         "comfyui_models_fetch",
         "slot_pull_image",

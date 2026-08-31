@@ -89,6 +89,16 @@ class UpdateEditableRefused(Hal0Error):
     status = 409
 
 
+class ComponentNotFound(Hal0Error):
+    code = "system.component_not_found"
+    status = 404
+
+
+class ComponentConvergeBusy(Hal0Error):
+    code = "system.component_converge_busy"
+    status = 409
+
+
 def _refuse_if_editable() -> None:
     """Preflight: hard-refuse an update on an editable/dev install (audit 4.1).
 
@@ -680,6 +690,15 @@ async def check_updates(request: Request) -> dict[str, Any]:
 
     # A revoked (yanked) latest is never offered as an available update.
     update_available = bool(latest) and not revoked and _is_newer(latest, __version__)
+
+    def _components_pending() -> int:
+        try:
+            from hal0.components.status import component_status_snapshot
+
+            return int(component_status_snapshot()["pending"])
+        except Exception:
+            return 0  # courtesy field — never fail /check over it
+
     # #1585: the one-shot v1.0 profile-catalog reset runs inside commit(), so a
     # box updated 0.9.8→1.0 by the OLD daemon (which had no reset) lands
     # converged-except-for-this and then goes silent — `hal0 update` says
@@ -695,6 +714,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "manifest_url": url,
         "manifest": manifest if isinstance(manifest, dict) else {},
         "profile_reset": await asyncio.to_thread(profile_reset_status),
+        "components_pending": await asyncio.to_thread(_components_pending),
     }
 
 
@@ -1024,6 +1044,106 @@ async def set_channel(request: Request) -> dict[str, str]:
                 details={"error": str(exc)},
             ) from exc
     return {"channel": channel}
+
+
+# ── /components (spec 2026-08-30 §3) ───────────────────────────────────────
+
+
+@router.get("/components")
+async def list_components(request: Request) -> dict[str, Any]:
+    """Per-component version/converge status (catalog x state x live probes)."""
+    from hal0.components.status import component_status_snapshot
+
+    return await asyncio.to_thread(component_status_snapshot)
+
+
+async def _run_component_job(
+    jobs: dict[str, dict[str, Any]], job_id: str, component_id: str, arm_kwargs: dict[str, Any]
+) -> None:
+    from hal0.components.registry import component_by_id
+    from hal0.components.runner import converge_component
+
+    job = jobs[job_id]
+    job["state"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    comp = component_by_id(component_id)
+    try:
+        result = await asyncio.to_thread(converge_component, comp, job_id=job_id, **arm_kwargs)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["error"] = str(exc)
+    else:
+        job["component_result"] = result
+        failed = result.get("status") in ("build_failed", "snapshot_failed", "rolled_back")
+        job["state"] = "failed" if failed else "applied"
+        if failed:
+            job["error"] = result.get("error")
+    finally:
+        job["updated_at"] = time.time()
+        _persist_job(job)
+
+
+@router.post("/components/{component_id}/converge", status_code=202)
+async def converge_component_route(component_id: str, request: Request) -> dict[str, Any]:
+    """Re-run one component's converge arm (spec §3 — the retry surface)."""
+    from hal0.components.registry import component_by_id
+    from hal0.components.runner import _arm_kwargs
+
+    comp = component_by_id(component_id)
+    if comp is None:
+        raise ComponentNotFound(
+            f"no component {component_id!r}", details={"component": component_id}
+        )
+    # Parse the body BEFORE the busy check, deliberately: `await
+    # request.json()` yields control back to the event loop, so if the busy
+    # check ran first, two concurrent converge POSTs could both observe an
+    # empty/idle `jobs` dict, both pass the check, and both register + spawn
+    # a job — running two converge arms for the same component at once.
+    # With no `await` between the check and the job-dict write below, the
+    # check-then-register span is atomic from the event loop's perspective.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    jobs = _update_jobs(request)
+    if any(j.get("state") in ("queued", "running") for j in jobs.values()):
+        raise ComponentConvergeBusy(
+            "an update or converge job is already in flight",
+            details={"component": component_id},
+        )
+    # Reuse runner._arm_kwargs so the per-component flag mapping (e.g. the
+    # hindsight arm's ``upgrade`` kwarg spelling) isn't duplicated here.
+    # job_id is dropped from the base mapping and passed explicitly by
+    # ``_run_component_job`` once the job id is known.
+    arm_kwargs: dict[str, Any] = _arm_kwargs(
+        comp, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+    )
+    arm_kwargs.pop("job_id", None)
+    if component_id == "openwebui" and isinstance(body, dict):
+        target = body.get("target")
+        if isinstance(target, str):
+            from hal0.openwebui.image_pin import normalize_digest
+
+            normalized = normalize_digest(target)
+            if normalized is None:
+                raise BadRequest("target must be a sha256 digest", details={"target": target})
+            arm_kwargs["target_digest"] = normalized
+        if body.get("clear_override") is True:
+            arm_kwargs["clear_override"] = True
+
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {
+        "id": job_id,
+        "state": "queued",
+        "phase": f"converge:{component_id}",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "error": None,
+    }
+    _persist_job(jobs[job_id])
+    _spawn_update_task(request, _run_component_job(jobs, job_id, component_id, arm_kwargs))
+    return dict(jobs[job_id])
 
 
 # ── /slot-drift + /restart-slots (installer-setup WS-J, #1111) ───────────────
