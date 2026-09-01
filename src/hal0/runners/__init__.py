@@ -196,7 +196,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # this image builds from charlie12345/ROCmFPX @ c49ebdbd (2026-08-22),
         # which predates the merge — the model fails at load with
         # `unknown model architecture: 'qwen4exp'`. Serving it needs the
-        # pin-only combined-upstream image (see ARCH_ALTERNATIVE_IMAGES).
+        # strix runner (Vulkan-only, see ARCH_ALTERNATIVE_IMAGES).
         # DELETE this entry when the fork syncs qwen4exp (#2118's checklist).
         unsupported_archs=("qwen4exp",),
         title="Standard",
@@ -385,13 +385,13 @@ RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
 #: GHCR repo path with the host stripped) of an image that IS known to load
 #: it. Consulted by the model↔runner arch fit-check so the WARN can name a
 #: concrete escape hatch (the slot's ``image_pin``) instead of a dead end.
-#: ``qwen4exp`` → the pin-only combined-upstream variant (pristine upstream
-#: llama.cpp @ c841aeeb, no fork patches — packaging/runner/upstream/
-#: manifest.toml, hal0#2118). The hint only renders when the catalogue
-#: actually carries the id, so a box that never synced it degrades to the
-#: bare warning. Entries retire together with the matching
+#: ``qwen4exp`` → the strix runner's image (Vulkan-only registry runner,
+#: ADR-0006 successor to the retired pin-only combined-upstream variant —
+#: packaging/runner/strix/, hal0#2118/#2182). The hint only renders when the
+#: catalogue actually carries the id, so a box that never synced it degrades
+#: to the bare warning. Entries retire together with the matching
 #: ``unsupported_archs`` entry.
-ARCH_ALTERNATIVE_IMAGES: dict[str, str] = {"qwen4exp": "hal0ai/hal0-combined-upstream"}
+ARCH_ALTERNATIVE_IMAGES: dict[str, str] = {"qwen4exp": "hal0ai/hal0-strix-vulkan"}
 
 
 def runner_supports_arch(runner: Runner, arch: str | None) -> bool:

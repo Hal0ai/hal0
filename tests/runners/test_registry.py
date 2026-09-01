@@ -263,8 +263,9 @@ def test_arch_alternative_images_pair_with_a_denylist_entry() -> None:
     denylisted = {a for r in RUNNER_IMAGES.values() for a in r.unsupported_archs}
     for arch in ARCH_ALTERNATIVE_IMAGES:
         assert arch in denylisted
-    # And the #2118 pairing concretely: qwen4exp → the combined-upstream id.
-    assert ARCH_ALTERNATIVE_IMAGES["qwen4exp"] == "hal0ai/hal0-combined-upstream"
+    # And the #2118 pairing concretely: qwen4exp → the strix runner image
+    # (ADR-0006: the pin-only combined-upstream variant is retired).
+    assert ARCH_ALTERNATIVE_IMAGES["qwen4exp"] == "hal0ai/hal0-strix-vulkan"
 # --- display metadata + single-backend invariant (runtime-cascade D2/D5) --- #
 
 
