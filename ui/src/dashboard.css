@@ -53,6 +53,7 @@
   --dev-rocm:     #d76b6b;
   --dev-vulkan:   #7fb8ff;
   --dev-cpu:      #9c9c95;
+  --dev-cuda:     #8fce6f;  /* CUDA lane chip (runtime cascade) */
   --dev-npu:      #c896ff;
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
 
@@ -3652,6 +3653,29 @@ select.npu-sel {
 .pf-input::placeholder { color: var(--fg-5); }
 .pf-textarea { resize: vertical; line-height: 1.5; }
 select.pf-input { cursor: pointer; }
+
+/* Profile card runtime facts: backend chips in the title row (one solid
+   single-hue chip PER lane — never a blended dual-backend pill; muted when
+   the profile pins nothing to claim), the runtime's title+blurb one-liner,
+   and the install-state chip where the bench metric sits. */
+.pf-title-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 3px; }
+.pf-title-row .stk-lib-name { margin-bottom: 0; }
+.pf-be-row { display: inline-flex; align-items: center; gap: 4px; }
+.pf-be {
+  font-size: 9px; letter-spacing: 0.05em; border-radius: 4px; padding: 1px 6px;
+  white-space: nowrap; color: var(--bk, var(--fg-3));
+  background: color-mix(in srgb, var(--bk, var(--fg-5)) 18%, transparent);
+}
+.pf-runtime-line { font-size: 11px; color: var(--fg-3); line-height: 1.35; margin-top: 4px; }
+.pf-state {
+  font-size: 9.5px; white-space: nowrap; border-radius: 999px; padding: 1px 8px;
+  border: 1px solid var(--line); background: transparent; color: var(--fg-3);
+}
+.pf-state.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+.pf-state.warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
+.pf-state.err { color: var(--err); border-color: var(--err-line); background: var(--err-soft); }
+button.pf-state { cursor: pointer; }
+button.pf-state:disabled { cursor: default; opacity: 0.65; }
 
 /* Runtime surface (profiles overhaul): the drawer's hint / consequence /
    pull-affordance stack under the Runtime select, and the Advanced

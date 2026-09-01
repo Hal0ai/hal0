@@ -98,7 +98,7 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
 }))
 
 await import('../primitives.jsx')
-const { ProfileDrawer } = await import('../profiles.jsx')
+const { ProfileDrawer, ProfileCard } = await import('../profiles.jsx')
 
 // system-info `backends` fixture — the Task 2 row shape the Runtime select,
 // the card chips and the import preview all read.
@@ -342,5 +342,103 @@ describe('ProfileDrawer runtime select (U2)', () => {
     const submit = second.host.querySelector('[data-testid="pf-btn-submit"]') as HTMLButtonElement
     expect(submit.disabled).toBe(false)
     act(() => second.root.unmount())
+  })
+})
+
+// ── Task U3: runtime-aware profile cards ─────────────────────────────────────
+
+const NOOP = { onEdit: () => {}, onClone: () => {}, onDelete: () => {}, onExport: () => {} }
+
+function card(p: Record<string, unknown>) {
+  return mount(React.createElement(ProfileCard, { p, index: 0, ...NOOP }))
+}
+
+describe('ProfileCard runtime facts (U3)', () => {
+  it('a pinned dual-backend runtime renders one chip PER lane, plus state and blurb', () => {
+    const { host, root } = card({
+      name: 'coding', intent: 'Coder tune', runner: 'rocmfpx',
+      runtime_family: 'llama-server', quant: 'Q6_K', flags: '--jinja', used_by: ['agent'],
+    })
+    const chips = Array.from(
+      host.querySelectorAll('[data-testid="pf-runner-badge-coding"] .pf-be'),
+    ).map((c) => c.textContent)
+    expect(chips).toEqual(['ROCm', 'Vulkan'])
+    expect(host.querySelector('[data-testid="pf-runtime-state-coding"]')?.textContent).toContain(
+      'installed',
+    )
+    expect(host.querySelector('[data-testid="pf-runtime-line-coding"]')?.textContent).toBe(
+      'Standard — Runs every model type, incl. FPX quants.',
+    )
+    // No layout regression: the existing rows and footer tags stay put.
+    expect(host.textContent).toContain('Q6_K')
+    expect(host.textContent).toContain('--jinja')
+    expect(host.textContent).toContain('used by 1')
+    act(() => root.unmount())
+  })
+
+  it('an unpinned profile gets the muted AUTO chip, a "not pinned" state and plain words', () => {
+    const { host, root } = card({ name: 'chat', intent: 'Generic chat', runtime_family: 'llama-server' })
+    const badge = host.querySelector('[data-testid="pf-runner-badge-chat"]') as HTMLElement
+    expect(Array.from(badge.querySelectorAll('.pf-be')).map((c) => c.textContent)).toEqual(['AUTO'])
+    expect(badge.querySelector('.pf-be')?.getAttribute('style')).toBeNull()
+    expect(host.querySelector('[data-testid="pf-runtime-state-chat"]')?.textContent).toBe('not pinned')
+    expect(host.querySelector('[data-testid="pf-runtime-line-chat"]')?.textContent).toMatch(
+      /Auto — runs on whatever runtime the slot already uses/,
+    )
+    act(() => root.unmount())
+  })
+
+  it('an unpinned singleton-engine profile also carries its runtime family', () => {
+    const { host, root } = card({ name: 'comfyui', runtime_family: 'comfyui' })
+    expect(
+      Array.from(host.querySelectorAll('[data-testid="pf-runner-badge-comfyui"] .pf-be')).map(
+        (c) => c.textContent,
+      ),
+    ).toEqual(['AUTO', 'comfyui'])
+    act(() => root.unmount())
+  })
+
+  it('a runtime this box has no entry for renders "unknown", never an invented backend', () => {
+    const { host, root } = card({ name: 'legacy', runner: 'rocm-dnse', runtime_family: 'llama-server' })
+    expect(
+      Array.from(host.querySelectorAll('[data-testid="pf-runner-badge-legacy"] .pf-be')).map(
+        (c) => c.textContent,
+      ),
+    ).toEqual(['unknown'])
+    act(() => root.unmount())
+  })
+
+  it('the not-pulled chip pulls the runtime image, spins while in flight, and reverts on failure', () => {
+    const first = card({ name: 'strixy', runner: 'strix', runtime_family: 'llama-server' })
+    const chip = first.host.querySelector('[data-testid="pf-runtime-state-strixy"]') as HTMLButtonElement
+    expect(chip.tagName).toBe('BUTTON')
+    expect(chip.textContent).toContain('not pulled')
+    act(() => chip.click())
+    expect(pullStarts).toEqual([['strix-vulkan', '0831']])
+    act(() => first.root.unmount())
+
+    pullBox.current = { state: 'running', inFlight: true, error: null, pct: 12 }
+    const busy = card({ name: 'strixy', runner: 'strix', runtime_family: 'llama-server' })
+    const spinning = busy.host.querySelector(
+      '[data-testid="pf-runtime-state-strixy"]',
+    ) as HTMLButtonElement
+    expect(spinning.disabled).toBe(true)
+    expect(spinning.textContent).toMatch(/pulling/i)
+    act(() => busy.root.unmount())
+
+    pullBox.current = {
+      state: 'failed',
+      inFlight: false,
+      error: { code: 'runner_image.pull_failed', message: 'registry unreachable' },
+      pct: null,
+    }
+    const failed = card({ name: 'strixy', runner: 'strix', runtime_family: 'llama-server' })
+    const reverted = failed.host.querySelector(
+      '[data-testid="pf-runtime-state-strixy"]',
+    ) as HTMLButtonElement
+    expect(reverted.textContent).toContain('not pulled')
+    expect(reverted.disabled).toBe(false)
+    expect(reverted.title).toContain('registry unreachable')
+    act(() => failed.root.unmount())
   })
 })

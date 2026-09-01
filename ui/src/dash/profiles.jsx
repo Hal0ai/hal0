@@ -75,17 +75,10 @@ const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp
 
 function bk(name, meta) { return meta[name] || meta.cpu; }
 
-// Display backend for a profile: the explicit GPU backend (rocm|vulkan) when
-// set, otherwise mapped from device_class so npu/cpu/img still get a hue.
-// (spec-hw-slot-ownership §3: profiles no longer carry an image, so the old
-// vulkan-from-image-string inference is gone.)
-function backendOf(p, meta) {
-  if (p.backend && meta[p.backend]) return p.backend;
-  if (p.device_class === 'img') return 'img';
-  if (p.device_class === 'npu') return 'npu';
-  if (p.device_class === 'cpu') return 'cpu';
-  return 'cpu';
-}
+// (backendOf() retired with the card's device-hued chip: a profile's INERT
+// backend/device_class fit hint is not the runtime it carries, and the card
+// now shows the runtime's real lanes instead of a hue derived from a
+// match-only field.)
 
 // ── runtime vocabulary ───────────────────────────────────────────────────────
 //
@@ -164,14 +157,48 @@ function runnerTitleFor(key, backends) {
   return backends?.[key]?.title || key;
 }
 
-function runtimeLabel(p) {
-  return {
-    'llama-server': 'llama-server · slot hardware',
-    flm: 'FLM · slot binary',
-    kokoro: 'Kokoro · slot binary',
-    qwen3tts: 'Qwen3-TTS · slot binary',
-    comfyui: 'ComfyUI · slot binary',
-  }[p.runtime_family] || 'slot-selected runtime';
+// Backend chips for a profile's title row. ONE HUE PER BACKEND, ONE CHIP PER
+// BACKEND: a dual-backend runtime renders two chips side by side, never a
+// blended "ROCm + Vulkan" pill — the chip row is literally the list of lanes
+// the runtime can run on. A profile that pins nothing makes no backend claim,
+// so it gets the muted AUTO chip, joined by its runtime family when that
+// family is a singleton engine rather than the generic llama-server (the
+// engine is then a structural fact of the profile, not a runtime it chose).
+// Replaces the old runtimeLabel() "family · slot binary" chip, which named a
+// vocabulary ("binary") the operator surface no longer speaks.
+export function runtimeChips(p, backends) {
+  const key = p?.runner;
+  if (!key) {
+    const chips = [{ key: 'auto', label: 'AUTO', hue: null }];
+    if (p?.runtime_family && p.runtime_family !== 'llama-server')
+      chips.push({ key: 'family', label: p.runtime_family, hue: null });
+    return chips;
+  }
+  const row = backends?.[key];
+  if (!row) return [{ key: 'unknown', label: 'unknown', hue: null }];
+  const lanes = runnerLanes(row);
+  if (lanes.length === 0) return [{ key: 'auto', label: 'AUTO', hue: null }];
+  return lanes.map((l) => ({ key: l, label: LANE_TITLE[l] || l, hue: LANE_HUE[l] || null }));
+}
+
+// Install state of the runtime a profile pins, in the dropdown's vocabulary.
+export function runtimeState(p, backends) {
+  if (!p?.runner) return { label: 'not pinned', tone: '' };
+  const row = backends?.[p.runner];
+  if (!row) return { label: 'unknown', tone: '' };
+  if (row.state === 'installed') return { label: '● installed', tone: 'ok' };
+  if (row.state === 'installable') return { label: '○ not pulled', tone: 'warn', pullable: true };
+  return { label: 'unavailable', tone: 'err' };
+}
+
+// The one-liner under the intent: the registry's own title + blurb, the same
+// sentence the slot drawer shows for that runtime. An unpinned profile says
+// so in words rather than by omission.
+function runtimeLine(p, backends) {
+  if (!p?.runner) return 'Auto — runs on whatever runtime the slot already uses.';
+  const title = runnerTitleFor(p.runner, backends);
+  const blurb = backends?.[p.runner]?.blurb;
+  return blurb ? `${title} — ${blurb}` : title;
 }
 
 // ── inline pull affordance ───────────────────────────────────────────────────
@@ -251,12 +278,40 @@ function PfRow({ label, value, hue }) {
   );
 }
 
+// Install-state chip. A not-pulled runtime is fixable where the state is
+// read: the chip itself becomes the Pull button (its own component so the
+// pull hooks mount only on the cards that offer it). A failed pull reverts
+// the chip and carries the reason in its tooltip — it changes nothing about
+// the profile.
+function RuntimePullChip({ name, runnerKey, backends }) {
+  const pull = useRunnerPull(runnerKey, backends);
+  return (
+    <button type="button" className="pf-state mono warn" onClick={pull.start}
+      disabled={pull.inFlight || !pull.target}
+      title={pull.error ? `Pull failed — ${pull.error}` : 'Pull this runtime image now'}
+      data-testid={`pf-runtime-state-${name}`}>
+      {pull.inFlight ? '◌ pulling…' : '○ not pulled'}
+    </button>
+  );
+}
+
+function RuntimeStateChip({ p, backends }) {
+  const st = runtimeState(p, backends);
+  if (st.pullable) return <RuntimePullChip name={p.name} runnerKey={p.runner} backends={backends} />;
+  return (
+    <span className={'pf-state mono' + (st.tone ? ' ' + st.tone : '')}
+      data-testid={`pf-runtime-state-${p.name}`}>{st.label}</span>
+  );
+}
+
 // Profile card — adopts the Stacks library-card shell (.stk-lib-*) so the
-// Profiles and Stacks grids read as one family. Same data + actions as before.
-function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
-  const BACKEND_META = useBackendMeta();
-  const meta = bk(backendOf(p, BACKEND_META), BACKEND_META);
+// Profiles and Stacks grids read as one family. Same data + actions as before,
+// plus the runtime the profile carries: backend chips in the title row,
+// install state where the metric sits, title + blurb under the intent.
+export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
   const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const chips = runtimeChips(p, backends);
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
@@ -267,25 +322,24 @@ function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
     <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms' }}>
       <div className="stk-lib-h">
         <div className="stk-lib-id">
-          <div className="stk-lib-name">{p.name}</div>
+          <div className="pf-title-row">
+            <span className="stk-lib-name">{p.name}</span>
+            <span className="pf-be-row" data-testid={`pf-runner-badge-${p.name}`}
+              title={p.runner ? `runtime → ${p.runner}` : 'no runtime pinned'}>
+              {chips.map(c => (
+                <span key={c.key} className="pf-be mono" style={c.hue ? { '--bk': c.hue } : null}>{c.label}</span>
+              ))}
+            </span>
+          </div>
           <div className="stk-lib-intent">
             {intentOf(p)}{p.cloned_from && <span className="pf-based mono"> · ↳ {p.cloned_from}</span>}
           </div>
+          <div className="pf-runtime-line" data-testid={`pf-runtime-line-${p.name}`}>
+            {runtimeLine(p, backends)}
+          </div>
         </div>
         <div className="pf-card-meta">
-          <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
-            {runtimeLabel(p)}
-          </span>
-          {/* Runtime badge (Task 10 D4): only when the profile pins a runner —
-              reuses this card's own backend hue (`meta.color`, the same dot
-              idiom the chip above and the drawer footer already use) so a
-              runner-carrying profile reads as one family with its backend. */}
-          {p.runner && (
-            <span className="pf-drawer-preview mono" style={{ '--bk': meta.color }}
-              title={`runtime → ${p.runner}`} data-testid={`pf-runner-badge-${p.name}`}>
-              <span className="pf-chip-dot" />{runnerTitleFor(p.runner, systemInfoQuery.data?.backends)}
-            </span>
-          )}
+          <RuntimeStateChip p={p} backends={backends} />
           {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
       </div>
