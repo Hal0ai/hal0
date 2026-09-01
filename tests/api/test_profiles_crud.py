@@ -760,3 +760,17 @@ def test_create_is_still_fully_screened(legacy_client: TestClient) -> None:
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+
+
+# ── D4: profile.runner (optional RUNNER_IMAGES key) ────────────────────────────
+
+
+def test_create_profile_with_runner_roundtrip(client: TestClient) -> None:
+    r = client.post("/api/profiles", json={"name": "pf-api", "flags": "", "runner": "promptforge"})
+    assert r.status_code == 201
+    assert r.json()["runner"] == "promptforge"
+
+
+def test_create_profile_unknown_runner_422(client: TestClient) -> None:
+    r = client.post("/api/profiles", json={"name": "bad-api", "flags": "", "runner": "nope"})
+    assert r.status_code == 422

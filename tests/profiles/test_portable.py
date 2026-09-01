@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hal0.config.schema import PROFILE_SCHEMA_VERSION_CURRENT, ProfileConfig
-from hal0.errors import BadRequest, Conflict
+from hal0.errors import BadRequest, Conflict, UnprocessableEntity
 from hal0.profiles import ProfileCatalog
 from hal0.profiles.portable import (
     ENVELOPE_KIND,
@@ -71,6 +71,16 @@ class TestRoundTrip:
         assert imported.cloned_from == original.cloned_from
         assert imported.intent == original.intent
         assert imported.quant == original.quant
+
+    def test_export_import_round_trips_runner(self, tmp_hal0_home: str) -> None:
+        env = export_envelope(
+            "pf-port", ProfileConfig(flags="-fa on", runner="promptforge"), exported_at="t"
+        )
+        assert env["profile"]["runner"] == "promptforge"
+
+        dst = _catalog(tmp_hal0_home, "dst-runner.toml")
+        resolved = import_profile(env, "pf-port-copy", dst)
+        assert dst.resolve(resolved.name).runner == "promptforge"
 
 
 # ── export envelope shape ────────────────────────────────────────────────────
@@ -195,6 +205,17 @@ class TestImportProfile:
         with pytest.raises(BadRequest) as exc:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.hardware_flag_denied"
+
+    def test_unknown_runner_rejected(self, tmp_hal0_home: str) -> None:
+        """D4: import runs the profile's ``runner`` through
+        ``screen_profile_runner`` (the same check ``create``/``update`` apply)
+        — an envelope naming a runner key not in RUNNER_IMAGES is rejected even
+        though its checksum is intact (it was computed over the bad value)."""
+        env = export_envelope("orig", ProfileConfig(flags="", runner="nope"), exported_at="t")
+        assert verify_checksum(env) is True
+        with pytest.raises(UnprocessableEntity) as exc:
+            import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert exc.value.code == "profiles.unknown_runner"
 
 
 # ── #1416: the COMMIT path verifies the checksum, not just dry_run ───────────
