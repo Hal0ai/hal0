@@ -21,10 +21,11 @@ A [slot](/docs/concepts/slots/) owns its own hardware placement: `device`,
 registry (`hal0.runners.RUNNER_IMAGES`) — the fixed set of runner families
 hal0 knows how to launch:
 
-| Runner key | Runtime | Device class | Backend |
+| Runner key | Runtime | Device class | Backend(s) |
 |---|---|---|---|
-| `rocmfpx` | llama-server | gpu | rocm |
-| `vulkanfpx` | llama-server | gpu | vulkan |
+| `rocmfpx` | llama-server | gpu | rocm, vulkan (the **Standard** default) |
+| `promptforge` | llama-server | gpu | rocm |
+| `strix` | llama-server | gpu | vulkan |
 | `cuda` | llama-server | gpu | cuda |
 | `cpu` | llama-server | cpu | — |
 | `flm` | flm (NPU) | npu | — |
@@ -33,17 +34,38 @@ hal0 knows how to launch:
 | `qwen3tts` | qwen3tts (TTS) | gpu | rocm |
 | `comfyui` | comfyui (image gen) | img | — |
 
-`rocmfpx` and `vulkanfpx` resolve to the *same* image today — the shipped
-runner build is Vulkan-portable, so one image serves both GPU lanes on AMD.
-The two keys exist so a future split has somewhere to land, not because they
-differ right now.
+`rocmfpx` (dashboard title **Standard**) is the one image allowed to declare
+two backends: the shipped build is Vulkan-portable, so it serves both GPU
+lanes on AMD. `vulkanfpx` is a **retired spelling**, not a separate registry
+entry — it folds to `rocmfpx` through a permanent alias
+(`hal0.runners.RUNNER_ALIASES`) kept only for old TOML/env values and
+operator muscle memory. Every other GPU runner declares exactly one backend
+by design (ADR-0006): `promptforge` (dashboard title **PromptForge**) is
+ROCm-only, and `strix` (dashboard title **Strix**) is Vulkan-only —
+qwen4exp-architecture and MTP speculative-decode support, no FPX-family
+quants.
 
 A slot with no `binary` set derives one from its `device`
 (`hal0.runners.runner_for_backend`) — this is the ordinary case. A
-**profile** never names an image: profiles are device-agnostic flag
-templates (see [Providers, profiles & devices](/docs/reference/providers-profiles-devices/)).
+**profile** can optionally pin one of these runner keys too (see [Choose
+models → Preferred profile](/docs/guides/choose-models)); flags-only
+profiles (all seeds) still never name an image directly — see
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 The provider (`ContainerProvider`, `FLMProvider`, …) is what actually starts
 the process for whichever image resolution picks.
+
+<Aside type="note" title="Every shipped image is a registry runner (ADR-0006)">
+Pin-only images — catalogued for discovery but reachable only through a
+slot's `image_pin` escape hatch, never enumerable as a real Runtime option —
+are retired as a shipping shape. `strix` is the template: a full registry
+entry with its own title, blurb, and declared backend, reachable from the
+slot drawer's Runtime select like any other runtime. `image_pin` still
+exists, but strictly as the debug-only hatch it was always meant to be — a
+custom build, a rollback, or a hand-edited ref — not how an operator
+normally reaches a shipped runtime. See
+`docs/adr/0006-every-shipped-image-is-a-registry-runner.md` (repo-only) for
+the full decision record.
+</Aside>
 
 Resolution order, from `hal0.providers.container._resolve_image_ref`:
 
@@ -61,7 +83,12 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
 ## The Runner Images page
 
 Open **Slots → Runner Images**. The list is every catalogued image; the
-right-hand card shows the selected row's detail.
+right-hand card shows the selected row's detail. Rows group under two
+headings: **Default runtime** — each family's current release/override
+default — and **Optional runtimes** — every other registry entry, with
+specialty images (PromptForge, Strix) sorted first. Since ADR-0006 made
+every catalogued image a real registry entry, this is a strict two-way
+split; there's no longer a third bucket for uncatalogued or pin-only images.
 
 **Defaults strip** (top of the list, when at least one family has a
 catalogued row): one line per runner family — its effective image:tag, and
@@ -192,10 +219,12 @@ Membership in `hal0.config.schema.VULKAN_CAPABLE_IMAGE_REFS` is earned per
 exact image ref, not by "newer than the pin": the tags are git shortrefs and
 date stamps, not versions, and Vulkan correctness has not been monotonic
 across builds (an older tree passed where a newer one failed). As of this
-writing the set holds one ref, `ghcr.io/hal0ai/hal0-combined:0826`
-(`VULKAN_FIXED_IMAGE`) — check the constant in `src/hal0/config/schema.py`
-for the current membership, since new refs are added only after passing the
-validation matrix.
+writing the set holds two refs: `ghcr.io/hal0ai/hal0-combined:0826`
+(`VULKAN_FIXED_IMAGE`, the Standard/`rocmfpx` runtime's Vulkan lane) and
+`ghcr.io/hal0ai/hal0-strix-vulkan:0831` (`DEFAULT_STRIX_IMAGE`, the Strix
+runtime) — check the constant in `src/hal0/config/schema.py` for the current
+membership, since new refs are added only after passing the validation
+matrix.
 
 A `gpu-vulkan` llama-server slot on an AMD host is refused at load if its
 resolved image isn't in that set — the error names the image and tells you

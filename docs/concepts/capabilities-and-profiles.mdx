@@ -51,11 +51,17 @@ SlotManager runs as a podman container.
 A **profile** is a reusable, **device-agnostic** tune template. It bundles
 model-behavior flags — sampler settings, KV-cache type and quantization,
 batch/ubatch size, reasoning mode, jinja/chat-template behavior — and nothing
-about hardware. As of v1.0, a profile carries **no container image and no
-placement information at all**: no device, no GPU index, no thread count, no
+about *placement*. As of v1.0, a profile carries **no container image ref and
+no placement information**: no device, no GPU index, no thread count, no
 `-c`/`--ctx-size` (that flag is on hal0's own managed-args denylist and can
 never appear in a profile's flags). All of that lives on the
 [slot](/docs/concepts/slots), in the hardware/model write boundary.
+
+The one placement-adjacent thing a profile *can* carry is an optional
+**runtime** — a `RUNNER_IMAGES` registry key (`runner`), never a raw image
+ref or tag. A key survives an image/tag update, which is exactly the rot
+that got the old `image` field removed from profiles in the first place. See
+"Profiles can carry a runtime" below.
 
 This is a genuine v1.0 change, not a renaming exercise: pre-1.0 profiles were
 identity-bound to a backend (`rocm`, `vulkan`, `cuda`) and carried an image.
@@ -104,11 +110,15 @@ customise one is to clone it**: the dashboard's Profiles tab turns "Edit" into
 `cloned_from` recording the original) that you're then free to tune; Delete
 stays disabled on the seed itself.
 
-Each profile is also classified into a runtime family (llama-server, FLM,
-Kokoro, Qwen3-TTS, or ComfyUI) that determines which slot types it can serve,
-and profiles are portable: any profile can be exported to a self-contained,
-checksummed `.hal0profile.json` envelope and imported on another host — the
-same sharing model [stacks](/docs/concepts/stacks) use.
+Each profile is also classified into a **runtime family** (llama-server,
+FLM, Kokoro, Qwen3-TTS, or ComfyUI) that determines which slot types it can
+serve — a coarser, code-derived classification, not to be confused with the
+optional `runner` **runtime** key described below, which names one specific
+registry entry *within* the llama-server family. Profiles are portable: any
+profile can be exported to a self-contained, checksummed `.hal0profile.json`
+envelope (which round-trips the `runner` key too, and rejects an envelope
+naming an unknown one) and imported on another host — the same sharing model
+[stacks](/docs/concepts/stacks) use.
 
 ## Where hardware placement actually lives now: the slot
 
@@ -118,11 +128,12 @@ inert" — undersells one real nuance below.
 
 A slot carries its own **device** field — `gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, or `npu` — plus `gpu_index`, `n_gpu_layers`, `threads`, and
-`binary` (which selects a runner/container image family; `image_pin` is the
-escape hatch for a full image override). This "hardware grid" is what the
-slot owns exclusively, validated at config-load time so a typo fails fast.
-Legacy configs that still set the old overloaded `backend` field are
-auto-promoted to `device` on load, so old slot TOMLs keep working.
+`binary` (a `RUNNER_IMAGES` registry key — the dashboard calls this the
+slot's **Runtime**; `image_pin` is a debug-only escape hatch for a full
+image override, not a normal way to reach a shipped runtime). This "hardware
+grid" is what the slot owns exclusively, validated at config-load time so a
+typo fails fast. Legacy configs that still set the old overloaded `backend`
+field are auto-promoted to `device` on load, so old slot TOMLs keep working.
 
 A `ProfileConfig` still carries two optional fields, `device_class` and
 `backend`, for back-compat — but as of v1.0 they are **inert match-only fit
@@ -152,6 +163,78 @@ something you'd deliberately configure on a new install.
 ![The Profiles tab in the hal0 dashboard showing seed profile cards with bench metrics and intent chips](/screenshots/profiles-tab.png)
 
 *The Profiles tab — seed profile cards with bench metrics, intent labels, and the clone affordance for creating custom profiles.*
+
+## The Runtime registry
+
+Every image hal0 ships is registered as a `RUNNER_IMAGES` entry — a
+first-class runner reachable from the slot drawer's Runtime select, never
+only through the `image_pin` escape hatch. A pin-only image, catalogued for
+discovery but not offered anywhere a slot's Runtime is picked, is retired as
+a shipping shape (ADR-0006).
+
+| Runtime (title) | Registry key | Lane(s) | Notes |
+|---|---|---|---|
+| Standard | `rocmfpx` | ROCm + Vulkan | The default. Runs every model type, including FPX quants — the only runtime allowed both lanes. |
+| PromptForge | `promptforge` | ROCm | Optional. Accelerated PromptForge model distributions. |
+| Strix | `strix` | Vulkan | Optional. `qwen4exp`-class models with MTP speculative decode; no FPX quants. |
+| CUDA | `cuda` | CUDA | NVIDIA GPUs. |
+| CPU | `cpu` | — | Runs on the host CPU, no GPU required. |
+
+(The non-llama-server runtimes — FastFlowLM, Kokoro, Moonshine, Qwen3-TTS,
+ComfyUI — are `RUNNER_IMAGES` entries too, but each is fixed to its own slot
+type rather than offered as a pick in the Runtime select.)
+
+In the slot drawer's Hardware group, this registry drives one **Runtime**
+select — each option showing its title, a one-line blurb, and an
+install-state chip, filtered to what the slot's type and this host's
+hardware can actually run — plus a **Lane** pill row (Auto / ROCm / Vulkan)
+that only appears when the selected runtime supports more than one backend
+(today, only Standard). Picking a single-lane runtime derives the slot's
+device directly; picking a lane on a dual-lane runtime does the same thing
+the CLI's `hal0 slot edit <name> --hardware <rocm|vulkan>` does. Either way,
+switching restarts the slot on save. An "Advanced — image & version"
+disclosure holds the read-only effective image ref (pinned-by-release, or
+"debug pin" when one is set), a pointer to [Manage runner
+images](/docs/guides/manage-runner-images) for version/rollback management,
+and the debug `image_pin` field — which never widens or narrows the Runtime
+options above it.
+
+### Profiles can carry a runtime
+
+A profile's optional `runner` field names one of the llama-server-family
+runtimes above (Standard/PromptForge/Strix/CUDA/CPU — never the
+single-purpose ones, since a profile's `runtime_family` already fixes
+those). In the profile form this is the **Runtime** select, with "— any
+(flags-only tune) —" clearing it; none of the shipped seed profiles set it,
+and the select renders disabled on a seed (forking it via "Edit a copy" is
+what unlocks it). A profile carrying a runtime shows a runtime badge chip on
+its card.
+
+Applying a runtime-carrying profile to a slot is **profile wins**: on save,
+the slot's `binary` switches to the profile's runtime key, and — for a
+single-lane runtime — its `device` follows to the matching lane (a
+combined, multi-lane runtime like Standard only flips `binary` and leaves
+the current lane alone). The slot drawer's Profile row previews this before
+you save. The same rule governs swapping a slot onto a different model whose
+preferred profile carries a runtime. Either path is blocked only when it's
+physically impossible — e.g. picking a ROCm-only runtime on a host with no
+`/dev/kfd` — which fails with a plain-language error before anything is
+written, rather than partially applying.
+
+### Model ↔ runtime fit-check
+
+hal0 detects a GGUF model's `general.architecture` at registration, and a
+runtime can denylist archs its llama.cpp build is known to reject
+(`Runner.unsupported_archs`) — today just `qwen4exp` on Standard, whose
+build predates that architecture's upstream merge. Binding such a model to a
+slot (create, config change, or model swap) never blocks: it **warns**
+(`model_fit_warning` in the API response, a notice by the slot drawer's
+Model select) and, when a catalogued runtime is known to serve the
+architecture, names it — e.g. "switch this slot's Runtime to Strix to serve
+it." Per ADR-0006 the hint always points at switching the Runtime, never at
+pinning a raw image: `image_pin` disarms the check entirely (the catalogue
+has no way to know a hand-pinned image's arch table), so setting one
+silences the warning without curing the incompatibility.
 
 ## Flag precedence: how a launch command is assembled
 

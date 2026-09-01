@@ -188,7 +188,13 @@ export function hostHwFlags(rawHardware) {
 	const gpu0 = rawHardware?.gpus?.[0];
 	if (!gpu0) return {};
 	return {
-		rocm: !!gpu0.compute_capable,
+		// ROCm feasibility also passes when the top-level `kfd_present` probe
+		// fact is true, even if `compute_capable` (a HOST rocminfo probe) is
+		// false — a box with /dev/kfd but no host rocminfo (containers bring
+		// their own ROCm userland) actively runs ROCm slots, so this must
+		// match the backend's own gate (config_write._reconcile_device_profile
+		// via hal0.providers._gpu.kfd_present), not just the host probe.
+		rocm: !!(gpu0.compute_capable || rawHardware?.kfd_present),
 		vulkan: !!gpu0.vulkan_capable,
 		cuda: !!gpu0.compute_capable,
 	};

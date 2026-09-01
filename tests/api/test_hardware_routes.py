@@ -82,6 +82,26 @@ def test_flatten_pass_through_kvm_with_virtio_gpu() -> None:
     assert flat["npu_present"] is False
 
 
+def test_flatten_passes_through_kfd_present() -> None:
+    """``kfd_present`` is a top-level HardwareInfo field (host-truth ROCm
+    feasibility signal, matching the backend's own
+    ``_reconcile_device_profile`` gate) — the flatten step spreads ``**info``
+    first and never overwrites it, so it must survive to the UI payload even
+    when the GPU's own ``compute_capable`` is False (the FE/BE mismatch this
+    field exists to fix: a kfd-present, host-rocminfo-less box actively runs
+    ROCm slots but ``compute_capable`` alone reports it as infeasible)."""
+    info = HardwareInfo(
+        cpu_model="AMD Ryzen AI Max+ PRO 395",
+        gpus=[GPUInfo(vendor="amd", name="Radeon 8060S", compute_capable=False)],
+        npu=NPUInfo(present=False),
+        platform="strix-halo",
+        kfd_present=True,
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    assert flat["kfd_present"] is True
+    assert flat["gpus"][0]["compute_capable"] is False
+
+
 def test_flatten_strix_halo_is_unified() -> None:
     """is_uma comes from the live gpu_view sample (#703) — the old
     ``vram > ram*0.5`` route heuristic is deleted. For this fixture both

@@ -62,7 +62,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
-| `default_images` | dict[str,str] | `{}` | keys must be a known `RUNNER_IMAGES` family (e.g. `rocmfpx`, `vulkanfpx`, `cuda`, `cpu`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`); values must be non-empty image refs; sending `null` for a family clears its override |
+| `default_images` | dict[str,str] | `{}` | keys must be a known `RUNNER_IMAGES` family (`rocmfpx`, `promptforge`, `strix`, `cuda`, `cpu`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`; the legacy `vulkanfpx` key is still accepted and folds to `rocmfpx`); values must be non-empty image refs; sending `null` for a family clears its override |
 
 ### `[dispatcher]`
 
@@ -271,7 +271,7 @@ top-level scalars are accepted on load and normalized.
 | `threads` | int | `0` | — | `>= 0`; `0` = unset |
 | `metrics` | bool | `true` | — | emits `--metrics`, enabling llama-server's loopback-only `/metrics` endpoint; without it `/metrics` 501s and hal0's tok/s and request-count collection can never populate (#1810) |
 | `binary` | str | `""` | — | key into `RUNNER_IMAGES` |
-| `image_pin` | str \| null | `null` | — | escape-hatch image ref override |
+| `image_pin` | str \| null | `null` | — | debug-only escape-hatch image ref override (ADR-0006) — not the intended path to a shipped runtime; use `profile.runner` or the slot drawer's Runtime selector instead |
 | `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
 | `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
 | `profile` | str \| null | `null` | — | references `profiles.toml` |
@@ -425,16 +425,20 @@ copy — they can't be edited or deleted, only cloned.
 | `mtp` | bool | `false` | **informational only** — MTP is model-owned, not profile-owned |
 | `device_class` | `"gpu"\|"cpu"\|"npu"\|"img"` \| null | `null` | `null` = device-agnostic |
 | `backend` | `"rocm"\|"vulkan"\|"cuda"` \| null | `null` | |
+| `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
 | `quant` | str | `""` | display chip only — runtime reads quant from the model, not the profile |
 
-<Aside type="caution">
-On the v1.0 branch, `device_class`/`backend` are being rewritten to **inert match-only
-fit hints** — retained on-disk only because published `.hal0profile.json` export
-artifacts carry them and their checksums cover the field. The slot's own `device` enum
-is the single authoritative hardware fact. Verify this has landed on `main` before
-publishing this doc as unqualified fact — see the v1.0 release notes.
+<Aside type="note">
+`device_class`/`backend` are **inert match-only fit hints**, retained on-disk only
+because published `.hal0profile.json` export artifacts carry them and their checksums
+cover the field. The slot's own `device` enum is the single authoritative hardware
+fact — except that a `runner`-carrying profile CAN flip a GPU slot's `device` at write
+time (the profile wins within a device class): see
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
+An older `.hal0profile.json` envelope exported before the `runner` field existed
+imports with `runner: null` (flags-only), same as every seed profile.
 </Aside>
 
 Profiles no longer carry an `image` field — image resolution is slot-owned

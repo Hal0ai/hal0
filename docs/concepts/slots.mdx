@@ -53,12 +53,23 @@ v1.0 draws a hard line between two layers, and enforces it at every write path
 rather than just documenting it:
 
 - **The slot owns the physical/placement layer** — `device`, `gpu_index`,
-  `n_gpu_layers`, `threads`, `binary` (which container image family to run),
+  `n_gpu_layers`, `threads`, `binary` (a key into the `RUNNER_IMAGES`
+  registry — the dashboard's slot drawer calls this the slot's **Runtime**),
   and the `image_pin` escape hatch. This is the "hardware grid":
   `[device · NGL · THREADS · BINARY]`.
 - **The model owns the logical/behavioral layer** — `mtp`, `enable_thinking`,
   `vision`, `jinja`, `chat_template`, and freeform tuning flags. These are set
   on the model's registry entry (`defaults`), not on the slot.
+
+Every image hal0 ships is a `RUNNER_IMAGES` registry entry — the default,
+dual-lane build (`rocmfpx`, titled **Standard**, the only entry allowed both
+a ROCm and a Vulkan lane) plus optional single-lane runtimes such as
+`promptforge` (ROCm) and `strix` (Vulkan, built for `qwen4exp`-class models).
+Pin-only images — catalogued but reachable only by a raw ref — are retired;
+`image_pin` is a debug-only override (a custom build, an A/B test, a
+rollback) and never appears as a pickable Runtime option. See [Capabilities
+& profiles](/docs/concepts/capabilities-and-profiles) for the full Runtime
+picker and how a profile can carry one.
 
 Three keys in particular — **`mtp`, `enable_thinking`, `vision`** — are
 explicitly forbidden on a slot. `SlotConfig` doesn't even declare them as
