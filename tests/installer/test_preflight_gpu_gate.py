@@ -341,16 +341,19 @@ def test_the_shell_mirror_agrees_with_the_python_predicate(tmp_path: Path) -> No
     of ``providers._gpu.default_image_serves_vulkan_lane`` (preflight runs
     before hal0 is installed, so it cannot just call it). Two implementations
     of one predicate drift; this is the tripwire.
-    """
-    from hal0.config.schema import VULKAN_CAPABLE_IMAGE_REFS
-    from hal0.providers._gpu import default_image_serves_vulkan_lane
 
-    assert len(VULKAN_CAPABLE_IMAGE_REFS) == 1, (
-        "VULKAN_CAPABLE_IMAGE_REFS has grown past one member — the shell mirror in "
-        "installer/lib/preflight.sh only recognises the single-member shape "
-        "(default == VULKAN_FIXED_IMAGE) and must be taught the general case, or "
-        "fresh installs will be refused on a validated image"
-    )
+    Historically this test also asserted ``len(VULKAN_CAPABLE_IMAGE_REFS) ==
+    1`` as a static guard: the shell mirror used to recognise only the
+    single-member shape (default == VULKAN_FIXED_IMAGE) and would silently
+    refuse a validated image once the set grew. #2118 (the strix runner)
+    grew VULKAN_CAPABLE_IMAGE_REFS to two members, which tripped that guard;
+    the shell mirror in installer/lib/preflight.sh was taught the general
+    case (it now resolves every frozenset member to its own literal and
+    checks membership), so the static member-count guard no longer applies
+    and this test goes back to what it always was underneath: a runtime
+    agreement check against whatever this checkout's set actually contains.
+    """
+    from hal0.providers._gpu import default_image_serves_vulkan_lane
 
     script = (
         "set -euo pipefail\n"
@@ -365,6 +368,55 @@ def test_the_shell_mirror_agrees_with_the_python_predicate(tmp_path: Path) -> No
         "the shell mirror and the Python predicate disagree about whether this "
         f"checkout's default runner image serves the Vulkan lane (shell={shell_says})"
     )
+
+
+def _run_shell_mirror(schema_path: Path) -> str:
+    script = (
+        "set -euo pipefail\n"
+        f"source {PREFLIGHT!s}\n"
+        "if _hal0_vulkan_lane_serves_default_image; then echo yes; else echo no; fi\n"
+    )
+    env = {
+        **{k: v for k, v in os.environ.items() if k != "HAL0_GPU_VULKAN_LANE_OVERRIDE"},
+        "HAL0_SCHEMA_PY_OVERRIDE": str(schema_path),
+    }
+    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def test_the_shell_mirror_matches_a_non_first_member_of_a_multi_member_set(
+    tmp_path: Path,
+) -> None:
+    """The actual regression this task fixes: before the shell mirror was
+    taught the general case, it only ever compared the default against
+    VULKAN_FIXED_IMAGE — the FIRST historical member. A default that matches
+    some OTHER member of a (now multi-member) VULKAN_CAPABLE_IMAGE_REFS, e.g.
+    DEFAULT_STRIX_IMAGE joining alongside VULKAN_FIXED_IMAGE (#2118), must
+    still be recognised."""
+    schema = tmp_path / "schema.py"
+    schema.write_text(
+        'DEFAULT_ROCMFPX_IMAGE = "ghcr.io/example/combined:default"\n'
+        'VULKAN_FIXED_IMAGE = "ghcr.io/example/combined:fixed"\n'
+        'DEFAULT_STRIX_IMAGE = "ghcr.io/example/combined:default"\n'
+        "VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})\n"
+    )
+    assert _run_shell_mirror(schema) == "yes"
+
+
+def test_the_shell_mirror_still_says_no_when_default_matches_no_member(
+    tmp_path: Path,
+) -> None:
+    """A multi-member set that still doesn't include the default must answer
+    'no' — growing the set past one member must not accidentally widen this
+    into an always-yes check."""
+    schema = tmp_path / "schema.py"
+    schema.write_text(
+        'DEFAULT_ROCMFPX_IMAGE = "ghcr.io/example/combined:unvalidated"\n'
+        'VULKAN_FIXED_IMAGE = "ghcr.io/example/combined:fixed"\n'
+        'DEFAULT_STRIX_IMAGE = "ghcr.io/example/strix:default"\n'
+        "VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})\n"
+    )
+    assert _run_shell_mirror(schema) == "no"
 
 
 def test_the_shell_mirror_fails_closed_on_an_unreadable_schema(tmp_path: Path) -> None:

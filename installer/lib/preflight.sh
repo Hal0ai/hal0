@@ -1177,11 +1177,17 @@ preflight_gpu() {
 # layer in the system is the wrong place to re-derive logic that already has a
 # tested implementation twenty seconds later in the install.
 #
-# It recognises only the single-member shape of VULKAN_CAPABLE_IMAGE_REFS (a
-# default equal to VULKAN_FIXED_IMAGE) and answers "no" to everything else,
-# including anything it cannot parse. tests/installer/test_preflight_gpu_gate.py
-# pins agreement with the Python predicate, and trips if the capable set ever
-# grows past one member without this mirror being taught about it.
+# GENERAL CASE (VULKAN_CAPABLE_IMAGE_REFS may hold any number of members):
+# read the ``VULKAN_CAPABLE_IMAGE_REFS = frozenset({A, B, ...})`` literal,
+# resolve each element NAME to its own ``NAME = "ref"`` assignment earlier in
+# the file, and test whether DEFAULT_ROCMFPX_IMAGE's literal matches ANY of
+# them -- not just VULKAN_FIXED_IMAGE. A frozenset element that is itself a
+# quoted string literal (rather than a NAME) is also accepted, unresolved.
+# Answers "no" on anything it cannot parse, same as before. #2118 (the strix
+# runner) is what grew the set past one member and is the reason this mirror
+# had to stop assuming a single fixed pin.
+# tests/installer/test_preflight_gpu_gate.py pins agreement with the Python
+# predicate for whatever this checkout's set currently contains.
 #
 # Test seams: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright),
 # HAL0_SCHEMA_PY_OVERRIDE (path to the schema.py to read).
@@ -1200,10 +1206,34 @@ _hal0_vulkan_lane_serves_default_image() {
     fi
     [[ -r "${schema}" ]] || return 1
 
-    local default_ref fixed_ref
+    local default_ref
     default_ref="$(sed -n 's/^DEFAULT_ROCMFPX_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
-    fixed_ref="$(sed -n 's/^VULKAN_FIXED_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
-    [[ -n "${default_ref}" && -n "${fixed_ref}" && "${default_ref}" == "${fixed_ref}" ]]
+    [[ -n "${default_ref}" ]] || return 1
+
+    # Pull the frozenset's element list, e.g. "VULKAN_FIXED_IMAGE,
+    # DEFAULT_STRIX_IMAGE" out of "VULKAN_CAPABLE_IMAGE_REFS = frozenset({...})".
+    local refs_line
+    refs_line="$(sed -n 's/^VULKAN_CAPABLE_IMAGE_REFS = frozenset(\(.*\))$/\1/p' "${schema}" | head -n1)"
+    [[ -n "${refs_line}" ]] || return 1
+    refs_line="${refs_line#\{}"
+    refs_line="${refs_line%\}}"
+    [[ -n "${refs_line}" ]] || return 1
+
+    local member member_ref
+    local IFS=','
+    for member in ${refs_line}; do
+        member="${member//[[:space:]]/}"
+        [[ -z "${member}" ]] && continue
+        if [[ "${member}" == \"*\" ]]; then
+            # A quoted literal in the set, not a NAME -- use it as-is.
+            member_ref="${member#\"}"
+            member_ref="${member_ref%\"}"
+        else
+            member_ref="$(sed -n "s/^${member} = \"\\(.*\\)\"\$/\\1/p" "${schema}" | head -n1)"
+        fi
+        [[ -n "${member_ref}" && "${member_ref}" == "${default_ref}" ]] && return 0
+    done
+    return 1
 }
 
 # -- CPU-lane runner-image gate (shell mirror of hal0.runners, #2126) --------
