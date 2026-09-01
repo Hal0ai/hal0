@@ -65,9 +65,6 @@ works regardless of which device a slot targets:
 | Profile | Purpose |
 |---|---|
 | `chat` | Minimal generic chat — fallback for unknown models |
-| `chat-long-context` | Long-context chat variant (~128K ctx) |
-| `dense` | Generic dense workload (~128K ctx); family quirks live in a dedicated variant, e.g. `chadrock-dense` |
-| `moe` | Generic MoE workload (~32K ctx); family quirks in e.g. `chadrock-moe` |
 | `embedding` | Pooled embeddings (`--embedding`, wide ubatch) |
 | `reranking` | Reranking (`--reranking`) — always a separate instance from `embedding` |
 | `cpu-chat` | CPU-safe chat |
@@ -77,13 +74,18 @@ works regardless of which device a slot targets:
 | `moonshine` | Speech-to-text (Moonshine), CPU |
 | `comfyui` | Image generation (ComfyUI) |
 | `brain` | The hal0-brain steward workload (small tool-routing model) |
-| `chadrock-dense` / `chadrock-moe` | Family-tuned recipes for specific dense/MoE model cards (ROCmFP4, MTP, mmproj) |
-| `thinking` | Reasoning-ON workload for reasoning-capable models |
-| `coding` | Code-gen tuned workload |
 
 `embedding` and `reranking` are deliberately separate profiles/slots rather than
 one server handling both — combining `--embedding` and `--reranking` on a
 single llama-server instance produces all-zero scores.
+
+That's the whole shipped seed core — ten profiles, one per runtime family
+plus the generic llama-server workloads. The workload variants a pre-1.0
+install seeded (`chat-long-context`, `dense`, `moe`, `thinking`, `coding`,
+`chadrock-dense`, `chadrock-moe`) were demoted off the seed list; an
+existing install keeps them as ordinary custom profiles, and a fresh install
+can pull them back in as published addons — see
+[Profile addons](/docs/reference/profile-addons).
 
 ### Seed profiles are virtual
 
@@ -126,7 +128,7 @@ A `ProfileConfig` still carries two optional fields, `device_class` and
 `backend`, for back-compat — but as of v1.0 they are **inert match-only fit
 hints**, not a source of runtime configuration:
 
-- None of the 17 shipped seed profiles set either field — they're
+- None of the 10 shipped seed profiles set either field — they're
   device-agnostic by construction.
 - When set (on a hand-authored or pre-1.0 profile), `device_class` is
   consulted only as a **fit-check** signal (surfacing a
@@ -209,10 +211,11 @@ independent signals:
 
 A profile's own `mtp` field still exists on disk for API/round-trip
 back-compat, but it is **informational only** — it is not read by
-`resolve_profile_flags()` or the launch path at all. Two seed profiles happen
-to be tuned for MTP-capable model families (`chadrock-dense`,
-`chadrock-moe`), but that's a property of what model you'd pair with them, not
-something the profile itself switches on.
+`resolve_profile_flags()` or the launch path at all. Two of the addon
+profiles (`chadrock-dense`, `chadrock-moe` — see
+[Profile addons](/docs/reference/profile-addons)) happen to be tuned for
+MTP-capable model families, but that's a property of what model you'd pair
+them with, not something the profile itself switches on.
 
 Resolution: an explicit slot override always wins. Under Auto, MTP is enabled
 only when the model is eligible. Forcing MTP on a model with no MTP layers at

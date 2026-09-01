@@ -1319,8 +1319,10 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
-#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 18 seed
-#: entries (with their per-profile rationale comments) and
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 10 seed
+#: entries (with their per-profile rationale comments; the 8 workload
+#: variants pruned off the seed list live in
+#: ``hal0/config/data/legacy_seed_profiles.toml`` instead) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
 #: is (re)assigned at the bottom of this module, once every model above
 #: exists, as a module-scope re-export so every existing
@@ -1390,10 +1392,11 @@ DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 class ProfileConfig(BaseModel):
     """One ``[profile.<name>]`` entry in profiles.toml.
 
-    A profile is a reusable backend template — image + bench-tuned flag
-    bundle + optional MTP toggle.  Slots reference a profile by name;
-    the profile supplies everything except the model path, context size,
-    and port (which belong to the slot).
+    A profile is a reusable, device-agnostic tune template — bench-tuned
+    flag bundle + optional MTP toggle, and (as of v1.0) no image. Slots
+    reference a profile by name; the profile supplies everything except
+    the image, model path, context size, and port (which belong to the
+    slot).
 
     See the hal0 container-runtime design doc (§1) and bench doc for the
     rationale behind each seed profile.
