@@ -1461,6 +1461,17 @@ class ProfileConfig(BaseModel):
             "envelope-checksum back-compat (see ``device_class``)."
         ),
     )
+    runner: str | None = Field(
+        default=None,
+        description=(
+            "Optional RUNNER_IMAGES key (runtime-cascade spec D4). Applying "
+            "this profile sets the slot's binary to this runtime and — for a "
+            "single-backend runtime — derives the device (profile wins). A "
+            "registry KEY, never an image ref: keys survive image/tag updates, "
+            "which is exactly the rot that got `image` removed from profiles "
+            "(spec-hw-slot-ownership §3). None = flags-only tune (all seeds)."
+        ),
+    )
     cloned_from: str | None = Field(
         default=None,
         description=(

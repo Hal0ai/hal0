@@ -20,7 +20,15 @@
  *       (reversing the §5 fold into [model].n_gpu_layers). -1/empty = the "all
  *       layers" default; an untouched field never rides the PUT. ctx_size keeps
  *       its own PATCH /defaults path. The grid also carries device / THREADS /
- *       BINARY / image_pin, with a non-blocking fit-check warning (§4).
+ *       the Runtime-first cascade (runtime-cascade redesign, ADR-0006): a
+ *       single Runtime select (`slot-hw-runtime`, hw-cascade.js's
+ *       runnerOptions/applyRunnerChoice) replaces the old Device + Runner
+ *       Image + Backend trio, with a Lane picker (`slot-hw-lane`) for a
+ *       dual-lane runner and a collapsed Advanced disclosure
+ *       (`slot-hw-advanced`) holding the read-only resolved image and a
+ *       debug-only image_pin escape hatch (`slot-hw-image-pin`) — never an
+ *       enumerated union. An out-of-vocab persisted runtime keeps its own
+ *       "· not in this catalog" option instead of a blocking warning.
  *   C6. configured slots (a model bound) sort before unconfigured ones.
  *   (RETIRED — #1379) the Parallel and Extra Args controls are GONE, with
  *       the Template override and the Regenerate overlay. All three were
@@ -50,6 +58,14 @@ const EMBED = {
   enable_thinking: null, n_gpu_layers: -1,
   metrics: {},
 }
+
+// hw-cascade.js's runnerOptions() vetoes a runner only when hw is KNOWN and
+// NONE of its lanes are feasible (hostHwFlags reads a bare `hardware: {}` —
+// no gpus[0] — as unknown, never a veto, since the Task 12 fix). Report both
+// lanes capable anyway so a test that drives the rocm/vulkan Lane pills has
+// a real feasible pair to pick from, rather than relying on a specific
+// runtime's own declared lanes.
+const HW_CAPABLE = { gpus: [{ compute_capable: true, vulkan_capable: true }] }
 
 /**
  * Override the in-bundle HAL0_DATA.slots for this page. data.jsx assigns
@@ -187,21 +203,28 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
 
-  test('HW grid — the typed fields + Runner Image + Backend render, Device select is gone (§2)', async ({ page }) => {
+  test('HW grid — Runtime + Threads + NGL render; Device select is gone; image pin hidden until Advanced opens (§2)', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     // The standalone Device select is GONE (hw-cascade): `device` is derived
-    // from the Backend (binary · backend) pick, so Device/Binary can no
-    // longer be driven into a mismatch from this drawer.
+    // from the Runtime pick (and its Lane, for a dual-lane runner), so
+    // Device/Runtime can no longer be driven into a mismatch from this
+    // drawer. The old Runner Image catalog dropdown + Backend select are
+    // gone too — replaced by the single Runtime select.
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-image-pin')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-runtime')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
+    // The image/version truth + debug pin live behind the collapsed
+    // Advanced disclosure — not visible until it's opened.
+    await expect(page.getByTestId('slot-hw-image-pin')).toHaveCount(0)
+    await page.getByTestId('slot-hw-advanced').click()
+    await expect(page.getByTestId('slot-hw-advanced-image')).toBeVisible()
   })
 
-  test('HW grid — picking the vulkan pair Save PUTs /config { device: gpu-vulkan } and restarts', async ({ page }) => {
+  test('HW grid — picking the Vulkan lane Save PUTs /config { device: gpu-vulkan } and restarts', async ({ page }) => {
     const puts: any[] = []
     const restarts: string[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
@@ -220,7 +243,7 @@ test.describe('Slot edit controls (/slots)', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          hardware: {},
+          hardware: HW_CAPABLE,
           features: {},
           podman_context: 'rootless',
           backends: {
@@ -239,9 +262,12 @@ test.describe('Slot edit controls (/slots)', () => {
     )
     await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
-    // rocm↔vulkan rides the Backend pair choice now — picking the vulkan
-    // pair of the same binary derives device=gpu-vulkan.
-    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx::vulkan')
+    // rocmfpx is a dual-lane runner (rocm + vulkan) — the Runtime select
+    // already resolves to it (the slot's persisted binary), so the Lane
+    // pills render immediately; picking the Vulkan lane derives
+    // device=gpu-vulkan without touching Runtime at all.
+    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('rocmfpx')
+    await page.getByTestId('slot-hw-lane').getByRole('button', { name: 'Vulkan' }).click()
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({ device: 'gpu-vulkan' })
@@ -273,7 +299,9 @@ test.describe('Slot edit controls (/slots)', () => {
         body: JSON.stringify({
           backends: {
             rocmfpx: {
+              title: 'ROCm FPX',
               backend: 'rocm',
+              device_class: 'gpu',
               supported_backends: ['rocm'],
               image: 'ghcr.io/hal0ai/runner:test',
             },
@@ -284,14 +312,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'gpu-rocm', threads: 0, binary: '', image_pin: null }, EMBED])
 
     await page.goto('/#slots/primary')
-    // Pick the Backend pair — options encode (binary · backend); picking one
-    // sets `binary` and derives `device`.
-    await page.getByTestId('slot-hw-binary').selectOption('rocmfpx::rocm')
+    // Pick the Runtime — a single-lane runner's device is derived from it.
+    await page.getByTestId('slot-hw-runtime').selectOption('rocmfpx')
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
-    // Runner Image is a catalog dropdown now; the free-text escape hatch
-    // lives behind the "Custom image ref…" option.
-    await page.getByTestId('slot-hw-image-pin').selectOption('__custom__')
+    // The debug pin is a free-text escape hatch behind the Advanced
+    // disclosure now — never an enumerated catalog dropdown.
+    await page.getByTestId('slot-hw-advanced').click()
+    await page.getByTestId('slot-hw-debug-pin-open').click()
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -300,24 +328,26 @@ test.describe('Slot edit controls (/slots)', () => {
       threads: 8,
       image_pin: 'ghcr.io/example/runner:test',
     })
-    expect(puts[0].binary).toBeTruthy()
+    expect(puts[0].binary).toBe('rocmfpx')
   })
 
-  test('HW grid — Runner Image is a catalog dropdown; picking one repopulates BINARY', async ({ page }) => {
-    // rocmfpx alone serves both rocm and vulkan out of one dual-backend
-    // image; cuda ships its own. The Runner Image select lists the two
-    // distinct refs; choosing the shared one offers both (binary · backend)
-    // pairs, choosing cuda's hops BINARY to its sole key.
+  // ADR-0006: every shipped runner image gets a RUNNER_IMAGES entry — the
+  // Runtime select lists REGISTRY entries by title, not a raw-image-first
+  // catalog dropdown. The #2170 "catalogued · downloaded" optgroup (a
+  // downloaded-but-uncatalogued image class) has no members left once every
+  // shipped image is registered, and is retired with it.
+  test('HW grid — Runtime select lists registry entries by title (ADR-0006)', async ({ page }) => {
     await page.route('**/api/system-info', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          hardware: {},
+          hardware: HW_CAPABLE,
           features: {},
           podman_context: 'rootless',
           backends: {
             rocmfpx: {
+              title: 'ROCm FPX (default)',
               image: 'ghcr.io/hal0ai/tb:dual',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -325,13 +355,15 @@ test.describe('Slot edit controls (/slots)', () => {
               supported_backends: ['rocm', 'vulkan'],
               format_arch: 'gguf',
               state: 'installed',
+              is_default: true,
             },
-            cuda: {
-              image: 'ghcr.io/hal0ai/tb:cuda',
+            strix: {
+              title: 'Strix (Vulkan optional)',
+              image: 'ghcr.io/hal0ai/tb:strix',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
-              backend: 'cuda',
-              supported_backends: ['cuda'],
+              backend: 'vulkan',
+              supported_backends: ['vulkan'],
               format_arch: 'gguf',
               state: 'installed',
             },
@@ -339,58 +371,32 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    // Pin the catalogue empty via the #1498 passthrough hatch (forced-mock
-    // otherwise substitutes the baked fixture, whose downloaded catalogue
-    // row would add a "catalogued · downloaded" option and break the exact
-    // catalog-count assertion below — that lane has its own test).
-    await page.addInitScript(() => {
-      ;(window as unknown as { __hal0MockPassthrough: string[] }).__hal0MockPassthrough = ['/api/runner-images']
-    })
-    await page.route('**/api/runner-images', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ images: [], families: [] }),
-      }),
-    )
-    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx', image_pin: null }, EMBED])
+    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
 
-    const imageSel = page.getByTestId('slot-hw-image-pin')
-    await expect(imageSel).toBeVisible()
-    // Catalog: default + 2 distinct images + the custom escape hatch.
-    await expect(imageSel.locator('option')).toHaveCount(4)
-
-    // Pick the shared dual-backend image → Backend offers every (binary ·
-    // backend) pair the image ships (1 binary × rocm/vulkan = 2) and the
-    // current rocmfpx · rocm selection survives (it ships in the image).
-    await imageSel.selectOption('ghcr.io/hal0ai/tb:dual')
-    const binarySel = page.getByTestId('slot-hw-binary')
-    await expect(binarySel.locator('option')).toHaveCount(2)
-    await expect(binarySel).toHaveValue('rocmfpx::rocm')
-
-    // Hop to the cuda image → rocmfpx doesn't ship in it, so the Backend
-    // moves to the image's sole pair (and derives its device with it).
-    await imageSel.selectOption('ghcr.io/hal0ai/tb:cuda')
-    await expect(binarySel).toHaveValue('cuda::cuda')
-    await expect(binarySel.locator('option')).toHaveCount(1)
+    const sel = page.getByTestId('slot-hw-runtime')
+    await expect(sel).toBeVisible()
+    // Registry entries by TITLE — no optgroup split (the old
+    // "catalogued · downloaded" grouping is gone) and no separate Runner
+    // Image / Backend selects.
+    await expect(sel.locator('option', { hasText: 'ROCm FPX (default)' })).toHaveCount(1)
+    await expect(sel.locator('option', { hasText: 'Strix (Vulkan optional)' })).toHaveCount(1)
+    await expect(sel.locator('optgroup')).toHaveCount(0)
+    await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
   })
 
-  test('HW grid — downloaded catalogue image outside the release catalog is offerable as a pin', async ({ page }) => {
-    // #2118: combined-upstream is wired to slots ONLY via per-slot
-    // image_pin — it has no RUNNER_IMAGES family, so it must surface in the
-    // "catalogued · downloaded" optgroup instead of hiding behind the
-    // free-text custom hatch.
+  test('HW grid — a legacy image_pin surfaces the Advanced debug warning, not an enumerated Backend union', async ({ page }) => {
     await page.route('**/api/system-info', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          hardware: {},
+          hardware: HW_CAPABLE,
           features: {},
           podman_context: 'rootless',
           backends: {
             rocmfpx: {
+              title: 'ROCm FPX',
               image: 'ghcr.io/hal0ai/tb:dual',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -403,65 +409,40 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    await page.addInitScript(() => {
-      ;(window as unknown as { __hal0MockPassthrough: string[] }).__hal0MockPassthrough = ['/api/runner-images']
-    })
-    await page.route('**/api/runner-images', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          images: [
-            {
-              id: 'combined-upstream',
-              image: 'ghcr.io/hal0ai/hal0-combined-upstream',
-              tag: '0829',
-              downloaded: true,
-              store_state: 'present',
-              notes: 'pin-only upstream variant',
-            },
-            {
-              // Not downloaded — must NOT be offered.
-              id: 'rocm',
-              image: 'ghcr.io/hal0ai/hal0-toolbox-rocm',
-              tag: 'v1',
-              downloaded: false,
-              store_state: 'missing',
-              notes: '',
-            },
-          ],
-          families: [],
-        }),
-      }),
-    )
-    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx', image_pin: null }, EMBED])
+    // #2118/ADR-0006: combined-upstream is a pin-only ref retired from the
+    // release catalogue — a slot still carrying it (an older TOML) must
+    // surface the Advanced debug warning + supersession banner, never an
+    // enumerated Backend/Runner-Image union.
+    await seedSlots(page, [
+      { ...PRIMARY, binary: 'rocmfpx', image_pin: 'ghcr.io/hal0ai/hal0-combined-upstream:0829' },
+      EMBED,
+    ])
     await page.goto('/#slots/primary')
 
-    const imageSel = page.getByTestId('slot-hw-image-pin')
-    await expect(imageSel).toBeVisible()
-    // default + 1 catalog image + 1 catalogued·downloaded + custom hatch.
-    await expect(imageSel.locator('option')).toHaveCount(4)
-    const grouped = imageSel.locator('optgroup[label="catalogued · downloaded"] option')
-    await expect(grouped).toHaveCount(1)
-    await expect(grouped).toHaveText(/combined-upstream/)
-
-    // Picking it lands on the out-of-catalog pin path (fallback Backend
-    // union) — the form never dead-ends.
-    await imageSel.selectOption('ghcr.io/hal0ai/hal0-combined-upstream:0829')
-    await expect(imageSel).toHaveValue('ghcr.io/hal0ai/hal0-combined-upstream:0829')
+    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('rocmfpx')
+    await page.getByTestId('slot-hw-advanced').click()
+    await expect(page.getByTestId('slot-hw-image-pin')).toHaveValue(
+      'ghcr.io/hal0ai/hal0-combined-upstream:0829',
+    )
+    await expect(page.getByTestId('slot-hw-debug-pin-warning')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-supersession-banner')).toBeVisible()
+    // No enumerated Backend/Runner-Image union anywhere in the drawer.
+    await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
   })
 
-  test('HW grid — fit-check warns on a persisted pair the catalog does not offer (§4)', async ({ page }) => {
-    // rocmfpx serves rocm/vulkan; a cpu-device slot pinned to it does not fit.
-    // The cascade can no longer CREATE that state, but a persisted TOML can
-    // still carry it — the out-of-vocab pair keeps its own option and a
-    // non-blocking warning surfaces the misconfiguration (spec §4).
+  test('HW grid — an out-of-vocab persisted runtime keeps its own option instead of vanishing', async ({ page }) => {
+    // rocmfpx is gpu-only; a cpu-device slot pinned to it does not fit. The
+    // cascade can no longer CREATE that state, but a persisted TOML can
+    // still carry it — selectedRunnerKey() returns null and the Runtime
+    // select renders the persisted binary as its own "· not in this
+    // catalog" option so the drawer never silently rewrites it (unit-tested
+    // in hw-cascade.test.ts; this is the DOM-level guarantee).
     await page.route('**/api/system-info', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          hardware: {},
+          hardware: HW_CAPABLE,
           features: {},
           podman_context: 'rootless',
           backends: {
@@ -480,7 +461,9 @@ test.describe('Slot edit controls (/slots)', () => {
     )
     await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
-    await expect(page.getByTestId('slot-hw-fit-warning')).toBeVisible()
+    const sel = page.getByTestId('slot-hw-runtime')
+    await expect(sel).toHaveValue('rocmfpx')
+    await expect(sel.locator('option', { hasText: 'not in this catalog' })).toHaveCount(1)
   })
 
   test('NPU modality controls remain visible and wire ASR updates', async ({ page }) => {

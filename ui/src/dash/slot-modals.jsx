@@ -20,14 +20,12 @@ import { useModels, usePullJob } from "@/api/hooks/useModels";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
-	applyBackendChoice,
+	applyRunnerChoice,
 	archFitWarning,
-	backendOptions,
-	cataloguePinOptions,
-	optionValue,
-	selectedBackendValue,
+	laneValues,
+	runnerOptions,
+	selectedRunnerKey,
 } from "./hw-cascade.js";
-import { useRunnerImages } from "@/api/hooks/useRunnerImages";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
 // the Runner Images page so option labels and the RunnerCard can't drift.
 import { formatProvenanceShort } from "./runner-images.jsx";
@@ -143,6 +141,50 @@ function crossDeviceTarget(profile, devBackend) {
 	if (profile.device_class && profile.device_class !== targetClass)
 		return null;
 	return targetDevice;
+}
+
+// Lane token → display title, for the Runtime select's option suffix and the
+// Lane pills (hw-cascade.js's runnerOptions/laneValues deal only in the raw
+// backend tokens — rocm/vulkan/cuda/cpu — so the JSX owns the display copy).
+const LANE_TITLE = { rocm: "ROCm", vulkan: "Vulkan", cuda: "CUDA", cpu: "CPU" };
+function laneTitle(lane) {
+	return LANE_TITLE[lane] || lane;
+}
+
+// Runtime select suffix for one runnerOptions() row: 'ROCm + Vulkan' for a
+// dual-lane runner, the single lane's title for one, '' for a backend-
+// agnostic runner (no lanes declared — it takes whatever device it's given).
+function laneLabel(option) {
+	return (option?.lanes || []).map(laneTitle).join(" + ");
+}
+
+// Host capability flags for runnerOptions()'s hw filter, from the RAW
+// /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
+// NOT the normalized computeCapable/vulkanCapable shape useHardware.ts's
+// hook exposes. Mirrors that same hook's normalizeHardware() derivation
+// (primary GPU's compute_capable/vulkan_capable) so the Hardware group's
+// Runtime select and the Profile row's apply-preview (below) can't disagree
+// about what this box can run.
+//
+// Unknown never vetoes; only an explicit probe answer does. `hw-cascade.js`'s
+// runnerOptions() only hides a runtime when a lane's flag reads explicitly
+// `false` — so this function must never manufacture a `false` it doesn't
+// have evidence for. Two "we don't know" shapes exist and both return `{}`:
+// no `hardware` at all (still loading) and `hardware` present but no
+// `gpus[0]` (a degraded probe, a partial payload, or a probe that came back
+// empty) — the latter used to fall through the `!!gpu0?.…` coercion into
+// `{rocm:false, vulkan:false, cuda:false}`, an explicit-looking veto for a
+// box that was never actually asked, which hid every GPU runtime from the
+// Runtime select (caught by the Task 12 e2e mocks in slot-edit-controls-v3
+// and slot-drawer-profile-v3).
+export function hostHwFlags(rawHardware) {
+	const gpu0 = rawHardware?.gpus?.[0];
+	if (!gpu0) return {};
+	return {
+		rocm: !!gpu0.compute_capable,
+		vulkan: !!gpu0.vulkan_capable,
+		cuda: !!gpu0.compute_capable,
+	};
 }
 
 // ─── Create-slot modal ──────────────────────────────────────────
@@ -277,12 +319,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// it is the UI's only rocm↔vulkan switch, since BINARY is metadata-gated
 	// to the same image and profiles carry backend only as an inert fit hint.
 	const systemInfoQuery = useSystemInfo();
-	// Catalogue rows for the Runner Image dropdown's "downloaded · catalogue"
-	// group (cataloguePinOptions): images synced+downloaded on this box that
-	// the release catalog doesn't list — e.g. the per-slot-pin-only
-	// combined-upstream variant (#2118). useQuery dedupes against the Runner
-	// Images page's identical key, so an open drawer adds no extra polling.
-	const runnerImagesQuery = useRunnerImages();
 
 	// Seed from the PERSISTED context window (slot.ctx_max, from
 	// [model].context_size) first — NOT the live runtime metric, which is 0
@@ -313,11 +349,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// image_pin — optional escape hatch. Empty = release default
 	// (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
 	const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
-	// Runner Image is a catalog dropdown (the RUNNER_IMAGES refs system-info
-	// reports — same source as the Runtimes page). `pinCustom` flips the
-	// control to a free-text input for the debug-build/A-B/rollback escape
-	// hatch the field originally existed for.
+	// `pinCustom` gates the debug-pin free-text input's visibility inside the
+	// Advanced disclosure (Task 9): the "Pin a custom image ref…" button
+	// flips it true to reveal the `slot-hw-image-pin` input; "Use release
+	// image" clears the pin and flips it back false. A slot that already
+	// carries a pin shows the input regardless (see `pinActive` in the
+	// disclosure body) — `pinCustom` only covers the empty-pin case where
+	// the operator hasn't typed anything yet.
 	const [pinCustom, setPinCustom] = useStateSM(false);
+	// Advanced disclosure's own open/closed state — independent of whether a
+	// pin is set, so an operator who collapses it keeps it collapsed even
+	// while a debug pin is active.
+	const [advOpen, setAdvOpen] = useStateSM(false);
 	// Runtime profile (SlotConfig.profile) — picks the runtime family,
 	// device-class gating and MTP draft backend. Flags: copy-on-stamp into
 	// model.defaults.extra_args (model drawer) when aligned with the model's
@@ -551,6 +594,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setBinary(slot.binary || "");
 		setImagePin(slot.image_pin || "");
 		setPinCustom(false);
+		setAdvOpen(false);
 		setProfileSel(slot.profile || "");
 		setSubmitErr(null);
 		setDiscardOpen(false);
@@ -1004,6 +1048,52 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
 		const devBackend = deviceBackend(device);
 		const modelProfile = curModelRow?.defaults?.profile || "";
+		// Apply preview (Task 10 D4): a profile carrying `runner` (a
+		// RUNNER_IMAGES key — Task 3) is applied through the SAME cascade the
+		// Hardware group's Runtime select uses (hw-cascade.js's
+		// runnerOptions/applyRunnerChoice) so this box previews exactly what
+		// the server's profile-wins reconcile (Task 5) does on Save: binary
+		// flips to the profile's runner, and — for a single-lane runner —
+		// device follows it. Computed independently of the Hardware group's
+		// own `options` (this IIFE runs earlier in render order) but reads
+		// the same system-info catalog + host hw flags, so the two can't
+		// disagree about what a runner key means.
+		const runnerCat = systemInfoQuery.data?.backends ?? {};
+		const { options: runnerCatalogOptions } = runnerOptions({
+			backends: runnerCat,
+			device: pendingDevice,
+			slotType: slot.type,
+			hw: hostHwFlags(systemInfoQuery.data?.hardware),
+		});
+		const selProfileRow = all.find((p) => p.name === profileSel) || null;
+		const runnerPreview = (() => {
+			if (!selProfileRow?.runner) return null;
+			// Compared against the FROZEN baseline (#1398), not the live
+			// `binary` state — that state is itself mirrored to the profile's
+			// runner the moment it's picked (see the select's onChange below),
+			// so comparing against it would make this box vanish right after
+			// the very pick it exists to announce.
+			const curBinary = baseline?.binary ?? "";
+			if (selProfileRow.runner === curBinary) return null;
+			const hit = runnerCatalogOptions.find(
+				(o) => o.key === selProfileRow.runner,
+			);
+			const cat = runnerCat[selProfileRow.runner];
+			const title = hit?.title || cat?.title || selProfileRow.runner;
+			const lanes =
+				hit?.lanes ||
+				(Array.isArray(cat?.supported_backends)
+					? cat.supported_backends
+					: []);
+			const singleLane = lanes.length === 1 ? lanes[0] : null;
+			const curLane = deviceBackend(pendingDevice);
+			return {
+				title,
+				lane: laneLabel({ lanes }),
+				movesOff:
+					singleLane && singleLane !== curLane ? laneTitle(curLane) : null,
+			};
+		})();
 		// Mirror backend profile_fits_slot: slot type supported first, then
 		// device_class match + backend match (when both declared).
 		const typeFit = all.filter(
@@ -1111,8 +1201,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						data-testid="slot-profile"
 						value={profileSel}
 						onChange={(e) => {
-							setProfileSel(e.target.value);
+							const nextName = e.target.value;
+							setProfileSel(nextName);
 							setFieldErrs((p) => ({ ...p, profile: undefined }));
+							// Profile wins (D4): a picked profile carrying `runner`
+							// mirrors into local binary/device state through the SAME
+							// applyRunnerChoice the Hardware group's Runtime select
+							// uses, so the Hardware rows below preview the post-save
+							// truth immediately — Save itself is unchanged; the
+							// server's reconcile (Task 5) performs the actual flip.
+							const nextProfile = all.find((p) => p.name === nextName);
+							if (nextProfile?.runner) {
+								const pick = applyRunnerChoice({
+									options: runnerCatalogOptions,
+									key: nextProfile.runner,
+									currentDevice: device,
+								});
+								setBinary(pick.binary);
+								setDevice(pick.device);
+							}
 						}}
 					>
 						{/* keep a none/out-of-vocab persisted profile selectable */}
@@ -1137,6 +1244,30 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</optgroup>
 						)}
 					</select>
+					{runnerPreview && (
+						<div
+							className="hint"
+							data-testid="slot-profile-preview"
+							style={{
+								marginTop: 6,
+								padding: "6px 10px",
+								borderRadius: "var(--rad-sm)",
+								color: "var(--info)",
+								border: "1px solid var(--info-line)",
+								background: "var(--info-soft)",
+							}}
+						>
+							<div>Applying this profile:</div>
+							<div>
+								· runtime → {runnerPreview.title}
+								{runnerPreview.lane ? ` (${runnerPreview.lane})` : ""}
+								{runnerPreview.movesOff
+									? ` — slot moves off ${runnerPreview.movesOff}`
+									: ""}
+							</div>
+							<div>· slot restarts on Save</div>
+						</div>
+					)}
 					{adoptedFromModel && (
 						<div className="hint">
 							Adopted from the bound model's preference — swapping the model
@@ -1484,297 +1615,105 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				<FieldGroup label="Hardware">
 					{(() => {
 						const backends = systemInfoQuery.data?.backends ?? {};
-						const binaryKeys = Object.keys(backends);
-						const pinnedImage = (imagePin || "").trim();
-						// Runner Image catalog — the distinct image refs RUNNER_IMAGES
-						// resolves to (same system-info source the Runtimes page renders).
-						// One image can ship several binaries (the combined image serves
-						// both `rocmfpx · rocm` and `rocmfpx · vulkan`); the map records
-						// which, so picking an image repopulates the Backend dropdown.
-						const imageKeysByRef = new Map();
-						for (const k of binaryKeys) {
-							const img = backends[k]?.image;
-							if (!img) continue;
-							if (!imageKeysByRef.has(img)) imageKeysByRef.set(img, []);
-							imageKeysByRef.get(img).push(k);
-						}
-						const catalogImages = [...imageKeysByRef.keys()];
-						// Downloaded catalogue rows outside the release catalog —
-						// pinnable without the free-text hatch (see
-						// cataloguePinOptions in hw-cascade.js / #2118).
-						const cataloguePins = cataloguePinOptions({
-							rows: runnerImagesQuery.data?.images,
-							catalogImages,
-							slotType: slot.type,
-						});
-						// Image → Backend cascade (hw-cascade.js): one dropdown of
-						// (binary · backend) pairs enumerated from the pinned image (or
-						// the release-catalog union when nothing is pinned). Picking a
-						// pair sets `binary` AND derives `device`, so the old
-						// Device/Binary mismatch is unrepresentable from this drawer.
-						// Reads `pendingDevice` (#1636 Codex fix) so a pending
-						// cross-backend profile switch previews the POST-save fit.
-						const cascade = backendOptions({
+						const hw = hostHwFlags(systemInfoQuery.data?.hardware);
+						// Runner-first cascade (hw-cascade.js, D3): one option per
+						// runtime, each carrying the lane(s) it can serve. Reads
+						// `pendingDevice` (#1636 Codex fix) so a pending cross-backend
+						// profile switch previews the POST-save fit.
+						const { options } = runnerOptions({
 							backends,
-							pinnedImage,
 							device: pendingDevice,
 							slotType: slot.type,
+							hw,
 						});
-						const backendSel = selectedBackendValue({
-							binary,
-							device: pendingDevice,
-							options: cascade.options,
-						});
-						// The one value the out-of-vocab self-option and the select's
-						// fallback `value` share — a single source so they can't diverge.
-						const oovValue = optionValue(
-							binary,
-							deviceBackend(pendingDevice),
-						);
+						const runtimeSel = selectedRunnerKey({ binary, options });
+						// '' = Auto (no binary pinned); a real key = that option;
+						// null = a persisted binary this catalog doesn't offer for
+						// this slot right now — kept as its own option so the drawer
+						// never silently rewrites persisted state.
+						const runtimeValue = runtimeSel === null ? binary : runtimeSel;
+						const selectedOption = runtimeSel
+							? options.find((o) => o.key === runtimeSel)
+							: null;
+						const laneVals = laneValues(selectedOption);
 						return (
 							<>
 								{/* Device select removed: `device` is now DERIVED from the
-								    Backend pick below (rocm↔vulkan rides the pair choice) —
+								    Runtime pick below (a single-lane runner's lane rides the
+								    pick; a dual-lane runner's Lane pills, further down) —
 								    the old standalone select let Device and Binary disagree.
 								    Save still persists it via PUT /config { device } and
 								    cold-restarts; non-GPU devices (npu/cpu/img) route to
 								    different runtime families, so they never flip here. */}
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Runner Image</span>
-										<FieldInfoIcon description="Pin the container image the slot launches. The list is the
-											runner-image catalog (the same registry the Runtimes page
-											shows); ‘Custom image ref…’ keeps the free-text escape
-											hatch for a debug build, A/B test, or rollback. Empty
-											uses the release catalog — the Backend below then offers
-											everything the catalog can launch for this slot." />
-									</div>
-									<div className="form-ctl">
-										{pinCustom ? (
-											<div
-												style={{ display: "flex", gap: 8, alignItems: "center" }}
-											>
-												<input
-													className={
-														"input mono" +
-														(fieldErrs.imagePin ? " input-err" : "")
-													}
-													data-testid="slot-hw-image-pin"
-													value={imagePin}
-													onChange={(e) => {
-														setImagePin(e.target.value);
-														setFieldErrs((p) => ({
-															...p,
-															imagePin: undefined,
-														}));
-													}}
-													placeholder={
-														binary && backends[binary]?.image
-															? backends[binary].image
-															: "will resolve from runner (binary)"
-													}
-													spellCheck={false}
-													style={{ flex: 1 }}
-													autoFocus
-												/>
-												<button
-													className="btn ghost sm"
-													data-testid="slot-hw-image-pin-catalog"
-													title="Back to the runner-image catalog"
-													onClick={() => setPinCustom(false)}
-												>
-													Catalog
-												</button>
-											</div>
-										) : (
-											<select
-												className={
-													"input mono" +
-													(fieldErrs.imagePin ? " input-err" : "")
-												}
-												data-testid="slot-hw-image-pin"
-												value={imagePin}
-												onChange={(e) => {
-													const v = e.target.value;
-													if (v === "__custom__") {
-														setPinCustom(true);
-														return;
-													}
-													setImagePin(v);
-													setFieldErrs((p) => ({ ...p, imagePin: undefined }));
-													// Keep the Backend pick coherent with the new image:
-													// if the current (binary, backend) pair isn't among
-													// what the image ships, hop to its sole pair, or
-													// clear so the operator picks from the repopulated
-													// list. Hopping adopts the pair's derived device.
-													const next = backendOptions({
-														backends,
-														pinnedImage: v,
-														device: pendingDevice,
-														slotType: slot.type,
-													});
-													const stillFits =
-														!binary ||
-														selectedBackendValue({
-															binary,
-															device: pendingDevice,
-															options: next.options,
-														}) !== null;
-													if (v && !stillFits) {
-														if (next.options.length === 1) {
-															setBinary(next.options[0].binary);
-															setDevice(next.options[0].device);
-														} else {
-															setBinary("");
-														}
-													}
-												}}
-												style={imagePin ? {} : { color: "var(--fg-4)" }}
-											>
-												<option value="">— default · release catalog —</option>
-												{/* A persisted pin outside the catalog (older release,
-												    hand-edited TOML) keeps its own option so opening the
-												    drawer never silently rewrites it. */}
-												{pinnedImage &&
-													!catalogImages.includes(pinnedImage) &&
-													!cataloguePins.some((o) => o.ref === pinnedImage) && (
-													<option value={pinnedImage}>
-														{pinnedImage} · custom
-													</option>
-												)}
-												{catalogImages.map((img) => (
-													<option key={img} value={img} title={img}>
-														{(imageKeysByRef.get(img) || []).join(" / ")} · {img}
-													</option>
-												))}
-												{/* Catalogued + downloaded images the release catalog
-												    doesn't list (e.g. combined-upstream, #2118) — the
-												    per-slot-pin lane without the free-text hatch. */}
-												{cataloguePins.length > 0 && (
-													<optgroup label="catalogued · downloaded">
-														{cataloguePins.map((o) => (
-															<option
-																key={o.ref}
-																value={o.ref}
-																title={o.notes || o.ref}
-															>
-																{o.id} · {o.ref}
-															</option>
-														))}
-													</optgroup>
-												)}
-												<option value="__custom__">Custom image ref…</option>
-											</select>
-										)}
-										{fieldErrs.imagePin ? (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.imagePin}
-											</div>
-										) : null}
-									</div>
-								</div>
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Backend</span>
-										<FieldInfoIcon description="⟳ Which runner binary · backend pair the slot launches
-											(a RUNNER_IMAGES key, not a profile). The list is exactly
-											what the selected Runner Image ships for this slot — the
-											release catalog when no image is pinned. Picking the
-											other GPU backend (rocm↔vulkan) restarts the slot onto
-											it; the bound model must be runnable there — Save blocks
-											otherwise." />
+										<span>Runtime</span>
+										<FieldInfoIcon description="Which engine build this slot launches. Options are what
+											this box's hardware can run; versions are managed on
+											the Runner Images page." />
 									</div>
 									<div className="form-ctl">
 										<select
 											className={
 												"input mono" + (fieldErrs.device ? " input-err" : "")
 											}
-											data-testid="slot-hw-binary"
-											value={backendSel ?? oovValue}
+											data-testid="slot-hw-runtime"
+											value={runtimeValue}
 											onChange={(e) => {
-												const pick = applyBackendChoice(
-													cascade.options,
-													e.target.value,
-													device,
-												);
+												const pick = applyRunnerChoice({
+													options,
+													key: e.target.value,
+													currentDevice: device,
+												});
 												setBinary(pick.binary);
 												setDevice(pick.device);
 												setFieldErrs((p) => ({ ...p, device: undefined }));
 											}}
 										>
 											{/* Auto entry only while nothing is pinned — picking a
-											    real pair is one-way, same as the old Binary select. */}
+											    real runtime is one-way, same as the old Backend
+											    select. */}
 											{!binary && (
 												<option value="">
 													— auto · resolved from device —
 												</option>
 											)}
-											{/* An out-of-vocab persisted pair (older release,
-											    hand-edited TOML, image that no longer ships it)
-											    keeps its own option so the drawer never silently
-											    rewrites it. */}
-											{backendSel === null && (
-												<option value={oovValue}>
-													{binary} · {deviceBackend(pendingDevice)} · not in
-													image
+											{/* An out-of-vocab persisted binary (older release,
+											    hand-edited TOML, a runtime this box no longer offers
+											    for the slot) keeps its own option so the drawer
+											    never silently rewrites it. */}
+											{runtimeSel === null && (
+												<option value={binary}>
+													{binary} · not in this catalog
 												</option>
 											)}
-											{cascade.options.map((o) => (
-												<option
-													key={optionValue(o.binary, o.backend)}
-													value={optionValue(o.binary, o.backend)}
-												>
-													{o.binary}
-													{o.backend ? ` · ${o.backend}` : ""}
-													{/* #1946: specialty-distribution kinds this runner
-													    serves ACCELERATED — so the operator can tell an
-													    accelerated runner from a plain-GGUF one. */}
-													{Array.isArray(o.specialties) &&
-													o.specialties.length > 0
-														? ` · ${o.specialties.join(", ")}`
-														: ""}
-													{/* llama.cpp build provenance of the runner's
-													    effective image (h0/runner-provenance) — e.g.
-													    `rocmfpx — ROCmFPX @0a59add (+4 patches)` vs
-													    `upstream — llama.cpp @c841aee`. Absent
-													    provenance renders exactly what rendered
-													    before. */}
-													{formatProvenanceShort(o.provenance)
-														? ` — ${formatProvenanceShort(o.provenance)}`
-														: ""}
+											{options.map((o) => (
+												<option key={o.key} value={o.key}>
+													{o.title}
+													{laneLabel(o) ? ` · ${laneLabel(o)}` : ""}
+													{o.state === "installable" ? " · not pulled" : ""}
 												</option>
 											))}
 										</select>
-										{!binary && cascade.options.length > 0 && (
-											<div className="hint">
-												No backend pinned — the launcher resolves one from the
-												device. Pick one to fix it.
-											</div>
-										)}
-										{cascade.emptyPin && (
-											<div className="hint" data-testid="slot-hw-binary-none">
-												Nothing in <span className="mono">{pinnedImage}</span>{" "}
-												can serve this slot. Pick another Runner Image, or the
-												release-catalog default.
-											</div>
-										)}
-										{(cascade.fallback || backendSel === null) && (
+										{selectedOption?.blurb ? (
+											<div className="hint">{selectedOption.blurb}</div>
+										) : null}
+										{deviceIsLiveEdit && (
 											<div
 												className="hint"
-												data-testid="slot-hw-fit-warning"
+												data-testid="slot-hw-consequence"
 												style={{
 													marginTop: 6,
 													padding: "6px 10px",
 													borderRadius: "var(--rad-sm)",
-													color: "var(--warn)",
-													border: "1px solid var(--warn-line)",
-													background: "var(--warn-soft)",
+													color: "var(--info)",
+													border: "1px solid var(--info-line)",
+													background: "var(--info-soft)",
 												}}
 											>
-												{cascade.fallback
-													? "⚠ Custom image ref — the catalog can't verify what it ships, so the list shows every known pair. The slot may fall back or fail at spawn if the image lacks the picked binary."
-													: `⚠ The persisted pair "${binary} · ${deviceBackend(pendingDevice)}" is not something ${pinnedImage ? "the pinned image" : "the catalog"} offers for this slot. The slot may fall back or fail at spawn — pick a listed pair to fix it.`}
+												Switching moves this slot to the{" "}
+												{laneTitle(deviceBackend(device))} lane and restarts
+												it on Save.
 											</div>
 										)}
 										{fieldErrs.device && (
@@ -1788,6 +1727,56 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										)}
 									</div>
 								</div>
+
+								{laneVals.length > 0 && (
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Lane</span>
+											<FieldInfoIcon description="Which GPU stack the Standard runtime uses. Auto
+												follows the device." />
+										</div>
+										<div className="form-ctl">
+											<div
+												data-testid="slot-hw-lane"
+												style={{ display: "flex", gap: 6 }}
+											>
+												{laneVals.map((lane) => {
+													const active = lane
+														? deviceBackend(pendingDevice) === lane
+														: !laneVals
+																.slice(1)
+																.includes(deviceBackend(pendingDevice));
+													return (
+														<button
+															key={lane || "auto"}
+															type="button"
+															className="btn ghost sm"
+															aria-pressed={active}
+															style={
+																active
+																	? {
+																			color: "var(--accent)",
+																			borderColor: "var(--accent-line)",
+																			background: "var(--accent-soft)",
+																		}
+																	: undefined
+															}
+															onClick={() =>
+																setDevice(
+																	lane
+																		? BACKEND_DEVICE[lane]
+																		: pendingDevice,
+																)
+															}
+														>
+															{lane ? laneTitle(lane) : "Auto"}
+														</button>
+													);
+												})}
+											</div>
+										</div>
+									</div>
+								)}
 
 								<div className="form-row">
 									<div className="form-lbl">
@@ -1844,6 +1833,237 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										)}
 									</div>
 								</div>
+
+								{/* Task 9: Advanced disclosure — image truth, debug pin,
+								    supersession banner. Collapsed by default; a controlled
+								    toggle (not native <details>) so the exact "▸"/"▾" glyph
+								    and label text are ours to own — mirrors the PanelHeader
+								    ▸/▾ pattern in
+								    dash/settings/pages/capabilities/shared.jsx. Everything
+								    inside is read-only or debug-only: the operator-facing
+								    hardware surface is Runtime/Lane above, and a pin here
+								    never widens or narrows those options (D1/D6 — no
+								    enumeration). "image"/"digest" language is permitted only
+								    inside this disclosure — the carve-out from the
+								    operator-noun rule that governs the rest of the group. */}
+								<div
+									className="form-section"
+									data-testid="slot-hw-advanced"
+									role="button"
+									tabIndex={0}
+									aria-expanded={advOpen}
+									style={{
+										cursor: "pointer",
+										userSelect: "none",
+										marginTop: 4,
+									}}
+									onClick={() => setAdvOpen((o) => !o)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter" || e.key === " ") {
+											e.preventDefault();
+											setAdvOpen((o) => !o);
+										}
+									}}
+								>
+									<span
+										className="mono"
+										style={{ marginRight: 6, color: "var(--fg-4)" }}
+									>
+										{advOpen ? "▾" : "▸"}
+									</span>
+									Advanced — image & version
+								</div>
+								{advOpen &&
+									(() => {
+										// The effective ref this slot actually runs: a debug
+										// pin (persisted server-side) beats the Runtime's
+										// catalog image, which beats an honest "unresolved
+										// yet" sentinel — never fabricate a ref nothing backs.
+										const effectiveImage =
+											slot.image_pin ||
+											backends[binary]?.image ||
+											"resolved at launch";
+										const pinActive = !!imagePin.trim();
+										const supersededByCombinedUpstream = imagePin.includes(
+											"hal0-combined-upstream",
+										);
+										// The one-click fix commits binary="strix" — only offer
+										// it when "strix" is actually a live pick in the SAME
+										// `options` list the Runtime select above renders (already
+										// filtered by device_class/slotType/hw feasibility). Firing
+										// setBinary("strix") when it isn't would land the operator
+										// on an unresolvable "strix · not in this catalog" pick —
+										// worse than the pin they started with.
+										const strixAvailable = options.some(
+											(o) => o.key === "strix",
+										);
+										return (
+											<>
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Image</span>
+														<FieldInfoIcon description="The exact runtime image resolved for this
+															slot — a debug pin when one is set, otherwise
+															the release image for the picked Runtime." />
+													</div>
+													<div className="form-ctl">
+														<span
+															className="mono"
+															data-testid="slot-hw-advanced-image"
+														>
+															{effectiveImage}
+														</span>
+														<div className="hint">
+															{pinActive
+																? "debug pin"
+																: "pinned by release · reconciled by hal0 update"}
+														</div>
+													</div>
+												</div>
+
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Version</span>
+													</div>
+													<div className="form-ctl">
+														<div className="hint">
+															Versions and rollback are managed per-runtime
+															on the{" "}
+															<a href="#slots/runner-images">
+																Runner Images page
+															</a>
+															.
+														</div>
+													</div>
+												</div>
+
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Debug pin</span>
+														<FieldInfoIcon description="Optional: pin this slot to an exact build
+															reference instead of the Runtime's release
+															default. Debug/rollback use only — cleared by
+															leaving it empty." />
+													</div>
+													<div className="form-ctl">
+														{!pinActive && !pinCustom && (
+															<button
+																type="button"
+																className="btn ghost sm"
+																data-testid="slot-hw-debug-pin-open"
+																onClick={() => setPinCustom(true)}
+															>
+																Pin a custom image ref…
+															</button>
+														)}
+														{(pinCustom || pinActive) && (
+															<>
+																<input
+																	className={
+																		"input mono" +
+																		(fieldErrs.imagePin
+																			? " input-err"
+																			: "")
+																	}
+																	data-testid="slot-hw-image-pin"
+																	value={imagePin}
+																	onChange={(e) => {
+																		setImagePin(e.target.value);
+																		setFieldErrs((p) => ({
+																			...p,
+																			imagePin: undefined,
+																		}));
+																	}}
+																	placeholder={
+																		binary && backends[binary]?.image
+																			? backends[binary].image
+																			: "will resolve from the Runtime pick"
+																	}
+																	spellCheck={false}
+																/>
+																{fieldErrs.imagePin ? (
+																	<div
+																		className="hint"
+																		style={{ color: "var(--err)" }}
+																	>
+																		{fieldErrs.imagePin}
+																	</div>
+																) : null}
+															</>
+														)}
+														{pinActive && (
+															<>
+																<div
+																	className="hint"
+																	data-testid="slot-hw-debug-pin-warning"
+																	style={{ color: "var(--warn)" }}
+																>
+																	Debug-only. hal0 can't verify what a
+																	custom ref ships — the slot keeps its
+																	current runtime binary and may fail at
+																	spawn.
+																</div>
+																<button
+																	type="button"
+																	className="btn ghost sm"
+																	data-testid="slot-hw-image-pin-clear"
+																	onClick={() => {
+																		setImagePin("");
+																		setPinCustom(false);
+																		setFieldErrs((p) => ({
+																			...p,
+																			imagePin: undefined,
+																		}));
+																	}}
+																>
+																	Use release image
+																</button>
+															</>
+														)}
+													</div>
+												</div>
+
+												{supersededByCombinedUpstream && (
+													<div
+														data-testid="slot-hw-supersession-banner"
+														style={{
+															marginTop: 6,
+															padding: "6px 10px",
+															borderRadius: "var(--rad-sm)",
+															color: "var(--warn)",
+															border: "1px solid var(--warn-line)",
+															background: "var(--warn-soft)",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "space-between",
+															gap: 8,
+														}}
+													>
+														<span>
+															⚠{" "}
+															{strixAvailable
+																? "Superseded by the Strix runtime"
+																: "Superseded by the Strix runtime — available after the next update"}
+														</span>
+														{strixAvailable && (
+															<button
+																type="button"
+																className="btn ghost sm"
+																data-testid="slot-hw-supersession-fix"
+																onClick={() => {
+																	setBinary("strix");
+																	setDevice("gpu-vulkan");
+																	setImagePin("");
+																}}
+															>
+																Switch to Strix
+															</button>
+														)}
+													</div>
+												)}
+											</>
+										);
+									})()}
 							</>
 						);
 					})()}

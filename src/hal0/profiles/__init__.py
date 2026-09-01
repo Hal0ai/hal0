@@ -59,6 +59,7 @@ class ResolvedProfile:
     runtime_family: RuntimeFamily
     supported_slot_types: tuple[SlotType, ...]
     backend: str | None = None
+    runner: str | None = None
     cloned_from: str | None = None
     #: Card display facts (profiles overhaul). The bench metrics are static
     #: for seeds and ``None`` for custom; ``used_by`` is the set of slots
@@ -76,6 +77,7 @@ class ResolvedProfile:
             "mtp": self.mtp,
             "device_class": self.device_class,
             "backend": self.backend,
+            "runner": self.runner,
             "resolved_flags": self.resolved_flags,
             "seed": self.seed,
             "runtime_family": self.runtime_family,
@@ -99,6 +101,10 @@ class ProfilePatch:
     #: Mirrors ProfileConfig.backend, which accepts "cuda" too. Omitting it here
     #: made a CUDA profile un-patchable through this seam.
     backend: Literal["rocm", "vulkan", "cuda"] | None = None
+    #: None = leave unchanged. Clearing a stored runner goes through a full
+    #: re-create (same as every other field here) — there is no separate
+    #: "clear" sentinel, mirroring `backend`/`device_class` above.
+    runner: str | None = None
     intent: str | None = None
     quant: str | None = None
 
@@ -178,6 +184,7 @@ class ProfileCatalog:
         # A create has no stored baseline, so §5/§21.7 stay a hard reject here —
         # only `update` grandfathers (see screen_profile_flags).
         screen_profile_flags(profile.flags)
+        profile = profile.model_copy(update={"runner": screen_profile_runner(profile.runner)})
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -214,6 +221,11 @@ class ProfileCatalog:
                     patch.device_class if patch.device_class is not None else existing.device_class
                 ),
                 backend=patch.backend if patch.backend is not None else existing.backend,
+                runner=(
+                    screen_profile_runner(patch.runner)
+                    if patch.runner is not None
+                    else existing.runner
+                ),
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
                 quant=patch.quant if patch.quant is not None else existing.quant,
@@ -318,6 +330,7 @@ class ProfileCatalog:
             mtp=profile.mtp,
             device_class=profile.device_class,
             backend=profile.backend,
+            runner=profile.runner,
             resolved_flags=resolve_profile_flags(profile),
             seed=name in SEED_PROFILES,
             runtime_family=runtime,
@@ -361,7 +374,33 @@ __all__ = [
     "RuntimeFamily",
     "SlotType",
     "screen_profile_flags",
+    "screen_profile_runner",
 ]
+
+
+def screen_profile_runner(runner: str | None) -> str | None:
+    """Validate + canonicalize a profile's runner key (D4). None passes.
+
+    ``runner`` is a RUNNER_IMAGES registry key, never an image ref — keys
+    survive image/tag updates (the same rot that got ``image`` removed from
+    profiles, spec-hw-slot-ownership §3). A superseded alias (e.g.
+    ``vulkanfpx``) is folded to its canonical key before persisting, so the
+    stored value is always the canonical registry key. Shared by the profile
+    catalog write seam (create/update) and the portable import path so both
+    apply the identical check.
+    """
+    if runner is None:
+        return None
+    from hal0.runners import RUNNER_IMAGES, canonical_runner_key
+
+    key = canonical_runner_key(runner)
+    if key not in RUNNER_IMAGES:
+        raise UnprocessableEntity(
+            f"unknown runtime {runner!r}",
+            code="profiles.unknown_runner",
+            details={"runner": runner, "available": sorted(RUNNER_IMAGES)},
+        )
+    return key
 
 
 def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None) -> None:
