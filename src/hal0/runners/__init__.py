@@ -57,6 +57,7 @@ from typing import Literal
 from hal0.config.schema import (
     DEFAULT_PROMPTFORGE_IMAGE,
     DEFAULT_ROCMFPX_IMAGE,
+    DEFAULT_STRIX_IMAGE,
     FALLBACK_CUDA_IMAGE,
     FALLBACK_VULKAN_IMAGE,
     STALE_ROCMFPX_IMAGE_REFS,
@@ -210,6 +211,37 @@ RUNNER_IMAGES: dict[str, Runner] = {
         supported_backends=("rocm",),  # HIP-only build: deliberately NOT
         # vulkan — the existing (device, BINARY) fit-check refuses a
         # gpu-vulkan pairing with no new code.
+        format_arch="gguf",
+    ),
+    "strix": Runner(
+        "strix",
+        DEFAULT_STRIX_IMAGE,
+        "llama-server",
+        # mtp=True: the pinned tree carries the NextN/MTP draft graph
+        # (--spec-type draft-mtp, sidecar or in-file draft tensors, adaptive
+        # sizing), so AUTO MTP resolution may speculate here exactly as on
+        # rocmfpx. mmproj: stock upstream multimodal (the source lineage
+        # documents the qwen4exp vision path). NO FPX-family quants —
+        # deliberately not in FPX_RUNNER_KEYS, so the #1790 quant/runner
+        # guard refuses FPX GGUFs here instead of letting them SIGSEGV.
+        RunnerSupports(mtp=True, jinja=True, mmproj=True),
+        "gpu",
+        "vulkan",
+        # Real key as of the 2026-08-31 §3-C gate PASS (ct150 kfd-present +
+        # ct151 kfd-absent; report in /mnt/mintdev/artifacts/): manifest.json's
+        # toolbox_images.strix was created FRESH for this image lineage (the
+        # promptforge pattern, never the rocmfpx wrong-lineage trap — module
+        # docstring) and carries the exact digest the gate validated.
+        "strix",
+        # Vulkan ONLY — the promptforge single-backend rule, opposite lane:
+        # the source tree's validated deployment is Vulkan + system RADV
+        # (recipe packaging/runner/strix/ builds GGML_HIP=OFF), so the existing
+        # (device, BINARY) fit-check refuses a gpu-rocm pairing with no new
+        # code. Launch-time admission to the gpu-vulkan lane is separately
+        # gated by VULKAN_CAPABLE_IMAGE_REFS (§3-C evidence), which this
+        # image must earn — this tuple is fit-check metadata, not a
+        # correctness claim.
+        supported_backends=("vulkan",),
         format_arch="gguf",
     ),
     "cuda": Runner(

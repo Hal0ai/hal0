@@ -50,6 +50,11 @@
       "tag": "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38",
       "digest": "sha256:370af6e9717e8c96742198a4b920888e6a248d447e21e3432de4d2c913703aea",
       "_notes": "PromptForge/ActiveFPX runner (HIP-only, GGML_VULKAN=OFF) for jcbtc Qwen3.8 CIRU distributions — OPTIONAL runner, never the AMD default. Digest is the exact image the #1891 ct150 gate validated 2026-08-30 (Paris + HumanEval+ 0.939/0.909 + MTP depth-4 ~86% acceptance; report in /mnt/mintdev/artifacts/). Tracked recipe: packaging/runner/promptforge/. Same digest pinned in Hal0ai/hal0-runner-images images.json."
+    },
+    "strix": {
+      "tag": "ghcr.io/hal0ai/hal0-strix-vulkan:0831",
+      "digest": "sha256:b50a73487d05bcae146aa54170cec981c7c6a158cc5cd1fa45a6096dfc5fe107",
+      "_notes": "Strix runner (Vulkan-only, GGML_HIP=OFF): Qwen3.8-Flash-Next qwen4exp + NextN/MTP (--spec-type draft-mtp, adaptive) + --tensor-read-lazy, built from the published r/StrixHalo production snapshot (myhacsint/llama.cpp @ 5d43efe26) — OPTIONAL runner, never the AMD default; successor to the hal0-combined-upstream:0829 pin (#2118). Digest is the exact image the 2026-08-31 §3-C gate validated on ct150 (kfd-present) AND ct151 (kfd-absent): Vulkan0 offload confirmed, temp-0 Paris, 256-token clean tail byte-identical across both boxes, json_schema constrained output, #1936 device-less diagnostic exit 78; report in /mnt/mintdev/artifacts/. Tracked recipe: packaging/runner/strix/."
     }
   },
   "_legacy_toolboxes": {

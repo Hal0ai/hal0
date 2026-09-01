@@ -1099,6 +1099,32 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #: is untouched by any of this.
 DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
 
+#: ``DEFAULT_STRIX_IMAGE`` — the strix-flavor runner: Vulkan-only build of
+#: the published production tree behind the 2026-08-31 r/StrixHalo field
+#: report (myhacsint/llama.cpp ``production/strix-halo-qwen4exp-b10669`` —
+#: upstream + the Nathanw1014 strix-halo Vulkan line + the apepojken
+#: qwen4exp optimizations + adaptive MTP; recipe at
+#: ``packaging/runner/strix/``; GGML_HIP=OFF because that tree's own scope
+#: statement and every lineage feeding it validate Vulkan only — mirror of
+#: the promptforge single-backend rule, opposite lane). What it adds over
+#: the upstream
+#: variant it supersedes for qwen4exp work (#2118): NextN/MTP speculative
+#: decode (``--spec-type draft-mtp``), ``--tensor-read-lazy`` PLE gathers,
+#: and the gfx1151 Vulkan FA/MoE kernels. Like promptforge, an OPTIONAL
+#: runner — never the AMD default; DEFAULT_ROCMFPX_IMAGE above is untouched.
+#: No FPX-family quant support: FPX GGUFs on this image are the #1790
+#: SIGSEGV class, and the launch-time guard keys off FPX_RUNNER_KEYS
+#: excluding it. GATE PASSED 2026-08-31: §3-C on ct150 (kfd-present) and
+#: ct151 (kfd-absent) — see the membership note on
+#: :data:`VULKAN_CAPABLE_IMAGE_REFS` below, which this ref joined on that
+#: evidence (Vulkan is its ONLY lane, so membership is what makes the
+#: runner launchable at all). manifest.json's ``toolbox_images.strix``
+#: carries the gate-validated digest and the strix Runner's ``manifest_key``
+#: points at it; this tag constant is the bundled fallback and stays in
+#: lockstep with the manifest entry (pinned by
+#: tests/packaging/test_strix_recipe.py).
+DEFAULT_STRIX_IMAGE = "ghcr.io/hal0ai/hal0-strix-vulkan:0831"
+
 #: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
 #: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
 #: FORMER DEFAULT — debris from slot creation under an older release — not a
@@ -1204,7 +1230,18 @@ VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #: :data:`DEFAULT_ROCMFPX_IMAGE` is NOT a member while the default pin is still
 #: the ade07ba lineage — which is the whole reason the gate cannot key off the
 #: default.
-VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE})
+#:
+#: ``DEFAULT_STRIX_IMAGE`` earned membership 2026-08-31 (§3-C run on ct150,
+#: kfd PRESENT, and ct151, kfd ABSENT — the renderD128-only #1888 box shape;
+#: report in /mnt/mintdev/artifacts/hal0-strix-gate-2026-08-31.md): Vulkan0
+#: (RADV GFX1151) offload confirmed on both boxes, temp-0 Paris probe,
+#: 256-token clean tail BYTE-IDENTICAL across the two boxes, json_schema
+#: returning grammar-constrained output with 200s across the thinking-kwarg
+#: matrix, and the #1936 device-less diagnostic (exit 78). The image is
+#: Vulkan-ONLY (GGML_HIP=OFF), so this lane is its only lane — membership
+#: here is what makes the runner launchable at all. The gate digest is
+#: pinned in manifest.json's ``toolbox_images.strix``.
+VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})
 
 #: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
 #: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU

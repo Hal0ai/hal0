@@ -1,0 +1,160 @@
+# Provenance for the STRIX runner image (Qwen3.8-Flash-Next + MTP,
+# strix-halo-tuned llama.cpp, Vulkan-only).
+#
+# WHY THIS EXISTS: ../upstream (hal0-combined-upstream:0829, #2118) unblocked
+# the qwen4exp architecture, but it is pristine ggml-org master: no NextN/MTP
+# speculative decode, no --tensor-read-lazy PLE gather, and none of the
+# strix-halo FA/MoE-prefill kernels. The pinned [source] below is the
+# published production tree behind the r/StrixHalo field report (2026-08-31,
+# "definitive highest throughput" post) — a curated snapshot combining
+# upstream, the Nathanw1014 strix-halo Vulkan line, and the apepojken
+# qwen4exp optimizations, tuned for exactly the gfx1151 UMA hardware the
+# fleet's GPU box runs. The report's deployment of that tree serves
+# Qwen3.8-Flash-Next Q4_K_M with a grafted Q8_0 MTP head at pp512 485 t/s /
+# MTP decode 52 t/s at ~91% draft acceptance on this silicon.
+#
+# WHAT THIS IS: a first-class OPTIONAL runner — RUNNER_IMAGES["strix"], the
+# promptforge shape, not the ../upstream pin-only shape. It appears in the
+# slot-drawer dropdown and a slot gets it only by selecting it; nothing
+# resolves to it by default and DEFAULT_ROCMFPX_IMAGE is untouched. It is
+# the intended SUCCESSOR to the hal0-combined-upstream:0829 pin for qwen4exp
+# slots (the #2118 retirement path).
+#
+# VULKAN-ONLY, deliberately — the first per-recipe cmake_flags divergence
+# from ../rocmfpx, and the mirror of promptforge's HIP-only rule on the
+# opposite lane: the snapshot's own scope statement is "Vulkan-first for
+# the documented production deployment" (Vulkan + system RADV, no ROCm
+# runtime required), its ROCm paths ride along inherited and unvalidated,
+# and every lineage feeding it (the Nathanw1014 fork's published artifact
+# line included) validates Vulkan only. GGML_HIP=ON here would ship an
+# untested backend under a tag whose name promises tuning. The registry
+# entry declares supported_backends=("vulkan",), so the existing
+# (device, BINARY) fit-check refuses a gpu-rocm pairing with no new code.
+# Launch-time admission to the gpu-vulkan lane is separately gated by
+# VULKAN_CAPABLE_IMAGE_REFS (#1888 / §3-C: evidence on a kfd-present AND a
+# kfd-absent box) — and since Vulkan is this runner's ONLY lane, earning
+# that membership IS the acceptance gate for the image, not an extra.
+# GATE PASSED 2026-08-31 for the :0831 build (digest sha256:b50a7348…, the
+# manifest.json toolbox_images.strix pin): ct150 (kfd-present) + ct151
+# (kfd-absent, renderD128-only) — Vulkan0 offload, temp-0 Paris, 256-token
+# clean tail byte-identical across boxes, json_schema constrained, #1936
+# device-less exit 78. Report: /mnt/mintdev/artifacts/
+# hal0-strix-gate-2026-08-31.md. A REBUILD does not inherit this: new
+# digest, new gate.
+# Driver note: the reference deployment ran system RADV (Fedora Mesa
+# 26.1.7); this image likewise uses the base toolbox's dnf
+# mesa-vulkan-drivers — NOT the Nathanw1014 toolbox's bundled dev Mesa
+# snapshot, whose known repeatability defect (their v0.7.3 notes) this
+# lineage sidesteps entirely.
+#
+# FEATURE DELTA vs ../upstream (:0829), per the pinned tree's own
+# PATCHSET.md (a provenance doc the snapshot ships in-tree) and the field
+# report:
+#   GAINED:
+#     * NextN/MTP speculative decode for qwen4exp (PR 27836 derivation:
+#       `--spec-type draft-mtp`, sidecar or in-file draft tensors) PLUS
+#       adaptive draft sizing (`--spec-draft-adaptive`) and the checkpoint/
+#       rollback/cache/server fixes the report calls out for reliable MTP
+#     * --tensor-read-lazy (PR 27794 lineage): random-access mmap advice +
+#       batched PLE row prefetch for the ~95 GiB gather table
+#     * the strix-halo Vulkan kernel line (Nathanw1014 fork work): FA +
+#       MoE-prefill fixes, mmid row-lists, lazy PLE handling
+#     * selected qwen4exp Vulkan execution-path work (apepojken line):
+#       skinny prefill, gathered QSA decode, radix top-k, GDN contiguity,
+#       static RDNA3 mat-vec paths, quantized-KV QSA support
+#     * qwen4exp correctness follow-ups (PR 27941 lineage), recurrent-state
+#       rollback, disconnect cancellation
+#   LOST vs ../upstream: the HIP lane (see VULKAN-ONLY above — ../upstream
+#   keeps combined flags; a qwen4exp slot that must run gpu-rocm stays on
+#   the 0829 pin).
+#   INHERITED-UNVALIDATED (the snapshot's own words): DeepSeek V4 sparse
+#   attention, DFlash2, Muse Glimmer, BailingMoE3, Motif-3, ROCm paths ride
+#   along untested — do not read their presence as support.
+#   ABSENT vs ../rocmfpx, same rule as ../upstream: no ROCmFPX/ROCmI4/IU4
+#   quant formats, no minicpm5/lfm2.5 patches. FPX-family GGUFs must never
+#   be launched on this image (hal0#1790 SIGSEGV class); "strix" staying out
+#   of FPX_RUNNER_KEYS is the guard.
+#
+# MTP SERVING NOTE: the draft head needs GTT headroom BESIDE the target — on
+# the fork's 64 GB reference box that means -ncmoe 4+; the 124 GiB fleet box
+# has more runway. Flags ride the slot profile / model defaults
+# (`--spec-type draft-mtp` + --spec-draft-*), gated by supports.mtp.
+
+[image]
+#: NOT DEFAULT_ROCMFPX_IMAGE and must never become it — see header. Kept in
+#: lockstep with hal0.config.schema.DEFAULT_STRIX_IMAGE by
+#: tests/packaging/test_strix_recipe.py.
+tag = "ghcr.io/hal0ai/hal0-strix-vulkan:0831"
+
+[base]
+#: Same base, same digest, same rationale as ../rocmfpx/manifest.toml and
+#: ../upstream/manifest.toml — byte-identical lineage so the variables
+#: between the three images are [source] and this recipe's declared
+#: Vulkan-only flag set. Yes, that keeps the ROCm 7.2.4 toolchain in a
+#: HIP-less image: the builder stage needs the base's cmake/glslc/vulkan
+#: toolchain either way, and a shared pinned base is what keeps the
+#: three-recipe lineage comparable (and the runtime dnf layer identical).
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+digest = "sha256:4f5418c1b1e39e5ad9bbadfd2e8381c6b8a70e9b03f667179a7233c6f681462a"
+rocm_version = "7.2.4"
+upstream_family = "https://github.com/kyuz0/amd-strix-halo-toolboxes"
+upstream_ref = "unknown — inherited finding, see ../rocmfpx/manifest.toml"
+dnf_packages_pinned = false
+
+[source]
+#: The field report's OWN production tree, published for reproducibility:
+#: myhacsint/llama.cpp branch `production/strix-halo-qwen4exp-b10669` —
+#: upstream master 9f0d017ef (2026-08-17) + ONE squashed snapshot commit
+#: (77ee2ed74) whose git TREE (fff0302a9f70ae9073588dd914db08cc578f256c) is
+#: byte-identical to the production commit the deployed binary reports
+#: (3287a6e9d / build 10669; llama-server sha256 c3adcbee09…, all recorded
+#: in the tree's PRODUCTION-SNAPSHOT.md). Chosen over the Nathanw1014
+#: branch tip this recipe first pinned because the snapshot ADDs the pieces
+#: the fork lacks (adaptive MTP draft sizing, skinny prefill, the MTP
+#: reliability fixes) and IS the tested deployment the numbers came from.
+#: The pin is the branch tip: snapshot + a docs/provenance commit that
+#: changes no compiled source (its own stated property).
+#: Squashed-history caveat, stated: the 205-commit working lineage is not
+#: public, so review means reading the snapshot diff, not cherry-picks —
+#: and hal0's §3-C acceptance pass (see VULKAN-ONLY above) is the
+#: validation gate before this runner serves anything real.
+repo = "https://github.com/myhacsint/llama.cpp.git"
+ref = "5d43efe26f68249eb74e93ee1abd05f984dcb133"
+ref_description = "docs: publish Strix Halo build and MTP provenance (production/strix-halo-qwen4exp-b10669 tip)"
+submodules = false
+
+[build]
+#: NOT the ../rocmfpx flag set — see the VULKAN-ONLY header block for why
+#: GGML_HIP is OFF here and what that forbids at slot level. The rest
+#: follows the snapshot's documented reference build (its
+#: PRODUCTION-SNAPSHOT.md "Rebuild" section): Release, static libs,
+#: Vulkan-only. Two deliberate deviations from that reference, named so
+#: nobody "restores" them silently:
+#:   * LLAMA_OPENSSL is not enabled — slots serve loopback HTTP behind the
+#:     hal0 entrypoint's /health supervision; enabling it would also mean
+#:     adding openssl-devel to the SHARED builder stage in
+#:     ../rocmfpx/build.sh, a cross-recipe edit this image does not need.
+#:   * LLAMA_BUILD_TESTS stays off (build.sh builds the four runtime
+#:     targets only; the flag would configure test targets nothing builds).
+#: GGML_NATIVE=ON matches the reference and specializes for the BUILD
+#: host's CPU: the build must run on lxc130 (strix-halo-class host). If the
+#: build host ever stops matching the fleet's CPU family, flip this OFF —
+#: a mismatched -march is the #2126 SIGILL class at model load.
+#: gpu_arch kept for provenance symmetry (the Vulkan backend compiles
+#: SPIR-V, not per-arch code objects; nothing consumes it at configure).
+gpu_arch = "gfx1151"
+cmake_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DGGML_HIP=OFF",
+    "-DGGML_VULKAN=ON",
+    "-DGGML_CUDA=OFF",
+    "-DGGML_NATIVE=ON",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DLLAMA_BUILD_SERVER=ON",
+    "-DLLAMA_BUILD_WEBUI=OFF",
+    "-DLLAMA_USE_PREBUILT_WEBUI=OFF",
+]
+
+#: No patches. Candidates live in the FEATURE DELTA header block (adaptive
+#: MTP draft sizing, skinny prefill) — add them here with a public PR
+#: reference when one exists, never as blind diffs from the field report.
