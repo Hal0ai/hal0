@@ -40,7 +40,12 @@ import httpx
 
 from hal0.capabilities.profile_fit import profile_name_for_fit
 from hal0.config.loader import load_hardware_info
-from hal0.config.schema import SEED_PROFILES, HardwareInfo, ProfileConfig
+from hal0.config.schema import (
+    LEGACY_SEED_PROFILES,
+    SEED_PROFILES,
+    HardwareInfo,
+    ProfileConfig,
+)
 from hal0.errors import BadRequest
 from hal0.hardware.recommend import _MOE_ARCHITECTURES
 from hal0.install.profile_derive import derive_device, derive_profile
@@ -376,12 +381,16 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
     if seed_name == "chat" and _looks_moe(facts):
         # "chat" is the flat, model-agnostic fallback; "moe" is the workload
         # profile tuned for hybrid-KV MoE models (f16 KV, no context shift).
+        # "moe" is a DEMOTED definition now, not a seed — ProfileCatalog.resolve
+        # still serves it (materializing it as a custom profile where an install
+        # has not already inherited it), which is why the guard below accepts the
+        # legacy set rather than seeds alone.
         seed_name = "moe"
 
-    if seed_name not in SEED_PROFILES:
+    if seed_name not in SEED_PROFILES and seed_name not in LEGACY_SEED_PROFILES:
         # Defensive only — profile_name_for_fit/derive_profile are expected
-        # to always name a live seed; guards against future seed-catalog
-        # drift rather than a case reachable today.
+        # to always name a catalog-resolvable profile; guards against future
+        # catalog drift rather than a case reachable today.
         warnings.append(
             f"derived seed profile {seed_name!r} is not in the current seed catalog "
             "— falling back to 'chat'"

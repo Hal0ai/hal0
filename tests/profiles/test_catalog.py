@@ -6,7 +6,7 @@ import pytest
 
 from hal0.config.loader import load_profiles_config, save_profiles_config
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
-from hal0.errors import Conflict, UnprocessableEntity
+from hal0.errors import Conflict, NotFound, UnprocessableEntity
 from hal0.profiles import ProfileCatalog, ProfilePatch, _runtime_family
 
 
@@ -220,10 +220,11 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
-    # Per spec §4.2: generic dense profile is model-agnostic (no quant hint);
-    # the chadrock-dense family-specific profile carries the ROCmFP4 hint.
-    assert by_name["dense"].quant == ""
-    assert by_name["chadrock-dense"].quant == "ROCmFP4"
+    # Seeds that carry no quant hint report it as the empty string, and a
+    # runtime-family seed carries its own (the FLM NPU quant here). The
+    # ROCmFP4 family hints moved out with the chadrock-* demotion.
+    assert by_name["chat"].quant == ""
+    assert by_name["flm"].quant == "W4ABF16"
 
 
 def test_custom_profile_has_no_bench_and_round_trips_intent_quant(
@@ -254,7 +255,7 @@ def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
         )
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert sorted(by_name["chat"].used_by) == ["agent", "primary"]
-    assert by_name["dense"].used_by == ()
+    assert by_name["embedding"].used_by == ()
     assert by_name["chat"].to_dict()["used_by"] == ["agent", "primary"]
 
 
@@ -338,3 +339,24 @@ def test_runtime_family_no_runner_unchanged() -> None:
     # device_class rules unchanged too
     assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="npu")) == "flm"
     assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="img")) == "comfyui"
+
+
+# ── demoted (ex-seed) profiles ────────────────────────────────────────────
+
+
+def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path) -> None:
+    """No profiles.toml at all: the curated agent/coder slots still resolve."""
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    resolved = catalog.resolve("chadrock-moe")
+    assert resolved.name == "chadrock-moe"
+    assert resolved.seed is False
+    # Persisted as a custom entry, so it is editable/deletable from here on.
+    assert "chadrock-moe" in load_profiles_config(p).profile
+
+
+def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:
+    catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
+    with pytest.raises(NotFound):
+        catalog.resolve("no-such-profile")

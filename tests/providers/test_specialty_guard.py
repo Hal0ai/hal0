@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hal0.config.schema import SEED_PROFILES, ProfileConfig
+from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig
 from hal0.errors import UnprocessableEntity
 from hal0.providers.container import (
     _CTX_SAFE_FALLBACK,
@@ -208,7 +208,9 @@ def test_operator_server_env_wins():
 
 
 def test_promptforge_seed_profile_exists():
-    prof = SEED_PROFILES["promptforge"]
+    # Demoted out of the seed catalog by the profile-system overhaul; still
+    # shipped, and still the recipe an install inherits (legacy_seed_profiles.toml).
+    prof = LEGACY_SEED_PROFILES["promptforge"]
     assert "--no-cache-prompt" in prof["flags"]
     assert "-fa on" in prof["flags"]
     assert prof["mtp"] is True
@@ -293,7 +295,7 @@ def test_promptforge_template_flags_not_injected_when_degraded():
     accelerated kernel path the card's flags assume, so a degraded launch
     must resolve flags exactly like a plain, unstamped model — none of the
     slot's named profile flags injected as a template."""
-    profile = ProfileConfig.model_validate(SEED_PROFILES["promptforge"])
+    profile = ProfileConfig.model_validate(LEGACY_SEED_PROFILES["promptforge"])
     model = _pf_model()  # no stamped defaults/provenance -> hits the #1787 path
 
     capable = _resolve_llama_scalars(

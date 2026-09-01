@@ -570,16 +570,21 @@ class TestSeededSlotTomls:
     def test_seeded_slot_profile_resolves_to_live_seed(
         self, toml_path: Path, tmp_path: Path
     ) -> None:
-        """Every shipped seed slot's `profile` must resolve to a live SEED_PROFILES key.
+        """Every shipped seed slot's `profile` must resolve through the catalog.
 
         SlotConfig does NOT validate profile existence, so a rename/removal of a
-        seed profile (the 0.9.5 2x2-grid consolidation retired rocmfpx-rocm/vkfpx-*)
+        profile (the 0.9.5 2x2-grid consolidation retired rocmfpx-rocm/vkfpx-*)
         or a plain typo in a slot TOML (profile="vulcan") would otherwise ship
-        green and only break at container launch on a real box. Resolving through
-        a catalog with NO on-disk overlay means only code seeds count, so a
-        dangling ref raises NotFound here.
+        green and only break at container launch on a real box.
+
+        The accepted set is SEED_PROFILES + LEGACY_SEED_PROFILES: ``agent`` and
+        ``coder`` name demoted definitions (``chadrock-moe`` / ``coding``), and
+        those are exactly the references ``ProfileCatalog._materialize_legacy``
+        exists to keep resolvable on a fresh install. Resolving through a
+        catalog with NO on-disk overlay is what proves that end of it — a
+        genuinely dangling ref still raises NotFound here.
         """
-        from hal0.config.schema import SEED_PROFILES
+        from hal0.config.schema import LEGACY_SEED_PROFILES, SEED_PROFILES
         from hal0.profiles import ProfileCatalog
 
         raw = tomllib.loads(toml_path.read_text())
@@ -587,9 +592,9 @@ class TestSeededSlotTomls:
         profile = slot.get("profile")
         if profile is None:
             pytest.skip(f"{toml_path.name} declares no profile")
-        assert profile in SEED_PROFILES, (
-            f"{toml_path.name} references profile {profile!r} which is not a live "
-            f"SEED_PROFILES key (renamed/removed/typo?)"
+        assert profile in SEED_PROFILES or profile in LEGACY_SEED_PROFILES, (
+            f"{toml_path.name} references profile {profile!r} which is neither a live "
+            f"SEED_PROFILES key nor a shipped legacy definition (renamed/removed/typo?)"
         )
         # Resolve through the real path too — raises NotFound on a dangling ref.
         ProfileCatalog(path=tmp_path / "nonexistent.toml").resolve(profile)

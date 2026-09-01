@@ -189,7 +189,7 @@ class TestLoadProfilesConfig:
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        for name in ("chat", "chat-long-context", "moe", "dense"):
+        for name in ("chat", "cpu-chat", "embedding", "reranking"):
             assert name in cfg.profile
 
     def test_seed_rocm_mtp_false(self, tmp_path: Path) -> None:
@@ -197,9 +197,15 @@ class TestLoadProfilesConfig:
         assert cfg.profile["chat"].mtp is False
 
     def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
-        """Non-MTP profiles stay False; MTP-capable family profiles are True."""
+        """Non-MTP profiles stay False; MTP-capable family profiles are True.
+
+        The three mtp=true recipes (chadrock-dense / chadrock-moe /
+        promptforge) were demoted out of the seed catalog, so the seed set is
+        now uniformly mtp=false — the set below is deliberately empty rather
+        than deleted, so re-introducing an MTP seed has to name itself here.
+        """
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        _MTP_TRUE_PROFILES = {"chadrock-dense", "chadrock-moe", "promptforge"}
+        _MTP_TRUE_PROFILES: set[str] = set()
         for name in SEED_PROFILES:
             expected_mtp = name in _MTP_TRUE_PROFILES
             assert cfg.profile[name].mtp is expected_mtp, (

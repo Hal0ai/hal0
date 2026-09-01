@@ -108,6 +108,27 @@ def seed_profiles() -> dict[str, dict[str, Any]]:
 
 
 @lru_cache(maxsize=1)
+def legacy_seed_profiles() -> dict[str, dict[str, Any]]:
+    """The 8 demoted profile definitions, keyed by slug — same shape as
+    :func:`seed_profiles`, but NOT part of the shipped seed catalog.
+
+    These used to be seeds; the catalog was pruned to the minimal core and
+    these workload variants became operator-owned data. They stay shipped
+    (rather than deleted) so an upgrade can inject them once as ordinary
+    custom profiles — see ``legacy_seed_profiles.toml``'s header and
+    ``loader.load_profiles_config``.
+    """
+    raw = _read_toml("legacy_seed_profiles.toml")
+    profiles = raw.get("profile", {})
+    out: dict[str, dict[str, Any]] = {}
+    for name, entry in profiles.items():
+        entry = dict(entry)
+        entry.pop("image", None)
+        out[name] = entry
+    return out
+
+
+@lru_cache(maxsize=1)
 def seed_stacks() -> dict[str, StackConfig]:
     """Built-in seed stacks, validated into :class:`StackConfig` instances."""
     from hal0.config.schema import StackConfig  # local import: breaks the cycle
@@ -150,6 +171,7 @@ def reset_cache() -> None:
     should call this after making their change.
     """
     seed_profiles.cache_clear()
+    legacy_seed_profiles.cache_clear()
     seed_stacks.cache_clear()
     profile_bench.cache_clear()
     family_defaults.cache_clear()

@@ -188,12 +188,52 @@ class ProfileCatalog:
         cfg = load_profiles_config(self._path)
         profile = cfg.profile.get(name)
         if profile is None:
+            profile = self._materialize_legacy(name)
+        if profile is None:
             raise NotFound(
                 f"profile {name!r} not found",
                 code="profiles.not_found",
                 details={"profile": name, "available": sorted(cfg.profile)},
             )
         return self._resolve_item(name, profile)
+
+    def _materialize_legacy(self, name: str) -> ProfileConfig | None:
+        """Adopt a demoted (ex-seed) definition on first reference, or None.
+
+        An install that already carries these definitions in its profiles.toml
+        never reaches here. This is for the one state that structurally cannot:
+        a FRESH install, where there is no profiles.toml at all, yet the shipped
+        configuration still names demoted profiles — install.sh copies
+        ``installer/etc-hal0/slots/agent.toml`` (``chadrock-moe``) and
+        ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
+        agent slot asks for ``moe``. Without this the curated slots on a
+        brand-new box would reference nothing.
+
+        The absent-file gate is load-bearing, not an optimisation: once
+        profiles.toml exists the catalog is authoritative, and a legacy name
+        missing from it means the operator DELETED it. Re-materializing there
+        would resurrect it on the next read — precisely the virtual-seed
+        behaviour the demotion exists to escape.
+
+        Materializing (rather than answering read-only) is what leaves the
+        entry editable and deletable afterwards, exactly like a demoted one. A
+        write failure is not fatal: the caller still gets the definition and
+        the next reference retries.
+        """
+        from hal0.config.schema import LEGACY_SEED_PROFILES
+
+        entry = LEGACY_SEED_PROFILES.get(name)
+        if entry is None or self._path_or_default().exists():
+            return None
+        profile = ProfileConfig.model_validate(entry)
+        with self._lock:
+            catalog = load_profiles_config(self._path)
+            catalog.profile[name] = profile
+            try:
+                save_profiles_config(catalog, self._path)
+            except OSError as exc:
+                log.warning("profiles.legacy_materialize_write_failed name=%s error=%s", name, exc)
+        return profile
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)

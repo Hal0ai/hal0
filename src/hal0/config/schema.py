@@ -3500,6 +3500,10 @@ class Hal0Config(BaseModel):
 from hal0.config import seeds as _seeds  # noqa: E402
 
 SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
+#: The 8 demoted (ex-seed) definitions — shipped data, NOT part of the seed
+#: catalog. Injected once into an existing install's profiles.toml as ordinary
+#: custom profiles by ``loader.load_profiles_config``.
+LEGACY_SEED_PROFILES: dict[str, dict[str, object]] = _seeds.legacy_seed_profiles()
 SEED_STACKS: dict[str, StackConfig] = _seeds.seed_stacks()
 PROFILE_BENCH: dict[str, dict[str, float]] = _seeds.profile_bench()
 FAMILY_DEFAULTS: dict[str, str] = _seeds.family_defaults()
@@ -3514,6 +3518,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "FAMILY_DEFAULTS",
+    "LEGACY_SEED_PROFILES",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
