@@ -117,6 +117,40 @@ def render() -> dict[Path, str]:
     return files
 
 
+def is_stale(path: Path, body: str) -> bool:
+    """True when ``path`` does not already hold the generated ``body``.
+
+    Deliberately BLIND to the envelope's ``hal0_version``, and to nothing
+    else. That field is stamped by ``export_envelope`` from
+    ``hal0.__version__``, which resolves from INSTALLED package metadata
+    (``src/hal0/__init__.py``) — so it differs between a release checkout, a
+    tree mid-version-bump, and one where hal0 is not pip-installed at all
+    (``0.0.0+source``). A raw-text comparison calls all eight envelopes stale
+    in every one of those and points the reader at the wrong problem; the
+    stamp records WHICH RELEASE wrote the file, not what the file says.
+
+    Everything the checksum covers — and the checksum itself, the name, kind,
+    schema_version, exported_at, and the whole formatting of the file — is
+    still compared strictly. Keep this in lockstep with
+    ``tests/community/test_addon_envelopes.py::_staleness_view``.
+    """
+    if not path.exists():
+        return True
+    on_disk = path.read_text(encoding="utf-8")
+    if on_disk == body:
+        return False
+    try:
+        stamped = json.loads(on_disk).get("hal0_version")
+        fresh = json.loads(body)
+    except (json.JSONDecodeError, AttributeError):
+        return True  # unparseable on disk — regenerate it
+    if not isinstance(fresh, dict) or "hal0_version" not in fresh or stamped is None:
+        return True  # index.json (no stamp): the text difference is real
+    # Re-render with the committed stamp: any surviving difference is content
+    # or formatting, both of which a regeneration is genuinely needed for.
+    return _dump({**fresh, "hal0_version": stamped}) != on_disk
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -128,9 +162,7 @@ def main(argv: list[str]) -> int:
 
     files = render()
     expected = set(files)
-    stale: list[Path] = [
-        path for path, body in files.items() if not path.exists() or path.read_text() != body
-    ]
+    stale: list[Path] = [path for path, body in files.items() if is_stale(path, body)]
     orphans = [p for p in ADDONS_DIR.glob("*.hal0profile.json") if p not in expected]
 
     if args.check:
@@ -139,12 +171,19 @@ def main(argv: list[str]) -> int:
         return 1 if (stale or orphans) else 0
 
     ADDONS_DIR.mkdir(parents=True, exist_ok=True)
-    for path, body in sorted(files.items()):
-        path.write_text(body, encoding="utf-8")
+    # Write only what `is_stale` flags, for the same reason it ignores the
+    # stamp: an unconditional rewrite in a checkout whose ambient
+    # `hal0.__version__` differs would restamp all eight files and produce a
+    # diff of pure provenance churn. Regenerating is then idempotent.
+    for path in sorted(stale):
+        path.write_text(files[path], encoding="utf-8")
     for path in orphans:
         path.unlink()
         print(f"removed orphan {path.relative_to(ROOT)}")
-    print(f"wrote {len(files) - 1} envelopes + index.json to {ADDONS_DIR.relative_to(ROOT)}")
+    if stale:
+        for path in sorted(stale):
+            print(f"wrote {path.relative_to(ROOT)}")
+    print(f"{len(stale)} of {len(files)} files rewritten in {ADDONS_DIR.relative_to(ROOT)}")
     return 0
 
 

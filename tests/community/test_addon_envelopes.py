@@ -9,8 +9,12 @@ instead of shipping a catalog that disagrees with the code.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+from types import ModuleType
+
+import pytest
 
 from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig
 from hal0.profiles import ProfileCatalog, _runtime_family
@@ -126,3 +130,41 @@ def test_index_declares_the_runner_tolerant_release() -> None:
     """
     for row in _index()["addons"]:
         assert row["min_hal0_version"] == "1.2.0"
+
+
+# ── scripts/export_addons.py --check ─────────────────────────────────────────
+
+
+def _generator() -> ModuleType:
+    """Import ``scripts/export_addons.py`` (not a package) by path."""
+    path = REPO_ROOT / "scripts" / "export_addons.py"
+    spec = importlib.util.spec_from_file_location("export_addons", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_check_passes_on_the_committed_catalog() -> None:
+    assert _generator().main(["--check"]) == 0
+
+
+def test_check_is_blind_to_the_hal0_version_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--check`` must agree with the pytest staleness test about what stale MEANS.
+
+    ``export_envelope`` stamps ``hal0.__version__``, which resolves from
+    INSTALLED package metadata — so it differs between a release checkout, a
+    version bump, and a tree where hal0 is not pip-installed (``0.0.0+source``).
+    A raw-text comparison flags all eight envelopes stale in any of those, with
+    a message pointing at the wrong problem. The stamp is provenance, not
+    content; everything the checksum covers is still compared strictly.
+    """
+    monkeypatch.setattr("hal0.profiles.portable.__version__", "9.9.9-drift")
+    assert _generator().main(["--check"]) == 0
+
+
+def test_check_still_catches_real_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The blindness is scoped to ``hal0_version`` — nothing else."""
+    module = _generator()
+    monkeypatch.setattr(module, "EXPORTED_AT", "1999-01-01T00:00:00Z")
+    assert module.main(["--check"]) == 1
