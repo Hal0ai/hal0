@@ -18,7 +18,11 @@ is rejected rather than silently resolved. Non-GPU profiles (npu/cpu/img,
 
 from __future__ import annotations
 
+import pytest
+
+from hal0.slots.config_write import _reconcile_device_profile
 from hal0.slots.manager import SlotManager
+from hal0.slots.state import SlotConfigError
 
 
 def _gpu_cfg(name: str, *, device: str, profile: str, model: str = "m") -> dict:
@@ -136,3 +140,53 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
     cfg = await sm.get_config("voice")
     assert cfg["device"] == "cpu"
     assert cfg["profile"] == "kokoro"
+
+
+# ── Task 5: profile apply flips runtime + device (profile wins, D4) ────────
+
+
+def _catalog_with_runner(tmp_path, monkeypatch, runner="promptforge"):
+    """Point ``load_profiles_config`` at a profiles.toml whose "pf" profile
+    carries ``runner``. Mirrors the ``HAL0_HOME``-env idiom the rest of this
+    file uses (via ``tmp_hal0_home``) — these sync tests call
+    ``_reconcile_device_profile`` directly and take ``tmp_path``/``monkeypatch``
+    instead of the async fixture.
+    """
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    etc_dir = tmp_path / "etc" / "hal0"
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    (etc_dir / "profiles.toml").write_text(f'[profile.pf]\nrunner = "{runner}"\n')
+
+
+def test_profile_with_runner_sets_binary_and_device(tmp_path, monkeypatch):
+    _catalog_with_runner(tmp_path, monkeypatch)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
+    _reconcile_device_profile(cfg, changed={"profile"})
+    assert cfg["binary"] == "promptforge"
+    assert cfg["device"] == "gpu-rocm"  # derived from the single backend
+
+
+def test_profile_runner_infeasible_rocm_no_kfd_raises(tmp_path, monkeypatch):
+    _catalog_with_runner(tmp_path, monkeypatch)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
+    with pytest.raises(SlotConfigError):
+        _reconcile_device_profile(cfg, changed={"profile"})
+    assert cfg["binary"] == ""  # no partial write
+    assert cfg["device"] == "gpu-vulkan"
+
+
+def test_profile_runner_multi_backend_keeps_lane(tmp_path, monkeypatch):
+    _catalog_with_runner(tmp_path, monkeypatch, runner="rocmfpx")
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": "promptforge"}
+    _reconcile_device_profile(cfg, changed={"profile"})
+    assert cfg["binary"] == "rocmfpx"
+    assert cfg["device"] == "gpu-vulkan"  # combined default: lane untouched
+
+
+def test_profile_runner_ignored_on_unrelated_write(tmp_path, monkeypatch):
+    _catalog_with_runner(tmp_path, monkeypatch)
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
+    _reconcile_device_profile(cfg, changed={"threads"})
+    assert cfg["binary"] == ""  # drift heals only on profile edit
