@@ -25,6 +25,11 @@ export interface Profile {
   seed?: boolean
   /** GPU runtime (rocm|vulkan); null for non-GPU profiles (#751). */
   backend?: 'rocm' | 'vulkan' | null
+  /** Optional runtime binding — a RUNNER_IMAGES key (D4). Saving a slot on
+   *  this profile flips its `binary` (+ `device` for a single-lane runner)
+   *  via the server's profile-wins reconcile. null/absent = flags-only tune,
+   *  no runtime opinion. */
+  runner?: string | null
   /** Provenance: profile this one was cloned from (clone / edit-a-copy). */
   cloned_from?: string | null
   /** Human label shown as the card headline (e.g. "MoE agents"). */
@@ -45,6 +50,10 @@ export interface ProfileBody {
   mtp?: boolean
   device_class?: string
   backend?: 'rocm' | 'vulkan' | null
+  /** Optional runtime binding — a RUNNER_IMAGES key (D4); null clears it on
+   *  create (PUT leaves a stored runner unchanged when omitted/null — there
+   *  is no clear sentinel, mirroring backend/device_class). */
+  runner?: string | null
   cloned_from?: string | null
   intent?: string
   quant?: string
