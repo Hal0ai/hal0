@@ -174,7 +174,7 @@ function row(overrides: Record<string, unknown> = {}) {
 }
 
 describe('groupRows', () => {
-  it('groups default families, specialized, and referenced rows', () => {
+  it('groups default-family rows apart from everything else', () => {
     const rows = [
       { id: 'a', is_default: { family: 'rocmfpx', source: 'release' } },
       { id: 'b', is_default: null, specialties: ['promptforge'] },
@@ -182,13 +182,28 @@ describe('groupRows', () => {
     ]
     const g = groupRows(rows)
     expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['a'])
-    expect(g.specialized.map((r: { id: string }) => r.id)).toEqual(['b'])
-    expect(g.other.map((r: { id: string }) => r.id)).toEqual(['c'])
+    expect(g.optional.map((r: { id: string }) => r.id)).toEqual(['b', 'c'])
+  })
+
+  it('sorts optional rows specialties-first, ahead of uncatalogued/referenced rows', () => {
+    const rows = [
+      { id: 'other1', is_default: null, ownership: 'referenced' },
+      { id: 'spec1', is_default: null, specialties: ['promptforge'] },
+      { id: 'other2', is_default: null },
+      { id: 'spec2', is_default: null, extra: { specialties: ['comfyui'] } },
+    ]
+    const g = groupRows(rows)
+    expect(g.optional.map((r: { id: string }) => r.id)).toEqual([
+      'spec1',
+      'spec2',
+      'other1',
+      'other2',
+    ])
   })
 
   it('reads specialties from extra.specialties when the top-level field is absent', () => {
     const rows = [{ id: 'd', is_default: null, extra: { specialties: ['comfyui'] } }]
-    expect(groupRows(rows).specialized.map((r: { id: string }) => r.id)).toEqual(['d'])
+    expect(groupRows(rows).optional.map((r: { id: string }) => r.id)).toEqual(['d'])
   })
 
   it('a default-family row wins over specialties (defaults bucket takes priority)', () => {
@@ -197,12 +212,12 @@ describe('groupRows', () => {
     ]
     const g = groupRows(rows)
     expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['e'])
-    expect(g.specialized).toEqual([])
+    expect(g.optional).toEqual([])
   })
 
   it('tolerates empty/absent input', () => {
-    expect(groupRows([])).toEqual({ defaults: [], specialized: [], other: [] })
-    expect(groupRows(undefined)).toEqual({ defaults: [], specialized: [], other: [] })
+    expect(groupRows([])).toEqual({ defaults: [], optional: [] })
+    expect(groupRows(undefined)).toEqual({ defaults: [], optional: [] })
   })
 })
 
