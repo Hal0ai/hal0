@@ -266,6 +266,8 @@ def test_arch_alternative_images_pair_with_a_denylist_entry() -> None:
     # And the #2118 pairing concretely: qwen4exp → the strix runner image
     # (ADR-0006: the pin-only combined-upstream variant is retired).
     assert ARCH_ALTERNATIVE_IMAGES["qwen4exp"] == "hal0ai/hal0-strix-vulkan"
+
+
 # --- display metadata + single-backend invariant (runtime-cascade D2/D5) --- #
 
 

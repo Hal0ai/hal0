@@ -118,7 +118,9 @@ def profile_catalog_fixture(tmp_hal0_home: str) -> str:
     """
     etc_dir = Path(tmp_hal0_home) / "etc" / "hal0"
     etc_dir.mkdir(parents=True, exist_ok=True)
-    (etc_dir / "profiles.toml").write_text('[profile.pf]\nrunner = "promptforge"\nbackend = "rocm"\n')
+    (etc_dir / "profiles.toml").write_text(
+        '[profile.pf]\nrunner = "promptforge"\nbackend = "rocm"\n'
+    )
     return tmp_hal0_home
 
 

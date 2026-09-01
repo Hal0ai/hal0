@@ -258,10 +258,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         supported_backends=("vulkan",),
         format_arch="gguf",
         title="Strix",
-        blurb=(
-            "Qwen4 experimental support + MTP speculative decode. Vulkan only. "
-            "No FPX quants."
-        ),
+        blurb=("Qwen4 experimental support + MTP speculative decode. Vulkan only. No FPX quants."),
     ),
     "cuda": Runner(
         "cuda",
