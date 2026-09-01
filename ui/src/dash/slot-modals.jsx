@@ -319,14 +319,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// image_pin — optional escape hatch. Empty = release default
 	// (RUNNER_IMAGES[binary]). A non-default pin is shown on the slot card.
 	const [imagePin, setImagePin] = useStateSM(slot?.image_pin || "");
-	// Runner Image is a catalog dropdown (the RUNNER_IMAGES refs system-info
-	// reports — same source as the Runtimes page). `pinCustom` flips the
-	// control to a free-text input for the debug-build/A-B/rollback escape
-	// hatch the field originally existed for. D3 (Task 8) replaced the
-	// catalog dropdown with a plain "Pin override" text input, so `pinCustom`
-	// is unread for now — Task 9 rebuilds the pin UI under an Advanced
-	// disclosure; pinCustom survives for it.
+	// `pinCustom` gates the debug-pin free-text input's visibility inside the
+	// Advanced disclosure (Task 9): the "Pin a custom image ref…" button
+	// flips it true to reveal the `slot-hw-image-pin` input; "Use release
+	// image" clears the pin and flips it back false. A slot that already
+	// carries a pin shows the input regardless (see `pinActive` in the
+	// disclosure body) — `pinCustom` only covers the empty-pin case where
+	// the operator hasn't typed anything yet.
 	const [pinCustom, setPinCustom] = useStateSM(false);
+	// Advanced disclosure's own open/closed state — independent of whether a
+	// pin is set, so an operator who collapses it keeps it collapsed even
+	// while a debug pin is active.
+	const [advOpen, setAdvOpen] = useStateSM(false);
 	// Runtime profile (SlotConfig.profile) — picks the runtime family,
 	// device-class gating and MTP draft backend. Flags: copy-on-stamp into
 	// model.defaults.extra_args (model drawer) when aligned with the model's
@@ -560,6 +564,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setBinary(slot.binary || "");
 		setImagePin(slot.image_pin || "");
 		setPinCustom(false);
+		setAdvOpen(false);
 		setProfileSel(slot.profile || "");
 		setSubmitErr(null);
 		setDiscardOpen(false);
@@ -1675,43 +1680,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Pin override</span>
-										<FieldInfoIcon description="Optional: pin this slot to an exact build reference
-											instead of the Runtime's release default. Debug/rollback
-											use only — cleared by leaving it empty." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" +
-												(fieldErrs.imagePin ? " input-err" : "")
-											}
-											data-testid="slot-hw-image-pin"
-											value={imagePin}
-											onChange={(e) => {
-												setImagePin(e.target.value);
-												setFieldErrs((p) => ({
-													...p,
-													imagePin: undefined,
-												}));
-											}}
-											placeholder={
-												binary && backends[binary]?.image
-													? backends[binary].image
-													: "will resolve from the Runtime pick"
-											}
-											spellCheck={false}
-										/>
-										{fieldErrs.imagePin ? (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.imagePin}
-											</div>
-										) : null}
-									</div>
-								</div>
-
-								<div className="form-row">
-									<div className="form-lbl">
 										<span>Threads</span>
 										<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
 											decide." />
@@ -1765,6 +1733,237 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										)}
 									</div>
 								</div>
+
+								{/* Task 9: Advanced disclosure — image truth, debug pin,
+								    supersession banner. Collapsed by default; a controlled
+								    toggle (not native <details>) so the exact "▸"/"▾" glyph
+								    and label text are ours to own — mirrors the PanelHeader
+								    ▸/▾ pattern in
+								    dash/settings/pages/capabilities/shared.jsx. Everything
+								    inside is read-only or debug-only: the operator-facing
+								    hardware surface is Runtime/Lane above, and a pin here
+								    never widens or narrows those options (D1/D6 — no
+								    enumeration). "image"/"digest" language is permitted only
+								    inside this disclosure — the carve-out from the
+								    operator-noun rule that governs the rest of the group. */}
+								<div
+									className="form-section"
+									data-testid="slot-hw-advanced"
+									role="button"
+									tabIndex={0}
+									aria-expanded={advOpen}
+									style={{
+										cursor: "pointer",
+										userSelect: "none",
+										marginTop: 4,
+									}}
+									onClick={() => setAdvOpen((o) => !o)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter" || e.key === " ") {
+											e.preventDefault();
+											setAdvOpen((o) => !o);
+										}
+									}}
+								>
+									<span
+										className="mono"
+										style={{ marginRight: 6, color: "var(--fg-4)" }}
+									>
+										{advOpen ? "▾" : "▸"}
+									</span>
+									Advanced — image & version
+								</div>
+								{advOpen &&
+									(() => {
+										// The effective ref this slot actually runs: a debug
+										// pin (persisted server-side) beats the Runtime's
+										// catalog image, which beats an honest "unresolved
+										// yet" sentinel — never fabricate a ref nothing backs.
+										const effectiveImage =
+											slot.image_pin ||
+											backends[binary]?.image ||
+											"resolved at launch";
+										const pinActive = !!imagePin.trim();
+										const supersededByCombinedUpstream = imagePin.includes(
+											"hal0-combined-upstream",
+										);
+										// The one-click fix commits binary="strix" — only offer
+										// it when "strix" is actually a live pick in the SAME
+										// `options` list the Runtime select above renders (already
+										// filtered by device_class/slotType/hw feasibility). Firing
+										// setBinary("strix") when it isn't would land the operator
+										// on an unresolvable "strix · not in this catalog" pick —
+										// worse than the pin they started with.
+										const strixAvailable = options.some(
+											(o) => o.key === "strix",
+										);
+										return (
+											<>
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Image</span>
+														<FieldInfoIcon description="The exact runtime image resolved for this
+															slot — a debug pin when one is set, otherwise
+															the release image for the picked Runtime." />
+													</div>
+													<div className="form-ctl">
+														<span
+															className="mono"
+															data-testid="slot-hw-advanced-image"
+														>
+															{effectiveImage}
+														</span>
+														<div className="hint">
+															{pinActive
+																? "debug pin"
+																: "pinned by release · reconciled by hal0 update"}
+														</div>
+													</div>
+												</div>
+
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Version</span>
+													</div>
+													<div className="form-ctl">
+														<div className="hint">
+															Versions and rollback are managed per-runtime
+															on the{" "}
+															<a href="#slots/runner-images">
+																Runner Images page
+															</a>
+															.
+														</div>
+													</div>
+												</div>
+
+												<div className="form-row">
+													<div className="form-lbl">
+														<span>Debug pin</span>
+														<FieldInfoIcon description="Optional: pin this slot to an exact build
+															reference instead of the Runtime's release
+															default. Debug/rollback use only — cleared by
+															leaving it empty." />
+													</div>
+													<div className="form-ctl">
+														{!pinActive && !pinCustom && (
+															<button
+																type="button"
+																className="btn ghost sm"
+																data-testid="slot-hw-debug-pin-open"
+																onClick={() => setPinCustom(true)}
+															>
+																Pin a custom image ref…
+															</button>
+														)}
+														{(pinCustom || pinActive) && (
+															<>
+																<input
+																	className={
+																		"input mono" +
+																		(fieldErrs.imagePin
+																			? " input-err"
+																			: "")
+																	}
+																	data-testid="slot-hw-image-pin"
+																	value={imagePin}
+																	onChange={(e) => {
+																		setImagePin(e.target.value);
+																		setFieldErrs((p) => ({
+																			...p,
+																			imagePin: undefined,
+																		}));
+																	}}
+																	placeholder={
+																		binary && backends[binary]?.image
+																			? backends[binary].image
+																			: "will resolve from the Runtime pick"
+																	}
+																	spellCheck={false}
+																/>
+																{fieldErrs.imagePin ? (
+																	<div
+																		className="hint"
+																		style={{ color: "var(--err)" }}
+																	>
+																		{fieldErrs.imagePin}
+																	</div>
+																) : null}
+															</>
+														)}
+														{pinActive && (
+															<>
+																<div
+																	className="hint"
+																	data-testid="slot-hw-debug-pin-warning"
+																	style={{ color: "var(--warn)" }}
+																>
+																	Debug-only. hal0 can't verify what a
+																	custom ref ships — the slot keeps its
+																	current runtime binary and may fail at
+																	spawn.
+																</div>
+																<button
+																	type="button"
+																	className="btn ghost sm"
+																	data-testid="slot-hw-image-pin-clear"
+																	onClick={() => {
+																		setImagePin("");
+																		setPinCustom(false);
+																		setFieldErrs((p) => ({
+																			...p,
+																			imagePin: undefined,
+																		}));
+																	}}
+																>
+																	Use release image
+																</button>
+															</>
+														)}
+													</div>
+												</div>
+
+												{supersededByCombinedUpstream && (
+													<div
+														data-testid="slot-hw-supersession-banner"
+														style={{
+															marginTop: 6,
+															padding: "6px 10px",
+															borderRadius: "var(--rad-sm)",
+															color: "var(--warn)",
+															border: "1px solid var(--warn-line)",
+															background: "var(--warn-soft)",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "space-between",
+															gap: 8,
+														}}
+													>
+														<span>
+															⚠{" "}
+															{strixAvailable
+																? "Superseded by the Strix runtime"
+																: "Superseded by the Strix runtime — available after the next update"}
+														</span>
+														{strixAvailable && (
+															<button
+																type="button"
+																className="btn ghost sm"
+																data-testid="slot-hw-supersession-fix"
+																onClick={() => {
+																	setBinary("strix");
+																	setDevice("gpu-vulkan");
+																	setImagePin("");
+																}}
+															>
+																Switch to Strix
+															</button>
+														)}
+													</div>
+												)}
+											</>
+										);
+									})()}
 							</>
 						);
 					})()}
