@@ -427,6 +427,7 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
     )
     monkeypatch.setattr(probe_mod, "_gpu_group_gids", lambda: {"render": 993, "video": 44})
     monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 512000)
+    monkeypatch.setattr(probe_mod, "_kfd_present", lambda: False)
 
     def fake_read_text(path: Path) -> str | None:
         s = str(path)
@@ -475,6 +476,47 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert info.uptime_s == 4242
     assert info.kernel == "Linux version 7.0.6-2-pve"
     assert info.distro == "Debian GNU/Linux 13 (trixie)"
+    assert info.kfd_present is False
+
+
+def test_probe_kfd_present_true_surfaces_on_hardware_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kfd-usable box (containerized ROCm userland, no host rocminfo)
+    reports ``kfd_present=True`` on the payload even when the GPU's own
+    ``compute_capable`` is False (issue: FE/BE ROCm gate mismatch) — this
+    is the same signal ``_reconcile_device_profile`` gates ROCm feasibility
+    on, via ``hal0.providers._gpu.kfd_present``."""
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Test CPU", 8, 16))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (32768, 24576))
+    monkeypatch.setattr(
+        probe_mod,
+        "_detect_gpus",
+        lambda: [GPUInfo(vendor="amd", index=0, name="Radeon", compute_capable=False)],
+    )
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_gpu_group_gids", lambda: {})
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 0)
+    monkeypatch.setattr(probe_mod, "_kfd_present", lambda: True)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _path: None)
+
+    info = HardwareProbe().probe()
+    assert info.gpus[0].compute_capable is False
+    assert info.kfd_present is True
+
+
+def test_probe_kfd_present_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Test CPU", 8, 16))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (32768, 24576))
+    monkeypatch.setattr(probe_mod, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_gpu_group_gids", lambda: {})
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 0)
+    monkeypatch.setattr(probe_mod, "_kfd_present", lambda: False)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _path: None)
+
+    info = HardwareProbe().probe()
+    assert info.kfd_present is False
 
 
 _DMIDECODE_SAMPLE = """\
