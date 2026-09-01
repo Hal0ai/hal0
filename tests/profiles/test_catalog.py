@@ -353,6 +353,28 @@ def test_update_changing_the_runner_folds_aliases(tmp_hal0_home: str) -> None:
     assert cat.update("folder", ProfilePatch(runner="vulkanfpx")).runner == "rocmfpx"
 
 
+def test_update_resubmitting_an_out_of_vocab_runner_is_grandfathered(
+    tmp_hal0_home: str,
+) -> None:
+    """#2183 — the drawer resends the stored runner verbatim on every save, so
+    screening an UNCHANGED value made a profile whose runtime left the registry
+    un-editable in every field."""
+    _stage_runner_profile("ghosted", "ghost-runner")
+    updated = ProfileCatalog().update(
+        "ghosted", ProfilePatch(intent="renamed", runner="ghost-runner")
+    )
+    assert updated.intent == "renamed"
+    assert updated.runner == "ghost-runner"
+
+
+def test_update_cannot_swap_one_unknown_runner_for_another(tmp_hal0_home: str) -> None:
+    """The exemption is byte-identical resubmission only, not an amnesty."""
+    _stage_runner_profile("ghosted", "ghost-runner")
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().update("ghosted", ProfilePatch(runner="other-ghost"))
+    assert exc.value.code == "profiles.unknown_runner"
+
+
 def test_update_can_clear_an_out_of_vocab_runner(tmp_hal0_home: str) -> None:
     """Dropping a runtime is always safe, so the clear sentinel bypasses the
     screen — that is the in-product way off a stale key."""

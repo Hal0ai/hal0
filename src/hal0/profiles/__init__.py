@@ -455,12 +455,35 @@ def _merge_runner(patched: str | None, stored: str | None) -> str | None:
     * ``""`` — the explicit CLEAR sentinel: back to Auto (no runtime pinned).
       Never screened: dropping a runtime is always a legal state, and this is
       the only in-product way off a key the registry no longer carries.
+    * the value already stored — grandfathered through unscreened (#2183).
     * anything else — a real key, screened and canonicalized as on create.
+
+    The grandfather clause mirrors ``screen_profile_flags``' (#1411): a runner
+    key can leave ``RUNNER_IMAGES`` under the profile that stores it — a runtime
+    renamed or dropped by a build, or a downgrade — and the drawer re-sends the
+    stored runner verbatim on every save, so screening an UNCHANGED value 422'd
+    a write that changes nothing and made the profile un-editable in EVERY
+    field. The screen judges what an update INTRODUCES, not what it inherits;
+    any actual change (including one unknown key for another) is still fully
+    screened, and `create` stays strict — it has no stored baseline.
     """
     if patched is None:
         return stored
     if not patched.strip():
         return None
+    if patched == stored:
+        from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+        if patched not in RUNNER_IMAGES:
+            # Logged, not silently ignored — mirrors the flags grandfathering.
+            # An unchanged key that IS in the registry is the ordinary save and
+            # says nothing worth a line.
+            log.info(
+                "profile carries a runner key this box's registry no longer "
+                "offers; grandfathered on update",
+                extra={"event": "profile.runner_grandfathered", "runner": patched},
+            )
+        return stored
     return screen_profile_runner(patched)
 
 

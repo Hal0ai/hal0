@@ -495,6 +495,10 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
+        422 profiles.unknown_runner: `runner` CHANGES to a key this box's
+            registry does not carry. Re-sending the profile's own stored key is
+            grandfathered (#2183, mirroring the flags rule below) so a runtime
+            that left the registry never makes the profile un-editable.
         400 slot.hardware_flag_denied: flags NEWLY introduce a slot-owned
             hardware flag. Ones the profile already stores are grandfathered
             (#1411) — see :func:`hal0.profiles.screen_profile_flags`.

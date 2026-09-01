@@ -819,6 +819,28 @@ def test_put_null_runner_keeps_the_stored_runtime(client: TestClient) -> None:
     assert r.json()["runner"] == "promptforge"
 
 
+def test_ghost_profile_metadata_edit_is_not_blocked_by_its_stored_runner(
+    ghost_client: TestClient,
+) -> None:
+    """#2183 — the drawer round-trips `runner` on every save, so screening an
+    UNCHANGED value 422'd every field of a profile whose runtime left the
+    registry. Mirrors the #1411 flags grandfathering."""
+    r = ghost_client.put(
+        "/api/profiles/ghosted", json={"flags": "-fa on", "runner": "ghost-runner", "intent": "Now"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "Now"
+    assert r.json()["runner"] == "ghost-runner"
+
+
+def test_ghost_profile_cannot_switch_to_another_unknown_runner(ghost_client: TestClient) -> None:
+    """The exemption is byte-identical resubmission only — any ACTUAL change is
+    still fully screened."""
+    r = ghost_client.put("/api/profiles/ghosted", json={"runner": "other-ghost"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "profiles.unknown_runner"
+
+
 def test_ghost_profile_edit_omitting_runner_also_works(ghost_client: TestClient) -> None:
     r = ghost_client.put("/api/profiles/ghosted", json={"intent": "Now"})
     assert r.status_code == 200, r.text
