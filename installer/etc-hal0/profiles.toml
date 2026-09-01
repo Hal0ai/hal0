@@ -1,8 +1,8 @@
 # hal0 profile catalog — OPERATOR CUSTOM PROFILES ONLY.
 #
-# Seed profiles are VIRTUAL: the built-in catalog (chat / chat-long-context /
-# embedding / reranking / cpu-chat / flm / kokoro / qwen3-tts / comfyui)
-# lives in code
+# Seed profiles are VIRTUAL: the built-in catalog (chat / cpu-chat /
+# embedding / reranking / brain / flm / kokoro / moonshine / qwen3-tts /
+# comfyui) lives in code
 # (SEED_PROFILES in hal0.config.schema) and is overlaid on every
 # load. It is intentionally NOT materialised here so that a re-tuned seed — new
 # flags, a bumped toolbox image — reaches every install on upgrade instead of
@@ -22,10 +22,10 @@
 # informational only — MTP and --jinja are now MODEL/runner capabilities, not
 # profile tunes; see ModelDefaults.mtp / .jinja in hal0.registry.model.
 #
-# Example — a custom workload profile cloned from `chat-long-context`:
+# Example — a custom workload profile cloned from `chat`:
 #
 #   [profile.my-moe]
 #   flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --no-mmap"
 #   mtp          = false
 #   device_class = "gpu"
-#   cloned_from  = "chat-long-context"
+#   cloned_from  = "chat"

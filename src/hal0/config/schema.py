@@ -1512,6 +1512,18 @@ class ProfilesConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
+    legacy_seeds_migrated: bool = Field(
+        default=False,
+        description=(
+            "Write-once marker for the one-time demotion of the 8 pruned seeds "
+            "(:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles. False "
+            "on a pre-demotion profiles.toml; ``loader.load_profiles_config`` "
+            "injects the missing definitions, flips this to True and persists. "
+            "Without the marker the injection would repeat on every load and a "
+            "delete could never stick — the virtual-seed behaviour the demotion "
+            "exists to escape."
+        ),
+    )
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────
@@ -3500,6 +3512,10 @@ class Hal0Config(BaseModel):
 from hal0.config import seeds as _seeds  # noqa: E402
 
 SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
+#: The 8 demoted (ex-seed) definitions — shipped data, NOT part of the seed
+#: catalog. Injected once into an existing install's profiles.toml as ordinary
+#: custom profiles by ``loader.load_profiles_config``.
+LEGACY_SEED_PROFILES: dict[str, dict[str, object]] = _seeds.legacy_seed_profiles()
 SEED_STACKS: dict[str, StackConfig] = _seeds.seed_stacks()
 PROFILE_BENCH: dict[str, dict[str, float]] = _seeds.profile_bench()
 FAMILY_DEFAULTS: dict[str, str] = _seeds.family_defaults()
@@ -3514,6 +3530,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "FAMILY_DEFAULTS",
+    "LEGACY_SEED_PROFILES",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
