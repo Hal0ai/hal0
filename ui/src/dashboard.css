@@ -3667,6 +3667,8 @@ select.pf-input { cursor: pointer; }
   background: color-mix(in srgb, var(--bk, var(--fg-5)) 18%, transparent);
 }
 .pf-runtime-line { font-size: 11px; color: var(--fg-3); line-height: 1.35; margin-top: 4px; }
+.pf-import-runtime { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pf-import-gone { color: var(--err); }
 .pf-state {
   font-size: 9.5px; white-space: nowrap; border-radius: 999px; padding: 1px 8px;
   border: 1px solid var(--line); background: transparent; color: var(--fg-3);

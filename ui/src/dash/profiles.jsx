@@ -770,18 +770,59 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
 // and the profile-specific preview (identity + integrity + collision — no
 // model resolve/pull). The dialog shell + name input + commit live in
 // primitives.jsx.
-function ImportModal({ existing, onClose, onImported }) {
+export function ImportModal({ existing, onClose, onImported }) {
   const imp = useProfileImport();
-  const renderPreview = (report) => (
-    <>
-      <div className="stk-dlg-hint">
-        {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
-      </div>
-      {report.collides && (
-        <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
-      )}
-    </>
-  );
+  const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  // The dry run reports the runtime the envelope AUTHORS (`runner`), the
+  // family the profile resolves to, and whether importing has to drop that
+  // runtime because this box has no such entry (`runner_stripped`). A dropped
+  // runtime WARNS and proceeds: import stays portable, so the flags and quant
+  // still land — the profile just arrives with no runtime pinned, and the
+  // commit button says exactly that.
+  const renderPreview = (report) => {
+    const stripped = !!report.runner_stripped;
+    const key = report.runner || '';
+    const chips = (stripped || !key)
+      ? [{ key: 'auto', label: 'AUTO', hue: null }]
+      : runtimeChips({ runner: key }, backends);
+    return (
+      <>
+        <div className="stk-dlg-hint">
+          {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
+        </div>
+        <div className="stk-dlg-hint pf-import-runtime" data-testid="pf-import-runtime">
+          Runtime:{' '}
+          {stripped ? (
+            <>
+              <span className="mono pf-import-gone">{key}</span>
+              <span className="pf-state mono">not available</span>
+              {' → Auto'}
+            </>
+          ) : key ? runnerTitleFor(key, backends) : 'Auto'}
+          <span className="pf-be-row">
+            {chips.map(c => (
+              <span key={c.key} className="pf-be mono" style={c.hue ? { '--bk': c.hue } : null}>{c.label}</span>
+            ))}
+          </span>
+          {report.runtime_family && (
+            <span className="pf-state mono">family: {report.runtime_family}</span>
+          )}
+        </div>
+        {stripped && (
+          <div className="stk-dlg-warn" data-testid="pf-import-runtime-warn">
+            {Icons.alert}<b>{key}</b> is not available on this box — the profile
+            imports with runtime Auto. Its flags and quant come across unchanged;
+            slots applying it keep their own runtime. Install it from the Runner
+            Images page, then set it on the profile.
+          </div>
+        )}
+        {report.collides && (
+          <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
+        )}
+      </>
+    );
+  };
   return (
     <ImportDialog
       title="Import profile"
@@ -791,6 +832,7 @@ function ImportModal({ existing, onClose, onImported }) {
       fileTestid="pf-import-file"
       nameTestid="pf-import-name"
       confirmTestid="pf-import-confirm"
+      confirmLabel={(report) => (report?.runner_stripped ? 'Import as Auto' : 'Import')}
       namePlaceholder="my-profile"
       invalidCopy="Not a valid .hal0profile.json envelope"
       existing={existing}

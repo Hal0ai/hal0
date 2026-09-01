@@ -98,7 +98,7 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
 }))
 
 await import('../primitives.jsx')
-const { ProfileDrawer, ProfileCard } = await import('../profiles.jsx')
+const { ProfileDrawer, ProfileCard, ImportModal } = await import('../profiles.jsx')
 
 // system-info `backends` fixture — the Task 2 row shape the Runtime select,
 // the card chips and the import preview all read.
@@ -440,5 +440,76 @@ describe('ProfileCard runtime facts (U3)', () => {
     expect(reverted.disabled).toBe(false)
     expect(reverted.title).toContain('registry unreachable')
     act(() => failed.root.unmount())
+  })
+})
+
+// ── Task U5: import preview runtime line ─────────────────────────────────────
+
+async function openImportWith(report: Record<string, unknown>) {
+  importResult.current = report
+  const m = mount(
+    React.createElement(ImportModal, { existing: [], onClose: () => {}, onImported: () => {} }),
+  )
+  const input = m.host.querySelector('[data-testid="pf-import-file"]') as HTMLInputElement
+  // ImportDialog only calls file.text() — a duck-typed stand-in avoids
+  // happy-dom's read-only FileList.
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [{ text: async () => JSON.stringify({ kind: 'hal0.profile' }) }],
+  })
+  await act(async () => {
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  return m
+}
+
+function confirmBtn(host: HTMLElement) {
+  return host.querySelector('[data-testid="pf-import-confirm"]') as HTMLButtonElement
+}
+
+describe('ImportModal runtime preview (U5)', () => {
+  it('names the envelope runtime by title, with its lane chip and family', async () => {
+    const { host, root } = await openImportWith({
+      dry_run: true, valid: true, checksum_ok: true, name: 'strixy', schema_version: 1,
+      collides: false, runner: 'strix', runner_stripped: false, runtime_family: 'llama-server',
+    })
+    const line = host.querySelector('[data-testid="pf-import-runtime"]') as HTMLElement
+    expect(line.textContent).toContain('Strix')
+    expect(Array.from(line.querySelectorAll('.pf-be')).map((c) => c.textContent)).toEqual(['Vulkan'])
+    expect(line.textContent).toContain('family: llama-server')
+    expect(host.querySelector('[data-testid="pf-import-runtime-warn"]')).toBeNull()
+    expect(confirmBtn(host).textContent).toBe('Import')
+    act(() => root.unmount())
+  })
+
+  it('says Auto for an envelope that pins no runtime', async () => {
+    const { host, root } = await openImportWith({
+      dry_run: true, valid: true, checksum_ok: true, name: 'chatty', schema_version: 1,
+      collides: false, runner: null, runner_stripped: false, runtime_family: 'llama-server',
+    })
+    const line = host.querySelector('[data-testid="pf-import-runtime"]') as HTMLElement
+    expect(line.textContent).toContain('Runtime: Auto')
+    expect(Array.from(line.querySelectorAll('.pf-be')).map((c) => c.textContent)).toEqual(['AUTO'])
+    act(() => root.unmount())
+  })
+
+  it('warns (never blocks) on a runtime this box lacks, and says what Import will do', async () => {
+    const { host, root } = await openImportWith({
+      dry_run: true, valid: true, checksum_ok: true, name: 'strix-next-tune', schema_version: 1,
+      collides: false, runner: 'strix-next', runner_stripped: true, runtime_family: 'llama-server',
+    })
+    const line = host.querySelector('[data-testid="pf-import-runtime"]') as HTMLElement
+    expect(line.textContent).toContain('strix-next')
+    expect(line.textContent).toContain('Auto')
+    const warn = host.querySelector('[data-testid="pf-import-runtime-warn"]') as HTMLElement
+    expect(warn.textContent).toContain('not available on this box')
+    expect(warn.textContent).toContain('imports with runtime Auto')
+    const btn = confirmBtn(host)
+    expect(btn.textContent).toBe('Import as Auto')
+    expect(btn.disabled).toBe(false)
+    act(() => root.unmount())
   })
 })
