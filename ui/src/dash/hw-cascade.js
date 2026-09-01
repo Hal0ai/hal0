@@ -189,6 +189,102 @@ export function cataloguePinOptions({ rows, catalogImages, slotType }) {
 	return out;
 }
 
+// Lane token → the hw capability flag that gates it (systemInfo.hardware's
+// computeCapable/vulkanCapable, threaded through as `hw`). A lane with no
+// entry here (e.g. cpu) is never hardware-vetoed.
+const LANE_HW = { rocm: "rocm", vulkan: "vulkan", cuda: "cuda" };
+
+/**
+ * Enumerate the runner-first Backend dropdown for a slot: one option per
+ * runner (not per lane), each carrying the lanes (backends) it can serve.
+ * This is the replacement for the image-first backendOptions() cascade —
+ * the operator now picks a runner directly, and the lane (when the runner
+ * offers more than one) is a secondary choice within it.
+ *
+ * @param backends system-info `backends` map (key → row; Task 2 shape)
+ * @param device   the slot's (pending) device enum, e.g. "gpu-rocm"
+ * @param slotType slot.type — gates runner families via FAMILY_SLOT_TYPES
+ * @param hw       host capability flags, e.g. { rocm, vulkan, cuda } — from
+ *                 systemInfo.hardware (computeCapable/vulkanCapable). Missing
+ *                 flags never veto (unknown hw applies no filter).
+ *
+ * Returns `{ options }`, where each option is
+ * `{ key, title, blurb, lanes, state, isDefault, provenance }`.
+ */
+export function runnerOptions({ backends, device, slotType, hw }) {
+	const devClass = deviceClassOf(device);
+	const options = [];
+	for (const [key, r] of Object.entries(backends || {})) {
+		if (!r) continue;
+		if (r.device_class && r.device_class !== devClass) continue;
+		const types = FAMILY_SLOT_TYPES[r.runtime_family];
+		if (types && slotType && !types.includes(slotType)) continue;
+		const lanes = Array.isArray(r.supported_backends)
+			? r.supported_backends
+			: [];
+		// Hardware filter: hide a runtime when hw is known and NONE of its
+		// lanes is feasible on this box. Unknown hw ({}) never vetoes.
+		if (
+			hw &&
+			lanes.length > 0 &&
+			lanes.every((l) => LANE_HW[l] && hw[LANE_HW[l]] === false)
+		)
+			continue;
+		options.push({
+			key,
+			title: r.title || key,
+			blurb: r.blurb || "",
+			lanes,
+			state: r.state,
+			isDefault: !!r.is_default,
+			provenance: r.provenance || undefined,
+		});
+	}
+	options.sort(
+		(a, b) => b.isDefault - a.isDefault || a.title.localeCompare(b.title),
+	);
+	return { options };
+}
+
+/**
+ * Lane values for a runner option's backend picker: '' (Auto) plus each
+ * declared lane, but only when the runner actually offers a choice — a
+ * single-lane or backend-agnostic runner has nothing to pick between.
+ */
+export function laneValues(option) {
+	const lanes = option?.lanes || [];
+	return lanes.length > 1 ? ["", ...lanes] : [];
+}
+
+/**
+ * Resolve a runner pick to the state it drives. A single-lane GPU runner
+ * maps its one lane to the device (same BACKEND_DEVICE table as the image-
+ * first cascade); a multi-lane or backend-agnostic runner leaves the
+ * slot's current device untouched (the lane, if any, is a separate pick).
+ */
+export function applyRunnerChoice({ options, key, currentDevice }) {
+	const hit = (options || []).find((o) => o.key === key);
+	if (!hit) return { binary: key, device: currentDevice };
+	const lanes = hit.lanes || [];
+	if (lanes.length === 1) {
+		const target = BACKEND_DEVICE[lanes[0]];
+		if (target && deviceClassOf(target) === deviceClassOf(currentDevice))
+			return { binary: key, device: target };
+	}
+	return { binary: key, device: currentDevice };
+}
+
+/**
+ * The option key matching the slot's persisted binary.
+ * '' = no binary pinned (auto); null = a binary is persisted but no option
+ * matches it (out-of-vocab — the caller renders it as its own self-option
+ * so the drawer never silently rewrites a persisted value).
+ */
+export function selectedRunnerKey({ binary, options }) {
+	if (!binary) return "";
+	return (options || []).some((o) => o.key === binary) ? binary : null;
+}
+
 /**
  * Resolve a Backend dropdown pick to the state it drives.
  * Unknown values (the out-of-vocab persisted pair rendered as its own option)

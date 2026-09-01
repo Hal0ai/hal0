@@ -1,229 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import {
-  applyBackendChoice,
-  backendOptions,
-  cataloguePinOptions,
-  optionValue,
-  selectedBackendValue,
-} from '../hw-cascade.js'
+import { applyRunnerChoice, laneValues, runnerOptions, selectedRunnerKey } from '../hw-cascade.js'
 
-// Catalog fixture mirroring system-info's RUNNER_IMAGES shape. The combined
-// image ships one binary that serves BOTH llama backends (rocmfpx · rocm and
-// rocmfpx · vulkan) plus a vulkan-only sibling — the exact shape the cascade
-// exists for.
-const COMBINED = 'ghcr.io/hal0ai/hal0-combined-upstream:0829'
+// Backends fixture mirroring system-info's `backends[key]` shape (Task 2):
+// title/blurb/is_default alongside the existing supported_backends/
+// device_class/runtime_family/state.
 const backends = {
-  rocmfpx: {
-    image: COMBINED,
-    backend: 'rocm',
-    supported_backends: ['rocm', 'vulkan'],
-    device_class: 'gpu',
-    runtime_family: 'llama-server',
-    supports: { specialties: ['promptforge'] },
-  },
-  otherbin: {
-    image: COMBINED,
-    backend: 'vulkan',
-    device_class: 'gpu',
-    runtime_family: 'llama-server',
-  },
-  cpubin: {
-    image: 'ghcr.io/hal0ai/hal0-cpu:1',
-    backend: 'cpu',
-    device_class: 'cpu',
-    runtime_family: 'llama-server',
-  },
-  kokorobin: {
-    image: 'ghcr.io/hal0ai/hal0-tts:1',
-    backend: 'rocm',
-    device_class: 'gpu',
-    runtime_family: 'kokoro',
-  },
+  rocmfpx:     { title: 'Standard',    blurb: 'Runs everything.', is_default: true,
+                 supported_backends: ['rocm', 'vulkan'], device_class: 'gpu',
+                 runtime_family: 'llama-server', state: 'installed' },
+  promptforge: { title: 'PromptForge', blurb: 'Accelerated PF.', is_default: false,
+                 supported_backends: ['rocm'], device_class: 'gpu',
+                 runtime_family: 'llama-server', state: 'installed' },
+  strix:       { title: 'Strix',       blurb: 'Qwen4 + MTP.', is_default: false,
+                 supported_backends: ['vulkan'], device_class: 'gpu',
+                 runtime_family: 'llama-server', state: 'installable' },
+  kokoro:      { title: 'Kokoro', supported_backends: ['cpu'], device_class: 'cpu',
+                 runtime_family: 'kokoro', state: 'installed' },
 }
 
-const gpuLlm = { device: 'gpu-rocm', slotType: 'llm' }
-
-describe('backendOptions — release-catalog default (no image pin)', () => {
-  const res = backendOptions({ backends, pinnedImage: '', ...gpuLlm })
-  const values = res.options.map((o) => optionValue(o.binary, o.backend))
-
-  it('expands multi-backend binaries into one option per (binary, backend) pair', () => {
-    expect(values).toContain(optionValue('rocmfpx', 'rocm'))
-    expect(values).toContain(optionValue('rocmfpx', 'vulkan'))
-    expect(values).toContain(optionValue('otherbin', 'vulkan'))
+describe('runnerOptions', () => {
+  it('lists gpu llama runtimes for an llm slot, default first', () => {
+    const { options } = runnerOptions({ backends, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true } })
+    expect(options.map(o => o.key)).toEqual(['rocmfpx', 'promptforge', 'strix'])
+    expect(options[0].isDefault).toBe(true)
   })
-  it('derives the target device from the backend token', () => {
-    const rv = res.options.find((o) => o.binary === 'rocmfpx' && o.backend === 'vulkan')
-    expect(rv?.device).toBe('gpu-vulkan')
-    const rr = res.options.find((o) => o.binary === 'rocmfpx' && o.backend === 'rocm')
-    expect(rr?.device).toBe('gpu-rocm')
+  it('hides hardware-infeasible lanes (no kfd → rocm-only rows gone)', () => {
+    const { options } = runnerOptions({ backends, device: 'gpu-vulkan', slotType: 'llm', hw: { rocm: false, vulkan: true } })
+    expect(options.map(o => o.key)).toEqual(['rocmfpx', 'strix'])
   })
-  it('filters by device class and slot type', () => {
-    expect(values.some((v) => v.startsWith('cpubin'))).toBe(false) // cpu class
-    expect(values.some((v) => v.startsWith('kokorobin'))).toBe(false) // tts family
+  it('gates by slot type via runtime family', () => {
+    const { options } = runnerOptions({ backends, device: 'cpu', slotType: 'tts', hw: {} })
+    expect(options.map(o => o.key)).toEqual(['kokoro'])
   })
-  it('carries specialties through for the option label', () => {
-    const rr = res.options.find((o) => o.binary === 'rocmfpx' && o.backend === 'rocm')
-    expect(rr?.specialties).toEqual(['promptforge'])
-  })
-  it('is neither a fallback nor an empty pin', () => {
-    expect(res.fallback).toBe(false)
-    expect(res.emptyPin).toBe(false)
+  it('never crosses device_class (rocm↔vulkan gpu devices stay clear of the cpu-class runtime)', () => {
+    const rocm = runnerOptions({ backends, device: 'gpu-rocm', slotType: undefined, hw: {} })
+    const vulkan = runnerOptions({ backends, device: 'gpu-vulkan', slotType: undefined, hw: {} })
+    expect(rocm.options.some(o => o.key === 'kokoro')).toBe(false)
+    expect(vulkan.options.some(o => o.key === 'kokoro')).toBe(false)
   })
 })
 
-describe('backendOptions — catalog image pinned', () => {
-  it('lists only pairs shipping in the pinned image', () => {
-    const res = backendOptions({ backends, pinnedImage: COMBINED, ...gpuLlm })
-    const values = res.options.map((o) => optionValue(o.binary, o.backend))
-    expect(values).toEqual(
-      expect.arrayContaining([
-        optionValue('rocmfpx', 'rocm'),
-        optionValue('rocmfpx', 'vulkan'),
-        optionValue('otherbin', 'vulkan'),
-      ]),
-    )
-    expect(values.some((v) => v.startsWith('cpubin'))).toBe(false)
+describe('lanes + choice', () => {
+  it('only the multi-lane default offers lane values', () => {
+    const { options } = runnerOptions({ backends, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true } })
+    expect(laneValues(options[0])).toEqual(['', 'rocm', 'vulkan'])
+    expect(laneValues(options[1])).toEqual([])
   })
-  it('a catalog image whose binaries do not fit the slot → emptyPin, no options', () => {
-    const res = backendOptions({
-      backends,
-      pinnedImage: 'ghcr.io/hal0ai/hal0-cpu:1',
-      ...gpuLlm,
-    })
-    expect(res.options).toEqual([])
-    expect(res.emptyPin).toBe(true)
-    expect(res.fallback).toBe(false)
+  it('single-lane pick derives the device; multi-lane keeps it', () => {
+    const { options } = runnerOptions({ backends, device: 'gpu-vulkan', slotType: 'llm', hw: { rocm: true, vulkan: true } })
+    expect(applyRunnerChoice({ options, key: 'promptforge', currentDevice: 'gpu-vulkan' }))
+      .toEqual({ binary: 'promptforge', device: 'gpu-rocm' })
+    expect(applyRunnerChoice({ options, key: 'rocmfpx', currentDevice: 'gpu-vulkan' }))
+      .toEqual({ binary: 'rocmfpx', device: 'gpu-vulkan' })
   })
-})
-
-describe('backendOptions — custom (non-catalog) image ref', () => {
-  it('cannot enumerate, so falls back to the device-fit union and flags it', () => {
-    const res = backendOptions({
-      backends,
-      pinnedImage: 'ghcr.io/other/debug-build:abc',
-      ...gpuLlm,
-    })
-    const values = res.options.map((o) => optionValue(o.binary, o.backend))
-    expect(values).toContain(optionValue('rocmfpx', 'rocm'))
-    expect(res.fallback).toBe(true)
-    expect(res.emptyPin).toBe(false)
-  })
-})
-
-describe('backendOptions — non-GPU slot never flips device', () => {
-  it('cpu slot lists only its own backend and keeps the device', () => {
-    const res = backendOptions({
-      backends,
-      pinnedImage: '',
-      device: 'cpu',
-      slotType: 'llm',
-    })
-    const values = res.options.map((o) => optionValue(o.binary, o.backend))
-    expect(values).toEqual([optionValue('cpubin', 'cpu')])
-    expect(res.options[0].device).toBe('cpu')
-  })
-})
-
-describe('applyBackendChoice', () => {
-  const res = backendOptions({ backends, pinnedImage: '', ...gpuLlm })
-  it('picking a cross-backend pair flips the device with the binary', () => {
-    expect(
-      applyBackendChoice(res.options, optionValue('rocmfpx', 'vulkan'), 'gpu-rocm'),
-    ).toEqual({ binary: 'rocmfpx', device: 'gpu-vulkan' })
-  })
-  it('picking a same-backend pair keeps the device', () => {
-    expect(
-      applyBackendChoice(res.options, optionValue('rocmfpx', 'rocm'), 'gpu-rocm'),
-    ).toEqual({ binary: 'rocmfpx', device: 'gpu-rocm' })
-  })
-  it('an unknown value (out-of-vocab persisted pair) keeps the current device', () => {
-    expect(applyBackendChoice(res.options, optionValue('ghost', 'rocm'), 'gpu-rocm')).toEqual({
-      binary: 'ghost',
-      device: 'gpu-rocm',
-    })
-  })
-})
-
-describe('selectedBackendValue', () => {
-  const res = backendOptions({ backends, pinnedImage: '', ...gpuLlm })
-  it('resolves the (binary, device) pair to its option value', () => {
-    expect(
-      selectedBackendValue({ binary: 'rocmfpx', device: 'gpu-vulkan', options: res.options }),
-    ).toBe(optionValue('rocmfpx', 'vulkan'))
-  })
-  it('returns null for a persisted pair outside the option list (screenshot mismatch)', () => {
-    const pinned = backendOptions({
-      backends,
-      pinnedImage: 'ghcr.io/hal0ai/hal0-cpu:1',
-      ...gpuLlm,
-    })
-    expect(
-      selectedBackendValue({ binary: 'otherbin', device: 'gpu-rocm', options: pinned.options }),
-    ).toBe(null)
-  })
-  it('returns empty string when no binary is pinned (auto)', () => {
-    expect(selectedBackendValue({ binary: '', device: 'gpu-rocm', options: res.options })).toBe('')
-  })
-})
-
-describe('cataloguePinOptions — downloaded catalogue rows beyond the release catalog', () => {
-  // GET /api/runner-images rows (RunnerImage shape, the fields the helper reads).
-  const rows = [
-    // The motivating case (#2118): catalogued + downloaded, repo outside the
-    // release catalog — must surface as a pinnable option.
-    {
-      id: 'combined-upstream',
-      image: 'ghcr.io/hal0ai/hal0-combined-upstream',
-      tag: '0829',
-      downloaded: true,
-      notes: 'pin-only upstream variant',
-    },
-    // Same lineage the release catalog already lists (digest-pinned there) —
-    // offering it again would show one image under two spellings.
-    { id: 'cpu', image: 'ghcr.io/hal0ai/hal0-toolbox-cpu', tag: 'v1', downloaded: true },
-    // Catalogued but not on this box — a pin would just crash-loop.
-    { id: 'rocm', image: 'ghcr.io/hal0ai/hal0-toolbox-rocm', tag: 'v1', downloaded: false },
-  ]
-  // Release-catalog refs as system-info hands them out: tag AND digest shapes.
-  const catalogImages = [
-    'ghcr.io/hal0ai/hal0-combined:0826',
-    'ghcr.io/hal0ai/hal0-toolbox-cpu@sha256:eab70d0355981c08133a6fff28e472690c7091f6e968da1a2f269bdfa29311a1',
-  ]
-
-  it('offers downloaded rows the release catalog does not list, as repo:tag', () => {
-    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
-    expect(out).toEqual([
-      {
-        id: 'combined-upstream',
-        ref: 'ghcr.io/hal0ai/hal0-combined-upstream:0829',
-        notes: 'pin-only upstream variant',
-      },
-    ])
-  })
-
-  it('dedupes against catalog refs by repo, digest-pinned refs included', () => {
-    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
-    expect(out.some((o) => o.ref.includes('toolbox-cpu'))).toBe(false)
-  })
-
-  it('drops rows that are not downloaded', () => {
-    const out = cataloguePinOptions({ rows, catalogImages, slotType: 'llm' })
-    expect(out.some((o) => o.ref.includes('toolbox-rocm'))).toBe(false)
-  })
-
-  it('offers nothing for slot types llama-server does not serve', () => {
-    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'tts' })).toEqual([])
-    expect(cataloguePinOptions({ rows, catalogImages, slotType: 'image' })).toEqual([])
-  })
-
-  it('serves every llama-server slot type', () => {
-    for (const t of ['llm', 'embedding', 'reranking']) {
-      expect(cataloguePinOptions({ rows, catalogImages, slotType: t }).length).toBe(1)
-    }
-  })
-
-  it('tolerates missing rows/catalog', () => {
-    expect(cataloguePinOptions({ rows: undefined, catalogImages: undefined, slotType: 'llm' })).toEqual([])
+  it('out-of-vocab persisted binary → null (caller renders self-option)', () => {
+    const { options } = runnerOptions({ backends, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true } })
+    expect(selectedRunnerKey({ binary: 'ghostbin', options })).toBeNull()
+    expect(selectedRunnerKey({ binary: '', options })).toBe('')
   })
 })
