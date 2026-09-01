@@ -66,13 +66,17 @@ class TestListProfiles:
         for item in data:
             assert not forbidden.intersection(item["flags"].split()), item["name"]
 
-    def test_dense_family_variant_seeds_present(self, client: TestClient) -> None:
-        """The long-context seed remains a device-agnostic GPU tune."""
+    def test_generic_workload_seeds_are_device_agnostic(self, client: TestClient) -> None:
+        """The generic llama-server seeds carry no hardware placement.
+
+        (``chat-long-context`` used to stand in for this; it is a demoted
+        definition now — see ``legacy_seed_profiles.toml``.)
+        """
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
-        assert by_name["chat-long-context"]["seed"] is True
-        assert by_name["chat-long-context"]["mtp"] is False
-        assert by_name["chat-long-context"]["device_class"] is None
-        assert "-ctk q8_0" in by_name["chat-long-context"]["flags"]
+        for name in ("chat", "cpu-chat", "embedding", "reranking"):
+            assert by_name[name]["seed"] is True
+            assert by_name[name]["mtp"] is False
+            assert by_name[name]["device_class"] is None
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""
@@ -129,8 +133,8 @@ class TestListProfiles:
 
     def test_dense_mtp_rocmfp4_mtp_true(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "chat-long-context")
-        assert dense["mtp"] is False
+        cpu_chat = next(item for item in data if item["name"] == "cpu-chat")
+        assert cpu_chat["mtp"] is False
 
     def test_vulkan_profile_is_device_agnostic(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
@@ -145,12 +149,13 @@ class TestListProfiles:
         profile-catalog's resolved_flags (no model bound at this level)
         never carries the --spec-draft-* bundle, even for an mtp=true seed
         like rocm-dense. See providers.container._effective_mtp for where
-        the real, model-aware decision now lives."""
+        the real, model-aware decision now lives. (Every remaining seed is
+        mtp=false since the mtp=true recipes were demoted, so this asserts
+        the invariant over the whole set rather than one seed.)"""
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "chat-long-context")
-        assert dense["mtp"] is False
-        assert "--spec-type" not in dense["resolved_flags"]
-        assert MTP_FLAG_BUNDLE not in dense["resolved_flags"]
+        for item in data:
+            assert "--spec-type" not in item["resolved_flags"], item["name"]
+            assert MTP_FLAG_BUNDLE not in item["resolved_flags"], item["name"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()

@@ -1,0 +1,14 @@
+{
+  "checksum": "sha256:962e4ff331785f77eb8c945eb6b75f42ec35912710ebdf6ba0dca3c6588f6fbd",
+  "exported_at": "2026-09-01T00:00:00Z",
+  "hal0_version": "1.1.0",
+  "kind": "hal0.profile",
+  "name": "moe",
+  "profile": {
+    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj",
+    "intent": "Generic MoE workload · tuned for 32K ctx",
+    "mtp": false,
+    "quant": ""
+  },
+  "schema_version": 1
+}

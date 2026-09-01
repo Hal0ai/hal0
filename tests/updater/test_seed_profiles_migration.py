@@ -74,7 +74,7 @@ def test_prune_writes_backup_once(tmp_hal0_home: str) -> None:
     assert backup.exists()
     original = backup.read_text(encoding="utf-8")
     # A second migration run must not clobber the original backup.
-    _write_profiles(_seed_table("dense"))
+    _write_profiles(_seed_table("embedding"))
     ensure_seed_profiles()
     assert backup.read_text(encoding="utf-8") == original
 

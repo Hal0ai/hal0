@@ -31,9 +31,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
-from hal0.profiles import ProfileCatalog, ProfilePatch, screen_profile_flags
+from hal0.profiles import (
+    ProfileCatalog,
+    ProfilePatch,
+    runtime_family_of,
+    screen_profile_flags,
+)
 from hal0.profiles.generate import LlmCallContext, generate_draft_profile
 from hal0.profiles.portable import (
+    envelope_runner_status,
     export_envelope,
     import_profile,
     parse_envelope,
@@ -328,6 +334,12 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     to be the only place it was checked, so a tampered file that failed the
     dry-run report still imported cleanly on the next call.
 
+    A runtime this box does not have is STRIPPED, never a block: import stays
+    portable, so a profile authored on a richer box still lands (flags and
+    quant intact) — it just lands with no runtime pinned. Both the dry run
+    and the commit response report it as ``runner_stripped``, alongside the
+    envelope's own ``runner`` and the profile's ``runtime_family``.
+
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
         400 profiles.checksum_mismatch: checksum does not cover the body (#1416).
@@ -357,6 +369,11 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
         existing = {p.name for p in ProfileCatalog().list()}
         target = name or env.name
         collides = bool(target) and target in existing
+        # Runtime facts the preview renders: the key the envelope AUTHORS
+        # (not the one that will be stored), whether importing has to drop it
+        # because this box has no such runtime, and the family the profile
+        # resolves to. A dropped runtime warns and proceeds — it never blocks.
+        _kept, runner_stripped = envelope_runner_status(env.profile)
         return {
             "dry_run": True,
             "valid": True,
@@ -364,6 +381,9 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
             "name": env.name or "",
             "schema_version": env.schema_version,
             "collides": collides,
+            "runner": env.profile.runner,
+            "runner_stripped": runner_stripped,
+            "runtime_family": runtime_family_of(env.name or "", env.profile),
         }
 
     if not name or not isinstance(name, str):
@@ -400,8 +420,18 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     ) as rec:
         resolved = import_profile(envelope, name, ProfileCatalog(), force=force)
         rec.after = {"name": name}
+    _kept, runner_stripped = envelope_runner_status(env.profile)
+    if runner_stripped:
+        log.warning(
+            "profile import dropped a runtime this box does not have",
+            extra={
+                "event": "profile.import_runner_stripped",
+                "profile": name,
+                "runner": env.profile.runner,
+            },
+        )
     response.status_code = 201
-    return {"dry_run": False, "profile": resolved.to_dict()}
+    return {"dry_run": False, "profile": resolved.to_dict(), "runner_stripped": runner_stripped}
 
 
 @router.get("/{name}")
@@ -432,6 +462,10 @@ def export_profile(name: str) -> dict[str, Any]:
         mtp=resolved.mtp,
         device_class=resolved.device_class,
         backend=resolved.backend,
+        # The envelope is the import preview's only source of runtime truth,
+        # so the export has to actually carry `runner` — it was omitted here
+        # while every other ProfileConfig field was copied across.
+        runner=resolved.runner,
         cloned_from=resolved.cloned_from,
         intent=resolved.intent,
         quant=resolved.quant,

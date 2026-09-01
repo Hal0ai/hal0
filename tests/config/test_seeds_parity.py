@@ -4,9 +4,6 @@ from hal0.config import seeds
 
 CANONICAL_PROFILES = {
     "chat",
-    "chat-long-context",
-    "dense",
-    "moe",
     "embedding",
     "reranking",
     "cpu-chat",
@@ -15,11 +12,20 @@ CANONICAL_PROFILES = {
     "qwen3-tts",
     "comfyui",
     "brain",
+    "moonshine",
+}
+
+#: The 8 workload variants the seed catalog carried until the profile-system
+#: overhaul. Shipped as demoted definitions (legacy_seed_profiles.toml), not
+#: seeds — see that file's header.
+LEGACY_PROFILES = {
+    "chat-long-context",
+    "dense",
+    "moe",
     "chadrock-dense",
     "chadrock-moe",
     "thinking",
     "coding",
-    "moonshine",
     "promptforge",
 }
 
@@ -28,20 +34,26 @@ def test_seed_catalog_is_canonical_and_complete() -> None:
     assert set(seeds.seed_profiles()) == CANONICAL_PROFILES
 
 
+def test_legacy_catalog_is_canonical_and_complete() -> None:
+    assert set(seeds.legacy_seed_profiles()) == LEGACY_PROFILES
+
+
 def test_seed_profiles_are_device_agnostic_and_partition_safe() -> None:
     # Slot-hardware flags (§5) + hal0-managed args (§21.7) — token-exact, so
     # --model_path / --threads-batch in the TTS / cpu-chat seeds never trip.
     forbidden = {"-ngl", "--n-gpu-layers", "-dev", "--device", "--threads", "-t"}
     forbidden |= {"-c", "--ctx-size", "--host", "--port", "--model", "--alias"}
-    for name, profile in seeds.seed_profiles().items():
+    for name, profile in {**seeds.seed_profiles(), **seeds.legacy_seed_profiles()}.items():
         assert "image" not in profile, name
         assert profile.get("backend") is None, name
         assert not forbidden.intersection(str(profile.get("flags", "")).split()), name
 
 
 def test_fpx_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
-    moe = seeds.seed_profiles()["moe"]["flags"]
-    dense = seeds.seed_profiles()["dense"]["flags"]
+    # These four are demoted definitions now; their flag text is what an
+    # upgraded install inherits verbatim, so it stays pinned here.
+    moe = seeds.legacy_seed_profiles()["moe"]["flags"]
+    dense = seeds.legacy_seed_profiles()["dense"]["flags"]
     # Generic moe/dense are model-agnostic and carry no family-specific
     # kv-cache (chadrock-specific -ctk/-ctv moved to chadrock-moe/dense
     # per spec §4.2). Both still carry batch defaults; context is slot-owned
@@ -50,8 +62,8 @@ def test_fpx_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
     assert "-c" not in moe.split()
     assert "-c" not in dense.split()
     # Chadrock family profiles own the family-specific KV quirks
-    chadrock_moe = seeds.seed_profiles()["chadrock-moe"]["flags"]
-    chadrock_dense = seeds.seed_profiles()["chadrock-dense"]["flags"]
+    chadrock_moe = seeds.legacy_seed_profiles()["chadrock-moe"]["flags"]
+    chadrock_dense = seeds.legacy_seed_profiles()["chadrock-dense"]["flags"]
     assert "-ctk f16" in chadrock_moe
     assert "-ctk q8_0" in chadrock_dense
     for flags in (moe, dense, chadrock_moe, chadrock_dense):

@@ -30,6 +30,10 @@ export interface Profile {
    *  via the server's profile-wins reconcile. null/absent = flags-only tune,
    *  no runtime opinion. */
   runner?: string | null
+  /** Runtime family the profile resolves to (llama-server | flm | kokoro |
+   *  qwen3tts | moonshine | comfyui) — a structural fact of its name +
+   *  device_class, not a choice. The card chips a non-llama-server family. */
+  runtime_family?: string
   /** Provenance: profile this one was cloned from (clone / edit-a-copy). */
   cloned_from?: string | null
   /** Human label shown as the card headline (e.g. "MoE agents"). */
@@ -78,6 +82,13 @@ export interface ProfileImportDryResult {
   name: string
   schema_version: number
   collides: boolean
+  /** Runtime key the ENVELOPE carries (not the one that will be stored). */
+  runner?: string | null
+  /** True when that key is not in this box's registry: the import proceeds
+   *  and lands the profile with no runtime pinned. Never a block. */
+  runner_stripped?: boolean
+  /** Runtime family the imported profile will resolve to. */
+  runtime_family?: string
 }
 
 export function useProfiles() {

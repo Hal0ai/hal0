@@ -6,8 +6,8 @@ import pytest
 
 from hal0.config.loader import load_profiles_config, save_profiles_config
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
-from hal0.errors import Conflict, UnprocessableEntity
-from hal0.profiles import ProfileCatalog, ProfilePatch
+from hal0.errors import Conflict, NotFound, UnprocessableEntity
+from hal0.profiles import ProfileCatalog, ProfilePatch, _runtime_family
 
 
 def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
@@ -220,10 +220,11 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
-    # Per spec §4.2: generic dense profile is model-agnostic (no quant hint);
-    # the chadrock-dense family-specific profile carries the ROCmFP4 hint.
-    assert by_name["dense"].quant == ""
-    assert by_name["chadrock-dense"].quant == "ROCmFP4"
+    # Seeds that carry no quant hint report it as the empty string, and a
+    # runtime-family seed carries its own (the FLM NPU quant here). The
+    # ROCmFP4 family hints moved out with the chadrock-* demotion.
+    assert by_name["chat"].quant == ""
+    assert by_name["flm"].quant == "W4ABF16"
 
 
 def test_custom_profile_has_no_bench_and_round_trips_intent_quant(
@@ -254,7 +255,7 @@ def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
         )
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert sorted(by_name["chat"].used_by) == ["agent", "primary"]
-    assert by_name["dense"].used_by == ()
+    assert by_name["embedding"].used_by == ()
     assert by_name["chat"].to_dict()["used_by"] == ["agent", "primary"]
 
 
@@ -298,3 +299,89 @@ def test_profile_without_runner_unchanged(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
     prof = cat.create("plain", ProfileConfig(flags="-fa on"))
     assert prof.runner is None
+
+
+# ── runtime_family precedence: runner > device_class > legacy name ────────
+
+
+def test_runtime_family_prefers_runner_key() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="kokoro")
+    assert _runtime_family("my-custom", profile) == "kokoro"
+
+
+def test_runtime_family_runner_beats_legacy_name() -> None:
+    # a kokoro-NAMED profile pointing at the comfyui runner is comfyui-family
+    profile = ProfileConfig(flags="", mtp=False, runner="comfyui")
+    assert _runtime_family("kokoro", profile) == "comfyui"
+
+
+def test_runtime_family_runner_beats_device_class() -> None:
+    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="rocmfpx")
+    assert _runtime_family("custom", profile) == "llama-server"
+
+
+def test_runtime_family_unknown_runner_falls_back() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="ghost-runner")
+    assert _runtime_family("kokoro", profile) == "kokoro"  # legacy name rule still fires
+
+
+def test_runtime_family_no_runner_unchanged() -> None:
+    cases = [
+        ("flm", "flm"),
+        ("qwen3-tts", "qwen3tts"),
+        ("kokoro", "kokoro"),
+        ("moonshine", "moonshine"),
+        ("comfyui", "comfyui"),
+        ("anything", "llama-server"),
+    ]
+    for name, expected in cases:
+        assert _runtime_family(name, ProfileConfig(flags="", mtp=False)) == expected
+    # device_class rules unchanged too
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="npu")) == "flm"
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="img")) == "comfyui"
+
+
+# ── demoted (ex-seed) profiles ────────────────────────────────────────────
+
+
+def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
+    """'coding' is no longer in SEED_PROFILES, so _guard_custom lets it through."""
+    p = tmp_path / "profiles.toml"
+    p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    updated = catalog.update("coding", ProfilePatch(intent="mine now"))
+    assert updated.intent == "mine now"
+    assert updated.seed is False
+
+    catalog.delete("coding")
+    assert all(profile.name != "coding" for profile in catalog.list())
+    # The delete sticks — the migration marker stops the re-injection.
+    assert "coding" not in load_profiles_config(p).profile
+
+
+def test_resolve_does_not_resurrect_a_deleted_legacy_profile(tmp_path: Path) -> None:
+    p = tmp_path / "profiles.toml"
+    p.write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    with pytest.raises(NotFound):
+        catalog.resolve("coding")
+
+
+def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path) -> None:
+    """No profiles.toml at all: the curated agent/coder slots still resolve."""
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    resolved = catalog.resolve("chadrock-moe")
+    assert resolved.name == "chadrock-moe"
+    assert resolved.seed is False
+    # Persisted as a custom entry, so it is editable/deletable from here on.
+    assert "chadrock-moe" in load_profiles_config(p).profile
+
+
+def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:
+    catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
+    with pytest.raises(NotFound):
+        catalog.resolve("no-such-profile")

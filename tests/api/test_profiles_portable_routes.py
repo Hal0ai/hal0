@@ -112,6 +112,35 @@ class TestImportDryRun:
         )
         assert r.json()["collides"] is False
 
+    def test_dry_run_reports_the_envelope_runtime_and_family(self, client: TestClient) -> None:
+        """The preview names the runtime the envelope drags along, so the
+        operator sees it before committing."""
+        _create_custom(client, "pf-runner")
+        client.put("/api/profiles/pf-runner", json={"runner": "strix"})
+        env = client.post("/api/profiles/pf-runner/export").json()
+        assert env["profile"]["runner"] == "strix"
+
+        r = client.post("/api/profiles/import", json={"envelope": env, "dry_run": True})
+        body = r.json()
+        assert body["runner"] == "strix"
+        assert body["runner_stripped"] is False
+        assert body["runtime_family"] == "llama-server"
+
+    def test_dry_run_flags_a_runtime_this_box_does_not_have(self, client: TestClient) -> None:
+        """An unavailable runtime is a WARNING, not a block: the dry run names
+        the key it will drop and says the import lands as Auto."""
+        env = client.post(f"/api/profiles/{_seed_name()}/export").json()
+        env["profile"]["runner"] = "strix-next"
+        r = client.post(
+            "/api/profiles/import",
+            json={"envelope": env, "name": "fresh-name", "dry_run": True, "force": True},
+        )
+        body = r.json()
+        assert r.status_code == 200
+        assert body["valid"] is True
+        assert body["runner"] == "strix-next"
+        assert body["runner_stripped"] is True
+
     def test_dry_run_checksum_ok_false_when_tampered(self, client: TestClient) -> None:
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
         env["profile"]["flags"] = "-fa off TAMPERED"
@@ -134,6 +163,29 @@ class TestImportCommit:
         got = client.get("/api/profiles/imported-one")
         assert got.status_code == 200
         assert got.json()["name"] == "imported-one"
+
+    def test_commit_imports_an_unavailable_runtime_as_auto(self, client: TestClient) -> None:
+        """Same substitution on the commit path, reported the same way — the
+        profile lands, its runtime does not."""
+        env = client.post(f"/api/profiles/{_seed_name()}/export").json()
+        env["profile"]["runner"] = "strix-next"
+        r = client.post(
+            "/api/profiles/import",
+            json={"envelope": env, "name": "as-auto", "force": True},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["runner_stripped"] is True
+        assert body["profile"]["runner"] is None
+
+    def test_commit_keeps_an_available_runtime(self, client: TestClient) -> None:
+        _create_custom(client, "pf-keep")
+        client.put("/api/profiles/pf-keep", json={"runner": "strix"})
+        env = client.post("/api/profiles/pf-keep/export").json()
+        r = client.post("/api/profiles/import", json={"envelope": env, "name": "pf-keep-copy"})
+        assert r.status_code == 201
+        assert r.json()["runner_stripped"] is False
+        assert r.json()["profile"]["runner"] == "strix"
 
     def test_commit_without_name_400(self, client: TestClient) -> None:
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
