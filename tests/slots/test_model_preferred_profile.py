@@ -9,6 +9,10 @@ profile and the manager never flips the slot's hardware to satisfy a model.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from hal0.registry.model import Model, ModelDefaults
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -97,3 +101,34 @@ def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
     assert fits("cpu-chat", gpu_vulkan) is True  # seed is device-agnostic
     assert fits("comfyui", gpu_vulkan) is False  # img profile, wrong type+class
     assert fits("does-not-exist", gpu_vulkan) is False
+
+
+@pytest.fixture
+def profile_catalog_fixture(tmp_hal0_home: str) -> str:
+    """Add profile "pf" — runner="promptforge" (rocm) — to the catalog.
+
+    ``load_profiles_config``/``ProfileCatalog`` read ``profiles.toml`` off
+    ``paths.profiles_toml()`` (``$HAL0_HOME/etc/hal0/profiles.toml``), which
+    ``tmp_hal0_home`` already isolates — writing the file there is enough for
+    every catalog reader in this process to pick "pf" up. ``backend="rocm"``
+    puts "pf" at odds with a ``gpu-vulkan`` slot's backend so the two new
+    tests actually exercise the runner-carrying-profile veto relief (Task 6)
+    rather than passing on the pre-existing device-agnostic (backend=None)
+    fast path.
+    """
+    etc_dir = Path(tmp_hal0_home) / "etc" / "hal0"
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    (etc_dir / "profiles.toml").write_text('[profile.pf]\nrunner = "promptforge"\nbackend = "rocm"\n')
+    return tmp_hal0_home
+
+
+def test_runner_profile_fits_across_gpu_lanes(profile_catalog_fixture) -> None:
+    # profile "pf" carries runner="promptforge" (rocm); slot is gpu-vulkan.
+    # Same device class → fits (the config-write reconcile flips the lane).
+    assert SlotManager._profile_fits_slot("pf", {"type": "llm", "device": "gpu-vulkan"})
+
+
+def test_runner_profile_still_vetoed_cross_class(profile_catalog_fixture) -> None:
+    # gpu runtime on a cpu slot stays a veto — crossing device class is a
+    # re-create, not an adoption.
+    assert not SlotManager._profile_fits_slot("pf", {"type": "llm", "device": "cpu"})

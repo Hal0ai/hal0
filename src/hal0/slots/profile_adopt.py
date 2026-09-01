@@ -79,11 +79,20 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
         )
         if resolved.device_class is not None and resolved.device_class != slot_class:
             return False
+        if resolved.runner:
+            from hal0.runners import get_runner
+
+            if get_runner(resolved.runner).device_class != slot_class:
+                return False
         if resolved.backend:
             from hal0.model_meta import device_to_backend
 
             slot_backend = device_to_backend(device)[1]
-            if slot_backend and slot_backend != resolved.backend:
+            # A runner-carrying profile may flip the GPU lane at write time
+            # (runtime-cascade D4: profile wins within a device class — see
+            # hal0.slots.config_write._reconcile_device_profile) — only a
+            # runner-LESS backend hint stays a veto.
+            if slot_backend and slot_backend != resolved.backend and not resolved.runner:
                 return False
     return True
 
