@@ -62,6 +62,33 @@ class GPUMemorySample:
     gpu_busy: float | None  # 0..1, raw
     util_is_forced_high: bool
 
+    @property
+    def gtt_free_mb(self) -> float | None:
+        """Free GTT (MiB): ``gtt_total - gtt_used``, clamped at 0.
+
+        This is HOST truth even inside an LXC container: the amdgpu
+        ``mem_info_gtt_*`` sysfs counters describe the host's shared GART
+        pool, unlike the container's lxcfs-shaped ``/proc/meminfo`` which
+        only reflects the cgroup (field finding: a 47 GiB weight load hit
+        ``cudaMalloc failed: out of memory`` while the container's ``free``
+        showed 65 GiB "available"). ``None`` when either counter is absent
+        (non-AMD, no GPU) — "unknown" stays distinguishable from 0.
+        """
+        if self.gtt_total_mb is None or self.gtt_used_mb is None:
+            return None
+        return max(self.gtt_total_mb - self.gtt_used_mb, 0.0)
+
+    @property
+    def vram_free_mb(self) -> float | None:
+        """Free dedicated VRAM (MiB): ``vram_total - vram_used``, clamped at 0.
+
+        ``None`` when either counter is absent — same contract as
+        :attr:`gtt_free_mb`.
+        """
+        if self.vram_total_mb is None or self.vram_used_mb is None:
+            return None
+        return max(self.vram_total_mb - self.vram_used_mb, 0.0)
+
 
 def _max_pool(*candidates: float | None) -> float | None:
     """max() over the non-None candidates; None when all are missing.

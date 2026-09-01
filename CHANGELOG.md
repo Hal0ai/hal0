@@ -48,6 +48,14 @@ applying. Add those subsections to a version's section to surface them; see
   the kyuz0 layout by construction, so existing img slots need no
   reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
   upgraded boxes (#2171).
+||||||| parent of 993ea3b6 (feat(hardware): host-truth GTT feasibility signal (warn, never block))
+- **Host-truth GTT feasibility signal.** `GET /api/hardware` now carries live
+  `gtt_used_mb`/`gtt_free_mb` from the amdgpu `mem_info_gtt_*` sysfs counters
+  (host truth even inside an LXC container, where the cgroup-shaped meminfo
+  can show tens of GiB "available" while a GTT weight allocation fails), the
+  slot load path emits an advisory `slot.gtt_feasibility` warning — never a
+  block — when a model's weights exceed the free GTT pool, and the dashboard's
+  Detected-hardware panel shows the live free-GTT figure.
 
 ## [1.1.0] — 2026-08-31
 

@@ -29,6 +29,7 @@ from hal0.slots.capacity import (
     _host_has_capable_gpu,
     _systemd_unit_mem_bytes,
     build_per_slot,
+    gtt_fit_warning,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -409,3 +410,46 @@ class TestSystemdUnitMemFallback:
 
         assert result == 999
         mock_fallback.assert_not_called()
+
+
+# ── gtt_fit_warning — WARN-only host-truth GTT feasibility (pure) ───────────
+#
+# Field finding (LXC on a UMA Proxmox host): a 47.3 GiB weight load failed
+# with cudaMalloc OOM while the container's meminfo showed 65 GiB
+# "available" — GTT allocations draw from the HOST's free RAM and the
+# cgroup-shaped meminfo is a lie for GPU purposes. The helper compares the
+# incoming weights against the amdgpu sysfs free-GTT counters instead.
+
+
+class TestGttFitWarning:
+    def test_warns_when_weights_exceed_free_gtt(self) -> None:
+        """The ct105 shape: 47.3 GiB weights vs ~18 GiB actually free."""
+        msg = gtt_fit_warning(47.3 * 1024, gtt_free_mb=18.0 * 1024, gtt_total_mb=96.0 * 1024)
+        assert msg is not None
+        assert "47.3 GiB" in msg
+        assert "18.0 GiB" in msg
+        assert "96.0 GiB" in msg
+
+    def test_silent_when_it_fits(self) -> None:
+        assert gtt_fit_warning(8192.0, gtt_free_mb=20480.0, gtt_total_mb=98304.0) is None
+
+    def test_silent_at_exact_boundary(self) -> None:
+        """needed == free is not "clearly exceeds" — no warning."""
+        assert gtt_fit_warning(20480.0, gtt_free_mb=20480.0, gtt_total_mb=98304.0) is None
+
+    def test_silent_when_counters_absent(self) -> None:
+        """Non-AMD / no-GPU host (None counters) → fail-soft silence."""
+        assert gtt_fit_warning(47.3 * 1024, gtt_free_mb=None, gtt_total_mb=None) is None
+        assert gtt_fit_warning(47.3 * 1024, gtt_free_mb=None, gtt_total_mb=98304.0) is None
+        assert gtt_fit_warning(47.3 * 1024, gtt_free_mb=18432.0, gtt_total_mb=None) is None
+
+    def test_silent_on_unknown_or_zero_size(self) -> None:
+        """Unknown model size never warns (mirrors preload_evict's fail-open)."""
+        assert gtt_fit_warning(0.0, gtt_free_mb=1024.0, gtt_total_mb=98304.0) is None
+        assert gtt_fit_warning(-5.0, gtt_free_mb=1024.0, gtt_total_mb=98304.0) is None
+
+    def test_warns_even_when_free_is_zero(self) -> None:
+        """A fully-consumed pool (free 0) still warns rather than dividing oddly."""
+        msg = gtt_fit_warning(1024.0, gtt_free_mb=0.0, gtt_total_mb=98304.0)
+        assert msg is not None
+        assert "0.0 GiB" in msg

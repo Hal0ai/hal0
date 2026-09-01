@@ -262,3 +262,53 @@ def test_sample_is_frozen(tmp_path: Path) -> None:
     s = sample(vendor="amd", drm=drm)
     with pytest.raises(dataclasses.FrozenInstanceError):
         s.vendor = "nvidia"  # type: ignore[misc]
+
+
+# ── gtt_free_mb / vram_free_mb — host-truth free pool (GTT feasibility) ──────
+
+
+def test_free_pools_derived_from_sysfs(tmp_path: Path) -> None:
+    """free = total - used, straight off the sysfs counters (host truth)."""
+    drm = _mk_drm(
+        tmp_path, vram_used_mb=100, gtt_used_mb=2048, vram_total_mb=512, gtt_total_mb=81920
+    )
+    s = sample(vendor="amd", drm=drm)
+    assert s.gtt_free_mb == pytest.approx(81920.0 - 2048.0)
+    assert s.vram_free_mb == pytest.approx(512.0 - 100.0)
+
+
+def test_free_pools_none_when_counter_absent(tmp_path: Path) -> None:
+    """A missing used/total counter degrades free to None, not 0 (fail-soft)."""
+    drm = _mk_drm(
+        tmp_path, vram_used_mb=None, gtt_used_mb=None, vram_total_mb=512, gtt_total_mb=81920
+    )
+    s = sample(vendor="amd", drm=drm)
+    assert s.gtt_free_mb is None
+    assert s.vram_free_mb is None
+
+
+def test_free_pools_clamped_at_zero() -> None:
+    """used > total (counter races / GART shrink) clamps to 0, never negative."""
+    s = GPUMemorySample(
+        vendor="amd",
+        is_uma=True,
+        vram_total_mb=512.0,
+        gtt_total_mb=81920.0,
+        total_mb=81920.0,
+        vram_used_mb=600.0,
+        gtt_used_mb=90000.0,
+        used_mb=90000.0,
+        gpu_busy=None,
+        util_is_forced_high=False,
+    )
+    assert s.gtt_free_mb == 0.0
+    assert s.vram_free_mb == 0.0
+
+
+def test_free_pools_none_on_no_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No GPU at all (non-AMD, no drm) → both free pools are None."""
+    monkeypatch.setattr(gpu_view, "_amd_drm_device", lambda: None)
+    monkeypatch.setattr(gpu_view, "_run", _no_nvidia)
+    s = sample()
+    assert s.gtt_free_mb is None
+    assert s.vram_free_mb is None
