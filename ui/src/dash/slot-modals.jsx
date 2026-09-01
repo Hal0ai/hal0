@@ -322,7 +322,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Runner Image is a catalog dropdown (the RUNNER_IMAGES refs system-info
 	// reports — same source as the Runtimes page). `pinCustom` flips the
 	// control to a free-text input for the debug-build/A-B/rollback escape
-	// hatch the field originally existed for.
+	// hatch the field originally existed for. D3 (Task 8) replaced the
+	// catalog dropdown with a plain "Pin override" text input, so `pinCustom`
+	// is unread for now — Task 9 rebuilds the pin UI under an Advanced
+	// disclosure; pinCustom survives for it.
 	const [pinCustom, setPinCustom] = useStateSM(false);
 	// Runtime profile (SlotConfig.profile) — picks the runtime family,
 	// device-class gating and MTP draft backend. Flags: copy-on-stamp into
@@ -1672,10 +1675,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 								<div className="form-row">
 									<div className="form-lbl">
-										<span>Image pin</span>
-										<FieldInfoIcon description="Optional: pin an exact image ref instead of the
-											Runtime's default. Empty resolves from the Runtime pick
-											above." />
+										<span>Pin override</span>
+										<FieldInfoIcon description="Optional: pin this slot to an exact build reference
+											instead of the Runtime's release default. Debug/rollback
+											use only — cleared by leaving it empty." />
 									</div>
 									<div className="form-ctl">
 										<input
