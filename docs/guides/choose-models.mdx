@@ -91,6 +91,19 @@ top of the Models view (`#models/profiles`) — that's where you manage the
 runtime-profile templates the model drawer's template picker draws from.
 See [Manage slots](/docs/guides/manage-slots) for what a profile controls.
 
+A profile's create/edit form has an optional **Runtime** select — "— any
+(flags-only tune) —" to leave it unset, or one of the llama-server-family
+runtimes (Standard, PromptForge, Strix, CUDA, CPU) to pin one. A profile
+that pins a runtime shows a matching badge on its card. Seed profiles always
+render the select disabled: forking a seed copies its runtime binding
+verbatim, and you change it by editing the copy. Naming a runtime here does
+more than set a default flag bundle — applying the profile to a slot (at
+create time, from the slot drawer, or via a model's preferred-profile
+adoption) also sets that slot's runtime and, for a single-backend runtime,
+its GPU lane. See [Manage slots → Dashboard: the slot edit
+drawer](/docs/guides/manage-slots) for what that apply looks like from the
+slot side.
+
 ## Launch flags now live on the model, not the slot
 
 As of v1.0, tuning knobs that used to be per-slot — `extra_args`, `mtp`,
@@ -218,10 +231,18 @@ curl -X PUT http://localhost:8080/api/models/qwen3.6-27b \
 
 A slot adopts this preference automatically: when it's created bound to
 the model with no explicit profile of its own, and again on **every**
-subsequent model swap. The preference is honoured only when it's
-compatible with the slot's existing device and type — an incompatible
-preference is ignored and the slot keeps its current profile; hal0 never
-flips a slot's hardware to satisfy a model's preference.
+subsequent model swap. The preference is honoured only when it's compatible
+with the slot's existing device *class* (gpu/cpu/npu/img) and type — an
+incompatible preference is ignored and the slot keeps its current profile.
+Within that same device class, though, a preferred profile that pins a
+runtime (see [The Profiles tab](#filter-and-sort-the-catalog) above) *can*
+now flip the slot's specific GPU lane — e.g. adopting a Strix-carrying
+preference on a `gpu-rocm` slot moves it to `gpu-vulkan` — the same
+profile-wins reconcile the slot drawer's Profile row previews. It's still
+never adopted if that flip isn't physically possible on this host (a
+ROCm-only runtime with no `/dev/kfd`, for instance); the slot keeps its
+current profile in that case instead. A flags-only preferred profile (no
+runtime pinned) behaves as before and never touches the slot's hardware.
 
 ## How model fit is evaluated
 

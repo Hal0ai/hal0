@@ -120,6 +120,14 @@ hal0 slot create embed \
    tune stays the model's (or yours). Change a slot's profile later with
    `hal0 slot edit <name> --profile <profile>` or the slot drawer.
 
+   A profile can also pin a **runtime** — one of hal0's runner-registry
+   entries (Standard, PromptForge, Strix, CUDA, CPU) — instead of just flags.
+   Naming such a profile at create time sets the new slot's `binary` (and, for
+   a single-backend runtime, its `device`) to match, so the profile decides
+   the runtime and not only the tune. A ROCm-only runtime profile on a host
+   with no `/dev/kfd` is rejected at create time with a plain-language error
+   rather than writing a slot that can never spawn.
+
 </Steps>
 
 Creating a slot writes its config and systemd drop-in but does **not**
@@ -341,13 +349,51 @@ caution under Rename, earlier on this page.
 ### Hardware
 
 Holds the fields v1.0 moved onto the slot itself — see [The hardware/model
-write boundary](/docs/concepts/slots) for why. **Device** appears only for
-GPU-class slots: it's the rocm/vulkan switch covered in Switching a slot to
-the Vulkan lane, above. **Runner Image** pins a specific container image
-(or is left to resolve from Runner Binary); **Runner Binary** picks which
-binary inside that image executes; **Threads** is the CPU thread count
-(`0` = runtime default); **NGL** is GPU layers to offload (`-1` = all).
-Every field here needs a restart to take effect.
+write boundary](/docs/concepts/slots) for why. The old separate **Device**,
+**Runner Image**, and **Runner Binary** controls are gone — a runtime-first
+redesign folded them into two fields, since `device` is now *derived* from
+the runtime you pick rather than an independently editable value:
+
+- **Runtime** lists hal0's runner-registry entries, filtered to what this
+  slot's type and this box's detected hardware can actually run. Each option
+  shows the runtime's name, its lane(s) when it offers more than one (e.g.
+  "Standard · ROCm + Vulkan"), and a "· not pulled" suffix when its image
+  hasn't been downloaded yet; picking one shows its one-line blurb
+  underneath. The registry as of this release: **Standard** (the ROCm+Vulkan
+  default — "Runs every model type, including FPX quants."), **PromptForge**
+  (ROCm only), **Strix** (Vulkan only — qwen4exp support plus MTP speculative
+  decode, no FPX quants), **CUDA**, and **CPU** — plus the singleton engines
+  (FastFlowLM, Kokoro, Moonshine, Qwen3-TTS, ComfyUI) for their own slot
+  types. A persisted `binary` this box no longer offers for the slot (older
+  release, hand-edited TOML) stays selectable as its own "‹binary› · not in
+  this catalog" option rather than being silently rewritten. Picking a new
+  runtime shows an inline note that Save will move the slot to that lane and
+  restart it.
+- **Lane** — Auto / ROCm / Vulkan pills — only appears when the picked
+  runtime actually offers more than one backend. Today that's Standard
+  alone; every optional runtime (PromptForge, Strix, CUDA) declares exactly
+  one backend, so it has nothing to pick between.
+
+**Threads** is the CPU thread count (`0` = runtime default); **NGL** is GPU
+layers to offload (`-1` = all). Every field here needs a restart to take
+effect.
+
+Below NGL, a collapsed **Advanced — image & version** disclosure holds what
+used to live in the main Hardware fields: a read-only **Image** line (the
+effective ref this slot runs — a debug pin if one is set, otherwise the
+release image for the picked Runtime, captioned "pinned by release ·
+reconciled by hal0 update"), a **Version** line pointing at the [Runner
+Images page](/docs/guides/manage-runner-images) for version/rollback
+management, and a **Debug pin** behind a "Pin a custom image ref…" button —
+opening it shows the warning "Debug-only. hal0 can't verify what a custom
+ref ships — the slot keeps its current runtime binary and may fail at
+spawn." and a "Use release image" button to clear it. A pin never widens or
+narrows the Runtime/Lane options above it. If the pin still references the
+retired `hal0-combined-upstream` image, a "Superseded by the Strix runtime"
+banner appears with a one-click switch — the button itself only renders when
+Strix actually resolves for this slot (right hardware, right slot type);
+otherwise the banner reads "…available after the next update" with no
+button.
 
 ### Profile: same-device tuning, or a cross-device switch
 
@@ -359,6 +405,18 @@ strand the slot's currently bound model on a backend it can't run. A profile
 matching the bound model's own stamped preference shows as adopted from the
 model (swapping the model may change it); one you pick that diverges instead
 overlays its flags on top of the model's tune for this slot only, at launch.
+
+A profile can also carry a **runtime** (see [Choose models → Profiles
+tab](/docs/guides/choose-models)), not just flags. Picking one that names a
+runtime different from the slot's current binary shows an inline preview
+above the select — "Applying this profile: runtime → ‹title› (‹lane›) …
+slot restarts on Save" — and mirrors the pick straight into the Hardware
+group's Runtime/Lane controls so you see the post-save state immediately.
+Save itself doesn't change: the same profile-wins logic runs whether you
+edit an existing slot or `hal0 slot create --profile <profile>` a new one
+(see Create a slot, above). The only thing that blocks the apply is physical
+infeasibility — a ROCm-only runtime profile on a host with no `/dev/kfd`, for
+example — never whether the slot's bound model happens to run well under it.
 
 ### Model: swap and the context ceiling
 
@@ -377,6 +435,15 @@ ceiling replaces the dense-capped derived default rather than clamping it,
 so it can raise the effective window (still bounded by the model's native
 GGUF context) — see [Slots](/docs/concepts/slots) for the mechanics. Leave
 it unset to just follow the model.
+
+Binding a model whose detected GGUF architecture isn't loadable by the
+slot's current runtime (today: `qwen4exp`, which the default Standard build
+predates) shows a non-blocking notice by the Model select instead of
+crash-looping silently at launch. When a catalogued runtime can serve it,
+the notice names it directly — "switch this slot's Runtime to \"Strix\" to
+serve it" — rather than pointing at the `image_pin` debug hatch. Nothing is
+blocked and nothing is auto-switched; the notice just tells you which
+Runtime pick to make.
 
 ### Advanced: eviction priority and the resolved command
 

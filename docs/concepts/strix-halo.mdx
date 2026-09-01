@@ -67,23 +67,28 @@ meantime switching is a supported, one-command operation — see below.
 <Aside type="caution">
 **The Vulkan LLM lane is gated on the runner image, by design.**
 
-hal0's LLM slots all run one runner image, a single HIP + Vulkan build. On the
-`ade07ba` lineage that image's Vulkan backend emitted invalid tokens for every
-model it served, at full nominal speed, while HTTP 200, container health,
-`hal0 doctor` and the streaming `done` frame all read green — hal0 shipped a
+hal0's default LLM runtime (`rocmfpx`, titled **Standard** in the dashboard)
+is a single HIP + Vulkan build that serves both lanes. On the `ade07ba`
+lineage that image's Vulkan backend emitted invalid tokens for every model it
+served, at full nominal speed, while HTTP 200, container health, `hal0
+doctor` and the streaming `done` frame all read green — hal0 shipped a
 release where an entire box served nonsense and every dial was in the green.
 
 The image was fixed, and the lane came back with two permanent guards:
 
 1. A `gpu-vulkan` LLM slot may only launch from a runner image whose Vulkan
    backend has been validated. Anything else — including the old lineage — is
-   refused at slot load, by name, with the ticket number.
+   refused at slot load, by name, with the ticket number. Today that
+   validated set holds the fixed Standard image and the Vulkan-only **Strix**
+   runtime (built for `qwen4exp`-class models); a new Vulkan-capable image
+   earns membership the same way, one ref at a time.
 2. Every LLM slot, on every lane, must pass an output-sanity probe before it
    is marked ready. A backend that emits nonsense fails readiness in about a
    second instead of serving it for hours.
 
-If you pin a slot to your own runner image, expect the Vulkan lane to refuse
-it until that image is added to the validated set. That refusal is the feature.
+If you pin a slot to your own runner image via the debug `image_pin` hatch,
+expect the Vulkan lane to refuse it until that image is added to the
+validated set. That refusal is the feature.
 </Aside>
 
 ### Switching a slot to the Vulkan lane
@@ -96,14 +101,18 @@ hal0 slot edit agent --hardware vulkan     # gpu-rocm -> gpu-vulkan
 hal0 slot edit agent --hardware rocm       # and back
 ```
 
-In the dashboard, open the slot's drawer and change **Device** in the same
-place. Either way the slot is re-rendered and restarted on the new lane.
+In the dashboard, open the slot's drawer: with the **Standard** runtime
+selected — the only one offering both lanes — a **Lane** pill row (Auto /
+ROCm / Vulkan) appears; picking a lane there does the same thing as the CLI's
+`--hardware` flag (there's no separate Device select any more — the slot's
+device is derived from the Runtime/Lane pick). Either way the slot is
+re-rendered and restarted on the new lane.
 
 Two checks stand between the switch and serving traffic, and both are the
 point rather than an obstacle:
 
 1. **Preflight** — the target lane's devices must be present (`/dev/kfd` for
-   ROCm, a render node for Vulkan) and, for Vulkan, the slot's runner image
+   ROCm, a render node for Vulkan) and, for Vulkan, the slot's runtime image
    must be one whose Vulkan backend is validated. A refusal here names the
    image and the reason.
 2. **Output sanity** — the slot answers a fixed prompt before it is marked

@@ -95,9 +95,12 @@ runtime image reference.
 | `mtp` | **Informational only** — MTP is model-owned, not profile-owned (see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/)). |
 | `device_class` | `gpu \| cpu \| npu \| img \| null`. |
 | `backend` | `rocm \| vulkan \| cuda \| null`. |
+| `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |
 | `quant` | Display chip only — the runtime reads quant from the model, not the profile. |
+
+Setting `runner` on a profile via `POST`/`PUT /api/profiles` is validated against the registry: an unknown key (after folding legacy aliases like `vulkanfpx` → `rocmfpx`) 422s with `profiles.unknown_runner` (`hal0.profiles.screen_profile_runner`). Applying a runner-carrying profile to a slot is a server-side reconcile (`hal0.slots.config_write._reconcile_device_profile`): it rewrites the slot's `binary` and, when the runner declares exactly one `supported_backends` lane, the slot's `device` too. If the runner's lane is physically infeasible on this host — e.g. a ROCm-only runtime (like `promptforge`) on a host with no `/dev/kfd` — the apply is refused with a 400 `slot.config_error` (`SlotConfigError`) naming the runtime and the missing device node, rather than writing a config that would crash-loop. Model-swap adoption of a model's preferred profile (`hal0.slots.profile_adopt`) follows the same device-class check before adopting a `runner`-carrying profile.
 
 <Aside type="note">
 As of v1.0, `device_class`/`backend` are **inert match-only fit hints**. The
@@ -136,27 +139,34 @@ in the repository, not published to these docs).
 
 ## Runner images
 
-`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can
-launch — `rocmfpx`, `vulkanfpx`, `cuda`, `cpu` (all `llama-server`), plus one
-key per single-purpose runtime: `flm`, `kokoro`, `moonshine`, `qwen3tts`,
-`comfyui`. Each entry pairs a runner key with a bundled default image ref, a
-`runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), and an optional
-`backend` (`rocm`/`vulkan`/`cuda`) — this is the registry `SlotConfig.binary`
-indexes into, and the single place every provider now resolves its launch
-image from (`hal0.runners.resolve_runner_image`), replacing what used to be
-three separate, inconsistent image-resolution chains.
+`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can launch. Every entry carries a bundled default image ref, a `runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), an optional `backend` (`rocm`/`vulkan`/`cuda`), a `supported_backends` tuple, and operator-facing display metadata (`title`, `blurb`, `is_default`) surfaced by `GET /api/system-info`'s `backends` object (keyed by runner key, one entry per `RUNNER_IMAGES` row).
 
-A slot's `binary` field selects a runner key directly; left empty, it derives
-one from the slot's `device` via `hal0.runners.runner_for_backend`. Either
-way, the slot's actual launch image is resolved through
-`hal0.providers.container._resolve_image_ref`: `slot.image_pin` (a per-slot
-escape hatch) outranks `[slots].default_images[<runner key>]` (an operator's
-per-family override, settable from the dashboard), which outranks the
-registry's release-baked default (itself resolvable through an
-`HAL0_TOOLBOX_IMAGE_<KEY>` env override or a release manifest digest pin).
-`rocmfpx` and `vulkanfpx` resolve to the same image today — the shipped
-runner build is Vulkan-portable — so the two keys exist for a future split,
-not because they differ now.
+As of ADR-0006 (`docs/adr/0006-every-shipped-image-is-a-registry-runner.md`), every image hal0 ships gets its own `RUNNER_IMAGES` entry — a pin-only image, catalogued for discovery but reachable only through a slot's `image_pin` escape hatch, is retired as a shipping shape. `image_pin` remains available as a debug-only hatch (a custom build, a rollback, a hand-edited ref) but is never how an operator normally reaches a shipped runtime.
+
+The registry today:
+
+| Key | `runtime_family` | `backend`(s) | Default / optional | Notes |
+|---|---|---|---|---|
+| `rocmfpx` | `llama-server` | `rocm`, `vulkan` | Default (`is_default=True`) | The only runner allowed two `supported_backends` — one Vulkan-portable image serves both lanes. Denies the `qwen4exp` GGUF architecture (see the arch fit-check below). |
+| `promptforge` | `llama-server` | `rocm` | Optional | HIP-only build; accelerated PromptForge model distributions. |
+| `strix` | `llama-server` | `vulkan` | Optional | Vulkan-only; qwen4exp + MTP speculative decode support. Deliberately excluded from `FPX_RUNNER_KEYS`, so an FPX-family GGUF is refused cleanly on this runner instead of SIGSEGVing (the #1790 quant/runner guard). Image: `ghcr.io/hal0ai/hal0-strix-vulkan` (manifest digest pin, key `strix`). Supersedes the retired pin-only `combined-upstream` image as the intended runtime for `qwen4exp` slots. |
+| `cuda` | `llama-server` | `cuda` | Optional | NVIDIA GPUs. |
+| `cpu` | `llama-server` | `cpu` (device_class `cpu`) | Optional | Portable `-march`, no GPU required. |
+| `flm` | `flm` | `npu` (device_class `npu`) | Optional | FastFlowLM. |
+| `kokoro` | `kokoro` | `cpu` (device_class `cpu`) | Optional | TTS. |
+| `moonshine` | `moonshine` | `cpu` (device_class `cpu`) | Optional | STT, ONNX. |
+| `qwen3tts` | `qwen3tts` | `rocm` | Optional | TTS. |
+| `comfyui` | `comfyui` | `rocm` (device_class `img`) | Optional | Image generation. |
+
+`vulkanfpx` is a permanent legacy alias (`RUNNER_ALIASES`) that folds to `rocmfpx` before every lookup — it is not a separate registry entry, and never was one after the ROCmFPX image collapse; it is kept only so on-disk `binary = "vulkanfpx"` values, model `preferred_runner` rows, env overrides, and operator muscle memory keep working.
+
+A slot's `binary` field selects a runner key directly; left empty, it derives one from the slot's `device` via `hal0.runners.runner_for_backend`. Either way, the slot's actual launch image is resolved through `hal0.providers.container._resolve_image_ref`: `slot.image_pin` (the debug-only escape hatch) outranks `[slots].default_images[<runner key>]` (an operator's per-family override, settable from the dashboard), which outranks the registry's release-baked default (itself resolvable through an `HAL0_TOOLBOX_IMAGE_<KEY>` env override or a release manifest digest pin — see [Environment variables](/docs/reference/env-vars/)).
+
+### Model↔runner architecture fit-check
+
+Each `Runner` entry may carry an `unsupported_archs` tuple — a denylist of GGUF `general.architecture` ids that runner's llama.cpp build is known to reject at load (`unknown model architecture: '<arch>'`, an instant crash-loop). `rocmfpx` currently denies `qwen4exp` (its fork build predates that architecture's upstream merge). This is a WARN-only check at slot/model assignment time, never a block — an unlisted arch is assumed loadable, which is optimistic, not a guarantee.
+
+When a denied arch has a known alternative runner, `hal0.runners.ARCH_ALTERNATIVE_IMAGES` maps the arch to that runner image's catalogue id so the warning can name a concrete next step (currently `qwen4exp` → the `strix` runner's image). The warning copy directs the operator to switch the slot's Runtime selection, never to reach for `image_pin` — `image_pin` is a debug hatch, not the intended path to a registry runner.
 
 See [Manage runner images](/docs/guides/manage-runner-images/) for the
 catalogue page (Slots → Runner Images), the Vulkan lane's image gate, and
