@@ -462,6 +462,39 @@ def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path
     assert "chadrock-moe" in load_profiles_config(p).profile
 
 
+def test_resolve_materializes_every_legacy_name_on_a_fresh_install(tmp_path: Path) -> None:
+    """Adoption is once-per-NAME, not once-per-install.
+
+    A fresh box ships three references to demoted profiles across different
+    files (agent.toml → chadrock-moe, coder.toml → coding, the saber seed
+    stack → moe). The first resolve creates profiles.toml; if that alone shut
+    adoption off, whichever slot happened to launch first would win and the
+    rest would silently fall back to the device default.
+    """
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    for name in ("chadrock-moe", "coding", "moe"):
+        assert catalog.resolve(name).name == name
+
+    stored = load_profiles_config(p).profile
+    assert {"chadrock-moe", "coding", "moe"} <= set(stored)
+
+
+def test_materialized_legacy_profile_stays_deleted(tmp_path: Path) -> None:
+    """Adopting a name settles it: a later delete is not undone by a resolve."""
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    catalog.resolve("coding")
+    catalog.delete("coding")
+
+    with pytest.raises(NotFound):
+        catalog.resolve("coding")
+    # ...and it does not take its unadopted siblings down with it.
+    assert catalog.resolve("moe").name == "moe"
+
+
 def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:
     catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
     with pytest.raises(NotFound):

@@ -1527,6 +1527,32 @@ class ProfilesConfig(BaseModel):
             "exists to escape."
         ),
     )
+    legacy_seeds_adopted: list[str] | None = Field(
+        default=None,
+        description=(
+            "Per-name ledger of the legacy seeds this install has already "
+            "settled — injected by the bulk demotion, adopted on first "
+            "reference by ``ProfileCatalog._materialize_legacy``, or deleted. "
+            "A legacy name listed here and absent from ``profile`` was DELETED "
+            "and must never be re-materialized; a legacy name not listed has "
+            "simply never been referenced yet. ``None`` means the file predates "
+            "the ledger — see :meth:`adopted_legacy_names`."
+        ),
+    )
+
+    def adopted_legacy_names(self) -> frozenset[str]:
+        """Legacy seed names this install has already settled.
+
+        The ledger is the authority when present. When it is absent (``None``
+        — a profiles.toml written before the ledger existed) the migration
+        marker is the only signal left, and it answers the question exactly:
+        a True marker means the bulk demotion already passed over every legacy
+        name, so absence from ``profile`` is a deletion; a False marker means
+        the demotion has not run, so nothing is settled yet.
+        """
+        if self.legacy_seeds_adopted is not None:
+            return frozenset(self.legacy_seeds_adopted)
+        return frozenset(LEGACY_SEED_PROFILES) if self.legacy_seeds_migrated else frozenset()
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────

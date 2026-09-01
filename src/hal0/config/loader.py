@@ -783,8 +783,16 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
         # so mark the migration done. Leaving it False would arm it against the
         # FIRST file this install writes (a plain custom-profile save), which
         # would then inherit all 8 legacy definitions on the next load.
+        #
+        # The adoption ledger starts EMPTY and explicitly so (not None): the
+        # bulk demotion is what does not apply here, while adopting a legacy
+        # name on first reference very much does — the curated slots this
+        # install ships still name three of them. An empty ledger is the whole
+        # difference between "fresh, nothing referenced yet" and "demotion ran,
+        # anything missing was deleted", which file existence alone cannot tell
+        # apart once the first adoption has written the file.
         return ProfilesConfig.model_validate(
-            {"profile": SEED_PROFILES, "legacy_seeds_migrated": True}
+            {"profile": SEED_PROFILES, "legacy_seeds_migrated": True, "legacy_seeds_adopted": []}
         )
     raw = _read_toml(Path(target))
     # spec-hw-slot-ownership §3: ``image`` was removed from ProfileConfig. Drop a
@@ -837,6 +845,13 @@ def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
     overwritten. Persisting is best-effort — a read-only /etc must serve the
     merged catalog in memory rather than fail the load (the migration simply
     re-runs next time), mirroring :func:`_sanitize_custom_profile_flags`.
+
+    This pass settles EVERY legacy name at once — the injected ones and the
+    operator's own alike — so the adoption ledger records that an upgraded
+    install has already made its decision about all of them. That is what
+    keeps ``ProfileCatalog._materialize_legacy`` from re-adopting one here
+    after a delete, while leaving it free to adopt on a fresh install where
+    the ledger is empty.
     """
     if cfg.legacy_seeds_migrated:
         return
@@ -846,6 +861,7 @@ def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
     for name in injected:
         cfg.profile[name] = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[name])
     cfg.legacy_seeds_migrated = True
+    cfg.legacy_seeds_adopted = sorted(LEGACY_SEED_PROFILES)
     try:
         save_profiles_config(cfg, path=target)
     except OSError as exc:

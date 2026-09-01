@@ -215,11 +215,21 @@ class ProfileCatalog:
         agent slot asks for ``moe``. Without this the curated slots on a
         brand-new box would reference nothing.
 
-        The absent-file gate is load-bearing, not an optimisation: once
-        profiles.toml exists the catalog is authoritative, and a legacy name
-        missing from it means the operator DELETED it. Re-materializing there
-        would resurrect it on the next read — precisely the virtual-seed
-        behaviour the demotion exists to escape.
+        The gate is load-bearing, not an optimisation: a legacy name the
+        install has already settled and that is now missing from the catalog
+        was DELETED, and re-materializing it would resurrect it on the next
+        read — precisely the virtual-seed behaviour the demotion exists to
+        escape. But "settled" is a fact about a NAME, not about the install:
+        the gate used to be ``profiles.toml exists``, which the first adoption
+        itself makes true, so whichever of the shipped references resolved
+        first won and every other one fell back to the device default. A fresh
+        box ships three (agent.toml → chadrock-moe, coder.toml → coding, the
+        saber stack → moe), so the outcome depended on launch order.
+
+        ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
+        a fresh install (adopt freely, once each), every legacy name after the
+        bulk demotion has run (adopt nothing — absence is a deletion), and
+        growing by one on each adoption here.
 
         Materializing (rather than answering read-only) is what leaves the
         entry editable and deletable afterwards, exactly like a demoted one. A
@@ -229,12 +239,16 @@ class ProfileCatalog:
         from hal0.config.schema import LEGACY_SEED_PROFILES
 
         entry = LEGACY_SEED_PROFILES.get(name)
-        if entry is None or self._path_or_default().exists():
+        if entry is None:
             return None
         profile = ProfileConfig.model_validate(entry)
         with self._lock:
             catalog = load_profiles_config(self._path)
+            adopted = catalog.adopted_legacy_names()
+            if name in adopted:
+                return None
             catalog.profile[name] = profile
+            catalog.legacy_seeds_adopted = sorted(adopted | {name})
             try:
                 save_profiles_config(catalog, self._path)
             except OSError as exc:
@@ -316,6 +330,15 @@ class ProfileCatalog:
                     details={"slots": in_use_slots, "models": in_use_models},
                 )
             del catalog.profile[name]
+            # A deleted legacy name is settled whether or not it was ever
+            # adopted here — otherwise deleting one the operator had created
+            # themselves (under a legacy name, on a fresh install) would leave
+            # it eligible for adoption and the next resolve would hand back the
+            # shipped definition in its place.
+            from hal0.config.schema import LEGACY_SEED_PROFILES
+
+            if name in LEGACY_SEED_PROFILES:
+                catalog.legacy_seeds_adopted = sorted(catalog.adopted_legacy_names() | {name})
             save_profiles_config(catalog, self._path)
 
     def slots_using(self, name: str) -> list[str]:
