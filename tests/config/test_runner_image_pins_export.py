@@ -19,6 +19,9 @@ Membership rule (why these constants and not the others):
   retention sweep's blast radius, and its tag shape is not release-shaped, so
   the allowlist is its only durable protection once the runner-images
   ``images.json`` entry moves on.
+* ``DEFAULT_STRIX_IMAGE`` — same argument as promptforge: bundled fallback
+  for the optional strix runner, ``hal0-``-prefixed package inside the sweep,
+  date-stamped tag with no manifest pin yet.
 
 Deliberately excluded: ``STALE_ROCMFPX_IMAGE_REFS`` and
 ``NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS`` (string-comparison retag/deny lists —
@@ -35,6 +38,7 @@ from pathlib import Path
 from hal0.config.schema import (
     DEFAULT_PROMPTFORGE_IMAGE,
     DEFAULT_ROCMFPX_IMAGE,
+    DEFAULT_STRIX_IMAGE,
     VULKAN_CAPABLE_IMAGE_REFS,
 )
 
@@ -44,7 +48,8 @@ _EXPORT_PATH = _REPO_ROOT / "exports" / "runner-image-pins.json"
 
 def _expected_export_text() -> str:
     pins = sorted(
-        {DEFAULT_ROCMFPX_IMAGE, DEFAULT_PROMPTFORGE_IMAGE} | set(VULKAN_CAPABLE_IMAGE_REFS)
+        {DEFAULT_ROCMFPX_IMAGE, DEFAULT_PROMPTFORGE_IMAGE, DEFAULT_STRIX_IMAGE}
+        | set(VULKAN_CAPABLE_IMAGE_REFS)
     )
     doc = {"source": "src/hal0/config/schema.py", "pins": pins}
     return json.dumps(doc, indent=2, sort_keys=True) + "\n"
