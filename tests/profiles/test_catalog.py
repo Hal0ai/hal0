@@ -7,7 +7,7 @@ import pytest
 from hal0.config.loader import load_profiles_config, save_profiles_config
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
 from hal0.errors import Conflict, UnprocessableEntity
-from hal0.profiles import ProfileCatalog, ProfilePatch
+from hal0.profiles import ProfileCatalog, ProfilePatch, _runtime_family
 
 
 def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
@@ -298,3 +298,43 @@ def test_profile_without_runner_unchanged(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
     prof = cat.create("plain", ProfileConfig(flags="-fa on"))
     assert prof.runner is None
+
+
+# ── runtime_family precedence: runner > device_class > legacy name ────────
+
+
+def test_runtime_family_prefers_runner_key() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="kokoro")
+    assert _runtime_family("my-custom", profile) == "kokoro"
+
+
+def test_runtime_family_runner_beats_legacy_name() -> None:
+    # a kokoro-NAMED profile pointing at the comfyui runner is comfyui-family
+    profile = ProfileConfig(flags="", mtp=False, runner="comfyui")
+    assert _runtime_family("kokoro", profile) == "comfyui"
+
+
+def test_runtime_family_runner_beats_device_class() -> None:
+    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="rocmfpx")
+    assert _runtime_family("custom", profile) == "llama-server"
+
+
+def test_runtime_family_unknown_runner_falls_back() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="ghost-runner")
+    assert _runtime_family("kokoro", profile) == "kokoro"  # legacy name rule still fires
+
+
+def test_runtime_family_no_runner_unchanged() -> None:
+    cases = [
+        ("flm", "flm"),
+        ("qwen3-tts", "qwen3tts"),
+        ("kokoro", "kokoro"),
+        ("moonshine", "moonshine"),
+        ("comfyui", "comfyui"),
+        ("anything", "llama-server"),
+    ]
+    for name, expected in cases:
+        assert _runtime_family(name, ProfileConfig(flags="", mtp=False)) == expected
+    # device_class rules unchanged too
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="npu")) == "flm"
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="img")) == "comfyui"

@@ -110,21 +110,37 @@ class ProfilePatch:
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
-    """Classify a profile's runtime family from its TYPED fields — the profile
-    ``name`` + ``device_class`` — never an image string.
+    """Classify a profile's runtime family from its TYPED fields, in the
+    precedence ``runner`` > ``device_class`` > profile ``name`` — never an
+    image string.
 
-    spec-hw-slot-ownership §3: profiles carry no ``image`` anymore, so the old
-    exact-image→``RUNNER_IMAGES`` lookup and the image-substring sniffs are gone.
-    The runtime family is a structural fact: ``device_class`` pins the
-    single-purpose runtimes (``img`` → comfyui, ``npu`` → flm), and the
-    name-keyed CPU engines — the two TTS engines (kokoro / qwen3tts) plus the
-    moonshine STT engine, which share a ``cpu`` device_class with a plain
-    llama-server CPU profile and so can only be told apart by name — key off
-    their seed slug. Mirrors the model-side backends-driven classification in
+    ``profile.runner`` (runtime-cascade D4) is the structural signal: a
+    registry key names exactly one runtime, so its ``Runner.runtime_family``
+    is the answer whenever one is stored. That makes the family a property of
+    the runtime the profile selects rather than of the slug it happens to
+    carry, so a custom profile can be any family — the single-purpose runtimes
+    are no longer seed-only.
+
+    Everything below the runner check is the PRE-runner fallback, kept for the
+    (still-common) runner-less profile and for a stored key that is no longer
+    in the registry. spec-hw-slot-ownership §3: profiles carry no ``image``
+    anymore, so the old exact-image→``RUNNER_IMAGES`` lookup and the
+    image-substring sniffs are gone. ``device_class`` pins the single-purpose
+    runtimes (``img`` → comfyui, ``npu`` → flm), and the name-keyed CPU
+    engines — the two TTS engines (kokoro / qwen3tts) plus the moonshine STT
+    engine, which share a ``cpu`` device_class with a plain llama-server CPU
+    profile and so can only be told apart by name — key off their seed slug.
+    Mirrors the model-side backends-driven classification in
     :func:`hal0.model_meta.modality.derive_modalities` (a structural signal, not
-    a substring guess). Custom (cloned) profiles have no special-runtime signal
-    and resolve to ``llama-server`` — the single-purpose runtimes are seed-only.
+    a substring guess). A runner-less custom (cloned) profile has no
+    special-runtime signal and resolves to ``llama-server``.
     """
+    if profile.runner:
+        from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+        runner = RUNNER_IMAGES.get(profile.runner)
+        if runner is not None:
+            return runner.runtime_family
     if name == "flm" or profile.device_class == "npu":
         return "flm"
     if name == "qwen3-tts":
