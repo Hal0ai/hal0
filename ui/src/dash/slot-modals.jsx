@@ -157,6 +157,25 @@ function laneLabel(option) {
 	return (option?.lanes || []).map(laneTitle).join(" + ");
 }
 
+// Host capability flags for runnerOptions()'s hw filter, from the RAW
+// /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
+// NOT the normalized computeCapable/vulkanCapable shape useHardware.ts's
+// hook exposes. Mirrors that same hook's normalizeHardware() derivation
+// (primary GPU's compute_capable/vulkan_capable) so the Hardware group's
+// Runtime select and the Profile row's apply-preview (below) can't disagree
+// about what this box can run. Absent hardware (still loading) never vetoes
+// (hw = {}).
+function hostHwFlags(rawHardware) {
+	const gpu0 = rawHardware?.gpus?.[0];
+	return rawHardware
+		? {
+				rocm: !!gpu0?.compute_capable,
+				vulkan: !!gpu0?.vulkan_capable,
+				cuda: !!gpu0?.compute_capable,
+			}
+		: {};
+}
+
 // ─── Create-slot modal ──────────────────────────────────────────
 // Decomposed (D2) into dash/slots/CreateSlotModal.jsx — the create flow is now
 // a pure instance: pick a model (it carries tune/device/runner) + name it. The
@@ -1018,6 +1037,52 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
 		const devBackend = deviceBackend(device);
 		const modelProfile = curModelRow?.defaults?.profile || "";
+		// Apply preview (Task 10 D4): a profile carrying `runner` (a
+		// RUNNER_IMAGES key — Task 3) is applied through the SAME cascade the
+		// Hardware group's Runtime select uses (hw-cascade.js's
+		// runnerOptions/applyRunnerChoice) so this box previews exactly what
+		// the server's profile-wins reconcile (Task 5) does on Save: binary
+		// flips to the profile's runner, and — for a single-lane runner —
+		// device follows it. Computed independently of the Hardware group's
+		// own `options` (this IIFE runs earlier in render order) but reads
+		// the same system-info catalog + host hw flags, so the two can't
+		// disagree about what a runner key means.
+		const runnerCat = systemInfoQuery.data?.backends ?? {};
+		const { options: runnerCatalogOptions } = runnerOptions({
+			backends: runnerCat,
+			device: pendingDevice,
+			slotType: slot.type,
+			hw: hostHwFlags(systemInfoQuery.data?.hardware),
+		});
+		const selProfileRow = all.find((p) => p.name === profileSel) || null;
+		const runnerPreview = (() => {
+			if (!selProfileRow?.runner) return null;
+			// Compared against the FROZEN baseline (#1398), not the live
+			// `binary` state — that state is itself mirrored to the profile's
+			// runner the moment it's picked (see the select's onChange below),
+			// so comparing against it would make this box vanish right after
+			// the very pick it exists to announce.
+			const curBinary = baseline?.binary ?? "";
+			if (selProfileRow.runner === curBinary) return null;
+			const hit = runnerCatalogOptions.find(
+				(o) => o.key === selProfileRow.runner,
+			);
+			const cat = runnerCat[selProfileRow.runner];
+			const title = hit?.title || cat?.title || selProfileRow.runner;
+			const lanes =
+				hit?.lanes ||
+				(Array.isArray(cat?.supported_backends)
+					? cat.supported_backends
+					: []);
+			const singleLane = lanes.length === 1 ? lanes[0] : null;
+			const curLane = deviceBackend(pendingDevice);
+			return {
+				title,
+				lane: laneLabel({ lanes }),
+				movesOff:
+					singleLane && singleLane !== curLane ? laneTitle(curLane) : null,
+			};
+		})();
 		// Mirror backend profile_fits_slot: slot type supported first, then
 		// device_class match + backend match (when both declared).
 		const typeFit = all.filter(
@@ -1125,8 +1190,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						data-testid="slot-profile"
 						value={profileSel}
 						onChange={(e) => {
-							setProfileSel(e.target.value);
+							const nextName = e.target.value;
+							setProfileSel(nextName);
 							setFieldErrs((p) => ({ ...p, profile: undefined }));
+							// Profile wins (D4): a picked profile carrying `runner`
+							// mirrors into local binary/device state through the SAME
+							// applyRunnerChoice the Hardware group's Runtime select
+							// uses, so the Hardware rows below preview the post-save
+							// truth immediately — Save itself is unchanged; the
+							// server's reconcile (Task 5) performs the actual flip.
+							const nextProfile = all.find((p) => p.name === nextName);
+							if (nextProfile?.runner) {
+								const pick = applyRunnerChoice({
+									options: runnerCatalogOptions,
+									key: nextProfile.runner,
+									currentDevice: device,
+								});
+								setBinary(pick.binary);
+								setDevice(pick.device);
+							}
 						}}
 					>
 						{/* keep a none/out-of-vocab persisted profile selectable */}
@@ -1151,6 +1233,30 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</optgroup>
 						)}
 					</select>
+					{runnerPreview && (
+						<div
+							className="hint"
+							data-testid="slot-profile-preview"
+							style={{
+								marginTop: 6,
+								padding: "6px 10px",
+								borderRadius: "var(--rad-sm)",
+								color: "var(--info)",
+								border: "1px solid var(--info-line)",
+								background: "var(--info-soft)",
+							}}
+						>
+							<div>Applying this profile:</div>
+							<div>
+								· runtime → {runnerPreview.title}
+								{runnerPreview.lane ? ` (${runnerPreview.lane})` : ""}
+								{runnerPreview.movesOff
+									? ` — slot moves off ${runnerPreview.movesOff}`
+									: ""}
+							</div>
+							<div>· slot restarts on Save</div>
+						</div>
+					)}
 					{adoptedFromModel && (
 						<div className="hint">
 							Adopted from the bound model's preference — swapping the model
@@ -1498,24 +1604,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				<FieldGroup label="Hardware">
 					{(() => {
 						const backends = systemInfoQuery.data?.backends ?? {};
-						// Host capability flags for runnerOptions()'s hw filter. The
-						// name `hardware` on systemInfoQuery.data is the RAW
-						// /api/hardware payload (snake_case, nested under gpus[]) —
-						// NOT the normalized computeCapable/vulkanCapable shape
-						// useHardware.ts's hook exposes — so this mirrors that same
-						// hook's normalizeHardware() derivation (primary GPU's
-						// compute_capable / vulkan_capable) inline rather than
-						// assuming the normalized field names live here too. Absent
-						// hardware (still loading) never vetoes (hw = {}).
-						const rawHw = systemInfoQuery.data?.hardware;
-						const gpu0 = rawHw?.gpus?.[0];
-						const hw = rawHw
-							? {
-									rocm: !!gpu0?.compute_capable,
-									vulkan: !!gpu0?.vulkan_capable,
-									cuda: !!gpu0?.compute_capable,
-								}
-							: {};
+						const hw = hostHwFlags(systemInfoQuery.data?.hardware);
 						// Runner-first cascade (hw-cascade.js, D3): one option per
 						// runtime, each carrying the lane(s) it can serve. Reads
 						// `pendingDevice` (#1636 Codex fix) so a pending cross-backend
