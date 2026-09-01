@@ -15,8 +15,8 @@ its own `backends` key in system-info's release catalogue
 it; the release catalogue that drives the slot drawer's Backend cascade did
 not.
 
-That split produced a real operator-facing failure, caught testing
-Qwen3.8-Flash-Next on ct105 (#2170). The drawer's Backend dropdown is built
+That split produced a real operator-facing failure, caught during hardware
+validation of a qwen4exp model (#2170). The drawer's Backend dropdown is built
 by `backendOptions()` (`ui/src/dash/hw-cascade.js:78-138`): when the pinned
 ref matches a release-catalogue image (`pinInCatalog`) it enumerates just
 that image's backends; when it doesn't — exactly the `combined-upstream`
