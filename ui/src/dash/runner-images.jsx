@@ -14,8 +14,10 @@
 // runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
 // FamilyStrip driven straight by the server's `families` summary (effective
 // ref, source tier, store state, newer-release marker), and the list groups
-// into "Default families" / "Specialized" / "Other catalogued" sections via
-// the pure groupRows() helper.
+// into "Default runtime" / "Optional runtimes" sections via the pure
+// groupRows() helper (ADR-0006, Task 11 — every shipped image is a registry
+// runner, so the old three-way default/specialized/other split collapses to
+// default-vs-everything-else).
 
 import {
   useRunnerImages,
@@ -44,22 +46,24 @@ function fmtBytesRI(b) {
 
 // ── Pure helpers (unit-tested in __tests__/runner-images-view.test.tsx) ──
 
-// Row grouping for the catalogue list (runner-catalogue-v3, Task 10):
-// default-family repos first, then specialty images (server-provided
-// `specialties` from RUNNER_IMAGES supports / images.json — read
-// defensively, since rows don't carry the field from every backend yet),
-// then referenced/uncatalogued-family rows. A row that IS a family default
-// lands in `defaults` even if it also carries specialties — the family strip
-// above already surfaces it, so the list shouldn't also branch it into
-// "Specialized".
+// Row grouping for the catalogue list (runner-catalogue-v3, Task 10; ADR-0006
+// regroup, Task 11): every catalogued image is a registry runner now — the
+// list has exactly two sections, "Default runtime" (a family's release/
+// override default) and "Optional runtimes" (everything else, specialty
+// images sorted ahead of plain referenced/uncatalogued-family rows). A row
+// that IS a family default lands in `defaults` even if it also carries
+// specialties — the family strip above already surfaces it, so the list
+// shouldn't also branch it into the optional bucket.
 export function groupRows(images) {
-  const g = { defaults: [], specialized: [], other: [] };
+  const defaults = [];
+  const specialized = [];
+  const other = [];
   for (const img of images || []) {
-    if (img.is_default) g.defaults.push(img);
-    else if ((img.specialties || img.extra?.specialties || []).length) g.specialized.push(img);
-    else g.other.push(img);
+    if (img.is_default) defaults.push(img);
+    else if ((img.specialties || img.extra?.specialties || []).length) specialized.push(img);
+    else other.push(img);
   }
-  return g;
+  return { defaults, optional: [...specialized, ...other] };
 }
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
@@ -331,24 +335,16 @@ export function RunnerImagesView() {
 
           {grouped.defaults.length > 0 && (
             <>
-              <div className="mdl-list-h"><span>Default families</span></div>
+              <div className="mdl-list-h"><span>Default runtime</span></div>
               {grouped.defaults.map(img => (
                 <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
               ))}
             </>
           )}
-          {grouped.specialized.length > 0 && (
+          {grouped.optional.length > 0 && (
             <>
-              <div className="mdl-list-h"><span>Specialized</span></div>
-              {grouped.specialized.map(img => (
-                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
-              ))}
-            </>
-          )}
-          {grouped.other.length > 0 && (
-            <>
-              <div className="mdl-list-h"><span>Other catalogued</span></div>
-              {grouped.other.map(img => (
+              <div className="mdl-list-h"><span>Optional runtimes</span></div>
+              {grouped.optional.map(img => (
                 <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
               ))}
             </>
