@@ -445,7 +445,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             runner (RUNNER_IMAGES[slot.binary]); the per-slot escape hatch is
             slot.image_pin in the slot editor. */}
 
-        <div className="mono pf-hint">Hardware and image are selected on the slot.</div>
+        <div className="mono pf-hint">Hardware and Runtime are selected on the slot; versions are managed on the Runner Images page.</div>
 
         <FormRow label="Runtime" sub="optional — pins the slot's engine build on apply">
           <select className="pf-input mono" value={form.runner || ''} disabled={runtimeLocked}

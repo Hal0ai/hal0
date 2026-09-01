@@ -185,6 +185,6 @@ export function archFitWarning({ arch, device, binary, imagePin, backends, altRe
 		`⚠ Model architecture "${arch}" is not supported by the ${key} ` +
 		"runner's llama.cpp build — the model will fail at load and the slot " +
 		"will crash-loop.";
-	if (altRef) msg += ` Pin "${altRef}" (Runner Image) to serve it.`;
+	if (altRef) msg += ` Switch this slot's Runtime to one that serves it ("${altRef}").`;
 	return msg;
 }

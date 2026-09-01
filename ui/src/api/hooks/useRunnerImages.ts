@@ -38,9 +38,11 @@ export interface RunnerImage {
   // runtime the image's entrypoint serves (backend RuntimeFamily vocabulary —
   // "llama-server", "comfyui", …) and which backends its runner binary can
   // execute ("rocm"/"vulkan"/"cpu"/…, [] = not declared). Optional so rows
-  // from a pre-contract backend still type-check; readers fall back (see
-  // cataloguePinOptions in dash/hw-cascade.js) rather than treating absence
-  // as a veto.
+  // from a pre-contract backend still type-check. The runtime-gated
+  // consumers (runnerOptions() in dash/hw-cascade.js, profiles.jsx) read
+  // this same vocabulary off the system-info `backends` map, not off these
+  // catalogue rows — the image-first `cataloguePinOptions` cascade that
+  // once read it here was retired with the pin-only image shape (ADR-0006).
   runtime_family?: string | null
   supported_backends?: string[]
   local_path: string | null

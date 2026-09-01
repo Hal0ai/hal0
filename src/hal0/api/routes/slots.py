@@ -657,6 +657,18 @@ def _merged_model_default(body: dict[str, Any], before: dict[str, Any]) -> str |
     return None
 
 
+def _image_repo(ref: str) -> str:
+    """Strip a trailing ``:tag`` off an image ref, e.g.
+    ``ghcr.io/hal0ai/hal0-strix-vulkan:0831`` → ``ghcr.io/hal0ai/hal0-strix-vulkan``.
+    A ref with no tag is returned unchanged. Used only for the cheap
+    reverse lookup that names an arch-fit hint's Runtime by title instead
+    of a bare ref (:func:`_arch_fit_warning`) — never for launch-path
+    image resolution, which lives in :mod:`hal0.runners`.
+    """
+    head, sep, tail = ref.rpartition(":")
+    return head if sep and "/" not in tail else ref
+
+
 def _arch_fit_warning(
     model_arch: str | None,
     device: str | None,
@@ -677,7 +689,10 @@ def _arch_fit_warning(
     know a pinned image's arch table. An unknown/unset arch or BINARY, or
     a non-GGUF lane, never warns. ``alternative_ref`` (a catalogued image
     ref that CAN load the arch, resolved by the route glue) turns the
-    warning into an actionable hint.
+    warning into an actionable hint: switch the slot's Runtime, per
+    ADR-0006 (``image_pin`` is a debug-only hatch, not how an operator
+    normally reaches a shipped runtime) — named by the runner's ``title``
+    when the ref matches a ``RUNNER_IMAGES`` entry, else by the bare ref.
     """
     if not model_arch or image_pin:
         return None
@@ -710,7 +725,19 @@ def _arch_fit_warning(
         "load and the slot will crash-loop"
     )
     if alternative_ref:
-        msg += f' — pin "{alternative_ref}" on this slot (image_pin) to serve it'
+        alt_title = None
+        alt_repo = _image_repo(alternative_ref)
+        for candidate in RUNNER_IMAGES.values():
+            if _image_repo(candidate.image) == alt_repo:
+                alt_title = candidate.title
+                break
+        if alt_title:
+            msg += f' — switch this slot\'s Runtime to "{alt_title}" to serve it'
+        else:
+            msg += (
+                " — switch this slot's Runtime to one that supports it: the "
+                f'"{alternative_ref}" runner image serves this architecture'
+            )
     return msg
 
 
