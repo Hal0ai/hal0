@@ -779,7 +779,13 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     """
     target = path if path is not None else paths.profiles_toml()
     if not Path(target).exists():
-        return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
+        # No file = fresh install: there is no pre-demotion catalog to rescue,
+        # so mark the migration done. Leaving it False would arm it against the
+        # FIRST file this install writes (a plain custom-profile save), which
+        # would then inherit all 8 legacy definitions on the next load.
+        return ProfilesConfig.model_validate(
+            {"profile": SEED_PROFILES, "legacy_seeds_migrated": True}
+        )
     raw = _read_toml(Path(target))
     # spec-hw-slot-ownership §3: ``image`` was removed from ProfileConfig. Drop a
     # stray ``image`` key an un-migrated (or hand-edited) profiles.toml still
@@ -812,7 +818,46 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     for key, seed_raw in SEED_PROFILES.items():
         cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
     _sanitize_custom_profile_flags(cfg, Path(target))
+    _demote_legacy_seeds(cfg, Path(target))
     return cfg
+
+
+def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
+    """Inject the 8 pruned seeds once, as ordinary custom profiles.
+
+    They were seeds until the catalog was cut to its minimal core, so an
+    upgraded install's slots and models still reference them by name. Writing
+    them into the operator catalog keeps those references resolvable and — the
+    point of a *demotion* — makes them editable and deletable, which a virtual
+    seed can never be.
+
+    ``legacy_seeds_migrated`` is what makes this once-only: without the marker
+    every load would re-inject, so a delete would reappear on the next read.
+    An existing entry under a legacy name is an operator's own and is never
+    overwritten. Persisting is best-effort — a read-only /etc must serve the
+    merged catalog in memory rather than fail the load (the migration simply
+    re-runs next time), mirroring :func:`_sanitize_custom_profile_flags`.
+    """
+    if cfg.legacy_seeds_migrated:
+        return
+    from hal0.config.schema import LEGACY_SEED_PROFILES
+
+    injected = [name for name in LEGACY_SEED_PROFILES if name not in cfg.profile]
+    for name in injected:
+        cfg.profile[name] = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[name])
+    cfg.legacy_seeds_migrated = True
+    try:
+        save_profiles_config(cfg, path=target)
+    except OSError as exc:
+        log.warning(
+            "could not persist demoted legacy profiles; serving merged catalog in-memory",
+            extra={"event": "profile.legacy_demote_write_failed", "error": str(exc)},
+        )
+        return
+    log.info(
+        "demoted pruned seed profiles to custom entries",
+        extra={"event": "profile.legacy_seeds_demoted", "profiles": injected},
+    )
 
 
 def _sanitize_custom_profile_flags(cfg: ProfilesConfig, target: Path) -> None:

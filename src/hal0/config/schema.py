@@ -1512,6 +1512,18 @@ class ProfilesConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
+    legacy_seeds_migrated: bool = Field(
+        default=False,
+        description=(
+            "Write-once marker for the one-time demotion of the 8 pruned seeds "
+            "(:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles. False "
+            "on a pre-demotion profiles.toml; ``loader.load_profiles_config`` "
+            "injects the missing definitions, flips this to True and persists. "
+            "Without the marker the injection would repeat on every load and a "
+            "delete could never stick — the virtual-seed behaviour the demotion "
+            "exists to escape."
+        ),
+    )
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────

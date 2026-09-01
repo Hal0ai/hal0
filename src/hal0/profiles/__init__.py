@@ -200,10 +200,11 @@ class ProfileCatalog:
     def _materialize_legacy(self, name: str) -> ProfileConfig | None:
         """Adopt a demoted (ex-seed) definition on first reference, or None.
 
-        An install that already carries these definitions in its profiles.toml
-        never reaches here. This is for the one state that structurally cannot:
-        a FRESH install, where there is no profiles.toml at all, yet the shipped
-        configuration still names demoted profiles — install.sh copies
+        ``loader._demote_legacy_seeds`` covers every install that HAS a
+        profiles.toml. This is for the one state it structurally cannot: a
+        FRESH install, where there is no file at all and the migration is a
+        deliberate no-op, yet the shipped configuration still names demoted
+        profiles — install.sh copies
         ``installer/etc-hal0/slots/agent.toml`` (``chadrock-moe``) and
         ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
         agent slot asks for ``moe``. Without this the curated slots on a

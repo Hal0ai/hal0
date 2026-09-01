@@ -344,6 +344,31 @@ def test_runtime_family_no_runner_unchanged() -> None:
 # ── demoted (ex-seed) profiles ────────────────────────────────────────────
 
 
+def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
+    """'coding' is no longer in SEED_PROFILES, so _guard_custom lets it through."""
+    p = tmp_path / "profiles.toml"
+    p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    updated = catalog.update("coding", ProfilePatch(intent="mine now"))
+    assert updated.intent == "mine now"
+    assert updated.seed is False
+
+    catalog.delete("coding")
+    assert all(profile.name != "coding" for profile in catalog.list())
+    # The delete sticks — the migration marker stops the re-injection.
+    assert "coding" not in load_profiles_config(p).profile
+
+
+def test_resolve_does_not_resurrect_a_deleted_legacy_profile(tmp_path: Path) -> None:
+    p = tmp_path / "profiles.toml"
+    p.write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    with pytest.raises(NotFound):
+        catalog.resolve("coding")
+
+
 def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path) -> None:
     """No profiles.toml at all: the curated agent/coder slots still resolve."""
     p = tmp_path / "profiles.toml"
