@@ -75,6 +75,30 @@ def test_add_from_path_registers_gguf(
     assert body["id"] in ids
 
 
+def test_add_from_path_persists_detected_architecture(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """A readable GGUF header's ``general.architecture`` lands on the
+    registry row (``Model.architecture``) so the model↔runner arch
+    fit-check (hal0#2118) can warn at slot assignment."""
+    client, drop = add_path_client
+    target = drop / "qwen3.8-flash-next-ud-q2-k-xl.gguf"
+    target.write_bytes(
+        _build_gguf(
+            3,
+            [("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen4exp"))],
+        )
+    )
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+    assert r.status_code == 201, r.text
+    assert r.json()["architecture"] == "qwen4exp"
+
+    listing = client.get("/api/models").json()
+    row = next(m for m in listing["models"] if m["id"] == r.json()["id"])
+    assert row["architecture"] == "qwen4exp"
+
+
 def test_add_from_path_surfaces_medium_confidence_for_filename_guess(
     add_path_client: tuple[TestClient, Path],
 ) -> None:

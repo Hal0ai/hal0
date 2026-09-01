@@ -936,6 +936,11 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             # read the registry truth instead of assuming a single backend.
             "supported_backends": list(runner.supported_backends),
             "format_arch": runner.format_arch,
+            # format_arch's §4 refinement (hal0#2118): GGUF general.architecture
+            # ids this runner's llama.cpp build is KNOWN to reject at load —
+            # the slot drawer's model↔runner arch fit-check reads this next to
+            # the model row's detected `architecture`.
+            "unsupported_archs": list(runner.unsupported_archs),
             # Per-runner capability metadata (UI-API-1 item 2 / spec §7): expose
             # what the runner registry actually knows so the model drawer can
             # filter its runner-override dropdown to COMPATIBLE runners. Only

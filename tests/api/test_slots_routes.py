@@ -2706,3 +2706,136 @@ def test_fit_check_refuses_promptforge_on_a_vulkan_device() -> None:
     # the sibling half: its own backend fits, and cpu is refused too
     assert _fit_check_warning("gpu-rocm", "promptforge") is None
     assert _fit_check_warning("cpu", "promptforge") is not None
+
+
+# ── model↔runner arch fit-check (hal0#2118) ──────────────────────────────────
+
+
+def test_arch_fit_warning_paths() -> None:
+    from hal0.api.routes.slots import _arch_fit_warning
+
+    # The #2118 shape: qwen4exp on the default rocmfpx build → warn.
+    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None)
+    assert warn is not None
+    assert "qwen4exp" in warn
+    assert "rocmfpx" in warn
+    assert "crash-loop" in warn
+    # No BINARY = the HW-gated default derived from the device — a GPU lane
+    # resolves to rocmfpx, so the SAME model still warns (this is exactly how
+    # the #2118 slot was configured: no explicit binary).
+    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", "", None) is not None
+    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", None, None) is not None
+    # An image_pin disarms the check — the pin IS the documented escape hatch.
+    pinned = _arch_fit_warning(
+        "qwen4exp", "gpu-rocm", "rocmfpx", "ghcr.io/hal0ai/hal0-combined-upstream:0829"
+    )
+    assert pinned is None
+    # Arch not on the denylist / unknown arch → silent.
+    assert _arch_fit_warning("llama", "gpu-rocm", "rocmfpx", None) is None
+    assert _arch_fit_warning(None, "gpu-rocm", "rocmfpx", None) is None
+    # Stock-build runners denylist nothing today.
+    assert _arch_fit_warning("qwen4exp", "cpu", "cpu", None) is None
+    # Non-GGUF runtime lane (format_arch != "gguf") has no opinion.
+    assert _arch_fit_warning("qwen4exp", "npu", "flm", None) is None
+    # Unknown BINARY key → the launch path reports its own error.
+    assert _arch_fit_warning("qwen4exp", "gpu-rocm", "does-not-exist", None) is None
+    # The vulkanfpx alias folds to rocmfpx before lookup.
+    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", "vulkanfpx", None) is not None
+
+
+def test_arch_fit_warning_names_the_catalogued_alternative() -> None:
+    from hal0.api.routes.slots import _arch_fit_warning
+
+    ref = "ghcr.io/hal0ai/hal0-combined-upstream:0829"
+    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None, alternative_ref=ref)
+    assert warn is not None
+    assert ref in warn
+    assert "image_pin" in warn
+
+
+def test_merged_model_default_shapes() -> None:
+    from hal0.api.routes.slots import _merged_model_default
+
+    # Write wins over disk, both sub-table and flat-string shapes fold.
+    assert _merged_model_default({"model": {"default": "a"}}, {"model": {"default": "b"}}) == "a"
+    assert _merged_model_default({"model": "a"}, {}) == "a"
+    # A write that omits `model` falls back to the persisted section.
+    assert _merged_model_default({}, {"model": {"default": "b"}}) == "b"
+    # A write that explicitly clears the binding resolves to None.
+    assert _merged_model_default({"model": {"default": ""}}, {"model": {"default": "b"}}) is None
+    assert _merged_model_default({}, {}) is None
+
+
+def test_put_config_warns_on_denylisted_model_arch(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    """hal0#2118: binding a model whose detected GGUF arch the effective
+    runner denylists WARNS (non-blocking) — the write succeeds (200) and the
+    response carries ``model_fit_warning`` naming the arch."""
+    from hal0.registry.model import Model
+
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "flashnext",
+        [
+            'name = "flashnext"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "[model]",
+            'default = "qwen3.8-flash-next-ud-q2-k-xl"',
+        ],
+    )
+    isolated_client.app.state.model_registry.add(
+        Model(
+            id="qwen3.8-flash-next-ud-q2-k-xl",
+            path="/models/qwen3.8-flash-next-ud-q2-k-xl.gguf",
+            architecture="qwen4exp",
+        )
+    )
+    # Touching only the binary still checks against the PERSISTED model.
+    r = isolated_client.put("/api/slots/flashnext/config", json={"binary": "rocmfpx"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert "model_fit_warning" in out
+    assert "qwen4exp" in out["model_fit_warning"]
+    assert "rocmfpx" in out["model_fit_warning"]
+
+    # Pinning an image (THE #2118 escape hatch) disarms the warning.
+    r = isolated_client.put(
+        "/api/slots/flashnext/config",
+        json={"image_pin": "ghcr.io/hal0ai/hal0-combined-upstream:0829"},
+    )
+    assert r.status_code == 200, r.text
+    assert "model_fit_warning" not in r.json()
+
+
+def test_put_config_no_arch_warning_for_supported_arch(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    """A bound model with a supported (or unknown) arch carries no
+    ``model_fit_warning`` key."""
+    from hal0.registry.model import Model
+
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "plain",
+        [
+            'name = "plain"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            "[model]",
+            'default = "llama-model"',
+        ],
+    )
+    isolated_client.app.state.model_registry.add(
+        Model(id="llama-model", path="/models/llama.gguf", architecture="llama")
+    )
+    r = isolated_client.put("/api/slots/plain/config", json={"binary": "rocmfpx"})
+    assert r.status_code == 200, r.text
+    assert "model_fit_warning" not in r.json()

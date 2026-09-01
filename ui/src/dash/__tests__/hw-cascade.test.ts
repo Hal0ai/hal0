@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyBackendChoice,
+  archFitWarning,
   backendOptions,
   cataloguePinOptions,
   optionValue,
@@ -277,5 +278,64 @@ describe('cataloguePinOptions — downloaded catalogue rows beyond the release c
 
   it('tolerates missing rows/catalog', () => {
     expect(cataloguePinOptions({ rows: undefined, catalogImages: undefined, slotType: 'llm' })).toEqual([])
+  })
+})
+
+describe('archFitWarning — model↔runner GGUF-arch fit-check (hal0#2118)', () => {
+  // system-info runner rows carrying the denylist the check reads.
+  const archBackends = {
+    rocmfpx: {
+      image: COMBINED,
+      backend: 'rocm',
+      supported_backends: ['rocm', 'vulkan'],
+      device_class: 'gpu',
+      runtime_family: 'llama-server',
+      format_arch: 'gguf',
+      unsupported_archs: ['qwen4exp'],
+    },
+    cpu: {
+      image: 'ghcr.io/hal0ai/hal0-toolbox-cpu:v1',
+      backend: 'cpu',
+      device_class: 'cpu',
+      runtime_family: 'llama-server',
+      format_arch: 'gguf',
+      unsupported_archs: [],
+    },
+    flm: {
+      image: 'ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44',
+      device_class: 'npu',
+      runtime_family: 'flm',
+      format_arch: 'flm',
+      unsupported_archs: [],
+    },
+  }
+  const base = { device: 'gpu-rocm', binary: 'rocmfpx', imagePin: '', backends: archBackends }
+
+  it('warns when the arch is on the effective runner denylist', () => {
+    const msg = archFitWarning({ ...base, arch: 'qwen4exp' })
+    expect(msg).toContain('qwen4exp')
+    expect(msg).toContain('rocmfpx')
+  })
+  it('resolves the HW-gated default runner when no binary is pinned (the #2118 shape)', () => {
+    expect(archFitWarning({ ...base, binary: '', arch: 'qwen4exp' })).toContain('rocmfpx')
+    expect(archFitWarning({ ...base, binary: '', device: 'cpu', arch: 'qwen4exp' })).toBe(null)
+  })
+  it('an image_pin disarms the check — the pin IS the escape hatch', () => {
+    expect(archFitWarning({ ...base, arch: 'qwen4exp', imagePin: COMBINED })).toBe(null)
+  })
+  it('stays silent for supported or unknown archs', () => {
+    expect(archFitWarning({ ...base, arch: 'llama' })).toBe(null)
+    expect(archFitWarning({ ...base, arch: '' })).toBe(null)
+    expect(archFitWarning({ ...base, arch: undefined })).toBe(null)
+  })
+  it('has no opinion on non-GGUF lanes, unknown keys, or an older payload without the denylist', () => {
+    expect(archFitWarning({ ...base, binary: 'flm', arch: 'qwen4exp' })).toBe(null)
+    expect(archFitWarning({ ...base, binary: 'nope', arch: 'qwen4exp' })).toBe(null)
+    const older = { rocmfpx: { ...archBackends.rocmfpx, unsupported_archs: undefined } }
+    expect(archFitWarning({ ...base, backends: older, arch: 'qwen4exp' })).toBe(null)
+  })
+  it('names the alternative image when the caller resolved one', () => {
+    const msg = archFitWarning({ ...base, arch: 'qwen4exp', altRef: COMBINED })
+    expect(msg).toContain(COMBINED)
   })
 })

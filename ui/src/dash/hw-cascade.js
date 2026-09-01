@@ -193,6 +193,48 @@ export function cataloguePinOptions({ rows, catalogImages, slotType }) {
 }
 
 /**
+ * Model↔runner GGUF-arch fit-check (hal0#2118) — FE mirror of the backend's
+ * `_arch_fit_warning` in api/routes/slots.py. WARN, never block: returns a
+ * message string when the bound model's detected `general.architecture` is on
+ * the effective runner's `unsupported_archs` denylist (system-info runner
+ * rows), else null. An image_pin disarms the check — the pin IS the #2118
+ * escape hatch, and the catalog can't know a pinned image's arch table.
+ * `altRef` (an image ref known to load the arch) turns the warning into an
+ * actionable hint.
+ *
+ * @param arch     model row's `architecture` (GGUF general.architecture id)
+ * @param device   the slot's (pending) device enum, e.g. "gpu-rocm"
+ * @param binary   the slot's BINARY runner key ('' = HW-gated default)
+ * @param imagePin trimmed image_pin ('' = release-catalog default)
+ * @param backends system-info RUNNER_IMAGES map (key → runner row)
+ * @param altRef   optional catalogued image ref that CAN load the arch
+ */
+export function archFitWarning({ arch, device, binary, imagePin, backends, altRef = "" }) {
+	if (!arch || String(imagePin || "").trim()) return null;
+	const cat = backends || {};
+	let key = String(binary || "");
+	if (!key) {
+		// No BINARY = the HW-gated default the launcher derives from the
+		// device — runner_for_backend's FE mirror (cuda → cuda, cpu → cpu,
+		// any other GPU lane → rocmfpx).
+		const be = deviceBackend(device);
+		key = be === "cuda" ? "cuda" : be === "cpu" ? "cpu" : "rocmfpx";
+	}
+	const runner = cat[key];
+	// Unknown runner key, a non-GGUF runtime lane, or an older system-info
+	// payload without the denylist: no opinion, never a warning.
+	if (!runner || runner.format_arch !== "gguf") return null;
+	const deny = runner.unsupported_archs;
+	if (!Array.isArray(deny) || !deny.includes(arch)) return null;
+	let msg =
+		`⚠ Model architecture "${arch}" is not supported by the ${key} ` +
+		"runner's llama.cpp build — the model will fail at load and the slot " +
+		"will crash-loop.";
+	if (altRef) msg += ` Pin "${altRef}" (Runner Image) to serve it.`;
+	return msg;
+}
+
+/**
  * Resolve a Backend dropdown pick to the state it drives.
  * Unknown values (the out-of-vocab persisted pair rendered as its own option)
  * set the binary and leave the device alone.
