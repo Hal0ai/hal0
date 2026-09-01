@@ -2377,3 +2377,54 @@ class TestVenvRefreshIsCommitAgnostic:
         assert "--force-reinstall" in cmd
         # Never conditions the pip call on a version comparison.
         assert str(tmp_path / "hal0-0.9.8") in cmd
+
+
+# ── installed_version — current/VERSION beats wheel metadata (nightly loop) ──
+#
+# A nightly wheel carries the BASE version in its pip metadata (PEP 440 has
+# no shape for v<base>-nightly.<stamp>), so hal0.__version__ can't say which
+# nightly is installed. Boxes on the newest nightly compared
+# 1.1.0 < 1.1.0-nightly.<stamp> and saw "update available" forever, re-staging
+# the same release on every `hal0 update` (ct105 + ct150, 2026-09-01).
+
+
+def test_installed_version_prefers_current_version_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.updater.updater import installed_version
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    release = tmp_path / "usr-lib" / "hal0" / "hal0-1.1.0-nightly.20260901025155"
+    release.mkdir(parents=True)
+    (release / "VERSION").write_text("1.1.0-nightly.20260901025155\n", encoding="utf-8")
+    current = tmp_path / "usr-lib" / "hal0" / "current"
+    current.symlink_to(release)
+
+    assert installed_version() == "1.1.0-nightly.20260901025155"
+
+
+def test_installed_version_falls_back_to_wheel_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0
+    from hal0.updater.updater import installed_version
+
+    # No current symlink at all (source/dev install) → wheel metadata.
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    assert installed_version() == hal0.__version__
+
+    # An EMPTY VERSION file degrades the same way, never answers "".
+    release = tmp_path / "usr-lib" / "hal0" / "hal0-x"
+    release.mkdir(parents=True)
+    (release / "VERSION").write_text("", encoding="utf-8")
+    (tmp_path / "usr-lib" / "hal0" / "current").symlink_to(release)
+    assert installed_version() == hal0.__version__
+
+
+def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
+    # The loop itself: same nightly on both sides must not read as newer.
+    assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0-nightly.20260901025155") is False
+    # And the pre-fix comparison that caused the loop stays true (the manifest
+    # IS newer than the bare wheel base) — proving the fix must come from the
+    # installed side, not from _is_newer.
+    assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0") is True
