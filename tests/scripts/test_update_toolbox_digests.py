@@ -1,13 +1,16 @@
 """scripts/update-toolbox-digests.sh must never null a valid digest pin (#1676).
 
 The script only resolved digests via the ghcr.io registry v2 curl path. The
-comfyui entry pins a docker.io, digest-referenced tag
+comfyui entry used to pin a docker.io, digest-referenced tag
 (``docker.io/kyuz0/amd-strix-halo-comfyui@sha256:...``): the ghcr-only path
 mis-parsed it, reported it "unpublished", and overwrote a valid digest with
 null — which then failed ``release.yml``'s null-digest gate on the very
-manifest this script prepares.
+manifest this script prepares. Comfyui has since flipped to hal0's own
+``ghcr.io/hal0ai/hal0-comfyui`` image, so no live manifest entry exercises
+the non-ghcr paths any more — the #1676 coverage lives entirely in the
+synthetic docker.io fixtures below.
 
-These tests drive the REAL script against a throwaway copy of the manifest,
+These tests drive the REAL script against throwaway fixture manifests,
 under a hermetic PATH where ``curl`` and ``docker`` are stubbed to always
 fail (simulating an offline / token-less run) so the tests are deterministic
 regardless of the sandbox's real network access. A digest-pinned ref must
@@ -20,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -29,13 +31,11 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "update-toolbox-digests.sh"
-_MANIFEST = _REPO_ROOT / "manifest.json"
 
-_COMFYUI_TAG = (
-    "docker.io/kyuz0/amd-strix-halo-comfyui"
-    "@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
-)
-_COMFYUI_DIGEST = "sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
+# Synthetic non-ghcr, digest-pinned ref shaped like the comfyui entry that
+# originally triggered #1676 (docker.io/<owner>/<repo>@sha256:...).
+_PINNED_DIGEST = "sha256:" + "0066678a" * 8
+_PINNED_TAG = f"docker.io/example/imggen@{_PINNED_DIGEST}"
 
 
 def _write_always_failing(path: Path) -> None:
@@ -70,24 +70,6 @@ def _load(manifest: Path) -> dict:
     return json.loads(manifest.read_text(encoding="utf-8"))
 
 
-# ── the regression, against the real manifest ──────────────────────────────
-
-
-def test_comfyui_digest_survives_a_full_offline_run(tmp_path: Path, offline_path: str) -> None:
-    """THE bug: a copy of the real manifest, network fully stubbed off."""
-    manifest = tmp_path / "manifest.json"
-    shutil.copy2(_MANIFEST, manifest)
-    before = _load(manifest)["toolbox_images"]["comfyui"]["digest"]
-    assert before == _COMFYUI_DIGEST  # sanity: fixture assumption still holds
-
-    proc = _run(manifest, offline_path)
-
-    assert proc.returncode == 0, proc.stderr
-    after = _load(manifest)["toolbox_images"]["comfyui"]
-    assert after["digest"] == _COMFYUI_DIGEST
-    assert after["tag"] == _COMFYUI_TAG
-
-
 # ── isolated behaviour, minimal fixture manifests ──────────────────────────
 
 
@@ -104,13 +86,13 @@ def test_digest_pinned_non_ghcr_ref_resolves_without_touching_curl_or_docker(
     tmp_path: Path, offline_path: str
 ) -> None:
     manifest = _fixture_manifest(
-        tmp_path, {"comfyui": {"tag": _COMFYUI_TAG, "digest": "sha256:" + "0" * 64}}
+        tmp_path, {"imggen": {"tag": _PINNED_TAG, "digest": "sha256:" + "0" * 64}}
     )
 
     proc = _run(manifest, offline_path)
 
     assert proc.returncode == 0, proc.stderr
-    assert _load(manifest)["toolbox_images"]["comfyui"]["digest"] == _COMFYUI_DIGEST
+    assert _load(manifest)["toolbox_images"]["imggen"]["digest"] == _PINNED_DIGEST
     assert "unpublished" not in proc.stderr
     assert "1 digest(s) updated, 0 left null" in proc.stdout
 

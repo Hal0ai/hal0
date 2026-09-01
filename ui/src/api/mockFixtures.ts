@@ -354,7 +354,7 @@ function buildProfiles() {
     },
     {
       name: 'comfyui',
-      image: 'docker.io/kyuz0/amd-strix-halo-comfyui:latest',
+      image: 'ghcr.io/hal0ai/hal0-comfyui:latest',
       flags: '--disable-mmap --bf16-vae --cache-none',
       mtp: false,
       resolved_flags: '--disable-mmap --bf16-vae --cache-none',

@@ -87,16 +87,17 @@ def test_start_cmd_emits_required_flags(
 
 
 def test_image_ref_follows_manifest_pin_or_fallback(provider: ComfyUIProvider) -> None:
-    # Phase D (#599): manifest.json repins comfyui to the kyuz0 Strix Halo
-    # build. With the repo manifest visible (HAL0_HOME unset), image_ref
-    # returns that digest pin; without a manifest it falls back to
+    # manifest.json pins comfyui to hal0's own published Strix Halo build
+    # (ghcr.io/hal0ai/hal0-comfyui; flipped from the kyuz0 image it mirrors).
+    # With the repo manifest visible (HAL0_HOME unset), image_ref returns
+    # that digest pin; without a manifest it falls back to
     # _HAL0_COMFYUI_IMAGE.
     ref = provider.image_ref({})
     assert (
         ref
         == (
-            "docker.io/kyuz0/amd-strix-halo-comfyui"
-            "@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
+            "ghcr.io/hal0ai/hal0-comfyui"
+            "@sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b"
         )
         or ref == _HAL0_COMFYUI_IMAGE
     )
@@ -148,7 +149,7 @@ def test_container_spec_command_runs_python_main(
     model_info: dict[str, Any],
 ) -> None:
     spec = provider.container_spec(slot_cfg, model_info)
-    # bash -lc so the kyuz0 image's /opt/venv login-shell activation runs.
+    # bash -lc so the image's /opt/venv login-shell activation runs.
     assert spec.command[:2] == ["bash", "-lc"]
     assert "exec python main.py" in spec.command[2]
     # The slot port (not the ComfyUI default) is what we listen on.

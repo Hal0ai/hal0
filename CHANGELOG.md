@@ -40,6 +40,14 @@ applying. Add those subsections to a version's section to surface them; see
   "catalogued · downloaded" pin lane gates each row on its declared
   runtime family instead of assuming every catalogue row is a
   llama-server fork (#2174).
+### Changed
+
+- The ComfyUI runner family now defaults to hal0's own published image
+  `ghcr.io/hal0ai/hal0-comfyui` (digest-pinned in `manifest.json`) instead of
+  the third-party `docker.io/kyuz0/amd-strix-halo-comfyui`. The image mirrors
+  the kyuz0 layout by construction, so existing img slots need no
+  reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
+  upgraded boxes (#2171).
 
 ## [1.1.0] — 2026-08-31
 
