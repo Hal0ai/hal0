@@ -1,0 +1,14 @@
+{
+  "checksum": "sha256:ccf7aa2c4a3fa04471ee492860ecbe0f82bc25ac5599e916fc2865026f634c0f",
+  "exported_at": "2026-09-01T00:00:00Z",
+  "hal0_version": "1.1.0",
+  "kind": "hal0.profile",
+  "name": "chadrock-dense",
+  "profile": {
+    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj",
+    "intent": "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx",
+    "mtp": true,
+    "quant": "ROCmFP4"
+  },
+  "schema_version": 1
+}

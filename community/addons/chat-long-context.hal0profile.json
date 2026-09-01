@@ -1,0 +1,14 @@
+{
+  "checksum": "sha256:068eaf3fd98f11933640bd85270f6b63a7b5817f07297da1f74b68fd7389642a",
+  "exported_at": "2026-09-01T00:00:00Z",
+  "hal0_version": "1.1.0",
+  "kind": "hal0.profile",
+  "name": "chat-long-context",
+  "profile": {
+    "flags": "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift",
+    "intent": "Long-context chat · tuned for 128K ctx",
+    "mtp": false,
+    "quant": ""
+  },
+  "schema_version": 1
+}
