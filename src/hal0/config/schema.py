@@ -2110,6 +2110,21 @@ class HardwareInfo(BaseModel):
     npu: NPUInfo = Field(
         default_factory=NPUInfo, description="Detected NPU (present=False if none)."
     )
+    kfd_present: bool = Field(
+        default=False,
+        description=(
+            "Whether /dev/kfd is present AND usable by the slot-runner "
+            "identity, per hal0.providers._gpu.kfd_present. This is the "
+            "same host-truth signal the backend's device/profile "
+            "reconciliation gate (_reconcile_device_profile) uses to decide "
+            "ROCm feasibility. Distinct from gpus[].compute_capable, which "
+            "requires a HOST rocminfo probe to succeed — many boxes run "
+            "ROCm slots fine via a containerized userland with no host "
+            "rocminfo, so compute_capable alone under-reports ROCm "
+            "feasibility. Consumers should treat ROCm as feasible when "
+            "EITHER signal is true."
+        ),
+    )
     disk_free_mb: int = Field(
         default=0,
         ge=0,

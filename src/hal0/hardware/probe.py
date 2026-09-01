@@ -31,6 +31,7 @@ import structlog
 from hal0.config import paths as _paths
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.errors import Hal0Error
+from hal0.providers._gpu import kfd_present as _kfd_present
 
 log = structlog.get_logger(__name__)
 
@@ -972,6 +973,12 @@ class HardwareProbe:
                 gpus=visible_gpus,
                 gpu_group_gids=_gpu_group_gids(),
                 npu=npu,
+                # Same host-truth signal the backend's device/profile
+                # reconcile gate uses (config_write._reconcile_device_profile)
+                # — cheap (file stat + mode check, no subprocess), so safe on
+                # the hot probe path. See HardwareInfo.kfd_present docstring
+                # for why this is a distinct signal from gpu.compute_capable.
+                kfd_present=_kfd_present(),
                 disk_free_mb=disk_mb,
                 cgroup_max_mb=_read_cgroup_memory_max_mb(),
                 platform=platform,

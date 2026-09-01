@@ -84,7 +84,15 @@ function normalizeHardware(raw: any): Hardware {
     cores: cores ? `${cores}c · ${threads}t` : (raw?.cores ?? ''),
     gpu: raw?.gpu_name ?? gpu0?.name ?? raw?.gpu ?? '',
     gpuVendor: raw?.gpu_vendor ?? gpu0?.vendor ?? '',
-    computeCapable: !!gpu0?.compute_capable,
+    // `compute_capable` alone is a HOST rocminfo probe — false on a box
+    // where /dev/kfd is passed through but rocminfo isn't installed on the
+    // host (containers bring their own ROCm userland). Such a box actively
+    // runs ROCm slots, so fold in the same `kfd_present` host-truth signal
+    // the backend's own feasibility gate uses (kfd_present is AMD-only —
+    // never set on an NVIDIA box — so this can't leak a false CUDA signal).
+    // Otherwise the Hardware & Runtimes page shows "ROCm / compute capable:
+    // no" on a box that is, in fact, running ROCm.
+    computeCapable: !!(gpu0?.compute_capable || raw?.kfd_present),
     vulkanCapable: !!gpu0?.vulkan_capable,
     ram: {
       total: ramTotalMb ? mbToGb(ramTotalMb) : Number(ram?.total ?? 0),

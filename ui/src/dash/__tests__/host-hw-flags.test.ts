@@ -43,4 +43,34 @@ describe('hostHwFlags', () => {
       hostHwFlags({ gpus: [{ compute_capable: false, vulkan_capable: true }] }),
     ).toEqual({ rocm: false, vulkan: true, cuda: false })
   })
+
+  // kfd_present: FE/BE ROCm gate mismatch (host-truth fix). A box with
+  // /dev/kfd but no host rocminfo (containers bring their own ROCm
+  // userland) actively runs ROCm slots — the backend's own feasibility
+  // gate (config_write._reconcile_device_profile via
+  // hal0.providers._gpu.kfd_present) allows it, so the drawer must not
+  // veto it just because the host-rocminfo-backed compute_capable is false.
+
+  it('gpu0 present, compute_capable false but top-level kfd_present true → rocm true, cuda still false', () => {
+    expect(
+      hostHwFlags({
+        kfd_present: true,
+        gpus: [{ compute_capable: false, vulkan_capable: false }],
+      }),
+    ).toEqual({ rocm: true, vulkan: false, cuda: false })
+  })
+
+  it('gpu0 present, compute_capable true and kfd_present false → rocm true (compute_capable alone still sufficient)', () => {
+    expect(
+      hostHwFlags({
+        kfd_present: false,
+        gpus: [{ compute_capable: true, vulkan_capable: false }],
+      }),
+    ).toEqual({ rocm: true, vulkan: false, cuda: true })
+  })
+
+  it('no gpus[0] but top-level kfd_present true → still {} (unknown shape preserved, no veto)', () => {
+    expect(hostHwFlags({ kfd_present: true, gpus: [] })).toEqual({})
+    expect(hostHwFlags({ kfd_present: true })).toEqual({})
+  })
 })
