@@ -24,6 +24,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- `hal0 update` now reads the installed version from the active release's
+  `current/VERSION` file instead of the wheel metadata. A nightly wheel
+  deliberately carries only the BASE version in pip metadata (PEP 440 has no
+  shape for `v<base>-nightly.<stamp>`), so a box already on the newest
+  nightly compared `1.1.0 < 1.1.0-nightly.<stamp>` and looped "update
+  available" forever, re-staging the same release on every run.
+
 ### Added
 
 - The dashboard now surfaces the decisive crash line when a slot container

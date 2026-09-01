@@ -674,7 +674,7 @@ def _enforce_upgrade_floor(
     spec = (manifest.upgrade_from or "").strip()
     if not spec:
         return
-    installed = current or hal0.__version__
+    installed = current or installed_version()
     try:
         from packaging.specifiers import InvalidSpecifier, SpecifierSet
         from packaging.version import InvalidVersion, Version
@@ -2116,6 +2116,32 @@ def _versioned_install_dir(version: str) -> Path:
 def _current_symlink() -> Path:
     """Return ``<usr_lib>/current`` — the atomic-swap target."""
     return _usr_lib_root() / "current"
+
+
+def installed_version() -> str:
+    """The release version actually running — ``current/VERSION`` when present,
+    else ``hal0.__version__``.
+
+    A nightly wheel deliberately carries the BASE version in its package
+    metadata: PEP 440 has no vocabulary for the ``v<base>-nightly.<stamp>``
+    tag shape, so pip metadata can't hold it (that is why release.yml's
+    version gate only base-matches nightly tags). ``hal0.__version__`` is
+    therefore blind to WHICH nightly is installed — a box already on the
+    newest nightly compared ``1.1.0 < 1.1.0-nightly.<stamp>`` and reported
+    "update available" forever, re-staging the same release on every
+    ``hal0 update`` (live on ct105 + ct150, 2026-09-01).
+
+    The release tarball ships its exact version in the top-level ``VERSION``
+    file and activation swaps ``current`` onto that tree, so
+    ``current/VERSION`` IS the installed identity. The wheel version remains
+    the fallback for source/dev installs with no release dir. Fail-soft: any
+    unreadable/empty VERSION degrades to the old behavior, never an error.
+    """
+    try:
+        v = (_current_symlink() / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return hal0.__version__
+    return v or hal0.__version__
 
 
 # ── Release-directory tokens (the only thing that crosses the privileged seam) ──
@@ -4433,7 +4459,9 @@ class Updater:
         """Check for a newer version on the configured release channel.
 
         Fetches the release manifest, validates it against the
-        ``ReleaseManifest`` schema, and compares against ``hal0.__version__``.
+        ``ReleaseManifest`` schema, and compares against
+        :func:`installed_version` (``current/VERSION``-first — see its
+        docstring for the nightly wheel-metadata story).
 
         Returns a ``ReleaseInfo`` dataclass; the route layer constructs the
         wire JSON from this so the CLI + API surface stay in lock-step.
@@ -4452,7 +4480,8 @@ class Updater:
         # operator should not be nudged toward a release we've pulled. The
         # version is still surfaced (revoked + reason) so the dashboard can
         # explain why no update is offered. See docs/internal/release-manifest.md.
-        update_available = bool(latest) and not revoked and _is_newer(latest, hal0.__version__)
+        current_version = installed_version()
+        update_available = bool(latest) and not revoked and _is_newer(latest, current_version)
         if revoked and bool(latest):
             log.warning(
                 "updater.latest_revoked",
@@ -4461,7 +4490,7 @@ class Updater:
                 reason=revoked_reason,
             )
         return ReleaseInfo(
-            current=hal0.__version__,
+            current=current_version,
             latest=latest or None,
             channel=ch,
             update_available=update_available,
