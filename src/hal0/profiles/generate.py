@@ -46,11 +46,11 @@ from hal0.config.schema import (
     HardwareInfo,
     ProfileConfig,
 )
-from hal0.errors import BadRequest
+from hal0.errors import BadRequest, NotFound
 from hal0.hardware.recommend import _MOE_ARCHITECTURES
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.model_meta import classify, model_is_mtp_eligible
-from hal0.profiles import ProfileCatalog
+from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.profiles.portable import export_envelope
 from hal0.upstreams.huggingface import (
     _HF_MODELS_URL,
@@ -382,9 +382,8 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
         # "chat" is the flat, model-agnostic fallback; "moe" is the workload
         # profile tuned for hybrid-KV MoE models (f16 KV, no context shift).
         # "moe" is a DEMOTED definition now, not a seed — ProfileCatalog.resolve
-        # still serves it (materializing it as a custom profile where an install
-        # has not already inherited it), which is why the guard below accepts the
-        # legacy set rather than seeds alone.
+        # serves it wherever the install still has it, which is why the guard
+        # below accepts the legacy set rather than seeds alone.
         seed_name = "moe"
 
     if seed_name not in SEED_PROFILES and seed_name not in LEGACY_SEED_PROFILES:
@@ -397,6 +396,33 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
         )
         seed_name = "chat"
     return device, seed_name, warnings
+
+
+def _resolve_seed_or_fall_back(seed_name: str, warnings: list[str]) -> ResolvedProfile:
+    """Resolve the derived profile, degrading to ``chat`` if it is gone.
+
+    Membership in ``SEED_PROFILES``/``LEGACY_SEED_PROFILES`` is a STATIC fact
+    about shipped data; whether the catalog can actually serve a name is a
+    runtime one, and since the demotion the two can disagree. A legacy name is
+    an ordinary custom profile now, so deleting it is a first-class operator
+    action — and :meth:`ProfileCatalog.resolve` deliberately does not resurrect
+    a deleted entry. The MoE upgrade above still asks for ``moe``, so without
+    this a draft request for a MoE-shaped model on an install that deleted it
+    would surface a raw NotFound.
+
+    ``chat`` is a seed, so it cannot be deleted and this cannot recurse.
+    """
+    catalog = ProfileCatalog()
+    try:
+        return catalog.resolve(seed_name)
+    except NotFound:
+        if seed_name == "chat":
+            raise
+        warnings.append(
+            f"derived seed profile {seed_name!r} is no longer in the profile catalog "
+            "— falling back to 'chat'"
+        )
+        return catalog.resolve("chat")
 
 
 # ── intent headline: heuristic + use_llm summarizer ─────────────────────────
@@ -534,7 +560,7 @@ async def generate_draft_profile(
     device, seed_name, fit_warnings = _fit_seed_profile(facts, resolved_hw)
     warnings.extend(fit_warnings)
 
-    seed = ProfileCatalog().resolve(seed_name)
+    seed = _resolve_seed_or_fall_back(seed_name, warnings)
 
     intent = _build_intent(facts, facts.capability, device)
     if use_llm:
@@ -557,7 +583,7 @@ async def generate_draft_profile(
         mtp=bool(seed.mtp or facts.mtp_eligible),
         device_class=seed.device_class,
         backend=seed.backend,
-        cloned_from=seed_name,
+        cloned_from=seed.name,
         intent=intent,
         quant=facts.quant or seed.quant or "",
     )
