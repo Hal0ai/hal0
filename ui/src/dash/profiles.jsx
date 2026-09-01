@@ -543,7 +543,11 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       mtp: !!form.mtp,
       intent: form.intent ?? '',
       quant: form.quant ?? '',
-      runner: form.runner || null,
+      // '' is the API's CLEAR sentinel for runner (#2186), NOT null: on a PUT
+      // null means "leave the stored runtime alone", so sending it for the
+      // Auto option made picking Auto a silent no-op. On a create '' reads as
+      // "no runtime pinned" — the same Auto, nothing to clear.
+      runner: form.runner || '',
       ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
     };
     try {

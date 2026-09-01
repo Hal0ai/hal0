@@ -774,3 +774,81 @@ def test_create_profile_with_runner_roundtrip(client: TestClient) -> None:
 def test_create_profile_unknown_runner_422(client: TestClient) -> None:
     r = client.post("/api/profiles", json={"name": "bad-api", "flags": "", "runner": "nope"})
     assert r.status_code == 422
+
+
+# ── #2186 clear sentinel + #2183 out-of-vocab grandfathering ──────────────────
+
+
+@pytest.fixture
+def ghost_client(tmp_hal0_home: str) -> Iterator[TestClient]:
+    """Client over a box whose stored profile pins a runtime this build's
+    RUNNER_IMAGES no longer carries (removed/renamed key, or a downgrade)."""
+    _seed_profiles_toml(tmp_hal0_home, "ghosted", "-fa on", runner="ghost-runner", intent="before")
+    with TestClient(create_app()) as c:
+        yield c
+
+
+def _pinned(client: TestClient, name: str = "pf-runtime") -> None:
+    r = client.post("/api/profiles", json={"name": name, "flags": "", "runner": "promptforge"})
+    assert r.status_code == 201, r.text
+
+
+def test_put_blank_runner_clears_the_stored_runtime(client: TestClient) -> None:
+    """#2186 — the drawer's '— Auto —' option has to actually reach Auto."""
+    _pinned(client)
+    r = client.put("/api/profiles/pf-runtime", json={"flags": "", "runner": ""})
+    assert r.status_code == 200, r.text
+    assert r.json()["runner"] is None
+    listed = next(p for p in client.get("/api/profiles").json() if p["name"] == "pf-runtime")
+    assert listed["runner"] is None
+
+
+def test_put_omitting_runner_keeps_the_stored_runtime(client: TestClient) -> None:
+    _pinned(client)
+    r = client.put("/api/profiles/pf-runtime", json={"intent": "Renamed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["runner"] == "promptforge"
+
+
+def test_put_null_runner_keeps_the_stored_runtime(client: TestClient) -> None:
+    """Explicit null stays leave-unchanged (the field's documented meaning) —
+    clearing is '' and nothing else."""
+    _pinned(client)
+    r = client.put("/api/profiles/pf-runtime", json={"intent": "Renamed", "runner": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["runner"] == "promptforge"
+
+
+def test_ghost_profile_metadata_edit_is_not_blocked_by_its_stored_runner(
+    ghost_client: TestClient,
+) -> None:
+    """#2183 — the drawer round-trips `runner` on every save, so screening an
+    UNCHANGED value 422'd every field of a profile whose runtime left the
+    registry. Mirrors the #1411 flags grandfathering."""
+    r = ghost_client.put(
+        "/api/profiles/ghosted", json={"flags": "-fa on", "runner": "ghost-runner", "intent": "Now"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "Now"
+    assert r.json()["runner"] == "ghost-runner"
+
+
+def test_ghost_profile_cannot_switch_to_another_unknown_runner(ghost_client: TestClient) -> None:
+    """The exemption is byte-identical resubmission only — any ACTUAL change is
+    still fully screened."""
+    r = ghost_client.put("/api/profiles/ghosted", json={"runner": "other-ghost"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "profiles.unknown_runner"
+
+
+def test_ghost_profile_edit_omitting_runner_also_works(ghost_client: TestClient) -> None:
+    r = ghost_client.put("/api/profiles/ghosted", json={"intent": "Now"})
+    assert r.status_code == 200, r.text
+    assert r.json()["runner"] == "ghost-runner"
+
+
+def test_ghost_profile_can_be_cleared_to_auto(ghost_client: TestClient) -> None:
+    """The migration path off a stale key: clearing bypasses the screen."""
+    r = ghost_client.put("/api/profiles/ghosted", json={"runner": ""})
+    assert r.status_code == 200, r.text
+    assert r.json()["runner"] is None

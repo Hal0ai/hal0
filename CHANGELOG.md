@@ -26,6 +26,19 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Editing a profile whose stored runtime key has left this box's runner
+  registry (renamed, dropped by a build, or a downgrade) no longer 422s with
+  `profiles.unknown_runner`. The drawer re-sends the stored `runner` on every
+  save, so screening an unchanged value rejected a write that changes nothing
+  and made the profile un-editable in every field. `PUT /api/profiles/{name}`
+  now screens `runner` only when it actually changes — the same grandfathering
+  the profile's stored flags get (#1411); creates stay strict (#2183).
+- Clearing a profile's Runtime back to "Auto" in the profiles drawer now
+  actually clears it. `PUT /api/profiles/{name}` reads `runner: null` as
+  "leave unchanged" (as it does for every other field), so the Auto option
+  silently no-op'd and the runtime badge came back after save. The empty
+  string is now the explicit clear sentinel on that field — never screened,
+  so it is also the way off a stored runtime this box no longer has (#2186).
 - `hal0 update` now reads the installed version from the active release's
   `current/VERSION` file instead of the wheel metadata. A nightly wheel
   deliberately carries only the BASE version in pip metadata (PEP 440 has no
