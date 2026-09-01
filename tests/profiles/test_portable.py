@@ -14,10 +14,11 @@ from pathlib import Path
 import pytest
 
 from hal0.config.schema import PROFILE_SCHEMA_VERSION_CURRENT, ProfileConfig
-from hal0.errors import BadRequest, Conflict, UnprocessableEntity
+from hal0.errors import BadRequest, Conflict
 from hal0.profiles import ProfileCatalog
 from hal0.profiles.portable import (
     ENVELOPE_KIND,
+    envelope_runner_status,
     export_envelope,
     import_profile,
     parse_envelope,
@@ -206,16 +207,33 @@ class TestImportProfile:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.hardware_flag_denied"
 
-    def test_unknown_runner_rejected(self, tmp_hal0_home: str) -> None:
-        """D4: import runs the profile's ``runner`` through
-        ``screen_profile_runner`` (the same check ``create``/``update`` apply)
-        — an envelope naming a runner key not in RUNNER_IMAGES is rejected even
-        though its checksum is intact (it was computed over the bad value)."""
-        env = export_envelope("orig", ProfileConfig(flags="", runner="nope"), exported_at="t")
+    def test_unknown_runner_is_stripped_not_rejected(self, tmp_hal0_home: str) -> None:
+        """Import STRIPS a runtime this box does not have, it does not block.
+
+        A portable profile authored on a richer box must still land — its
+        flags and quant are the point — but it lands as Auto rather than
+        carrying a key this box cannot honour. ``screen_profile_runner``
+        stays strict for create/update; only import substitutes.
+        """
+        env = export_envelope(
+            "orig", ProfileConfig(flags="-fa on", quant="Q6_K", runner="nope"), exported_at="t"
+        )
         assert verify_checksum(env) is True
-        with pytest.raises(UnprocessableEntity) as exc:
-            import_profile(env, "copied", _catalog(tmp_hal0_home))
-        assert exc.value.code == "profiles.unknown_runner"
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.runner is None
+        # Everything else crosses unchanged.
+        assert resolved.flags == "-fa on"
+        assert resolved.quant == "Q6_K"
+
+    def test_known_runner_survives_import(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", ProfileConfig(flags="", runner="strix"), exported_at="t")
+        resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
+        assert resolved.runner == "strix"
+
+    def test_envelope_runner_status_reports_the_substitution(self) -> None:
+        assert envelope_runner_status(ProfileConfig()) == (None, False)
+        assert envelope_runner_status(ProfileConfig(runner="strix")) == ("strix", False)
+        assert envelope_runner_status(ProfileConfig(runner="nope")) == (None, True)
 
 
 # ── #1416: the COMMIT path verifies the checksum, not just dry_run ───────────

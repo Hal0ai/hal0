@@ -373,9 +373,19 @@ __all__ = [
     "ResolvedProfile",
     "RuntimeFamily",
     "SlotType",
+    "runtime_family_of",
     "screen_profile_flags",
     "screen_profile_runner",
 ]
+
+
+def runtime_family_of(name: str, profile: ProfileConfig) -> RuntimeFamily:
+    """Public seam for :func:`_runtime_family` — the runtime family a profile
+    resolves to, for callers that hold a ProfileConfig that is not (yet) in
+    the catalog. The import dry run reports it for an envelope that has not
+    been created.
+    """
+    return _runtime_family(name, profile)
 
 
 def screen_profile_runner(runner: str | None) -> str | None:

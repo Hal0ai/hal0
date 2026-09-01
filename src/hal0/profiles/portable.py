@@ -94,6 +94,29 @@ def verify_checksum(envelope: dict[str, Any]) -> bool:
     return envelope.get("checksum") == _checksum(body)
 
 
+def envelope_runner_status(profile: ProfileConfig) -> tuple[str | None, bool]:
+    """The runner an imported ``profile`` will carry, and whether the
+    envelope's own key had to be dropped to get there.
+
+    Import is PORTABLE: a profile authored on a box with more runtimes still
+    has to land here — its flags and quant are the whole point — so a runner
+    key absent from ``RUNNER_IMAGES`` is stripped to ``None`` (Auto) instead
+    of failing the import. ``screen_profile_runner`` stays strict on the
+    create/update seams: only import substitutes, and it reports the
+    substitution rather than performing it silently (the dry run's
+    ``runner_stripped``).
+    """
+    runner = profile.runner
+    if runner is None:
+        return None, False
+    from hal0.runners import RUNNER_IMAGES, canonical_runner_key
+
+    key = canonical_runner_key(runner)
+    if key in RUNNER_IMAGES:
+        return key, False
+    return None, True
+
+
 def import_profile(
     data: Any,
     name: str,
@@ -142,4 +165,5 @@ def import_profile(
             },
         )
     # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
-    return catalog.create(name, env.profile)
+    kept, _stripped = envelope_runner_status(env.profile)
+    return catalog.create(name, env.profile.model_copy(update={"runner": kept}))
