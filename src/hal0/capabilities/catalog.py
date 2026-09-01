@@ -61,6 +61,7 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
     "whispercpp": "whispercpp",  # the whisper.cpp STT recipe
     "vibevoice": "kokoro",  # closest existing provider; the UI lets the user override
     "comfyui": "comfyui",
+    "qwen3tts": "qwen3tts",
 }
 
 # Per-runtime allow-list of host backends the toolbox image can actually
@@ -388,8 +389,20 @@ def _backend_variants(entry: Any) -> list[str]:
     explicit = getattr(entry, "provider", None)
     if explicit and explicit != "llama-server":
         if explicit == "flm":
+            # Mirrors the untouched legacy ``{"flm", "npu"}`` tag branch
+            # below: NPU is offered unconditionally, with no
+            # ``available_backends()`` intersection — host-truth NPU
+            # gating lives downstream, in the load-time FLM probe
+            # (:func:`_flm_rows_for_capability` / :func:`available_backends`
+            # itself), not here.
             return ["npu"]
-        return list(_RUNTIME_TO_HOST_BACKENDS.get(explicit, ()))
+        # Same host-presence intersection as the tag-driven
+        # ``_RUNTIME_TO_HOST_BACKENDS`` branch further down (moonshine's
+        # CPU-only ONNX wheel, ComfyUI's Vulkan-only image, …) — an
+        # explicit provider still can't advertise a lane the host can't
+        # actually serve.
+        host_backends = {b["id"] for b in available_backends()}
+        return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(explicit, ()) if c in host_backends]
     # explicit llama-server (or unset) falls through to the existing
     # lane fan-out, which already encodes host-present AMD/CPU logic.
 

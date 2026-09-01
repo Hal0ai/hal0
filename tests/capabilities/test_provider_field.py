@@ -24,9 +24,14 @@ from typing import Any
 import pytest
 
 from hal0.capabilities import catalog
-from hal0.model_meta import derive_model_provider
+from hal0.model_meta import RUNTIME_FAMILIES, derive_model_provider
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
+
+
+def _hosts(*ids: str) -> list[dict[str, Any]]:
+    """A minimal ``available_backends()``-shaped stand-in, host ids only."""
+    return [{"id": i} for i in ids]
 
 
 class _Entry:
@@ -48,13 +53,39 @@ def test_provider_for_backend_legacy_paths_unchanged() -> None:
     assert catalog._provider_for_backend("", "npu", entry=_Entry()) == "flm"
 
 
-def test_backend_variants_provider_specialty() -> None:
-    # Provider set → lanes come from the runtime map, tags ignored. No host
-    # facts are consulted for this branch (no monkeypatching needed here) —
-    # if this hangs or errors reaching for host facts, the specialty branch
-    # isn't returning early.
+def test_backend_variants_provider_specialty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Provider set → lanes come from the runtime map, tags ignored.
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("cpu"))
     e = _Entry(provider="moonshine", backends=["vulkan", "rocm"])
     assert catalog._backend_variants(e) == ["cpu"]
+
+
+def test_backend_variants_provider_specialty_filters_by_host_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicit provider's lanes are still intersected with what the host
+    # actually advertises — same rule the legacy ``_RUNTIME_TO_HOST_BACKENDS``
+    # tag branch applies (moonshine's CPU-only wheel, ComfyUI's Vulkan-only
+    # image, …). Kokoro's runtime map offers ("gpu-vulkan", "cpu").
+    e = _Entry(provider="kokoro", backends=["vulkan"])
+
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("cpu"))
+    assert catalog._backend_variants(e) == ["cpu"], "gpu-vulkan absent from host, must be dropped"
+
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
+    assert catalog._backend_variants(e) == ["gpu-vulkan", "cpu"]
+
+
+def test_backend_variants_provider_specialty_npu_unfiltered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mirrors the untouched legacy ``{"flm", "npu"}`` tag branch: NPU is
+    # offered unconditionally, with no ``available_backends()`` intersection.
+    # A host with NO backends at all (not even the NPU) still gets the lane —
+    # if this ever regresses to consulting host facts, this test must fail.
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts())
+    e = _Entry(provider="flm")
+    assert catalog._backend_variants(e) == ["npu"]
 
 
 class _StripProvider:
@@ -85,6 +116,7 @@ def seeded_registry(tmp_path: Path) -> ModelRegistry:
         Model(id="npu-a", path=str(tmp_path / "npu-a"), backends=["flm"]),
         Model(id="stt-a", path=str(tmp_path / "stt-a"), backends=["moonshine"]),
         Model(id="tts-a", path=str(tmp_path / "tts-a"), backends=["kokoro"]),
+        Model(id="tts-b", path=str(tmp_path / "tts-b"), backends=["qwen3tts"]),
         Model(id="img-a", path=str(tmp_path / "img-a"), backends=["comfyui"]),
         Model(id="unknown-a", path=str(tmp_path / "unknown-a"), backends=[]),
     ]
@@ -94,8 +126,15 @@ def seeded_registry(tmp_path: Path) -> ModelRegistry:
 
 
 def test_provider_split_matches_legacy_resolution(seeded_registry: ModelRegistry) -> None:
+    resolved: set[str] = set()
     for model in seeded_registry.list():
         legacy = catalog._provider_for_backend(
             "", "cpu", entry=_StripProvider(model)
         )
         assert derive_model_provider(model.backends) == legacy, model.id
+        resolved.add(legacy)
+    # Total over RUNTIME_FAMILIES — no family is excluded from the parity
+    # check. If a future runtime family is added to either map without a
+    # matching seed row (or without keeping both maps in sync), this fails
+    # instead of silently passing on a narrower fixture.
+    assert resolved == set(RUNTIME_FAMILIES)
