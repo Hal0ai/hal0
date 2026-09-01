@@ -402,10 +402,12 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
   }
 
   const SYSTEM_INFO_BACKENDS = {
-    // hw-cascade.js's runnerOptions() vetoes a runner when hw is KNOWN and
-    // none of its lanes are feasible — a bare `hardware: {}` (no gpus[0])
-    // reads as "rocm unsupported" and would silently filter `promptforge`
-    // out of both this cascade and the Hardware group's own.
+    // hw-cascade.js's runnerOptions() vetoes a runner only when hw is KNOWN
+    // and none of its lanes are feasible (a bare `hardware: {}` — no
+    // gpus[0] — reads as unknown, never a veto, since the Task 12 fix).
+    // Report rocm capable anyway so `promptforge`'s single lane resolves as
+    // a real pick, not just "not vetoed", in both this cascade and the
+    // Hardware group's own.
     hardware: { gpus: [{ compute_capable: true, vulkan_capable: true }] },
     features: {}, podman_context: 'rootless',
     backends: {

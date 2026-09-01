@@ -59,11 +59,12 @@ const EMBED = {
   metrics: {},
 }
 
-// hw-cascade.js's runnerOptions() vetoes a runner when hw is KNOWN and none
-// of its lanes are feasible — a bare `hardware: {}` (no gpus[0]) reads as
-// "rocm/vulkan/cuda all unsupported" and would silently filter every GPU
-// runner out from under a test's own /api/system-info fixture. Report both
-// lanes capable so mocked hardware never fights the mocked backends.
+// hw-cascade.js's runnerOptions() vetoes a runner only when hw is KNOWN and
+// NONE of its lanes are feasible (hostHwFlags reads a bare `hardware: {}` —
+// no gpus[0] — as unknown, never a veto, since the Task 12 fix). Report both
+// lanes capable anyway so a test that drives the rocm/vulkan Lane pills has
+// a real feasible pair to pick from, rather than relying on a specific
+// runtime's own declared lanes.
 const HW_CAPABLE = { gpus: [{ compute_capable: true, vulkan_capable: true }] }
 
 /**
