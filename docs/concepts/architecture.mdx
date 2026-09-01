@@ -106,8 +106,10 @@ A slot's behavior is shaped by two more ideas that sit on top of it:
   slot fields.
 - A **profile** is a device-agnostic, reusable *tune template* — sampler
   settings, KV-cache policy, batch size, reasoning mode. As of the v1.0
-  hardware-ownership split, a profile carries **no image and no hardware
-  placement** — that's the slot's job.
+  hardware-ownership split, a profile carries **no image ref and no hardware
+  placement** — that's the slot's job. It may optionally name a **Runtime**
+  by registry key (never an image ref); applying such a profile switches the
+  slot's runtime — and, for a single-lane runtime, its device — on save.
 
 See [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for
 the full model, including the write-boundary partition between what the slot
