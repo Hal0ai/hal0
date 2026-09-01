@@ -13,11 +13,12 @@ import json
 from pathlib import Path
 
 from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig
-from hal0.profiles import ProfileCatalog
+from hal0.profiles import ProfileCatalog, _runtime_family
 from hal0.profiles.portable import export_envelope, import_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADDONS_DIR = REPO_ROOT / "community" / "addons"
+INDEX = ADDONS_DIR / "index.json"
 
 
 def _envelope_files() -> list[Path]:
@@ -72,3 +73,56 @@ def test_every_envelope_imports_clean(tmp_path: Path) -> None:
         catalog = ProfileCatalog(path=tmp_path / f"{env['name']}.toml")
         imported = import_profile(env, env["name"], catalog)
         assert imported.name == env["name"]
+
+
+# ── index.json — the hal0.dev catalog contract ───────────────────────────────
+
+
+def _index() -> dict:
+    assert INDEX.exists(), "missing community/addons/index.json — run scripts/export_addons.py"
+    return json.loads(INDEX.read_text(encoding="utf-8"))
+
+
+def test_index_envelope_shape() -> None:
+    index = _index()
+    assert index["kind"] == "hal0.addon-index"
+    assert index["schema_version"] == 1
+    assert isinstance(index["addons"], list)
+
+
+def test_index_covers_exactly_the_committed_envelopes() -> None:
+    rows = _index()["addons"]
+    assert [r["name"] for r in rows] == sorted(r["name"] for r in rows), "rows must sort by name"
+    assert {r["file"] for r in rows} == {p.name for p in _envelope_files()}
+    for row in rows:
+        assert (ADDONS_DIR / row["file"]).exists()
+
+
+def test_index_rows_agree_with_their_envelopes() -> None:
+    for row in _index()["addons"]:
+        envelope = json.loads((ADDONS_DIR / row["file"]).read_text(encoding="utf-8"))
+        assert row["name"] == envelope["name"]
+        assert row["checksum"] == envelope["checksum"]
+        assert row["description"] == envelope["profile"]["intent"]
+        assert row["runner"] == envelope["profile"].get("runner")
+        # `title` is the intent's headline: everything before the first
+        # separator (` · `) or parenthetical.
+        assert row["description"].startswith(row["title"])
+        assert row["title"] == row["title"].strip()
+
+
+def test_index_runtime_family_matches_classification() -> None:
+    for row in _index()["addons"]:
+        profile = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[row["name"]])
+        assert row["runtime_family"] == _runtime_family(row["name"], profile)
+
+
+def test_index_declares_the_runner_tolerant_release() -> None:
+    """`min_hal0_version` is the release that can import these envelopes.
+
+    1.1.0 shipped without the import-side `runner` handling, so an envelope
+    naming an unknown runner key had no defined behaviour there; the
+    strip-to-Auto import lands in 1.2.0 alongside this catalog.
+    """
+    for row in _index()["addons"]:
+        assert row["min_hal0_version"] == "1.2.0"

@@ -1,0 +1,86 @@
+{
+  "kind": "hal0.addon-index",
+  "schema_version": 1,
+  "addons": [
+    {
+      "name": "chadrock-dense",
+      "title": "Chadrock 27B dense coder",
+      "description": "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:ccf7aa2c4a3fa04471ee492860ecbe0f82bc25ac5599e916fc2865026f634c0f",
+      "file": "chadrock-dense.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "chadrock-moe",
+      "title": "Chadrock 35B MoE Saber",
+      "description": "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:cd454bc0cf8bf74da61dbae0e82ac66e75e78ba03e8fca424e9f2bebd41740a6",
+      "file": "chadrock-moe.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "chat-long-context",
+      "title": "Long-context chat",
+      "description": "Long-context chat · tuned for 128K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:068eaf3fd98f11933640bd85270f6b63a7b5817f07297da1f74b68fd7389642a",
+      "file": "chat-long-context.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "coding",
+      "title": "Code-gen workload",
+      "description": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:03a7ee5c6752b0efef783f2215de6f2b58260fc7d7635fab991d1a95fb161a09",
+      "file": "coding.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "dense",
+      "title": "Generic dense workload",
+      "description": "Generic dense workload · tuned for 128K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:24233a11274cc95d5c5055626b070d9b71a0639378439c0f24ecd62f857c2c3f",
+      "file": "dense.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "moe",
+      "title": "Generic MoE workload",
+      "description": "Generic MoE workload · tuned for 32K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:962e4ff331785f77eb8c945eb6b75f42ec35912710ebdf6ba0dca3c6588f6fbd",
+      "file": "moe.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "promptforge",
+      "title": "CIRU ActiveFPX + PromptForge accelerated serving",
+      "description": "CIRU ActiveFPX + PromptForge accelerated serving (#1946)",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:98ec3d54902b378bd578ea78837e02169c4f6cc1b5c7014a04f36242bcd8ce74",
+      "file": "promptforge.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    },
+    {
+      "name": "thinking",
+      "title": "Reasoning-ON workload",
+      "description": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:ea7dcba67830d1b0d1d47ef2c2ea4e3d303eb688c678d21f15403daa5a7bbc99",
+      "file": "thinking.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    }
+  ]
+}
