@@ -258,6 +258,51 @@ describe('ProfileDrawer runtime select (U2)', () => {
     act(() => root.unmount())
   })
 
+  // #2186 — the API reads null as "leave the stored runtime unchanged", so the
+  // Auto option has to travel as the '' clear sentinel or the save silently
+  // keeps the old runtime and the card badge reappears.
+  it('picking Auto on an edit sends the clear sentinel, never null', async () => {
+    const { host, root } = mount(
+      React.createElement(ProfileDrawer, {
+        mode: 'edit',
+        source: { name: 'pinned', flags: '', runner: 'promptforge' },
+        onClose: () => {},
+        onSaved: () => {},
+      }),
+    )
+    const sel = select(host)
+    expect(sel.value).toBe('promptforge')
+    pick(sel, '')
+    const btn = host.querySelector('[data-testid="pf-btn-submit"]') as HTMLButtonElement
+    await act(async () => {
+      btn.click()
+    })
+    expect(updateCalls).toHaveLength(1)
+    const call = updateCalls[0] as { name: string; body: Record<string, unknown> }
+    expect(call.name).toBe('pinned')
+    expect(call.body.runner).toBe('')
+    act(() => root.unmount())
+  })
+
+  it('a create with no runtime picked sends "" too (Auto, nothing to clear)', async () => {
+    const { host, root } = mount(
+      React.createElement(ProfileDrawer, {
+        mode: 'clone',
+        source: { name: 'plain', flags: '', runner: '' },
+        onClose: () => {},
+        onSaved: () => {},
+      }),
+    )
+    expect(select(host).value).toBe('')
+    const btn = host.querySelector('[data-testid="pf-btn-submit"]') as HTMLButtonElement
+    await act(async () => {
+      btn.click()
+    })
+    expect(createCalls).toHaveLength(1)
+    expect((createCalls[0] as Record<string, unknown>).runner).toBe('')
+    act(() => root.unmount())
+  })
+
   it('renders the select disabled when forking a seed', () => {
     const { host, root } = mount(
       React.createElement(ProfileDrawer, {

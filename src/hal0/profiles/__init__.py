@@ -101,9 +101,14 @@ class ProfilePatch:
     #: Mirrors ProfileConfig.backend, which accepts "cuda" too. Omitting it here
     #: made a CUDA profile un-patchable through this seam.
     backend: Literal["rocm", "vulkan", "cuda"] | None = None
-    #: None = leave unchanged. Clearing a stored runner goes through a full
-    #: re-create (same as every other field here) — there is no separate
-    #: "clear" sentinel, mirroring `backend`/`device_class` above.
+    #: None = leave unchanged (as everywhere else on this class); ``""`` =
+    #: CLEAR the stored runtime back to Auto (#2186). ``runner`` is the one
+    #: field here with a natural empty value — "no runtime pinned" is a real,
+    #: reachable state (every seed is in it), unlike ``backend``/``device_class``
+    #: whose None already means "unset" — so a clear needs a wire value that is
+    #: not None, and the empty string is the one the select control already
+    #: produces. Without it the drawer's "— Auto —" option sent None and the
+    #: stored runtime silently survived the save.
     runner: str | None = None
     intent: str | None = None
     quant: str | None = None
@@ -278,11 +283,7 @@ class ProfileCatalog:
                     patch.device_class if patch.device_class is not None else existing.device_class
                 ),
                 backend=patch.backend if patch.backend is not None else existing.backend,
-                runner=(
-                    screen_profile_runner(patch.runner)
-                    if patch.runner is not None
-                    else existing.runner
-                ),
+                runner=_merge_runner(patch.runner, existing.runner),
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
                 quant=patch.quant if patch.quant is not None else existing.quant,
@@ -445,8 +446,32 @@ def runtime_family_of(name: str, profile: ProfileConfig) -> RuntimeFamily:
     return _runtime_family(name, profile)
 
 
+def _merge_runner(patched: str | None, stored: str | None) -> str | None:
+    """Resolve an update's ``runner`` against the profile's stored value.
+
+    The three wire cases (#2186), in order:
+
+    * ``None`` — the field was omitted: leave the stored runtime alone.
+    * ``""`` — the explicit CLEAR sentinel: back to Auto (no runtime pinned).
+      Never screened: dropping a runtime is always a legal state, and this is
+      the only in-product way off a key the registry no longer carries.
+    * anything else — a real key, screened and canonicalized as on create.
+    """
+    if patched is None:
+        return stored
+    if not patched.strip():
+        return None
+    return screen_profile_runner(patched)
+
+
 def screen_profile_runner(runner: str | None) -> str | None:
-    """Validate + canonicalize a profile's runner key (D4). None passes.
+    """Validate + canonicalize a profile's runner key (D4). None/blank passes.
+
+    A blank string is treated as None — "no runtime pinned" — rather than
+    looked up as a key: it is what the drawer's Auto option puts on the wire,
+    and an empty key names nothing in any registry. (On an update the blank is
+    already resolved by :func:`_merge_runner` as the clear sentinel; this is
+    the create/import side of the same reading.)
 
     ``runner`` is a RUNNER_IMAGES registry key, never an image ref — keys
     survive image/tag updates (the same rot that got ``image`` removed from
@@ -456,7 +481,7 @@ def screen_profile_runner(runner: str | None) -> str | None:
     catalog write seam (create/update) and the portable import path so both
     apply the identical check.
     """
-    if runner is None:
+    if runner is None or not runner.strip():
         return None
     from hal0.runners import RUNNER_IMAGES, canonical_runner_key
 

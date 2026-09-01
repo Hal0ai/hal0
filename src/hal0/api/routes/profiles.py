@@ -156,7 +156,13 @@ class ProfileUpdateBody(BaseModel):
     )
     runner: str | None = Field(
         default=None,
-        description="Optional runtime (RUNNER_IMAGES key) this profile applies to the slot.",
+        description=(
+            "Optional runtime (RUNNER_IMAGES key) this profile applies to the "
+            "slot. None/omitted leaves the stored value unchanged; the empty "
+            "string is the explicit CLEAR sentinel — it unpins the runtime "
+            "(back to Auto) and is never screened, so it also works for a "
+            "stored key this box's registry no longer carries."
+        ),
     )
     intent: str | None = Field(default=None, description="Human label for the card headline.")
     quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
@@ -478,6 +484,12 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
     """Update an existing custom profile (shallow merge).
 
     Returns the updated profile item.
+
+    Every field omitted (or sent as null) keeps its stored value. ``runner``
+    additionally takes ``""`` as an explicit clear (#2186): the stored runtime
+    is unpinned back to Auto. There is no other way to reach Auto — null is
+    "leave alone", so without the sentinel the drawer's Auto option silently
+    no-op'd.
 
     Raises:
         409 profiles.seed_immutable: name is a seed profile.
