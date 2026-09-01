@@ -46,7 +46,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-binary')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-runtime')).toBeVisible()
     await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
   })
 
@@ -361,5 +361,142 @@ test.describe('slot profile divergence (#1636)', () => {
     await expect(page.locator('.drawer')).toBeVisible()
     await page.getByTestId('slot-profile').selectOption('rocm')
     await expect(page.getByTestId('slot-profile-device-switch')).toHaveCount(0)
+  })
+})
+
+// ─── Profile apply flow — runner-carrying profile (Task 10 D4) ────────────
+//
+// A profile can pin a `runner` (a RUNNER_IMAGES key, Task 3) independently of
+// its `backend`/`device_class` fit fields. Picking one in the drawer's
+// `slot-profile` select mirrors it through the SAME hw-cascade.js
+// runnerOptions/applyRunnerChoice the Hardware group's `slot-hw-runtime`
+// select uses (slot-modals.jsx's `profileRow` IIFE), so `slot-profile-preview`
+// previews exactly what the server's profile-wins reconcile (Task 5) does on
+// Save: `binary` flips to the profile's runner and — for a single-lane
+// runner — `device` follows it.
+test.describe('profile apply flow — runner-carrying profile applies a new runtime (Task 10 D4)', () => {
+  const VULKAN_SLOT = {
+    name: 'vulkan-chat', type: 'llm', device: 'gpu-vulkan',
+    device_class: 'gpu', backend: 'vulkan',
+    model: 'qwen-vulkan-demo', model_id: 'qwen-vulkan-demo',
+    group: 'chat', state: 'ready', port: 8101, isDefault: true,
+    runtime: 'container', profile: '',
+    container_status: 'running', container_health: true,
+    n_gpu_layers: -1, threads: 0,
+    mem_mb: 4_000,
+    metrics: { toks: 30, ttft: 260, ctx: 8192, kv: null, mem: 4.0 },
+  }
+
+  // Carries no device_class/backend of its own (so it always fits the
+  // slot-type/device filters in `profileRow` regardless of the slot's
+  // current device) — isolates the `runner` cascade under test from the
+  // pre-existing #1636 cross-device profile-switch mechanism, which pivots
+  // on `backend`/`device_class` instead.
+  const RUNNER_PROFILE = {
+    name: 'promptforge-apply',
+    image: 'ghcr.io/hal0ai/promptforge:v1',
+    flags: '', mtp: false, resolved_flags: '', seed: false, used_by: [],
+    intent: 'Promptforge — single-lane ROCm runtime',
+    supported_slot_types: ['llm'],
+    runner: 'promptforge',
+  }
+
+  const SYSTEM_INFO_BACKENDS = {
+    // hw-cascade.js's runnerOptions() vetoes a runner when hw is KNOWN and
+    // none of its lanes are feasible — a bare `hardware: {}` (no gpus[0])
+    // reads as "rocm unsupported" and would silently filter `promptforge`
+    // out of both this cascade and the Hardware group's own.
+    hardware: { gpus: [{ compute_capable: true, vulkan_capable: true }] },
+    features: {}, podman_context: 'rootless',
+    backends: {
+      promptforge: {
+        title: 'Promptforge',
+        image: 'ghcr.io/hal0ai/promptforge:v1',
+        runtime_family: 'llamacpp',
+        device_class: 'gpu',
+        backend: 'rocm',
+        supported_backends: ['rocm'],
+        format_arch: 'gguf',
+        state: 'installed',
+      },
+    },
+  }
+
+  async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
+    await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
+      let real: any
+      Object.defineProperty(window, 'HAL0_DATA', {
+        configurable: true, get() { return real },
+        set(v) { real = v; if (v && typeof v === 'object') { v.slots = slots; v.models = models } },
+      })
+    }, { slots, models })
+  }
+
+  test('runner-carrying profile on a vulkan slot: preview renders, Save PUTs the new runtime + gpu-rocm device', async ({ page }) => {
+    const puts: any[] = []
+    const restarts: string[] = []
+    await page.route('**/api/slots/vulkan-chat/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/vulkan-chat/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/vulkan-chat/restart', async (route) => {
+      restarts.push(route.request().method())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/system-info', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SYSTEM_INFO_BACKENDS) }),
+    )
+    // /api/profiles is `networkFirst` in the forced-mock allowlist (see
+    // src/api/mock.ts MOCK_ALLOWLIST) — a page.route registration is tried
+    // BEFORE the baked fixture, so this override is authoritative without
+    // needing the __hal0MockPassthrough hatch. That hatch (#1498/#1527,
+    // reused by #2170's own e2e work) is only needed for an endpoint the
+    // forced allowlist substitutes UNCONDITIONALLY — /api/system-info isn't
+    // allowlisted at all (real fetch, routed above) and /api/models is
+    // allowlisted non-networkFirst, so it's seeded via the HAL0_DATA setter
+    // below instead (mirrors buildModels()'s own documented escape hatch in
+    // src/api/mockFixtures.ts, which page.route can't reach either).
+    await page.route('**/api/profiles', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([RUNNER_PROFILE]) }),
+    )
+    // No models seeded — the slot's bound model_id is intentionally absent
+    // from the catalog so `curModelRow` never resolves and the #1636
+    // stranded-model Save guard (which only fires for a RESOLVED bound
+    // model) can't interfere with this test's own assertions.
+    await seedSlotsAndModels(page, [VULKAN_SLOT], [])
+    await page.goto('/#slots/vulkan-chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    // Runtime starts on the persisted (auto/vulkan-device-derived) pick —
+    // no preview yet.
+    await expect(page.getByTestId('slot-profile-preview')).toHaveCount(0)
+
+    await page.getByTestId('slot-profile').selectOption('promptforge-apply')
+
+    // Applying this profile previews the runtime it carries and that the
+    // slot restarts on Save.
+    const preview = page.getByTestId('slot-profile-preview')
+    await expect(preview).toBeVisible()
+    await expect(preview).toContainText('Promptforge')
+    await expect(preview).toContainText('slot restarts on Save')
+
+    // The Hardware group's Runtime select mirrors the SAME pick immediately
+    // (both read from the one hw-cascade.js cascade) — proving the preview
+    // isn't a display-only fiction.
+    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('promptforge')
+
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toMatchObject({
+      binary: 'promptforge',
+      device: 'gpu-rocm',
+      profile: 'promptforge-apply',
+    })
+    // A runtime/device change is a hardware change — the cold restart fires
+    // in the background after the config write lands.
+    await expect.poll(() => restarts.length).toBeGreaterThan(0)
   })
 })
