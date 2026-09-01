@@ -213,6 +213,12 @@ def model_to_dict(model: Any) -> dict[str, Any]:
       derived from the filename (path basename, then ``hf_filename``) so
       registries written before the field existed surface quant without
       re-registration. Filename-only on this hot path — no header read.
+    * ``runs_on`` — derived host-backend lanes (``gpu-rocm`` / ``gpu-vulkan``
+      / ``cpu`` / ``npu``) this model can run under, via
+      :func:`hal0.capabilities.catalog.runs_on_for_model`. Imported lazily
+      below: ``hal0.capabilities.catalog`` imports from ``hal0.registry``,
+      which this module is itself imported by, so a module-level import
+      here would cycle.
     """
     if hasattr(model, "model_dump"):
         dumped = model.model_dump(mode="json")
@@ -230,6 +236,9 @@ def model_to_dict(model: Any) -> dict[str, Any]:
         quant = lazy_quant(dumped)
         if quant:
             dumped["quant"] = quant
+    from hal0.capabilities.catalog import runs_on_for_model
+
+    dumped["runs_on"] = runs_on_for_model(model)
     return dumped
 
 

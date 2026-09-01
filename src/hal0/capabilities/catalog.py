@@ -385,6 +385,14 @@ def _backend_variants(entry: Any) -> list[str]:
     will surface a clear error if the specific model doesn't have an
     FLM-packaged variant.
     """
+    explicit = getattr(entry, "provider", None)
+    if explicit and explicit != "llama-server":
+        if explicit == "flm":
+            return ["npu"]
+        return list(_RUNTIME_TO_HOST_BACKENDS.get(explicit, ()))
+    # explicit llama-server (or unset) falls through to the existing
+    # lane fan-out, which already encodes host-present AMD/CPU logic.
+
     raw: list[str] = []
     backend = getattr(entry, "backend", None)
     if isinstance(backend, str) and backend:
@@ -485,6 +493,9 @@ def _provider_for_backend(entry_backend: str, backend_id: str, *, entry: Any = N
     """Pick the provider that pairs with this backend / entry combo.
 
     Resolution order:
+      0. The explicit ``entry.provider`` field (Task 1 — a registry Model
+         may carry it, set by the operator or a prior pull). Wins over
+         every tag-derived guess below: it's the source of truth once set.
       1. NPU backend → always FLM.
       2. The singular ``entry.backend`` tag (CuratedModel uses this).
       3. The ``entry.backends`` list (registry Model uses this; .backend
@@ -500,6 +511,9 @@ def _provider_for_backend(entry_backend: str, backend_id: str, *, entry: Any = N
     moonshine selection in capabilities.toml and the underlying slot
     TOML the next time they touched the card.
     """
+    explicit = getattr(entry, "provider", None)
+    if explicit:
+        return str(explicit)
     if backend_id == "npu":
         return "flm"
     if entry_backend in _BACKEND_TO_PROVIDER:
@@ -1062,9 +1076,21 @@ def catalogs_by_slot(
     }
 
 
+def runs_on_for_model(model: Any) -> list[str]:
+    """Host-backend lanes a registry model can run on (derived; UI 'Runs on').
+
+    Thin public wrapper over :func:`_backend_variants` so callers outside
+    this module (the models-service row serialiser) don't reach for a
+    private symbol. Honors the explicit ``model.provider`` field first,
+    same as every other catalog resolution (see :func:`_backend_variants`).
+    """
+    return _backend_variants(model)
+
+
 __all__ = [
     "available_backends",
     "catalogs_by_slot",
     "get_backend",
     "models_for_capability",
+    "runs_on_for_model",
 ]
