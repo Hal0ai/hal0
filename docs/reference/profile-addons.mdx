@@ -1,0 +1,220 @@
+---
+title: Profile addons — envelope & index contract
+description: "The .hal0profile.json envelope and addons index.json a site serves so an operator can install a profile that does not ship in the seed core — verified against src/hal0/profiles/portable.py, src/hal0/api/routes/profiles.py and scripts/export_addons.py."
+sidebar:
+  order: 75
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 ships a deliberately small **seed profile core**. Everything else is an
+**addon**: a single portable profile, published as one JSON file, installed
+through the dashboard's profile Import.
+
+This page is the contract — the exact wire shapes, who verifies what, and the
+compatibility rules a publisher must respect.
+
+## What an addon is
+
+An addon is **a portable profile envelope and nothing else**:
+
+- **A profile, not an image.** Profiles carry no image reference at all
+  (spec-hw-slot-ownership §3). `ProfileConfig` is a flag bundle plus display
+  facts — `flags`, `mtp`, `device_class`, `backend`, `runner`, `intent`,
+  `quant`, `cloned_from` (`src/hal0/config/schema.py`, `ProfileConfig`).
+- **No secrets, no host paths.** `export_envelope` serializes the profile
+  template only (`src/hal0/profiles/portable.py`).
+- **No models and no slots.** Unlike a stack, a profile references neither, so
+  importing one resolves nothing and downloads nothing.
+- **`runner` is a registry KEY, never an image ref.** When present it must be a
+  key of `RUNNER_IMAGES` (`src/hal0/runners/`). Keys survive image and tag
+  updates; image strings rot, which is why profiles stopped carrying them.
+  A superseded alias is folded to its canonical key on the way in
+  (`hal0.profiles.screen_profile_runner`).
+
+<Aside type="note">
+The addons hal0 publishes itself are the eight tunes pruned out of the seed
+core — `chat-long-context`, `dense`, `moe`, `thinking`, `coding`,
+`chadrock-dense`, `chadrock-moe`, `promptforge`. All eight are llama-server
+tunes and ship `runner` **unset**, so the runtime the slot already resolves
+(Auto) is the one-click correct answer for every one of them.
+</Aside>
+
+## The `.hal0profile.json` envelope
+
+Produced by `hal0.profiles.portable.export_envelope`, and by
+`POST /api/profiles/{name}/export` (`src/hal0/api/routes/profiles.py`).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string | Always `hal0.profile` (`portable.ENVELOPE_KIND`). Import rejects anything else. |
+| `schema_version` | int | Envelope schema. Current: `1` (`PROFILE_SCHEMA_VERSION_CURRENT`). |
+| `hal0_version` | string | The release that produced the file. Provenance only — never gates import. |
+| `exported_at` | string | Caller-stamped timestamp. `export_envelope` has no clock of its own. |
+| `name` | string | Suggested profile name. The importer may override it. |
+| `checksum` | string | `sha256:<hex>` over the **profile body only**. |
+| `profile` | object | The `ProfileConfig` body, `exclude_none` — absent keys mean "unset". |
+
+The checksum covers `profile` and nothing else, so re-exporting the same
+profile yields the same checksum no matter what `exported_at` says
+(`portable._checksum`).
+
+A real published addon, `community/addons/coding.hal0profile.json`, verbatim:
+
+```json
+{
+  "checksum": "sha256:03a7ee5c6752b0efef783f2215de6f2b58260fc7d7635fab991d1a95fb161a09",
+  "exported_at": "2026-09-01T00:00:00Z",
+  "hal0_version": "1.1.0",
+  "kind": "hal0.profile",
+  "name": "coding",
+  "profile": {
+    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj",
+    "intent": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
+    "mtp": false,
+    "quant": ""
+  },
+  "schema_version": 1
+}
+```
+
+## The `index.json` catalog
+
+One index per addon directory. It exists so a catalog UI can render the whole
+listing without fetching eight envelopes, and so a client can tell **before
+downloading** whether it can install a row.
+
+```json
+{
+  "kind": "hal0.addon-index",
+  "schema_version": 1,
+  "addons": [
+    {
+      "name": "coding",
+      "title": "Code-gen workload",
+      "description": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
+      "runtime_family": "llama-server",
+      "runner": null,
+      "checksum": "sha256:03a7ee5c6752b0efef783f2215de6f2b58260fc7d7635fab991d1a95fb161a09",
+      "file": "coding.hal0profile.json",
+      "min_hal0_version": "1.2.0"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | Always `hal0.addon-index`. |
+| `schema_version` | Index schema. Current: `1`. Independent of the envelope's. |
+| `addons[].name` | The profile name, and the index's sort key — rows are sorted by it. |
+| `addons[].title` | The `intent` headline: everything before the first `·` or `(`. |
+| `addons[].description` | The full `intent` string. |
+| `addons[].runtime_family` | From `hal0.profiles._runtime_family` — the same classification the API reports, derived from `runner` > `device_class` > name, never from an image string. |
+| `addons[].runner` | The envelope's `runner` key, or `null` when unset. |
+| `addons[].checksum` | Copied from the envelope. Must match byte-for-byte. |
+| `addons[].file` | Envelope filename, relative to the index. |
+| `addons[].min_hal0_version` | Oldest hal0 release that can install this row. |
+
+`min_hal0_version` is **1.2.0** for every row hal0 publishes. 1.1.0 shipped
+portable profiles but not the import-side `runner` handling, so an envelope
+naming a runner key that release did not know had no defined behaviour there;
+the tolerant import lands in 1.2.0.
+
+## Serving a catalog
+
+An addon site is a **static directory** — no API, no database:
+
+```
+/addons/index.json
+/addons/coding.hal0profile.json
+/addons/thinking.hal0profile.json
+…
+```
+
+Two rules make that safe to cache:
+
+1. **Envelopes are immutable per checksum.** Changing a profile's body changes
+   its checksum, so it is a *new* envelope. Never edit a published file in
+   place and keep its old checksum — every importer that cached the checksum
+   will then report corruption.
+2. **The index is regenerated, never hand-patched.** Adding, changing, or
+   withdrawing an addon means rewriting `index.json` alongside the envelopes,
+   in the same publish.
+
+For the catalog hal0 publishes, both rules are mechanical:
+`scripts/export_addons.py` is the only author of `community/addons/`. It
+derives every envelope from `LEGACY_SEED_PROFILES` with a frozen `exported_at`
+constant (so output is reproducible byte-for-byte), writes the index, and
+deletes orphans. `scripts/export_addons.py --check` exits non-zero when the
+committed catalog is stale, and `tests/community/test_addon_envelopes.py`
+fails the build if the two ever disagree.
+
+## Installing one
+
+In the dashboard: **Profiles → Import**, then paste the envelope JSON or upload
+the `.hal0profile.json` file. The underlying call is
+`POST /api/profiles/import` (`src/hal0/api/routes/profiles.py`):
+
+```json
+{ "envelope": { }, "name": "coding", "dry_run": false, "force": false }
+```
+
+- **Dry run** (`"dry_run": true`) validates the envelope and reports back
+  without writing anything — `valid`, `checksum_ok`, `name`, `schema_version`,
+  and `collides` (whether the target name is already taken). Returns 200.
+- **Commit** creates the profile under `name` and returns the resolved profile
+  item with 201. A commit without a `name` is a 400 `profiles.import_no_name`.
+
+<Aside type="caution">
+The **commit** path verifies the checksum, not just the dry run (#1416). A
+missing or empty `checksum` is still accepted — hand-authored envelopes
+legitimately omit it — but a checksum that is *present and wrong* is a 400
+`profiles.checksum_mismatch`. `"force": true` waives **that check only**; the
+§5/§21.7 flag screen in `ProfileCatalog.create` still applies, so an envelope
+can never back-door a hardware or hal0-managed flag past the guards `POST`
+and `PUT` enforce. A forced import is logged.
+</Aside>
+
+## Compatibility rules
+
+**Envelope schema gate.** `schema_version` greater than the running hal0's
+`PROFILE_SCHEMA_VERSION_CURRENT` is rejected outright — 400
+`profiles.envelope_too_new`, with `got` and `supported` in the error details
+(`hal0.profiles.portable.import_profile`). Older versions are accepted; the
+migration seam is there, but only v1 exists so far. Unknown *envelope* keys are
+ignored (`ProfileEnvelope` is `extra="ignore"`) so a newer producer's additions
+never break an older importer — the inner `ProfileConfig` still forbids unknown
+fields, so a bogus profile key is a hard `profiles.bad_envelope`.
+
+**Unknown `runner`.** A `runner` key the importing box does not have in
+`RUNNER_IMAGES` does **not** fail the import. The key is stripped, the profile
+imports with `runner` unset — i.e. Auto, letting the slot resolve its own
+runtime — and the operator is told: the dry-run preview and the commit response
+both report the stripped key. This is the deliberate ruling for a portable
+artifact: a catalog is published once and installed on boxes with different
+runtime sets, and a flag bundle is still useful without the runtime pin, so a
+missing runner is a **warning, never a blocker**. Setting the runner
+explicitly, by contrast, is a typed write and stays strict — `POST`/`PUT`
+`/api/profiles` reject an unknown key with 422 `profiles.unknown_runner`,
+listing the available keys in `details.available`
+(`hal0.profiles.screen_profile_runner`).
+
+**Name collisions.** Import never overwrites. An existing name is a 409
+`profiles.exists` (`ProfileCatalog.create`); the dry run flags it as `collides`
+first so the UI can offer a different name.
+
+**Flags.** Screened unconditionally on every import, forced or not: a profile
+may not carry slot-owned hardware flags (§5) or hal0-managed args (§21.7).
+Violations are 400 `slot.hardware_flag_denied` / `slot.managed_arg_denied`.
+
+## Publishing your own
+
+1. Author the profile on a box, or generate a draft with
+   `POST /api/profiles/generate`.
+2. Export it: `POST /api/profiles/{name}/export` returns the exact envelope
+   shape above. Save it as `<name>.hal0profile.json`.
+3. Serve the file and an `index.json` row for it from any static host.
+4. Keep the row's `checksum` equal to the envelope's, and set
+   `min_hal0_version` to the oldest release whose import semantics your
+   envelope actually relies on.
