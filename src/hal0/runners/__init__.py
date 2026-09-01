@@ -152,6 +152,15 @@ class Runner:
     #: Carries the lxc105 finding — GGUF forks can reject newer GGUF arch
     #: versions — as a coarse first-class marker for the §4 fit-check to refine.
     format_arch: str | None = None
+    #: Operator-facing display name ("Standard", "PromptForge") — D5 of the
+    #: runtime-cascade spec. UI copy speaks "Runtime <title>", never the key.
+    title: str = ""
+    #: One plain-language line answering "why would I pick this" — never a
+    #: git revision (provenance stays its own field on the API payload).
+    blurb: str = ""
+    #: True for the ONE combined default runtime (rocmfpx) — the only entry
+    #: allowed >1 supported_backends (test-enforced invariant).
+    is_default: bool = False
 
 
 RUNNER_IMAGES: dict[str, Runner] = {
@@ -165,6 +174,9 @@ RUNNER_IMAGES: dict[str, Runner] = {
         None,
         supported_backends=("rocm", "vulkan"),
         format_arch="gguf",
+        title="Standard",
+        blurb="Runs every model type, including FPX quants.",
+        is_default=True,
     ),
     "promptforge": Runner(
         "promptforge",
@@ -187,6 +199,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # vulkan — the existing (device, BINARY) fit-check refuses a
         # gpu-vulkan pairing with no new code.
         format_arch="gguf",
+        title="PromptForge",
+        blurb="Accelerated PromptForge model distributions. ROCm only.",
     ),
     "strix": Runner(
         "strix",
@@ -218,6 +232,11 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # correctness claim.
         supported_backends=("vulkan",),
         format_arch="gguf",
+        title="Strix",
+        blurb=(
+            "Qwen4 experimental support + MTP speculative decode. Vulkan only. "
+            "No FPX quants."
+        ),
     ),
     "cuda": Runner(
         "cuda",
@@ -229,6 +248,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         None,
         supported_backends=("cuda",),
         format_arch="gguf",
+        title="CUDA",
+        blurb="NVIDIA GPUs.",
     ),
     "cpu": Runner(
         "cpu",
@@ -256,6 +277,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "cpu",
         supported_backends=("cpu",),
         format_arch="gguf",
+        title="CPU",
+        blurb="Runs on the host CPU — no GPU required.",
     ),
     "flm": Runner(
         "flm",
@@ -267,6 +290,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "flm",
         supported_backends=("npu",),
         format_arch="flm",
+        title="FastFlowLM",
     ),
     "kokoro": Runner(
         "kokoro",
@@ -278,6 +302,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "kokoro",
         supported_backends=("cpu",),
         format_arch="kokoro",
+        title="Kokoro",
     ),
     "moonshine": Runner(
         "moonshine",
@@ -289,6 +314,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "moonshine",
         supported_backends=("cpu",),
         format_arch="onnx",
+        title="Moonshine",
     ),
     "qwen3tts": Runner(
         "qwen3tts",
@@ -300,6 +326,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "qwen3tts",
         supported_backends=("rocm",),
         format_arch="qwen3tts",
+        title="Qwen3-TTS",
     ),
     "comfyui": Runner(
         "comfyui",
@@ -311,6 +338,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "comfyui",
         supported_backends=("rocm",),
         format_arch="safetensors",
+        title="ComfyUI",
     ),
 }
 

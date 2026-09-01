@@ -226,3 +226,31 @@ def test_canonical_family_folds_vulkanfpx() -> None:
 
 def test_canonical_family_map_only_folds_the_fpx_twin() -> None:
     assert CANONICAL_FAMILY == {"vulkanfpx": "rocmfpx"}
+
+
+# --- display metadata + single-backend invariant (runtime-cascade D2/D5) --- #
+
+
+def test_single_backend_invariant():
+    """D2: the dual-lane privilege belongs solely to the combined default."""
+    for key, runner in RUNNER_IMAGES.items():
+        if key == "rocmfpx":
+            assert len(runner.supported_backends) == 2
+            continue
+        assert len(runner.supported_backends) <= 1, (
+            f"{key} declares {runner.supported_backends}; only rocmfpx may be multi-backend"
+        )
+
+
+def test_llama_server_entries_have_display_metadata():
+    """D5: every llama-server runtime needs an operator-facing name + blurb."""
+    for key, runner in RUNNER_IMAGES.items():
+        if runner.runtime_family != "llama-server":
+            continue
+        assert runner.title, f"{key} has no title"
+        assert runner.blurb, f"{key} has no blurb"
+
+
+def test_exactly_one_default_gpu_runtime():
+    defaults = [k for k, r in RUNNER_IMAGES.items() if r.is_default]
+    assert defaults == ["rocmfpx"]
