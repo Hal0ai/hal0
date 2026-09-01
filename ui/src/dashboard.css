@@ -3653,6 +3653,28 @@ select.npu-sel {
 .pf-textarea { resize: vertical; line-height: 1.5; }
 select.pf-input { cursor: pointer; }
 
+/* Runtime surface (profiles overhaul): the drawer's hint / consequence /
+   pull-affordance stack under the Runtime select, and the Advanced
+   disclosure the quant field moved behind. */
+.pf-hint { font-size: 10.5px; color: var(--fg-4); line-height: 1.45; margin: -4px 0 10px; }
+.pf-hint-warn { color: var(--warn); }
+.pf-consequence {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: -2px 0 12px; padding: 7px 10px; border-radius: var(--rad-sm);
+  font-size: 11.5px; color: var(--info);
+  border: 1px solid var(--info-line); background: var(--info-soft);
+}
+.pf-consequence .pf-btn { padding: 3px 9px; font-size: 10.5px; }
+.pf-pull-err { font-size: 10.5px; color: var(--err); }
+.pf-disc {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 12px 0 2px; border: none; border-top: 1px solid var(--line-soft);
+  background: none; color: var(--fg-3); font-family: inherit; font-size: 12.5px;
+  text-align: left; cursor: pointer;
+}
+.pf-disc:hover { color: var(--fg); }
+.pf-disc-caret { color: var(--fg-4); }
+
 /* backend segmented control */
 .pf-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pf-seg-btn {

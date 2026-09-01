@@ -24,6 +24,8 @@ import {
 } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
+import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
+import { selectedRunnerKey } from './hw-cascade.js'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -85,26 +87,76 @@ function backendOf(p, meta) {
   return 'cpu';
 }
 
-// Runtime select (Task 10 D4): profile.runner is an OPTIONAL RUNNER_IMAGES
-// key — a profile that carries one pins the slot's runtime on apply (the
-// server's profile-wins reconcile, Task 5); the form only offers the
-// llama-server-family runners (rocmfpx/promptforge/strix/cuda/cpu) since
-// those are the generic tune-template's real alternatives — the other
-// runtime families (flm/kokoro/qwen3tts/comfyui) are singleton engines a
-// profile's NAME/device_class already ties it to structurally, never picked
-// through this select.
+// ── runtime vocabulary ───────────────────────────────────────────────────────
+//
+// `profile.runner` is an OPTIONAL RUNNER_IMAGES key (Task 10 D4) — a profile
+// that carries one pins the slot's runtime on apply (the server's profile-wins
+// reconcile, Task 5); an empty one is "Auto", a flags-only tune with no
+// runtime opinion. Display copy is the registry's own (`title`/`blurb` on
+// system-info's `backends` rows), so the profile drawer, the profile card and
+// the slot drawer name a runtime the same way.
+
 const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
-function runnerLaneLabel(r) {
-  const lanes = Array.isArray(r?.supported_backends) ? r.supported_backends : [];
-  return lanes.map((l) => LANE_TITLE[l] || l).join(' + ');
+// One hue per backend lane (dashboard.css --dev-*), so a lane reads the same
+// colour in a chip here as it does on a slot card or a chart legend.
+const LANE_HUE = {
+  rocm: 'var(--dev-rocm)', vulkan: 'var(--dev-vulkan)',
+  cuda: 'var(--dev-cuda)', cpu: 'var(--dev-cpu)',
+};
+// Lane token → the host capability flag gating it (mirrors hw-cascade.js's
+// LANE_HW). A lane with no entry is never hardware-vetoed.
+const LANE_HW = { rocm: 'rocm', vulkan: 'vulkan', cuda: 'cuda' };
+
+// The backends a runtime can actually run on: the §4 fit-check list, falling
+// back to its single declared `backend` on an older system-info payload.
+// Empty = backend-agnostic (nothing to claim).
+function runnerLanes(r) {
+  const sup = r?.supported_backends;
+  if (Array.isArray(sup) && sup.length > 0) return sup;
+  return r?.backend ? [r.backend] : [];
 }
-function llamaServerRunners(backends) {
-  return Object.entries(backends || {})
-    .filter(([, r]) => r?.runtime_family === 'llama-server')
-    .sort(([, a], [, b]) =>
-      (b?.is_default ? 1 : 0) - (a?.is_default ? 1 : 0)
-      || (a?.title || '').localeCompare(b?.title || ''));
+function laneLabel(lanes) {
+  return (lanes || []).map((l) => LANE_TITLE[l] || l).join(' + ');
 }
+
+// Host capability flags for the runtime filter below — mirrors the slot
+// drawer's hostHwFlags (slot-modals.jsx): read from the RAW /api/system-info
+// `hardware` payload (snake_case, nested under gpus[]), NOT the normalized
+// computeCapable/vulkanCapable shape useHardware.ts exposes. Absent hardware
+// (still loading) never vetoes.
+function hostHwFlags(rawHardware) {
+  const gpu0 = rawHardware?.gpus?.[0];
+  return rawHardware
+    ? { rocm: !!gpu0?.compute_capable, vulkan: !!gpu0?.vulkan_capable, cuda: !!gpu0?.compute_capable }
+    : {};
+}
+
+// Runtime options for the profile drawer, in the same row shape hw-cascade's
+// runnerOptions() produces. That function is NOT reused here: its device_class
+// and slot-type filters answer "what can THIS slot launch", and a profile has
+// neither a device nor a slot type — it is a portable tune template, so the
+// list is every runtime the box's registry carries (CPU engines included).
+// The hardware veto DOES apply identically: a runtime whose every lane is
+// infeasible on this box is hidden rather than offered and then rejected.
+function profileRunnerOptions(backends, hw) {
+  const out = [];
+  for (const [key, r] of Object.entries(backends || {})) {
+    if (!r) continue;
+    const lanes = runnerLanes(r);
+    if (hw && lanes.length > 0 && lanes.every((l) => LANE_HW[l] && hw[LANE_HW[l]] === false)) continue;
+    out.push({
+      key,
+      title: r.title || key,
+      blurb: r.blurb || '',
+      lanes,
+      state: r.state,
+      isDefault: !!r.is_default,
+    });
+  }
+  out.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0) || a.title.localeCompare(b.title));
+  return out;
+}
+
 // Runner badge title: the runner's operator-facing name from system-info's
 // backends catalog, falling back to the raw key when the catalog hasn't
 // loaded yet or no longer carries it (deleted/renamed runner).
@@ -120,6 +172,51 @@ function runtimeLabel(p) {
     qwen3tts: 'Qwen3-TTS · slot binary',
     comfyui: 'ComfyUI · slot binary',
   }[p.runtime_family] || 'slot-selected runtime';
+}
+
+// ── inline pull affordance ───────────────────────────────────────────────────
+//
+// "Not pulled" is fixable where it is read (drawer consequence box, card state
+// chip) instead of failing at spawn, through the SAME seam the Runner Images
+// page uses: useRunnerImagePullJob → POST /api/runner-images/{id}/pull.
+// system-info names a runtime's resolved image REF; that route addresses a
+// catalogue ROW id, which images.json may supply independently of the repo
+// path (registry/runner_image_sync.py:475), so the row is matched by repo
+// rather than derived from the ref.
+function splitImageRef(ref) {
+  const s = String(ref || '');
+  const at = s.indexOf('@');
+  const body = at >= 0 ? s.slice(0, at) : s;
+  const lastSlash = body.lastIndexOf('/');
+  const tail = lastSlash >= 0 ? body.slice(lastSlash + 1) : body;
+  const colon = tail.indexOf(':');
+  if (colon < 0) return { repo: body, tag: null };
+  return { repo: body.slice(0, lastSlash + 1) + tail.slice(0, colon), tag: tail.slice(colon + 1) };
+}
+
+export function pullTargetFor(runnerRow, images) {
+  const { repo, tag } = splitImageRef(runnerRow?.image);
+  if (!repo) return null;
+  const row = (images || []).find((i) => i?.image === repo);
+  if (!row) return null;
+  // Only name a tag the catalogue actually knows — the route 404s on any
+  // other, and the row's headline tag is the honest fallback.
+  const known = tag && (row.tag === tag || (row.available_tags || []).includes(tag));
+  return { id: row.id, tag: known ? tag : undefined };
+}
+
+function useRunnerPull(runnerKey, backends) {
+  const imagesQuery = useRunnerImages();
+  const job = useRunnerImagePullJob();
+  const target = pullTargetFor(backends?.[runnerKey], imagesQuery.data?.images);
+  return {
+    target,
+    inFlight: !!job.inFlight,
+    // A failed pull is reported inline and nothing else — it never gates the
+    // profile save (the profile is a template; the image is a separate fact).
+    error: job.error?.message || (target ? null : 'no catalogue entry for this runtime image'),
+    start: () => { if (target) job.start(target.id, target.tag).catch(() => {}); },
+  };
 }
 
 // Card headline. Prefer the server-authored intent; fall back to a pretty
@@ -299,11 +396,30 @@ function warnForm(_form) {
 // shared FormRow. Named ProfileDrawer (not Drawer) to avoid shadowing the
 // primitives.jsx Drawer global. validateForm/warnForm are passed into useForm
 // verbatim so the validation rules stay in this view.
-function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
+// "Pull now" — the inline fix for a not-pulled runtime (panel 11). Its own
+// component so the pull hooks mount only where the affordance renders.
+function RunnerPullButton({ runnerKey, backends }) {
+  const pull = useRunnerPull(runnerKey, backends);
+  return (
+    <>
+      <button type="button" className="pf-btn" onClick={pull.start}
+        disabled={pull.inFlight || !pull.target} data-testid="pf-runtime-pull">
+        {pull.inFlight ? 'Pulling…' : pull.error ? 'Retry pull' : 'Pull now'}
+      </button>
+      {pull.error && !pull.inFlight && (
+        <span className="mono pf-pull-err" data-testid="pf-runtime-pull-err">{pull.error}</span>
+      )}
+    </>
+  );
+}
+
+export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const BACKEND_META = useBackendMeta();
   const systemInfoQuery = useSystemInfo();
-  const runtimeRunners = llamaServerRunners(systemInfoQuery.data?.backends);
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const runtimeOptions = profileRunnerOptions(backends, hostHwFlags(systemInfoQuery.data?.hardware));
+  const [advOpen, setAdvOpen] = useState(false);
   // Seed profiles render the Runtime select disabled (edit-a-copy forks the
   // seed's runner binding verbatim; a subsequent Edit of that custom copy —
   // which is never itself a seed — unlocks it). `isEdit` never lands on a
@@ -351,6 +467,12 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const meta = bk('cpu', BACKEND_META);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
   const nameLen = (form.name || '').length;
+  // '' = Auto; a key = that option; null = a stored key this box's registry
+  // doesn't offer (out-of-vocab — rendered as its own option below).
+  const runtimeSel = selectedRunnerKey({ binary: form.runner || '', options: runtimeOptions });
+  const runtimeUnknown = runtimeSel === null;
+  const runtimeValue = runtimeUnknown ? form.runner : runtimeSel;
+  const selectedRuntime = runtimeSel ? runtimeOptions.find(o => o.key === runtimeSel) : null;
 
   async function submit(e) {
     e.preventDefault();
@@ -447,25 +569,48 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
 
         <div className="mono pf-hint">Hardware and image are selected on the slot.</div>
 
+        {/* Runtime — same dropdown anatomy as the slot drawer's Runtime
+            control (title · lane(s) · install state, blurb underneath), so
+            one vocabulary covers both surfaces. '' = Auto. */}
         <FormRow label="Runtime" sub="optional — pins the slot's engine build on apply">
-          <select className="pf-input mono" value={form.runner || ''} disabled={runtimeLocked}
+          <select className="pf-input mono" value={runtimeValue} disabled={runtimeLocked}
             onChange={e => set('runner', e.target.value)} data-testid="profile-runner">
-            <option value="">— any (flags-only tune) —</option>
-            {runtimeRunners.map(([key, r]) => (
-              <option key={key} value={key}>
-                {r.title || key}{runnerLaneLabel(r) ? ` · ${runnerLaneLabel(r)}` : ''}
+            <option value="">— Auto · no runtime pinned —</option>
+            {/* A persisted key this box's registry no longer carries keeps its
+                own option: the drawer never silently rewrites stored state. */}
+            {runtimeUnknown && (
+              <option value={form.runner}>{form.runner} · not in this box's registry</option>
+            )}
+            {runtimeOptions.map(o => (
+              <option key={o.key} value={o.key}>
+                {o.title}{laneLabel(o.lanes) ? ` · ${laneLabel(o.lanes)}` : ''}
+                {o.state === 'installable' ? ' · not pulled' : ''}
               </option>
             ))}
           </select>
         </FormRow>
+        {selectedRuntime?.blurb && <div className="mono pf-hint">{selectedRuntime.blurb}</div>}
+        {runtimeUnknown && (
+          <div className="mono pf-hint pf-hint-warn" data-testid="pf-runtime-unknown">
+            hal0 has no entry for this runtime — kept because the profile already carries it.
+            Picking anything else drops it for good.
+          </div>
+        )}
+        {selectedRuntime && (
+          <div className="pf-consequence" data-testid="pf-runtime-consequence">
+            <span>
+              {laneLabel(selectedRuntime.lanes)
+                ? `Slots applying this profile move to the ${laneLabel(selectedRuntime.lanes)} lane.`
+                : `Slots applying this profile launch on ${selectedRuntime.title}.`}
+            </span>
+            {selectedRuntime.state === 'installable' && (
+              <RunnerPullButton runnerKey={selectedRuntime.key} backends={backends} />
+            )}
+          </div>
+        )}
         {runtimeLocked && (
           <div className="mono pf-hint">Forked from a seed — its runtime carries over; edit the copy to change it.</div>
         )}
-
-        <FormRow label="Quant" sub="weight format">
-          <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
-            placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
-        </FormRow>
 
         <FormRow label="Flags" sub="appended to the run command"
           error={show('flags') ? errs.flags : null}>
@@ -483,6 +628,22 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
           </button>
         </FormRow>
+
+        {/* Advanced (operator ruling): the main form is name · intent ·
+            runtime · flags · MTP. Quant is a match-only display fact, not
+            something authoring a tune starts from, so it demotes here — same
+            progressive-disclosure idiom as the slot drawer's Advanced
+            section. Still editable, still prefilled on edit/clone/import. */}
+        <button type="button" className="pf-disc" aria-expanded={advOpen}
+          onClick={() => setAdvOpen(o => !o)} data-testid="pf-advanced-toggle">
+          <span className="mono pf-disc-caret">{advOpen ? '▾' : '▸'}</span>Advanced
+        </button>
+        {advOpen && (
+          <FormRow label="Quant" sub="weight format">
+            <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
+              placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
+          </FormRow>
+        )}
       </form>
     </FormDrawer>
   );
