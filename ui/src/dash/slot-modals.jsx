@@ -163,17 +163,27 @@ function laneLabel(option) {
 // hook exposes. Mirrors that same hook's normalizeHardware() derivation
 // (primary GPU's compute_capable/vulkan_capable) so the Hardware group's
 // Runtime select and the Profile row's apply-preview (below) can't disagree
-// about what this box can run. Absent hardware (still loading) never vetoes
-// (hw = {}).
-function hostHwFlags(rawHardware) {
+// about what this box can run.
+//
+// Unknown never vetoes; only an explicit probe answer does. `hw-cascade.js`'s
+// runnerOptions() only hides a runtime when a lane's flag reads explicitly
+// `false` — so this function must never manufacture a `false` it doesn't
+// have evidence for. Two "we don't know" shapes exist and both return `{}`:
+// no `hardware` at all (still loading) and `hardware` present but no
+// `gpus[0]` (a degraded probe, a partial payload, or a probe that came back
+// empty) — the latter used to fall through the `!!gpu0?.…` coercion into
+// `{rocm:false, vulkan:false, cuda:false}`, an explicit-looking veto for a
+// box that was never actually asked, which hid every GPU runtime from the
+// Runtime select (caught by the Task 12 e2e mocks in slot-edit-controls-v3
+// and slot-drawer-profile-v3).
+export function hostHwFlags(rawHardware) {
 	const gpu0 = rawHardware?.gpus?.[0];
-	return rawHardware
-		? {
-				rocm: !!gpu0?.compute_capable,
-				vulkan: !!gpu0?.vulkan_capable,
-				cuda: !!gpu0?.compute_capable,
-			}
-		: {};
+	if (!gpu0) return {};
+	return {
+		rocm: !!gpu0.compute_capable,
+		vulkan: !!gpu0.vulkan_capable,
+		cuda: !!gpu0.compute_capable,
+	};
 }
 
 // ─── Create-slot modal ──────────────────────────────────────────
