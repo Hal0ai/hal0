@@ -1787,6 +1787,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										const supersededByCombinedUpstream = imagePin.includes(
 											"hal0-combined-upstream",
 										);
+										// The one-click fix commits binary="strix" — only offer
+										// it when "strix" is actually a live pick in the SAME
+										// `options` list the Runtime select above renders (already
+										// filtered by device_class/slotType/hw feasibility). Firing
+										// setBinary("strix") when it isn't would land the operator
+										// on an unresolvable "strix · not in this catalog" pick —
+										// worse than the pin they started with.
+										const strixAvailable = options.some(
+											(o) => o.key === "strix",
+										);
 										return (
 											<>
 												<div className="form-row">
@@ -1819,7 +1829,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														<div className="hint">
 															Versions and rollback are managed per-runtime
 															on the{" "}
-															<a href="#runner-images">
+															<a href="#slots/runner-images">
 																Runner Images page
 															</a>
 															.
@@ -1930,20 +1940,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														}}
 													>
 														<span>
-															⚠ Superseded by the Strix runtime
+															⚠{" "}
+															{strixAvailable
+																? "Superseded by the Strix runtime"
+																: "Superseded by the Strix runtime — available after the next update"}
 														</span>
-														<button
-															type="button"
-															className="btn ghost sm"
-															data-testid="slot-hw-supersession-fix"
-															onClick={() => {
-																setBinary("strix");
-																setDevice("gpu-vulkan");
-																setImagePin("");
-															}}
-														>
-															Switch to Strix
-														</button>
+														{strixAvailable && (
+															<button
+																type="button"
+																className="btn ghost sm"
+																data-testid="slot-hw-supersession-fix"
+																onClick={() => {
+																	setBinary("strix");
+																	setDevice("gpu-vulkan");
+																	setImagePin("");
+																}}
+															>
+																Switch to Strix
+															</button>
+														)}
 													</div>
 												)}
 											</>
