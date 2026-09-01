@@ -132,3 +132,61 @@ def test_runner_profile_still_vetoed_cross_class(profile_catalog_fixture) -> Non
     # gpu runtime on a cpu slot stays a veto — crossing device class is a
     # re-create, not an adoption.
     assert not SlotManager._profile_fits_slot("pf", {"type": "llm", "device": "cpu"})
+
+
+def test_profile_fits_slot_unknown_runner_key_returns_false(tmp_hal0_home: str) -> None:
+    # A hand-edited profiles.toml naming a runner that no longer exists (or
+    # never did) must not raise hal0.errors.NotFound out of this predicate —
+    # its only caller in the swap path (apply_preferred_profile) does not
+    # catch it. Unknown key = never adopt.
+    etc_dir = Path(tmp_hal0_home) / "etc" / "hal0"
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    (etc_dir / "profiles.toml").write_text('[profile.pf]\nrunner = "not-a-real-runner"\n')
+    assert SlotManager._profile_fits_slot("pf", {"type": "llm", "device": "gpu-vulkan"}) is False
+
+
+async def test_swap_adopts_runner_carrying_profile_flips_binary_and_device(
+    profile_catalog_fixture, monkeypatch
+) -> None:
+    # Regression for the Task 5/6 review finding: apply_preferred_profile
+    # (the swap path) used to persist ``profile`` alone via a bare
+    # write_slot_toml, leaving ``binary``/``device`` on the old lane — an
+    # incoherent triple. It must now route through the SAME
+    # _reconcile_device_profile the drawer/update_config path uses, so all
+    # three land together in the one write.
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    _register("pf-model", profile="pf")
+    sm = SlotManager()
+    cfg0 = _gpu_vulkan_cfg("g", "pf-model")
+    cfg0["profile"] = "chat"
+    await sm.create("g", cfg0)
+
+    changed = await sm._apply_preferred_profile("g", "pf-model")
+
+    assert changed is True
+    persisted = await sm.get_config("g")
+    assert persisted["profile"] == "pf"
+    assert persisted["binary"] == "promptforge"
+    assert persisted["device"] == "gpu-rocm"  # flipped from gpu-vulkan
+
+
+async def test_swap_keeps_prior_profile_when_runner_infeasible(
+    profile_catalog_fixture, monkeypatch
+) -> None:
+    # kfd-less host: the reconcile raises SlotConfigError for the ROCm-only
+    # "pf" runner. Swap must treat this as "preference doesn't fit" — keep
+    # the slot's current profile/binary/device and NOT raise.
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
+    _register("pf-model-2", profile="pf")
+    sm = SlotManager()
+    cfg0 = _gpu_vulkan_cfg("g", "pf-model-2")
+    cfg0["profile"] = "chat"
+    await sm.create("g", cfg0)
+
+    changed = await sm._apply_preferred_profile("g", "pf-model-2")
+
+    assert changed is False
+    persisted = await sm.get_config("g")
+    assert persisted["profile"] == "chat"
+    assert persisted.get("binary", "") == ""
+    assert persisted["device"] == "gpu-vulkan"
