@@ -48,6 +48,47 @@ function deviceClassOf(device) {
 // entry here (e.g. cpu) is never hardware-vetoed.
 const LANE_HW = { rocm: "rocm", vulkan: "vulkan", cuda: "cuda" };
 
+// Host capability flags for the `hw` filter below, from the RAW
+// /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
+// NOT the normalized computeCapable/vulkanCapable shape useHardware.ts's
+// hook exposes. Mirrors that same hook's normalizeHardware() derivation
+// (primary GPU's compute_capable/vulkan_capable).
+//
+// This lives here, next to the LANE_HW table and runnerOptions() that consume
+// it, because it has THREE callers that must not disagree about what one box
+// can run: the slot drawer's Hardware group (slot-modals.jsx), that drawer's
+// profile apply-preview, and the profile drawer's Runtime select
+// (profiles.jsx). profiles.jsx used to keep a private copy that drifted on
+// both rules below; hw-cascade.js is the one module all three already import,
+// and putting it here avoids an import cycle (slot-modals.jsx imports
+// runtimeChips FROM profiles.jsx, so profiles.jsx cannot import from it).
+//
+// Unknown never vetoes; only an explicit probe answer does. runnerOptions()
+// only hides a runtime when a lane's flag reads explicitly `false` — so this
+// function must never manufacture a `false` it doesn't have evidence for.
+// Two "we don't know" shapes exist and both return `{}`: no `hardware` at all
+// (still loading) and `hardware` present but no `gpus[0]` (a degraded probe,
+// a partial payload, or a probe that came back empty) — the latter used to
+// fall through the `!!gpu0?.…` coercion into `{rocm:false, vulkan:false,
+// cuda:false}`, an explicit-looking veto for a box that was never actually
+// asked, which hid every GPU runtime from the Runtime select (caught by the
+// Task 12 e2e mocks in slot-edit-controls-v3 and slot-drawer-profile-v3).
+export function hostHwFlags(rawHardware) {
+	const gpu0 = rawHardware?.gpus?.[0];
+	if (!gpu0) return {};
+	return {
+		// ROCm feasibility also passes when the top-level `kfd_present` probe
+		// fact is true, even if `compute_capable` (a HOST rocminfo probe) is
+		// false — a box with /dev/kfd but no host rocminfo (containers bring
+		// their own ROCm userland) actively runs ROCm slots, so this must
+		// match the backend's own gate (config_write._reconcile_device_profile
+		// via hal0.providers._gpu.kfd_present), not just the host probe.
+		rocm: !!(gpu0.compute_capable || rawHardware?.kfd_present),
+		vulkan: !!gpu0.vulkan_capable,
+		cuda: !!gpu0.compute_capable,
+	};
+}
+
 /**
  * Enumerate the runner-first Backend dropdown for a slot: one option per
  * runner (not per lane), each carrying the lanes (backends) it can serve.

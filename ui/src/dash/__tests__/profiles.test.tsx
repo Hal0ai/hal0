@@ -163,9 +163,11 @@ function mount(el: React.ReactElement) {
 }
 
 // hw flags ride on the RAW system-info `hardware` payload (gpus[0]
-// compute_capable/vulkan_capable). A PRESENT-but-empty hardware object reads
-// as "no GPU", which vetoes every GPU runtime — so the default fixture is a
-// dual-capable box and the veto gets its own case below.
+// compute_capable/vulkan_capable), translated by hw-cascade.js's shared
+// hostHwFlags. Only an explicit `false` from a probed gpus[0] vetoes a lane;
+// a payload with no gpus[0] reads as "unknown" and vetoes nothing. The
+// default fixture is a dual-capable box; the veto and the two unknown shapes
+// each get their own case below.
 const GPU_HARDWARE = { gpus: [{ compute_capable: true, vulkan_capable: true }] }
 
 beforeEach(() => {
@@ -357,6 +359,37 @@ describe('ProfileDrawer runtime select (U2)', () => {
     )
     const values = Array.from(select(host).querySelectorAll('option')).map((o) => o.value)
     expect(values).toEqual(['', 'kokoro'])
+    act(() => root.unmount())
+  })
+
+  // Parity with the slot drawer's hardware gate (hw-cascade.js hostHwFlags,
+  // covered lane-by-lane in host-hw-flags.test.ts). Both drawers must answer
+  // the same feasibility question about the same box; these two cases are the
+  // ones the profile drawer used to get wrong with its own private copy.
+
+  it('does not veto ROCm-only runtimes on a kfd-present box with no host rocminfo', () => {
+    systemInfoBox.current = {
+      backends: BACKENDS,
+      hardware: { kfd_present: true, gpus: [{ compute_capable: false, vulkan_capable: false }] },
+    }
+    const { host, root } = mount(
+      React.createElement(ProfileDrawer, { mode: 'create', source: undefined, onClose: () => {}, onSaved: () => {} }),
+    )
+    const values = Array.from(select(host).querySelectorAll('option')).map((o) => o.value)
+    expect(values).toContain('promptforge')
+    expect(values).toContain('rocmfpx')
+    // vulkan is still an explicit `false`, so the vulkan-only runtime stays hidden
+    expect(values).not.toContain('strix')
+    act(() => root.unmount())
+  })
+
+  it('treats hardware-present-but-no-gpus[0] as unknown, not as a veto', () => {
+    systemInfoBox.current = { backends: BACKENDS, hardware: {} }
+    const { host, root } = mount(
+      React.createElement(ProfileDrawer, { mode: 'create', source: undefined, onClose: () => {}, onSaved: () => {} }),
+    )
+    const values = Array.from(select(host).querySelectorAll('option')).map((o) => o.value)
+    expect(values).toEqual(['', 'rocmfpx', 'kokoro', 'promptforge', 'strix'])
     act(() => root.unmount())
   })
 

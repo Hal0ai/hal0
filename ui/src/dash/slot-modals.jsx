@@ -22,6 +22,7 @@ import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyRunnerChoice,
 	archFitWarning,
+	hostHwFlags,
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
@@ -165,40 +166,6 @@ function laneLabel(option) {
 	return (option?.lanes || []).map(laneTitle).join(" + ");
 }
 
-// Host capability flags for runnerOptions()'s hw filter, from the RAW
-// /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
-// NOT the normalized computeCapable/vulkanCapable shape useHardware.ts's
-// hook exposes. Mirrors that same hook's normalizeHardware() derivation
-// (primary GPU's compute_capable/vulkan_capable) so the Hardware group's
-// Runtime select and the Profile row's apply-preview (below) can't disagree
-// about what this box can run.
-//
-// Unknown never vetoes; only an explicit probe answer does. `hw-cascade.js`'s
-// runnerOptions() only hides a runtime when a lane's flag reads explicitly
-// `false` — so this function must never manufacture a `false` it doesn't
-// have evidence for. Two "we don't know" shapes exist and both return `{}`:
-// no `hardware` at all (still loading) and `hardware` present but no
-// `gpus[0]` (a degraded probe, a partial payload, or a probe that came back
-// empty) — the latter used to fall through the `!!gpu0?.…` coercion into
-// `{rocm:false, vulkan:false, cuda:false}`, an explicit-looking veto for a
-// box that was never actually asked, which hid every GPU runtime from the
-// Runtime select (caught by the Task 12 e2e mocks in slot-edit-controls-v3
-// and slot-drawer-profile-v3).
-export function hostHwFlags(rawHardware) {
-	const gpu0 = rawHardware?.gpus?.[0];
-	if (!gpu0) return {};
-	return {
-		// ROCm feasibility also passes when the top-level `kfd_present` probe
-		// fact is true, even if `compute_capable` (a HOST rocminfo probe) is
-		// false — a box with /dev/kfd but no host rocminfo (containers bring
-		// their own ROCm userland) actively runs ROCm slots, so this must
-		// match the backend's own gate (config_write._reconcile_device_profile
-		// via hal0.providers._gpu.kfd_present), not just the host probe.
-		rocm: !!(gpu0.compute_capable || rawHardware?.kfd_present),
-		vulkan: !!gpu0.vulkan_capable,
-		cuda: !!gpu0.compute_capable,
-	};
-}
 
 // Concatenate a flag base with an overlay the way the launcher does: the
 // profile's tune is appended AFTER the model tune, and diffFlags' pair map is

@@ -25,7 +25,7 @@ import {
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
-import { selectedRunnerKey } from './hw-cascade.js'
+import { hostHwFlags, selectedRunnerKey } from './hw-cascade.js'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -112,17 +112,11 @@ function laneLabel(lanes) {
   return (lanes || []).map((l) => LANE_TITLE[l] || l).join(' + ');
 }
 
-// Host capability flags for the runtime filter below — mirrors the slot
-// drawer's hostHwFlags (slot-modals.jsx): read from the RAW /api/system-info
-// `hardware` payload (snake_case, nested under gpus[]), NOT the normalized
-// computeCapable/vulkanCapable shape useHardware.ts exposes. Absent hardware
-// (still loading) never vetoes.
-function hostHwFlags(rawHardware) {
-  const gpu0 = rawHardware?.gpus?.[0];
-  return rawHardware
-    ? { rocm: !!gpu0?.compute_capable, vulkan: !!gpu0?.vulkan_capable, cuda: !!gpu0?.compute_capable }
-    : {};
-}
+// Host capability flags come from hw-cascade.js's shared `hostHwFlags` — the
+// same translator the slot drawer uses, so the two drawers cannot answer the
+// feasibility question differently for one box (this file used to keep a
+// private copy, which drifted: it missed the kfd_present ROCm rule and turned
+// a gpus[]-less payload into an explicit all-false veto).
 
 // Runtime options for the profile drawer, in the same row shape hw-cascade's
 // runnerOptions() produces. That function is NOT reused here: its device_class
