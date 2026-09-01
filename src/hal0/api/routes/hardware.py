@@ -928,6 +928,9 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "runtime_family": runner.runtime_family,
             "device_class": runner.device_class,
             "backend": runner.backend,
+            "title": runner.title,
+            "blurb": runner.blurb,
+            "is_default": runner.is_default,
             # Fit-check metadata (spec-hw-slot-ownership §4): the backends this
             # runner image can serve + the GGUF/format arch it accepts (the
             # lxc105 "forks reject newer GGUFs" finding). RUNNER_IMAGES now

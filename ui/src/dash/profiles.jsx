@@ -23,6 +23,7 @@ import {
   useProfileImport,
 } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
+import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -68,7 +69,7 @@ function useBackendMeta() {
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
 
-const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp: false };
+const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp: false, runner: '' };
 
 function bk(name, meta) { return meta[name] || meta.cpu; }
 
@@ -82,6 +83,33 @@ function backendOf(p, meta) {
   if (p.device_class === 'npu') return 'npu';
   if (p.device_class === 'cpu') return 'cpu';
   return 'cpu';
+}
+
+// Runtime select (Task 10 D4): profile.runner is an OPTIONAL RUNNER_IMAGES
+// key — a profile that carries one pins the slot's runtime on apply (the
+// server's profile-wins reconcile, Task 5); the form only offers the
+// llama-server-family runners (rocmfpx/promptforge/strix/cuda/cpu) since
+// those are the generic tune-template's real alternatives — the other
+// runtime families (flm/kokoro/qwen3tts/comfyui) are singleton engines a
+// profile's NAME/device_class already ties it to structurally, never picked
+// through this select.
+const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
+function runnerLaneLabel(r) {
+  const lanes = Array.isArray(r?.supported_backends) ? r.supported_backends : [];
+  return lanes.map((l) => LANE_TITLE[l] || l).join(' + ');
+}
+function llamaServerRunners(backends) {
+  return Object.entries(backends || {})
+    .filter(([, r]) => r?.runtime_family === 'llama-server')
+    .sort(([, a], [, b]) =>
+      (b?.is_default ? 1 : 0) - (a?.is_default ? 1 : 0)
+      || (a?.title || '').localeCompare(b?.title || ''));
+}
+// Runner badge title: the runner's operator-facing name from system-info's
+// backends catalog, falling back to the raw key when the catalog hasn't
+// loaded yet or no longer carries it (deleted/renamed runner).
+function runnerTitleFor(key, backends) {
+  return backends?.[key]?.title || key;
 }
 
 function runtimeLabel(p) {
@@ -131,6 +159,7 @@ function PfRow({ label, value, hue }) {
 function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
   const BACKEND_META = useBackendMeta();
   const meta = bk(backendOf(p, BACKEND_META), BACKEND_META);
+  const systemInfoQuery = useSystemInfo();
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
@@ -150,6 +179,16 @@ function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
           <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
             {runtimeLabel(p)}
           </span>
+          {/* Runtime badge (Task 10 D4): only when the profile pins a runner —
+              reuses this card's own backend hue (`meta.color`, the same dot
+              idiom the chip above and the drawer footer already use) so a
+              runner-carrying profile reads as one family with its backend. */}
+          {p.runner && (
+            <span className="pf-drawer-preview mono" style={{ '--bk': meta.color }}
+              title={`runtime → ${p.runner}`} data-testid={`pf-runner-badge-${p.name}`}>
+              <span className="pf-chip-dot" />{runnerTitleFor(p.runner, systemInfoQuery.data?.backends)}
+            </span>
+          )}
           {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
       </div>
@@ -263,6 +302,14 @@ function warnForm(_form) {
 function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const BACKEND_META = useBackendMeta();
+  const systemInfoQuery = useSystemInfo();
+  const runtimeRunners = llamaServerRunners(systemInfoQuery.data?.backends);
+  // Seed profiles render the Runtime select disabled (edit-a-copy forks the
+  // seed's runner binding verbatim; a subsequent Edit of that custom copy —
+  // which is never itself a seed — unlocks it). `isEdit` never lands on a
+  // seed (ProfileCard only offers Edit-a-copy for seeds — see onClone), so
+  // this only actually gates the 'clone' mode.
+  const runtimeLocked = !!(source && source.seed);
 
   const deriveInitial = () => {
     if (mode === 'create') return { ...BLANK };
@@ -272,6 +319,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       quant: source.quant || '',
       flags: source.flags || '',
       mtp: !!source.mtp,
+      runner: source.runner || '',
     };
     if (mode === 'clone') {
       const suffix = source.seed ? '-custom' : '-copy';
@@ -319,6 +367,7 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       mtp: !!form.mtp,
       intent: form.intent ?? '',
       quant: form.quant ?? '',
+      runner: form.runner || null,
       ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
     };
     try {
@@ -396,7 +445,22 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             runner (RUNNER_IMAGES[slot.binary]); the per-slot escape hatch is
             slot.image_pin in the slot editor. */}
 
-        <div className="mono pf-hint">Hardware, runner binary, and image are selected on the slot.</div>
+        <div className="mono pf-hint">Hardware and Runtime are selected on the slot; versions are managed on the Runner Images page.</div>
+
+        <FormRow label="Runtime" sub="optional — pins the slot's engine build on apply">
+          <select className="pf-input mono" value={form.runner || ''} disabled={runtimeLocked}
+            onChange={e => set('runner', e.target.value)} data-testid="profile-runner">
+            <option value="">— any (flags-only tune) —</option>
+            {runtimeRunners.map(([key, r]) => (
+              <option key={key} value={key}>
+                {r.title || key}{runnerLaneLabel(r) ? ` · ${runnerLaneLabel(r)}` : ''}
+              </option>
+            ))}
+          </select>
+        </FormRow>
+        {runtimeLocked && (
+          <div className="mono pf-hint">Forked from a seed — its runtime carries over; edit the copy to change it.</div>
+        )}
 
         <FormRow label="Quant" sub="weight format">
           <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}

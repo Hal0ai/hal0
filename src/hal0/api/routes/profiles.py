@@ -77,6 +77,10 @@ class ProfileBody(BaseModel):
             "profiles. Selects no runtime — the slot's `device` does."
         ),
     )
+    runner: str | None = Field(
+        default=None,
+        description="Optional runtime (RUNNER_IMAGES key) this profile applies to the slot.",
+    )
     cloned_from: str | None = Field(
         default=None,
         description="Provenance: profile this one was cloned from (informational).",
@@ -143,6 +147,10 @@ class ProfileUpdateBody(BaseModel):
             "stored value unchanged. `cuda` was missing here while ProfileConfig "
             "accepted it, so a CUDA profile 422'd on every PUT — un-editable."
         ),
+    )
+    runner: str | None = Field(
+        default=None,
+        description="Optional runtime (RUNNER_IMAGES key) this profile applies to the slot.",
     )
     intent: str | None = Field(default=None, description="Human label for the card headline.")
     quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
@@ -217,6 +225,7 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
                 mtp=body.mtp,
                 device_class=body.device_class,
                 backend=body.backend,
+                runner=body.runner,
                 cloned_from=body.cloned_from,
                 intent=body.intent,
                 quant=body.quant,
@@ -469,6 +478,7 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
                 mtp=body.mtp,
                 device_class=body.device_class,
                 backend=body.backend,
+                runner=body.runner,
                 intent=body.intent,
                 quant=body.quant,
             ),

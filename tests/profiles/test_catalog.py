@@ -272,3 +272,29 @@ def test_used_by_lists_bound_slots_id_keyed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["chat"].used_by == ("brain",)
     assert by_name["chat"].to_dict()["used_by"] == ["brain"]
+
+
+def test_create_profile_with_runner(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    prof = cat.create("pf-setup", ProfileConfig(flags="-fa on", runner="promptforge"))
+    assert prof.runner == "promptforge"
+    assert cat.resolve("pf-setup").to_dict()["runner"] == "promptforge"
+
+
+def test_create_profile_with_alias_runner_folds(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    prof = cat.create("legacy", ProfileConfig(flags="", runner="vulkanfpx"))
+    assert prof.runner == "rocmfpx"  # RUNNER_ALIASES folded at save
+
+
+def test_create_profile_unknown_runner_rejected(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    with pytest.raises(UnprocessableEntity) as exc:
+        cat.create("bad", ProfileConfig(flags="", runner="nope"))
+    assert exc.value.code == "profiles.unknown_runner"
+
+
+def test_profile_without_runner_unchanged(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    prof = cat.create("plain", ProfileConfig(flags="-fa on"))
+    assert prof.runner is None

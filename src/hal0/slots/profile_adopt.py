@@ -79,11 +79,28 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
         )
         if resolved.device_class is not None and resolved.device_class != slot_class:
             return False
+        if resolved.runner:
+            from hal0.runners import get_runner
+
+            try:
+                runner = get_runner(resolved.runner)
+            except Exception:
+                # Unknown runner key (hand-edited profiles.toml, or a runner
+                # since removed from the registry) — never adopt it rather
+                # than let hal0.errors.NotFound escape past this predicate's
+                # callers, which only catch SlotConfigError.
+                return False
+            if runner.device_class != slot_class:
+                return False
         if resolved.backend:
             from hal0.model_meta import device_to_backend
 
             slot_backend = device_to_backend(device)[1]
-            if slot_backend and slot_backend != resolved.backend:
+            # A runner-carrying profile may flip the GPU lane at write time
+            # (runtime-cascade D4: profile wins within a device class — see
+            # hal0.slots.config_write._reconcile_device_profile) — only a
+            # runner-LESS backend hint stays a veto.
+            if slot_backend and slot_backend != resolved.backend and not resolved.runner:
                 return False
     return True
 
@@ -262,6 +279,30 @@ async def apply_preferred_profile(host: ProfileAdoptHost, slot_name: str, model_
             )
             return False
         cfg_dict = {**cfg_dict, "profile": preferred}
+        # Route through the SAME reconcile the drawer/update_config path uses
+        # (D4: profile wins) so a runner-carrying, cross-lane profile that
+        # passed profile_fits_slot's device-CLASS check doesn't persist a
+        # bare `profile=` while leaving `device`/`binary` on the old lane —
+        # the reconcile flips both together, in this one write. A profile
+        # that fits by class but turns out physically infeasible (e.g. a
+        # ROCm runtime with no /dev/kfd) is treated the same as "doesn't
+        # fit": keep the slot's current profile and skip the swap-time
+        # adoption rather than raising out of SlotManager.swap().
+        from hal0.slots.config_write import _reconcile_device_profile
+
+        try:
+            _reconcile_device_profile(cfg_dict, changed={"profile"})
+        except SlotConfigError as exc:
+            log.info(
+                "slot.preferred_profile_infeasible",
+                extra={
+                    "slot": slot_name,
+                    "model_id": model_id,
+                    "profile": preferred,
+                    "reason": str(exc),
+                },
+            )
+            return False
         try:
             write_slot_toml(host._config_file(slot_name), cfg_dict)
         except OSError as exc:

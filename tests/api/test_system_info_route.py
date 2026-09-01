@@ -97,6 +97,20 @@ def test_system_info_backends_expose_fit_check_metadata(
         assert entry["supported_backends"], f"{key} declares no supported_backends"
 
 
+def test_system_info_backend_display_metadata(
+    isolated_client: TestClient,
+) -> None:
+    """runtime-cascade D2/D5: each backend exposes the runner registry's
+    operator-facing title/blurb/is_default so the dashboard can present
+    runtimes by human name instead of the registry key."""
+    payload = isolated_client.get("/api/system-info").json()
+    rocmfpx = payload["backends"]["rocmfpx"]
+    assert rocmfpx["title"] == "Standard"
+    assert rocmfpx["blurb"]
+    assert rocmfpx["is_default"] is True
+    assert payload["backends"]["promptforge"]["is_default"] is False
+
+
 def test_system_info_matches_hardware_and_features_endpoints(
     isolated_client: TestClient,
 ) -> None:

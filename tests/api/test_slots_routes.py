@@ -2746,11 +2746,27 @@ def test_arch_fit_warning_paths() -> None:
 def test_arch_fit_warning_names_the_catalogued_alternative() -> None:
     from hal0.api.routes.slots import _arch_fit_warning
 
+    # A ref with no matching RUNNER_IMAGES entry (the retired combined-upstream
+    # pin-only lineage, ADR-0006) falls back to naming the bare ref.
     ref = "ghcr.io/hal0ai/hal0-combined-upstream:0829"
     warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None, alternative_ref=ref)
     assert warn is not None
     assert ref in warn
-    assert "image_pin" in warn
+    assert "Runtime" in warn
+    assert "image_pin" not in warn
+
+
+def test_arch_fit_warning_names_the_runtime_title_when_catalogued() -> None:
+    from hal0.api.routes.slots import _arch_fit_warning
+
+    # The real #2118 shape (ADR-0006): the alternative ref IS a RUNNER_IMAGES
+    # entry (strix), so the hint names its title instead of the bare ref.
+    ref = "ghcr.io/hal0ai/hal0-strix-vulkan:0831"
+    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None, alternative_ref=ref)
+    assert warn is not None
+    assert "Strix" in warn
+    assert "Runtime" in warn
+    assert ref not in warn
 
 
 def test_merged_model_default_shapes() -> None:

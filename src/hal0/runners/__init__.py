@@ -169,6 +169,15 @@ class Runner:
     #: image bump that removes it. Empty ``()`` = no known gaps (which is
     #: NOT a support guarantee — the fit-check stays a WARN, never a block).
     unsupported_archs: tuple[str, ...] = ()
+    #: Operator-facing display name ("Standard", "PromptForge") — D5 of the
+    #: runtime-cascade spec. UI copy speaks "Runtime <title>", never the key.
+    title: str = ""
+    #: One plain-language line answering "why would I pick this" — never a
+    #: git revision (provenance stays its own field on the API payload).
+    blurb: str = ""
+    #: True for the ONE combined default runtime (rocmfpx) — the only entry
+    #: allowed >1 supported_backends (test-enforced invariant).
+    is_default: bool = False
 
 
 RUNNER_IMAGES: dict[str, Runner] = {
@@ -187,9 +196,12 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # this image builds from charlie12345/ROCmFPX @ c49ebdbd (2026-08-22),
         # which predates the merge — the model fails at load with
         # `unknown model architecture: 'qwen4exp'`. Serving it needs the
-        # pin-only combined-upstream image (see ARCH_ALTERNATIVE_IMAGES).
+        # strix runner (Vulkan-only, see ARCH_ALTERNATIVE_IMAGES).
         # DELETE this entry when the fork syncs qwen4exp (#2118's checklist).
         unsupported_archs=("qwen4exp",),
+        title="Standard",
+        blurb="Runs every model type, including FPX quants.",
+        is_default=True,
     ),
     "promptforge": Runner(
         "promptforge",
@@ -212,6 +224,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # vulkan — the existing (device, BINARY) fit-check refuses a
         # gpu-vulkan pairing with no new code.
         format_arch="gguf",
+        title="PromptForge",
+        blurb="Accelerated PromptForge model distributions. ROCm only.",
     ),
     "strix": Runner(
         "strix",
@@ -243,6 +257,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # correctness claim.
         supported_backends=("vulkan",),
         format_arch="gguf",
+        title="Strix",
+        blurb=("Qwen4 experimental support + MTP speculative decode. Vulkan only. No FPX quants."),
     ),
     "cuda": Runner(
         "cuda",
@@ -254,6 +270,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         None,
         supported_backends=("cuda",),
         format_arch="gguf",
+        title="CUDA",
+        blurb="NVIDIA GPUs.",
     ),
     "cpu": Runner(
         "cpu",
@@ -281,6 +299,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "cpu",
         supported_backends=("cpu",),
         format_arch="gguf",
+        title="CPU",
+        blurb="Runs on the host CPU — no GPU required.",
     ),
     "flm": Runner(
         "flm",
@@ -292,6 +312,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "flm",
         supported_backends=("npu",),
         format_arch="flm",
+        title="FastFlowLM",
     ),
     "kokoro": Runner(
         "kokoro",
@@ -303,6 +324,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "kokoro",
         supported_backends=("cpu",),
         format_arch="kokoro",
+        title="Kokoro",
     ),
     "moonshine": Runner(
         "moonshine",
@@ -314,6 +336,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "moonshine",
         supported_backends=("cpu",),
         format_arch="onnx",
+        title="Moonshine",
     ),
     "qwen3tts": Runner(
         "qwen3tts",
@@ -325,6 +348,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "qwen3tts",
         supported_backends=("rocm",),
         format_arch="qwen3tts",
+        title="Qwen3-TTS",
     ),
     "comfyui": Runner(
         "comfyui",
@@ -336,6 +360,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "comfyui",
         supported_backends=("rocm",),
         format_arch="safetensors",
+        title="ComfyUI",
     ),
 }
 
@@ -357,13 +382,13 @@ RUNNER_ALIASES: dict[str, str] = {"vulkanfpx": "rocmfpx"}
 #: GHCR repo path with the host stripped) of an image that IS known to load
 #: it. Consulted by the model↔runner arch fit-check so the WARN can name a
 #: concrete escape hatch (the slot's ``image_pin``) instead of a dead end.
-#: ``qwen4exp`` → the pin-only combined-upstream variant (pristine upstream
-#: llama.cpp @ c841aeeb, no fork patches — packaging/runner/upstream/
-#: manifest.toml, hal0#2118). The hint only renders when the catalogue
-#: actually carries the id, so a box that never synced it degrades to the
-#: bare warning. Entries retire together with the matching
+#: ``qwen4exp`` → the strix runner's image (Vulkan-only registry runner,
+#: ADR-0006 successor to the retired pin-only combined-upstream variant —
+#: packaging/runner/strix/, hal0#2118/#2182). The hint only renders when the
+#: catalogue actually carries the id, so a box that never synced it degrades
+#: to the bare warning. Entries retire together with the matching
 #: ``unsupported_archs`` entry.
-ARCH_ALTERNATIVE_IMAGES: dict[str, str] = {"qwen4exp": "hal0ai/hal0-combined-upstream"}
+ARCH_ALTERNATIVE_IMAGES: dict[str, str] = {"qwen4exp": "hal0ai/hal0-strix-vulkan"}
 
 
 def runner_supports_arch(runner: Runner, arch: str | None) -> bool:

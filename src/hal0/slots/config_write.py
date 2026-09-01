@@ -115,12 +115,56 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
     from hal0.config.loader import load_profiles_config
 
     prof = load_profiles_config().profile.get(profile_name)
+
+    from hal0.config.schema import map_backend_to_device
+
+    prof_runner = getattr(prof, "runner", None) if prof is not None else None
+    if prof_runner and "profile" in changed:
+        from hal0.runners import canonical_runner_key, get_runner
+
+        key = canonical_runner_key(prof_runner)
+        try:
+            runner = get_runner(key)
+        except Exception:
+            return  # unknown key in a hand-edited profiles.toml: leave slot alone
+        sups = runner.supported_backends
+        new_device = None
+        if len(sups) == 1:
+            lane = sups[0]
+            if lane == "rocm":
+                # Physical feasibility gate (D4): a ROCm-only runtime on a
+                # kfd-less host can never spawn — fail the apply with a plain
+                # message instead of writing a doomed config. Vulkan-lane
+                # feasibility stays with the existing spawn-time
+                # VULKAN_CAPABLE_IMAGE_REFS gate. Checked BEFORE any mutation
+                # so an infeasible apply leaves ``scalars`` untouched (no
+                # partial write).
+                from hal0.providers._gpu import kfd_present
+
+                if not kfd_present():
+                    raise SlotConfigError(
+                        f"profile {profile_name!r} needs the {runner.title or key} "
+                        "runtime (ROCm), but this host has no /dev/kfd — "
+                        "pick a Vulkan-capable runtime or profile",
+                        details={"profile": profile_name, "runner": key, "lane": lane},
+                    )
+                new_device = map_backend_to_device(lane)
+            elif lane in ("vulkan", "cuda"):
+                new_device = map_backend_to_device(lane)
+            elif runner.device_class == "cpu":
+                new_device = "cpu"
+        # Every write below happens only after the feasibility gate above has
+        # already passed (or there was nothing to gate) — no partial write.
+        scalars["binary"] = key
+        if new_device is not None:
+            scalars["device"] = new_device
+        return  # runner adoption supersedes the backend-hint reconcile
+
     prof_backend = getattr(prof, "backend", None) if prof is not None else None
     if not prof_backend:
         # Non-GPU profile (or unknown profile with no backend) — leave alone.
         return
 
-    from hal0.config.schema import map_backend_to_device
     from hal0.model_meta import device_to_backend
 
     device = scalars.get("device")
