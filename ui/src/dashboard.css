@@ -3701,6 +3701,18 @@ button.pf-state:disabled { cursor: default; opacity: 0.65; }
 .pf-disc:hover { color: var(--fg); }
 .pf-disc-caret { color: var(--fg-4); }
 
+/* Slot drawer — profile apply preview (`slot-profile-preview`). Every
+   consequence of "profile wins" enumerated before Save: runtime, lane, the
+   flags the tune replaces, the restart. Info tone, not a warning: nothing
+   here is a problem, it is what Save will do. Lane chips reuse .pf-be. */
+.sl-apply {
+  margin-top: 6px; padding: 7px 10px; border-radius: var(--rad-sm);
+  color: var(--info); border: 1px solid var(--info-line); background: var(--info-soft);
+}
+.sl-apply-line { margin-top: 2px; line-height: 1.5; }
+.sl-apply-line b { font-weight: 600; }
+.sl-apply .pf-be-row { margin-left: 6px; vertical-align: middle; }
+
 /* backend segmented control */
 .pf-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pf-seg-btn {
