@@ -317,6 +317,17 @@ class Model(BaseModel):
         ),
     )
 
+    provider: str | None = Field(
+        default=None,
+        description=(
+            "Engine identity (a hal0.model_meta.RUNTIME_FAMILIES member). "
+            "None means 'derive' — resolve from the legacy backend tags via "
+            "hal0.model_meta.derive_model_provider. Persists in the registry "
+            "row's ``extra`` JSON blob (repository.py) — no schema migration, "
+            "same fold as capability_flags/modalities_override."
+        ),
+    )
+
     capability_flags: ModelCapabilities = Field(
         default_factory=ModelCapabilities,
         description=(

@@ -47,6 +47,11 @@ _CONTEXT_LENGTH_KEY = "context_length"
 _CAPABILITY_FLAGS_EXTRA_KEY = "_capability_flags"
 _MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 
+#: Explicit engine identity (:attr:`hal0.registry.model.Model.provider`) —
+#: same "no dedicated column" treatment as the two keys above. Only written
+#: when set (None means "derive"), mirroring _DEFAULT_EXTRA_KEY's rule.
+_PROVIDER_EXTRA_KEY = "_provider"
+
 #: spec-hw-slot-ownership §1: ``ModelDefaults.enable_thinking`` / ``.vision``
 #: are tri-state (None/False/True) reasoning + vision-projector owners, moved
 #: onto the model from the slot. Like ``capability_flags`` /
@@ -164,6 +169,9 @@ def model_to_row(
         metadata[_CAPABILITY_FLAGS_EXTRA_KEY] = capability_flags
     if model.modalities_override is not None:
         metadata[_MODALITIES_OVERRIDE_EXTRA_KEY] = [m.value for m in model.modalities_override]
+    # Explicit engine identity — only stamped when set (None means "derive").
+    if model.provider is not None:
+        metadata[_PROVIDER_EXTRA_KEY] = model.provider
     # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
     if model.default:
         metadata[_DEFAULT_EXTRA_KEY] = True
@@ -410,6 +418,8 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     modalities_override = (
         list(raw_modalities_override) if isinstance(raw_modalities_override, list) else None
     )
+    raw_provider = metadata.pop(_PROVIDER_EXTRA_KEY, None)
+    provider = raw_provider if isinstance(raw_provider, str) else None
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
     raw_enable_thinking = metadata.pop(_ENABLE_THINKING_EXTRA_KEY, None)
     enable_thinking = raw_enable_thinking if isinstance(raw_enable_thinking, bool) else None
@@ -444,6 +454,7 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         # drop deferred post-1.0); the deploy-window fold reads them directly.
         capability_flags=capability_flags,
         modalities_override=modalities_override,
+        provider=provider,
         defaults=defaults,
         default=default,
         metadata=metadata,

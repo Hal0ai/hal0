@@ -600,9 +600,9 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
     Body accepts any subset of: ``name``, ``capabilities``, ``backends``,
-    ``defaults`` (nested ``ModelDefaults``), plus the legacy fields
-    (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
-    ``changed_fields`` so the footer ticker can render a "you edited X"
+    ``provider``, ``defaults`` (nested ``ModelDefaults``), plus the legacy
+    fields (``license``, ``tags``, ``metadata`` …). Emits ``model.updated``
+    with ``changed_fields`` so the footer ticker can render a "you edited X"
     chip.
 
     ``defaults`` and ``capability_flags`` are the two tables where "any
@@ -620,6 +620,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         outside the launchable range (#1414).
       * ``400 slot.hardware_flag_denied`` / ``400 slot.managed_arg_denied`` —
         ``defaults.extra_args`` reaching for slot- or authority-owned flags.
+      * ``400 model.provider_invalid`` — ``provider`` not a
+        ``hal0.model_meta.RUNTIME_FAMILIES`` member.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry

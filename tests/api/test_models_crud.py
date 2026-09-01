@@ -1070,3 +1070,29 @@ def test_put_clearing_mmproj_and_vision_together_accepted(
     )
     assert r.status_code == 200, r.text
     assert r.json()["mmproj"] is None
+
+
+# ── Task 1: Model.provider explicit engine identity ─────────────────────────
+
+
+def test_update_model_provider_valid_and_invalid(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """PUT accepts a RUNTIME_FAMILIES member into ``provider``, it survives
+    the extra-JSON round trip, and a non-member is rejected with
+    ``model.provider_invalid`` (screened before the row is touched)."""
+    fpath = crud_models_root / "prov1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "prov1", "path": str(fpath)})
+
+    r = crud_client.put("/api/models/prov1", json={"provider": "kokoro"})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "kokoro"
+
+    r2 = crud_client.get("/api/models/prov1")
+    assert r2.json()["provider"] == "kokoro"  # survives the extra-JSON round trip
+
+    bad = crud_client.put("/api/models/prov1", json={"provider": "whispercpp"})
+    assert bad.status_code == 400, bad.text
+    assert bad.json()["error"]["code"] == "model.provider_invalid"

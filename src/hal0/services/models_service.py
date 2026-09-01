@@ -1457,6 +1457,9 @@ def screen_model_write(
       worker — stay editable, so an unrelated rename does not have to fix an
       invariant it never violated. Every write that could CREATE or PRESERVE the
       broken pairing is still screened.
+    * ``provider`` — must be a ``hal0.model_meta.RUNTIME_FAMILIES`` member when
+      present, else ``400 model.provider_invalid``. ``None``/absent means
+      "derive" and is never screened here.
 
     spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
     runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
@@ -1503,6 +1506,16 @@ def screen_model_write(
         # managed-arg one — ``-ngl`` is in both sets.
         _deny_slot_hardware_flags(tokens, segment=seg)
         _deny_managed_flags(tokens, segment=seg)
+
+    provider = body.get("provider")
+    if provider is not None:
+        from hal0.model_meta import RUNTIME_FAMILIES
+
+        if provider not in RUNTIME_FAMILIES:
+            raise BadRequest(
+                f"provider must be one of {', '.join(RUNTIME_FAMILIES)} (got {provider!r})",
+                code="model.provider_invalid",
+            )
 
 
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was

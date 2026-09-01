@@ -22,9 +22,11 @@ from typing import Any
 import pytest
 
 from hal0.model_meta import (
+    RUNTIME_FAMILIES,
     canonical_device,
     capability_from_filename,
     classify,
+    derive_model_provider,
     device_to_backend,
     is_resolvable,
     labels_of,
@@ -441,3 +443,30 @@ def test_model_is_mtp_eligible(model_info: dict[str, Any], expected: bool) -> No
     from hal0.model_meta import model_is_mtp_eligible
 
     assert model_is_mtp_eligible(model_info) is expected
+
+
+# ── derive_model_provider ────────────────────────────────────────────────────
+
+
+def test_derive_model_provider_specialty_tags() -> None:
+    assert derive_model_provider(["moonshine"]) == "moonshine"
+    assert derive_model_provider(["kokoro"]) == "kokoro"
+    assert derive_model_provider(["comfyui"]) == "comfyui"
+    assert derive_model_provider(["qwen3tts"]) == "qwen3tts"
+    assert derive_model_provider(["npu"]) == "flm"
+    assert derive_model_provider(["flm"]) == "flm"
+
+
+def test_derive_model_provider_llama_lanes_and_defaults() -> None:
+    # GPU lane tags are lanes, not engines — they derive llama-server.
+    assert derive_model_provider(["rocm", "vulkan"]) == "llama-server"
+    assert derive_model_provider(["cpu"]) == "llama-server"
+    assert derive_model_provider([]) == "llama-server"
+    assert derive_model_provider(None) == "llama-server"
+    # First specialty tag wins even mixed with lanes.
+    assert derive_model_provider(["vulkan", "moonshine"]) == "moonshine"
+
+
+def test_derive_model_provider_total_over_families() -> None:
+    for fam in RUNTIME_FAMILIES:
+        assert derive_model_provider([fam]) in RUNTIME_FAMILIES

@@ -79,7 +79,7 @@ Unknown-value policy — ONE documented rule per translation direction
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -191,6 +191,37 @@ RUNTIME_FAMILIES: tuple[str, ...] = (
     "moonshine",
     "comfyui",
 )
+
+#: Legacy backend/tag → runtime family, for :func:`derive_model_provider`.
+#: Lane tags (rocm/vulkan/cuda/cpu) are deliberately absent — they are
+#: hardware lanes, not engines, and fall through to the llama-server default.
+_PROVIDER_TAGS: dict[str, str] = {
+    "flm": "flm",
+    "npu": "flm",
+    "moonshine": "moonshine",
+    "kokoro": "kokoro",
+    "comfyui": "comfyui",
+    "qwen3tts": "qwen3tts",
+}
+
+
+def derive_model_provider(backends: Sequence[str] | None) -> str:
+    """Engine identity for a registry model from its legacy backend tags.
+
+    Lane tags (rocm/vulkan/cuda/cpu) are hardware lanes, not engines — they
+    resolve to the llama-server default. Mirrors capabilities.catalog's
+    step-3 resolution for registry rows; curated-only tokens (whispercpp,
+    vibevoice) never appear on registry models.
+
+    Total: always returns a :data:`RUNTIME_FAMILIES` member, even for an
+    empty/``None`` input or an unrecognised tag set.
+    """
+    for tag in backends or ():
+        fam = _PROVIDER_TAGS.get(str(tag).strip().lower())
+        if fam:
+            return fam
+    return "llama-server"
+
 
 #: Legacy ``backend`` token → canonical ``device``. Used by the SlotConfig
 #: and CapabilitySelection promote-then-drop shims (auto-promote a legacy
@@ -667,6 +698,7 @@ __all__ = [
     "canonical_device",
     "capability_from_filename",
     "classify",
+    "derive_model_provider",
     "device_to_backend",
     "is_resolvable",
     "labels_of",
