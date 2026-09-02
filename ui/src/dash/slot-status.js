@@ -366,6 +366,49 @@ export function breakerChip(slot, elapsedS = 0) {
 }
 
 /**
+ * Chip for the slot drawer's Advanced "Image" row (image-dedupe task).
+ *
+ * The drawer used to render this as a second, separate row ("Image status")
+ * repeating the same ref the resolved-Image row above it already showed,
+ * plus a " · #id" suffix — two stacked rows, same digest, both overflowing
+ * the drawer. This collapses that second row's JOB (what is the container
+ * actually running, right now, vs. what would launch on next (re)start)
+ * into a small chip that decorates the single remaining Image row.
+ *
+ *   not running                       → null (nothing running to compare)
+ *   actual image unknown (null/'')    → null (don't know ≠ don't match)
+ *   actual === resolved               → "live"            (ok / green)
+ *   actual !== resolved (both known)  → "restart pending"  (warn / amber)
+ *
+ * @param {string|null|undefined} actualImage - the ref backing the slot's
+ *   RUNNING container right now (actual_image / image_pin / image
+ *   precedence — see slot-modals.jsx).
+ * @param {string|null|undefined} resolvedRef - the ref the drawer resolves
+ *   to right now (a debug pin, else the picked Runtime's release image).
+ * @param {string} slotButtonState - "off" | "running" | "transitional",
+ *   from slotButtonPhase(slot).
+ * @returns {{cls: string, label: string, tooltip: string}|null}
+ */
+export function imageLiveState(actualImage, resolvedRef, slotButtonState) {
+  if (slotButtonState !== "running") return null;
+  if (!actualImage) return null;
+  if (actualImage === resolvedRef) {
+    return {
+      cls: "chip ok",
+      label: "live",
+      tooltip: "The running container is already on this exact image.",
+    };
+  }
+  return {
+    cls: "chip warn",
+    label: "restart pending",
+    tooltip:
+      `The running container still uses ${actualImage} — it switches to ` +
+      `this resolved image on the slot's next restart.`,
+  };
+}
+
+/**
  * Project slotPhase() → stateChipClass-compatible CSS class.
  * Used in slot-modals.jsx to color lifecycle state chips.
  */

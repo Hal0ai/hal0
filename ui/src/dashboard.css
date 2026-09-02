@@ -149,6 +149,12 @@ a { color: inherit; text-decoration: none; }
 .mono {
   font-family: var(--jbm);
   font-feature-settings: "zero" 1, "ss02" 1, "calt" 0;
+  /* Long refs (image digests, resolved commands) must wrap inside whatever
+     panel/drawer they sit in rather than push it wider — the slot drawer's
+     Advanced image row (image-dedupe) is the case that surfaced this, but
+     the fix belongs on the class every mono ref span already shares. */
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 .num { font-variant-numeric: tabular-nums; font-feature-settings: "zero" 1, "tnum" 1; }
 
