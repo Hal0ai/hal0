@@ -89,7 +89,7 @@ export function findNewSlotHardwareFlags(text, storedText = "") {
 // Where each managed flag is actually controlled from — surfaced in the inline
 // rejection so the operator knows why it's off-limits and where to set it.
 export const MANAGED_FLAG_SOURCE = {
-  "--model": "the model's on-disk path (Source · re-pull coords)",
+  "--model": "the model's on-disk path (Source — repo · file · mmproj · paths)",
   "--ctx-size": "the context_size field",
   "--host": "the server bind host (authority-owned)",
   "--port": "PortAuthority (shown read-only on the slot)",
@@ -149,10 +149,73 @@ function canonManaged(flag) {
   return MANAGED_SHORT[flag] || flag;
 }
 
+// Short → long canonicalisation for llama-server's own flag spellings. Mirrors
+// hal0.slots.argv.FLAG_ALIASES verbatim (kept in sync by
+// tests/ui_contracts/test_flag_aliases_mirror.py, which parses this literal
+// as JSON and compares it against the server dict). Written as strict JSON
+// (double-quoted keys/values, no trailing comma) so that parse holds.
+export const FLAG_ALIASES = {
+  "-b": "--batch-size",
+  "-ub": "--ubatch-size",
+  "-ngl": "--n-gpu-layers",
+  "-ctk": "--cache-type-k",
+  "-ctv": "--cache-type-v",
+  "-t": "--threads",
+  "-tb": "--threads-batch",
+  "-fa": "--flash-attn",
+  "-dev": "--device",
+  "-sm": "--split-mode",
+  "-c": "--ctx-size",
+  "-ts": "--tensor-split",
+  "-mg": "--main-gpu",
+  "-np": "--parallel",
+  "-kvu": "--kv-unified",
+  "-ngld": "--n-gpu-layers-draft"
+};
+
+// Fold a flag spelling onto its canonical long form via FLAG_ALIASES, or
+// return it unchanged when it isn't a known short alias (already long, or an
+// unrecognised flag entirely).
+export function canonFlag(flag) {
+  return FLAG_ALIASES[flag] || flag;
+}
+
+// The category a canonical (long) flag belongs to in the model drawer's
+// grouped flags editor. Seeded from the flags the repo's own seed profiles +
+// panel 03 use; anything absent here falls through to "template-misc" in
+// groupFlagPairs. Keyed by canonical long name — callers fold through
+// canonFlag before looking up.
+export const FLAG_CATEGORIES = {
+  "--temp": "sampling",
+  "--top-p": "sampling",
+  "--top-k": "sampling",
+  "--min-p": "sampling",
+  "--repeat-penalty": "sampling",
+  "--presence-penalty": "sampling",
+  "--frequency-penalty": "sampling",
+  "--flash-attn": "cache-kv",
+  "--cache-type-k": "cache-kv",
+  "--cache-type-v": "cache-kv",
+  "--cache-reuse": "cache-kv",
+  "--batch-size": "memory-batch",
+  "--ubatch-size": "memory-batch",
+  "--no-mmap": "memory-batch",
+  "--mlock": "memory-batch",
+  "--parallel": "memory-batch",
+};
+
+// Display order + labels for the model drawer's flag-category sections.
+export const CATEGORY_ORDER = [
+  { id: "sampling", label: "Sampling" },
+  { id: "cache-kv", label: "Cache · KV" },
+  { id: "memory-batch", label: "Memory · batch" },
+  { id: "template-misc", label: "Template · misc" },
+];
+
 // Group a flat token list into { flag, value } pairs (a flag consumes the next
 // token as its value iff that token isn't itself a flag). Bare positionals are
 // dropped from the pair view (they never carry a managed key).
-function pairs(tokens) {
+export function flagPairs(tokens) {
   const out = [];
   let i = 0;
   while (i < tokens.length) {
@@ -211,8 +274,8 @@ export function highlightSegments(text) {
 //   changed:   [{ flag, from, to }] same flag, different value
 //   unchanged: number             identical pairs
 export function diffFlags(modelText, profileText) {
-  const mp = pairs(tokenizeFlags(modelText).tokens);
-  const pp = pairs(tokenizeFlags(profileText).tokens);
+  const mp = flagPairs(tokenizeFlags(modelText).tokens);
+  const pp = flagPairs(tokenizeFlags(profileText).tokens);
   const key = (p) => p.canon;
   const pByFlag = new Map();
   for (const p of pp) pByFlag.set(key(p), p);
@@ -244,4 +307,153 @@ export function diffFlags(modelText, profileText) {
 export function flagsEquivalent(a, b) {
   const d = diffFlags(a, b);
   return !d.diverged;
+}
+
+// Group `text`'s flag pairs by FLAG_CATEGORIES for the model drawer's grouped
+// flags editor. Unknown flags (not in FLAG_CATEGORIES) fall through to
+// "template-misc". Empty groups are omitted; the remaining groups keep
+// CATEGORY_ORDER's order. `error` mirrors tokenizeFlags's — groups are still
+// returned best-effort (from whatever tokens were accumulated before the
+// error) so a mid-edit unbalanced quote doesn't blank the editor.
+export function groupFlagPairs(text) {
+  const { tokens, error } = tokenizeFlags(text);
+  const byCategory = new Map(CATEGORY_ORDER.map((c) => [c.id, []]));
+  for (const p of flagPairs(tokens)) {
+    const canon = canonFlag(p.flag);
+    const catId = FLAG_CATEGORIES[canon] || "template-misc";
+    byCategory.get(catId).push({ flag: p.flag, canon, value: p.value });
+  }
+  const groups = CATEGORY_ORDER
+    .map((c) => ({ id: c.id, label: c.label, pairs: byCategory.get(c.id) }))
+    .filter((g) => g.pairs.length > 0);
+  return { groups, error };
+}
+
+// Split raw flag text into an alternating sequence of whitespace-run and
+// token segments, quote-aware like tokenizeFlags: a `'...'`/`"..."` run keeps
+// its enclosing quotes and any embedded whitespace as ONE segment, so a
+// `--chat-template-kwargs '{"enable_thinking":false}'`- or `--alias "a b"`-
+// style value round-trips as a single unit instead of being torn into
+// fragments that corrupt everything after them. The segment's `text` keeps
+// the raw quote characters verbatim — callers that replace a segment's text
+// (spliceFlagValue) intentionally drop them, since the replacement value is
+// inserted unquoted.
+function rawSegments(text) {
+  const s = String(text || "");
+  const segs = [];
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    if (/\s/.test(s[i])) {
+      let j = i;
+      while (j < n && /\s/.test(s[j])) j += 1;
+      segs.push({ text: s.slice(i, j), word: false });
+      i = j;
+      continue;
+    }
+    let j = i;
+    let quote = null;
+    while (j < n) {
+      const ch = s[j];
+      if (quote) {
+        j += 1;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; j += 1; continue; }
+      if (/\s/.test(ch)) break;
+      j += 1;
+    }
+    segs.push({ text: s.slice(i, j), word: true });
+    i = j;
+  }
+  return segs;
+}
+
+// Locate the { flag, value } pair in `segs` (as produced by rawSegments)
+// whose canonFlag(flag) === canon, returning the segment indices of the flag
+// token and its value token (null when the flag carries no value, i.e. the
+// next word is itself a flag or there is no next word). Returns null when no
+// pair matches.
+//
+// `occurrence` selects WHICH match, counted in text order from 0. Repeating a
+// flag is legitimate llama-server usage — `-ot ffn=CPU -ot attn=GPU`, and the
+// same for --override-kv / --lora — so "the pair for this canon" is not a
+// unique thing, and a caller editing the second one has to be able to say so.
+// The walk enumerates pairs exactly as flagPairs does (a flag consumes the
+// next token iff that token isn't itself a flag), so the n-th pair here is the
+// n-th pair there.
+function findFlagPairSegIndices(segs, canon, occurrence = 0) {
+  const wordIdx = [];
+  segs.forEach((seg, i) => { if (seg.word) wordIdx.push(i); });
+  let seen = 0;
+  for (let k = 0; k < wordIdx.length; k += 1) {
+    const flagIdx = wordIdx[k];
+    const tok = segs[flagIdx].text;
+    if (!isFlagToken(tok) || canonFlag(tok) !== canon) continue;
+    const next = wordIdx[k + 1];
+    const hit =
+      next != null && !isFlagToken(segs[next].text)
+        ? { flagIdx, valueIdx: next }
+        : { flagIdx, valueIdx: null };
+    if (seen === occurrence) return hit;
+    seen += 1;
+  }
+  return null;
+}
+
+// Replace the value token of the pair whose canonFlag(flag) === canon with
+// `nextValue`, preserving the operator's original flag spelling, token order,
+// and every other token's surrounding whitespace verbatim. A no-op (returns
+// `text` unchanged) when no pair matches canon, or the matched flag carries no
+// value token to replace.
+//
+// `occurrence` picks which repetition of `canon` to edit (0 = the first, the
+// default). Anything holding a per-pair identity — the drawer's tune pills —
+// must pass it, or a text carrying the same flag twice edits the wrong one.
+export function spliceFlagValue(text, canon, nextValue, occurrence = 0) {
+  const s = String(text || "");
+  const segs = rawSegments(s);
+  const found = findFlagPairSegIndices(segs, canon, occurrence);
+  if (!found || found.valueIdx == null) return s;
+  segs[found.valueIdx] = { text: String(nextValue), word: true };
+  return segs.map((seg) => seg.text).join("");
+}
+
+// Drop the flag token + its value token (or just the flag, for a boolean
+// flag) for the pair whose canonFlag(flag) === canon, collapsing the
+// resulting double space so the surrounding tokens read as if the pair had
+// never been there. A no-op when no pair matches canon.
+//
+// `occurrence` picks which repetition of `canon` to drop (0 = the first, the
+// default) — see spliceFlagValue.
+export function removeFlagFromText(text, canon, occurrence = 0) {
+  const s = String(text || "");
+  const segs = rawSegments(s);
+  const found = findFlagPairSegIndices(segs, canon, occurrence);
+  if (!found) return s;
+  const { flagIdx, valueIdx } = found;
+  const endIdx = valueIdx != null ? valueIdx : flagIdx;
+  const drop = new Set();
+  for (let i = flagIdx; i <= endIdx; i += 1) drop.add(i);
+  if (flagIdx > 0 && !segs[flagIdx - 1].word) {
+    drop.add(flagIdx - 1);
+  } else if (endIdx + 1 < segs.length && !segs[endIdx + 1].word) {
+    drop.add(endIdx + 1);
+  }
+  return segs.filter((_, i) => !drop.has(i)).map((seg) => seg.text).join("");
+}
+
+// Append `flag` (and `value`, when given) to `text`, space-separated from
+// whatever's already there. A value containing whitespace is wrapped in
+// double quotes so it round-trips through tokenizeFlags as one token; a
+// null/undefined/empty value is omitted entirely (a boolean flag).
+export function addFlagToText(text, flag, value) {
+  const base = String(text || "");
+  let piece = flag;
+  if (value !== null && value !== undefined && value !== "") {
+    const v = String(value);
+    piece += /\s/.test(v) ? ` "${v}"` : ` ${v}`;
+  }
+  return base ? `${base} ${piece}` : piece;
 }

@@ -48,27 +48,27 @@ export function RichSelect({
   'aria-label': ariaLabel,
   'data-testid': testId,
 }) {
-  const generatedId = useId()
-  const baseId = testId || generatedId
-  const rootRef = useRef(null)
-  const listRef = useRef(null)
-  const [state, setState] = useState(() => initialState(value ?? null))
+  const generatedId = useId();
+  const baseId = testId || generatedId;
+  const rootRef = useRef(null);
+  const listRef = useRef(null);
+  const [state, setState] = useState(() => initialState(value ?? null));
 
   // Optional open/close notification (Task 11d) — the Model select's caller
   // fires its one-shot batch feasibility probe here, on the transition into
   // `open`, rather than on every render while open. No consumer is required
   // to pass this; the effect is a no-op without it.
   useEffect(() => {
-    if (onOpenChange) onOpenChange(state.open)
+    if (onOpenChange) onOpenChange(state.open);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.open])
+  }, [state.open]);
 
   // A `value` change from outside while closed (e.g. a sibling control
   // driving this select, or the initial load resolving) re-seeds activeId
   // so the next open starts on the right row. While open, an in-flight
   // keyboard/mouse navigation owns activeId and is left alone.
   useEffect(() => {
-    setState((s) => (s.open ? s : closeList(value ?? null)))
+    setState((s) => (s.open ? s : closeList(value ?? null)));
   }, [value]);
 
   useEffect(() => {
@@ -132,7 +132,9 @@ export function RichSelect({
         role="combobox"
         aria-haspopup="listbox"
         aria-expanded={state.open}
-        aria-controls={`${baseId}-listbox`}
+        // #2204: only name the listbox once it actually exists — pointing
+        // aria-controls at a closed/unrendered id misdirects assistive tech.
+        aria-controls={state.open ? `${baseId}-listbox` : undefined}
         aria-activedescendant={activeDescendantId(baseId, state)}
         aria-label={ariaLabel}
         onClick={onTriggerClick}

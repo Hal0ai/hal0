@@ -144,7 +144,7 @@ async function landConcurrentWrite(page: Page, patch: Record<string, unknown>) {
 async function openDrawer(page: Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 }
 
 const saveBtn = (page: Page) => page.getByTestId('model-save')
@@ -240,7 +240,10 @@ test.describe('Model drawer — frozen baseline + dirty-gated Save', () => {
     await openDrawer(page)
     await expect(saveBtn(page)).toBeDisabled()
 
-    await page.getByTestId('model-name-input').fill('Renamed model')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now.
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('Renamed model')
+    await page.getByTestId('model-title-input').press('Enter')
     await expect(saveBtn(page)).toBeEnabled()
     await saveBtn(page).click()
 

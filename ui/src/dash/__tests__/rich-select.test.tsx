@@ -86,3 +86,28 @@ describe('RichSelect trigger passthrough', () => {
     expect(trigger.hasAttribute('aria-label')).toBe(false)
   })
 })
+
+// #2204: aria-controls used to name the listbox id unconditionally, even
+// while closed and not rendered — pointing assistive tech at a nonexistent
+// element. It should only be present once the listbox actually exists.
+describe('RichSelect aria-controls', () => {
+  it('omits aria-controls while closed (the listbox is not rendered)', () => {
+    const el = mount(
+      <RichSelect data-testid="probe" value="a" options={OPTIONS} onChange={() => {}} />,
+    )
+    const trigger = el.querySelector('[data-testid="probe"]') as HTMLButtonElement
+    expect(trigger.hasAttribute('aria-controls')).toBe(false)
+  })
+
+  it('sets aria-controls to the listbox id once open', () => {
+    const el = mount(
+      <RichSelect data-testid="probe" value="a" options={OPTIONS} onChange={() => {}} />,
+    )
+    const trigger = el.querySelector('[data-testid="probe"]') as HTMLButtonElement
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(trigger.getAttribute('aria-controls')).toBe('probe-listbox')
+    expect(el.querySelector('#probe-listbox')).not.toBeNull()
+  })
+})

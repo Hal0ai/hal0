@@ -219,6 +219,13 @@ def model_to_dict(model: Any) -> dict[str, Any]:
       below: ``hal0.capabilities.catalog`` imports from ``hal0.registry``,
       which this module is itself imported by, so a module-level import
       here would cycle.
+    * ``provider_effective`` (Task 6) — the stored ``provider`` when set,
+      else :func:`hal0.model_meta.derive_model_provider` off the stored
+      ``backends`` tags. Read-only: the write paths (create/update) never
+      accept this key back, and the derivation itself is total (always a
+      :data:`hal0.model_meta.RUNTIME_FAMILIES` member), so the engine
+      picker always has a concrete "Auto resolves to" preview even for a
+      row with no explicit provider.
     """
     if hasattr(model, "model_dump"):
         dumped = model.model_dump(mode="json")
@@ -239,6 +246,9 @@ def model_to_dict(model: Any) -> dict[str, Any]:
     from hal0.capabilities.catalog import runs_on_for_model
 
     dumped["runs_on"] = runs_on_for_model(model)
+    dumped["provider_effective"] = dumped.get("provider") or derive_model_provider(
+        getattr(model, "backends", None) or dumped.get("backends")
+    )
     return dumped
 
 

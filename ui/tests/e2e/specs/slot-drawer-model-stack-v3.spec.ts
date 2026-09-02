@@ -118,7 +118,10 @@ test.describe('Slot drawer — stacked model editor', () => {
     await expect(
       modelDrawer(page).locator('.drawer-h h2 > span > span').first(),
     ).toHaveText('Qwen3.6-27B-MTP')
-    await expect(modelDrawer(page).getByTestId('model-name-input')).toHaveAttribute(
+    // model-drawer-2 Task 3: the id-fallback placeholder lives on the inline
+    // title input now, not a "Display name" form row.
+    await modelDrawer(page).getByTestId('model-title-edit').click()
+    await expect(modelDrawer(page).getByTestId('model-title-input')).toHaveAttribute(
       'placeholder',
       'qwen3.6-27b-mtp',
     )
@@ -150,6 +153,10 @@ test.describe('Slot drawer — stacked model editor', () => {
     // NGL lives behind the slot drawer's Advanced disclosure (Task 11a).
     await page.getByTestId('slot-hw-advanced').click()
     const ngl = page.getByTestId('slot-hw-ngl')
+    // model-drawer-2 Task 4: the model drawer's tune editor rests on grouped
+    // pills; the flags textarea — the free-text control this case needs, to
+    // prove both drawers accept typing at once — is behind the raw toggle.
+    await modelDrawer(page).getByTestId('model-tune-raw-toggle').click()
     const flags = modelDrawer(page).getByTestId('model-flags-input')
     await expect(ngl).toBeVisible()
     await expect(flags).toBeVisible()
@@ -245,6 +252,6 @@ test.describe('Slot drawer — stacked model editor', () => {
     expect(modelBox.x).toBeGreaterThanOrEqual(0)
     expect(Math.round(modelBox.x + modelBox.width)).toBe(1024)
     // Still fully usable at the narrow size.
-    await expect(modelDrawer(page).getByTestId('model-flags-input')).toBeVisible()
+    await expect(modelDrawer(page).getByTestId('model-tune-raw-toggle')).toBeVisible()
   })
 })

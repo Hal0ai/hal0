@@ -21,6 +21,121 @@ import {
   isFlagToken,
   tokenizeFlags,
 } from '../flags-tune.js'
+import {
+  canonFlag, groupFlagPairs, spliceFlagValue,
+  removeFlagFromText, addFlagToText, FLAG_ALIASES, CATEGORY_ORDER,
+} from '../flags-tune.js'
+
+describe("canonFlag", () => {
+  it("folds a short alias to its long form", () => {
+    // pick any real pair from FLAG_ALIASES at implementation time, e.g.:
+    const [short, long] = Object.entries(FLAG_ALIASES)[0];
+    expect(canonFlag(short)).toBe(long);
+  });
+  it("returns unknown flags unchanged", () => {
+    expect(canonFlag("--totally-novel")).toBe("--totally-novel");
+  });
+});
+
+describe("groupFlagPairs", () => {
+  it("groups known flags and routes unknown to template-misc", () => {
+    const { groups, error } = groupFlagPairs("--temp 0.4 --cache-type-k q8_0 --wat 1");
+    expect(error).toBeNull();
+    const ids = groups.map((g) => g.id);
+    expect(ids).toContain("sampling");
+    expect(ids).toContain("cache-kv");
+    const misc = groups.find((g) => g.id === "template-misc");
+    expect(misc!.pairs).toEqual([{ flag: "--wat", canon: "--wat", value: "1" }]);
+  });
+  it("omits empty groups and keeps CATEGORY_ORDER order", () => {
+    const { groups } = groupFlagPairs("--temp 0.4");
+    expect(groups).toHaveLength(1);
+    expect(groups[0].id).toBe("sampling");
+    const order = CATEGORY_ORDER.map((c) => c.id);
+    expect(order).toEqual(["sampling", "cache-kv", "memory-batch", "template-misc"]);
+  });
+  it("surfaces tokenizer errors", () => {
+    expect(groupFlagPairs('--temp "0.4').error).toMatch(/unbalanced quote/);
+  });
+});
+
+describe("splice helpers preserve spelling, order, untouched text", () => {
+  const t = "-fa auto --temp 0.4 -b 2048";
+  it("spliceFlagValue replaces one value", () => {
+    expect(spliceFlagValue(t, "--temp", "0.2")).toBe("-fa auto --temp 0.2 -b 2048");
+  });
+  it("removeFlagFromText drops flag+value", () => {
+    expect(removeFlagFromText(t, "--temp")).toBe("-fa auto -b 2048");
+  });
+  it("removeFlagFromText drops a boolean flag alone", () => {
+    expect(removeFlagFromText("--jinja --temp 0.4", "--jinja")).toBe("--temp 0.4");
+  });
+  it("addFlagToText appends, quoting whitespace values", () => {
+    expect(addFlagToText(t, "--override-kv", "a b")).toBe(t + ' --override-kv "a b"');
+    expect(addFlagToText("", "--jinja", null)).toBe("--jinja");
+  });
+  it("splice via a short alias canon hits the long-typed flag and vice versa", () => {
+    expect(spliceFlagValue("--batch-size 2048", canonFlag("-b"), "512"))
+      .toBe("--batch-size 512");
+  });
+  it("spliceFlagValue replaces a double-quoted multi-word value without corrupting the remainder", () => {
+    expect(spliceFlagValue('--foo "a b" --temp 0.4', "--foo", "x"))
+      .toBe("--foo x --temp 0.4");
+  });
+  it("spliceFlagValue replaces a single-quoted multi-word value without corrupting the remainder", () => {
+    expect(spliceFlagValue("--foo 'a b' --temp 0.4", "--foo", "x"))
+      .toBe("--foo x --temp 0.4");
+  });
+  it("removeFlagFromText drops a double-quoted multi-word value without corrupting the remainder", () => {
+    expect(removeFlagFromText('--foo "a b" --temp 0.4', "--foo")).toBe("--temp 0.4");
+  });
+  it("removeFlagFromText drops a single-quoted multi-word value without corrupting the remainder", () => {
+    expect(removeFlagFromText("--foo 'a b' --temp 0.4", "--foo")).toBe("--temp 0.4");
+  });
+});
+
+// Repeating a flag is legitimate llama-server usage (-ot / --override-kv /
+// --lora), so "the pair for this canon" is not unique and the helpers have to
+// be told WHICH one. Without the occurrence index every affordance on the
+// second pill silently acted on the first.
+describe("splice helpers address a specific occurrence of a repeated flag", () => {
+  const rep = "-ot ffn=CPU -ot attn=GPU --temp 0.4";
+
+  it("defaults to the first occurrence (unchanged contract)", () => {
+    expect(removeFlagFromText(rep, "-ot")).toBe("-ot attn=GPU --temp 0.4");
+    expect(spliceFlagValue(rep, "-ot", "x")).toBe("-ot x -ot attn=GPU --temp 0.4");
+  });
+
+  it("removes the second occurrence and leaves the first intact", () => {
+    expect(removeFlagFromText(rep, "-ot", 1)).toBe("-ot ffn=CPU --temp 0.4");
+  });
+
+  it("edits the second occurrence's value only", () => {
+    expect(spliceFlagValue(rep, "-ot", "attn=CPU", 1))
+      .toBe("-ot ffn=CPU -ot attn=CPU --temp 0.4");
+  });
+
+  it("counts occurrences across mixed spellings via canonFlag", () => {
+    const mixed = "-b 512 --batch-size 2048";
+    expect(spliceFlagValue(mixed, "--batch-size", "1024", 1)).toBe("-b 512 --batch-size 1024");
+    expect(removeFlagFromText(mixed, "--batch-size", 1)).toBe("-b 512");
+  });
+
+  it("counts a bare repetition as its own occurrence", () => {
+    // `--temp --temp 0.5`: the first carries no value (the next token is a
+    // flag), so occurrence 0 is the bare one and occurrence 1 is the valued one.
+    const bare = "--temp --temp 0.5";
+    expect(removeFlagFromText(bare, "--temp", 0)).toBe("--temp 0.5");
+    expect(spliceFlagValue(bare, "--temp", "0.9", 1)).toBe("--temp --temp 0.9");
+    // Occurrence 0 has no value token to replace — still a documented no-op.
+    expect(spliceFlagValue(bare, "--temp", "0.9", 0)).toBe(bare);
+  });
+
+  it("an out-of-range occurrence is a no-op, never a wrong-pair edit", () => {
+    expect(removeFlagFromText(rep, "-ot", 5)).toBe(rep);
+    expect(spliceFlagValue(rep, "-ot", "x", 5)).toBe(rep);
+  });
+});
 
 describe('isFlagToken', () => {
   it('accepts long flags with real content', () => {

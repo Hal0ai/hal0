@@ -21,6 +21,7 @@
  * despite both existing server-side too.
  */
 import { test, expect } from '../fixtures/apiMock'
+import { pickRichOption } from '../fixtures/richSelect'
 
 const MODEL_ID = 'qwen3.6-27b-mtp'
 const PROFILE_FLAGS = '--cache-type-k q8_0'
@@ -106,6 +107,11 @@ async function mockSeedProfile(page: import('@playwright/test').Page) {
 async function stampFromProfile(page: import('@playwright/test').Page, name: string) {
   await page.getByTestId('model-seed-profile-open').click()
   await page.getByTestId(`model-seed-profile-option-${name}`).click()
+  // Task 8 (#2205): EVERY pick now opens the consequence-preview confirm —
+  // the old wouldClobber shortcut that skipped it for an empty/matching
+  // current flags text is gone. Same POST, same effects; one extra click.
+  await expect(page.getByTestId('model-seed-preview')).toBeVisible()
+  await page.getByRole('button', { name: 'Stamp tune', exact: true }).click()
 }
 
 /** Set an override via the ledger's "+ Override…" menu (cap id + on/off). */
@@ -121,7 +127,18 @@ async function setCapOverride(
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+}
+
+/**
+ * model-drawer-2 Task 9: MMProj / HF repo / HF filename / Paths live behind a
+ * disclosure that rests closed. The apiMock catch-all answers the lazy
+ * POST /api/models/inspect with `{}` — no variants, so MMProj degrades to the
+ * free-text path input this spec's save contract fills.
+ */
+async function openSource(page: import('@playwright/test').Page) {
+  await page.getByTestId('model-source-disclosure').click()
+  await expect(page.getByTestId('model-source-paths')).toBeVisible()
 }
 
 test.describe('Model drawer — complete save and compact field help', () => {
@@ -145,19 +162,28 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     await openDrawer(page)
 
-    await page.getByTestId('model-name-input').fill('Saved model name')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now.
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('Saved model name')
+    await page.getByTestId('model-title-input').press('Enter')
     // Backends is retired (spec-hw-slot-ownership §1/§8) — Engine is the
     // write path now; "Runs on" is derived/read-only and not editable here.
-    await page.getByTestId('model-provider-select').selectOption('flm')
+    // Task 6: the native <select> became a RichSelect (rich-select.jsx).
+    await pickRichOption(page.getByTestId('model-provider-select'), 'flm')
+    await openSource(page)
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
     await page.getByTestId('model-hfrepo-input').fill('org/saved-repo')
     await page.getByTestId('model-hffile-input').fill('saved-q4.gguf')
     // Stamp now round-trips through POST /api/models/{id}/seed-profile.
     await stampFromProfile(page, 'rocm-save')
+    // model-drawer-2 Task 4: the flags textarea is the raw view behind
+    // `model-tune-raw-toggle` — the stamped STRING is what this asserts, so it
+    // reads it there.
+    await page.getByTestId('model-tune-raw-toggle').click()
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     expect(seedRequests).toEqual([{ profile: 'rocm-save' }])
     await page.getByTestId('model-ctx-input').fill('16384')
-    await page.getByTestId('model-chat-template').selectOption('chatml')
+    await pickRichOption(page.getByTestId('model-chat-template'), 'chatml')
     // Overrides ledger replaces the four always-on TypedCapSeg rows.
     await setCapOverride(page, 'mtp', 'off')
     await setCapOverride(page, 'thinking', 'on')
@@ -216,20 +242,33 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    // 10 rows (was 13 pre-Task-8): Option A's header meta move relocated
+    // model-drawer-2 Task 9: the three Source rows (MMProj / HF repo / HF
+    // filename) moved behind the Source disclosure and a read-only "Paths" row
+    // joined them there, so the RESTING drawer shows 9 − 3 = 6 rows and the
+    // opened disclosure adds 4 back for 10. Both counts are asserted, because
+    // the rule under test ("every described label carries the info icon, and
+    // nothing carries a .sub subtitle") has to hold on either side of it.
+    await expect(labels).toHaveCount(6)
+    await openSource(page)
+    // 9 rows (was 13 pre-Task-8): Option A's header meta move relocated
     // "Default for {type}" off the row list entirely (−1) and folded the
     // "Modality" row into a renamed "Capabilities" row in place (±0 — the
     // modality tag left for the header, the readout chips stayed); the four
     // always-on tri-state rows (mtp/thinking/jinja/vision) collapsed into one
     // "Overrides" ledger row (−4 +1 = −3); and the single editable "Backends"
     // row split into "Engine" + read-only "Runs on" (−1 +2 = +1).
-    // 13 − 1 − 3 + 1 = 10.
+    // 13 − 1 − 3 + 1 = 10, then model-drawer-2 Task 3 moved "Display name"
+    // off the row list onto the header's inline title editor (−1) = 9, and
+    // Task 9 added the read-only "Paths" row inside the disclosure (+1) = 10.
     await expect(labels).toHaveCount(10)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
     await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(10)
 
-    const displayNameLabel = labels.filter({ hasText: 'Display name' })
-    const info = displayNameLabel.getByRole('button', { name: 'Info' })
+    // Display name no longer has a form row (Task 3) — MMProj is a plain
+    // text-input row with the same FieldInfoIcon shape, so it stands in for
+    // the generic hover/focus-only info-help behaviour asserted below.
+    const mmprojLabel = labels.filter({ hasText: 'MMProj' })
+    const info = mmprojLabel.getByRole('button', { name: 'Info' })
     // #1683: the popup portals to document.body (so overflow:hidden panels
     // can't clip it), so it's no longer a DOM descendant of the label — find
     // it via the button's aria-describedby instead of a row-scoped locator.

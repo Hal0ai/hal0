@@ -215,6 +215,15 @@ test.describe('Model drawer — rejected writes', () => {
   async function openDrawer(page: Page) {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').first().click()
+    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+  }
+
+  /** model-drawer-2 Task 4: the tune editor rests on grouped pills, and the
+   *  flags TEXTAREA is the raw view behind the toggle. These cases are about
+   *  the flags string itself (managed-arg screening, an unbalanced quote), so
+   *  they reach it the way an operator would — through raw mode. */
+  async function showRawFlags(page: Page) {
+    await page.getByTestId('model-tune-raw-toggle').click()
     await expect(page.getByTestId('model-flags-input')).toBeVisible()
   }
 
@@ -238,7 +247,11 @@ test.describe('Model drawer — rejected writes', () => {
     })
 
     await openDrawer(page)
-    await page.getByTestId('model-name-input').fill('Renamed while failing')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now
+    // (✎ → model-title-input, Enter commits), not a "Display name" form row.
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('Renamed while failing')
+    await page.getByTestId('model-title-input').press('Enter')
     await page.getByTestId('model-ctx-input').fill('16384')
     await page.getByTestId('model-save').click()
 
@@ -249,7 +262,9 @@ test.describe('Model drawer — rejected writes', () => {
     )
     // …drawer stays open with BOTH edits still in the fields.
     await expect(page.locator('.drawer.open')).toHaveCount(1)
-    await expect(page.getByTestId('model-name-input')).toHaveValue('Renamed while failing')
+    await expect(
+      page.locator('.drawer.open h2 > span > span').first(),
+    ).toHaveText('Renamed while failing')
     await expect(page.getByTestId('model-ctx-input')).toHaveValue('16384')
   })
 
@@ -268,6 +283,7 @@ test.describe('Model drawer — rejected writes', () => {
     })
 
     await openDrawer(page)
+    await showRawFlags(page)
     await page.getByTestId('model-flags-input').fill('--port 9999')
 
     await expect(page.getByTestId('model-save')).toBeDisabled()
@@ -291,6 +307,7 @@ test.describe('Model drawer — rejected writes', () => {
     })
 
     await openDrawer(page)
+    await showRawFlags(page)
     await page.getByTestId('model-flags-input').fill('--chat-template "broken')
 
     await expect(page.getByTestId('model-save')).toBeDisabled()

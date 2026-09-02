@@ -14,6 +14,7 @@
  *        back to `model.id` for display, so an explicit empty is a valid write.
  */
 import { test, expect } from '../fixtures/apiMock'
+import { pickRichOption } from '../fixtures/richSelect'
 
 const MODEL_ID = 'qwen3.6-27b-mtp'
 
@@ -68,15 +69,42 @@ async function capturePut(page: import('@playwright/test').Page) {
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+}
+
+/**
+ * model-drawer-2 Task 9: the Source rows (MMProj / HF repo / HF filename /
+ * Paths) live behind a disclosure that rests closed, so every spec touching
+ * them opens it first. Opening also fires the ONE lazy POST /api/models/inspect
+ * that feeds the mmproj picker.
+ */
+async function openSource(page: import('@playwright/test').Page) {
+  await page.getByTestId('model-source-disclosure').click()
+  await expect(page.getByTestId('model-source-paths')).toBeVisible()
+}
+
+/** Stub the repo listing behind the mmproj picker (default: no projectors). */
+async function mockInspect(page: import('@playwright/test').Page, variants: any[] = []) {
+  await page.route('**/api/models/inspect', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ repo: 'org/original-repo', cached: true, variants, tags: [] }),
+    }),
+  )
 }
 
 test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () => {
   test('clearing mmproj on a vision model blocks the PUT until a path is restored', async ({ page }) => {
     await seedModel(page)
+    // No projector in the repo listing → the picker degrades to the free-text
+    // path input this test has always driven (Task 9's fallback).
+    await mockInspect(page)
     const puts = await capturePut(page)
     await openDrawer(page)
+    await openSource(page)
 
+    await expect(page.getByTestId('model-mmproj-select')).toHaveCount(0)
     await expect(page.getByTestId('model-mmproj-error')).toHaveCount(0)
     await page.getByTestId('model-mmproj-input').fill('')
 
@@ -98,6 +126,43 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     // save" — a different gate, not this one.)
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-Q8.gguf')
     await expect(page.getByTestId('model-mmproj-error')).toHaveCount(0)
+  })
+
+  test('the repo-fed picker gates the same way, and stores an absolute path', async ({ page }) => {
+    await seedModel(page)
+    // The repo ships a projector, so MMProj is a RichSelect (Task 9). Its
+    // option ids are the VALUE stored on the row — `Model.mmproj` is an
+    // absolute host path (registry/model.py:249, pull.py:1071), so the
+    // filename the repo lists resolves against the stored sidecar's own
+    // directory (`/models` here) before it is offered.
+    await mockInspect(page, [
+      { id: 'mmproj-F16.gguf', size_bytes: 644245094, size: '0.6 GB', info: 'mmproj · 0.6 GB' },
+      { id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' },
+    ])
+    const puts = await capturePut(page)
+    await openDrawer(page)
+    await openSource(page)
+
+    const picker = page.getByTestId('model-mmproj-select')
+    await expect(picker).toBeVisible()
+    // The editable absolute-path input is gone while the picker is up.
+    await expect(page.getByTestId('model-mmproj-input')).toHaveCount(0)
+    // The stored projector isn't in the repo listing — it keeps its own row.
+    await expect(picker).toContainText('mmproj-Q8.gguf')
+
+    // "— none —" clears the pairing and re-arms the vision gate.
+    await pickRichOption(picker, '')
+    await expect(page.getByTestId('model-mmproj-error')).toBeVisible()
+    await expect(page.getByTestId('model-save')).toBeDisabled()
+
+    // Picking the repo's projector writes `<dir>/<filename>`, and that exact
+    // string is what the PUT carries — never the bare filename.
+    await pickRichOption(picker, '/models/mmproj-F16.gguf')
+    await expect(page.getByTestId('model-mmproj-error')).toHaveCount(0)
+    await expect(page.getByTestId('model-source-paths')).toContainText('/models/mmproj-F16.gguf')
+    await page.getByTestId('model-save').click()
+    await expect.poll(() => puts.length).toBe(1)
+    expect(puts[0].mmproj).toBe('/models/mmproj-F16.gguf')
   })
 
   test('capability chips are no longer editable in the drawer', async ({ page }) => {
@@ -124,9 +189,13 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     const puts = await capturePut(page)
     await openDrawer(page)
 
-    const nameInput = page.getByTestId('model-name-input')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now
+    // (✎ → model-title-input, Enter commits), not a "Display name" form row.
+    await page.getByTestId('model-title-edit').click()
+    const nameInput = page.getByTestId('model-title-input')
     await expect(nameInput).toHaveValue('Original name')
     await nameInput.fill('')
+    await nameInput.press('Enter')
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -148,8 +217,11 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     // rather than asserting the whole heading's text.
     await expect(page.locator('.drawer.open h2')).toContainText(MODEL_ID)
     // titleNode's structure: h2 > span (title row) > span (the name, first
-    // child) + modality tag + default badge/toggle.
+    // child) + modality tag + default toggle chip.
     await expect(page.locator('.drawer.open h2 > span > span').first()).toHaveText(MODEL_ID)
-    await expect(page.getByTestId('model-name-input')).toHaveValue('')
+    // model-drawer-2 Task 3: the empty draft still seeds the inline editor —
+    // opening it shows the stored empty string, not a fabricated value.
+    await page.getByTestId('model-title-edit').click()
+    await expect(page.getByTestId('model-title-input')).toHaveValue('')
   })
 })
