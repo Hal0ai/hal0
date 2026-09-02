@@ -111,7 +111,13 @@ test.describe('Slot drawer — stacked model editor', () => {
     // It is the model editor, opened on the slot's BOUND row — the drawer title
     // is `longName || name || id`, and the Display-name placeholder is the id.
     await expect(modelDrawer(page).locator('.modal-h-eye')).toContainText('Edit model')
-    await expect(modelDrawer(page).locator('.drawer-h h2')).toHaveText('Qwen3.6-27B-MTP')
+    // Option A drawer (Task 8, PR-3): the title row also carries the
+    // modality tag + default badge/toggle now, so the h2 is no longer JUST
+    // the name.
+    await expect(modelDrawer(page).locator('.drawer-h h2')).toContainText('Qwen3.6-27B-MTP')
+    await expect(
+      modelDrawer(page).locator('.drawer-h h2 > span > span').first(),
+    ).toHaveText('Qwen3.6-27B-MTP')
     await expect(modelDrawer(page).getByTestId('model-name-input')).toHaveAttribute(
       'placeholder',
       'qwen3.6-27b-mtp',

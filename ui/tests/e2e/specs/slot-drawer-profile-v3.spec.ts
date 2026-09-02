@@ -216,7 +216,9 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // mtp is a model-owned tri-state cap now (ModelDefaults.mtp), edited on the
   // model drawer instead. Only the "the row is gone" assertion survives here;
   // the tri-state behavior itself is covered by model-drawer-save-info-v3
-  // (cap-mtp-*) and the server-side reject by
+  // (the overrides ledger's model-cap-override-add-mtp-on/-off, since the
+  // Option A restyle — Task 8, PR-3 — retired the cap-mtp-* always-on rows)
+  // and the server-side reject by
   // tests/slot_config/test_validation_and_lock.py::TestRejectModelOwnedSlotKeys.
 
   const MTP_SLOT = { name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',

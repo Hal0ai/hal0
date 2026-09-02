@@ -3,6 +3,20 @@
  *
  * Uses a production-shaped registry row so the PUT contract exercises every
  * field surfaced by ModelDrawer while proving unrelated defaults survive.
+ *
+ * Option A drawer (Task 8, PR-3): the editable "Backends" chip-toggle row is
+ * retired (spec-hw-slot-ownership §1/§8 — the model is device-agnostic) in
+ * favor of an "Engine" select (`model-provider-select`, writes `provider`)
+ * plus a read-only "Runs on" readout; the four always-on tri-state
+ * (mtp/thinking/jinja/vision) rows collapse into the overrides ledger
+ * (`model-cap-override-add` → `model-cap-override-add-{id}-on|off`); and
+ * stamping a profile goes through the "⤵ Seed from profile…" button
+ * (`model-seed-profile-open` → `model-seed-profile-option-{name}`), which
+ * POSTs /api/models/{id}/seed-profile instead of copying flags client-side.
+ *
+ * TODO(#2198): the seed-profile server route lands with #2198 (not merged as
+ * of this branch) — mocked below per useModelSeedProfile.ts's documented
+ * contract. Drop the mock once #2198 merges.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -68,6 +82,39 @@ async function mockDrawerLookups(page: import('@playwright/test').Page) {
   )
 }
 
+/** TODO(#2198): stand-in for the not-yet-merged seed-profile route. */
+async function mockSeedProfile(page: import('@playwright/test').Page) {
+  const requests: any[] = []
+  await page.route(`**/api/models/${MODEL_ID}/seed-profile`, async (route) => {
+    const body = route.request().postDataJSON()
+    requests.push(body)
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: MODEL_ID,
+        defaults: { profile: body.profile, extra_args: PROFILE_FLAGS },
+      }),
+    })
+  })
+  return requests
+}
+
+async function stampFromProfile(page: import('@playwright/test').Page, name: string) {
+  await page.getByTestId('model-seed-profile-open').click()
+  await page.getByTestId(`model-seed-profile-option-${name}`).click()
+}
+
+/** Set an override via the ledger's "+ Override…" menu (cap id + on/off). */
+async function setCapOverride(
+  page: import('@playwright/test').Page,
+  id: string,
+  value: 'on' | 'off',
+) {
+  await page.getByTestId('model-cap-override-add').click()
+  await page.getByTestId(`model-cap-override-add-${id}-${value}`).click()
+}
+
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
@@ -78,6 +125,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
   test('successful PUT carries every surfaced field, preserves unrelated defaults, and closes with feedback', async ({ page }) => {
     await seedProductionModel(page)
     await mockDrawerLookups(page)
+    const seedRequests = await mockSeedProfile(page)
 
     let putBody: any = null
     await page.route(`**/api/models/${MODEL_ID}`, async (route) => {
@@ -95,18 +143,30 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await openDrawer(page)
 
     await page.getByTestId('model-name-input').fill('Saved model name')
-    await page.getByTestId('backend-toggle-vulkan').click()
+    // Backends is retired (spec-hw-slot-ownership §1/§8) — Engine is the
+    // write path now; "Runs on" is derived/read-only and not editable here.
+    await page.getByTestId('model-provider-select').selectOption('flm')
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
     await page.getByTestId('model-hfrepo-input').fill('org/saved-repo')
     await page.getByTestId('model-hffile-input').fill('saved-q4.gguf')
-    await page.getByTestId('model-template-select').selectOption('rocm-save')
-    await page.getByTestId('model-flags-input').fill(PROFILE_FLAGS)
+    // Stamp now round-trips through POST /api/models/{id}/seed-profile.
+    await stampFromProfile(page, 'rocm-save')
+    await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
+    expect(seedRequests).toEqual([{ profile: 'rocm-save' }])
     await page.getByTestId('model-ctx-input').fill('16384')
     await page.getByTestId('model-chat-template').selectOption('chatml')
-    await page.getByTestId('cap-mtp-off').click()
-    await page.getByTestId('cap-thinking-on').click()
-    await page.getByTestId('cap-jinja-off').click()
-    await page.getByTestId('cap-vision-off').click()
+    // Overrides ledger replaces the four always-on TypedCapSeg rows.
+    await setCapOverride(page, 'mtp', 'off')
+    await setCapOverride(page, 'thinking', 'on')
+    await setCapOverride(page, 'jinja', 'off')
+    await setCapOverride(page, 'vision', 'off')
+    await expect(page.getByTestId('model-cap-override-mtp')).toContainText('off')
+    await expect(page.getByTestId('model-cap-override-thinking')).toContainText('on')
+    await expect(page.getByTestId('model-cap-override-jinja')).toContainText('off')
+    await expect(page.getByTestId('model-cap-override-vision')).toContainText('off')
+    // Every cap now has an override — the "+ Override…" button disappears
+    // (CapOverrideAdd renders null once `remaining` is empty).
+    await expect(page.getByTestId('model-cap-override-add')).toHaveCount(0)
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => putBody).not.toBeNull()
@@ -114,7 +174,11 @@ test.describe('Model drawer — complete save and compact field help', () => {
     // Type-tag chips are retired — saves never touch tags.
     expect(putBody).not.toHaveProperty('tags')
     expect(putBody.capabilities).toBeUndefined()
-    expect(putBody.backends).toEqual(['rocm', 'vulkan'])
+    // Backends is a dead write path (models_service.py drops a client-sent
+    // `backends` key silently) — the drawer never sends it; provider is the
+    // real write instead.
+    expect(putBody).not.toHaveProperty('backends')
+    expect(putBody.provider).toBe('flm')
     expect(putBody.mmproj).toBe('/models/mmproj-saved.gguf')
     expect(putBody.hf_repo).toBe('org/saved-repo')
     expect(putBody.hf_filename).toBe('saved-q4.gguf')
@@ -137,7 +201,9 @@ test.describe('Model drawer — complete save and compact field help', () => {
     expect(putBody.defaults.n_gpu_layers).toBeNull()
 
     await expect(page.locator('.drawer.open')).toHaveCount(0)
-    await expect(page.locator('.hal0-toast')).toContainText('Updated Original model name')
+    // The seed-profile step above raises its own "Seeded …" toast first —
+    // both can be on screen at once, so scope to the one Save raised.
+    await expect(page.locator('.hal0-toast').last()).toContainText('Updated Original model name')
   })
 
   test('every described label uses hover/focus-only info help', async ({ page }) => {
@@ -147,14 +213,17 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    // 13 rows: the pre-existing 14 (Vision tri-state row +1,
-    // spec-hw-slot-ownership §1; retired Types chip row −1 — type tags are
-    // inert, typed fields own behaviour) minus the retired editable
-    // Capabilities chip row (−1, #2193 — capabilities are read-only now, so
-    // there's no control left here to describe).
-    await expect(labels).toHaveCount(13)
+    // 10 rows (was 13 pre-Task-8): Option A's header meta move relocated
+    // "Default for {type}" off the row list entirely (−1) and folded the
+    // "Modality" row into a renamed "Capabilities" row in place (±0 — the
+    // modality tag left for the header, the readout chips stayed); the four
+    // always-on tri-state rows (mtp/thinking/jinja/vision) collapsed into one
+    // "Overrides" ledger row (−4 +1 = −3); and the single editable "Backends"
+    // row split into "Engine" + read-only "Runs on" (−1 +2 = +1).
+    // 13 − 1 − 3 + 1 = 10.
+    await expect(labels).toHaveCount(10)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(13)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(10)
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
