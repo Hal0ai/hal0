@@ -1377,3 +1377,65 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     act(() => root.unmount())
   })
 })
+
+// ─── Task 10 — live staged footer ───────────────────────────────────────────
+describe('footer summary', () => {
+  it('clean drawer → "no changes"', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    const footer = q<HTMLElement>(host, 'model-foot-summary')
+    expect(footer).toBeTruthy()
+    expect(footer.textContent).toBe('no changes')
+    act(() => root.unmount())
+  })
+
+  it('staged changes → summary with field names and slot restart info', async () => {
+    slotsBox.current = [{ name: 'agent', model_default: 'm1' }, { name: 'brain', model_default: 'm2', model: 'm1' }]
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    // Edit extra (flags) and ctx (context)
+    act(() => {
+      const extraInput = q<HTMLTextAreaElement>(host, 'model-extra-input')
+      extraInput.value = '--some-flag'
+      extraInput.dispatchEvent(new Event('change', { bubbles: true }))
+      extraInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    act(() => {
+      const ctxInput = q<HTMLInputElement>(host, 'model-ctx-input')
+      ctxInput.value = '12000'
+      ctxInput.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    const footer = q<HTMLElement>(host, 'model-foot-summary')
+    expect(footer).toBeTruthy()
+    expect(footer.textContent).toContain('2 changes')
+    expect(footer.textContent).toContain('flags')
+    expect(footer.textContent).toContain('context')
+    expect(footer.textContent).toContain('restarts 2 slots')
+    expect(footer.textContent).toContain('agent')
+    expect(footer.textContent).toContain('brain')
+    act(() => root.unmount())
+  })
+
+  it('zero using slots → restart clause omitted', async () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    // Edit extra (flags)
+    act(() => {
+      const extraInput = q<HTMLTextAreaElement>(host, 'model-extra-input')
+      extraInput.value = '--some-flag'
+      extraInput.dispatchEvent(new Event('change', { bubbles: true }))
+      extraInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    const footer = q<HTMLElement>(host, 'model-foot-summary')
+    expect(footer).toBeTruthy()
+    expect(footer.textContent).toContain('1 changes')
+    expect(footer.textContent).toContain('flags')
+    expect(footer.textContent).not.toContain('restarts')
+    act(() => root.unmount())
+  })
+})

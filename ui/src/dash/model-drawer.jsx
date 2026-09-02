@@ -34,7 +34,7 @@ import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlots } from "@/api/hooks/useSlots";
 import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
 import { feasibilityHint } from "@/dash/feasibility-copy";
-import { slotsUsingModel } from "@/dash/model-usage.js";
+import { slotsUsingModel, footSummary } from "@/dash/model-usage.js";
 import { RichSelect } from "@/dash/rich-select.jsx";
 import {
 	canonicalCapabilities,
@@ -2156,8 +2156,13 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 				title={titleNode}
 				foot={
 					<>
-						<span style={{ color: "var(--warn)" }}>
-							⟳ changes require the slot to restart
+						<span
+							style={{
+								color: dirty ? "var(--warn)" : "var(--muted)",
+							}}
+							data-testid="model-foot-summary"
+						>
+							{footSummary(changes, slotsUsingModel(slotsQuery.data, model.id))}
 						</span>
 						<span style={{ display: "inline-flex", gap: 8 }}>
 							<button className="btn ghost sm" onClick={onClose}>
