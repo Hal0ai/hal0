@@ -124,9 +124,13 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     const puts = await capturePut(page)
     await openDrawer(page)
 
-    const nameInput = page.getByTestId('model-name-input')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now
+    // (✎ → model-title-input, Enter commits), not a "Display name" form row.
+    await page.getByTestId('model-title-edit').click()
+    const nameInput = page.getByTestId('model-title-input')
     await expect(nameInput).toHaveValue('Original name')
     await nameInput.fill('')
+    await nameInput.press('Enter')
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -148,8 +152,11 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     // rather than asserting the whole heading's text.
     await expect(page.locator('.drawer.open h2')).toContainText(MODEL_ID)
     // titleNode's structure: h2 > span (title row) > span (the name, first
-    // child) + modality tag + default badge/toggle.
+    // child) + modality tag + default toggle chip.
     await expect(page.locator('.drawer.open h2 > span > span').first()).toHaveText(MODEL_ID)
-    await expect(page.getByTestId('model-name-input')).toHaveValue('')
+    // model-drawer-2 Task 3: the empty draft still seeds the inline editor —
+    // opening it shows the stored empty string, not a fabricated value.
+    await page.getByTestId('model-title-edit').click()
+    await expect(page.getByTestId('model-title-input')).toHaveValue('')
   })
 })

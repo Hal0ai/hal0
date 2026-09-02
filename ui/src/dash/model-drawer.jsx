@@ -30,6 +30,8 @@ import { useModelSeedProfile } from "@/api/hooks/useModelSeedProfile";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useMetaEnums } from "@/api/hooks/useMeta";
+import { useSlots } from "@/api/hooks/useSlots";
+import { slotsUsingModel } from "@/dash/model-usage.js";
 import {
 	canonicalCapabilities,
 	deviceById,
@@ -666,13 +668,19 @@ function deriveModelChanges(baseline, form) {
 }
 
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
-function ModelDrawer({ open, onClose, model }) {
+// `onOpenSlot` is optional (Task 3, facts-band used-by cell): when a host
+// passes it, each slot name in the used-by list is a jump button; absent, the
+// names render as plain text. jump wiring: models.jsx passes onOpenSlot — NOT
+// wired yet (the standalone Models page has no slot-drawer opener nearby to
+// reach trivially); tracked as a follow-up rather than faked here.
+export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const update = useModelUpdate();
 	const setDefault = useModelSetDefault();
 	const seedProfile = useModelSeedProfile();
 	const templates = useChatTemplates(open);
 	const profilesQuery = useProfiles();
 	const enums = useMetaEnums();
+	const slotsQuery = useSlots();
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
@@ -699,6 +707,19 @@ function ModelDrawer({ open, onClose, model }) {
 	const [vision, setVision] = useStateMD("auto");
 	// Local UI state.
 	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
+	// Inline title editor (Task 3): the ✎ button swaps the name span for an
+	// input seeded from the CURRENT draft (`name`), never from the live model
+	// prop, so a prior uncommitted edit survives reopening the editor. Escape
+	// must revert without ever calling setName — the 735b6291 bug class (a
+	// blur fired by the input's own removal from the DOM once landed a
+	// "cancelled" edit anyway). titleCancelRef is the synchronous guard: Escape
+	// flags it before closing, and the shared commit path checks the flag
+	// first, so even a stray blur from unmounting can't sneak the draft
+	// through. Enter and a real click-away both funnel through the same
+	// commit path — "blur commits like Enter".
+	const [editingTitle, setEditingTitle] = useStateMD(false);
+	const [titleDraft, setTitleDraft] = useStateMD("");
+	const titleCancelRef = useRefMD(false);
 	// Per-type default: the `model` prop is live-polled (see the seam note
 	// above), but the models-query invalidation this POST fires can land after
 	// the drawer has already read the row, so track the POST response as the
@@ -955,6 +976,33 @@ function ModelDrawer({ open, onClose, model }) {
 		}
 	};
 
+	// Inline title editor (Task 3, see the state comment above). One commit
+	// path for both Enter and a real click-away blur; Escape never reaches it
+	// with the cancel flag unset, so it can never carry the draft into `name`.
+	const openTitleEdit = () => {
+		titleCancelRef.current = false;
+		setTitleDraft(name);
+		setEditingTitle(true);
+	};
+	const commitTitle = () => {
+		if (titleCancelRef.current) {
+			titleCancelRef.current = false;
+			setEditingTitle(false);
+			return;
+		}
+		setName(titleDraft);
+		setEditingTitle(false);
+	};
+	const cancelTitleEdit = (e) => {
+		// Consumed here so the Drawer's document-level Escape→close listener
+		// never sees this press — Escape in the field cancels the rename, it
+		// must not also close the drawer (same reasoning as the slot rename
+		// field, slot-modals.jsx).
+		e.stopPropagation();
+		titleCancelRef.current = true;
+		setEditingTitle(false);
+	};
+
 	// THE comparison — derived once, against the FROZEN baseline, read by both
 	// the unsaved-changes guard and the save body. Nothing below re-derives a
 	// predicate and nothing touches the live `model` prop.
@@ -1067,12 +1115,51 @@ function ModelDrawer({ open, onClose, model }) {
 	// slot drawer's ceiling placeholder.
 	const modelContextLength = Number(model?.metadata?.context_length) || null;
 
-	// Title row: modality tag + default badge ride the header now (panel 07,
-	// callout K) — both are facts/actions, not field rows, so the old
-	// "Modality" and "Default for {type}" rows are gone below.
+	// Title row (Task 3): inline-editable name + modality tag + ONE default
+	// chip ride the header — facts/actions, not field rows, so the old
+	// "Modality" and "Default for {type}" rows stay gone below, and the old
+	// badge+ghost-chip+button trio collapses into the single toggle chip.
+	// Shows the live draft (`name`), never the frozen `model` prop, so a
+	// committed-but-unsaved edit sticks even if the editor is reopened.
+	const titleText = name.trim() || model.longName || model.id;
 	const titleNode = (
-		<span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-			<span>{model.longName || model.name || model.id}</span>
+		<span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+			{editingTitle ? (
+				<input
+					className="input mono"
+					data-testid="model-title-input"
+					autoFocus
+					placeholder={model.id}
+					value={titleDraft}
+					onChange={(e) => setTitleDraft(e.target.value)}
+					onBlur={commitTitle}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") {
+							e.preventDefault();
+							commitTitle();
+						} else if (e.key === "Escape") {
+							e.preventDefault();
+							cancelTitleEdit(e);
+						}
+					}}
+					style={{ fontSize: 14, minWidth: 140 }}
+				/>
+			) : (
+				<>
+					<span>{titleText}</span>
+					<button
+						type="button"
+						className="btn ghost sm"
+						data-testid="model-title-edit"
+						onClick={openTitleEdit}
+						aria-label="Edit name"
+						title="Edit name"
+						style={{ fontSize: 11, padding: "2px 7px", lineHeight: 1 }}
+					>
+						✎
+					</button>
+				</>
+			)}
 			<span
 				className="tag"
 				data-testid="model-modality"
@@ -1088,60 +1175,129 @@ function ModelDrawer({ open, onClose, model }) {
 			>
 				{modality}
 			</span>
-			{isTypeDefault ? (
-				<span
-					className="tag"
-					data-testid="model-default-badge"
-					style={{
-						color: "var(--ok)",
-						borderColor: "var(--ok)",
-						background: "var(--bg-2)",
-						fontFamily: "var(--jbm)",
-						fontSize: 9,
-						letterSpacing: ".05em",
-						textTransform: "uppercase",
-						padding: "2px 6px",
-						borderRadius: 3,
-						border: "1px solid var(--ok)",
-					}}
-				>
-					✓ {typeLabel} default
-				</span>
-			) : (
-				<span
-					className="tag"
-					data-testid="model-default-none"
-					style={{
-						color: "var(--fg-4)",
-						borderColor: "var(--line)",
-						background: "var(--bg-2)",
-						fontFamily: "var(--jbm)",
-						fontSize: 9,
-						letterSpacing: ".05em",
-						textTransform: "uppercase",
-						padding: "2px 6px",
-						borderRadius: 3,
-						border: "1px solid var(--line)",
-					}}
-				>
-					not the default
-				</span>
-			)}
 			<button
 				type="button"
 				className="btn ghost sm"
 				data-testid="model-default-toggle"
 				onClick={onToggleDefault}
 				disabled={setDefault.isPending}
-				style={{ fontSize: 10.5 }}
+				style={
+					isTypeDefault
+						? {
+								fontSize: 10.5,
+								color: "var(--ok)",
+								borderColor: "var(--ok)",
+								background: "var(--ok-soft)",
+							}
+						: { fontSize: 10.5 }
+				}
 			>
-				{setDefault.isPending
-					? "Saving…"
-					: isTypeDefault
-						? "Remove default"
-						: "Set as default"}
+				{isTypeDefault ? `✓ ${typeLabel} default` : `${typeLabel} default`}
 			</button>
 		</span>
+	);
+
+	// Facts band (Task 3): read-only quant/size/arch/context/sha256/used-by
+	// strip under the header. Each cell renders ONLY when its fact exists on
+	// the row — an absent fact is an absent cell, never a blank one.
+	const sizeGb =
+		Number(model.size_bytes) > 0
+			? (Number(model.size_bytes) / 1024 ** 3).toFixed(1)
+			: null;
+	const nativeContext = modelContextLength
+		? modelContextLength >= 1024
+			? `${Math.round(modelContextLength / 1024)}K`
+			: String(modelContextLength)
+		: null;
+	const modelSha256 =
+		typeof model?.metadata?.sha256 === "string" && model.metadata.sha256
+			? model.metadata.sha256
+			: null;
+	const usedBySlots = slotsUsingModel(slotsQuery.data, model.id);
+	const factCellStyle = { minWidth: 0 };
+	const factLabelStyle = {
+		fontSize: 9,
+		letterSpacing: ".05em",
+		textTransform: "uppercase",
+		color: "var(--fg-4)",
+		marginBottom: 2,
+	};
+	const factValueStyle = { fontSize: 12, color: "var(--fg-2)" };
+	const factsNode = (
+		<div
+			data-testid="model-facts"
+			style={{
+				display: "grid",
+				gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
+				gap: "10px 16px",
+				margin: "4px 0 16px",
+				padding: "11px 14px",
+				border: "1px solid var(--line)",
+				borderRadius: 8,
+				background: "var(--bg-2)",
+			}}
+		>
+			{model.quant && (
+				<div style={factCellStyle}>
+					<div style={factLabelStyle}>Quant</div>
+					<div className="mono" style={factValueStyle}>{model.quant}</div>
+				</div>
+			)}
+			{sizeGb && (
+				<div style={factCellStyle}>
+					<div style={factLabelStyle}>Size</div>
+					<div className="mono" style={factValueStyle}>{sizeGb} GB</div>
+				</div>
+			)}
+			{model.architecture && (
+				<div style={factCellStyle}>
+					<div style={factLabelStyle}>Architecture</div>
+					<div className="mono" style={factValueStyle}>{model.architecture}</div>
+				</div>
+			)}
+			{nativeContext && (
+				<div style={factCellStyle}>
+					<div style={factLabelStyle}>Native ctx</div>
+					<div className="mono" style={factValueStyle}>{nativeContext}</div>
+				</div>
+			)}
+			{modelSha256 && (
+				<div style={factCellStyle}>
+					<div style={factLabelStyle}>sha256</div>
+					<div className="mono" style={factValueStyle} title={modelSha256}>
+						{modelSha256.slice(0, 8)}
+					</div>
+				</div>
+			)}
+			<div style={factCellStyle} data-testid="model-facts-usedby">
+				<div style={factLabelStyle}>Used by</div>
+				<div className="mono" style={factValueStyle}>
+					{usedBySlots.length === 0 ? (
+						"0 slots"
+					) : (
+						<>
+							{usedBySlots.length} slot{usedBySlots.length === 1 ? "" : "s"} —{" "}
+							{usedBySlots.map((s, i) => (
+								<React.Fragment key={s.name}>
+									{i > 0 && " · "}
+									{onOpenSlot ? (
+										<button
+											type="button"
+											className="link"
+											onClick={() => onOpenSlot(s.name)}
+										>
+											{s.name}
+										</button>
+									) : (
+										s.name
+									)}
+								</React.Fragment>
+							))}
+						</>
+					)}
+				</div>
+			</div>
+		</div>
 	);
 
 	return (
@@ -1182,22 +1338,9 @@ function ModelDrawer({ open, onClose, model }) {
 					</>
 				}
 			>
-				{/* ── Identity ── */}
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Display name</span>
-						<FieldInfoIcon description="empty keeps the model id" />
-					</div>
-					<div className="form-ctl">
-						<input
-							className="input"
-							data-testid="model-name-input"
-							placeholder={model.id}
-							value={name}
-							onChange={(e) => setName(e.target.value)}
-						/>
-					</div>
-				</div>
+				{/* ── Facts band (Task 3) — name/default moved onto the header title;
+				    quant/size/arch/context/sha256/used-by ride here instead. ── */}
+				{factsNode}
 
 				{/* ── Launch-command hero: seed button + flags (1b / panel 12 Fix 2/3) ── */}
 				<div

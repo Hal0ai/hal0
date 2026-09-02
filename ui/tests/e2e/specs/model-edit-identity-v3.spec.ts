@@ -1,6 +1,11 @@
 /**
- * model-edit-identity-v3 — display name editing in the model "Edit options"
- * pane (RecipeEditorModal).
+ * model-edit-identity-v3 — display name editing in the model drawer header.
+ *
+ * model-drawer-2 Task 3 moved the name field off a "Display name" form row
+ * and onto the drawer title itself: a ✎ button (`model-title-edit`) swaps the
+ * name span for an inline input (`model-title-input`), committed on
+ * Enter/blur. These tests were written against the old form-row field
+ * (`model-name-input`) — retargeted to the inline editor, same contract.
  *
  * The curated "type" toggle row (mtp/moe/tool-calling/reasoning/coder/vision)
  * is RETIRED: behaviour is owned by typed fields (defaults.mtp,
@@ -27,12 +32,13 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
 }
 
 test.describe('Model edit — display name, type toggles retired', () => {
-  test('name input renders; no curated type toggles', async ({ page }) => {
+  test('title editor opens on the ✎ button; no curated type toggles', async ({ page }) => {
     await mockChatTemplates(page)
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
 
-    const nameInput = page.getByTestId('model-name-input')
+    await page.getByTestId('model-title-edit').click()
+    const nameInput = page.getByTestId('model-title-input')
     await expect(nameInput).toBeVisible()
     // Placeholder falls back to the model id so the field is self-describing
     // even when no display name is set.
@@ -64,7 +70,9 @@ test.describe('Model edit — display name, type toggles retired', () => {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
 
-    await page.getByTestId('model-name-input').fill('My Renamed Qwen')
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('My Renamed Qwen')
+    await page.getByTestId('model-title-input').press('Enter')
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => putBody?.name).toBe('My Renamed Qwen')

@@ -1,12 +1,17 @@
 /**
  * model-drawer-default-v3 — per-type default MODEL marker (Set / Remove).
  *
- * The model drawer surfaces whether the model is its dispatcher type's default
- * and a Set-as-default / Remove-default affordance that POSTs
- * /api/models/{id}/default. The server enforces the single-holder invariant;
- * the UI just fires the mutation and lets the models-query invalidation flip
- * the badge. Asserts the badge + button reflect the (stateful-mocked) flag both
- * ways round.
+ * The model drawer surfaces whether the model is its dispatcher type's
+ * default via a single toggle chip that POSTs /api/models/{id}/default. The
+ * server enforces the single-holder invariant; the UI just fires the
+ * mutation and lets the models-query invalidation flip the chip. Asserts the
+ * chip's text reflects the (stateful-mocked) flag both ways round.
+ *
+ * model-drawer-2 Task 3 collapsed the old badge (`model-default-badge` /
+ * `model-default-none`) + ghost chip + separate button trio into ONE
+ * `model-default-toggle` chip whose own text carries the state ("llm
+ * default" / "✓ llm default") — the testid is preserved, only the badge
+ * testids and the "Set as default" / "Remove default" text are gone.
  */
 import { test, expect } from '../fixtures/apiMock'
 import { MOCK_DATA } from '../fixtures/mock-data'
@@ -28,7 +33,7 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
 }
 
 test.describe('Model drawer — per-type default', () => {
-  test('Set as default → badge flips → Remove default flips back', async ({ page }) => {
+  test('default chip toggles both ways', async ({ page }) => {
     await mockProfiles(page)
     await mockChatTemplates(page)
 
@@ -66,18 +71,15 @@ test.describe('Model drawer — per-type default', () => {
     await expect(page.getByTestId('model-flags-input')).toBeVisible()
 
     // Initially not the default.
-    await expect(page.getByTestId('model-default-none')).toBeVisible()
     const toggle = page.getByTestId('model-default-toggle')
-    await expect(toggle).toHaveText(/Set as default/)
+    await expect(toggle).toHaveText('llm default')
 
-    // Promote → badge appears, button flips to Remove.
+    // Promote → chip flips to the checked state.
     await toggle.click()
-    await expect(page.getByTestId('model-default-badge')).toBeVisible()
-    await expect(page.getByTestId('model-default-toggle')).toHaveText(/Remove default/)
+    await expect(page.getByTestId('model-default-toggle')).toHaveText('✓ llm default')
 
-    // Clear → badge gone, button back to Set.
+    // Clear → chip flips back.
     await page.getByTestId('model-default-toggle').click()
-    await expect(page.getByTestId('model-default-none')).toBeVisible()
-    await expect(page.getByTestId('model-default-toggle')).toHaveText(/Set as default/)
+    await expect(page.getByTestId('model-default-toggle')).toHaveText('llm default')
   })
 })

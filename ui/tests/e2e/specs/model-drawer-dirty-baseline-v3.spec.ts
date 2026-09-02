@@ -240,7 +240,10 @@ test.describe('Model drawer — frozen baseline + dirty-gated Save', () => {
     await openDrawer(page)
     await expect(saveBtn(page)).toBeDisabled()
 
-    await page.getByTestId('model-name-input').fill('Renamed model')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now.
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('Renamed model')
+    await page.getByTestId('model-title-input').press('Enter')
     await expect(saveBtn(page)).toBeEnabled()
     await saveBtn(page).click()
 

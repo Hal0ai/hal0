@@ -145,7 +145,10 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     await openDrawer(page)
 
-    await page.getByTestId('model-name-input').fill('Saved model name')
+    // model-drawer-2 Task 3: name edits ride the inline title editor now.
+    await page.getByTestId('model-title-edit').click()
+    await page.getByTestId('model-title-input').fill('Saved model name')
+    await page.getByTestId('model-title-input').press('Enter')
     // Backends is retired (spec-hw-slot-ownership §1/§8) — Engine is the
     // write path now; "Runs on" is derived/read-only and not editable here.
     await page.getByTestId('model-provider-select').selectOption('flm')
@@ -216,20 +219,24 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    // 10 rows (was 13 pre-Task-8): Option A's header meta move relocated
+    // 9 rows (was 13 pre-Task-8): Option A's header meta move relocated
     // "Default for {type}" off the row list entirely (−1) and folded the
     // "Modality" row into a renamed "Capabilities" row in place (±0 — the
     // modality tag left for the header, the readout chips stayed); the four
     // always-on tri-state rows (mtp/thinking/jinja/vision) collapsed into one
     // "Overrides" ledger row (−4 +1 = −3); and the single editable "Backends"
     // row split into "Engine" + read-only "Runs on" (−1 +2 = +1).
-    // 13 − 1 − 3 + 1 = 10.
-    await expect(labels).toHaveCount(10)
+    // 13 − 1 − 3 + 1 = 10, then model-drawer-2 Task 3 moved "Display name"
+    // off the row list onto the header's inline title editor (−1) = 9.
+    await expect(labels).toHaveCount(9)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(10)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(9)
 
-    const displayNameLabel = labels.filter({ hasText: 'Display name' })
-    const info = displayNameLabel.getByRole('button', { name: 'Info' })
+    // Display name no longer has a form row (Task 3) — MMProj is a plain
+    // text-input row with the same FieldInfoIcon shape, so it stands in for
+    // the generic hover/focus-only info-help behaviour asserted below.
+    const mmprojLabel = labels.filter({ hasText: 'MMProj' })
+    const info = mmprojLabel.getByRole('button', { name: 'Info' })
     // #1683: the popup portals to document.body (so overflow:hidden panels
     // can't clip it), so it's no longer a DOM descendant of the label — find
     // it via the button's aria-describedby instead of a row-scoped locator.
