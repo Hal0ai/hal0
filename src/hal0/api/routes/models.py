@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -30,6 +30,7 @@ from hal0.registry.pull import PullInvalidSource
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
+from hal0.slots.capacity import estimate_file_size_kv_mb, gtt_feasibility_verdict
 
 # See slots.py for the writer-gate rationale.
 
@@ -588,6 +589,81 @@ async def update_model_from_hf(
         dest=dest,
         run_wrapper=_run_pull_with_events,
     )
+
+
+@router.post("/feasibility")
+async def models_feasibility(request: Request) -> dict[str, Any]:
+    """Advisory GTT preflight for a batch of (model, ctx) picks.
+
+    Registered ABOVE the ``/{model_id}`` catch-all below so the literal
+    ``feasibility`` path never resolves as a model id (same reason
+    ``/pulls`` and ``/updates/check`` sit above it).
+
+    Never 404s, never blocks — an unknown model id or missing host GPU
+    truth (no ``hardware_stats`` wired, or the sample failed) yields a
+    ``verdict: "unknown"`` row rather than an error. This is a batch
+    advisory endpoint for the drawer's model picker, not a gate.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    items = body.get("models") or []
+
+    registry = request.app.state.model_registry
+    stats = getattr(request.app.state, "hardware_stats", None)
+    gpu = None
+    if stats is not None:
+        try:
+            gpu = await asyncio.to_thread(stats.gpu_sample)
+        except Exception:
+            gpu = None
+    free = getattr(gpu, "gtt_free_mb", None)
+    total = getattr(gpu, "gtt_total_mb", None)
+
+    results: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("model_id") or "")
+        try:
+            model = registry.get(mid)
+        except Exception:
+            results.append(
+                {
+                    "model_id": mid,
+                    "verdict": "unknown",
+                    "needed_mb": 0.0,
+                    "gtt_free_mb": free,
+                    "gtt_total_mb": total,
+                }
+            )
+            continue
+        model_mb = float(model.size_bytes or 0) / (1024 * 1024)
+        ctx_meta = model.model_dump(mode="json")
+        ctx = item.get("ctx")
+        if isinstance(ctx, int) and ctx > 0:
+            ctx_meta["defaults"] = {**(ctx_meta.get("defaults") or {}), "context_size": ctx}
+        needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
+        verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
+        results.append({"model_id": mid, **verdict})
+    return {"results": results}
+
+
+@router.get("/feasibility")
+async def models_feasibility_method_not_allowed() -> None:
+    """``/feasibility`` is POST-only.
+
+    A path-param route always fully matches GET on ANY single path
+    segment (Starlette matches by path+method independently per route,
+    not by "most specific literal wins"), so without this explicit
+    literal GET registered above the ``/{model_id}`` catch-all, a stray
+    GET here would silently resolve as model_id="feasibility" and 404
+    with a misleading "model not found" instead of the correct 405.
+    """
+    raise HTTPException(status_code=405, detail="POST required")
 
 
 @router.get("/{model_id}")
