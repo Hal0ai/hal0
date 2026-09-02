@@ -51,7 +51,11 @@ import { diffFlags } from "./flags-tune.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
-import { stateChipClassForSlot, slotButtonPhase } from "./slot-status.js";
+import {
+	stateChipClassForSlot,
+	slotButtonPhase,
+	imageLiveState,
+} from "./slot-status.js";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { npuModalityOn } from "./npu-modality.js";
 import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
@@ -2776,36 +2780,39 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											>
 												{effectiveImage}
 											</span>
+											{(() => {
+												// The old, separate "Image status" row's job — what's
+												// ACTUALLY running vs. what the next (re)start would
+												// use — collapses into this chip instead of a second
+												// stacked row repeating the same ref (image-dedupe).
+												// Same actual_image/image_pin/image precedence the
+												// deleted row used to render.
+												const actualImage =
+													slot.actual_image ||
+													slot.image_pin ||
+													slot.image ||
+													null;
+												const chip = imageLiveState(
+													actualImage,
+													effectiveImage,
+													slotButtonPhase(slot),
+												);
+												if (!chip) return null;
+												return (
+													<span
+														className={chip.cls}
+														style={{ marginLeft: 8 }}
+														title={chip.tooltip}
+													>
+														{chip.label}
+													</span>
+												);
+											})()}
 											<div className="hint">
 												{pinActive
 													? "debug pin"
 													: "pinned by release · reconciled by hal0 update"}
 											</div>
-										</div>
-									</div>
-
-									<div className="form-row">
-										<div className="form-lbl">
-											<span>Image status</span>
-											<FieldInfoIcon description="The image this slot is ACTUALLY running right now,
-												while it's up — distinct from the resolved release
-												image above, which is what the next (re)start
-												would use." />
-										</div>
-										<div className="form-ctl">
-											<span className="mono" data-testid="slot-image-status">
-												{slotButtonPhase(slot) === "running"
-													? (slot.actual_image ||
-															slot.image_pin ||
-															slot.image ||
-															"present") +
-														(slot.id != null
-															? ` · #${slot.id}`
-															: slot.slot_id != null
-																? ` · #${slot.slot_id}`
-																: "")
-													: "—"}
-											</span>
 										</div>
 									</div>
 
