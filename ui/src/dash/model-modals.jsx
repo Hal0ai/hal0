@@ -272,10 +272,13 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   );
 }
 
-// Model capability + backend vocabularies now come from GET /api/meta/enums
-// (useMetaEnums → meta.model_capabilities / meta.model_backends, with the
-// typed static fallback) — the hardcoded MODEL_CAPABILITIES / MODEL_BACKENDS
-// constants that used to live here are gone.
+// The hardcoded MODEL_CAPABILITIES / MODEL_BACKENDS constants that used to
+// live here are gone, and so is this file's capability/label editing UI
+// (the Capabilities/Labels editors were retired — #2193). GET
+// /api/meta/enums (via useMetaEnums → meta.model_capabilities /
+// meta.model_backends) still backs that vocabulary where it's actually
+// consumed — model-drawer.jsx, models.jsx, stacks.jsx, profiles.jsx,
+// HardwareRuntimesPage.jsx, ModelDefaultsPage.jsx — not in this file.
 
 // ─── Delete model confirm ───────────────────────────────────────
 function DeleteModelDialog({ open, onClose, model }) {

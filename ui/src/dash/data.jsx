@@ -336,9 +336,10 @@ const HAL0_DATA = {
 
   // ── v0.4 #544: omnirouter routing table mock removed. The settings
   // rail no longer renders an OmniRouter section — that surface lives
-  // on the MCP view (hal0-mcp#routing) and the live agent view. The
-  // live `/api/omni/route` snapshot drives the MCP view's per-tool
-  // target list when the backend is available.
+  // on the MCP view (hal0-mcp#routing) and the live agent view. There
+  // is no live omni introspection endpoint on the server (no
+  // `/api/omni/route`-shaped route exists under src/hal0/api/routes/);
+  // the routing side of this is tracked by #2192/#2193.
 
   // v0.3 PR-8: HAL0_DATA.approvals removed. The dashboard reads
   // approvals from the live /api/agent/approvals queue (via
