@@ -93,7 +93,10 @@ applying. Add those subsections to a version's section to surface them; see
   ordinary custom entries (`ProfilesConfig.legacy_seeds_migrated`), so
   nothing an operator's slots or models already point at disappears — the
   entries just become editable and deletable like any custom profile,
-  which a seed never could be.
+  which a seed never could be. A FRESH install never sees them in its
+  catalog, but the curated slots and seed stacks it ships still name three;
+  each such name is adopted into `profiles.toml` on first reference,
+  independently of the others, and stays deleted once deleted.
 - **Pruned seeds ship as portable addon envelopes.** The eight demoted
   tunes are published as `.hal0profile.json` envelopes under
   `community/addons/` (`scripts/export_addons.py`, byte-for-byte
@@ -123,6 +126,23 @@ applying. Add those subsections to a version's section to surface them; see
   the kyuz0 layout by construction, so existing img slots need no
   reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
   upgraded boxes (#2171).
+
+### Migrations
+
+- **`profiles.toml` gains two bookkeeping keys and is not readable by
+  1.1.0.** The seed prune records its one-time work in the file itself:
+  `legacy_seeds_migrated` (the bulk demotion has run) and
+  `legacy_seeds_adopted` (which demoted names this install has already
+  materialized or deleted, so a delete sticks and a fresh box can still adopt
+  each one on first reference). Both are written automatically on the first
+  load or profile save after upgrading — nothing to run by hand. But
+  `ProfilesConfig` is `extra = "forbid"` on 1.1.0 and earlier, so **rolling
+  back to 1.1.0 after the upgrade fails to parse the migrated
+  `profiles.toml`** and the profile catalog will not load on the old build.
+  Back up `/etc/hal0/profiles.toml` before upgrading if you may downgrade;
+  restoring that copy (or deleting the two keys) makes the file readable by
+  1.1.0 again.
+
 ## [1.1.0] — 2026-08-31
 
 ### Highlights
