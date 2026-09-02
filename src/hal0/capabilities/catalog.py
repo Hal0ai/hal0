@@ -390,7 +390,7 @@ def _backend_variants(entry: Any) -> list[str]:
     explicit = getattr(entry, "provider", None)
     if explicit and explicit != "llama-server":
         if explicit == "flm":
-            # Mirrors the untouched legacy ``{"flm", "npu"}`` tag branch
+            # Mirrors the untouched original ``{"flm", "npu"}`` tag branch
             # below: NPU is offered unconditionally, with no
             # ``available_backends()`` intersection — host-truth NPU
             # gating lives downstream, in the load-time FLM probe

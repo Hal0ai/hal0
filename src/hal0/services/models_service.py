@@ -399,9 +399,7 @@ async def commit_scan_rows(
             # spec forbids on registry rows). Screen it against the same
             # vocab the create path enforces (see the ``model.provider_invalid``
             # check further down this module) and reject the row instead.
-            skipped.append(
-                {"path": str(resolved), "reason": f"invalid_provider:{provider!r}"}
-            )
+            skipped.append({"path": str(resolved), "reason": f"invalid_provider:{provider!r}"})
             continue
 
         suggested_id = row.get("id") or suggest_id_from_path(resolved)

@@ -206,7 +206,7 @@ _PROVIDER_TAGS: dict[str, str] = {
 
 
 def derive_model_provider(backends: Sequence[str] | None) -> str:
-    """Engine identity for a registry model from its legacy backend tags.
+    """Engine identity for a registry model from its tag-era backend tags.
 
     Lane tags (rocm/vulkan/cuda/cpu) are hardware lanes, not engines — they
     resolve to the llama-server default. Mirrors capabilities.catalog's

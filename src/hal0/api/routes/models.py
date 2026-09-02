@@ -378,7 +378,7 @@ async def create_model(request: Request) -> dict[str, Any]:
     emitted ``model.registered`` event so the footer can colour-code
     catalogue picks vs hand-registered files. Defaults to ``"manual"``.
 
-    A body carrying legacy ``backends`` tags but no ``provider`` gets one
+    A body carrying tag-era ``backends`` tags but no ``provider`` gets one
     derived (``hal0.model_meta.derive_model_provider``) before screening, so
     create never mints a permanently ``provider=None`` row (Task 3) — an
     explicit ``provider`` in the body is never overridden.
@@ -395,7 +395,7 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
-    # Task 3 fix: a create body can still hand-carry legacy ``backends``
+    # Task 3 fix: a create body can still hand-carry tag-era ``backends``
     # tags (create, unlike PUT, isn't retiring the field as an input) — but
     # a create with ``backends`` and no ``provider`` must not mint a
     # permanently provider=None row. Derive only when provider is absent;

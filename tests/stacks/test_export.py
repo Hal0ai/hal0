@@ -116,9 +116,7 @@ class TestEmbedReferences:
                 provider="kokoro",
             )
         )
-        stack = StackConfig(
-            name="Voice", slots=[StackSlotEntry(slot="tts", model="kokoro-voice")]
-        )
+        stack = StackConfig(name="Voice", slots=[StackSlotEntry(slot="tts", model="kokoro-voice")])
         out = embed_references(stack, registry=r)
         assert out.models["kokoro-voice"].provider == "kokoro"
 

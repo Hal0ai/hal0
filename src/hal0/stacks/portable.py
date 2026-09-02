@@ -97,7 +97,7 @@ def embed_references(
                 size_bytes=m.size_bytes,
                 capabilities=list(m.capabilities),
                 backends=list(m.backends),
-                # Task 3: legacy backends is a vestigial lane hint now —
+                # Task 3: tag-era backends is a vestigial lane hint now —
                 # embed the row's explicit provider verbatim, or derive it
                 # from those same backends when the row never got one.
                 provider=m.provider or derive_model_provider(m.backends),

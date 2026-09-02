@@ -128,9 +128,7 @@ def seeded_registry(tmp_path: Path) -> ModelRegistry:
 def test_provider_split_matches_legacy_resolution(seeded_registry: ModelRegistry) -> None:
     resolved: set[str] = set()
     for model in seeded_registry.list():
-        legacy = catalog._provider_for_backend(
-            "", "cpu", entry=_StripProvider(model)
-        )
+        legacy = catalog._provider_for_backend("", "cpu", entry=_StripProvider(model))
         assert derive_model_provider(model.backends) == legacy, model.id
         resolved.add(legacy)
     # Total over RUNTIME_FAMILIES — no family is excluded from the parity
@@ -154,7 +152,9 @@ def test_backend_variants_llama_provider_empty_backends_falls_through(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
-    m = Model(id="llama-a", path=str(tmp_path / "llama-a.gguf"), backends=[], provider="llama-server")
+    m = Model(
+        id="llama-a", path=str(tmp_path / "llama-a.gguf"), backends=[], provider="llama-server"
+    )
     assert catalog._backend_variants(m) == ["gpu-vulkan", "cpu"]
 
 
@@ -177,7 +177,9 @@ def test_runs_on_for_model_non_empty_for_empty_backends_llama_row(
     from hal0.services.models_service import model_to_dict
 
     monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
-    m = Model(id="llama-b", path=str(tmp_path / "llama-b.gguf"), backends=[], provider="llama-server")
+    m = Model(
+        id="llama-b", path=str(tmp_path / "llama-b.gguf"), backends=[], provider="llama-server"
+    )
     assert model_to_dict(m)["runs_on"] == ["gpu-vulkan", "cpu"]
 
 

@@ -372,7 +372,7 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             if curated.capability
             else (["image"] if is_comfyui else ["chat"]),
             backends=comfyui_backends,
-            # Task 3: stamp provider alongside the legacy backends tag on a
+            # Task 3: stamp provider alongside the tag-era backends tag on a
             # NEW row — backends stays a vestigial lane hint (non-comfyui
             # rows carry none), provider is the write-path source of truth.
             provider=derive_model_provider(comfyui_backends),

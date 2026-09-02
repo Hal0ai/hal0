@@ -1315,7 +1315,7 @@ def _register_pulled(
                 quant=detected_quant,
                 capabilities=caps,
                 backends=backends,
-                # Task 3: stamp provider alongside the legacy backends tag on
+                # Task 3: stamp provider alongside the tag-era backends tag on
                 # a NEW row — backends stays a vestigial lane hint, provider
                 # is the write-path source of truth.
                 provider=derive_model_provider(backends),
@@ -2134,7 +2134,7 @@ def _register_flm_pulled(
                 size_bytes=size_bytes,
                 capabilities=caps,
                 backends=["npu"],
-                # Task 3: stamp provider alongside the legacy backends tag on
+                # Task 3: stamp provider alongside the tag-era backends tag on
                 # a NEW row — see the matching comment in ``_register_pulled``.
                 provider=derive_model_provider(["npu"]),
                 metadata={"runtime": "flm"},

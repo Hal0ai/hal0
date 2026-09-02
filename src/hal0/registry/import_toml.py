@@ -70,7 +70,7 @@ def _load_toml_models(registry_file: Path) -> tuple[dict[str, Model], int]:
                 skipped_invalid += 1
                 continue
             try:
-                # Task 3: a legacy entry may only ever have carried
+                # Task 3: a tag-era entry may only ever have carried
                 # ``backends`` tags — ``provider`` is the write-path source
                 # of truth now, so backfill it here rather than leaving a
                 # freshly-imported row to fall back on lazy derivation.
