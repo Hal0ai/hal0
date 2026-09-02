@@ -24,8 +24,11 @@ That will:
 5. Create the LXC privileged, with `nesting/keyctl/fuse/mknod`, every probed
    device as `devN`, the matching `lxc.cgroup2.devices.allow` rules,
    `lxc.prlimit.memlock: unlimited`, and `lxc.apparmor.profile: unconfined`
-6. Start it, wait for network, and verify the forwarded devices are actually
-   visible inside the container before installing anything
+6. Start it, read the guest's `render` gid, re-point every `devN` entry at it
+   and restart if it differed (the host's gid is only correct by coincidence,
+   and a privileged container has no idmap to shift it), then wait for network
+   and verify each forwarded device is visible **and carries the expected gid**
+   before installing anything
 7. Install `curl` if the template lacks it (the one package that cannot be
    fetched by the thing it fetches), then pipe `https://hal0.dev/install.sh`
    into `bash`. Everything else the guest installs itself — bootstrap pulls

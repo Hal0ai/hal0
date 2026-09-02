@@ -107,6 +107,15 @@ Then apply it:
 pct stop <CTID> && pct start <CTID>
 ```
 
+<Aside type="tip">
+The quick-path script resolves this for you: it boots the container once,
+reads the guest's `render` gid, re-points every `devN` entry at it, and
+restarts. That step exists because the correct gid cannot be known before
+the container exists — and on a **privileged** container there is no idmap
+to paper over the difference, so a host gid of 993 stays 993 inside a guest
+whose render group is 991.
+</Aside>
+
 <Aside type="caution" title="gid means the CONTAINER's gid, not the host's">
 The `gid=` value must be the render group's id **inside the container**,
 not on the host — the two gid spaces can disagree. See the Render-group

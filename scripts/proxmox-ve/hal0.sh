@@ -206,7 +206,14 @@ _dev_major() {
 
 _add_gpu_device() {
     local path="$1" with_gid="${2:-1}" gid=""
-    [[ -e "${path}" ]] || return 1
+    # Symlinks are skipped, not resolved: on a Strix Halo host /dev/dri/amdgpu
+    # is a symlink to the render node the glob above already picked up, so
+    # following it would forward the same device twice — and `stat -c %t` on
+    # the link itself reports major 0, which would emit a meaningless
+    # `lxc.cgroup2.devices.allow: c 0:* rwm` rule. Only real character
+    # devices are forwarded.
+    [[ -L "${path}" ]] && return 1
+    [[ -c "${path}" ]] || return 1
     if [[ "${with_gid}" == "1" ]]; then
         gid="$(stat -c '%g' "${path}" 2>/dev/null || true)"
     fi
@@ -236,8 +243,12 @@ discover_gpu_devices() {
     for node in /dev/dri/renderD*; do
         [[ -e "${node}" ]] && _add_gpu_device "${node}" 1
     done
-    # Strix Halo exposes /dev/dri/amdgpu (no card0); forward it when present.
-    [[ -e /dev/dri/amdgpu ]] && _add_gpu_device /dev/dri/amdgpu 1
+    # Some kernels expose /dev/dri/amdgpu as its own node; forward it when it
+    # is a real device (on Strix Halo it is a symlink to the render node and
+    # _add_gpu_device skips it).
+    if [[ -e /dev/dri/amdgpu ]]; then
+        _add_gpu_device /dev/dri/amdgpu 1 || true
+    fi
     # ROCm compute node.
     [[ -e /dev/kfd ]] && _add_gpu_device /dev/kfd 1
     # XDNA/NPU accelerators (FastFlowLM lane).
@@ -396,6 +407,59 @@ start_lxc() {
     msg_ok "LXC ${CTID} started"
 }
 
+# ── align device gids with the container's render group ───────────────────
+# `devN: …,gid=` sets the node's owning group as seen INSIDE the container,
+# and hal0 requires that group to be the guest's `render` group — otherwise
+# preflight_gpu classifies the passthrough as broken and refuses to install
+# (correctly: hal0-user probes could not open the node).
+#
+# The gid this script forwards initially is the HOST's, which is only right
+# by coincidence. On an unprivileged container pct shifts it through the
+# idmap; on a privileged one there is no shift at all, so a host render gid
+# of 993 lands as 993 inside a guest whose render group is 991 (Debian 13 and
+# Ubuntu 24.04/26.04 all number it differently). That mismatch is the single
+# most common broken-passthrough shape, and it cannot be resolved before the
+# container exists — hence this pass: boot once, read the real gid from the
+# guest, rewrite the dev entries, restart.
+align_device_gids() {
+    [[ ${#GPU_DEV_ARGS[@]} -gt 0 ]] || return 0
+    msg_info "reading the render gid inside the container"
+
+    local gid=""
+    local _
+    for _ in $(seq 1 15); do
+        gid="$(pct exec "${CTID}" -- getent group render 2>/dev/null | cut -d: -f3 || true)"
+        [[ -n "${gid}" ]] && break
+        sleep 2
+    done
+    if [[ -z "${gid}" ]]; then
+        msg_warn "no 'render' group inside the container — leaving forwarded gids as they are"
+        return 0
+    fi
+
+    local changed=0 i=0 dev path
+    for dev in "${GPU_DEV_ARGS[@]}"; do
+        path="${dev%%,*}"
+        if [[ "${dev}" != "${path},gid=${gid}" ]]; then
+            pct set "${CTID}" --dev"${i}" "${path},gid=${gid}" >/dev/null \
+                || die "could not re-point dev${i} at gid ${gid}"
+            GPU_DEV_ARGS[i]="${path},gid=${gid}"
+            changed=1
+        fi
+        i=$((i + 1))
+    done
+
+    if [[ "${changed}" -eq 0 ]]; then
+        msg_ok "device gids already match the container's render group (${gid})"
+        return 0
+    fi
+
+    msg_info "re-pointing devices at the container's render gid (${gid}) and restarting"
+    pct stop "${CTID}" >/dev/null || die "pct stop failed"
+    pct start "${CTID}" >/dev/null || die "pct start failed"
+    msg_ok "devices aligned to render gid ${gid}"
+}
+
 # ── wait for network ──────────────────────────────────────────────────────
 wait_for_net() {
     msg_info "waiting for network in LXC"
@@ -416,17 +480,33 @@ wait_for_net() {
 verify_devices() {
     [[ ${#GPU_DEV_ARGS[@]} -gt 0 ]] || return 0
     msg_info "verifying devices inside the LXC"
-    local missing=""
-    local dev path
+    local missing="" wrong_gid=""
+    local dev path want_gid have_gid
     for dev in "${GPU_DEV_ARGS[@]}"; do
         path="${dev%%,*}"
-        pct exec "${CTID}" -- test -e "${path}" || missing="${missing} ${path}"
+        if ! pct exec "${CTID}" -- test -e "${path}"; then
+            missing="${missing} ${path}"
+            continue
+        fi
+        # The gid the entry asked for must be the gid the guest actually sees,
+        # or hal0's preflight classifies the passthrough as broken and refuses
+        # to install (BROKEN_GID) — which is the whole point of the alignment
+        # pass above.
+        want_gid="${dev#*gid=}"
+        [[ "${want_gid}" == "${dev}" ]] && continue
+        have_gid="$(pct exec "${CTID}" -- stat -c '%g' "${path}" 2>/dev/null || true)"
+        [[ "${have_gid}" == "${want_gid}" ]] \
+            || wrong_gid="${wrong_gid} ${path}(want ${want_gid}, got ${have_gid:-?})"
     done
     if [[ -n "${missing}" ]]; then
         msg_error "forwarded but not visible in the container:${missing}"
         die "check /etc/pve/lxc/${CTID}.conf, then: pct stop ${CTID} && pct start ${CTID}"
     fi
-    msg_ok "devices visible in LXC"
+    if [[ -n "${wrong_gid}" ]]; then
+        msg_error "device gid mismatch inside the container:${wrong_gid}"
+        die "hal0 would refuse this passthrough — fix the devN gid in /etc/pve/lxc/${CTID}.conf"
+    fi
+    msg_ok "devices visible in LXC with the expected gid"
 }
 
 # ── install hal0 ──────────────────────────────────────────────────────────
@@ -494,6 +574,7 @@ main() {
     create_lxc
     apply_raw_config
     start_lxc
+    align_device_gids
     wait_for_net
     verify_devices
     ensure_fetcher
