@@ -10,6 +10,7 @@
  * mirroring the existing "Recipe editor opens" test in models-v3.spec.ts.
  */
 import { test, expect } from '../fixtures/apiMock'
+import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 test.describe('Recipe editor — chat-template field', () => {
   test('select is populated from /api/chat-templates and Save writes defaults.chat_template', async ({
@@ -49,17 +50,18 @@ test.describe('Recipe editor — chat-template field', () => {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
 
-    // ── 4. Chat-template select is visible ───────────────────────
-    const tmplSelect = page.locator('select.chat-template-select')
+    // ── 4. Chat-template RichSelect is visible ────────────────────
+    const tmplSelect = page.getByTestId('model-chat-template')
     await expect(tmplSelect).toBeVisible()
 
     // ── 5. Options are populated from the mock ───────────────────
-    await expect(tmplSelect.locator('option[value="auto"]')).toHaveCount(1)
-    await expect(tmplSelect.locator('option[value="chatml"]')).toHaveCount(1)
-    await expect(tmplSelect.locator('option[value="llama3"]')).toHaveCount(1)
+    const listbox = await openRichSelect(tmplSelect)
+    await expect(listbox.locator('[data-option-id="auto"]')).toHaveCount(1)
+    await expect(listbox.locator('[data-option-id="chatml"]')).toHaveCount(1)
+    await expect(listbox.locator('[data-option-id="llama3"]')).toHaveCount(1)
 
     // ── 6. Select chatml and save ─────────────────────────────────
-    await tmplSelect.selectOption('chatml')
+    await pickRichOption(tmplSelect, 'chatml')
     await page.getByTestId('model-save').click()
 
     // ── 7. PUT body includes defaults.chat_template === 'chatml' ─
@@ -81,9 +83,11 @@ test.describe('Recipe editor — chat-template field', () => {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
 
-    const tmplSelect = page.locator('select.chat-template-select')
+    const tmplSelect = page.getByTestId('model-chat-template')
     await expect(tmplSelect).toBeVisible()
-    // Default value should be "auto"
-    await expect(tmplSelect).toHaveValue('auto')
+    // Default value should be "auto" — the closed trigger renders the
+    // selected option's row + chip directly (rich-select.jsx).
+    await expect(tmplSelect).toContainText('Auto')
+    await expect(tmplSelect).toContainText('GGUF embedded')
   })
 })

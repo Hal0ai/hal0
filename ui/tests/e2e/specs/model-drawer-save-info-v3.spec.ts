@@ -21,6 +21,7 @@
  * despite both existing server-side too.
  */
 import { test, expect } from '../fixtures/apiMock'
+import { pickRichOption } from '../fixtures/richSelect'
 
 const MODEL_ID = 'qwen3.6-27b-mtp'
 const PROFILE_FLAGS = '--cache-type-k q8_0'
@@ -164,7 +165,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     expect(seedRequests).toEqual([{ profile: 'rocm-save' }])
     await page.getByTestId('model-ctx-input').fill('16384')
-    await page.getByTestId('model-chat-template').selectOption('chatml')
+    await pickRichOption(page.getByTestId('model-chat-template'), 'chatml')
     // Overrides ledger replaces the four always-on TypedCapSeg rows.
     await setCapOverride(page, 'mtp', 'off')
     await setCapOverride(page, 'thinking', 'on')

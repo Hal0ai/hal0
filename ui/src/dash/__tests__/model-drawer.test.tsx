@@ -27,12 +27,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { ReactDOM: unknown }).ReactDOM = { ...ReactDOMClient, createPortal }
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 
-const { updateCalls, setDefaultCalls, setDefaultResult, slotsBox, profilesBox } = vi.hoisted(() => ({
+const { updateCalls, setDefaultCalls, setDefaultResult, slotsBox, profilesBox, templatesBox } = vi.hoisted(() => ({
   updateCalls: [] as unknown[],
   setDefaultCalls: [] as unknown[],
   setDefaultResult: { current: { default: true, type: 'llm' } as Record<string, unknown> },
   slotsBox: { current: [] as Record<string, unknown>[] },
   profilesBox: { current: [] as Record<string, unknown>[] },
+  templatesBox: { current: [] as Record<string, unknown>[] },
 }))
 
 vi.mock('@/api/hooks/useModels', () => ({
@@ -57,7 +58,7 @@ vi.mock('@/api/hooks/useModelSeedProfile', () => ({
 }))
 
 vi.mock('@/api/hooks/useChatTemplates', () => ({
-  useChatTemplates: () => ({ data: [], isLoading: false }),
+  useChatTemplates: () => ({ data: templatesBox.current, isLoading: false }),
 }))
 
 vi.mock('@/api/hooks/useProfiles', () => ({
@@ -134,6 +135,7 @@ beforeEach(() => {
   setDefaultResult.current = { default: true, type: 'llm' }
   slotsBox.current = []
   profilesBox.current = []
+  templatesBox.current = []
 })
 
 afterEach(() => {
@@ -521,6 +523,58 @@ describe('ModelDrawer tune pills (Task 4)', () => {
     expect(ctk).toBeTruthy()
     expect(ctk.getAttribute('data-divergence')).toBe('added')
     expect(q(host, 'model-diverged-chip').textContent).toBe('◆ 3 diverged')
+    act(() => root.unmount())
+  })
+})
+
+// ─── Task 5 — chat template RichSelect ──────────────────────────────────────
+// useChatTemplates rows are {id, label, valid, error} (chat_templates.py's
+// _entry); a `valid: false` row carries the render-lint error string. The
+// native <select> became a RichSelect (rich-select.jsx) so a broken template
+// can chip its warning inline instead of hiding it behind a plain <option>
+// label.
+describe('ModelDrawer chat template (Task 5)', () => {
+  const TEMPLATES = [
+    { id: 'auto', label: 'Auto (GGUF embedded)', valid: true, error: null },
+    { id: 'broken', label: 'broken', valid: false, error: 'TemplateSyntaxError: x' },
+  ]
+
+  it('renders rich rows with lint chips', () => {
+    templatesBox.current = TEMPLATES
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    act(() => q<HTMLButtonElement>(host, 'model-chat-template').click())
+
+    const autoRow = host.querySelector('[data-option-id="auto"]') as HTMLElement
+    expect(autoRow.textContent).toContain('GGUF embedded')
+    expect(autoRow.textContent).toContain('use the template the model file ships')
+
+    const brokenRow = host.querySelector('[data-option-id="broken"]') as HTMLElement
+    expect(brokenRow.textContent).toContain('⚠ broken')
+    expect(brokenRow.textContent).toContain('TemplateSyntaxError: x')
+    act(() => root.unmount())
+  })
+
+  it('picking a template updates form state', async () => {
+    templatesBox.current = TEMPLATES
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    act(() => q<HTMLButtonElement>(host, 'model-chat-template').click())
+    act(() => (host.querySelector('[data-option-id="broken"]') as HTMLElement).click())
+
+    const saveBtn = q<HTMLButtonElement>(host, 'model-save')
+    expect(saveBtn.disabled).toBe(false)
+
+    await act(async () => {
+      saveBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const call = updateCalls[0] as { id: string; body: { defaults: Record<string, unknown> } }
+    expect(call.body.defaults.chat_template).toBe('broken')
     act(() => root.unmount())
   })
 })

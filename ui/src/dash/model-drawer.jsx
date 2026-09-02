@@ -32,6 +32,7 @@ import { useProfiles } from "@/api/hooks/useProfiles";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlots } from "@/api/hooks/useSlots";
 import { slotsUsingModel } from "@/dash/model-usage.js";
+import { RichSelect } from "@/dash/rich-select.jsx";
 import {
 	canonicalCapabilities,
 	deviceById,
@@ -1043,6 +1044,35 @@ function deriveModelChanges(baseline, form) {
 	return c;
 }
 
+// Build the chat-template RichSelect's options from useChatTemplates rows
+// (`{id, label, valid, error}` — chat_templates.py's `_entry`). `auto` is
+// hand-rolled first with its own blurb (the catalog's own "Auto (GGUF
+// embedded)" label rides the chip instead of the row name, matching the
+// mockup); every other row chips a lint failure inline — `valid: false`
+// carries the render-check's error string — so a broken template dropped
+// into the store dir reads as a warning here, not only as a slot crash.
+function chatTemplateRichOptions(templates) {
+	const rows = Array.isArray(templates) ? templates : [];
+	const opts = [
+		{
+			id: "auto",
+			row: "Auto",
+			right: <span className="chip ok">GGUF embedded</span>,
+			desc: "use the template the model file ships — right for ~every GGUF",
+		},
+	];
+	for (const t of rows) {
+		if (t.id === "auto") continue;
+		opts.push({
+			id: t.id,
+			row: t.label,
+			right: t.valid === false ? <span className="chip warn">⚠ broken</span> : null,
+			desc: t.valid === false ? t.error : null,
+		});
+	}
+	return opts;
+}
+
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 // `onOpenSlot` is optional (Task 3, facts-band used-by cell): when a host
 // passes it, each slot name in the used-by list is a jump button; absent, the
@@ -1917,21 +1947,13 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 						<FieldInfoIcon description="auto = use the template embedded in the GGUF" />
 					</div>
 					<div className="form-ctl">
-						<select
-							className="input mono chat-template-select"
+						<RichSelect
 							data-testid="model-chat-template"
+							aria-label="Chat template"
 							value={chatTemplate}
-							onChange={(e) => setChatTemplate(e.target.value)}
-						>
-							<option value="auto">Auto (GGUF embedded)</option>
-							{(Array.isArray(templates.data) ? templates.data : [])
-								.filter((t) => t.id !== "auto")
-								.map((t) => (
-									<option key={t.id} value={t.id}>
-										{t.label}
-									</option>
-								))}
-						</select>
+							options={chatTemplateRichOptions(templates.data)}
+							onChange={setChatTemplate}
+						/>
 					</div>
 				</div>
 				{/* Overrides ledger (panel 09 V1): Auto is invisible — only an
