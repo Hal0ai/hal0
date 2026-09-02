@@ -35,7 +35,12 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // the apply preview below chips a lane exactly the way the profile card and
 // the profile drawer do (one solid single-hue chip PER lane, muted AUTO for
 // a profile that pins nothing) — one authority, no third dialect.
-import { runtimeChips } from "./profiles.jsx";
+// useRunnerPull (issue #2185, Task 11c): the SAME pull mutation the
+// Profiles view's not-pulled runtime chip uses — reused verbatim here for
+// the Runtime RichSelect's inline Pull affordance rather than a second
+// hook that could resolve a pull target differently.
+import { runtimeChips, useRunnerPull } from "./profiles.jsx";
+import { RichSelect } from "./rich-select.jsx";
 // shlex-lite flag diff — the apply preview's "replaces N flags" count.
 import { diffFlags } from "./flags-tune.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
@@ -168,13 +173,208 @@ function laneTitle(lane) {
 	return LANE_TITLE[lane] || lane;
 }
 
-// Runtime select suffix for one runnerOptions() row: 'ROCm + Vulkan' for a
-// dual-lane runner, the single lane's title for one, '' for a backend-
-// agnostic runner (no lanes declared — it takes whatever device it's given).
-function laneLabel(option) {
-	return (option?.lanes || []).map(laneTitle).join(" + ");
+// ── Runtime RichSelect rows (Task 11c) ────────────────────────────────────
+// (laneLabel(), the old plain-text " · ROCm + Vulkan" suffix helper, is gone
+// with the native <select> it decorated — the RichSelect rows below chip
+// each lane instead, via profiles.jsx's runtimeChips.)
+// Plain install-state indicator — NOT a button. Lives in both the closed
+// trigger (RichSelect's `right`) and the open row, so it must never be
+// interactive (a nested <button> inside the trigger's own <button> would be
+// invalid HTML and double-fire clicks). The inline Pull action below lives
+// in `desc` instead, which only ever renders inside the <li> row.
+function runtimeInstallBadge(state) {
+	if (state === "installed") return <span className="chip ok">● installed</span>;
+	if (state === "installable") return <span className="chip warn">○ not pulled</span>;
+	if (!state) return null;
+	return <span className="chip">{state}</span>;
 }
 
+// Runtime row description: the runner's blurb, plus an inline Pull button
+// (issue #2185) for an `installable` (not-pulled) runtime — reusing
+// profiles.jsx's `useRunnerPull`, the SAME mutation the Profiles view's own
+// not-pulled chip fires, so a pull kicked off from either surface lands in
+// the same job. `e.stopPropagation()` keeps the click from also committing
+// this option (the <li> it lives in fires onOptionClick on any click).
+function RuntimeRowDesc({ runnerKey, blurb, installable, backends }) {
+	const pull = useRunnerPull(runnerKey, backends);
+	if (!blurb && !installable) return null;
+	return (
+		<span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+			{blurb ? <span>{blurb}</span> : null}
+			{installable && (
+				<button
+					type="button"
+					className="btn ghost sm"
+					style={{ alignSelf: "flex-start" }}
+					disabled={pull.inFlight || !pull.target}
+					onClick={(e) => {
+						e.stopPropagation();
+						pull.start();
+					}}
+					title={pull.error ? `Pull failed — ${pull.error}` : "Pull this runtime image now"}
+				>
+					{pull.inFlight ? "◌ pulling…" : "⇩ Pull now"}
+				</button>
+			)}
+		</span>
+	);
+}
+
+// Build the Runtime RichSelect's options from a runnerOptions() list — one
+// solid `.pf-be` chip per lane (via profiles.jsx's `runtimeChips`, fed a
+// bare `{runner: key}` "profile" shape so it reuses the exact lane/hue
+// logic the Profiles view and the profile-apply preview already use — one
+// authority for what a lane chip looks like), the install-state chip, and
+// the blurb+Pull desc. The Auto entry and an out-of-vocab persisted binary
+// keep their EXACT current plain-text copy — no chips, no desc — per the
+// "out-of-vocab rows keep current copy" rule.
+function runtimeRichOptions({ binary, runtimeSel, runtimeOptions, backends }) {
+	const opts = [];
+	if (!binary) {
+		opts.push({ id: "", row: "— auto · resolved from device —" });
+	}
+	if (runtimeSel === null) {
+		opts.push({ id: binary, row: `${binary} · not in this catalog` });
+	}
+	for (const o of runtimeOptions) {
+		opts.push({
+			id: o.key,
+			row: (
+				<span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+					<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{o.title}</span>
+					<span className="pf-be-row">
+						{runtimeChips({ runner: o.key }, backends).map((c) => (
+							<span
+								key={c.key}
+								className="pf-be mono"
+								style={c.hue ? { "--bk": c.hue } : null}
+							>
+								{c.label}
+							</span>
+						))}
+					</span>
+				</span>
+			),
+			right: runtimeInstallBadge(o.state),
+			desc: (
+				<RuntimeRowDesc
+					runnerKey={o.key}
+					blurb={o.blurb}
+					installable={o.state === "installable"}
+					backends={backends}
+				/>
+			),
+		});
+	}
+	return opts;
+}
+
+// ── Model RichSelect rows (Task 11c) ──────────────────────────────────────
+// The one non-"chat" capability worth calling out as a modality tag on the
+// row's name line (mockup panel 05: "qwen3.8-vl-8b … <tag mod>vision</tag>").
+// Plain chat/tool-calling/coding models get no modality tag — those are
+// covered in the desc line's capability list instead.
+const MODEL_MODALITY_CAPS = ["vision", "image", "embed", "rerank", "transcription", "tts"];
+function modelModalityTag(m) {
+	const caps = Array.isArray(m?.capabilities) ? m.capabilities : [];
+	return MODEL_MODALITY_CAPS.find((c) => caps.includes(c)) || null;
+}
+
+// Build the Model RichSelect's options from the already-filtered compatible
+// list. `verdictChipFor(modelId)` returns the right-aligned GTT feasibility
+// chip (`● fits · ~N GB` / `◐ tight` / `○ won't fit`, or null for an
+// unverdicted/unknown row) — a no-op placeholder here; Task 11d wires it to
+// the batch `useModelsFeasibility` call fired on dropdown open. `usedByCount`
+// is read from the slots list already queried in this drawer (`slotsQuery`),
+// never a second fetch.
+function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChipFor }) {
+	const opts = [];
+	if (cur && !has) {
+		opts.push({ id: cur, row: slotLong || cur });
+	}
+	if (!cur) {
+		opts.push({ id: "", row: "—" });
+	}
+	const countUsedBy = (id) =>
+		(allSlots || []).filter((s) => (s.model_id || s.model) === id).length;
+	for (const m of compatible) {
+		const quant = m.quant || null;
+		const modTag = modelModalityTag(m);
+		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
+		const usedBy = countUsedBy(m.id);
+		opts.push({
+			id: m.id,
+			row: (
+				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+					<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+						{m.longName || m.id}
+					</span>
+					{quant && <span className="chip amber">{quant}</span>}
+					{modTag && <span className="chip info">{modTag}</span>}
+				</span>
+			),
+			right: verdictChipFor ? verdictChipFor(m.id) : null,
+			desc: `${quant || "—"} · ${caps.length ? caps.join(" + ") : "—"} · used by ${usedBy} slot${usedBy === 1 ? "" : "s"}`,
+		});
+	}
+	return opts;
+}
+
+// ── Profile RichSelect rows (Task 11c) ────────────────────────────────────
+// name + the runtime it carries (title/chips, via profiles.jsx's shared
+// runtimeChips) + an intent line — mirrors how the Profiles view itself
+// names a runtime (runnerTitleFor/runtimeLine there), so the slot drawer's
+// Profile row can't describe a runtime differently than the Profiles page
+// does for the same profile.
+function profileRuntimeTitle(key, backends) {
+	return key ? backends?.[key]?.title || key : "Auto";
+}
+function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND_DEVICE: deviceMap }) {
+	const opts = [];
+	// keep a none/out-of-vocab persisted profile selectable — exact current
+	// copy, no chips/desc (out-of-vocab rows keep their plain-text row).
+	if (none) opts.push({ id: "", row: "— none —" });
+	if (outOfVocab) opts.push({ id: outOfVocab, row: outOfVocab });
+	const rowFor = (p, crossTarget) => ({
+		id: p.name,
+		row: (
+			<span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+				<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+					{p.name}
+					{crossTarget ? ` · → ${crossTarget}` : ""}
+				</span>
+				<span className="pf-be-row">
+					{runtimeChips(p, backends).map((c) => (
+						<span
+							key={c.key}
+							className="pf-be mono"
+							style={c.hue ? { "--bk": c.hue } : null}
+						>
+							{c.label}
+						</span>
+					))}
+				</span>
+			</span>
+		),
+		desc: p.intent
+			? `${profileRuntimeTitle(p.runner, backends)} — ${p.intent}`
+			: profileRuntimeTitle(p.runner, backends),
+	});
+	for (const p of fit) opts.push(rowFor(p, null));
+	// RichSelect has no <optgroup> — a disabled marker row stands in for the
+	// old "Other backend — switches slot device" group label (disabled rows
+	// are skipped by arrow/Home/End nav and unclickable, same as a group
+	// header would be).
+	if (crossFit.length > 0) {
+		opts.push({
+			id: "__crossfit_header__",
+			disabled: true,
+			row: "— other backend — switches slot device —",
+		});
+		for (const p of crossFit) opts.push(rowFor(p, deviceMap[p.backend]));
+	}
+	return opts;
+}
 
 // Concatenate a flag base with an overlay the way the launcher does: the
 // profile's tune is appended AFTER the model tune, and diffFlags' pair map is
@@ -1320,12 +1520,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						slot's device on save." />
 				</div>
 				<div className="form-ctl">
-					<select
-						className="input mono"
+					<RichSelect
 						data-testid="slot-profile"
 						value={profileSel}
-						onChange={(e) => {
-							const nextName = e.target.value;
+						options={profileRichOptions({
+							none: !slot.profile,
+							outOfVocab:
+								profileSel && !listedNames.includes(profileSel)
+									? profileSel
+									: null,
+							fit,
+							crossFit,
+							backends: runnerCat,
+							BACKEND_DEVICE,
+						})}
+						onChange={(nextName) => {
 							setProfileSel(nextName);
 							setFieldErrs((p) => ({ ...p, profile: undefined }));
 							// Profile wins (D4): a picked profile carrying `runner`
@@ -1345,29 +1554,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								setDevice(pick.device);
 							}
 						}}
-					>
-						{/* keep a none/out-of-vocab persisted profile selectable */}
-						{!slot.profile && <option value="">— none —</option>}
-						{profileSel && !listedNames.includes(profileSel) && (
-							<option value={profileSel}>{profileSel}</option>
-						)}
-						{fit.map((p) => (
-							<option key={p.name} value={p.name} title={p.intent}>
-								{p.name}
-								{p.intent ? ` · ${p.intent}` : ""}
-							</option>
-						))}
-						{crossFit.length > 0 && (
-							<optgroup label="Other backend — switches slot device">
-								{crossFit.map((p) => (
-									<option key={p.name} value={p.name} title={p.intent}>
-										{p.name} · → {BACKEND_DEVICE[p.backend]}
-										{p.intent ? ` · ${p.intent}` : ""}
-									</option>
-								))}
-							</optgroup>
-						)}
-					</select>
+					/>
 					{applyPreview && (
 						<div
 							className="hint sl-apply"
@@ -1763,43 +1950,40 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											<div
 												style={{ display: "flex", gap: 8, alignItems: "center" }}
 											>
-												<select
-													className="input mono"
-													style={{ flex: 1 }}
-													value={cur}
-													disabled={saving || !!pendingCrossDevice}
-													data-testid="slot-model-swap"
-													aria-label={`Model for ${slot.name}`}
-													onChange={(e) => {
-														const id = e.target.value;
-														if (!id || id === cur) return;
-														const picked = compatible.find((m) => m.id === id);
-														const label = picked?.longName || id;
-														// UI-5: swapping the model on a LIVE container slot cold-restarts
-														// it (~model-load seconds). Confirm through the shared
-														// ConfirmDialog before firing — stashing the pick re-renders the
-														// select back to `cur` (value={cur}), so cancel needs no manual
-														// revert. Mirrors the delete/dirty-close confirm gates.
-														const live = slotButtonPhase(slot) === "running";
-														if (isContainer && live) {
-															setPendingSwap({ id, label });
-															return;
-														}
-														fireSwap(id, label);
-													}}
-												>
-													{cur && !has && (
-														<option value={cur}>
-															{slot.modelLong || slot.model || cur}
-														</option>
-													)}
-													{!cur && <option value="">—</option>}
-													{compatible.map((m) => (
-														<option key={m.id} value={m.id}>
-															{m.longName || m.id}
-														</option>
-													))}
-												</select>
+												<div style={{ flex: 1, minWidth: 0 }}>
+													<RichSelect
+														data-testid="slot-model-swap"
+														value={cur}
+														disabled={saving || !!pendingCrossDevice}
+														options={modelRichOptions({
+															compatible,
+															cur,
+															has,
+															slotLong: slot.modelLong || slot.model || cur,
+															allSlots: Array.isArray(slotsQuery.data)
+																? slotsQuery.data
+																: [],
+															// Task 11d wires the real per-row fit chip here.
+															verdictChipFor: null,
+														})}
+														onChange={(id) => {
+															if (!id || id === cur) return;
+															const picked = compatible.find((m) => m.id === id);
+															const label = picked?.longName || id;
+															// UI-5: swapping the model on a LIVE container slot cold-restarts
+															// it (~model-load seconds). Confirm through the shared
+															// ConfirmDialog before firing — stashing the pick re-renders the
+															// select back to `cur` (value={cur}), so cancel needs no manual
+															// revert. Mirrors the delete/dirty-close confirm gates.
+															const live = slotButtonPhase(slot) === "running";
+															if (isContainer && live) {
+																setPendingSwap({ id, label });
+																return;
+															}
+															fireSwap(id, label);
+														}}
+													/>
+												</div>
 												{/* Inline model edit — the app-wide pencil affordance
 												    (Icons.edit), same bare `btn ghost sm` icon-button
 												    convention as the slot card. Opens the model drawer
@@ -1914,48 +2098,27 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								the Runner Images page." />
 						</div>
 						<div className="form-ctl">
-							<select
-								className={
-									"input mono" + (fieldErrs.device ? " input-err" : "")
-								}
+							<RichSelect
 								data-testid="slot-hw-runtime"
 								value={runtimeValue}
-								onChange={(e) => {
+								disabled={false}
+								options={runtimeRichOptions({
+									binary,
+									runtimeSel,
+									runtimeOptions,
+									backends: hwBackends,
+								})}
+								onChange={(key) => {
 									const pick = applyRunnerChoice({
 										options: runtimeOptions,
-										key: e.target.value,
+										key,
 										currentDevice: device,
 									});
 									setBinary(pick.binary);
 									setDevice(pick.device);
 									setFieldErrs((p) => ({ ...p, device: undefined }));
 								}}
-							>
-								{/* Auto entry only while nothing is pinned — picking a
-								    real runtime is one-way, same as the old Backend
-								    select. */}
-								{!binary && (
-									<option value="">
-										— auto · resolved from device —
-									</option>
-								)}
-								{/* An out-of-vocab persisted binary (older release,
-								    hand-edited TOML, a runtime this box no longer offers
-								    for the slot) keeps its own option so the drawer
-								    never silently rewrites it. */}
-								{runtimeSel === null && (
-									<option value={binary}>
-										{binary} · not in this catalog
-									</option>
-								)}
-								{runtimeOptions.map((o) => (
-									<option key={o.key} value={o.key}>
-										{o.title}
-										{laneLabel(o) ? ` · ${laneLabel(o)}` : ""}
-										{o.state === "installable" ? " · not pulled" : ""}
-									</option>
-								))}
-							</select>
+							/>
 							{selectedRuntimeOption?.blurb ? (
 								<div className="hint">{selectedRuntimeOption.blurb}</div>
 							) : null}
