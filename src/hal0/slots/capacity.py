@@ -844,6 +844,6 @@ __all__ = [
     "_host_has_capable_gpu",
     "build_per_slot",
     "estimate_file_size_kv_mb",
-    "gtt_fit_warning",
     "gtt_feasibility_verdict",
+    "gtt_fit_warning",
 ]
