@@ -59,8 +59,30 @@ vi.mock('@/api/hooks/useModels', () => ({
   }),
 }))
 
+// Task 8: seedCalls records every seedProfile.mutateAsync invocation so a
+// test can assert the exact {id, profile} the confirm's onConfirm sent.
+// seedHandler.current lets one test simulate a rejection (the "failed seed
+// keeps the dialog open for retry" path) without touching every other test's
+// happy-path default (a response shaped like the real POST — echoes the
+// requested profile name as the new provenance/extra_args).
+const { seedCalls, seedHandler } = vi.hoisted(() => ({
+  seedCalls: [] as unknown[],
+  seedHandler: {
+    current: undefined as
+      | ((body: { id: string; profile: string }) => unknown)
+      | undefined,
+  },
+}))
+
 vi.mock('@/api/hooks/useModelSeedProfile', () => ({
-  useModelSeedProfile: () => ({ mutateAsync: async () => ({}), isPending: false }),
+  useModelSeedProfile: () => ({
+    mutateAsync: async (body: { id: string; profile: string }) => {
+      seedCalls.push(body)
+      if (seedHandler.current) return seedHandler.current(body)
+      return { defaults: { profile: body.profile, extra_args: '' } }
+    },
+    isPending: false,
+  }),
 }))
 
 vi.mock('@/api/hooks/useChatTemplates', () => ({
@@ -179,6 +201,8 @@ beforeEach(() => {
   enumsBox.current = undefined
   feasibilityCalls.length = 0
   feasibilityHandler.current = undefined
+  seedCalls.length = 0
+  seedHandler.current = undefined
 })
 
 afterEach(() => {
@@ -815,6 +839,161 @@ describe('ModelDrawer context intelligence (Task 7)', () => {
     })
     expect(q(host, 'model-ctx-feasibility').textContent).toBe(expected.text)
 
+    act(() => root.unmount())
+  })
+})
+
+// ─── Task 8 — seed consequence preview + provider-aware filter (#2205) ─────
+// EVERY profile pick now routes through the consequence preview confirm; the
+// old wouldClobber shortcut that skipped confirm when the current flags were
+// already empty/matching is gone. The preview IS the confirm's message.
+function confirmButton(host: HTMLElement, label: string) {
+  return Array.from(host.querySelectorAll('button')).find(
+    (b) => b.textContent === label,
+  ) as HTMLButtonElement | undefined
+}
+
+describe('ModelDrawer seed consequence preview (Task 8, #2205)', () => {
+  it('seed confirm shows the diff and restart consequence', async () => {
+    profilesBox.current = [
+      { name: 'brain', flags: '-fa auto --temp 0.2 --reasoning-budget 0' },
+    ]
+    slotsBox.current = [
+      { name: 'agent', model_default: 'm1' },
+      { name: 'brain', model_default: 'm1' },
+    ]
+    const model = {
+      ...MODEL,
+      defaults: { extra_args: '-fa auto --temp 0.4 --top-p 0.9' },
+    }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-option-brain').click())
+
+    const preview = q(host, 'model-seed-preview')
+    expect(preview).toBeTruthy()
+    expect(preview.textContent).toContain('1 changed')
+    expect(preview.textContent).toContain('--temp 0.4→0.2')
+    expect(preview.textContent).toContain('1 added')
+    expect(preview.textContent).toContain('--reasoning-budget 0')
+    expect(preview.textContent).toContain('1 removed')
+    expect(preview.textContent).toContain('--top-p')
+    expect(preview.textContent).toContain('seeded from brain')
+    expect(preview.textContent).toContain('2 slots restart')
+    expect(preview.textContent).toContain('agent')
+    expect(preview.textContent).toContain('brain')
+
+    const confirmBtn = confirmButton(host, 'Stamp tune')
+    expect(confirmBtn).toBeTruthy()
+    await act(async () => {
+      confirmBtn!.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(seedCalls).toEqual([{ id: 'm1', profile: 'brain' }])
+    act(() => root.unmount())
+  })
+
+  it("no using slots → 'no slots currently load this model'", () => {
+    profilesBox.current = [{ name: 'brain', flags: '--temp 0.2' }]
+    slotsBox.current = []
+    const model = { ...MODEL, defaults: { extra_args: '--temp 0.4' } }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-option-brain').click())
+
+    expect(q(host, 'model-seed-preview').textContent).toContain(
+      'no slots currently load this model',
+    )
+    act(() => root.unmount())
+  })
+
+  it('seed always previews — even from empty flags', () => {
+    profilesBox.current = [{ name: 'brain', flags: '--temp 0.2' }]
+    slotsBox.current = []
+    const model = { ...MODEL, defaults: { extra_args: '' } }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-option-brain').click())
+
+    // Picking still opens the preview confirm — no direct doSeed POST fires
+    // before the operator hits "Stamp tune".
+    expect(q(host, 'model-seed-preview')).toBeTruthy()
+    expect(seedCalls).toEqual([])
+    act(() => root.unmount())
+  })
+
+  it('failed seed keeps the dialog open for retry', async () => {
+    profilesBox.current = [{ name: 'brain', flags: '--temp 0.2' }]
+    slotsBox.current = []
+    const model = { ...MODEL, defaults: { extra_args: '--temp 0.4' } }
+    seedHandler.current = () => {
+      throw new Error('network blip')
+    }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-option-brain').click())
+
+    const confirmBtn = confirmButton(host, 'Stamp tune')
+    await act(async () => {
+      confirmBtn!.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // The confirm dialog is still up for a retry — the preview box is proof.
+    expect(q(host, 'model-seed-preview')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
+  it('profile menu is provider-aware (#2205)', () => {
+    profilesBox.current = [
+      { name: 'chat', flags: '--temp 0.7', runtime_family: 'llama-server' },
+      { name: 'kokoro', flags: '--voice en', runtime_family: 'kokoro' },
+    ]
+    const model = { ...MODEL, provider_effective: 'kokoro', defaults: {} }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    expect(q(host, 'model-seed-profile-option-kokoro')).toBeTruthy()
+    expect(host.querySelector('[data-testid="model-seed-profile-option-chat"]')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('provider filter keeps the current provenance profile even if unfitting', () => {
+    profilesBox.current = [
+      { name: 'chat', flags: '--temp 0.7', runtime_family: 'llama-server' },
+      { name: 'kokoro', flags: '--voice en', runtime_family: 'kokoro' },
+    ]
+    const model = {
+      ...MODEL,
+      provider_effective: 'kokoro',
+      defaults: { extra_args: '--temp 0.7', profile: 'chat' },
+    }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }),
+    )
+
+    act(() => q<HTMLButtonElement>(host, 'model-seed-profile-open').click())
+    // "chat" doesn't fit kokoro's provider, but it's the current provenance —
+    // the existing rule (fitProfiles, :762) keeps it offered regardless.
+    expect(q(host, 'model-seed-profile-option-chat')).toBeTruthy()
+    expect(q(host, 'model-seed-profile-option-kokoro')).toBeTruthy()
     act(() => root.unmount())
   })
 })

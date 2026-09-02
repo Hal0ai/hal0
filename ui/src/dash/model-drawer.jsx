@@ -474,6 +474,63 @@ function SeedProfileButton({ options, onPick, disabled = false }) {
 	);
 }
 
+// ─── SeedPreview — the seed confirm's consequence preview (Task 8, #2205) ───
+// EVERY profile pick shows this now — the old wouldClobber shortcut that
+// skipped the confirm entirely for empty/matching flags is gone; this preview
+// IS the confirm's message. Three parts:
+//   1. diff counts (changed/added/removed — each line omitted when its count
+//      is zero), naming the flags that move.
+//   2. the provenance line the pick commits to ("seeded from {name}").
+//   3. the restart consequence, from the slots that already load this model.
+//
+// Diff direction: `diffFlags(modelText, profileText)` describes going FROM
+// profileText TO modelText (its own added/removed/changed read that way —
+// see flags-tune.js's jsdoc). The seed replaces the CURRENT flags with the
+// TARGET profile's, so `targetFlags` — not `currentFlags` — has to be the
+// first argument for "changed" to read current→target rather than backwards.
+function SeedPreview({ targetName, targetFlags, currentFlags, slots }) {
+	const diff = diffFlags(targetFlags, currentFlags || "");
+	const { added, removed, changed } = diff;
+	return (
+		<div
+			className="mono"
+			data-testid="model-seed-preview"
+			style={{ fontSize: 12, lineHeight: 1.7 }}
+		>
+			{changed.length > 0 && (
+				<div>
+					{changed.length} changed:{" "}
+					{changed.map((c) => `${c.flag} ${c.from}→${c.to}`).join(", ")}
+				</div>
+			)}
+			{added.length > 0 && (
+				<div>
+					{added.length} added:{" "}
+					{added
+						.map((a) => `${a.flag}${a.value != null ? ` ${a.value}` : ""}`)
+						.join(", ")}
+				</div>
+			)}
+			{removed.length > 0 && (
+				<div>
+					{/* #2195's honesty pattern: a flag that disappears is billed here
+					    too, not just additions/changes — the operator sees the whole
+					    consequence, not a partial one. */}
+					{removed.length} removed: {removed.map((r) => r.flag).join(", ")}
+				</div>
+			)}
+			<div>seeded from {targetName}</div>
+			<div>
+				{slots.length === 0
+					? "no slots currently load this model"
+					: `${slots.length} slot${slots.length === 1 ? "" : "s"} restart · ${slots
+							.map((s) => s.name)
+							.join(" · ")}`}
+			</div>
+		</div>
+	);
+}
+
 // ─── DivergenceDiff — client-side model-vs-profile diff (1c, inline) ─────────
 function DivergenceDiff({ diff, profileName, onReset }) {
 	return (
@@ -1230,11 +1287,22 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 
 	// Profiles that fit this model (same filter the old RecipeEditor used), so the
 	// template dropdown offers device-appropriate seeds.
+	//
+	// #2205: the filter used to stop at device/backend/type — a profile whose
+	// `runtime_family` names a different engine than the model's own provider
+	// still showed up (e.g. a rocm-tagged row that had its Engine explicitly
+	// set to kokoro kept offering llama-server profiles). `providerOk` keys off
+	// `model.provider_effective` — the same explicit-wins-over-derived
+	// precedence `_provider_for_backend` uses (catalog.py, since #2196) — with
+	// the same "llama-server" ultimate fallback engineRichOptions uses for a
+	// mock fixture that predates the field. A profile with no `runtime_family`
+	// carries no runtime opinion (flags-only tune) and always fits.
 	const fitProfiles = useMemoMD(() => {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
 		if (!model) return all;
 		const mClasses = modelDeviceClasses(model.backends, model.device, enums);
 		const mBackends = Array.isArray(model.backends) ? model.backends : [];
+		const modelProvider = model.provider_effective || "llama-server";
 		const fit = all.filter((p) => {
 			const pc = profileDeviceClass(p);
 			const classOk = !pc || mClasses.size === 0 || mClasses.has(pc);
@@ -1244,7 +1312,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 				!model.type ||
 				!Array.isArray(p.supported_slot_types) ||
 				p.supported_slot_types.includes(model.type);
-			return classOk && backendOk && typeOk;
+			const providerOk = !p.runtime_family || p.runtime_family === modelProvider;
+			return classOk && backendOk && typeOk && providerOk;
 		});
 		// Always keep the current provenance selectable even if it no longer fits.
 		const names = new Set(fit.map((p) => p.name));
@@ -1253,7 +1322,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 			if (cur) return [cur, ...fit];
 		}
 		return fit;
-	}, [profilesQuery.data, model?.id, profile, enums]);
+	}, [profilesQuery.data, model?.id, model?.provider_effective, profile, enums]);
 
 	const sourceProfile = useMemoMD(
 		() =>
@@ -1362,9 +1431,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// from the "⤵ Seed from profile…" menu POSTs /api/models/{id}/seed-profile
 	// (useModelSeedProfile, Task 7), which materialises the profile's flags
 	// into the model's `defaults` server-side and returns the updated row.
-	// Confirm first if the current flags would be clobbered (non-empty and not
-	// already the target text) — the write is immediate, there is no Cancel
-	// once it lands. On success, splice just the two fields the route owns
+	// EVERY pick previews its consequences first (Task 8) — the write is
+	// immediate, there is no Cancel once it lands. On success, splice just the
+	// two fields the route owns
 	// (profile provenance + extra_args) into the local form AND the frozen
 	// baseline, so the provenance/diverged chips read the new truth without
 	// the Save-model gate reporting a false "unsaved change" for a value the
@@ -1413,18 +1482,26 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		if (!nextName || seedProfile.isPending) return; // double-click / double-POST guard
 		const target = (profilesQuery.data || []).find((p) => p.name === nextName);
 		const targetFlags = target ? target.flags || "" : "";
-		const wouldClobber = extra.trim() && diffFlags(extra, targetFlags).diverged;
-		if (wouldClobber) {
-			setConfirm({
-				kind: "seed",
-				title: "Replace launch flags?",
-				message: `Seed from ${nextName}? Unsaved edits to the current flags are lost — this writes immediately.`,
-				confirmLabel: "Seed from profile",
-				onConfirm: () => doSeed(nextName),
-			});
-		} else {
-			doSeed(nextName);
-		}
+		const usedBySlotsForSeed = slotsUsingModel(slotsQuery.data, model.id);
+		// EVERY pick routes through this confirm now — the old wouldClobber
+		// shortcut (skip confirm when the current flags were empty or already
+		// matched the target) is gone. The preview IS the confirm: it always
+		// tells the operator what will change and what restarts, even for a
+		// pick that looks like a no-op.
+		setConfirm({
+			kind: "seed",
+			title: `Stamp tune from ${nextName}?`,
+			message: (
+				<SeedPreview
+					targetName={nextName}
+					targetFlags={targetFlags}
+					currentFlags={extra}
+					slots={usedBySlotsForSeed}
+				/>
+			),
+			confirmLabel: "Stamp tune",
+			onConfirm: () => doSeed(nextName),
+		});
 	};
 
 	const resetToProfile = () => {

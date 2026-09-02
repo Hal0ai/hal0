@@ -81,6 +81,11 @@ async function mockSeedProfile(page: import('@playwright/test').Page) {
 async function stampFromProfile(page: import('@playwright/test').Page, name: string) {
   await page.getByTestId('model-seed-profile-open').click()
   await page.getByTestId(`model-seed-profile-option-${name}`).click()
+  // Task 8 (#2205): EVERY pick now opens the consequence-preview confirm —
+  // the old wouldClobber shortcut that skipped it for an empty/matching
+  // current flags text is gone. Same POST, same effects; one extra click.
+  await expect(page.getByTestId('model-seed-preview')).toBeVisible()
+  await page.getByRole('button', { name: 'Stamp tune', exact: true }).click()
 }
 
 async function openDrawer(page: import('@playwright/test').Page) {
