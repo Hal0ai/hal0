@@ -42,6 +42,22 @@ const { updateCalls, setDefaultCalls, setDefaultResult, slotsBox, profilesBox, t
   enumsBox: { current: undefined as Record<string, unknown> | undefined },
 }))
 
+// Task 9: the Source disclosure's lazy repo probe. `useModelInspect` is a
+// react-query MUTATION the drawer fires from an effect on the disclosure's
+// first open, so the stand-in is useState-backed (same reasoning as the
+// feasibility mock below) — `mutate()` must genuinely re-render the component
+// for the picker to appear. `inspectHandler.current` decides what a probe
+// resolves to; returning an Error models the route failing (→ the text-input
+// fallback), leaving it unset models a probe still in flight.
+const { inspectCalls, inspectHandler } = vi.hoisted(() => ({
+  inspectCalls: [] as unknown[],
+  inspectHandler: {
+    current: undefined as
+      | ((body: { hf_repo?: string }) => Record<string, unknown> | Error | undefined)
+      | undefined,
+  },
+}))
+
 vi.mock('@/api/hooks/useModels', () => ({
   useModelUpdate: () => ({
     mutateAsync: async (b: unknown) => {
@@ -57,6 +73,25 @@ vi.mock('@/api/hooks/useModels', () => ({
     },
     isPending: false,
   }),
+  useModelInspect: () => {
+    const [state, setState] = React.useState<{
+      data?: Record<string, unknown>
+      isError: boolean
+    }>({ isError: false })
+    return {
+      data: state.data,
+      isError: state.isError,
+      isSuccess: !!state.data,
+      isPending: false,
+      mutate: (body: { hf_repo?: string }) => {
+        inspectCalls.push(body)
+        const out = inspectHandler.current?.(body)
+        if (out instanceof Error) setState({ isError: true })
+        else if (out) setState({ data: out, isError: false })
+      },
+      reset: () => setState({ isError: false }),
+    }
+  },
 }))
 
 // Task 8: seedCalls records every seedProfile.mutateAsync invocation so a
@@ -203,6 +238,8 @@ beforeEach(() => {
   feasibilityHandler.current = undefined
   seedCalls.length = 0
   seedHandler.current = undefined
+  inspectCalls.length = 0
+  inspectHandler.current = undefined
 })
 
 afterEach(() => {
@@ -994,6 +1031,251 @@ describe('ModelDrawer seed consequence preview (Task 8, #2205)', () => {
     // the existing rule (fitProfiles, :762) keeps it offered regardless.
     expect(q(host, 'model-seed-profile-option-chat')).toBeTruthy()
     expect(q(host, 'model-seed-profile-option-kokoro')).toBeTruthy()
+    act(() => root.unmount())
+  })
+})
+
+// ─── Task 9 — Source disclosure + repo-fed mmproj picker ────────────────────
+// The Source rows (MMProj / HF repo / HF filename) live behind a disclosure
+// now, and MMProj is a RichSelect fed by POST /api/models/inspect whenever the
+// row carries an hf_repo the probe can list projectors for.
+//
+// THE STORED SHAPE (pinned by "picking a variant stores…" below): `model.mmproj`
+// is an ABSOLUTE host path, never a bare filename — see the mmprojDirOf comment
+// in model-drawer.jsx for the source citations. The picker therefore offers
+// repo FILENAMES but writes `<the model's directory>/<filename>`.
+describe('ModelDrawer source disclosure (Task 9)', () => {
+  const MODEL_DIR = '/var/lib/hal0/models/qwen'
+  const SOURCE_MODEL = {
+    ...MODEL,
+    path: `${MODEL_DIR}/qwen-q8.gguf`,
+    hf_repo: 'org/qwen-gguf',
+    hf_filename: 'qwen-q8.gguf',
+    mmproj: null,
+  }
+  const VARIANTS = [
+    { id: 'mmproj-Q8_0.gguf', size_bytes: 966367641, size: '0.9 GB', info: 'mmproj' },
+    { id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' },
+  ]
+  const withVariants = () => {
+    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: VARIANTS })
+  }
+  const openSource = (host: HTMLElement) =>
+    act(() => q<HTMLElement>(host, 'model-source-disclosure').click())
+
+  it('source collapses to a disclosure; opens on click', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    const disc = q<HTMLElement>(host, 'model-source-disclosure')
+    expect(disc).toBeTruthy()
+    expect(disc.textContent).toContain('Source')
+    expect(disc.textContent).toContain('repo · file · mmproj · paths')
+    expect(disc.getAttribute('aria-expanded')).toBe('false')
+    // Collapsed: no source control is mounted, and no probe has fired.
+    expect(q(host, 'model-hfrepo-input')).toBeNull()
+    expect(q(host, 'model-hffile-input')).toBeNull()
+    expect(q(host, 'model-source-paths')).toBeNull()
+    expect(inspectCalls).toEqual([])
+
+    openSource(host)
+    expect(q<HTMLElement>(host, 'model-source-disclosure').getAttribute('aria-expanded')).toBe('true')
+    // The two coord inputs keep their testids and stay editable inside.
+    const repo = q<HTMLInputElement>(host, 'model-hfrepo-input')
+    const file = q<HTMLInputElement>(host, 'model-hffile-input')
+    expect(repo.value).toBe('org/qwen-gguf')
+    expect(file.value).toBe('qwen-q8.gguf')
+    act(() => typeInto(repo, 'org/other'))
+    expect(q<HTMLInputElement>(host, 'model-hfrepo-input').value).toBe('org/other')
+    act(() => root.unmount())
+  })
+
+  it('mmproj picker lists repo mmproj variants + none row', () => {
+    withVariants()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    // Lazy: the probe fires on the disclosure's first open, not on mount.
+    expect(inspectCalls).toEqual([{ hf_repo: 'org/qwen-gguf' }])
+
+    const trigger = q<HTMLButtonElement>(host, 'model-mmproj-select')
+    expect(trigger).toBeTruthy()
+    // The picker replaces the free-text absolute-path input entirely.
+    expect(q(host, 'model-mmproj-input')).toBeNull()
+
+    act(() => trigger.click())
+    const none = host.querySelector('[data-option-id=""]') as HTMLElement
+    expect(none.textContent).toContain('— none —')
+    const pick = host.querySelector(
+      `[data-option-id="${MODEL_DIR}/mmproj-Q8_0.gguf"]`,
+    ) as HTMLElement
+    expect(pick).toBeTruthy()
+    expect(pick.textContent).toContain('mmproj-Q8_0.gguf')
+    expect(pick.textContent).toContain('0.9 GB')
+    // The repo's non-projector variant is not a projector choice.
+    expect(host.textContent).not.toContain('model-q8.gguf')
+    act(() => root.unmount())
+  })
+
+  it('picking a variant stores the absolute path under the model directory', async () => {
+    withVariants()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/mmproj-Q8_0.gguf"]`) as HTMLElement).click(),
+    )
+
+    // The resolved path is what the paths block reads back…
+    expect(q<HTMLElement>(host, 'model-source-paths').textContent).toContain(
+      `${MODEL_DIR}/mmproj-Q8_0.gguf`,
+    )
+    // …and what the PUT carries — an absolute host path, never the filename.
+    const saveBtn = q<HTMLButtonElement>(host, 'model-save')
+    expect(saveBtn.disabled).toBe(false)
+    await act(async () => {
+      saveBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const call = updateCalls[0] as { body: { mmproj?: string | null } }
+    expect(call.body.mmproj).toBe(`${MODEL_DIR}/mmproj-Q8_0.gguf`)
+    act(() => root.unmount())
+  })
+
+  it('stored mmproj value missing from the listing renders as its own row', () => {
+    withVariants()
+    const stored = '/srv/projectors/mmproj-handpicked.gguf'
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...SOURCE_MODEL, mmproj: stored },
+      }),
+    )
+    openSource(host)
+    const trigger = q<HTMLButtonElement>(host, 'model-mmproj-select')
+    // The closed control shows the stored value's own row — not a rewrite.
+    expect(trigger.textContent).toContain('mmproj-handpicked.gguf')
+
+    act(() => trigger.click())
+    const own = host.querySelector(`[data-option-id="${stored}"]`) as HTMLElement
+    expect(own).toBeTruthy()
+    expect(own.getAttribute('aria-selected')).toBe('true')
+    // The repo's own projector is offered beside it, resolved against the
+    // STORED projector's directory (it owns the pairing, not model.path).
+    expect(
+      host.querySelector('[data-option-id="/srv/projectors/mmproj-Q8_0.gguf"]'),
+    ).toBeTruthy()
+    // Nothing was saved: an untouched picker leaves the row unchanged.
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it('picking none on a vision model keeps the save gate', () => {
+    withVariants()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: {
+          ...SOURCE_MODEL,
+          capabilities: ['chat', 'vision'],
+          mmproj: `${MODEL_DIR}/mmproj-Q8_0.gguf`,
+        },
+      }),
+    )
+    openSource(host)
+    expect(q(host, 'model-mmproj-error')).toBeNull()
+
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+    act(() => (host.querySelector('[data-option-id=""]') as HTMLElement).click())
+
+    const err = q<HTMLElement>(host, 'model-mmproj-error')
+    expect(err).toBeTruthy()
+    expect(err.textContent).toContain('mmproj')
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+
+    // Re-pairing the projector releases the gate again.
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/mmproj-Q8_0.gguf"]`) as HTMLElement).click(),
+    )
+    expect(q(host, 'model-mmproj-error')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('no hf_repo → text input fallback, and no probe fires', () => {
+    withVariants()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...SOURCE_MODEL, hf_repo: '' },
+      }),
+    )
+    openSource(host)
+    expect(inspectCalls).toEqual([])
+    expect(q(host, 'model-mmproj-select')).toBeNull()
+    const input = q<HTMLInputElement>(host, 'model-mmproj-input')
+    expect(input).toBeTruthy()
+    act(() => typeInto(input, '/srv/mmproj-typed.gguf'))
+    expect(q<HTMLInputElement>(host, 'model-mmproj-input').value).toBe('/srv/mmproj-typed.gguf')
+    act(() => root.unmount())
+  })
+
+  it('inspect failure → text input fallback', () => {
+    inspectHandler.current = () => new Error('inspect unreachable')
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    expect(inspectCalls).toEqual([{ hf_repo: 'org/qwen-gguf' }])
+    expect(q(host, 'model-mmproj-select')).toBeNull()
+    expect(q(host, 'model-mmproj-input')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
+  it('a repo with no projector files falls back to the text input too', () => {
+    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: [VARIANTS[1]] })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    expect(q(host, 'model-mmproj-select')).toBeNull()
+    expect(q(host, 'model-mmproj-input')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
+  it('paths render read-only and copyable', () => {
+    const copied: string[] = []
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText: (t: string) => copied.push(t) },
+      configurable: true,
+    })
+    const stored = `${MODEL_DIR}/mmproj-Q8_0.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...SOURCE_MODEL, mmproj: stored },
+      }),
+    )
+    openSource(host)
+    const paths = q<HTMLElement>(host, 'model-source-paths')
+    expect(paths).toBeTruthy()
+    expect(paths.textContent).toContain(`${MODEL_DIR}/qwen-q8.gguf`)
+    expect(paths.textContent).toContain(stored)
+    // Read-only: the block holds no input/textarea at all.
+    expect(paths.querySelector('input')).toBeNull()
+    expect(paths.querySelector('textarea')).toBeNull()
+
+    act(() => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
+    act(() => q<HTMLButtonElement>(host, 'model-source-copy-mmproj').click())
+    expect(copied).toEqual([`${MODEL_DIR}/qwen-q8.gguf`, stored])
     act(() => root.unmount())
   })
 })

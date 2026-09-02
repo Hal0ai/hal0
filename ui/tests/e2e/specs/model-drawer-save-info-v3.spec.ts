@@ -130,6 +130,17 @@ async function openDrawer(page: import('@playwright/test').Page) {
   await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 }
 
+/**
+ * model-drawer-2 Task 9: MMProj / HF repo / HF filename / Paths live behind a
+ * disclosure that rests closed. The apiMock catch-all answers the lazy
+ * POST /api/models/inspect with `{}` — no variants, so MMProj degrades to the
+ * free-text path input this spec's save contract fills.
+ */
+async function openSource(page: import('@playwright/test').Page) {
+  await page.getByTestId('model-source-disclosure').click()
+  await expect(page.getByTestId('model-source-paths')).toBeVisible()
+}
+
 test.describe('Model drawer — complete save and compact field help', () => {
   test('successful PUT carries every surfaced field, preserves unrelated defaults, and closes with feedback', async ({ page }) => {
     await seedProductionModel(page)
@@ -159,6 +170,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     // write path now; "Runs on" is derived/read-only and not editable here.
     // Task 6: the native <select> became a RichSelect (rich-select.jsx).
     await pickRichOption(page.getByTestId('model-provider-select'), 'flm')
+    await openSource(page)
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
     await page.getByTestId('model-hfrepo-input').fill('org/saved-repo')
     await page.getByTestId('model-hffile-input').fill('saved-q4.gguf')
@@ -230,6 +242,14 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
+    // model-drawer-2 Task 9: the three Source rows (MMProj / HF repo / HF
+    // filename) moved behind the Source disclosure and a read-only "Paths" row
+    // joined them there, so the RESTING drawer shows 9 − 3 = 6 rows and the
+    // opened disclosure adds 4 back for 10. Both counts are asserted, because
+    // the rule under test ("every described label carries the info icon, and
+    // nothing carries a .sub subtitle") has to hold on either side of it.
+    await expect(labels).toHaveCount(6)
+    await openSource(page)
     // 9 rows (was 13 pre-Task-8): Option A's header meta move relocated
     // "Default for {type}" off the row list entirely (−1) and folded the
     // "Modality" row into a renamed "Capabilities" row in place (±0 — the
@@ -238,10 +258,11 @@ test.describe('Model drawer — complete save and compact field help', () => {
     // "Overrides" ledger row (−4 +1 = −3); and the single editable "Backends"
     // row split into "Engine" + read-only "Runs on" (−1 +2 = +1).
     // 13 − 1 − 3 + 1 = 10, then model-drawer-2 Task 3 moved "Display name"
-    // off the row list onto the header's inline title editor (−1) = 9.
-    await expect(labels).toHaveCount(9)
+    // off the row list onto the header's inline title editor (−1) = 9, and
+    // Task 9 added the read-only "Paths" row inside the disclosure (+1) = 10.
+    await expect(labels).toHaveCount(10)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(9)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(10)
 
     // Display name no longer has a form row (Task 3) — MMProj is a plain
     // text-input row with the same FieldInfoIcon shape, so it stands in for

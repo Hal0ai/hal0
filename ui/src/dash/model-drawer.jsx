@@ -25,6 +25,7 @@
 import {
 	useModelUpdate,
 	useModelSetDefault,
+	useModelInspect,
 } from "@/api/hooks/useModels";
 import { useModelSeedProfile } from "@/api/hooks/useModelSeedProfile";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
@@ -1183,6 +1184,129 @@ function engineRichOptions(runtimeFamilies, providerEffective) {
 	];
 }
 
+// ── MMProj: the shape the registry actually stores (Task 9) ──────────────────
+//
+// `Model.mmproj` is an ABSOLUTE HOST PATH, never a bare filename. Three
+// independent places in the source say so:
+//
+//   · the field itself — "Absolute path to a multimodal projector (mmproj)
+//     GGUF sidecar … surfaced verbatim to the llama-server provider as
+//     --mmproj" (src/hal0/registry/model.py:249-256);
+//   · the write screen — `screen_vision_mmproj` rejects a projector that is
+//     not `Path(projector).is_file()` on this host, and its docstring names
+//     every registry-bound value "a caller-supplied host path"
+//     (src/hal0/services/models_service.py:1440-1475);
+//   · the pull worker — the `mmproj_filename` the Add-from-HF modal sends is
+//     an HF-side FILENAME and is resolved before it reaches the registry:
+//     `mmproj_final = final.parent / Path(mm_rec.hf_filename).name`
+//     (src/hal0/registry/pull.py:1071), persisted as `str(mmproj_final)`
+//     (pull.py:1095); the fileset branch does the same with the installed
+//     destination (`updates["mmproj"] = str(mmproj_dest)`, pull.py:1588), as
+//     does the discover scan (`model.mmproj = str(candidate.mmproj)`,
+//     src/hal0/registry/discover.py:404).
+//
+// So the picker lists repo FILENAMES but must write `<dir>/<filename>`, with
+// `<dir>` the directory the sidecar sits in beside the model — exactly what
+// the pull worker would have produced. `mmprojDirOf` prefers the stored
+// projector's own directory (a row whose sidecar lives elsewhere keeps it) and
+// falls back to the model file's directory. No derivable directory ⇒ no
+// picker: this drawer resolves a path, it never invents one.
+function mmprojDirOf(storedMmproj, modelPath) {
+	const src = String(storedMmproj || modelPath || "").trim();
+	const cut = src.lastIndexOf("/");
+	if (cut < 0) return null;
+	return cut === 0 ? "/" : src.slice(0, cut);
+}
+
+function joinMmprojPath(dir, filename) {
+	return dir === "/" ? `/${filename}` : `${dir}/${filename}`;
+}
+
+function basenameOf(p) {
+	const s = String(p || "");
+	const cut = s.lastIndexOf("/");
+	return cut < 0 ? s : s.slice(cut + 1);
+}
+
+function sizeChipText(variant) {
+	if (variant && variant.size) return String(variant.size);
+	const b = Number(variant && variant.size_bytes);
+	return b > 0 ? `${(b / 1024 ** 3).toFixed(2)} GB` : "";
+}
+
+// Build the MMProj RichSelect's options. Option ids are the VALUE the picker
+// stores (the resolved absolute path), so `onChange` is a plain `setMmproj`
+// and the control's `value` compares against the stored string directly —
+// there is no second place where a filename could be re-derived into a
+// different path than the one that was saved.
+//
+// `current` (a projector stored on the row that this repo's listing doesn't
+// offer — a hand-placed sidecar, or a repo that has since dropped the file)
+// always gets its own row, verbatim. A value this picker cannot explain is
+// still a value the operator chose; it is never silently rewritten or dropped.
+function mmprojRichOptions(dir, variants, current) {
+	const opts = [
+		{
+			id: "",
+			row: "— none —",
+			desc: "no projector paired — a row advertising vision cannot save without one",
+		},
+	];
+	const seen = new Set([""]);
+	for (const v of variants) {
+		const id = joinMmprojPath(dir, v.id);
+		if (seen.has(id)) continue;
+		seen.add(id);
+		const chip = sizeChipText(v);
+		opts.push({ id, row: v.id, right: chip ? mutedChip(chip) : null });
+	}
+	const cur = String(current || "").trim();
+	if (cur && !seen.has(cur)) {
+		opts.push({
+			id: cur,
+			row: basenameOf(cur),
+			right: mutedChip("stored"),
+			desc: "paired on this model · not among this repo's files",
+		});
+	}
+	return opts;
+}
+
+// One read-only path line for the Source disclosure's paths block: mono text
+// that wraps mid-token (#2210's overflow-wrap:anywhere pattern — a projector
+// path is long, unbreakable, and must not push the drawer sideways) plus the
+// house copy affordance (model-modals.jsx:391).
+function SourcePathLine({ label, value, testId, empty }) {
+	const has = !!String(value || "").trim();
+	return (
+		<div style={{ display: "flex", gap: 8, alignItems: "baseline", marginTop: 4 }}>
+			<span className="hint" style={{ minWidth: 52, flex: "0 0 auto" }}>
+				{label}
+			</span>
+			<span
+				className="mono"
+				style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", fontSize: 12 }}
+			>
+				{has ? value : <span className="hint">{empty}</span>}
+			</span>
+			{has && (
+				<button
+					type="button"
+					className="btn ghost sm"
+					data-testid={testId}
+					onClick={() => {
+						navigator.clipboard?.writeText(String(value));
+						window.__hal0Toast &&
+							window.__hal0Toast(`${label} path copied to clipboard`, "ok");
+					}}
+				>
+					Copy
+				</button>
+			)}
+		</div>
+	);
+}
+
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 // `onOpenSlot` is optional (Task 3, facts-band used-by cell): when a host
 // passes it, each slot name in the used-by list is a jump button; absent, the
@@ -1197,6 +1321,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const profilesQuery = useProfiles();
 	const enums = useMetaEnums();
 	const slotsQuery = useSlots();
+	// Repo listing behind the Source disclosure's mmproj picker (Task 9) —
+	// POST /api/models/inspect, server-cached, fired lazily (see srcOpen below).
+	const inspect = useModelInspect();
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
@@ -1229,6 +1356,15 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// tokenize — there are no pills to render for a string nobody can parse,
 	// and the textarea is the only surface that can repair it.
 	const [rawMode, setRawMode] = useStateMD(false);
+	// Task 9: the Source section is a disclosure ("▸ Source — repo · file ·
+	// mmproj · paths"), closed at rest. Re-pull coords and the projector are
+	// reference material for an operator who came looking; the drawer's resting
+	// height is spent on the launch tune instead.
+	const [srcOpen, setSrcOpen] = useStateMD(false);
+	// Which repo the mmproj picker's listing was fetched for. The probe is
+	// lazy — one POST on the disclosure's first open, never on drawer mount —
+	// and this guards the re-open from re-firing it for the same coord.
+	const inspectedRepo = useRefMD(null);
 	// Inline title editor (Task 3): the ✎ button swaps the name span for an
 	// input seeded from the CURRENT draft (`name`), never from the live model
 	// prop, so a prior uncommitted edit survives reopening the editor. Escape
@@ -1282,8 +1418,25 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setVision(b.vision);
 		setDefaultOverride(null);
 		setRawMode(false);
+		// A different row means a different repo listing — close the disclosure
+		// and forget the probe, so the next open fetches THIS model's projectors.
+		setSrcOpen(false);
+		inspectedRepo.current = null;
+		inspect.reset();
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
+
+	// The lazy repo probe (Task 9). Fires on the transition into `open` only,
+	// so editing the HF repo field while the disclosure is open doesn't fire a
+	// POST per keystroke; closing and re-opening picks the new coord up.
+	useEffectMD(() => {
+		if (!srcOpen) return;
+		const repo = hfRepo.trim();
+		if (!repo || inspectedRepo.current === repo) return;
+		inspectedRepo.current = repo;
+		inspect.mutate({ hf_repo: repo });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [srcOpen]);
 
 	// Profiles that fit this model (same filter the old RecipeEditor used), so the
 	// template dropdown offers device-appropriate seeds.
@@ -1372,6 +1525,24 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		visionModel && !mmproj.trim()
 			? "this model advertises vision — an mmproj sidecar path is required"
 			: null;
+
+	// MMProj picker feed (Task 9). The directory comes off the BASELINE, not the
+	// live draft: picking "— none —" empties `mmproj`, and re-deriving from the
+	// draft would make the picker's own options disappear mid-interaction.
+	const mmprojDir = mmprojDirOf(baseline?.mmproj, model?.path);
+	const mmprojVariants = useMemoMD(() => {
+		const rows = Array.isArray(inspect.data?.variants) ? inspect.data.variants : [];
+		return rows.filter((v) => /mmproj/i.test(String(v?.id || "")));
+	}, [inspect.data]);
+	// Four ways to have nothing to pick FROM — no repo, a failed probe, a repo
+	// that ships no projector, or no directory to resolve a filename against.
+	// Each degrades to the free-text path input rather than to a dead control.
+	const mmprojPicker =
+		!!hfRepo.trim() && !inspect.isError && !!mmprojDir && mmprojVariants.length > 0;
+	const mmprojOptions = useMemoMD(
+		() => (mmprojPicker ? mmprojRichOptions(mmprojDir, mmprojVariants, mmproj) : []),
+		[mmprojPicker, mmprojDir, mmprojVariants, mmproj],
+	);
 
 	// Context size validation (#1378). A lenient parseInt destroyed data twice
 	// over: "32k" landed as 32 (a 1000x context collapse) and "abc" dropped the
@@ -2314,64 +2485,128 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
             runner is chosen on the slot (BINARY → RUNNER_IMAGES); the Runtimes
             page (Settings → Runtimes) shows which slots resolve to each runner. */}
 
-				{/* ── Source · re-pull coords ── */}
-				<div className="form-section" style={{ marginTop: 16 }}>
-					Source · re-pull coords
+				{/* ── Source (disclosure) ── Where this row came from and where its
+            files sit: coords, projector, paths. Reference material, so it
+            rests closed — same controlled "▸"/"▾" idiom the slot drawer's
+            Advanced disclosure uses (slot-modals.jsx's slot-hw-advanced),
+            not a native <details>, so the glyph and label stay ours. */}
+				<div
+					className="form-section"
+					data-testid="model-source-disclosure"
+					role="button"
+					tabIndex={0}
+					aria-expanded={srcOpen}
+					style={{ marginTop: 16, cursor: "pointer", userSelect: "none" }}
+					onClick={() => setSrcOpen((o) => !o)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter" || e.key === " ") {
+							e.preventDefault();
+							setSrcOpen((o) => !o);
+						}
+					}}
+				>
+					<span className="mono" style={{ marginRight: 6, color: "var(--fg-4)" }}>
+						{srcOpen ? "▾" : "▸"}
+					</span>
+					Source — repo · file · mmproj · paths
 				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>MMProj</span>
-						<FieldInfoIcon description="vision projector sidecar path" />
-					</div>
-					<div className="form-ctl">
-						<input
-							className="input mono"
-							data-testid="model-mmproj-input"
-							placeholder="/var/lib/hal0/models/…/mmproj-Q8.gguf"
-							value={mmproj}
-							onChange={(e) => setMmproj(e.target.value)}
-						/>
-						{mmprojError && (
-							<div
-								className="err"
-								data-testid="model-mmproj-error"
-								style={{ marginTop: 6 }}
-							>
-								{mmprojError}
+				{srcOpen && (
+					<>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>MMProj</span>
+								<FieldInfoIcon
+									description={
+										mmprojPicker
+											? "vision projector sidecar · picked from the repo's own files and stored as the absolute path beside the model"
+											: "vision projector sidecar path — absolute, handed to the runner as --mmproj"
+									}
+								/>
 							</div>
-						)}
-					</div>
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>HF repo</span>
-						<FieldInfoIcon description="HuggingFace repo · needed to re-pull" />
-					</div>
-					<div className="form-ctl">
-						<input
-							className="input mono"
-							data-testid="model-hfrepo-input"
-							placeholder="unsloth/Qwen3-8B-GGUF"
-							value={hfRepo}
-							onChange={(e) => setHfRepo(e.target.value)}
-						/>
-					</div>
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>HF filename</span>
-						<FieldInfoIcon description="variant filename within the repo" />
-					</div>
-					<div className="form-ctl">
-						<input
-							className="input mono"
-							data-testid="model-hffile-input"
-							placeholder="qwen3-8b-q4_k_m.gguf"
-							value={hfFilename}
-							onChange={(e) => setHfFilename(e.target.value)}
-						/>
-					</div>
-				</div>
+							<div className="form-ctl">
+								{mmprojPicker ? (
+									<RichSelect
+										data-testid="model-mmproj-select"
+										aria-label="MMProj"
+										value={mmproj}
+										options={mmprojOptions}
+										onChange={setMmproj}
+									/>
+								) : (
+									<input
+										className="input mono"
+										data-testid="model-mmproj-input"
+										placeholder="/var/lib/hal0/models/…/mmproj-Q8.gguf"
+										value={mmproj}
+										onChange={(e) => setMmproj(e.target.value)}
+									/>
+								)}
+								{mmprojError && (
+									<div
+										className="err"
+										data-testid="model-mmproj-error"
+										style={{ marginTop: 6 }}
+									>
+										{mmprojError}
+									</div>
+								)}
+							</div>
+						</div>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>HF repo</span>
+								<FieldInfoIcon description="HuggingFace repo · needed to re-pull · feeds the projector list above" />
+							</div>
+							<div className="form-ctl">
+								<input
+									className="input mono"
+									data-testid="model-hfrepo-input"
+									placeholder="unsloth/Qwen3-8B-GGUF"
+									value={hfRepo}
+									onChange={(e) => setHfRepo(e.target.value)}
+								/>
+							</div>
+						</div>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>HF filename</span>
+								<FieldInfoIcon description="variant filename within the repo" />
+							</div>
+							<div className="form-ctl">
+								<input
+									className="input mono"
+									data-testid="model-hffile-input"
+									placeholder="qwen3-8b-q4_k_m.gguf"
+									value={hfFilename}
+									onChange={(e) => setHfFilename(e.target.value)}
+								/>
+							</div>
+						</div>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Paths</span>
+								<FieldInfoIcon description="where these files sit on this host · read-only — the model file is registry-owned, and the projector is set by the control above" />
+							</div>
+							<div className="form-ctl" data-testid="model-source-paths">
+								<SourcePathLine
+									label="model"
+									value={model.path}
+									testId="model-source-copy-path"
+									empty="not recorded on this row"
+								/>
+								{/* The DRAFT projector, not the stored one: this line is
+                    where a pick made above reads back as the resolved
+                    absolute path it will save as. */}
+								<SourcePathLine
+									label="mmproj"
+									value={mmproj}
+									testId="model-source-copy-mmproj"
+									empty="no projector paired"
+								/>
+							</div>
+						</div>
+					</>
+				)}
 
 				{update.isError && (
 					<div className="err">{update.error?.message || "Save failed"}</div>
