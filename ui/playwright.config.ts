@@ -45,6 +45,10 @@ export default defineConfig({
   // abort collection for the ENTIRE suite on its `vitest` import. Every e2e
   // file here is a `.spec.ts`, so pin that explicitly (#1399).
   testMatch: '**/*.spec.ts',
+  // macOS AppleDouble sidecars (`._foo.spec.ts`) appear on NFS/SMB checkouts
+  // and match the glob above; Playwright then aborts collection trying to
+  // parse the resource-fork bytes as TypeScript. Ignore them explicitly.
+  testIgnore: '**/._*',
   timeout: LIVE ? 180_000 : 30_000,
   // 12 minutes was set when the suite was ~8 min and 400-odd specs. At 686 specs
   // it runs 8-12 min on the CI runners, i.e. up to 100% of its own budget, and a
