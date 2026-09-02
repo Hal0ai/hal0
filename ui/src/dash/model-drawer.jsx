@@ -640,33 +640,61 @@ function TunePills({ text, onChange, profileFlags }) {
 	const removedPairs = d
 		? d.removed.map((r) => ({ ...r, canon: canonFlag(r.flag) }))
 		: [];
+	// Repeating a flag is legitimate llama-server usage (-ot ffn=CPU -ot
+	// attn=GPU, --override-kv, --lora), so a canon alone does not identify a
+	// pill. Number each pill among its same-canon siblings and carry that index
+	// into every splice — otherwise ✕ on the second pill removes the first, and
+	// the value popover edits the wrong one. Counting per group is the same as
+	// counting over the whole text: a canon's category is a pure function of the
+	// canon, so all its pairs land in one group, in text order.
+	const numberByCanon = (list) => {
+		const seen = new Map();
+		return list.map((p) => {
+			const occurrence = seen.get(p.canon) || 0;
+			seen.set(p.canon, occurrence + 1);
+			return { ...p, occurrence };
+		});
+	};
 	const sections = CATEGORY_ORDER.map((c) => ({
 		id: c.id,
 		label: c.label,
-		pairs: (groups.find((g) => g.id === c.id) || { pairs: [] }).pairs,
-		ghosts: removedPairs.filter(
-			(r) => (FLAG_CATEGORIES[r.canon] || "template-misc") === c.id,
+		pairs: numberByCanon((groups.find((g) => g.id === c.id) || { pairs: [] }).pairs),
+		ghosts: numberByCanon(
+			removedPairs.filter(
+				(r) => (FLAG_CATEGORIES[r.canon] || "template-misc") === c.id,
+			),
 		),
 	})).filter((s) => s.pairs.length > 0 || s.ghosts.length > 0);
 
-	const revert = (canon) => {
+	// Testids stay stable for the first occurrence — the overwhelmingly common
+	// case, and the shape the specs already key on — and only a repeat earns a
+	// 1-based suffix, so ids remain unique without churning the existing ones.
+	const pillId = (canon, occurrence) =>
+		occurrence === 0 ? canon : `${canon}-${occurrence + 1}`;
+	// Popover identity is the pill, not the flag: keying on canon alone opened
+	// one input per duplicate pill (several nodes sharing model-tune-value-input).
+	const pillKey = (canon, occurrence) => `${canon}:${occurrence}`;
+
+	const revert = (canon, occurrence) => {
 		const c = changedFor(canon);
 		if (!c) return;
 		// A boolean⇄valued change has no value token to splice on one side
 		// (spliceFlagValue is a documented no-op there), so it falls back to a
 		// remove + re-add at the tail, keeping the operator's own spelling.
 		if (c.from == null || c.to == null) {
-			onChange(addFlagToText(removeFlagFromText(text, canon), c.flag, c.from));
+			onChange(
+				addFlagToText(removeFlagFromText(text, canon, occurrence), c.flag, c.from),
+			);
 			return;
 		}
-		onChange(spliceFlagValue(text, canon, c.from));
+		onChange(spliceFlagValue(text, canon, c.from, occurrence));
 	};
-	const openValue = (canon, value) => {
+	const openValue = (canon, occurrence, value) => {
 		setAdding(false);
 		setValueDraft(value == null ? "" : String(value));
-		setEditingValue(canon);
+		setEditingValue(pillKey(canon, occurrence));
 	};
-	const commitValue = (canon) => {
+	const commitValue = (canon, occurrence) => {
 		setEditingValue(null);
 		const v = valueDraft.trim();
 		// Emptying the box is not "make this a bare flag" — spliceFlagValue would
@@ -676,7 +704,9 @@ function TunePills({ text, onChange, profileFlags }) {
 		// spliceFlagValue inserts the replacement verbatim, so a multi-word value
 		// has to arrive quoted or it tokenizes as two tokens and corrupts
 		// everything after it. Same rule addFlagToText applies on the add path.
-		onChange(spliceFlagValue(text, canon, /\s/.test(v) ? `"${v}"` : v));
+		onChange(
+			spliceFlagValue(text, canon, /\s/.test(v) ? `"${v}"` : v, occurrence),
+		);
 	};
 	const commitAdd = () => {
 		const raw = addDraft.trim();
@@ -744,18 +774,21 @@ function TunePills({ text, onChange, profileFlags }) {
 						{s.label}
 					</div>
 					<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-						{s.pairs.map((p, i) => {
+						{s.pairs.map((p) => {
 							const kind = divergenceFor(p.flag, p.canon);
 							const c = changedFor(p.canon);
+							const id = pillId(p.canon, p.occurrence);
 							return (
 								<span
-									key={`${p.canon}-${i}`}
+									key={pillKey(p.canon, p.occurrence)}
 									className={pillClass(kind)}
-									data-testid={`model-tune-pill-${p.canon}`}
+									data-testid={`model-tune-pill-${id}`}
 									data-divergence={kind}
 									title={
 										kind === "changed"
-											? `profile has ${p.flag} ${c ? c.from : ""}`
+											? c && c.from != null
+												? `profile has ${p.flag} ${c.from}`
+												: `profile has a bare ${p.flag}`
 											: kind === "denied"
 												? `${p.flag} is not settable on the model — see the error below`
 												: undefined
@@ -766,9 +799,9 @@ function TunePills({ text, onChange, profileFlags }) {
 										<span style={{ position: "relative" }}>
 											<button
 												type="button"
-												data-testid={`model-tune-pill-value-${p.canon}`}
+												data-testid={`model-tune-pill-value-${id}`}
 												aria-label={`Edit ${p.flag} value`}
-												onClick={() => openValue(p.canon, p.value)}
+												onClick={() => openValue(p.canon, p.occurrence, p.value)}
 												style={{
 													...iconBtnStyle,
 													color: "var(--fg)",
@@ -777,17 +810,18 @@ function TunePills({ text, onChange, profileFlags }) {
 											>
 												{p.value}
 											</button>
-											{editingValue === p.canon && (
+											{editingValue === pillKey(p.canon, p.occurrence) && (
 												<input
 													className="input mono"
 													data-testid="model-tune-value-input"
+													aria-label={`${p.flag} value`}
 													autoFocus
 													value={valueDraft}
 													onChange={(e) => setValueDraft(e.target.value)}
 													onKeyDown={(e) => {
 														if (e.key === "Enter") {
 															e.preventDefault();
-															commitValue(p.canon);
+															commitValue(p.canon, p.occurrence);
 														} else if (e.key === "Escape") {
 															// Consumed so the Drawer's document-level
 															// Escape→close never sees it: Escape here
@@ -806,10 +840,10 @@ function TunePills({ text, onChange, profileFlags }) {
 									{kind === "changed" && (
 										<button
 											type="button"
-											data-testid={`model-tune-pill-revert-${p.canon}`}
+											data-testid={`model-tune-pill-revert-${id}`}
 											aria-label={`Revert ${p.flag} to the profile value`}
-											title={`↺ back to ${c ? c.from : "the profile value"}`}
-											onClick={() => revert(p.canon)}
+											title={`↺ back to ${c && c.from != null ? c.from : "the profile value"}`}
+											onClick={() => revert(p.canon, p.occurrence)}
 											style={iconBtnStyle}
 										>
 											↺
@@ -817,9 +851,11 @@ function TunePills({ text, onChange, profileFlags }) {
 									)}
 									<button
 										type="button"
-										data-testid={`model-tune-pill-remove-${p.canon}`}
+										data-testid={`model-tune-pill-remove-${id}`}
 										aria-label={`Remove ${p.flag}`}
-										onClick={() => onChange(removeFlagFromText(text, p.canon))}
+										onClick={() =>
+											onChange(removeFlagFromText(text, p.canon, p.occurrence))
+										}
 										style={iconBtnStyle}
 									>
 										✕
@@ -827,29 +863,32 @@ function TunePills({ text, onChange, profileFlags }) {
 								</span>
 							);
 						})}
-						{s.ghosts.map((r, i) => (
-							<span
-								key={`ghost-${r.canon}-${i}`}
-								className="fpill fpill-tune fpill-rm"
-								data-testid={`model-tune-pill-ghost-${r.canon}`}
-								data-divergence="removed"
-								title={`in the profile, dropped here — restore ${r.flag}`}
-							>
-								<span>
-									{r.flag}
-									{r.value != null ? ` ${r.value}` : ""}
-								</span>
-								<button
-									type="button"
-									data-testid={`model-tune-pill-restore-${r.canon}`}
-									aria-label={`Restore ${r.flag} from the profile`}
-									onClick={() => onChange(addFlagToText(text, r.flag, r.value))}
-									style={iconBtnStyle}
+						{s.ghosts.map((r) => {
+							const id = pillId(r.canon, r.occurrence);
+							return (
+								<span
+									key={`ghost-${pillKey(r.canon, r.occurrence)}`}
+									className="fpill fpill-tune fpill-rm"
+									data-testid={`model-tune-pill-ghost-${id}`}
+									data-divergence="removed"
+									title={`in the profile, dropped here — restore ${r.flag}`}
 								>
-									+
-								</button>
-							</span>
-						))}
+									<span>
+										{r.flag}
+										{r.value != null ? ` ${r.value}` : ""}
+									</span>
+									<button
+										type="button"
+										data-testid={`model-tune-pill-restore-${id}`}
+										aria-label={`Restore ${r.flag} from the profile`}
+										onClick={() => onChange(addFlagToText(text, r.flag, r.value))}
+										style={iconBtnStyle}
+									>
+										+
+									</button>
+								</span>
+							);
+						})}
 					</div>
 				</div>
 			))}
@@ -876,6 +915,7 @@ function TunePills({ text, onChange, profileFlags }) {
 					<input
 						className="input mono"
 						data-testid="model-tune-add-input"
+						aria-label="Add a launch flag"
 						autoFocus
 						placeholder="--cache-type-k q8_0"
 						value={addDraft}

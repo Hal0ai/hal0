@@ -411,6 +411,61 @@ describe('ModelDrawer tune pills (Task 4)', () => {
     act(() => root.unmount())
   })
 
+  // Repeating a flag is legitimate llama-server usage (-ot / --override-kv /
+  // --lora). A canon alone does not identify a pill, so every affordance
+  // carries the pill's occurrence index — without it, ✕ on the second pill
+  // removed the first and the popover edited the wrong pair.
+  describe('repeated flags address their own pill', () => {
+    const REPEATED = {
+      ...MODEL,
+      defaults: { extra_args: '-ot ffn=CPU -ot attn=GPU --temp 0.4' },
+    }
+
+    it('removing the second occurrence leaves the first intact', () => {
+      const { host, root } = mount(
+        React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: REPEATED }),
+      )
+      // Occurrence 0 keeps the plain testid; the repeat earns a 1-based suffix.
+      expect(q(host, 'model-tune-pill--ot')).toBeTruthy()
+      expect(q(host, 'model-tune-pill--ot-2')).toBeTruthy()
+
+      act(() => q<HTMLButtonElement>(host, 'model-tune-pill-remove--ot-2').click())
+      expect(rawFlags(host)).toBe('-ot ffn=CPU --temp 0.4')
+      expect(q(host, 'model-tune-pill--ot-2')).toBeNull()
+      act(() => root.unmount())
+    })
+
+    it('editing the second occurrence edits the second', () => {
+      const { host, root } = mount(
+        React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: REPEATED }),
+      )
+      act(() => q<HTMLButtonElement>(host, 'model-tune-pill-value--ot-2').click())
+      const input = q<HTMLInputElement>(host, 'model-tune-value-input')
+      expect(input.value).toBe('attn=GPU')
+      act(() => typeInto(input, 'attn=CPU'))
+      press(input, 'Enter')
+      expect(rawFlags(host)).toBe('-ot ffn=CPU -ot attn=CPU --temp 0.4')
+      act(() => root.unmount())
+    })
+
+    it('only one value input is open at a time', () => {
+      const { host, root } = mount(
+        React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: REPEATED }),
+      )
+      act(() => q<HTMLButtonElement>(host, 'model-tune-pill-value--ot').click())
+      expect(host.querySelectorAll('[data-testid="model-tune-value-input"]').length).toBe(1)
+
+      // Opening the sibling pill's popover moves it, never duplicates it.
+      act(() => q<HTMLButtonElement>(host, 'model-tune-pill-value--ot-2').click())
+      const open = host.querySelectorAll(
+        '[data-testid="model-tune-value-input"]',
+      ) as NodeListOf<HTMLInputElement>
+      expect(open.length).toBe(1)
+      expect(open[0].value).toBe('attn=GPU')
+      act(() => root.unmount())
+    })
+  })
+
   it('unparseable text forces raw mode', () => {
     profilesBox.current = [CHAT_PROFILE]
     const { host, root } = mount(

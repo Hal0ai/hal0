@@ -375,18 +375,29 @@ function rawSegments(text) {
 // token and its value token (null when the flag carries no value, i.e. the
 // next word is itself a flag or there is no next word). Returns null when no
 // pair matches.
-function findFlagPairSegIndices(segs, canon) {
+//
+// `occurrence` selects WHICH match, counted in text order from 0. Repeating a
+// flag is legitimate llama-server usage — `-ot ffn=CPU -ot attn=GPU`, and the
+// same for --override-kv / --lora — so "the pair for this canon" is not a
+// unique thing, and a caller editing the second one has to be able to say so.
+// The walk enumerates pairs exactly as flagPairs does (a flag consumes the
+// next token iff that token isn't itself a flag), so the n-th pair here is the
+// n-th pair there.
+function findFlagPairSegIndices(segs, canon, occurrence = 0) {
   const wordIdx = [];
   segs.forEach((seg, i) => { if (seg.word) wordIdx.push(i); });
+  let seen = 0;
   for (let k = 0; k < wordIdx.length; k += 1) {
     const flagIdx = wordIdx[k];
     const tok = segs[flagIdx].text;
     if (!isFlagToken(tok) || canonFlag(tok) !== canon) continue;
     const next = wordIdx[k + 1];
-    if (next != null && !isFlagToken(segs[next].text)) {
-      return { flagIdx, valueIdx: next };
-    }
-    return { flagIdx, valueIdx: null };
+    const hit =
+      next != null && !isFlagToken(segs[next].text)
+        ? { flagIdx, valueIdx: next }
+        : { flagIdx, valueIdx: null };
+    if (seen === occurrence) return hit;
+    seen += 1;
   }
   return null;
 }
@@ -396,10 +407,14 @@ function findFlagPairSegIndices(segs, canon) {
 // and every other token's surrounding whitespace verbatim. A no-op (returns
 // `text` unchanged) when no pair matches canon, or the matched flag carries no
 // value token to replace.
-export function spliceFlagValue(text, canon, nextValue) {
+//
+// `occurrence` picks which repetition of `canon` to edit (0 = the first, the
+// default). Anything holding a per-pair identity — the drawer's tune pills —
+// must pass it, or a text carrying the same flag twice edits the wrong one.
+export function spliceFlagValue(text, canon, nextValue, occurrence = 0) {
   const s = String(text || "");
   const segs = rawSegments(s);
-  const found = findFlagPairSegIndices(segs, canon);
+  const found = findFlagPairSegIndices(segs, canon, occurrence);
   if (!found || found.valueIdx == null) return s;
   segs[found.valueIdx] = { text: String(nextValue), word: true };
   return segs.map((seg) => seg.text).join("");
@@ -409,10 +424,13 @@ export function spliceFlagValue(text, canon, nextValue) {
 // flag) for the pair whose canonFlag(flag) === canon, collapsing the
 // resulting double space so the surrounding tokens read as if the pair had
 // never been there. A no-op when no pair matches canon.
-export function removeFlagFromText(text, canon) {
+//
+// `occurrence` picks which repetition of `canon` to drop (0 = the first, the
+// default) — see spliceFlagValue.
+export function removeFlagFromText(text, canon, occurrence = 0) {
   const s = String(text || "");
   const segs = rawSegments(s);
-  const found = findFlagPairSegIndices(segs, canon);
+  const found = findFlagPairSegIndices(segs, canon, occurrence);
   if (!found) return s;
   const { flagIdx, valueIdx } = found;
   const endIdx = valueIdx != null ? valueIdx : flagIdx;

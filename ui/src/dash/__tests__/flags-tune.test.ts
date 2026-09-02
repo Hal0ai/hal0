@@ -94,6 +94,49 @@ describe("splice helpers preserve spelling, order, untouched text", () => {
   });
 });
 
+// Repeating a flag is legitimate llama-server usage (-ot / --override-kv /
+// --lora), so "the pair for this canon" is not unique and the helpers have to
+// be told WHICH one. Without the occurrence index every affordance on the
+// second pill silently acted on the first.
+describe("splice helpers address a specific occurrence of a repeated flag", () => {
+  const rep = "-ot ffn=CPU -ot attn=GPU --temp 0.4";
+
+  it("defaults to the first occurrence (unchanged contract)", () => {
+    expect(removeFlagFromText(rep, "-ot")).toBe("-ot attn=GPU --temp 0.4");
+    expect(spliceFlagValue(rep, "-ot", "x")).toBe("-ot x -ot attn=GPU --temp 0.4");
+  });
+
+  it("removes the second occurrence and leaves the first intact", () => {
+    expect(removeFlagFromText(rep, "-ot", 1)).toBe("-ot ffn=CPU --temp 0.4");
+  });
+
+  it("edits the second occurrence's value only", () => {
+    expect(spliceFlagValue(rep, "-ot", "attn=CPU", 1))
+      .toBe("-ot ffn=CPU -ot attn=CPU --temp 0.4");
+  });
+
+  it("counts occurrences across mixed spellings via canonFlag", () => {
+    const mixed = "-b 512 --batch-size 2048";
+    expect(spliceFlagValue(mixed, "--batch-size", "1024", 1)).toBe("-b 512 --batch-size 1024");
+    expect(removeFlagFromText(mixed, "--batch-size", 1)).toBe("-b 512");
+  });
+
+  it("counts a bare repetition as its own occurrence", () => {
+    // `--temp --temp 0.5`: the first carries no value (the next token is a
+    // flag), so occurrence 0 is the bare one and occurrence 1 is the valued one.
+    const bare = "--temp --temp 0.5";
+    expect(removeFlagFromText(bare, "--temp", 0)).toBe("--temp 0.5");
+    expect(spliceFlagValue(bare, "--temp", "0.9", 1)).toBe("--temp --temp 0.9");
+    // Occurrence 0 has no value token to replace — still a documented no-op.
+    expect(spliceFlagValue(bare, "--temp", "0.9", 0)).toBe(bare);
+  });
+
+  it("an out-of-range occurrence is a no-op, never a wrong-pair edit", () => {
+    expect(removeFlagFromText(rep, "-ot", 5)).toBe(rep);
+    expect(spliceFlagValue(rep, "-ot", "x", 5)).toBe(rep);
+  });
+});
+
 describe('isFlagToken', () => {
   it('accepts long flags with real content', () => {
     expect(isFlagToken('--threads')).toBe(true)
