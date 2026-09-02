@@ -78,6 +78,20 @@ describe("splice helpers preserve spelling, order, untouched text", () => {
     expect(spliceFlagValue("--batch-size 2048", canonFlag("-b"), "512"))
       .toBe("--batch-size 512");
   });
+  it("spliceFlagValue replaces a double-quoted multi-word value without corrupting the remainder", () => {
+    expect(spliceFlagValue('--foo "a b" --temp 0.4', "--foo", "x"))
+      .toBe("--foo x --temp 0.4");
+  });
+  it("spliceFlagValue replaces a single-quoted multi-word value without corrupting the remainder", () => {
+    expect(spliceFlagValue("--foo 'a b' --temp 0.4", "--foo", "x"))
+      .toBe("--foo x --temp 0.4");
+  });
+  it("removeFlagFromText drops a double-quoted multi-word value without corrupting the remainder", () => {
+    expect(removeFlagFromText('--foo "a b" --temp 0.4', "--foo")).toBe("--temp 0.4");
+  });
+  it("removeFlagFromText drops a single-quoted multi-word value without corrupting the remainder", () => {
+    expect(removeFlagFromText("--foo 'a b' --temp 0.4", "--foo")).toBe("--temp 0.4");
+  });
 });
 
 describe('isFlagToken', () => {

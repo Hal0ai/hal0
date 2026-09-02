@@ -330,20 +330,42 @@ export function groupFlagPairs(text) {
 }
 
 // Split raw flag text into an alternating sequence of whitespace-run and
-// non-whitespace-run segments (mirrors highlightSegments's tokenisation).
-// Unlike tokenizeFlags this is NOT quote-aware — the splice helpers below
-// accept that a quoted value's spacing may get normalized when re-spliced
-// (documented on spliceFlagValue/removeFlagFromText) in exchange for editing
-// the original string segment-wise so every OTHER token's spelling and
-// spacing survives untouched.
+// token segments, quote-aware like tokenizeFlags: a `'...'`/`"..."` run keeps
+// its enclosing quotes and any embedded whitespace as ONE segment, so a
+// `--chat-template-kwargs '{"enable_thinking":false}'`- or `--alias "a b"`-
+// style value round-trips as a single unit instead of being torn into
+// fragments that corrupt everything after them. The segment's `text` keeps
+// the raw quote characters verbatim — callers that replace a segment's text
+// (spliceFlagValue) intentionally drop them, since the replacement value is
+// inserted unquoted.
 function rawSegments(text) {
   const s = String(text || "");
   const segs = [];
-  const re = /(\s+)|(\S+)/g;
-  let m;
-  while ((m = re.exec(s)) !== null) {
-    if (m[1] != null) segs.push({ text: m[1], word: false });
-    else segs.push({ text: m[2], word: true });
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    if (/\s/.test(s[i])) {
+      let j = i;
+      while (j < n && /\s/.test(s[j])) j += 1;
+      segs.push({ text: s.slice(i, j), word: false });
+      i = j;
+      continue;
+    }
+    let j = i;
+    let quote = null;
+    while (j < n) {
+      const ch = s[j];
+      if (quote) {
+        j += 1;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; j += 1; continue; }
+      if (/\s/.test(ch)) break;
+      j += 1;
+    }
+    segs.push({ text: s.slice(i, j), word: true });
+    i = j;
   }
   return segs;
 }
