@@ -77,6 +77,7 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "kokoro": ("gpu-vulkan", "cpu"),
     "vibevoice": ("gpu-vulkan", "cpu"),
     "comfyui": ("gpu-vulkan",),
+    "qwen3tts": ("gpu-rocm",),  # Qwen3-TTS runner is ROCm-only (needs /dev/kfd)
 }
 
 _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
@@ -427,6 +428,20 @@ def _backend_variants(entry: Any) -> list[str]:
         cap_str = getattr(entry, "capability", "") or ""
         if comfy_subdir or cap_str == "image":
             raw.append("comfyui")
+
+    # An untagged row (backends=[], no .backend, no comfy signal) whose
+    # resolved engine is llama-server — explicit provider="llama-server",
+    # OR provider absent/None (derive_model_provider's total default) — has
+    # nothing in ``raw`` to fan out on, so ``out`` would stay empty and
+    # runs_on_for_model() would silently report zero lanes for a model that
+    # actually runs everywhere llama.cpp does. Reaching this point already
+    # proves ``explicit`` is not any OTHER provider (those paths returned
+    # above, including "flm" → ["npu"]) — so a remaining untagged case is
+    # llama-server by construction. Treat it as a bare
+    # ``backends=["llama-server"]`` row and let the fan-out below run its
+    # normal host-present AMD/CPU logic.
+    if not raw:
+        raw.append("llama-server")
 
     out: list[str] = []
     for b in raw:

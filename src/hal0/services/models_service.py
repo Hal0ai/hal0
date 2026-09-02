@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.model_meta import classify, derive_model_provider
+from hal0.model_meta import RUNTIME_FAMILIES, classify, derive_model_provider
 from hal0.registry.detect import DetectionResult, detect, detected_architecture
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
@@ -392,6 +392,17 @@ async def commit_scan_rows(
         provider = row.get("provider")
         if not isinstance(provider, str) or not provider.strip():
             provider = derive_model_provider(backends)
+        elif provider not in RUNTIME_FAMILIES:
+            # Final-review fix: an operator-supplied provider string was
+            # persisted unscreened, letting POST /api/models/scan mint an
+            # out-of-vocab row (e.g. "whispercpp", a curated-only tag the
+            # spec forbids on registry rows). Screen it against the same
+            # vocab the create path enforces (see the ``model.provider_invalid``
+            # check further down this module) and reject the row instead.
+            skipped.append(
+                {"path": str(resolved), "reason": f"invalid_provider:{provider!r}"}
+            )
+            continue
 
         suggested_id = row.get("id") or suggest_id_from_path(resolved)
         name = row.get("name") or resolved.stem

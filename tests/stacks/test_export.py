@@ -12,6 +12,7 @@ import pytest
 
 from hal0.config.loader import save_profiles_config
 from hal0.config.schema import (
+    STACK_SCHEMA_VERSION_CURRENT,
     ProfileConfig,
     ProfilesConfig,
     StackCapabilityRow,
@@ -184,6 +185,18 @@ class TestExportEnvelope:
         assert env["exported_at"] == "2026-06-20T00:00:00Z"
         assert env["checksum"].startswith("sha256:")
         assert env["stack"]["models"]["ace-saber"]["hf_repo"] == "jcbtc/ace"
+
+    def test_export_stamps_current_schema_version_2(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """Model.provider landed on StackModelMeta this branch (extra="forbid"),
+        so a stack exported by this build must stamp schema_version 2 — a
+        pre-PR-1 importer must hit the designed envelope_too_new gate rather
+        than fail raw pydantic validation on the unknown ``provider`` field."""
+        env = export_envelope(_stack(), exported_at="2026-06-20T00:00:00Z", registry=reg)
+        assert STACK_SCHEMA_VERSION_CURRENT == 2
+        assert env["schema_version"] == 2
+        assert env["stack"]["schema_version"] == 2
 
     def test_checksum_is_deterministic_and_ignores_exported_at(
         self, reg: ModelRegistry, tmp_hal0_home: str

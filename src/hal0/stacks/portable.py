@@ -277,7 +277,9 @@ def import_stack(
             code="stacks.envelope_too_new",
             details={"got": env.stack.schema_version, "supported": STACK_SCHEMA_VERSION_CURRENT},
         )
-    # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
+    # (forward-compat seam: older schema_version would migrate here; v1 and v2
+    # both import cleanly today — v2 only added StackModelMeta.provider, which
+    # v1 importers never wrote and v2 readers treat as optional.)
     _reconcile_profiles(env.stack, profiles_path)
     resolved = catalog.create(slug, env.stack)
     report = resolve_models(env.stack, registry)

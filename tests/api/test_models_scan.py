@@ -93,3 +93,52 @@ def test_commit_rows_stamps_provider_alongside_backends(tmp_hal0_home: str) -> N
         row = client.get("/api/models/kokoro-voice").json()
         assert row["provider"] == "kokoro"
         assert row["backends"] == ["kokoro"]
+
+
+def test_scan_commit_rejects_out_of_vocab_provider(tmp_hal0_home: str) -> None:
+    """An operator-supplied ``provider`` on a scan-commit row must be screened
+    against RUNTIME_FAMILIES same as the POST /api/models create path — an
+    out-of-vocab token like "whispercpp" (a curated-only tag, never valid on
+    a registry row) must be skipped, not persisted unscreened."""
+    fp = Path(tmp_hal0_home) / "mystery-voice.gguf"
+    fp.write_bytes(b"\x00" * 8)
+
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/models/scan",
+            json={
+                "rows": [
+                    {"path": str(fp), "id": "mystery-voice", "provider": "whispercpp"},
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "mystery-voice" not in body["added"]
+        assert any(s.get("path") == str(fp) for s in body["skipped"]), body["skipped"]
+
+        listing = client.get("/api/models").json()
+        ids = {m["id"] for m in listing.get("models", [])}
+        assert "mystery-voice" not in ids
+
+
+def test_scan_commit_persists_valid_explicit_provider(tmp_hal0_home: str) -> None:
+    fp = Path(tmp_hal0_home) / "explicit-qwen.gguf"
+    fp.write_bytes(b"\x00" * 8)
+
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/models/scan",
+            json={
+                "rows": [
+                    {"path": str(fp), "id": "explicit-qwen", "provider": "qwen3tts"},
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert "explicit-qwen" in r.json()["added"]
+
+        row = client.get("/api/models/explicit-qwen").json()
+        assert row["provider"] == "qwen3tts"

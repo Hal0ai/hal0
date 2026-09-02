@@ -138,3 +138,52 @@ def test_provider_split_matches_legacy_resolution(seeded_registry: ModelRegistry
     # matching seed row (or without keeping both maps in sync), this fails
     # instead of silently passing on a narrower fixture.
     assert resolved == set(RUNTIME_FAMILIES)
+
+
+# ── empty-``backends`` llama fall-through (final-review fix) ──────────────────
+#
+# runs_on_for_model(Model(backends=[], provider="llama-server")) used to
+# return [] — the tag fan-out in ``_backend_variants`` only ran off
+# ``entry.backend``/``entry.backends`` tags, and an explicit llama-server row
+# (or a legacy provider=None row, which derives to llama-server too) with no
+# tags supplied neither of those. Both must now fall through to the same
+# host-present AMD/CPU fan-out as a ``backends=["llama-server"]`` row.
+
+
+def test_backend_variants_llama_provider_empty_backends_falls_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
+    m = Model(id="llama-a", path=str(tmp_path / "llama-a.gguf"), backends=[], provider="llama-server")
+    assert catalog._backend_variants(m) == ["gpu-vulkan", "cpu"]
+
+
+def test_backend_variants_legacy_none_provider_empty_backends_falls_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # provider=None (pre-Task-1 row) derives to llama-server; must get the
+    # same fall-through as an explicit provider="llama-server" row.
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
+    m = Model(id="legacy-a", path=str(tmp_path / "legacy-a.gguf"), backends=[], provider=None)
+    assert derive_model_provider(m.backends) == "llama-server"
+    assert catalog._backend_variants(m) == ["gpu-vulkan", "cpu"]
+
+
+def test_runs_on_for_model_non_empty_for_empty_backends_llama_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """model_to_dict(model)["runs_on"] must not be silently empty — the
+    coverage gap this branch's final review flagged."""
+    from hal0.services.models_service import model_to_dict
+
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
+    m = Model(id="llama-b", path=str(tmp_path / "llama-b.gguf"), backends=[], provider="llama-server")
+    assert model_to_dict(m)["runs_on"] == ["gpu-vulkan", "cpu"]
+
+
+def test_backend_variants_qwen3tts_yields_gpu_rocm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-rocm", "cpu"))
+    m = Model(id="tts-c", path=str(tmp_path / "tts-c"), backends=[], provider="qwen3tts")
+    assert catalog._backend_variants(m) == ["gpu-rocm"]

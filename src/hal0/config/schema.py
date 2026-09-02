@@ -1562,7 +1562,7 @@ class ProfilesConfig(BaseModel):
 
 # Stacks carry their own schema version (independent of hal0.toml meta.schema_version),
 # stamped on every StackConfig and on the export envelope (PR-3).
-STACK_SCHEMA_VERSION_CURRENT = 1
+STACK_SCHEMA_VERSION_CURRENT = 2
 
 #: Profile export envelopes carry their own schema version (independent of
 #: hal0.toml meta.schema_version), stamped on every ``.hal0profile.json`` export.
