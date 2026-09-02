@@ -101,30 +101,51 @@ class ProfilePatch:
     #: Mirrors ProfileConfig.backend, which accepts "cuda" too. Omitting it here
     #: made a CUDA profile un-patchable through this seam.
     backend: Literal["rocm", "vulkan", "cuda"] | None = None
-    #: None = leave unchanged. Clearing a stored runner goes through a full
-    #: re-create (same as every other field here) — there is no separate
-    #: "clear" sentinel, mirroring `backend`/`device_class` above.
+    #: None = leave unchanged (as everywhere else on this class); ``""`` =
+    #: CLEAR the stored runtime back to Auto (#2186). ``runner`` is the one
+    #: field here with a natural empty value — "no runtime pinned" is a real,
+    #: reachable state (every seed is in it), unlike ``backend``/``device_class``
+    #: whose None already means "unset" — so a clear needs a wire value that is
+    #: not None, and the empty string is the one the select control already
+    #: produces. Without it the drawer's "— Auto —" option sent None and the
+    #: stored runtime silently survived the save.
     runner: str | None = None
     intent: str | None = None
     quant: str | None = None
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
-    """Classify a profile's runtime family from its TYPED fields — the profile
-    ``name`` + ``device_class`` — never an image string.
+    """Classify a profile's runtime family from its TYPED fields, in the
+    precedence ``runner`` > ``device_class`` > profile ``name`` — never an
+    image string.
 
-    spec-hw-slot-ownership §3: profiles carry no ``image`` anymore, so the old
-    exact-image→``RUNNER_IMAGES`` lookup and the image-substring sniffs are gone.
-    The runtime family is a structural fact: ``device_class`` pins the
-    single-purpose runtimes (``img`` → comfyui, ``npu`` → flm), and the
-    name-keyed CPU engines — the two TTS engines (kokoro / qwen3tts) plus the
-    moonshine STT engine, which share a ``cpu`` device_class with a plain
-    llama-server CPU profile and so can only be told apart by name — key off
-    their seed slug. Mirrors the model-side backends-driven classification in
+    ``profile.runner`` (runtime-cascade D4) is the structural signal: a
+    registry key names exactly one runtime, so its ``Runner.runtime_family``
+    is the answer whenever one is stored. That makes the family a property of
+    the runtime the profile selects rather than of the slug it happens to
+    carry, so a custom profile can be any family — the single-purpose runtimes
+    are no longer seed-only.
+
+    Everything below the runner check is the PRE-runner fallback, kept for the
+    (still-common) runner-less profile and for a stored key that is no longer
+    in the registry. spec-hw-slot-ownership §3: profiles carry no ``image``
+    anymore, so the old exact-image→``RUNNER_IMAGES`` lookup and the
+    image-substring sniffs are gone. ``device_class`` pins the single-purpose
+    runtimes (``img`` → comfyui, ``npu`` → flm), and the name-keyed CPU
+    engines — the two TTS engines (kokoro / qwen3tts) plus the moonshine STT
+    engine, which share a ``cpu`` device_class with a plain llama-server CPU
+    profile and so can only be told apart by name — key off their seed slug.
+    Mirrors the model-side backends-driven classification in
     :func:`hal0.model_meta.modality.derive_modalities` (a structural signal, not
-    a substring guess). Custom (cloned) profiles have no special-runtime signal
-    and resolve to ``llama-server`` — the single-purpose runtimes are seed-only.
+    a substring guess). A runner-less custom (cloned) profile has no
+    special-runtime signal and resolves to ``llama-server``.
     """
+    if profile.runner:
+        from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+        runner = RUNNER_IMAGES.get(profile.runner)
+        if runner is not None:
+            return runner.runtime_family
     if name == "flm" or profile.device_class == "npu":
         return "flm"
     if name == "qwen3-tts":
@@ -172,12 +193,67 @@ class ProfileCatalog:
         cfg = load_profiles_config(self._path)
         profile = cfg.profile.get(name)
         if profile is None:
+            profile = self._materialize_legacy(name)
+        if profile is None:
             raise NotFound(
                 f"profile {name!r} not found",
                 code="profiles.not_found",
                 details={"profile": name, "available": sorted(cfg.profile)},
             )
         return self._resolve_item(name, profile)
+
+    def _materialize_legacy(self, name: str) -> ProfileConfig | None:
+        """Adopt a demoted (ex-seed) definition on first reference, or None.
+
+        ``loader._demote_legacy_seeds`` covers every install that HAS a
+        profiles.toml. This is for the one state it structurally cannot: a
+        FRESH install, where there is no file at all and the migration is a
+        deliberate no-op, yet the shipped configuration still names demoted
+        profiles — install.sh copies
+        ``installer/etc-hal0/slots/agent.toml`` (``chadrock-moe``) and
+        ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
+        agent slot asks for ``moe``. Without this the curated slots on a
+        brand-new box would reference nothing.
+
+        The gate is load-bearing, not an optimisation: a demoted name the
+        install has already settled and that is now missing from the catalog
+        was DELETED, and re-materializing it would resurrect it on the next
+        read — precisely the virtual-seed behaviour the demotion exists to
+        escape. But "settled" is a fact about a NAME, not about the install:
+        the gate used to be ``profiles.toml exists``, which the first adoption
+        itself makes true, so whichever of the shipped references resolved
+        first won and every other one fell back to the device default. A fresh
+        box ships three (agent.toml → chadrock-moe, coder.toml → coding, the
+        saber stack → moe), so the outcome depended on launch order.
+
+        ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
+        a fresh install (adopt freely, once each), every demoted name after the
+        bulk demotion has run (adopt nothing — absence is a deletion), and
+        growing by one on each adoption here.
+
+        Materializing (rather than answering read-only) is what leaves the
+        entry editable and deletable afterwards, exactly like a demoted one. A
+        write failure is not fatal: the caller still gets the definition and
+        the next reference retries.
+        """
+        from hal0.config.schema import LEGACY_SEED_PROFILES
+
+        entry = LEGACY_SEED_PROFILES.get(name)
+        if entry is None:
+            return None
+        profile = ProfileConfig.model_validate(entry)
+        with self._lock:
+            catalog = load_profiles_config(self._path)
+            adopted = catalog.adopted_legacy_names()
+            if name in adopted:
+                return None
+            catalog.profile[name] = profile
+            catalog.legacy_seeds_adopted = sorted(adopted | {name})
+            try:
+                save_profiles_config(catalog, self._path)
+            except OSError as exc:
+                log.warning("profiles.legacy_materialize_write_failed name=%s error=%s", name, exc)
+        return profile
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
@@ -221,11 +297,7 @@ class ProfileCatalog:
                     patch.device_class if patch.device_class is not None else existing.device_class
                 ),
                 backend=patch.backend if patch.backend is not None else existing.backend,
-                runner=(
-                    screen_profile_runner(patch.runner)
-                    if patch.runner is not None
-                    else existing.runner
-                ),
+                runner=_merge_runner(patch.runner, existing.runner),
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
                 quant=patch.quant if patch.quant is not None else existing.quant,
@@ -258,6 +330,15 @@ class ProfileCatalog:
                     details={"slots": in_use_slots, "models": in_use_models},
                 )
             del catalog.profile[name]
+            # A deleted demoted name is settled whether or not it was ever
+            # adopted here — otherwise deleting one the operator had created
+            # themselves (under a demoted name, on a fresh install) would leave
+            # it eligible for adoption and the next resolve would hand back the
+            # shipped definition in its place.
+            from hal0.config.schema import LEGACY_SEED_PROFILES
+
+            if name in LEGACY_SEED_PROFILES:
+                catalog.legacy_seeds_adopted = sorted(catalog.adopted_legacy_names() | {name})
             save_profiles_config(catalog, self._path)
 
     def slots_using(self, name: str) -> list[str]:
@@ -373,13 +454,70 @@ __all__ = [
     "ResolvedProfile",
     "RuntimeFamily",
     "SlotType",
+    "runtime_family_of",
     "screen_profile_flags",
     "screen_profile_runner",
 ]
 
 
+def runtime_family_of(name: str, profile: ProfileConfig) -> RuntimeFamily:
+    """Public seam for :func:`_runtime_family` — the runtime family a profile
+    resolves to, for callers that hold a ProfileConfig that is not (yet) in
+    the catalog. The import dry run reports it for an envelope that has not
+    been created.
+    """
+    return _runtime_family(name, profile)
+
+
+def _merge_runner(patched: str | None, stored: str | None) -> str | None:
+    """Resolve an update's ``runner`` against the profile's stored value.
+
+    The three wire cases (#2186), in order:
+
+    * ``None`` — the field was omitted: leave the stored runtime alone.
+    * ``""`` — the explicit CLEAR sentinel: back to Auto (no runtime pinned).
+      Never screened: dropping a runtime is always a legal state, and this is
+      the only in-product way off a key the registry no longer carries.
+    * the value already stored — grandfathered through unscreened (#2183).
+    * anything else — a real key, screened and canonicalized as on create.
+
+    The grandfather clause mirrors ``screen_profile_flags``' (#1411): a runner
+    key can leave ``RUNNER_IMAGES`` under the profile that stores it — a runtime
+    renamed or dropped by a build, or a downgrade — and the drawer re-sends the
+    stored runner verbatim on every save, so screening an UNCHANGED value 422'd
+    a write that changes nothing and made the profile un-editable in EVERY
+    field. The screen judges what an update INTRODUCES, not what it inherits;
+    any actual change (including one unknown key for another) is still fully
+    screened, and `create` stays strict — it has no stored baseline.
+    """
+    if patched is None:
+        return stored
+    if not patched.strip():
+        return None
+    if patched == stored:
+        from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+        if patched not in RUNNER_IMAGES:
+            # Logged, not silently ignored — mirrors the flags grandfathering.
+            # An unchanged key that IS in the registry is the ordinary save and
+            # says nothing worth a line.
+            log.info(
+                "profile carries a runner key this box's registry no longer "
+                "offers; grandfathered on update",
+                extra={"event": "profile.runner_grandfathered", "runner": patched},
+            )
+        return stored
+    return screen_profile_runner(patched)
+
+
 def screen_profile_runner(runner: str | None) -> str | None:
-    """Validate + canonicalize a profile's runner key (D4). None passes.
+    """Validate + canonicalize a profile's runner key (D4). None/blank passes.
+
+    A blank string is treated as None — "no runtime pinned" — rather than
+    looked up as a key: it is what the drawer's Auto option puts on the wire,
+    and an empty key names nothing in any registry. (On an update the blank is
+    already resolved by :func:`_merge_runner` as the clear sentinel; this is
+    the create/import side of the same reading.)
 
     ``runner`` is a RUNNER_IMAGES registry key, never an image ref — keys
     survive image/tag updates (the same rot that got ``image`` removed from
@@ -389,7 +527,7 @@ def screen_profile_runner(runner: str | None) -> str | None:
     catalog write seam (create/update) and the portable import path so both
     apply the identical check.
     """
-    if runner is None:
+    if runner is None or not runner.strip():
         return None
     from hal0.runners import RUNNER_IMAGES, canonical_runner_key
 

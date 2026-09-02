@@ -6,8 +6,8 @@ import pytest
 
 from hal0.config.loader import load_profiles_config, save_profiles_config
 from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
-from hal0.errors import Conflict, UnprocessableEntity
-from hal0.profiles import ProfileCatalog, ProfilePatch
+from hal0.errors import Conflict, NotFound, UnprocessableEntity
+from hal0.profiles import ProfileCatalog, ProfilePatch, _runtime_family
 
 
 def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
@@ -220,10 +220,11 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
 def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
-    # Per spec §4.2: generic dense profile is model-agnostic (no quant hint);
-    # the chadrock-dense family-specific profile carries the ROCmFP4 hint.
-    assert by_name["dense"].quant == ""
-    assert by_name["chadrock-dense"].quant == "ROCmFP4"
+    # Seeds that carry no quant hint report it as the empty string, and a
+    # runtime-family seed carries its own (the FLM NPU quant here). The
+    # ROCmFP4 family hints moved out with the chadrock-* demotion.
+    assert by_name["chat"].quant == ""
+    assert by_name["flm"].quant == "W4ABF16"
 
 
 def test_custom_profile_has_no_bench_and_round_trips_intent_quant(
@@ -254,7 +255,7 @@ def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
         )
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert sorted(by_name["chat"].used_by) == ["agent", "primary"]
-    assert by_name["dense"].used_by == ()
+    assert by_name["embedding"].used_by == ()
     assert by_name["chat"].to_dict()["used_by"] == ["agent", "primary"]
 
 
@@ -298,3 +299,203 @@ def test_profile_without_runner_unchanged(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
     prof = cat.create("plain", ProfileConfig(flags="-fa on"))
     assert prof.runner is None
+
+
+def test_create_with_blank_runner_is_auto(tmp_hal0_home: str) -> None:
+    """'' means "no runtime", never a key to look up — so a create carrying the
+    drawer's Auto option lands as Auto instead of 422'ing on an empty key."""
+    prof = ProfileCatalog().create("blankrun", ProfileConfig(flags="", runner=""))
+    assert prof.runner is None
+
+
+# ── update runner semantics: None = unchanged, "" = clear (#2186),
+#    unchanged value grandfathered (#2183) ─────────────────────────────────
+
+
+def _stage_runner_profile(name: str, runner: str) -> None:
+    """Put a profile carrying *runner* on disk, bypassing the write screen.
+
+    The only way to stage a stored key the registry no longer offers — the
+    #2183 case, where a runner was removed/renamed by a build (or the box was
+    downgraded) after the profile was authored.
+    """
+    cfg = load_profiles_config()
+    cfg.profile[name] = ProfileConfig(flags="-fa on", runner=runner, intent="before")
+    save_profiles_config(cfg)
+
+
+def test_update_without_runner_leaves_the_stored_runtime(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    cat.create("keeper", ProfileConfig(flags="", runner="promptforge"))
+    assert cat.update("keeper", ProfilePatch(intent="renamed")).runner == "promptforge"
+
+
+def test_update_blank_runner_clears_to_auto(tmp_hal0_home: str) -> None:
+    """#2186 — '' is the clear sentinel; None still means leave-unchanged."""
+    cat = ProfileCatalog()
+    cat.create("clearme", ProfileConfig(flags="", runner="promptforge"))
+    updated = cat.update("clearme", ProfilePatch(runner=""))
+    assert updated.runner is None
+    assert cat.resolve("clearme").runner is None
+
+
+def test_update_changing_the_runner_still_screens(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    cat.create("switcher", ProfileConfig(flags="", runner="promptforge"))
+    with pytest.raises(UnprocessableEntity) as exc:
+        cat.update("switcher", ProfilePatch(runner="nope"))
+    assert exc.value.code == "profiles.unknown_runner"
+
+
+def test_update_changing_the_runner_folds_aliases(tmp_hal0_home: str) -> None:
+    cat = ProfileCatalog()
+    cat.create("folder", ProfileConfig(flags=""))
+    assert cat.update("folder", ProfilePatch(runner="vulkanfpx")).runner == "rocmfpx"
+
+
+def test_update_resubmitting_an_out_of_vocab_runner_is_grandfathered(
+    tmp_hal0_home: str,
+) -> None:
+    """#2183 — the drawer resends the stored runner verbatim on every save, so
+    screening an UNCHANGED value made a profile whose runtime left the registry
+    un-editable in every field."""
+    _stage_runner_profile("ghosted", "ghost-runner")
+    updated = ProfileCatalog().update(
+        "ghosted", ProfilePatch(intent="renamed", runner="ghost-runner")
+    )
+    assert updated.intent == "renamed"
+    assert updated.runner == "ghost-runner"
+
+
+def test_update_cannot_swap_one_unknown_runner_for_another(tmp_hal0_home: str) -> None:
+    """The exemption is byte-identical resubmission only, not an amnesty."""
+    _stage_runner_profile("ghosted", "ghost-runner")
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().update("ghosted", ProfilePatch(runner="other-ghost"))
+    assert exc.value.code == "profiles.unknown_runner"
+
+
+def test_update_can_clear_an_out_of_vocab_runner(tmp_hal0_home: str) -> None:
+    """Dropping a runtime is always safe, so the clear sentinel bypasses the
+    screen — that is the in-product way off a stale key."""
+    _stage_runner_profile("ghosted", "ghost-runner")
+    assert ProfileCatalog().update("ghosted", ProfilePatch(runner="")).runner is None
+
+
+# ── runtime_family precedence: runner > device_class > legacy name ────────
+
+
+def test_runtime_family_prefers_runner_key() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="kokoro")
+    assert _runtime_family("my-custom", profile) == "kokoro"
+
+
+def test_runtime_family_runner_beats_legacy_name() -> None:
+    # a kokoro-NAMED profile pointing at the comfyui runner is comfyui-family
+    profile = ProfileConfig(flags="", mtp=False, runner="comfyui")
+    assert _runtime_family("kokoro", profile) == "comfyui"
+
+
+def test_runtime_family_runner_beats_device_class() -> None:
+    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="rocmfpx")
+    assert _runtime_family("custom", profile) == "llama-server"
+
+
+def test_runtime_family_unknown_runner_falls_back() -> None:
+    profile = ProfileConfig(flags="", mtp=False, runner="ghost-runner")
+    assert _runtime_family("kokoro", profile) == "kokoro"  # legacy name rule still fires
+
+
+def test_runtime_family_no_runner_unchanged() -> None:
+    cases = [
+        ("flm", "flm"),
+        ("qwen3-tts", "qwen3tts"),
+        ("kokoro", "kokoro"),
+        ("moonshine", "moonshine"),
+        ("comfyui", "comfyui"),
+        ("anything", "llama-server"),
+    ]
+    for name, expected in cases:
+        assert _runtime_family(name, ProfileConfig(flags="", mtp=False)) == expected
+    # device_class rules unchanged too
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="npu")) == "flm"
+    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="img")) == "comfyui"
+
+
+# ── demoted (ex-seed) profiles ────────────────────────────────────────────
+
+
+def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
+    """'coding' is no longer in SEED_PROFILES, so _guard_custom lets it through."""
+    p = tmp_path / "profiles.toml"
+    p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    updated = catalog.update("coding", ProfilePatch(intent="mine now"))
+    assert updated.intent == "mine now"
+    assert updated.seed is False
+
+    catalog.delete("coding")
+    assert all(profile.name != "coding" for profile in catalog.list())
+    # The delete sticks — the migration marker stops the re-injection.
+    assert "coding" not in load_profiles_config(p).profile
+
+
+def test_resolve_does_not_resurrect_a_deleted_legacy_profile(tmp_path: Path) -> None:
+    p = tmp_path / "profiles.toml"
+    p.write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
+    catalog = ProfileCatalog(path=p)
+
+    with pytest.raises(NotFound):
+        catalog.resolve("coding")
+
+
+def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path) -> None:
+    """No profiles.toml at all: the curated agent/coder slots still resolve."""
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    resolved = catalog.resolve("chadrock-moe")
+    assert resolved.name == "chadrock-moe"
+    assert resolved.seed is False
+    # Persisted as a custom entry, so it is editable/deletable from here on.
+    assert "chadrock-moe" in load_profiles_config(p).profile
+
+
+def test_resolve_materializes_every_legacy_name_on_a_fresh_install(tmp_path: Path) -> None:
+    """Adoption is once-per-NAME, not once-per-install.
+
+    A fresh box ships three references to demoted profiles across different
+    files (agent.toml → chadrock-moe, coder.toml → coding, the saber seed
+    stack → moe). The first resolve creates profiles.toml; if that alone shut
+    adoption off, whichever slot happened to launch first would win and the
+    rest would silently fall back to the device default.
+    """
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    for name in ("chadrock-moe", "coding", "moe"):
+        assert catalog.resolve(name).name == name
+
+    stored = load_profiles_config(p).profile
+    assert {"chadrock-moe", "coding", "moe"} <= set(stored)
+
+
+def test_materialized_legacy_profile_stays_deleted(tmp_path: Path) -> None:
+    """Adopting a name settles it: a later delete is not undone by a resolve."""
+    p = tmp_path / "profiles.toml"
+    catalog = ProfileCatalog(path=p)
+
+    catalog.resolve("coding")
+    catalog.delete("coding")
+
+    with pytest.raises(NotFound):
+        catalog.resolve("coding")
+    # ...and it does not take its unadopted siblings down with it.
+    assert catalog.resolve("moe").name == "moe"
+
+
+def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:
+    catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
+    with pytest.raises(NotFound):
+        catalog.resolve("no-such-profile")

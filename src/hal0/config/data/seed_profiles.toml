@@ -1,4 +1,10 @@
-# hal0 1.0 seeded profile catalog (18 profiles total).
+# hal0 seeded profile catalog — the minimal core (10 profiles total).
+#
+# One profile per runtime family (flm, kokoro, moonshine, qwen3-tts,
+# comfyui) plus the generic llama-server workloads (chat, cpu-chat,
+# embedding, reranking, brain). The 8 workload VARIANTS this file used to
+# carry live in legacy_seed_profiles.toml now — see that file's header for
+# what happens to them on upgrade.
 #
 # Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md §4:
 # Profiles are device-agnostic logical-tune TEMPLATES — they carry only
@@ -28,37 +34,14 @@
 # Each profile is a complete recipe for a (workload × model-family) cell.
 # Slot picks ONE profile; per-slot [model].defaults.extra_args overrides.
 # Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in
-# the family-specific profile (e.g. profile.chadrock-moe), NOT in a
-# separate family_defaults layer.
+# the family-specific profile (e.g. profile.chadrock-moe, now in
+# legacy_seed_profiles.toml), NOT in a separate family_defaults layer.
 
 [profile.chat]
 # Minimal generic chat — fallback for unknown models.
 flags = "-fa auto --jinja -b 2048 -ub 512"
 mtp = false
 intent = "Generic chat (fallback for unknown models)"
-quant = ""
-
-[profile.chat-long-context]
-# Long-context chat variant (model-family defaults may override KV policy).
-flags = "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift"
-mtp = false
-intent = "Long-context chat · tuned for 128K ctx"
-quant = ""
-
-[profile.dense]
-# Generic dense workload — model-agnostic. Family-specific kv-cache / sampler
-# overrides go in profile.<family>-dense (e.g. profile.chadrock-dense).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = false
-intent = "Generic dense workload · tuned for 128K ctx"
-quant = ""
-
-[profile.moe]
-# Generic MoE workload — model-agnostic. Family-specific overrides in
-# profile.<family>-moe (e.g. profile.chadrock-moe).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = false
-intent = "Generic MoE workload · tuned for 32K ctx"
 quant = ""
 
 [profile.embedding]
@@ -146,61 +129,3 @@ mtp = false
 intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"
 quant = "Q8_0"
 
-[profile.chadrock-dense]
-# Chadrock 27B dense coder recipe (from
-# jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
-# launch card that the legacy profile.dense was distilled from). 27B
-# dense + ROCmFP4 + MTP-capable + mmproj (vision).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = true
-intent = "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx"
-quant = "ROCmFP4"
-
-[profile.chadrock-moe]
-# Chadrock 35B MoE Saber recipe (from
-# jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
-# card that the legacy profile.moe was distilled from). 35B MoE A3B +
-# ROCmFPX MoEQuality + MTP draft heads.
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = true
-intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx"
-quant = "ROCmFP4"
-
-[profile.thinking]
-# Workload-level reasoning-ON profile. Use for reasoning-capable models
-# (qwen3-5-9b-deepseek, qwen3-6-35b-a3b-halostrix-dyn-mtp, chadrock-
-# uncensored-thinking). Family-specific reasoning-format / MTP bits fold
-# into the materialized model text at edit time.
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
-mtp = false
-intent = "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx"
-quant = ""
-
-[profile.coding]
-# Workload-level code-gen tuned profile. Use for the coder slot (port
-# 8082), qwen3-coder, qwopus-coder, Qwen3-Coder-30B-A3B. Higher temp
-# for code-gen creativity; no reasoning (coders are non-reasoning).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
-mtp = false
-intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
-quant = ""
-
-[profile.promptforge]
-# CIRU ActiveFPX + PromptForge accelerated serving recipe (#1946's first
-# specialty distribution — see hal0.registry.specialty.SPECIALTY_KINDS).
-# `-fa on` is a DELIBERATE exception to this file's `-fa auto` rule above:
-# PromptForge's accelerated kernel path is a card requirement, not a
-# generic model/backend combination this template lands on unmodified —
-# the whole point of a specialty distribution is that its runner is built
-# a particular way, so a forced kernel is safe here where it would not be
-# on a generic seed. `--no-cache-prompt` matches the card's serving mode.
-# Device-agnostic like every other seed (fix round 1, #1946): the
-# ROCm-only enforcement lives where it already did — the promptforge
-# runner's supported_backends=("rocm",) and _guard_specialty_runner
-# (container.py) — pinning device_class/backend here would only have
-# duplicated that gate imprecisely (this is a template, not a hardware
-# placement decision; see ProfileConfig.device_class docs).
-flags = "-b 2048 -ub 2048 -fa on -ctk f16 -ctv f16 --no-cache-prompt"
-mtp = true
-quant = "ActiveFPX"
-intent = "CIRU ActiveFPX + PromptForge accelerated serving (#1946)"

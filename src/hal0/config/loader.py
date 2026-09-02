@@ -779,7 +779,21 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     """
     target = path if path is not None else paths.profiles_toml()
     if not Path(target).exists():
-        return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
+        # No file = fresh install: there is no pre-demotion catalog to rescue,
+        # so mark the migration done. Leaving it False would arm it against the
+        # FIRST file this install writes (a plain custom-profile save), which
+        # would then inherit all 8 demoted definitions on the next load.
+        #
+        # The adoption ledger starts EMPTY and explicitly so (not None): the
+        # bulk demotion is what does not apply here, while adopting a demoted
+        # name on first reference very much does — the curated slots this
+        # install ships still name three of them. An empty ledger is the whole
+        # difference between "fresh, nothing referenced yet" and "demotion ran,
+        # anything missing was deleted", which file existence alone cannot tell
+        # apart once the first adoption has written the file.
+        return ProfilesConfig.model_validate(
+            {"profile": SEED_PROFILES, "legacy_seeds_migrated": True, "legacy_seeds_adopted": []}
+        )
     raw = _read_toml(Path(target))
     # spec-hw-slot-ownership §3: ``image`` was removed from ProfileConfig. Drop a
     # stray ``image`` key an un-migrated (or hand-edited) profiles.toml still
@@ -812,7 +826,59 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     for key, seed_raw in SEED_PROFILES.items():
         cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
     _sanitize_custom_profile_flags(cfg, Path(target))
+    _demote_legacy_seeds(cfg, Path(target))
     return cfg
+
+
+# HAL0-SUNSET: v1.3.0 — one-shot upgrade path for installs whose profiles.toml
+# predates the catalog cut. Delete the bulk pass (and the ``legacy_seeds_migrated``
+# marker that gates it) once no supported upgrade can start from such a file; the
+# per-name adoption ledger and ``ProfileCatalog._materialize_legacy`` stay — those
+# are how a fresh install resolves the demoted names its shipped slots reference.
+def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
+    """Inject the 8 pruned seeds once, as ordinary custom profiles.
+
+    They were seeds until the catalog was cut to its minimal core, so an
+    upgraded install's slots and models still reference them by name. Writing
+    them into the operator catalog keeps those references resolvable and — the
+    point of a *demotion* — makes them editable and deletable, which a virtual
+    seed can never be.
+
+    ``legacy_seeds_migrated`` is what makes this once-only: without the marker
+    every load would re-inject, so a delete would reappear on the next read.
+    An existing entry under a demoted name is an operator's own and is never
+    overwritten. Persisting is best-effort — a read-only /etc must serve the
+    merged catalog in memory rather than fail the load (the migration simply
+    re-runs next time), mirroring :func:`_sanitize_custom_profile_flags`.
+
+    This pass settles EVERY demoted name at once — the injected ones and the
+    operator's own alike — so the adoption ledger records that an upgraded
+    install has already made its decision about all of them. That is what
+    keeps ``ProfileCatalog._materialize_legacy`` from re-adopting one here
+    after a delete, while leaving it free to adopt on a fresh install where
+    the ledger is empty.
+    """
+    if cfg.legacy_seeds_migrated:
+        return
+    from hal0.config.schema import LEGACY_SEED_PROFILES
+
+    injected = [name for name in LEGACY_SEED_PROFILES if name not in cfg.profile]
+    for name in injected:
+        cfg.profile[name] = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[name])
+    cfg.legacy_seeds_migrated = True
+    cfg.legacy_seeds_adopted = sorted(LEGACY_SEED_PROFILES)
+    try:
+        save_profiles_config(cfg, path=target)
+    except OSError as exc:
+        log.warning(
+            "could not persist demoted seed profiles; serving merged catalog in-memory",
+            extra={"event": "profile.legacy_demote_write_failed", "error": str(exc)},
+        )
+        return
+    log.info(
+        "demoted pruned seed profiles to custom entries",
+        extra={"event": "profile.legacy_seeds_demoted", "profiles": injected},
+    )
 
 
 def _sanitize_custom_profile_flags(cfg: ProfilesConfig, target: Path) -> None:

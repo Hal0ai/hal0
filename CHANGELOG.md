@@ -26,6 +26,19 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Editing a profile whose stored runtime key has left this box's runner
+  registry (renamed, dropped by a build, or a downgrade) no longer 422s with
+  `profiles.unknown_runner`. The drawer re-sends the stored `runner` on every
+  save, so screening an unchanged value rejected a write that changes nothing
+  and made the profile un-editable in every field. `PUT /api/profiles/{name}`
+  now screens `runner` only when it actually changes — the same grandfathering
+  the profile's stored flags get (#1411); creates stay strict (#2183).
+- Clearing a profile's Runtime back to "Auto" in the profiles drawer now
+  actually clears it. `PUT /api/profiles/{name}` reads `runner: null` as
+  "leave unchanged" (as it does for every other field), so the Auto option
+  silently no-op'd and the runtime badge came back after save. The empty
+  string is now the explicit clear sentinel on that field — never screened,
+  so it is also the way off a stored runtime this box no longer has (#2186).
 - `hal0 update` now reads the installed version from the active release's
   `current/VERSION` file instead of the wheel metadata. A nightly wheel
   deliberately carries only the BASE version in pip metadata (PEP 440 has no
@@ -67,6 +80,43 @@ applying. Add those subsections to a version's section to surface them; see
   arch, instead of the operator meeting a silent crash-loop at load. An
   `image_pin` disarms the check (the pin is the documented escape hatch);
   nothing is ever blocked and no image is auto-switched.
+- **Seed profile catalog pruned to a 10-profile minimal core.** The seeded
+  catalog carried 18 profiles — one per runtime family, the generic
+  llama-server workloads, and eight WORKLOAD VARIANTS of those generics
+  (`chat-long-context`, `dense`, `moe`, `thinking`, `coding`,
+  `chadrock-dense`, `chadrock-moe`, `promptforge`) — and since a seed is
+  virtual and can never be edited or deleted, shipping eighteen of them made
+  the Profiles page mostly un-actionable furniture. The eight move
+  byte-identically into `legacy_seed_profiles.toml`
+  (`LEGACY_SEED_PROFILES`) and stop being seeds. An install upgrading past
+  the prune gets them injected once into its own `profiles.toml` as
+  ordinary custom entries (`ProfilesConfig.legacy_seeds_migrated`), so
+  nothing an operator's slots or models already point at disappears — the
+  entries just become editable and deletable like any custom profile,
+  which a seed never could be. A FRESH install never sees them in its
+  catalog, but the curated slots and seed stacks it ships still name three;
+  each such name is adopted into `profiles.toml` on first reference,
+  independently of the others, and stays deleted once deleted.
+- **Pruned seeds ship as portable addon envelopes.** The eight demoted
+  tunes are published as `.hal0profile.json` envelopes under
+  `community/addons/` (`scripts/export_addons.py`, byte-for-byte
+  reproducible, `--check` for CI drift), alongside a versioned
+  `index.json` catalog (`kind: hal0.addon-index`) a site can serve
+  statically so a client can see title, description, runtime family and
+  checksum before fetching an envelope. The dashboard's Profiles → Import
+  installs one with a paste or an upload. `min_hal0_version` is 1.2.0 —
+  1.1.0 shipped portable profiles without the import-side unknown-`runner`
+  handling the addon contract relies on. See
+  `docs/reference/profile-addons.mdx`.
+- **Profiles carry a runtime; the dashboard shows it everywhere a profile
+  appears.** A profile can now optionally pin a `runner` (a `RUNNER_IMAGES`
+  registry key, validated on write, stripped to Auto on import if the box
+  doesn't have it) — the profiles form drawer gets a full Runtime select
+  with a consequence hint, profile cards carry a runtime badge/state
+  chip/blurb, the import preview shows the envelope's runtime and runtime
+  family before commit, and the slot Edit drawer's apply preview enumerates
+  the runtime, lane, flags and restart a profile change would actually
+  cause before you save it.
 
 ### Changed
 
@@ -76,6 +126,23 @@ applying. Add those subsections to a version's section to surface them; see
   the kyuz0 layout by construction, so existing img slots need no
   reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
   upgraded boxes (#2171).
+
+### Migrations
+
+- **`profiles.toml` gains two bookkeeping keys and is not readable by
+  1.1.0.** The seed prune records its one-time work in the file itself:
+  `legacy_seeds_migrated` (the bulk demotion has run) and
+  `legacy_seeds_adopted` (which demoted names this install has already
+  materialized or deleted, so a delete sticks and a fresh box can still adopt
+  each one on first reference). Both are written automatically on the first
+  load or profile save after upgrading — nothing to run by hand. But
+  `ProfilesConfig` is `extra = "forbid"` on 1.1.0 and earlier, so **rolling
+  back to 1.1.0 after the upgrade fails to parse the migrated
+  `profiles.toml`** and the profile catalog will not load on the old build.
+  Back up `/etc/hal0/profiles.toml` before upgrading if you may downgrade;
+  restoring that copy (or deleting the two keys) makes the file readable by
+  1.1.0 again.
+
 ## [1.1.0] — 2026-08-31
 
 ### Highlights

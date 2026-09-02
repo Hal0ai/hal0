@@ -14,6 +14,7 @@ from __future__ import annotations
 from hal0.config import seeds
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
+    LEGACY_SEED_PROFILES,
     PROFILE_BENCH,
     SEED_PROFILES,
     SEED_STACKS,
@@ -21,8 +22,34 @@ from hal0.config.schema import (
     StackConfig,
 )
 
-# The 1.0 catalog is intentionally small: workload/runtime-family seeds only.
-_EXPECTED_PROFILE_COUNT = 18
+# The seeded catalog is the operator-approved minimal core: one profile per
+# runtime family plus the generic llama-server workloads. The eight workload
+# variants it used to carry are parked in ``legacy_seed_profiles.toml`` and
+# demoted to ordinary custom profiles on existing installs (see
+# ``loader.load_profiles_config``).
+KEEP_NAMES = {
+    "chat",
+    "cpu-chat",
+    "embedding",
+    "reranking",
+    "brain",
+    "flm",
+    "kokoro",
+    "moonshine",
+    "qwen3-tts",
+    "comfyui",
+}
+LEGACY_NAMES = {
+    "chat-long-context",
+    "dense",
+    "moe",
+    "thinking",
+    "coding",
+    "chadrock-dense",
+    "chadrock-moe",
+    "promptforge",
+}
+_EXPECTED_PROFILE_COUNT = len(KEEP_NAMES)
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
 
 
@@ -31,9 +58,55 @@ class TestSeedProfilesToml:
         profiles = seeds.seed_profiles()
         assert len(profiles) == _EXPECTED_PROFILE_COUNT
 
+    def test_seed_set_is_minimal_core(self) -> None:
+        assert set(SEED_PROFILES) == KEEP_NAMES
+
     def test_every_entry_validates(self) -> None:
         for name, raw in seeds.seed_profiles().items():
             ProfileConfig.model_validate(raw), name  # raises on failure
+
+
+class TestLegacySeedProfilesToml:
+    def test_legacy_seeds_hold_the_pruned_eight(self) -> None:
+        assert set(LEGACY_SEED_PROFILES) == LEGACY_NAMES
+
+    def test_every_legacy_entry_validates(self) -> None:
+        for name, raw in LEGACY_SEED_PROFILES.items():
+            ProfileConfig.model_validate(raw), name  # raises on failure
+
+    def test_legacy_entries_carry_no_image(self) -> None:
+        # Same image-less contract as the seed set (spec-hw-slot-ownership §3).
+        for name, raw in LEGACY_SEED_PROFILES.items():
+            assert "image" not in raw, name
+
+    def test_legacy_shim_matches_loader(self) -> None:
+        assert seeds.legacy_seed_profiles() == LEGACY_SEED_PROFILES
+
+    def test_the_two_sets_are_disjoint(self) -> None:
+        assert not set(SEED_PROFILES) & set(LEGACY_SEED_PROFILES)
+
+
+class TestPruneLeavesInfrastructureResolvable:
+    """Everything the install path derives must still be a *seed*."""
+
+    def test_device_defaults_are_seeds(self) -> None:
+        from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+
+        assert set(DEVICE_DEFAULT_PROFILES.values()) <= set(SEED_PROFILES)
+
+    def test_derive_profile_targets_are_seeds(self) -> None:
+        from hal0.install.profile_derive import derive_profile
+
+        for cap, dev in [
+            ("embed", "gpu-rocm"),
+            ("rerank", "gpu-rocm"),
+            ("tts", "cpu"),
+            ("chat", "gpu-rocm"),
+            ("chat", "cpu"),
+            ("chat", "npu"),
+            ("coder", "gpu-rocm"),
+        ]:
+            assert derive_profile(cap, dev) in SEED_PROFILES, (cap, dev)
 
 
 class TestSeedStacksToml:

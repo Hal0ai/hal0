@@ -8,9 +8,11 @@ Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
   (`RunnerSupports.supported_backends` + `_guard_specialty_runner`), not on
   the profile template.
 - `flags` must NOT contain SLOT_HARDWARE_FLAGS or operational flags.
-- Profile names match the 1.0 catalog (18 total — 11 kept + 5 new for 1.0
-  + moonshine, reinstated post-1.0-freeze + promptforge (#1946); see
-  docs/adr/0001).
+- Profile names match the catalog: 10 shipped SEEDS (the minimal core, one
+  per runtime family plus the generic llama-server workloads) plus the 8
+  DEMOTED definitions parked in legacy_seed_profiles.toml. Both files ship,
+  both must honour the same flag-ownership invariants, so every check below
+  runs over the union.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from pathlib import Path
 
 import pytest
 
-SEED_PROFILES_PATH = Path(__file__).resolve().parents[2] / "src/hal0/config/data/seed_profiles.toml"
+_DATA_DIR = Path(__file__).resolve().parents[2] / "src/hal0/config/data"
+SEED_PROFILES_PATH = _DATA_DIR / "seed_profiles.toml"
+LEGACY_SEED_PROFILES_PATH = _DATA_DIR / "legacy_seed_profiles.toml"
 
 # Per spec §4.1: hardware + operational flags removed from every profile.
 SLOT_HARDWARE_FLAG_FRAGMENTS = (
@@ -48,11 +52,8 @@ OPERATIONAL_FLAG_FRAGMENTS = (
     "--no-mmap",
 )
 
-ALL_SEED_PROFILES = [
+CORE_SEED_PROFILES = [
     "profile.chat",
-    "profile.chat-long-context",
-    "profile.dense",
-    "profile.moe",
     "profile.embedding",
     "profile.reranking",
     "profile.cpu-chat",
@@ -61,8 +62,16 @@ ALL_SEED_PROFILES = [
     "profile.qwen3-tts",
     "profile.moonshine",
     "profile.comfyui",
-    # New for 1.0 (per spec §4.2):
     "profile.brain",
+]
+
+#: Demoted out of the seed catalog by the profile-system overhaul; still
+#: shipped (legacy_seed_profiles.toml) and injected once into an existing
+#: install as ordinary custom profiles.
+LEGACY_SEED_PROFILES = [
+    "profile.chat-long-context",
+    "profile.dense",
+    "profile.moe",
     "profile.chadrock-dense",
     "profile.chadrock-moe",
     "profile.thinking",
@@ -70,9 +79,11 @@ ALL_SEED_PROFILES = [
     "profile.promptforge",
 ]
 
+ALL_SEED_PROFILES = CORE_SEED_PROFILES + LEGACY_SEED_PROFILES
 
-def _load_seed_profiles() -> dict:
-    raw = tomllib.loads(SEED_PROFILES_PATH.read_text())
+
+def _load(path: Path) -> dict:
+    raw = tomllib.loads(path.read_text())
     # TOML dotted keys like [profile.chat] create nested tables:
     # {"profile": {"chat": {...}, "dense": {...}, ...}}
     # Prefix keys back so callers can use "profile.chat" consistently.
@@ -80,17 +91,30 @@ def _load_seed_profiles() -> dict:
     return {f"profile.{k}": v for k, v in inner.items()}
 
 
+def _load_seed_profiles() -> dict:
+    """Both shipped definition files, merged — the flag invariants apply to
+    every profile hal0 ships, seed or demoted."""
+    return {**_load(SEED_PROFILES_PATH), **_load(LEGACY_SEED_PROFILES_PATH)}
+
+
 def test_seed_profiles_loads() -> None:
     """Catalog parses as TOML and contains [profile.*] tables."""
-    profiles = _load_seed_profiles()
-    assert len(profiles) >= 11, f"expected ≥11 profiles, got {len(profiles)}: {list(profiles)}"
+    profiles = _load(SEED_PROFILES_PATH)
+    assert len(profiles) >= 10, f"expected ≥10 profiles, got {len(profiles)}: {list(profiles)}"
 
 
-def test_catalog_has_exactly_18_profiles() -> None:
-    """1.0 catalog is exactly 18 profiles (11 kept + 5 new + moonshine + promptforge)."""
-    profiles = _load_seed_profiles()
-    names = sorted(profiles)
-    assert names == sorted(ALL_SEED_PROFILES), f"catalog profiles out of order or missing: {names}"
+def test_seed_catalog_is_the_minimal_core() -> None:
+    names = sorted(_load(SEED_PROFILES_PATH))
+    assert names == sorted(CORE_SEED_PROFILES), f"seed catalog drifted: {names}"
+
+
+def test_legacy_catalog_holds_the_demoted_eight() -> None:
+    names = sorted(_load(LEGACY_SEED_PROFILES_PATH))
+    assert names == sorted(LEGACY_SEED_PROFILES), f"legacy catalog drifted: {names}"
+
+
+def test_the_two_files_are_disjoint() -> None:
+    assert not set(_load(SEED_PROFILES_PATH)) & set(_load(LEGACY_SEED_PROFILES_PATH))
 
 
 @pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)

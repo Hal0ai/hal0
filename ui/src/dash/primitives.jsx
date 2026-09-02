@@ -1093,6 +1093,10 @@ function ImportDialog({
   fileTestid,
   nameTestid,
   confirmTestid,
+  //: Commit button label. A string, or a function of the dry-run report for
+  //  a preview that changes what committing will DO (the profile import says
+  //  "Import as Auto" when the envelope's runtime isn't on this box).
+  confirmLabel = "Import",
   namePlaceholder = "name",
   existing = [],
   invalidCopy = "Not a valid envelope",
@@ -1183,7 +1187,7 @@ function ImportDialog({
           <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
           {report && (
             <button className="btn sm" onClick={onCommit} disabled={!canCommit} data-testid={confirmTestid}>
-              {busy ? "Importing…" : "Import"}
+              {busy ? "Importing…" : (typeof confirmLabel === "function" ? confirmLabel(report) : confirmLabel)}
             </button>
           )}
         </div>

@@ -108,10 +108,19 @@ test.describe('Profiles page (#658)', () => {
   })
 
   test('Profile card shows slot-owned runtime metadata instead of image tag', async ({ page }) => {
+    // U3 redesign: the single `.pf-bk` backend badge became a row of runtime
+    // chips (`.pf-be`) in the title row plus a runtime blurb line and an
+    // install-state chip. The fixtures pin no `runner`, so the chips read
+    // AUTO, the state reads "not pinned", and the blurb is the one that names
+    // the slot as the owner of the runtime — the assertion's original point.
     await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
     const firstCard = page.locator('.stk-lib-card').first()
-    await expect(firstCard.locator('.pf-bk')).toContainText('slot')
+    await expect(firstCard.locator('.pf-be').first()).toContainText('AUTO')
+    await expect(firstCard.locator('[data-testid="pf-runtime-line-rocm"]')).toContainText('slot')
+    await expect(firstCard.locator('.pf-state')).toContainText('not pinned')
+    // Flags are shown; the image tag is slot-owned and must not appear.
     await expect(firstCard).toContainText('--flash-attn')
+    await expect(firstCard).not.toContainText('rocmfp4-server')
   })
 
   test('vulkan profile shows fallback intent label', async ({ page }) => {
@@ -128,7 +137,7 @@ test.describe('Profiles page (#658)', () => {
     const seedSection = page.locator('.pf-section', { hasText: 'Seed templates' })
     await expect(seedSection.locator('.stk-lib-card')).toHaveCount(MOCK_DATA.profiles.length)
     const chat = page.locator('.stk-lib-card').first()
-    await expect(chat.locator('.pf-bk')).toContainText('slot')
+    await expect(chat.locator('.pf-be').first()).toContainText('AUTO')
     await expect(chat.locator('.pf-card-metric')).toContainText('52.8')
   })
 })

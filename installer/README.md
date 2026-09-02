@@ -191,10 +191,12 @@ Two things compose to launch a slot, and neither is the other:
   and both declare `RunnerSupports(mtp=True)`; `cuda` and `cpu` do not
   support MTP drafting.
 - The **profile** is a device-agnostic tune template — a flag bundle, nothing
-  more. Profiles no longer carry an image. The generic chat seeds are `chat`,
-  `chat-long-context`, `dense` and `moe`, with family-specific variants
-  (`chadrock-dense`, `chadrock-moe`) for models that need their own kv-cache
-  or sampler policy.
+  more. Profiles no longer carry an image. The seed core's one generic chat
+  template is `chat`; the long-context and dense/MoE workload variants
+  (`chat-long-context`, `dense`, `moe`, and the family-specific
+  `chadrock-dense`/`chadrock-moe`) were demoted off the seed list and ship as
+  addon profiles instead (`docs/reference/profile-addons.mdx`) — an existing
+  install keeps them as ordinary custom profiles.
 
 **MTP is a model property, not a profile tune.** `profile.mtp` in
 `profiles.toml` is informational only and is not consulted at launch

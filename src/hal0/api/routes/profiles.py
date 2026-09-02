@@ -31,9 +31,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
-from hal0.profiles import ProfileCatalog, ProfilePatch, screen_profile_flags
+from hal0.profiles import (
+    ProfileCatalog,
+    ProfilePatch,
+    runtime_family_of,
+    screen_profile_flags,
+)
 from hal0.profiles.generate import LlmCallContext, generate_draft_profile
 from hal0.profiles.portable import (
+    envelope_runner_status,
     export_envelope,
     import_profile,
     parse_envelope,
@@ -150,7 +156,13 @@ class ProfileUpdateBody(BaseModel):
     )
     runner: str | None = Field(
         default=None,
-        description="Optional runtime (RUNNER_IMAGES key) this profile applies to the slot.",
+        description=(
+            "Optional runtime (RUNNER_IMAGES key) this profile applies to the "
+            "slot. None/omitted leaves the stored value unchanged; the empty "
+            "string is the explicit CLEAR sentinel — it unpins the runtime "
+            "(back to Auto) and is never screened, so it also works for a "
+            "stored key this box's registry no longer carries."
+        ),
     )
     intent: str | None = Field(default=None, description="Human label for the card headline.")
     quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
@@ -328,6 +340,12 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     to be the only place it was checked, so a tampered file that failed the
     dry-run report still imported cleanly on the next call.
 
+    A runtime this box does not have is STRIPPED, never a block: import stays
+    portable, so a profile authored on a richer box still lands (flags and
+    quant intact) — it just lands with no runtime pinned. Both the dry run
+    and the commit response report it as ``runner_stripped``, alongside the
+    envelope's own ``runner`` and the profile's ``runtime_family``.
+
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
         400 profiles.checksum_mismatch: checksum does not cover the body (#1416).
@@ -357,6 +375,19 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
         existing = {p.name for p in ProfileCatalog().list()}
         target = name or env.name
         collides = bool(target) and target in existing
+        # Runtime facts the preview renders: the key the import will actually
+        # STORE, whether importing has to drop it because this box has no such
+        # runtime, and the family the profile resolves to. A dropped runtime
+        # warns and proceeds — it never blocks.
+        #
+        # Reporting the kept key matters for a superseded alias: it folds to
+        # its canonical entry rather than stripping, and the UI looks the
+        # reported key up in this box's runtime registry to title and chip it.
+        # The envelope's raw alias would miss that lookup and render "unknown"
+        # for an import that lands the runtime perfectly well. When the key IS
+        # stripped there is no canonical form to report, so the envelope's own
+        # key is returned — which is exactly what the warning names.
+        kept, runner_stripped = envelope_runner_status(env.profile)
         return {
             "dry_run": True,
             "valid": True,
@@ -364,6 +395,9 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
             "name": env.name or "",
             "schema_version": env.schema_version,
             "collides": collides,
+            "runner": kept or env.profile.runner,
+            "runner_stripped": runner_stripped,
+            "runtime_family": runtime_family_of(env.name or "", env.profile),
         }
 
     if not name or not isinstance(name, str):
@@ -400,8 +434,18 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
     ) as rec:
         resolved = import_profile(envelope, name, ProfileCatalog(), force=force)
         rec.after = {"name": name}
+    _kept, runner_stripped = envelope_runner_status(env.profile)
+    if runner_stripped:
+        log.warning(
+            "profile import dropped a runtime this box does not have",
+            extra={
+                "event": "profile.import_runner_stripped",
+                "profile": name,
+                "runner": env.profile.runner,
+            },
+        )
     response.status_code = 201
-    return {"dry_run": False, "profile": resolved.to_dict()}
+    return {"dry_run": False, "profile": resolved.to_dict(), "runner_stripped": runner_stripped}
 
 
 @router.get("/{name}")
@@ -432,6 +476,10 @@ def export_profile(name: str) -> dict[str, Any]:
         mtp=resolved.mtp,
         device_class=resolved.device_class,
         backend=resolved.backend,
+        # The envelope is the import preview's only source of runtime truth,
+        # so the export has to actually carry `runner` — it was omitted here
+        # while every other ProfileConfig field was copied across.
+        runner=resolved.runner,
         cloned_from=resolved.cloned_from,
         intent=resolved.intent,
         quant=resolved.quant,
@@ -445,10 +493,20 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
 
     Returns the updated profile item.
 
+    Every field omitted (or sent as null) keeps its stored value. ``runner``
+    additionally takes ``""`` as an explicit clear (#2186): the stored runtime
+    is unpinned back to Auto. There is no other way to reach Auto — null is
+    "leave alone", so without the sentinel the drawer's Auto option silently
+    no-op'd.
+
     Raises:
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
+        422 profiles.unknown_runner: `runner` CHANGES to a key this box's
+            registry does not carry. Re-sending the profile's own stored key is
+            grandfathered (#2183, mirroring the flags rule below) so a runtime
+            that left the registry never makes the profile un-editable.
         400 slot.hardware_flag_denied: flags NEWLY introduce a slot-owned
             hardware flag. Ones the profile already stores are grandfathered
             (#1411) — see :func:`hal0.profiles.screen_profile_flags`.

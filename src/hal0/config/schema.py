@@ -1319,8 +1319,10 @@ def resolve_default_image(backend: str | None, device_class: str | None = None) 
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
-#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 18 seed
-#: entries (with their per-profile rationale comments) and
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 10 seed
+#: entries (with their per-profile rationale comments; the 8 workload
+#: variants pruned off the seed list live in
+#: ``hal0/config/data/legacy_seed_profiles.toml`` instead) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
 #: is (re)assigned at the bottom of this module, once every model above
 #: exists, as a module-scope re-export so every existing
@@ -1390,10 +1392,11 @@ DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 class ProfileConfig(BaseModel):
     """One ``[profile.<name>]`` entry in profiles.toml.
 
-    A profile is a reusable backend template — image + bench-tuned flag
-    bundle + optional MTP toggle.  Slots reference a profile by name;
-    the profile supplies everything except the model path, context size,
-    and port (which belong to the slot).
+    A profile is a reusable, device-agnostic tune template — bench-tuned
+    flag bundle + optional MTP toggle, and (as of v1.0) no image. Slots
+    reference a profile by name; the profile supplies everything except
+    the image, model path, context size, and port (which belong to the
+    slot).
 
     See the hal0 container-runtime design doc (§1) and bench doc for the
     rationale behind each seed profile.
@@ -1512,6 +1515,44 @@ class ProfilesConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
+    legacy_seeds_migrated: bool = Field(
+        default=False,
+        description=(
+            "Write-once marker for the one-time demotion of the 8 pruned seeds "
+            "(:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles. False "
+            "on a pre-demotion profiles.toml; ``loader.load_profiles_config`` "
+            "injects the missing definitions, flips this to True and persists. "
+            "Without the marker the injection would repeat on every load and a "
+            "delete could never stick — the virtual-seed behaviour the demotion "
+            "exists to escape."
+        ),
+    )
+    legacy_seeds_adopted: list[str] | None = Field(
+        default=None,
+        description=(
+            "Per-name ledger of the demoted seeds this install has already "
+            "settled — injected by the bulk demotion, adopted on first "
+            "reference by ``ProfileCatalog._materialize_legacy``, or deleted. "
+            "A demoted name listed here and absent from ``profile`` was DELETED "
+            "and must never be re-materialized; a demoted name not listed has "
+            "simply never been referenced yet. ``None`` means the file predates "
+            "the ledger — see :meth:`adopted_legacy_names`."
+        ),
+    )
+
+    def adopted_legacy_names(self) -> frozenset[str]:
+        """Demoted seed names this install has already settled.
+
+        The ledger is the authority when present. When it is absent (``None``
+        — a profiles.toml written before the ledger existed) the migration
+        marker is the only signal left, and it answers the question exactly:
+        a True marker means the bulk demotion already passed over every demoted
+        name, so absence from ``profile`` is a deletion; a False marker means
+        the demotion has not run, so nothing is settled yet.
+        """
+        if self.legacy_seeds_adopted is not None:
+            return frozenset(self.legacy_seeds_adopted)
+        return frozenset(LEGACY_SEED_PROFILES) if self.legacy_seeds_migrated else frozenset()
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────
@@ -3515,6 +3556,10 @@ class Hal0Config(BaseModel):
 from hal0.config import seeds as _seeds  # noqa: E402
 
 SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
+#: The 8 demoted (ex-seed) definitions — shipped data, NOT part of the seed
+#: catalog. Injected once into an existing install's profiles.toml as ordinary
+#: custom profiles by ``loader.load_profiles_config``.
+LEGACY_SEED_PROFILES: dict[str, dict[str, object]] = _seeds.legacy_seed_profiles()
 SEED_STACKS: dict[str, StackConfig] = _seeds.seed_stacks()
 PROFILE_BENCH: dict[str, dict[str, float]] = _seeds.profile_bench()
 FAMILY_DEFAULTS: dict[str, str] = _seeds.family_defaults()
@@ -3529,6 +3574,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "FAMILY_DEFAULTS",
+    "LEGACY_SEED_PROFILES",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",

@@ -1,0 +1,14 @@
+{
+  "checksum": "sha256:98ec3d54902b378bd578ea78837e02169c4f6cc1b5c7014a04f36242bcd8ce74",
+  "exported_at": "2026-09-01T00:00:00Z",
+  "hal0_version": "1.1.0",
+  "kind": "hal0.profile",
+  "name": "promptforge",
+  "profile": {
+    "flags": "-b 2048 -ub 2048 -fa on -ctk f16 -ctv f16 --no-cache-prompt",
+    "intent": "CIRU ActiveFPX + PromptForge accelerated serving (#1946)",
+    "mtp": true,
+    "quant": "ActiveFPX"
+  },
+  "schema_version": 1
+}

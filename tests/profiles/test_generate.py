@@ -168,6 +168,47 @@ def test_generate_moe_architecture_upgrades_to_moe_seed(tmp_hal0_home: str) -> N
     assert result.profile["profile"]["cloned_from"] == "moe"
 
 
+def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(tmp_hal0_home: str) -> None:
+    """A DELETED demoted profile must degrade, not 500.
+
+    "moe" is an ordinary custom profile since the demotion, so deleting it is a
+    first-class operator action. The MoE upgrade above still names it, and
+    ProfileCatalog.resolve rightly refuses to resurrect a deleted entry — so the
+    draft path has to absorb the NotFound and fall back to "chat" with a
+    warning, which is the contract the pre-demotion seed-membership guard had.
+    """
+    import asyncio
+    from pathlib import Path as _Path
+
+    # A migrated catalog with no "moe": the marker stops the demotion from
+    # re-injecting it, and the file existing stops resolve from materializing it.
+    etc = _Path(tmp_hal0_home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "profiles.toml").write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
+
+    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
+    reg.add(
+        Model(
+            id="chadrock-moe",
+            path="/models/chadrock.gguf",
+            capabilities=["chat"],
+            architecture="qwen3next",
+        )
+    )
+
+    result = asyncio.run(
+        generate_draft_profile(
+            model_id="chadrock-moe",
+            exported_at=_EXPORTED_AT,
+            hw=_hw_rocm(),
+            registry=reg,
+        )
+    )
+
+    assert result.profile["profile"]["cloned_from"] == "chat"
+    assert any("moe" in w and "chat" in w for w in result.warnings), result.warnings
+
+
 def test_generate_embed_capability_clones_embedding_seed(tmp_hal0_home: str) -> None:
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(

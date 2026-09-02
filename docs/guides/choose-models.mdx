@@ -91,9 +91,10 @@ top of the Models view (`#models/profiles`) — that's where you manage the
 runtime-profile templates the model drawer's template picker draws from.
 See [Manage slots](/docs/guides/manage-slots) for what a profile controls.
 
-A profile's create/edit form has an optional **Runtime** select — "— any
-(flags-only tune) —" to leave it unset, or one of the llama-server-family
-runtimes (Standard, PromptForge, Strix, CUDA, CPU) to pin one. A profile
+A profile's create/edit form has an optional **Runtime** select — "— Auto ·
+no runtime pinned —" to leave it unset, or any runtime this box's registry
+carries to pin one (the single-purpose runtimes like Kokoro included, since a
+profile has no slot type to narrow the list to one family). A profile
 that pins a runtime shows a matching badge on its card. Seed profiles always
 render the select disabled: forking a seed copies its runtime binding
 verbatim, and you change it by editing the copy. Naming a runtime here does

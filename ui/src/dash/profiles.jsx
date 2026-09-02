@@ -24,6 +24,8 @@ import {
 } from '@/api/hooks/useProfiles'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
+import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
+import { hostHwFlags, selectedRunnerKey } from './hw-cascade.js'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -73,38 +75,75 @@ const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp
 
 function bk(name, meta) { return meta[name] || meta.cpu; }
 
-// Display backend for a profile: the explicit GPU backend (rocm|vulkan) when
-// set, otherwise mapped from device_class so npu/cpu/img still get a hue.
-// (spec-hw-slot-ownership §3: profiles no longer carry an image, so the old
-// vulkan-from-image-string inference is gone.)
-function backendOf(p, meta) {
-  if (p.backend && meta[p.backend]) return p.backend;
-  if (p.device_class === 'img') return 'img';
-  if (p.device_class === 'npu') return 'npu';
-  if (p.device_class === 'cpu') return 'cpu';
-  return 'cpu';
+// (backendOf() retired with the card's device-hued chip: a profile's INERT
+// backend/device_class fit hint is not the runtime it carries, and the card
+// now shows the runtime's real lanes instead of a hue derived from a
+// match-only field.)
+
+// ── runtime vocabulary ───────────────────────────────────────────────────────
+//
+// `profile.runner` is an OPTIONAL RUNNER_IMAGES key (Task 10 D4) — a profile
+// that carries one pins the slot's runtime on apply (the server's profile-wins
+// reconcile, Task 5); an empty one is "Auto", a flags-only tune with no
+// runtime opinion. Display copy is the registry's own (`title`/`blurb` on
+// system-info's `backends` rows), so the profile drawer, the profile card and
+// the slot drawer name a runtime the same way.
+
+const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
+// One hue per backend lane (dashboard.css --dev-*), so a lane reads the same
+// colour in a chip here as it does on a slot card or a chart legend.
+const LANE_HUE = {
+  rocm: 'var(--dev-rocm)', vulkan: 'var(--dev-vulkan)',
+  cuda: 'var(--dev-cuda)', cpu: 'var(--dev-cpu)',
+};
+// Lane token → the host capability flag gating it (mirrors hw-cascade.js's
+// LANE_HW). A lane with no entry is never hardware-vetoed.
+const LANE_HW = { rocm: 'rocm', vulkan: 'vulkan', cuda: 'cuda' };
+
+// The backends a runtime can actually run on: the §4 fit-check list, falling
+// back to its single declared `backend` on an older system-info payload.
+// Empty = backend-agnostic (nothing to claim).
+function runnerLanes(r) {
+  const sup = r?.supported_backends;
+  if (Array.isArray(sup) && sup.length > 0) return sup;
+  return r?.backend ? [r.backend] : [];
+}
+function laneLabel(lanes) {
+  return (lanes || []).map((l) => LANE_TITLE[l] || l).join(' + ');
 }
 
-// Runtime select (Task 10 D4): profile.runner is an OPTIONAL RUNNER_IMAGES
-// key — a profile that carries one pins the slot's runtime on apply (the
-// server's profile-wins reconcile, Task 5); the form only offers the
-// llama-server-family runners (rocmfpx/promptforge/strix/cuda/cpu) since
-// those are the generic tune-template's real alternatives — the other
-// runtime families (flm/kokoro/qwen3tts/comfyui) are singleton engines a
-// profile's NAME/device_class already ties it to structurally, never picked
-// through this select.
-const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
-function runnerLaneLabel(r) {
-  const lanes = Array.isArray(r?.supported_backends) ? r.supported_backends : [];
-  return lanes.map((l) => LANE_TITLE[l] || l).join(' + ');
+// Host capability flags come from hw-cascade.js's shared `hostHwFlags` — the
+// same translator the slot drawer uses, so the two drawers cannot answer the
+// feasibility question differently for one box (this file used to keep a
+// private copy, which drifted: it missed the kfd_present ROCm rule and turned
+// a gpus[]-less payload into an explicit all-false veto).
+
+// Runtime options for the profile drawer, in the same row shape hw-cascade's
+// runnerOptions() produces. That function is NOT reused here: its device_class
+// and slot-type filters answer "what can THIS slot launch", and a profile has
+// neither a device nor a slot type — it is a portable tune template, so the
+// list is every runtime the box's registry carries (CPU engines included).
+// The hardware veto DOES apply identically: a runtime whose every lane is
+// infeasible on this box is hidden rather than offered and then rejected.
+function profileRunnerOptions(backends, hw) {
+  const out = [];
+  for (const [key, r] of Object.entries(backends || {})) {
+    if (!r) continue;
+    const lanes = runnerLanes(r);
+    if (hw && lanes.length > 0 && lanes.every((l) => LANE_HW[l] && hw[LANE_HW[l]] === false)) continue;
+    out.push({
+      key,
+      title: r.title || key,
+      blurb: r.blurb || '',
+      lanes,
+      state: r.state,
+      isDefault: !!r.is_default,
+    });
+  }
+  out.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0) || a.title.localeCompare(b.title));
+  return out;
 }
-function llamaServerRunners(backends) {
-  return Object.entries(backends || {})
-    .filter(([, r]) => r?.runtime_family === 'llama-server')
-    .sort(([, a], [, b]) =>
-      (b?.is_default ? 1 : 0) - (a?.is_default ? 1 : 0)
-      || (a?.title || '').localeCompare(b?.title || ''));
-}
+
 // Runner badge title: the runner's operator-facing name from system-info's
 // backends catalog, falling back to the raw key when the catalog hasn't
 // loaded yet or no longer carries it (deleted/renamed runner).
@@ -112,14 +151,93 @@ function runnerTitleFor(key, backends) {
   return backends?.[key]?.title || key;
 }
 
-function runtimeLabel(p) {
+// Backend chips for a profile's title row. ONE HUE PER BACKEND, ONE CHIP PER
+// BACKEND: a dual-backend runtime renders two chips side by side, never a
+// blended "ROCm + Vulkan" pill — the chip row is literally the list of lanes
+// the runtime can run on. A profile that pins nothing makes no backend claim,
+// so it gets the muted AUTO chip, joined by its runtime family when that
+// family is a singleton engine rather than the generic llama-server (the
+// engine is then a structural fact of the profile, not a runtime it chose).
+// Replaces the old runtimeLabel() "family · slot binary" chip, which named a
+// vocabulary ("binary") the operator surface no longer speaks.
+export function runtimeChips(p, backends) {
+  const key = p?.runner;
+  if (!key) {
+    const chips = [{ key: 'auto', label: 'AUTO', hue: null }];
+    if (p?.runtime_family && p.runtime_family !== 'llama-server')
+      chips.push({ key: 'family', label: p.runtime_family, hue: null });
+    return chips;
+  }
+  const row = backends?.[key];
+  if (!row) return [{ key: 'unknown', label: 'unknown', hue: null }];
+  const lanes = runnerLanes(row);
+  if (lanes.length === 0) return [{ key: 'auto', label: 'AUTO', hue: null }];
+  return lanes.map((l) => ({ key: l, label: LANE_TITLE[l] || l, hue: LANE_HUE[l] || null }));
+}
+
+// Install state of the runtime a profile pins, in the dropdown's vocabulary.
+export function runtimeState(p, backends) {
+  if (!p?.runner) return { label: 'not pinned', tone: '' };
+  const row = backends?.[p.runner];
+  if (!row) return { label: 'unknown', tone: '' };
+  if (row.state === 'installed') return { label: '● installed', tone: 'ok' };
+  if (row.state === 'installable') return { label: '○ not pulled', tone: 'warn', pullable: true };
+  return { label: 'unavailable', tone: 'err' };
+}
+
+// The one-liner under the intent: the registry's own title + blurb, the same
+// sentence the slot drawer shows for that runtime. An unpinned profile says
+// so in words rather than by omission.
+function runtimeLine(p, backends) {
+  if (!p?.runner) return 'Auto — runs on whatever runtime the slot already uses.';
+  const title = runnerTitleFor(p.runner, backends);
+  const blurb = backends?.[p.runner]?.blurb;
+  return blurb ? `${title} — ${blurb}` : title;
+}
+
+// ── inline pull affordance ───────────────────────────────────────────────────
+//
+// "Not pulled" is fixable where it is read (drawer consequence box, card state
+// chip) instead of failing at spawn, through the SAME seam the Runner Images
+// page uses: useRunnerImagePullJob → POST /api/runner-images/{id}/pull.
+// system-info names a runtime's resolved image REF; that route addresses a
+// catalogue ROW id, which images.json may supply independently of the repo
+// path (registry/runner_image_sync.py:475), so the row is matched by repo
+// rather than derived from the ref.
+function splitImageRef(ref) {
+  const s = String(ref || '');
+  const at = s.indexOf('@');
+  const body = at >= 0 ? s.slice(0, at) : s;
+  const lastSlash = body.lastIndexOf('/');
+  const tail = lastSlash >= 0 ? body.slice(lastSlash + 1) : body;
+  const colon = tail.indexOf(':');
+  if (colon < 0) return { repo: body, tag: null };
+  return { repo: body.slice(0, lastSlash + 1) + tail.slice(0, colon), tag: tail.slice(colon + 1) };
+}
+
+export function pullTargetFor(runnerRow, images) {
+  const { repo, tag } = splitImageRef(runnerRow?.image);
+  if (!repo) return null;
+  const row = (images || []).find((i) => i?.image === repo);
+  if (!row) return null;
+  // Only name a tag the catalogue actually knows — the route 404s on any
+  // other, and the row's headline tag is the honest fallback.
+  const known = tag && (row.tag === tag || (row.available_tags || []).includes(tag));
+  return { id: row.id, tag: known ? tag : undefined };
+}
+
+function useRunnerPull(runnerKey, backends) {
+  const imagesQuery = useRunnerImages();
+  const job = useRunnerImagePullJob();
+  const target = pullTargetFor(backends?.[runnerKey], imagesQuery.data?.images);
   return {
-    'llama-server': 'llama-server · slot hardware',
-    flm: 'FLM · slot binary',
-    kokoro: 'Kokoro · slot binary',
-    qwen3tts: 'Qwen3-TTS · slot binary',
-    comfyui: 'ComfyUI · slot binary',
-  }[p.runtime_family] || 'slot-selected runtime';
+    target,
+    inFlight: !!job.inFlight,
+    // A failed pull is reported inline and nothing else — it never gates the
+    // profile save (the profile is a template; the image is a separate fact).
+    error: job.error?.message || (target ? null : 'no catalogue entry for this runtime image'),
+    start: () => { if (target) job.start(target.id, target.tag).catch(() => {}); },
+  };
 }
 
 // Card headline. Prefer the server-authored intent; fall back to a pretty
@@ -154,12 +272,40 @@ function PfRow({ label, value, hue }) {
   );
 }
 
+// Install-state chip. A not-pulled runtime is fixable where the state is
+// read: the chip itself becomes the Pull button (its own component so the
+// pull hooks mount only on the cards that offer it). A failed pull reverts
+// the chip and carries the reason in its tooltip — it changes nothing about
+// the profile.
+function RuntimePullChip({ name, runnerKey, backends }) {
+  const pull = useRunnerPull(runnerKey, backends);
+  return (
+    <button type="button" className="pf-state mono warn" onClick={pull.start}
+      disabled={pull.inFlight || !pull.target}
+      title={pull.error ? `Pull failed — ${pull.error}` : 'Pull this runtime image now'}
+      data-testid={`pf-runtime-state-${name}`}>
+      {pull.inFlight ? '◌ pulling…' : '○ not pulled'}
+    </button>
+  );
+}
+
+function RuntimeStateChip({ p, backends }) {
+  const st = runtimeState(p, backends);
+  if (st.pullable) return <RuntimePullChip name={p.name} runnerKey={p.runner} backends={backends} />;
+  return (
+    <span className={'pf-state mono' + (st.tone ? ' ' + st.tone : '')}
+      data-testid={`pf-runtime-state-${p.name}`}>{st.label}</span>
+  );
+}
+
 // Profile card — adopts the Stacks library-card shell (.stk-lib-*) so the
-// Profiles and Stacks grids read as one family. Same data + actions as before.
-function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
-  const BACKEND_META = useBackendMeta();
-  const meta = bk(backendOf(p, BACKEND_META), BACKEND_META);
+// Profiles and Stacks grids read as one family. Same data + actions as before,
+// plus the runtime the profile carries: backend chips in the title row,
+// install state where the metric sits, title + blurb under the intent.
+export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
   const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const chips = runtimeChips(p, backends);
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
@@ -170,25 +316,24 @@ function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
     <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms' }}>
       <div className="stk-lib-h">
         <div className="stk-lib-id">
-          <div className="stk-lib-name">{p.name}</div>
+          <div className="pf-title-row">
+            <span className="stk-lib-name">{p.name}</span>
+            <span className="pf-be-row" data-testid={`pf-runner-badge-${p.name}`}
+              title={p.runner ? `runtime → ${p.runner}` : 'no runtime pinned'}>
+              {chips.map(c => (
+                <span key={c.key} className="pf-be mono" style={c.hue ? { '--bk': c.hue } : null}>{c.label}</span>
+              ))}
+            </span>
+          </div>
           <div className="stk-lib-intent">
             {intentOf(p)}{p.cloned_from && <span className="pf-based mono"> · ↳ {p.cloned_from}</span>}
           </div>
+          <div className="pf-runtime-line" data-testid={`pf-runtime-line-${p.name}`}>
+            {runtimeLine(p, backends)}
+          </div>
         </div>
         <div className="pf-card-meta">
-          <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
-            {runtimeLabel(p)}
-          </span>
-          {/* Runtime badge (Task 10 D4): only when the profile pins a runner —
-              reuses this card's own backend hue (`meta.color`, the same dot
-              idiom the chip above and the drawer footer already use) so a
-              runner-carrying profile reads as one family with its backend. */}
-          {p.runner && (
-            <span className="pf-drawer-preview mono" style={{ '--bk': meta.color }}
-              title={`runtime → ${p.runner}`} data-testid={`pf-runner-badge-${p.name}`}>
-              <span className="pf-chip-dot" />{runnerTitleFor(p.runner, systemInfoQuery.data?.backends)}
-            </span>
-          )}
+          <RuntimeStateChip p={p} backends={backends} />
           {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
       </div>
@@ -299,11 +444,30 @@ function warnForm(_form) {
 // shared FormRow. Named ProfileDrawer (not Drawer) to avoid shadowing the
 // primitives.jsx Drawer global. validateForm/warnForm are passed into useForm
 // verbatim so the validation rules stay in this view.
-function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
+// "Pull now" — the inline fix for a not-pulled runtime (panel 11). Its own
+// component so the pull hooks mount only where the affordance renders.
+function RunnerPullButton({ runnerKey, backends }) {
+  const pull = useRunnerPull(runnerKey, backends);
+  return (
+    <>
+      <button type="button" className="pf-btn" onClick={pull.start}
+        disabled={pull.inFlight || !pull.target} data-testid="pf-runtime-pull">
+        {pull.inFlight ? 'Pulling…' : pull.error ? 'Retry pull' : 'Pull now'}
+      </button>
+      {pull.error && !pull.inFlight && (
+        <span className="mono pf-pull-err" data-testid="pf-runtime-pull-err">{pull.error}</span>
+      )}
+    </>
+  );
+}
+
+export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const BACKEND_META = useBackendMeta();
   const systemInfoQuery = useSystemInfo();
-  const runtimeRunners = llamaServerRunners(systemInfoQuery.data?.backends);
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const runtimeOptions = profileRunnerOptions(backends, hostHwFlags(systemInfoQuery.data?.hardware));
+  const [advOpen, setAdvOpen] = useState(false);
   // Seed profiles render the Runtime select disabled (edit-a-copy forks the
   // seed's runner binding verbatim; a subsequent Edit of that custom copy —
   // which is never itself a seed — unlocks it). `isEdit` never lands on a
@@ -351,6 +515,12 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const meta = bk('cpu', BACKEND_META);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
   const nameLen = (form.name || '').length;
+  // '' = Auto; a key = that option; null = a stored key this box's registry
+  // doesn't offer (out-of-vocab — rendered as its own option below).
+  const runtimeSel = selectedRunnerKey({ binary: form.runner || '', options: runtimeOptions });
+  const runtimeUnknown = runtimeSel === null;
+  const runtimeValue = runtimeUnknown ? form.runner : runtimeSel;
+  const selectedRuntime = runtimeSel ? runtimeOptions.find(o => o.key === runtimeSel) : null;
 
   async function submit(e) {
     e.preventDefault();
@@ -367,7 +537,11 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
       mtp: !!form.mtp,
       intent: form.intent ?? '',
       quant: form.quant ?? '',
-      runner: form.runner || null,
+      // '' is the API's CLEAR sentinel for runner (#2186), NOT null: on a PUT
+      // null means "leave the stored runtime alone", so sending it for the
+      // Auto option made picking Auto a silent no-op. On a create '' reads as
+      // "no runtime pinned" — the same Auto, nothing to clear.
+      runner: form.runner || '',
       ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
     };
     try {
@@ -445,27 +619,50 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             runner (RUNNER_IMAGES[slot.binary]); the per-slot escape hatch is
             slot.image_pin in the slot editor. */}
 
-        <div className="mono pf-hint">Hardware and Runtime are selected on the slot; versions are managed on the Runner Images page.</div>
+        <div className="mono pf-hint">Hardware and image are selected on the slot; versions are managed on the Runner Images page.</div>
 
+        {/* Runtime — same dropdown anatomy as the slot drawer's Runtime
+            control (title · lane(s) · install state, blurb underneath), so
+            one vocabulary covers both surfaces. '' = Auto. */}
         <FormRow label="Runtime" sub="optional — pins the slot's engine build on apply">
-          <select className="pf-input mono" value={form.runner || ''} disabled={runtimeLocked}
+          <select className="pf-input mono" value={runtimeValue} disabled={runtimeLocked}
             onChange={e => set('runner', e.target.value)} data-testid="profile-runner">
-            <option value="">— any (flags-only tune) —</option>
-            {runtimeRunners.map(([key, r]) => (
-              <option key={key} value={key}>
-                {r.title || key}{runnerLaneLabel(r) ? ` · ${runnerLaneLabel(r)}` : ''}
+            <option value="">— Auto · no runtime pinned —</option>
+            {/* A persisted key this box's registry no longer carries keeps its
+                own option: the drawer never silently rewrites stored state. */}
+            {runtimeUnknown && (
+              <option value={form.runner}>{form.runner} · not in this box's registry</option>
+            )}
+            {runtimeOptions.map(o => (
+              <option key={o.key} value={o.key}>
+                {o.title}{laneLabel(o.lanes) ? ` · ${laneLabel(o.lanes)}` : ''}
+                {o.state === 'installable' ? ' · not pulled' : ''}
               </option>
             ))}
           </select>
         </FormRow>
+        {selectedRuntime?.blurb && <div className="mono pf-hint">{selectedRuntime.blurb}</div>}
+        {runtimeUnknown && (
+          <div className="mono pf-hint pf-hint-warn" data-testid="pf-runtime-unknown">
+            hal0 has no entry for this runtime — kept because the profile already carries it.
+            Picking anything else drops it for good.
+          </div>
+        )}
+        {selectedRuntime && (
+          <div className="pf-consequence" data-testid="pf-runtime-consequence">
+            <span>
+              {laneLabel(selectedRuntime.lanes)
+                ? `Slots applying this profile move to the ${laneLabel(selectedRuntime.lanes)} lane.`
+                : `Slots applying this profile launch on ${selectedRuntime.title}.`}
+            </span>
+            {selectedRuntime.state === 'installable' && (
+              <RunnerPullButton runnerKey={selectedRuntime.key} backends={backends} />
+            )}
+          </div>
+        )}
         {runtimeLocked && (
           <div className="mono pf-hint">Forked from a seed — its runtime carries over; edit the copy to change it.</div>
         )}
-
-        <FormRow label="Quant" sub="weight format">
-          <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
-            placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
-        </FormRow>
 
         <FormRow label="Flags" sub="appended to the run command"
           error={show('flags') ? errs.flags : null}>
@@ -483,6 +680,22 @@ function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
             <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
           </button>
         </FormRow>
+
+        {/* Advanced (operator ruling): the main form is name · intent ·
+            runtime · flags · MTP. Quant is a match-only display fact, not
+            something authoring a tune starts from, so it demotes here — same
+            progressive-disclosure idiom as the slot drawer's Advanced
+            section. Still editable, still prefilled on edit/clone/import. */}
+        <button type="button" className="pf-disc" aria-expanded={advOpen}
+          onClick={() => setAdvOpen(o => !o)} data-testid="pf-advanced-toggle">
+          <span className="mono pf-disc-caret">{advOpen ? '▾' : '▸'}</span>Advanced
+        </button>
+        {advOpen && (
+          <FormRow label="Quant" sub="weight format">
+            <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
+              placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
+          </FormRow>
+        )}
       </form>
     </FormDrawer>
   );
@@ -555,18 +768,59 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
 // and the profile-specific preview (identity + integrity + collision — no
 // model resolve/pull). The dialog shell + name input + commit live in
 // primitives.jsx.
-function ImportModal({ existing, onClose, onImported }) {
+export function ImportModal({ existing, onClose, onImported }) {
   const imp = useProfileImport();
-  const renderPreview = (report) => (
-    <>
-      <div className="stk-dlg-hint">
-        {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
-      </div>
-      {report.collides && (
-        <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
-      )}
-    </>
-  );
+  const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  // The dry run reports the runtime the envelope AUTHORS (`runner`), the
+  // family the profile resolves to, and whether importing has to drop that
+  // runtime because this box has no such entry (`runner_stripped`). A dropped
+  // runtime WARNS and proceeds: import stays portable, so the flags and quant
+  // still land — the profile just arrives with no runtime pinned, and the
+  // commit button says exactly that.
+  const renderPreview = (report) => {
+    const stripped = !!report.runner_stripped;
+    const key = report.runner || '';
+    const chips = (stripped || !key)
+      ? [{ key: 'auto', label: 'AUTO', hue: null }]
+      : runtimeChips({ runner: key }, backends);
+    return (
+      <>
+        <div className="stk-dlg-hint">
+          {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
+        </div>
+        <div className="stk-dlg-hint pf-import-runtime" data-testid="pf-import-runtime">
+          Runtime:{' '}
+          {stripped ? (
+            <>
+              <span className="mono pf-import-gone">{key}</span>
+              <span className="pf-state mono">not available</span>
+              {' → Auto'}
+            </>
+          ) : key ? runnerTitleFor(key, backends) : 'Auto'}
+          <span className="pf-be-row">
+            {chips.map(c => (
+              <span key={c.key} className="pf-be mono" style={c.hue ? { '--bk': c.hue } : null}>{c.label}</span>
+            ))}
+          </span>
+          {report.runtime_family && (
+            <span className="pf-state mono">family: {report.runtime_family}</span>
+          )}
+        </div>
+        {stripped && (
+          <div className="stk-dlg-warn" data-testid="pf-import-runtime-warn">
+            {Icons.alert}<b>{key}</b> is not available on this box — the profile
+            imports with runtime Auto. Its flags and quant come across unchanged;
+            slots applying it keep their own runtime. Install it from the Runner
+            Images page, then set it on the profile.
+          </div>
+        )}
+        {report.collides && (
+          <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
+        )}
+      </>
+    );
+  };
   return (
     <ImportDialog
       title="Import profile"
@@ -576,6 +830,7 @@ function ImportModal({ existing, onClose, onImported }) {
       fileTestid="pf-import-file"
       nameTestid="pf-import-name"
       confirmTestid="pf-import-confirm"
+      confirmLabel={(report) => (report?.runner_stripped ? 'Import as Auto' : 'Import')}
       namePlaceholder="my-profile"
       invalidCopy="Not a valid .hal0profile.json envelope"
       existing={existing}

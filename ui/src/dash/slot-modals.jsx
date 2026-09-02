@@ -22,6 +22,7 @@ import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyRunnerChoice,
 	archFitWarning,
+	hostHwFlags,
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
@@ -29,6 +30,13 @@ import {
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
 // the Runner Images page so option labels and the RunnerCard can't drift.
 import { formatProvenanceShort } from "./runner-images.jsx";
+// Backend chips for a profile's runtime, borrowed from the Profiles view so
+// the apply preview below chips a lane exactly the way the profile card and
+// the profile drawer do (one solid single-hue chip PER lane, muted AUTO for
+// a profile that pins nothing) — one authority, no third dialect.
+import { runtimeChips } from "./profiles.jsx";
+// shlex-lite flag diff — the apply preview's "replaces N flags" count.
+import { diffFlags } from "./flags-tune.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -158,38 +166,107 @@ function laneLabel(option) {
 	return (option?.lanes || []).map(laneTitle).join(" + ");
 }
 
-// Host capability flags for runnerOptions()'s hw filter, from the RAW
-// /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
-// NOT the normalized computeCapable/vulkanCapable shape useHardware.ts's
-// hook exposes. Mirrors that same hook's normalizeHardware() derivation
-// (primary GPU's compute_capable/vulkan_capable) so the Hardware group's
-// Runtime select and the Profile row's apply-preview (below) can't disagree
-// about what this box can run.
-//
-// Unknown never vetoes; only an explicit probe answer does. `hw-cascade.js`'s
-// runnerOptions() only hides a runtime when a lane's flag reads explicitly
-// `false` — so this function must never manufacture a `false` it doesn't
-// have evidence for. Two "we don't know" shapes exist and both return `{}`:
-// no `hardware` at all (still loading) and `hardware` present but no
-// `gpus[0]` (a degraded probe, a partial payload, or a probe that came back
-// empty) — the latter used to fall through the `!!gpu0?.…` coercion into
-// `{rocm:false, vulkan:false, cuda:false}`, an explicit-looking veto for a
-// box that was never actually asked, which hid every GPU runtime from the
-// Runtime select (caught by the Task 12 e2e mocks in slot-edit-controls-v3
-// and slot-drawer-profile-v3).
-export function hostHwFlags(rawHardware) {
-	const gpu0 = rawHardware?.gpus?.[0];
-	if (!gpu0) return {};
+
+// Concatenate a flag base with an overlay the way the launcher does: the
+// profile's tune is appended AFTER the model tune, and diffFlags' pair map is
+// last-wins, so the joined text reads as the effective launch tune.
+function joinFlags(base, overlay) {
+	return [base, overlay]
+		.map((s) => String(s || "").trim())
+		.filter(Boolean)
+		.join(" ");
+}
+
+/**
+ * Apply preview for the drawer's profile row — every consequence of
+ * "profile wins" in one structure, computed BEFORE Save (mockup panel 12).
+ *
+ * The lines are DERIVED, never re-guessed: the runtime and lane come out of
+ * the same hw-cascade.js `applyRunnerChoice` the Hardware group's Runtime
+ * select drives (and that the server's profile-wins reconcile mirrors, Task
+ * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`
+ * — the same tokenizer the model drawer's divergence hint uses.
+ *
+ * A line with nothing true to say is OMITTED rather than faked (`lane: null`,
+ * `flags: 0`), with ONE exception the mockup calls out: a profile pinning no
+ * runtime (Auto) reports runtime/lane as `unchanged` instead of dropping
+ * them, so "this profile has no runtime opinion" can't be misread as "the
+ * preview failed to load".
+ *
+ * @param profile             the SELECTED profile row (null → no preview)
+ * @param backends            system-info `backends` catalog (key → row)
+ * @param options             runnerOptions() rows for this slot
+ * @param baselineRunner      the slot's FROZEN persisted binary ('' = auto)
+ * @param currentDevice       the slot's pending device enum, e.g. "gpu-rocm"
+ * @param modelFlags          the bound model's stamped tune (defaults.extra_args)
+ * @param currentProfileFlags the OUTGOING profile's tune ('' = none)
+ *
+ * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, restart }`
+ * or null.
+ */
+export function profileApplyPreview({
+	profile,
+	backends,
+	options,
+	baselineRunner,
+	currentDevice,
+	modelFlags,
+	currentProfileFlags,
+}) {
+	if (!profile) return null;
+	const key = profile.runner || "";
+	const cat = (backends || {})[key] || null;
+	const hit = (options || []).find((o) => o.key === key) || null;
+	// Lanes from the cascade row first, the raw catalog row second; an
+	// out-of-catalog key claims NO lane rather than borrowing one.
+	const lanes = key
+		? hit?.lanes ||
+			(Array.isArray(cat?.supported_backends) ? cat.supported_backends : [])
+		: [];
+	const runtime = {
+		unchanged: !key || key === (baselineRunner || ""),
+		title: key ? hit?.title || cat?.title || key : null,
+		lanes,
+	};
+
+	// Post-save device truth. applyRunnerChoice moves the device only for a
+	// single-lane runner inside the same device class, and returns the current
+	// device untouched for an unknown key — so an invented lane move is
+	// unrepresentable here.
+	const nextDevice = key
+		? applyRunnerChoice({ options, key, currentDevice }).device
+		: currentDevice;
+	const curLane = deviceBackend(currentDevice);
+	const nextLane = deviceBackend(nextDevice);
+	let lane = null;
+	if (nextLane !== curLane) {
+		lane = {
+			unchanged: false,
+			from: laneTitle(curLane),
+			to: laneTitle(nextLane),
+		};
+	} else if (curLane && (!key || lanes.length !== 1)) {
+		// Auto, a multi-lane runtime (the lane stays a live choice) or an
+		// unknown key: say the lane holds. A single-lane runtime already
+		// sitting on its one lane — or a slot with no lane to name at all —
+		// has nothing to report, and an empty "lane → unchanged ()" is
+		// exactly the faked line the panel forbids.
+		lane = { unchanged: true, from: laneTitle(curLane), to: laneTitle(curLane) };
+	}
+
+	// "replaces N flags": the pairs in THIS profile's tune that the slot does
+	// not already launch with — diffed against the effective current tune
+	// (model stamp + the outgoing profile's overlay), so switching between two
+	// profiles that agree on a flag doesn't bill it as a change.
+	const d = diffFlags(
+		profile.flags || "",
+		joinFlags(modelFlags, currentProfileFlags),
+	);
 	return {
-		// ROCm feasibility also passes when the top-level `kfd_present` probe
-		// fact is true, even if `compute_capable` (a HOST rocminfo probe) is
-		// false — a box with /dev/kfd but no host rocminfo (containers bring
-		// their own ROCm userland) actively runs ROCm slots, so this must
-		// match the backend's own gate (config_write._reconcile_device_profile
-		// via hal0.providers._gpu.kfd_present), not just the host probe.
-		rocm: !!(gpu0.compute_capable || rawHardware?.kfd_present),
-		vulkan: !!gpu0.vulkan_capable,
-		cuda: !!gpu0.compute_capable,
+		runtime,
+		lane,
+		flags: d.added.length + d.changed.length,
+		restart: true,
 	};
 }
 
@@ -1072,34 +1149,26 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			hw: hostHwFlags(systemInfoQuery.data?.hardware),
 		});
 		const selProfileRow = all.find((p) => p.name === profileSel) || null;
-		const runnerPreview = (() => {
-			if (!selProfileRow?.runner) return null;
-			// Compared against the FROZEN baseline (#1398), not the live
-			// `binary` state — that state is itself mirrored to the profile's
-			// runner the moment it's picked (see the select's onChange below),
-			// so comparing against it would make this box vanish right after
-			// the very pick it exists to announce.
-			const curBinary = baseline?.binary ?? "";
-			if (selProfileRow.runner === curBinary) return null;
-			const hit = runnerCatalogOptions.find(
-				(o) => o.key === selProfileRow.runner,
-			);
-			const cat = runnerCat[selProfileRow.runner];
-			const title = hit?.title || cat?.title || selProfileRow.runner;
-			const lanes =
-				hit?.lanes ||
-				(Array.isArray(cat?.supported_backends)
-					? cat.supported_backends
-					: []);
-			const singleLane = lanes.length === 1 ? lanes[0] : null;
-			const curLane = deviceBackend(pendingDevice);
-			return {
-				title,
-				lane: laneLabel({ lanes }),
-				movesOff:
-					singleLane && singleLane !== curLane ? laneTitle(curLane) : null,
-			};
-		})();
+		// Only a LIVE pick previews. Compared against the persisted profile
+		// name — NOT against the live `binary`/`device` state, which the
+		// select's onChange has already mirrored to the profile's runner by
+		// the time this runs, so a state comparison would make the box vanish
+		// on the very pick it exists to announce (#1398's frozen-baseline
+		// rule). Re-picking the profile the slot already has, or clearing to
+		// none, previews nothing: no apply happens.
+		const profileIsLiveSelection = profileSel !== (slot.profile || "");
+		const applyPreview = profileIsLiveSelection
+			? profileApplyPreview({
+					profile: selProfileRow,
+					backends: runnerCat,
+					options: runnerCatalogOptions,
+					baselineRunner: baseline?.binary ?? "",
+					currentDevice: pendingDevice,
+					modelFlags: curModelRow?.defaults?.extra_args || "",
+					currentProfileFlags:
+						all.find((p) => p.name === (slot.profile || ""))?.flags || "",
+				})
+			: null;
 		// Mirror backend profile_fits_slot: slot type supported first, then
 		// device_class match + backend match (when both declared).
 		const typeFit = all.filter(
@@ -1153,8 +1222,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// not had anything picked; treating it as `selCross` would suppress
 		// the fit warning and promise a Save-time switch that `changes.profile`
 		// (false — nothing changed) never arms, while `_reconcile_device_profile`
-		// deliberately leaves that drift untouched.
-		const profileIsLiveSelection = profileSel !== (slot.profile || "");
+		// deliberately leaves that drift untouched. (Same
+		// `profileIsLiveSelection` the apply preview above gates on.)
 		const selCross =
 			(profileIsLiveSelection &&
 				crossFit.find((p) => p.name === profileSel)) ||
@@ -1250,28 +1319,73 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</optgroup>
 						)}
 					</select>
-					{runnerPreview && (
+					{applyPreview && (
 						<div
-							className="hint"
+							className="hint sl-apply"
 							data-testid="slot-profile-preview"
-							style={{
-								marginTop: 6,
-								padding: "6px 10px",
-								borderRadius: "var(--rad-sm)",
-								color: "var(--info)",
-								border: "1px solid var(--info-line)",
-								background: "var(--info-soft)",
-							}}
 						>
 							<div>Applying this profile:</div>
-							<div>
-								· runtime → {runnerPreview.title}
-								{runnerPreview.lane ? ` (${runnerPreview.lane})` : ""}
-								{runnerPreview.movesOff
-									? ` — slot moves off ${runnerPreview.movesOff}`
-									: ""}
+							<div className="sl-apply-line">
+								· runtime →{" "}
+								{applyPreview.runtime.unchanged ? (
+									<>
+										<b>unchanged</b>
+										{applyPreview.runtime.title ? (
+											<>
+												{" "}
+												— already on <b>{applyPreview.runtime.title}</b>
+											</>
+										) : (
+											" — this profile pins none"
+										)}
+									</>
+								) : (
+									<b>{applyPreview.runtime.title}</b>
+								)}
+								{/* One solid single-hue chip PER lane (muted AUTO for a
+								    profile that pins nothing) — the Profiles view's own
+								    chip renderer, so a lane reads identically on the
+								    profile card, the profile drawer and here. */}
+								<span className="pf-be-row">
+									{runtimeChips(selProfileRow, runnerCat).map((c) => (
+										<span
+											key={c.key}
+											className="pf-be mono"
+											style={c.hue ? { "--bk": c.hue } : null}
+										>
+											{c.label}
+										</span>
+									))}
+								</span>
 							</div>
-							<div>· slot restarts on Save</div>
+							{applyPreview.lane && (
+								<div className="sl-apply-line">
+									· lane →{" "}
+									{applyPreview.lane.unchanged ? (
+										<>
+											<b>unchanged</b> ({applyPreview.lane.from})
+										</>
+									) : (
+										<>
+											{applyPreview.lane.from} → <b>{applyPreview.lane.to}</b>,
+											this slot leaves the {applyPreview.lane.from} lane
+										</>
+									)}
+								</div>
+							)}
+							{applyPreview.flags > 0 && (
+								<div className="sl-apply-line">
+									· flags → profile tune{" "}
+									<b>
+										replaces {applyPreview.flags} flag
+										{applyPreview.flags === 1 ? "" : "s"}
+									</b>{" "}
+									on this slot
+								</div>
+							)}
+							<div className="sl-apply-line">
+								· slot <b>restarts on Save</b>
+							</div>
 						</div>
 					)}
 					{adoptedFromModel && (
