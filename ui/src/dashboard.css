@@ -2321,6 +2321,27 @@ select.npu-sel {
 .mdl-chip:hover { color: var(--fg); border-color: var(--line-strong); }
 .mdl-chip.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 
+/* Tune pills (model drawer, structured flags editor) — the .fpill idiom again,
+   with one modifier per divergence state so the colour IS the answer to "how
+   does this differ from the profile that seeded it?". Unchanged pills stay
+   plain .fpill; `none` (no seeding profile) is deliberately indistinguishable
+   from unchanged, because with nothing to diverge from there is nothing to
+   say. .fpill-rm is the ghost: in the profile, dropped here. */
+/* The pill body is a read-out, not a control — only the affordances inside it
+   (value, ↺, ✕, +) are clickable, so it must not borrow .fpill's pointer. */
+.fpill-tune { cursor: default; }
+.fpill-tune button { cursor: pointer; }
+.fpill-chg { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
+.fpill-add { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+.fpill-deny { color: var(--err); border-color: var(--err-line); background: var(--err-soft); }
+.fpill-rm {
+  color: var(--fg-4);
+  border-style: dashed;
+  background: transparent;
+  text-decoration: line-through;
+}
+.fpill-rm button { text-decoration: none; }
+
 .mdl-list {
   background: var(--bg-1);
   border: 1px solid var(--line);

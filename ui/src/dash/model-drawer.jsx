@@ -45,6 +45,13 @@ import {
 	highlightSegments,
 	diffFlags,
 	tokenizeFlags,
+	canonFlag,
+	groupFlagPairs,
+	spliceFlagValue,
+	removeFlagFromText,
+	addFlagToText,
+	FLAG_CATEGORIES,
+	CATEGORY_ORDER,
 } from "@/dash/flags-tune.js";
 import {
 	CAP_DEFS,
@@ -562,6 +569,335 @@ function DivergenceDiff({ diff, profileName, onReset }) {
 	);
 }
 
+// ─── TunePills — the structured tune editor (grouped pills) ─────────────────
+//
+// The flags STRING stays the single source of truth. This is a pure render of
+// the `text` prop: there is no internal copy of it, and every affordance
+// splices the prop through one of the flags-tune helpers and hands the result
+// straight to `onChange`. What the pills show and what launches therefore
+// cannot drift — the only local state here is which popover is open.
+//
+// `profileFlags` is the seeding profile's current text, or null when the model
+// was never stamped. Null means there is nothing to diverge FROM: every pill
+// reads `data-divergence="none"`, no ghost pills render, and no revert
+// affordance appears — an unstamped model has no "profile value" to go back to.
+//
+// The parent owns the parse error: unparseable text renders FlagsEditor
+// instead of this, so groupFlagPairs is assumed to have succeeded here.
+function TunePills({ text, onChange, profileFlags }) {
+	// canon of the pill whose value popover is open (null = none), plus the
+	// in-flight draft. Only Enter commits; Escape and a click-away discard, so
+	// a half-typed value can never reach the flags string by accident.
+	const [editingValue, setEditingValue] = useStateMD(null);
+	const [valueDraft, setValueDraft] = useStateMD("");
+	const [adding, setAdding] = useStateMD(false);
+	const [addDraft, setAddDraft] = useStateMD("");
+	const wrapRef = useRefMD(null);
+	const popoverOpen = editingValue != null || adding;
+	const closePopovers = () => {
+		setEditingValue(null);
+		setAdding(false);
+		setAddDraft("");
+	};
+	// Same click-outside/Escape idiom as CapOverrideAdd above.
+	useEffectMD(() => {
+		if (!popoverOpen) return;
+		const onDown = (e) => {
+			if (wrapRef.current && !wrapRef.current.contains(e.target)) closePopovers();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") closePopovers();
+		};
+		document.addEventListener("mousedown", onDown);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("keydown", onKey);
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [popoverOpen]);
+
+	const { groups } = groupFlagPairs(text);
+	const d = profileFlags != null ? diffFlags(text, profileFlags) : null;
+	// Denial is judged per flag, not per string. The drawer's flagsError
+	// pipeline still owns the save gate and the rejection copy — unchanged; the
+	// pill only wears the styling, so the offending token is findable in a long
+	// tune without reading the message first.
+	const isDenied = (flag) =>
+		findManagedFlags(flag).length > 0 || findSlotHardwareFlags(flag).length > 0;
+	const changedFor = (canon) =>
+		d ? d.changed.find((c) => canonFlag(c.flag) === canon) || null : null;
+	const divergenceFor = (flag, canon) => {
+		if (isDenied(flag)) return "denied";
+		if (!d) return "none";
+		if (changedFor(canon)) return "changed";
+		if (d.added.some((a) => canonFlag(a.flag) === canon)) return "added";
+		return "unchanged";
+	};
+	// Ghosts: in the profile, absent from the text. Rendered dimmed in their own
+	// category so "what the profile had and this model dropped" is visible where
+	// the operator is already looking, instead of only in the raw-mode diff.
+	const removedPairs = d
+		? d.removed.map((r) => ({ ...r, canon: canonFlag(r.flag) }))
+		: [];
+	const sections = CATEGORY_ORDER.map((c) => ({
+		id: c.id,
+		label: c.label,
+		pairs: (groups.find((g) => g.id === c.id) || { pairs: [] }).pairs,
+		ghosts: removedPairs.filter(
+			(r) => (FLAG_CATEGORIES[r.canon] || "template-misc") === c.id,
+		),
+	})).filter((s) => s.pairs.length > 0 || s.ghosts.length > 0);
+
+	const revert = (canon) => {
+		const c = changedFor(canon);
+		if (!c) return;
+		// A boolean⇄valued change has no value token to splice on one side
+		// (spliceFlagValue is a documented no-op there), so it falls back to a
+		// remove + re-add at the tail, keeping the operator's own spelling.
+		if (c.from == null || c.to == null) {
+			onChange(addFlagToText(removeFlagFromText(text, canon), c.flag, c.from));
+			return;
+		}
+		onChange(spliceFlagValue(text, canon, c.from));
+	};
+	const openValue = (canon, value) => {
+		setAdding(false);
+		setValueDraft(value == null ? "" : String(value));
+		setEditingValue(canon);
+	};
+	const commitValue = (canon) => {
+		setEditingValue(null);
+		const v = valueDraft.trim();
+		// Emptying the box is not "make this a bare flag" — spliceFlagValue would
+		// leave the flag stranded with a blank token behind it. Removing a flag is
+		// the ✕'s job, so an empty commit just closes.
+		if (!v) return;
+		// spliceFlagValue inserts the replacement verbatim, so a multi-word value
+		// has to arrive quoted or it tokenizes as two tokens and corrupts
+		// everything after it. Same rule addFlagToText applies on the add path.
+		onChange(spliceFlagValue(text, canon, /\s/.test(v) ? `"${v}"` : v));
+	};
+	const commitAdd = () => {
+		const raw = addDraft.trim();
+		setAdding(false);
+		setAddDraft("");
+		if (!raw) return;
+		// "flag value…" — split on the FIRST space only, so a multi-word value
+		// (--chat-template-kwargs '{"enable_thinking":false}') stays one value.
+		const sp = raw.indexOf(" ");
+		const flag = sp === -1 ? raw : raw.slice(0, sp);
+		const value = sp === -1 ? null : raw.slice(sp + 1).trim();
+		// Hand addFlagToText the BARE value: it re-quotes whatever needs it, so
+		// passing an already-quoted string through would double the quotes.
+		const bare =
+			value && /^(["']).*\1$/.test(value) ? value.slice(1, -1) : value;
+		onChange(addFlagToText(text, flag, bare));
+	};
+
+	const pillClass = (kind) =>
+		`fpill fpill-tune${
+			kind === "changed"
+				? " fpill-chg"
+				: kind === "added"
+					? " fpill-add"
+					: kind === "denied"
+						? " fpill-deny"
+						: ""
+		}`;
+	const iconBtnStyle = {
+		background: "transparent",
+		border: "none",
+		color: "inherit",
+		font: "inherit",
+		cursor: "pointer",
+		padding: 0,
+		lineHeight: 1,
+	};
+	const popoverInputStyle = {
+		position: "absolute",
+		top: "calc(100% + 6px)",
+		left: 0,
+		zIndex: 60,
+		width: 150,
+		fontSize: 12,
+	};
+
+	return (
+		<div ref={wrapRef} data-testid="model-tune-pills">
+			{sections.map((s) => (
+				<div
+					key={s.id}
+					data-testid={`model-tune-group-${s.id}`}
+					style={{ marginBottom: 10 }}
+				>
+					<div
+						className="mono"
+						style={{
+							fontSize: 9,
+							letterSpacing: ".06em",
+							textTransform: "uppercase",
+							color: "var(--fg-4)",
+							marginBottom: 5,
+						}}
+					>
+						{s.label}
+					</div>
+					<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+						{s.pairs.map((p, i) => {
+							const kind = divergenceFor(p.flag, p.canon);
+							const c = changedFor(p.canon);
+							return (
+								<span
+									key={`${p.canon}-${i}`}
+									className={pillClass(kind)}
+									data-testid={`model-tune-pill-${p.canon}`}
+									data-divergence={kind}
+									title={
+										kind === "changed"
+											? `profile has ${p.flag} ${c ? c.from : ""}`
+											: kind === "denied"
+												? `${p.flag} is not settable on the model — see the error below`
+												: undefined
+									}
+								>
+									<span>{p.flag}</span>
+									{p.value != null && (
+										<span style={{ position: "relative" }}>
+											<button
+												type="button"
+												data-testid={`model-tune-pill-value-${p.canon}`}
+												aria-label={`Edit ${p.flag} value`}
+												onClick={() => openValue(p.canon, p.value)}
+												style={{
+													...iconBtnStyle,
+													color: "var(--fg)",
+													borderBottom: "1px dotted var(--line-strong)",
+												}}
+											>
+												{p.value}
+											</button>
+											{editingValue === p.canon && (
+												<input
+													className="input mono"
+													data-testid="model-tune-value-input"
+													autoFocus
+													value={valueDraft}
+													onChange={(e) => setValueDraft(e.target.value)}
+													onKeyDown={(e) => {
+														if (e.key === "Enter") {
+															e.preventDefault();
+															commitValue(p.canon);
+														} else if (e.key === "Escape") {
+															// Consumed so the Drawer's document-level
+															// Escape→close never sees it: Escape here
+															// discards the draft, it must not also shut
+															// the drawer.
+															e.preventDefault();
+															e.stopPropagation();
+															closePopovers();
+														}
+													}}
+													style={popoverInputStyle}
+												/>
+											)}
+										</span>
+									)}
+									{kind === "changed" && (
+										<button
+											type="button"
+											data-testid={`model-tune-pill-revert-${p.canon}`}
+											aria-label={`Revert ${p.flag} to the profile value`}
+											title={`↺ back to ${c ? c.from : "the profile value"}`}
+											onClick={() => revert(p.canon)}
+											style={iconBtnStyle}
+										>
+											↺
+										</button>
+									)}
+									<button
+										type="button"
+										data-testid={`model-tune-pill-remove-${p.canon}`}
+										aria-label={`Remove ${p.flag}`}
+										onClick={() => onChange(removeFlagFromText(text, p.canon))}
+										style={iconBtnStyle}
+									>
+										✕
+									</button>
+								</span>
+							);
+						})}
+						{s.ghosts.map((r, i) => (
+							<span
+								key={`ghost-${r.canon}-${i}`}
+								className="fpill fpill-tune fpill-rm"
+								data-testid={`model-tune-pill-ghost-${r.canon}`}
+								data-divergence="removed"
+								title={`in the profile, dropped here — restore ${r.flag}`}
+							>
+								<span>
+									{r.flag}
+									{r.value != null ? ` ${r.value}` : ""}
+								</span>
+								<button
+									type="button"
+									data-testid={`model-tune-pill-restore-${r.canon}`}
+									aria-label={`Restore ${r.flag} from the profile`}
+									onClick={() => onChange(addFlagToText(text, r.flag, r.value))}
+									style={iconBtnStyle}
+								>
+									+
+								</button>
+							</span>
+						))}
+					</div>
+				</div>
+			))}
+			{sections.length === 0 && (
+				<div className="hint" style={{ marginBottom: 10 }}>
+					no tune flags — seed from a profile, or add one below
+				</div>
+			)}
+			<div style={{ position: "relative", display: "inline-block" }}>
+				<button
+					type="button"
+					className="btn ghost sm"
+					data-testid="model-tune-add-flag"
+					aria-expanded={adding}
+					onClick={() => {
+						setEditingValue(null);
+						setAddDraft("");
+						setAdding((o) => !o);
+					}}
+				>
+					+ Add flag…
+				</button>
+				{adding && (
+					<input
+						className="input mono"
+						data-testid="model-tune-add-input"
+						autoFocus
+						placeholder="--cache-type-k q8_0"
+						value={addDraft}
+						onChange={(e) => setAddDraft(e.target.value)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") {
+								e.preventDefault();
+								commitAdd();
+							} else if (e.key === "Escape") {
+								e.preventDefault();
+								e.stopPropagation();
+								closePopovers();
+							}
+						}}
+						style={{ ...popoverInputStyle, width: 240 }}
+					/>
+				)}
+			</div>
+		</div>
+	);
+}
+
 // ─── Drawer dirty-tracking seam (#1398) ──────────────────────────────────────
 //
 // Same seam the slot drawer got in #1447, for the same reason. This drawer
@@ -707,6 +1043,12 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const [vision, setVision] = useStateMD("auto");
 	// Local UI state.
 	const [confirm, setConfirm] = useStateMD(null); // {title,message,confirmLabel,onConfirm}
+	// Task 4: ONE mode flag for the tune editor. Pills are the resting view;
+	// this only records the operator's explicit "show me the text" toggle. The
+	// EFFECTIVE mode (`rawEditor` below) also goes raw whenever the text won't
+	// tokenize — there are no pills to render for a string nobody can parse,
+	// and the textarea is the only surface that can repair it.
+	const [rawMode, setRawMode] = useStateMD(false);
 	// Inline title editor (Task 3): the ✎ button swaps the name span for an
 	// input seeded from the CURRENT draft (`name`), never from the live model
 	// prop, so a prior uncommitted edit survives reopening the editor. Escape
@@ -759,6 +1101,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setJinja(b.jinja);
 		setVision(b.vision);
 		setDefaultOverride(null);
+		setRawMode(false);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
 
@@ -801,6 +1144,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		[extra, sourceProfile],
 	);
 	const diverged = !!(diff && diff.diverged);
+	const divergedCount = diff
+		? diff.added.length + diff.changed.length + diff.removed.length
+		: 0;
 
 	// Managed-arg + slot-hardware + shlex validation on the flags text (inline,
 	// blocks save). spec-hw-slot-ownership §5: the model is device-agnostic, so
@@ -811,6 +1157,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const managedOffenders = useMemoMD(() => findManagedFlags(extra), [extra]);
 	const hwOffenders = useMemoMD(() => findSlotHardwareFlags(extra), [extra]);
 	const shlexErr = useMemoMD(() => tokenizeFlags(extra).error, [extra]);
+	// Effective tune mode: the operator's toggle, OR forced raw because the text
+	// can't be tokenized into pills at all.
+	const rawEditor = rawMode || !!shlexErr;
 	const flagsError = shlexErr
 		? shlexErr
 		: hwOffenders.length
@@ -1197,6 +1546,51 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		</span>
 	);
 
+	// Provenance + divergence chips (Task 4). They describe the flags, so they
+	// ride the tune card's own header row instead of a separate strip under it —
+	// "seeded from X" and "◆ N diverged" now read next to the thing they
+	// qualify, and the count answers "how much drifted?" without opening the
+	// raw-mode diff.
+	const tuneChipBase = {
+		fontFamily: "var(--jbm)",
+		fontSize: 9,
+		letterSpacing: ".05em",
+		textTransform: "uppercase",
+		padding: "2px 6px",
+		borderRadius: 3,
+	};
+	const tuneChips = (
+		<>
+			<span
+				className="tag"
+				data-testid="model-provenance-chip"
+				style={{
+					...tuneChipBase,
+					color: profile ? "var(--fg-3)" : "var(--fg-4)",
+					background: "var(--bg-2)",
+					border: "1px solid var(--line)",
+				}}
+			>
+				{profile ? `seeded from ${profile}` : "no template"}
+			</span>
+			{diverged && (
+				<span
+					className="tag"
+					data-testid="model-diverged-chip"
+					title={`Flags differ from ${profile}'s current text. The model owns these — the profile won't change them.`}
+					style={{
+						...tuneChipBase,
+						color: "var(--warn)",
+						background: "var(--warn-soft)",
+						border: "1px solid var(--warn-line)",
+					}}
+				>
+					◆ {divergedCount} diverged
+				</span>
+			)}
+		</>
+	);
+
 	// Facts band (Task 3): read-only quant/size/arch/context/sha256/used-by
 	// strip under the header. Each cell renders ONLY when its fact exists on
 	// the row — an absent fact is an absent cell, never a blank one.
@@ -1358,7 +1752,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 							borderBottom: "1px solid var(--line)",
 							display: "flex",
 							alignItems: "center",
-							gap: 10,
+							gap: 8,
+							flexWrap: "wrap",
 						}}
 					>
 						<span
@@ -1372,7 +1767,25 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 						>
 							launch flags · tune remainder · exactly what launches
 						</span>
+						{tuneChips}
 						<span style={{ flex: 1 }} />
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="model-tune-raw-toggle"
+							aria-pressed={rawEditor}
+							disabled={!!shlexErr}
+							title={
+								shlexErr
+									? "the text can't be parsed into pills — fix it here first"
+									: rawEditor
+										? "back to grouped pills"
+										: "edit the raw flags text"
+							}
+							onClick={() => setRawMode((r) => !r)}
+						>
+							{rawEditor ? "▦ pills" : "⌨ raw text"}
+						</button>
 						<SeedProfileButton
 							options={fitProfiles}
 							onPick={seedFromProfile}
@@ -1380,11 +1793,19 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 						/>
 					</div>
 					<div style={{ padding: 14, background: "var(--bg-sunken)" }}>
-						<FlagsEditor
-							value={extra}
-							onChange={setExtra}
-							invalid={!!flagsError}
-						/>
+						{rawEditor ? (
+							<FlagsEditor
+								value={extra}
+								onChange={setExtra}
+								invalid={!!flagsError}
+							/>
+						) : (
+							<TunePills
+								text={extra}
+								onChange={setExtra}
+								profileFlags={sourceProfile ? sourceProfile.flags || "" : null}
+							/>
+						)}
 						{flagsError && (
 							<div
 								className="err"
@@ -1437,80 +1858,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 							</span>
 						</div>
 					</div>
-					<div
-						style={{
-							padding: "9px 14px",
-							background: "var(--bg-2)",
-							borderTop: "1px solid var(--line)",
-							display: "flex",
-							alignItems: "center",
-							gap: 8,
-							flexWrap: "wrap",
-						}}
-					>
-						{profile ? (
-							<span
-								className="tag"
-								data-testid="model-provenance-chip"
-								style={{
-									color: "var(--fg-3)",
-									borderColor: "var(--line)",
-									background: "var(--bg-2)",
-									fontFamily: "var(--jbm)",
-									fontSize: 9,
-									letterSpacing: ".05em",
-									textTransform: "uppercase",
-									padding: "2px 6px",
-									borderRadius: 3,
-									border: "1px solid var(--line)",
-								}}
-							>
-								seeded from {profile}
-							</span>
-						) : (
-							<span
-								className="tag"
-								data-testid="model-provenance-chip"
-								style={{
-									color: "var(--fg-4)",
-									borderColor: "var(--line)",
-									background: "var(--bg-2)",
-									fontFamily: "var(--jbm)",
-									fontSize: 9,
-									letterSpacing: ".05em",
-									textTransform: "uppercase",
-									padding: "2px 6px",
-									borderRadius: 3,
-									border: "1px solid var(--line)",
-								}}
-							>
-								no template
-							</span>
-						)}
-						{diverged && (
-							<span
-								className="tag"
-								data-testid="model-diverged-chip"
-								title={`Flags differ from ${profile}'s current text. The model owns these — the profile won't change them.`}
-								style={{
-									color: "var(--warn)",
-									borderColor: "var(--warn-line)",
-									background: "var(--warn-soft)",
-									fontFamily: "var(--jbm)",
-									fontSize: 9,
-									letterSpacing: ".05em",
-									textTransform: "uppercase",
-									padding: "2px 6px",
-									borderRadius: 3,
-									border: "1px solid var(--warn-line)",
-								}}
-							>
-								◆ diverged from {profile}
-							</span>
-						)}
-					</div>
 				</div>
-				{diverged && diff && (
+				{rawEditor && diverged && diff && (
 					<DivergenceDiff
 						diff={diff}
 						profileName={profile}
@@ -1801,5 +2150,6 @@ function slotHardwareFlagMessage(offenders) {
 Object.assign(window, {
 	ModelDrawer,
 	FlagsEditor,
+	TunePills,
 	DivergenceDiff,
 });
