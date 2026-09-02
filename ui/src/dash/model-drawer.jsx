@@ -31,6 +31,8 @@ import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import { useSlots } from "@/api/hooks/useSlots";
+import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
+import { feasibilityHint } from "@/dash/feasibility-copy";
 import { slotsUsingModel } from "@/dash/model-usage.js";
 import { RichSelect } from "@/dash/rich-select.jsx";
 import {
@@ -84,6 +86,14 @@ function modalityLabel(caps, type) {
 	if (c.has("tts")) return "audio";
 	if (c.has("image")) return "image";
 	return type ? String(type) : "text";
+}
+
+// Native-context K-format, shared by the facts-band "Native ctx" cell (Task
+// 3) and the ctx row's native chip (Task 7) so the two "128K"-style displays
+// of the same metadata.context_length value can't drift apart.
+function contextLengthLabel(v) {
+	if (!v) return null;
+	return v >= 1024 ? `${Math.round(v / 1024)}K` : String(v);
 }
 
 // tri-state: absent (auto) | true (on) | false (off) — for mtp / jinja typed caps.
@@ -1319,6 +1329,28 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// in one place and forgotten in the other.
 	const saveBlocked = !!flagsError || !!mmprojError || !!ctxError;
 
+	// GTT feasibility probe (Task 7) — same 400ms-debounced pattern as the slot
+	// drawer's ceiling probe (slot-modals.jsx's ceilingFeasibility). Advisory
+	// only (warn-never-block, 993ea3b6): this NEVER feeds saveBlocked above,
+	// it only feeds the hint text rendered under the ctx row. Fires only while
+	// the drawer is open, and only for a non-empty ctx that already passes the
+	// same clean-integer check ctxError enforces — no probe for an empty or
+	// malformed field.
+	const ctxFeasibility = useModelsFeasibility();
+	const ctxFeasibilityTimer = useRefMD(null);
+	useEffectMD(() => {
+		if (ctxFeasibilityTimer.current) clearTimeout(ctxFeasibilityTimer.current);
+		const raw = ctx.trim();
+		if (!open || !model?.id || !raw || !/^\d+$/.test(raw)) return undefined;
+		const ctxNum = Number(raw);
+		if (!Number.isFinite(ctxNum) || ctxNum < 128) return undefined;
+		ctxFeasibilityTimer.current = setTimeout(() => {
+			ctxFeasibility.mutate({ models: [{ model_id: model.id, ctx: ctxNum }] });
+		}, 400);
+		return () => clearTimeout(ctxFeasibilityTimer.current);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, model?.id, ctx]);
+
 	// Return null when closed — matching the Modal contract the deleted
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
 	// primitive otherwise stays mounted, and `selected` is non-null even when the
@@ -1711,11 +1743,25 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		Number(model.size_bytes) > 0
 			? (Number(model.size_bytes) / 1024 ** 3).toFixed(1)
 			: null;
-	const nativeContext = modelContextLength
-		? modelContextLength >= 1024
-			? `${Math.round(modelContextLength / 1024)}K`
-			: String(modelContextLength)
-		: null;
+	const nativeContext = contextLengthLabel(modelContextLength);
+	// Ctx row intelligence (Task 7). ctxError already guarantees a clean,
+	// ≥128 integer for any non-empty value, so `ctxNumValue` is only ever
+	// non-null for a valid ctx — an errored or empty field never flips the
+	// native chip to warn or shows the rope box.
+	const ctxNumValue =
+		!ctxError && ctx.trim() ? Number(ctx.trim()) : null;
+	const ropeWarn = !!(
+		ctxNumValue &&
+		modelContextLength &&
+		ctxNumValue > modelContextLength
+	);
+	// The bound model's row from the last successful feasibility probe (or
+	// none — `feasibilityHint`'s default branch, and the `unknown` verdict,
+	// both render no hint at all; see feasibility-copy.ts).
+	const ctxFeasibilityRow = (ctxFeasibility.data?.results || []).find(
+		(r) => r.model_id === model?.id,
+	);
+	const ctxHint = ctxFeasibilityRow ? feasibilityHint(ctxFeasibilityRow) : null;
 	const modelSha256 =
 		typeof model?.metadata?.sha256 === "string" && model.metadata.sha256
 			? model.metadata.sha256
@@ -2046,6 +2092,17 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 					<div className="form-lbl">
 						<span>Context size</span>
 						<FieldInfoIcon description="tokens · the model's own limit — a slot's Context ceiling is hardware · empty = launcher default · sets managed --ctx-size" />
+						{/* Native-context chip (Task 7) — hidden when the GGUF carries no
+						    metadata.context_length. Flips to warn the moment a valid ctx
+						    entry exceeds it (same condition as the rope warnbox below). */}
+						{nativeContext && (
+							<span
+								className={"chip" + (ropeWarn ? " warn" : "")}
+								data-testid="model-ctx-native-chip"
+							>
+								{ropeWarn ? `> native ${nativeContext}` : `native ${nativeContext}`}
+							</span>
+						)}
 					</div>
 					<div className="form-ctl">
 						<input
@@ -2063,6 +2120,57 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 								style={{ color: "var(--err)" }}
 							>
 								{ctxError}
+							</div>
+						)}
+						{/* Rope warnbox (Task 7) — warn-never-block: this never touches
+						    saveBlocked above, it only surfaces that a launcher may need to
+						    apply rope scaling past the GGUF's trained (native) length. */}
+						{ropeWarn && (
+							<div
+								className="hint"
+								data-testid="model-ctx-rope-warn"
+								style={{
+									marginTop: 6,
+									padding: "6px 10px",
+									borderRadius: "var(--rad-sm)",
+									color: "var(--warn)",
+									border: "1px solid var(--warn-line)",
+									background: "var(--warn-soft)",
+								}}
+							>
+								{`◐ above the GGUF's native ${nativeContext} — needs rope scaling the launcher may not apply; quality degrades past native. Saves anyway.`}
+							</div>
+						)}
+						{/* GTT feasibility line (Task 7) — host-truth, warn-never-block
+						    (993ea3b6): an absent/unknown verdict renders nothing at all,
+						    same idiom as the slot drawer's ctxHint (slot-modals.jsx). */}
+						{ctxHint?.tone && (
+							<div
+								className="hint"
+								data-testid="model-ctx-feasibility"
+								style={
+									ctxHint.tone === "warn"
+										? {
+												marginTop: 6,
+												padding: "6px 10px",
+												borderRadius: "var(--rad-sm)",
+												color: "var(--warn)",
+												border: "1px solid var(--warn-line)",
+												background: "var(--warn-soft)",
+											}
+										: ctxHint.tone === "err"
+											? {
+													marginTop: 6,
+													padding: "6px 10px",
+													borderRadius: "var(--rad-sm)",
+													color: "var(--err)",
+													border: "1px solid var(--err-line)",
+													background: "var(--err-soft)",
+												}
+											: { marginTop: 6 }
+								}
+							>
+								{ctxHint.text}
 							</div>
 						)}
 					</div>

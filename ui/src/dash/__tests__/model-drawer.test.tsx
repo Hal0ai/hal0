@@ -18,6 +18,7 @@ import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { feasibilityHint } from '../feasibility-copy'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
@@ -87,6 +88,36 @@ vi.mock('@/api/hooks/useSlots', () => ({
   useSlots: () => ({ data: slotsBox.current, isLoading: false }),
 }))
 
+// GTT feasibility probe (Task 7) — a real useState-backed mutation stand-in
+// so calling `mutate()` from inside model-drawer.jsx's debounced effect
+// genuinely re-renders the component under test, the same way react-query's
+// own mutation state does. `feasibilityHandler.current` lets each test decide
+// what (if anything) a probe resolves to; leaving it unset means `mutate()`
+// records the call but never produces a hint, matching an in-flight/never-
+// responded probe.
+const { feasibilityCalls, feasibilityHandler } = vi.hoisted(() => ({
+  feasibilityCalls: [] as unknown[],
+  feasibilityHandler: {
+    current: undefined as
+      | ((body: { models: { model_id: string; ctx?: number }[] }) => { results: unknown[] } | undefined)
+      | undefined,
+  },
+}))
+
+vi.mock('@/api/hooks/useModelsFeasibility', () => ({
+  useModelsFeasibility: () => {
+    const [data, setData] = React.useState<{ results: unknown[] } | undefined>(undefined)
+    return {
+      data,
+      mutate: (body: { models: { model_id: string; ctx?: number }[] }) => {
+        feasibilityCalls.push(body)
+        const resp = feasibilityHandler.current?.(body)
+        if (resp) setData(resp)
+      },
+    }
+  },
+}))
+
 await import('../primitives.jsx')
 const { ModelDrawer } = await import('../model-drawer.jsx')
 
@@ -146,6 +177,8 @@ beforeEach(() => {
   profilesBox.current = []
   templatesBox.current = []
   enumsBox.current = undefined
+  feasibilityCalls.length = 0
+  feasibilityHandler.current = undefined
 })
 
 afterEach(() => {
@@ -701,6 +734,87 @@ describe('ModelDrawer engine (Task 6)', () => {
 
     const call = updateCalls[0] as { id: string; body: { provider?: string | null } }
     expect(call.body.provider).toBeNull()
+    act(() => root.unmount())
+  })
+})
+
+describe('ModelDrawer context intelligence (Task 7)', () => {
+  it('native chip renders from metadata.context_length; hidden when absent', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    expect(q(host, 'model-ctx-native-chip').textContent).toBe('native 128K')
+    act(() => root.unmount())
+
+    const noNative = { ...MODEL, metadata: { sha256: MODEL.metadata.sha256 } }
+    const mounted2 = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: noNative }),
+    )
+    expect(mounted2.host.querySelector('[data-testid="model-ctx-native-chip"]')).toBeNull()
+    act(() => mounted2.root.unmount())
+  })
+
+  it('over-native value flips the chip to warn and shows the rope warnbox; Save stays enabled', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    const input = q<HTMLInputElement>(host, 'model-ctx-input')
+    // MODEL's metadata.context_length is 131072 ("native 128K") — 262144 is
+    // over-native and must never touch saveBlocked (#1378's gate is
+    // untouched by this advisory signal).
+    act(() => typeInto(input, '262144'))
+
+    expect(q(host, 'model-ctx-native-chip').textContent).toBe('> native 128K')
+    const warnBox = q(host, 'model-ctx-rope-warn')
+    expect(warnBox.textContent).toContain('native 128K')
+    expect(warnBox.textContent).toContain('Saves anyway.')
+    expect(host.querySelector('[data-testid="model-ctx-error"]')).toBeNull()
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(false)
+
+    act(() => root.unmount())
+  })
+
+  it('feasibility line renders the hint for a verdict and nothing for unknown/empty', async () => {
+    feasibilityHandler.current = (body) => ({
+      results: [
+        {
+          model_id: body.models[0].model_id,
+          verdict: 'tight',
+          needed_mb: 20000,
+          gtt_free_mb: 15000,
+          gtt_total_mb: 24000,
+        },
+      ],
+    })
+
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+
+    // MODEL carries no defaults.context_size, so the ctx input seeds empty —
+    // an empty ctx must never fire a probe at all.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 450))
+    })
+    expect(feasibilityCalls.length).toBe(0)
+    expect(host.querySelector('[data-testid="model-ctx-feasibility"]')).toBeNull()
+
+    const input = q<HTMLInputElement>(host, 'model-ctx-input')
+    await act(async () => {
+      typeInto(input, '4096')
+      await new Promise((r) => setTimeout(r, 450))
+    })
+
+    expect(feasibilityCalls.length).toBe(1)
+    expect(feasibilityCalls[0]).toEqual({ models: [{ model_id: MODEL.id, ctx: 4096 }] })
+    const expected = feasibilityHint({
+      verdict: 'tight',
+      needed_mb: 20000,
+      gtt_free_mb: 15000,
+      gtt_total_mb: 24000,
+    })
+    expect(q(host, 'model-ctx-feasibility').textContent).toBe(expected.text)
+
     act(() => root.unmount())
   })
 })

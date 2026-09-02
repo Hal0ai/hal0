@@ -1333,6 +1333,11 @@ a { color: inherit; text-decoration: none; }
 }
 .input.mono { font-family: var(--jbm); font-size: 12.5px; }
 .input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* Field-error state (#2207) — `.input-err` was applied throughout the drawers
+   (model-drawer.jsx, slot-modals.jsx) with no rule of its own; same error
+   token as `.rsel-trigger.rsel-err` below borrows today. */
+.input-err { border-color: var(--err-line); }
+.input-err:focus { box-shadow: 0 0 0 3px var(--err-soft); }
 
 /* ════════════════════════════════════════════════════════════════════
    Dashboard view
@@ -3500,9 +3505,9 @@ select.npu-sel {
 }
 .rsel-trigger[disabled] { opacity: 0.45; cursor: not-allowed; }
 /* Field-error state, passed via RichSelect's `className` prop (Task 11
-   review fix) — same error tokens the plain `.input-err` inputs elsewhere
-   in the drawer use (border/err color), since `.input-err` itself carries
-   no rule of its own to reuse here. */
+   review fix) — same error tokens `.input-err` carries (#2207). RichSelect
+   isn't an <input>, so it needs its own selector rather than `.input-err`
+   itself. */
 .rsel-trigger.rsel-err { border-color: var(--err-line); }
 .rsel-trigger.rsel-err:focus-visible { box-shadow: 0 0 0 3px var(--err-soft); }
 .rsel-trigger-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
