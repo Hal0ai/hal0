@@ -81,6 +81,14 @@ export const ENDPOINTS = {
   modelUpdate: (id: string) => `/api/models/${encodeURIComponent(id)}/update`,
   modelScanPreview: '/api/models/scan/preview',
   modelAddFromPath: '/api/models/add-from-path',
+  // Drawer overhaul PR-3: apply a named profile's seed onto an already-added
+  // model row (POST body {profile: name} → the updated model dict). Distinct
+  // from the profile system's own seed application on first add.
+  modelSeedProfile: (id: string) => `/api/models/${encodeURIComponent(id)}/seed-profile`,
+  // Host-truth GTT feasibility signal (993ea3b6) — batched: POST
+  // {models: [{model_id, ctx?}]} → {results: [...]}. A non-list body 400s;
+  // this is the drawer's own pre-save probe, not the pull/inspect surface.
+  modelsFeasibility: '/api/models/feasibility',
   // Issue #311: free-text HF Hub model search backing the dashboard
   // "Search HF" button. Distinct from /api/models/inspect (which
   // resolves a known coord into variants) — this proxies HF's

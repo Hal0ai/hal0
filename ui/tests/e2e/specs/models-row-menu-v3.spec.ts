@@ -65,7 +65,11 @@ test.describe('Models row menu (kebab)', () => {
 
     // Drawer opened, targeted at the kebab'd row (not the auto-selected one).
     await expect(page.getByTestId('model-flags-input')).toBeVisible()
-    await expect(page.locator('.drawer-h h2')).toHaveText(OTHER_NAME)
+    // Option A drawer (Task 8, PR-3): the title row now also carries the
+    // modality tag + default badge/toggle (relocated here from their own
+    // field-rows), so the h2 is no longer JUST the name.
+    await expect(page.locator('.drawer-h h2')).toContainText(OTHER_NAME)
+    await expect(page.locator('.drawer-h h2 > span > span').first()).toHaveText(OTHER_NAME)
     // Menu closes itself on item click.
     await expect(page.locator('.hal0-menu')).toHaveCount(0)
 

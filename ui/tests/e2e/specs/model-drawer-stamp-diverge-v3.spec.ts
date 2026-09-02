@@ -2,8 +2,13 @@
  * model-drawer-stamp-diverge-v3 — D1 model editor drawer (post-R3 rework).
  *
  * Exercises the core "the model is the launchable thing" flow:
- *   1. STAMP — selecting a profile in the template picker COPIES its `flags`
- *      text into the model's own editable flags editor; provenance updates.
+ *   1. STAMP — picking a profile from the "⤵ Seed from profile…" menu POSTs
+ *      /api/models/{id}/seed-profile (Task 7's useModelSeedProfile hook,
+ *      server route shipped in #2198 / e31a451b, merged to main); the
+ *      response's `defaults.profile` / `defaults.extra_args` are spliced into
+ *      the flags editor + provenance chip. Option A drawer (Task 8, PR-3)
+ *      retired the old always-visible `model-template-select`, which copied
+ *      profile.flags client-side with no network round-trip at all.
  *   2. DIVERGE — editing the flags so they differ from the profile's current
  *      text raises the diverged chip + the inline client-side divergence diff.
  *   3. MANAGED-ARG REJECTION — a managed flag (--port) in the tune text surfaces
@@ -11,9 +16,18 @@
  *
  * /api/profiles is networkFirst in the mock harness, so page.route wins; the
  * drawer auto-targets the first installed model (qwen3.6-27b-mtp).
+ *
+ * The seed-profile server route shipped in #2198 (e31a451b, merged to main)
+ * — mockSeedProfile below stays regardless, because this whole harness is
+ * mock-driven (apiMock.ts: page.route stubs, Phase A/HAL0_DATA-seeded), the
+ * same reason mockProfiles/mockChatTemplates mock routes that exist
+ * server-side too. Its response shape follows useModelSeedProfile.ts's
+ * documented contract (POST {profile} → updated model dict,
+ * `defaults.profile` + `defaults.extra_args` set to the profile's flags).
  */
 import { test, expect } from '../fixtures/apiMock'
 
+const MODEL_ID = 'qwen3.6-27b-mtp'
 const PROFILE_FLAGS = '-fa on -b 2048 -ub 512 --threads 8'
 
 function mockProfiles(page: import('@playwright/test').Page) {
@@ -45,6 +59,30 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
   )
 }
 
+/** Route is live on main (#2198, e31a451b) — mocked because this harness is
+ * mock-driven, not because the server doesn't have it. */
+async function mockSeedProfile(page: import('@playwright/test').Page) {
+  const requests: any[] = []
+  await page.route(`**/api/models/${MODEL_ID}/seed-profile`, async (route) => {
+    const body = route.request().postDataJSON()
+    requests.push(body)
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: MODEL_ID,
+        defaults: { profile: body.profile, extra_args: PROFILE_FLAGS },
+      }),
+    })
+  })
+  return requests
+}
+
+async function stampFromProfile(page: import('@playwright/test').Page, name: string) {
+  await page.getByTestId('model-seed-profile-open').click()
+  await page.getByTestId(`model-seed-profile-option-${name}`).click()
+}
+
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').click()
@@ -55,14 +93,17 @@ test.describe('Model drawer — stamp & diverge', () => {
   test('selecting a profile copies its flags into the editor + sets provenance', async ({ page }) => {
     await mockProfiles(page)
     await mockChatTemplates(page)
+    const seedRequests = await mockSeedProfile(page)
     await openDrawer(page)
 
-    await page.getByTestId('model-template-select').selectOption('rocm-moe')
+    await stampFromProfile(page, 'rocm-moe')
 
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     await expect(page.getByTestId('model-provenance-chip')).toHaveText(/seeded from rocm-moe/i)
     // Freshly stamped text equals the profile — no divergence yet.
     await expect(page.getByTestId('model-diverged-chip')).toHaveCount(0)
+    // The wire contract: exactly one POST, body {profile: name}.
+    expect(seedRequests).toEqual([{ profile: 'rocm-moe' }])
 
     // Coverage hole: PROFILE_FLAGS bakes a slot-hardware flag (--threads)
     // right into the stamp, but none of this file's tests ever checked the
@@ -78,9 +119,11 @@ test.describe('Model drawer — stamp & diverge', () => {
   test('editing stamped flags raises the diverged chip + inline diff', async ({ page }) => {
     await mockProfiles(page)
     await mockChatTemplates(page)
+    await mockSeedProfile(page)
     await openDrawer(page)
 
-    await page.getByTestId('model-template-select').selectOption('rocm-moe')
+    await stampFromProfile(page, 'rocm-moe')
+    await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     // Add a flag the profile doesn't carry → diverged (added token).
     await page.getByTestId('model-flags-input').fill(`${PROFILE_FLAGS} --cache-type-k q8_0`)
 

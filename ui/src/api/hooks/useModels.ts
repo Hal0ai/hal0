@@ -30,6 +30,12 @@ export interface Model {
   runtime: string
   /** True when this model is its dispatcher type's default (per-type marker). */
   default?: boolean
+  /** Engine identity write path — see ApiModelRaw.provider (normalizeApiModel.ts). */
+  provider?: string | null
+  /** Derived, read-only host-backend lanes — see ApiModelRaw.runs_on (normalizeApiModel.ts). */
+  runs_on?: string[]
+  /** Provider-specific/user metadata bag — see ApiModelRaw.metadata (normalizeApiModel.ts). */
+  metadata?: { context_length?: number | null; [k: string]: unknown } | null
 }
 
 const MODELS_POLL_MS = 30_000

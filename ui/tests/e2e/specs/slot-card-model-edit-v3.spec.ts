@@ -81,7 +81,13 @@ test.describe('Slot card — inline model edit', () => {
     await pencil(page, 'primary').click()
     await expect(drawer(page)).toBeVisible()
     await expect(drawer(page).locator('.modal-h-eye')).toContainText('Edit model')
-    await expect(drawer(page).locator('.drawer-h h2')).toHaveText('Qwen3.6-27B-MTP')
+    // Option A drawer (Task 8, PR-3): the title row also carries the
+    // modality tag + default badge/toggle now, so the h2 is no longer JUST
+    // the name.
+    await expect(drawer(page).locator('.drawer-h h2')).toContainText('Qwen3.6-27B-MTP')
+    await expect(drawer(page).locator('.drawer-h h2 > span > span').first()).toHaveText(
+      'Qwen3.6-27B-MTP',
+    )
   })
 
   test('K2 — the pencil never fires a model swap and leaves the picker alone', async ({ page }) => {

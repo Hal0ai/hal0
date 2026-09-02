@@ -106,6 +106,17 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
 
     await expect(page.locator('[data-testid^="cap-toggle-"]')).toHaveCount(0)
     await expect(page.getByTestId('model-caps-readout')).toBeVisible()
+    // Option A drawer (Task 8): the four always-on tri-state rows
+    // (cap-mtp-*/cap-thinking-*/cap-jinja-*/cap-vision-*) are retired too —
+    // capability OVERRIDES live in the ledger now, a distinct surface from
+    // the read-only registry-capability chips asserted above.
+    await expect(page.locator('[data-testid^="cap-mtp-"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="cap-thinking-"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="cap-jinja-"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="cap-vision-"]')).toHaveCount(0)
+    // The ledger's own add-affordance is present (Auto is invisible until an
+    // override is set — this model has none in BASE_MODEL.defaults).
+    await expect(page.getByTestId('model-cap-override-add')).toBeVisible()
   })
 
   test('an emptied Display name sends name:"" so the stored name is cleared', async ({ page }) => {
@@ -131,7 +142,14 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     await openDrawer(page)
 
     // normalizeApiModel: longName = m.longName || m.name || m.id.
-    await expect(page.locator('.drawer.open h2')).toHaveText(MODEL_ID)
+    // Option A drawer (Task 8): the title row now also carries the modality
+    // tag + default badge/toggle (relocated here from their own field-rows),
+    // so the h2 is no longer JUST the name — scope to the name's own span
+    // rather than asserting the whole heading's text.
+    await expect(page.locator('.drawer.open h2')).toContainText(MODEL_ID)
+    // titleNode's structure: h2 > span (title row) > span (the name, first
+    // child) + modality tag + default badge/toggle.
+    await expect(page.locator('.drawer.open h2 > span > span').first()).toHaveText(MODEL_ID)
     await expect(page.getByTestId('model-name-input')).toHaveValue('')
   })
 })
