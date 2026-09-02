@@ -215,7 +215,7 @@ class ProfileCatalog:
         agent slot asks for ``moe``. Without this the curated slots on a
         brand-new box would reference nothing.
 
-        The gate is load-bearing, not an optimisation: a legacy name the
+        The gate is load-bearing, not an optimisation: a demoted name the
         install has already settled and that is now missing from the catalog
         was DELETED, and re-materializing it would resurrect it on the next
         read — precisely the virtual-seed behaviour the demotion exists to
@@ -227,7 +227,7 @@ class ProfileCatalog:
         saber stack → moe), so the outcome depended on launch order.
 
         ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
-        a fresh install (adopt freely, once each), every legacy name after the
+        a fresh install (adopt freely, once each), every demoted name after the
         bulk demotion has run (adopt nothing — absence is a deletion), and
         growing by one on each adoption here.
 
@@ -330,9 +330,9 @@ class ProfileCatalog:
                     details={"slots": in_use_slots, "models": in_use_models},
                 )
             del catalog.profile[name]
-            # A deleted legacy name is settled whether or not it was ever
+            # A deleted demoted name is settled whether or not it was ever
             # adopted here — otherwise deleting one the operator had created
-            # themselves (under a legacy name, on a fresh install) would leave
+            # themselves (under a demoted name, on a fresh install) would leave
             # it eligible for adoption and the next resolve would hand back the
             # shipped definition in its place.
             from hal0.config.schema import LEGACY_SEED_PROFILES

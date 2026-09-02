@@ -782,10 +782,10 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
         # No file = fresh install: there is no pre-demotion catalog to rescue,
         # so mark the migration done. Leaving it False would arm it against the
         # FIRST file this install writes (a plain custom-profile save), which
-        # would then inherit all 8 legacy definitions on the next load.
+        # would then inherit all 8 demoted definitions on the next load.
         #
         # The adoption ledger starts EMPTY and explicitly so (not None): the
-        # bulk demotion is what does not apply here, while adopting a legacy
+        # bulk demotion is what does not apply here, while adopting a demoted
         # name on first reference very much does — the curated slots this
         # install ships still name three of them. An empty ledger is the whole
         # difference between "fresh, nothing referenced yet" and "demotion ran,
@@ -830,6 +830,11 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     return cfg
 
 
+# HAL0-SUNSET: v1.3.0 — one-shot upgrade path for installs whose profiles.toml
+# predates the catalog cut. Delete the bulk pass (and the ``legacy_seeds_migrated``
+# marker that gates it) once no supported upgrade can start from such a file; the
+# per-name adoption ledger and ``ProfileCatalog._materialize_legacy`` stay — those
+# are how a fresh install resolves the demoted names its shipped slots reference.
 def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
     """Inject the 8 pruned seeds once, as ordinary custom profiles.
 
@@ -841,12 +846,12 @@ def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
 
     ``legacy_seeds_migrated`` is what makes this once-only: without the marker
     every load would re-inject, so a delete would reappear on the next read.
-    An existing entry under a legacy name is an operator's own and is never
+    An existing entry under a demoted name is an operator's own and is never
     overwritten. Persisting is best-effort — a read-only /etc must serve the
     merged catalog in memory rather than fail the load (the migration simply
     re-runs next time), mirroring :func:`_sanitize_custom_profile_flags`.
 
-    This pass settles EVERY legacy name at once — the injected ones and the
+    This pass settles EVERY demoted name at once — the injected ones and the
     operator's own alike — so the adoption ledger records that an upgraded
     install has already made its decision about all of them. That is what
     keeps ``ProfileCatalog._materialize_legacy`` from re-adopting one here
@@ -866,7 +871,7 @@ def _demote_legacy_seeds(cfg: ProfilesConfig, target: Path) -> None:
         save_profiles_config(cfg, path=target)
     except OSError as exc:
         log.warning(
-            "could not persist demoted legacy profiles; serving merged catalog in-memory",
+            "could not persist demoted seed profiles; serving merged catalog in-memory",
             extra={"event": "profile.legacy_demote_write_failed", "error": str(exc)},
         )
         return

@@ -383,7 +383,7 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
         # profile tuned for hybrid-KV MoE models (f16 KV, no context shift).
         # "moe" is a DEMOTED definition now, not a seed — ProfileCatalog.resolve
         # serves it wherever the install still has it, which is why the guard
-        # below accepts the legacy set rather than seeds alone.
+        # below accepts the demoted set rather than seeds alone.
         seed_name = "moe"
 
     if seed_name not in SEED_PROFILES and seed_name not in LEGACY_SEED_PROFILES:
@@ -403,7 +403,7 @@ def _resolve_seed_or_fall_back(seed_name: str, warnings: list[str]) -> ResolvedP
 
     Membership in ``SEED_PROFILES``/``LEGACY_SEED_PROFILES`` is a STATIC fact
     about shipped data; whether the catalog can actually serve a name is a
-    runtime one, and since the demotion the two can disagree. A legacy name is
+    runtime one, and since the demotion the two can disagree. A demoted name is
     an ordinary custom profile now, so deleting it is a first-class operator
     action — and :meth:`ProfileCatalog.resolve` deliberately does not resurrect
     a deleted entry. The MoE upgrade above still asks for ``moe``, so without
