@@ -26,7 +26,28 @@ import {
 
 const { useEffect, useId, useRef, useState } = React
 
-export function RichSelect({ value, options, onChange, disabled, onOpenChange, 'data-testid': testId }) {
+/**
+ * @param {{
+ *   value: string|null,
+ *   options: Array<{id: string, disabled?: boolean, row?: unknown, desc?: unknown, right?: unknown}>,
+ *   onChange: (id: string) => void,
+ *   disabled?: boolean,
+ *   onOpenChange?: (open: boolean) => void,
+ *   className?: string,
+ *   'aria-label'?: string,
+ *   'data-testid'?: string,
+ * }} props
+ */
+export function RichSelect({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  onOpenChange,
+  className,
+  'aria-label': ariaLabel,
+  'data-testid': testId,
+}) {
   const generatedId = useId()
   const baseId = testId || generatedId
   const rootRef = useRef(null)
@@ -99,7 +120,7 @@ export function RichSelect({ value, options, onChange, disabled, onOpenChange, '
     <div className="rsel" ref={rootRef}>
       <button
         type="button"
-        className="rsel-trigger"
+        className={className ? `rsel-trigger ${className}` : 'rsel-trigger'}
         data-testid={testId}
         disabled={!!disabled}
         role="combobox"
@@ -107,6 +128,7 @@ export function RichSelect({ value, options, onChange, disabled, onOpenChange, '
         aria-expanded={state.open}
         aria-controls={`${baseId}-listbox`}
         aria-activedescendant={activeDescendantId(baseId, state)}
+        aria-label={ariaLabel}
         onClick={onTriggerClick}
         onKeyDown={onKeyDown}
       >

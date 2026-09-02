@@ -3472,6 +3472,12 @@ select.npu-sel {
   outline: none;
 }
 .rsel-trigger[disabled] { opacity: 0.45; cursor: not-allowed; }
+/* Field-error state, passed via RichSelect's `className` prop (Task 11
+   review fix) — same error tokens the plain `.input-err` inputs elsewhere
+   in the drawer use (border/err color), since `.input-err` itself carries
+   no rule of its own to reuse here. */
+.rsel-trigger.rsel-err { border-color: var(--err-line); }
+.rsel-trigger.rsel-err:focus-visible { box-shadow: 0 0 0 3px var(--err-soft); }
 .rsel-trigger-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
 .rsel-trigger-placeholder { color: var(--fg-4); }
 .rsel-trigger-caret { color: var(--fg-3); flex-shrink: 0; display: inline-flex; transition: transform 0.12s ease; }

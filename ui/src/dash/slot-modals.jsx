@@ -1875,7 +1875,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							data-testid="slot-pin-toggle"
 							title={
 								pinned
-									? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority under Advanced)"
+									? "Unpin slot — idle/pressure eviction applies again (order set by the priority under \"When it unloads\")"
 									: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-Load toggle."
 							}
 						>
@@ -2003,6 +2003,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												<div style={{ flex: 1, minWidth: 0 }}>
 													<RichSelect
 														data-testid="slot-model-swap"
+														aria-label={`Model for ${slot.name}`}
 														value={cur}
 														disabled={saving || !!pendingCrossDevice}
 														options={modelRichOptions({
@@ -2166,6 +2167,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-ctl">
 							<RichSelect
 								data-testid="slot-hw-runtime"
+								className={fieldErrs.device ? "rsel-err" : undefined}
 								value={runtimeValue}
 								disabled={false}
 								options={runtimeRichOptions({
@@ -3206,33 +3208,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	);
 }
 
-function ReadOnlyStrip({ k, v }) {
-	return (
-		<div
-			style={{
-				padding: "10px 12px",
-				borderRight: "1px solid var(--line-soft)",
-				background: "var(--bg)",
-			}}
-		>
-			<div
-				className="mono"
-				style={{
-					fontSize: 9,
-					color: "var(--fg-4)",
-					textTransform: "uppercase",
-					letterSpacing: "0.08em",
-					marginBottom: 3,
-				}}
-			>
-				{k}
-			</div>
-			<div className="mono" style={{ fontSize: 12, color: "var(--fg)" }}>
-				{v}
-			</div>
-		</div>
-	);
-}
+// (ReadOnlyStrip, the two fact-grid cells Task 11a's regroup replaced, is
+// gone — its last callers moved into the drawer header/title/Advanced in
+// that commit, leaving this with no callers at all.)
 
 // ─── Inline swap popover ────────────────────────────────────────
 function InlineSwapPopover({ slot, open, onClose, onPick }) {
