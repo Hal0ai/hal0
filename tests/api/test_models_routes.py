@@ -24,8 +24,9 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.api.routes import models as models_route
+from hal0.model_meta import derive_model_provider
 from hal0.registry.model import Model, _derive_ns
-from hal0.services.models_service import lazy_quant
+from hal0.services.models_service import lazy_quant, model_to_dict
 
 # ── _derive_ns ─────────────────────────────────────────────────────────────
 
@@ -146,6 +147,30 @@ def test_get_model_attaches_ns(inspect_client: TestClient, tmp_hal0_home: str) -
     inspect_client.post("/api/models", json={"id": "g1", "path": str(fpath)})
     row = inspect_client.get("/api/models/g1").json()
     assert row["ns"] == "pulled"
+
+
+# ── provider_effective (Task 6 of the slot/model drawer overhaul) ───────────
+
+
+def test_model_to_dict_provider_effective_explicit() -> None:
+    """A row with an explicit ``provider`` surfaces it verbatim as
+    ``provider_effective`` — no re-derivation runs when the field is set."""
+    m = Model(id="explicit-flm", path="/tmp/explicit-flm.gguf", provider="flm", backends=[])
+    assert model_to_dict(m)["provider_effective"] == "flm"
+
+
+def test_model_to_dict_provider_effective_derived() -> None:
+    """A row with ``provider=None`` derives ``provider_effective`` from its
+    stored ``backends`` tags via :func:`derive_model_provider` — same
+    resolution the catalog and create/scan paths already rely on."""
+    m = Model(
+        id="legacy-moonshine",
+        path="/tmp/legacy-moonshine.gguf",
+        provider=None,
+        backends=["moonshine"],
+    )
+    assert derive_model_provider(m.backends) == "moonshine"
+    assert model_to_dict(m)["provider_effective"] == "moonshine"
 
 
 def test_list_models_type_is_dispatcher_vocab_for_local_rows(

@@ -403,7 +403,15 @@ async def create_model(request: Request) -> dict[str, Any]:
     # permanently provider=None row. Derive only when provider is absent;
     # an explicit ``provider`` keeps flowing through screen_model_write's
     # validity check unchanged.
-    body.setdefault("provider", derive_model_provider(body.get("backends")))
+    #
+    # #2199: a body carrying the key with an explicit ``null``/blank string
+    # is the SAME "no provider supplied" intent as an omitted key —
+    # ``dict.setdefault`` alone is a no-op once the key is PRESENT (even
+    # with value ``None``), so normalize both shapes onto one derivation
+    # path instead of testing key-presence.
+    provider = body.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+        body["provider"] = derive_model_provider(body.get("backends"))
     # Screen launch-affecting fields at CREATE time too (UI-API-1 item 1): PUT
     # already screened, but create wrote straight to the registry, so a row
     # born with an extra_args that smuggles --port/--model/… would only fail at
@@ -729,7 +737,10 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     dropped silently before screening/update, logged as
     ``model.backends_write_ignored``. ``provider`` is the write path now —
     the stored tags keep existing as vestigial lane hints (a future column
-    removal), but never change via this endpoint again.
+    removal), but never change via this endpoint again. An explicit
+    ``{"provider": null}`` (or a blank string) re-derives from the stored
+    ``backends`` tags rather than persisting a permanent ``provider=None``
+    row — the same "no provider supplied" convergence create applies (#2199).
 
     ``defaults`` and ``capability_flags`` are the two tables where "any
     subset" reaches INSIDE the object (#1413): an absent sub-key keeps the
@@ -776,6 +787,18 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         before = registry.get(model_id).model_dump(mode="python")
     except Exception:
         before = {}
+
+    # #2199: an explicit null/blank ``provider`` in a PUT body carries the
+    # same "no provider supplied" intent as create's omitted-key case —
+    # converge it onto the same derive-from-backends path (mirrors the
+    # registration path's Task 3 rule) instead of persisting a permanent
+    # ``provider=None`` row. ``backends`` is retired as a PUT input (popped
+    # above), so the STORED row's tags are the only signal left to derive
+    # from.
+    if "provider" in body:
+        provider = body.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            body["provider"] = derive_model_provider(before.get("backends"))
 
     # Validate the launch-affecting fields (defaults.extra_args + the
     # vision↔mmproj pairing) at SAVE time (UI-API-1 items 1/2, #1393). Shared

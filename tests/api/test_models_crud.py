@@ -1142,3 +1142,36 @@ def test_update_model_provider_valid_and_invalid(
     bad = crud_client.put("/api/models/prov1", json={"provider": "whispercpp"})
     assert bad.status_code == 400, bad.text
     assert bad.json()["error"]["code"] == "model.provider_invalid"
+
+
+def test_put_explicit_null_provider_rederives_from_backends_2199(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """#2199: a PUT body carrying ``{"provider": null}`` must converge on the
+    same derive-from-backends path as an omitted key, not persist a
+    permanent ``provider=None`` row. Round-trip through an explicit override
+    first so the assertion can't pass by coincidence (the row already being
+    at the derived value)."""
+    fpath = crud_models_root / "null-provider.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "null-provider", "path": str(fpath), "backends": ["kokoro"]},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["provider"] == "kokoro"  # create-time derivation (Task 3)
+
+    # Override to a different explicit provider first.
+    r = crud_client.put("/api/models/null-provider", json={"provider": "llama-server"})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "llama-server"
+
+    # An explicit null re-derives from the stored backends tags — it must
+    # neither store None nor leave the prior override in place.
+    r = crud_client.put("/api/models/null-provider", json={"provider": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "kokoro"
+
+    row = crud_client.get("/api/models/null-provider").json()
+    assert row["provider"] == "kokoro"
