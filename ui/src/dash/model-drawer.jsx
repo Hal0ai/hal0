@@ -22,7 +22,6 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
-import { useQueryClient } from "@tanstack/react-query";
 import {
 	useModelUpdate,
 	useModelSetDefault,
@@ -45,7 +44,12 @@ import {
 	diffFlags,
 	tokenizeFlags,
 } from "@/dash/flags-tune.js";
-import { CAP_DEFS, overriddenCaps, remainingCaps } from "@/dash/cap-overrides";
+import {
+	CAP_DEFS,
+	overriddenCaps,
+	remainingCaps,
+	overrideSummary,
+} from "@/dash/cap-overrides";
 
 const {
 	useState: useStateMD,
@@ -108,8 +112,8 @@ function CapOverrideAdd({ remaining, onPick }) {
 				type="button"
 				className="btn ghost sm"
 				data-testid="model-cap-override-add"
-				aria-haspopup="menu"
 				aria-expanded={open}
+				aria-controls="model-cap-override-popover"
 				onClick={() => setOpen((o) => !o)}
 			>
 				+ Override…
@@ -117,8 +121,15 @@ function CapOverrideAdd({ remaining, onPick }) {
 			{open && (
 				<>
 					<div className="mdl-row-menu-backdrop" onClick={() => setOpen(false)} />
+					{/* Plain labelled popover, not a menu (#2198 review): the children
+					    are toggle buttons with per-cap on/off state, not a linear list
+					    of commands, and there is no arrow-key traversal to back a
+					    role="menu"/menuitem contract — a dishonest "menu" announcement
+					    with no keyboard support is worse than an honest group. */}
 					<div
-						role="menu"
+						id="model-cap-override-popover"
+						role="group"
+						aria-label="Add a capability override"
 						style={{
 							position: "absolute",
 							top: "calc(100% + 4px)",
@@ -157,6 +168,7 @@ function CapOverrideAdd({ remaining, onPick }) {
 											type="button"
 											className="mdl-chip"
 											data-testid={`model-cap-override-add-${def.id}-on`}
+											aria-label={`${def.label} on`}
 											onClick={() => {
 												onPick(def.id, true);
 												setOpen(false);
@@ -168,6 +180,7 @@ function CapOverrideAdd({ remaining, onPick }) {
 											type="button"
 											className="mdl-chip"
 											data-testid={`model-cap-override-add-${def.id}-off`}
+											aria-label={`${def.label} off`}
 											onClick={() => {
 												onPick(def.id, false);
 												setOpen(false);
@@ -233,11 +246,16 @@ function CapOverridesLedger({ flags, onSet, onClear }) {
 				<CapOverrideAdd remaining={remaining} onPick={onSet} />
 			</div>
 			{overridden.length > 0 && (
-				<div className="hint" style={{ marginTop: 6 }}>
-					{overridden
-						.map(({ id }) => CAP_DEFS.find((d) => d.id === id)?.consequence)
-						.filter(Boolean)
-						.join(" ")}
+				<div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+					{overridden.map(({ id, value }) => (
+						<div
+							key={id}
+							className="hint"
+							data-testid={`model-cap-override-summary-${id}`}
+						>
+							{overrideSummary(id, value)}
+						</div>
+					))}
 				</div>
 			)}
 		</div>
@@ -336,8 +354,10 @@ function FlagsEditor({ value, onChange, invalid }) {
 // a deliberate action, not a persistent field. Same profile list the old
 // select offered (fitProfiles — filtered to what fits this model); picking
 // one is the caller's job (onPick), same click-outside/Escape idiom as
-// CapOverrideAdd above.
-function SeedProfileButton({ options, onPick }) {
+// CapOverrideAdd above. `disabled` (Fix 5): a seed POST is in flight —
+// suppress opening the menu and picking another option so a double-click
+// can't fire a second POST while the first is still pending.
+function SeedProfileButton({ options, onPick, disabled = false }) {
 	const [open, setOpen] = useStateMD(false);
 	const wrapRef = useRefMD(null);
 	useEffectMD(() => {
@@ -361,19 +381,30 @@ function SeedProfileButton({ options, onPick }) {
 				type="button"
 				className="btn ghost sm"
 				data-testid="model-seed-profile-open"
-				aria-haspopup="menu"
 				aria-expanded={open}
-				disabled={!options.length}
-				title={options.length ? undefined : "no profiles fit this model"}
+				aria-controls="model-seed-profile-popover"
+				disabled={!options.length || disabled}
+				title={
+					!options.length
+						? "no profiles fit this model"
+						: disabled
+							? "seeding…"
+							: undefined
+				}
 				onClick={() => setOpen((o) => !o)}
 			>
 				⤵ Seed from profile…
 			</button>
-			{open && options.length > 0 && (
+			{open && !disabled && options.length > 0 && (
 				<>
 					<div className="mdl-row-menu-backdrop" onClick={() => setOpen(false)} />
+					{/* Same honest-roles call as CapOverrideAdd above: no arrow-key
+					    traversal backs this list, so it's a labelled popover of
+					    buttons, not a role="menu"/menuitem widget. */}
 					<div
-						role="menu"
+						id="model-seed-profile-popover"
+						role="group"
+						aria-label="Seed from profile"
 						style={{
 							position: "absolute",
 							top: "calc(100% + 4px)",
@@ -392,7 +423,6 @@ function SeedProfileButton({ options, onPick }) {
 							<button
 								key={p.name}
 								type="button"
-								role="menuitem"
 								className="mono"
 								data-testid={`model-seed-profile-option-${p.name}`}
 								style={{
@@ -640,7 +670,6 @@ function ModelDrawer({ open, onClose, model }) {
 	const update = useModelUpdate();
 	const setDefault = useModelSetDefault();
 	const seedProfile = useModelSeedProfile();
-	const qc = useQueryClient();
 	const templates = useChatTemplates(open);
 	const profilesQuery = useProfiles();
 	const enums = useMetaEnums();
@@ -828,7 +857,9 @@ function ModelDrawer({ open, onClose, model }) {
 	const doSeed = async (nextName) => {
 		try {
 			const res = await seedProfile.mutateAsync({ id: model.id, profile: nextName });
-			qc.invalidateQueries({ queryKey: ["models", model.id] });
+			// useModelSeedProfile's own onSuccess already invalidates ["models"]
+			// (useModelSeedProfile.ts), which prefix-matches ["models", model.id] —
+			// a second invalidate here was a no-op duplicate of the hook's job.
 			const newProfile = res?.defaults?.profile || "";
 			const newExtra = res?.defaults?.extra_args || "";
 			setProfile(newProfile);
@@ -854,18 +885,23 @@ function ModelDrawer({ open, onClose, model }) {
 					"ok",
 				);
 		} catch (e) {
+			// Deliberately no setConfirm(null) here: a failed seed leaves the
+			// confirm dialog open so the operator can retry the same POST
+			// (network blip, transient 5xx) without re-picking the profile from
+			// the menu. Only a successful seed (above) closes it.
 			window.__hal0Toast &&
 				window.__hal0Toast(`Seed failed — ${e?.message || "see logs"}`, "err");
 		}
 	};
 
 	const seedFromProfile = (nextName) => {
-		if (!nextName) return;
+		if (!nextName || seedProfile.isPending) return; // double-click / double-POST guard
 		const target = (profilesQuery.data || []).find((p) => p.name === nextName);
 		const targetFlags = target ? target.flags || "" : "";
 		const wouldClobber = extra.trim() && diffFlags(extra, targetFlags).diverged;
 		if (wouldClobber) {
 			setConfirm({
+				kind: "seed",
 				title: "Replace launch flags?",
 				message: `Seed from ${nextName}? Unsaved edits to the current flags are lost — this writes immediately.`,
 				confirmLabel: "Seed from profile",
@@ -1018,6 +1054,11 @@ function ModelDrawer({ open, onClose, model }) {
 	const runsOnLanes = (Array.isArray(model.runs_on) ? model.runs_on : []).map(
 		(id) => ({ id, label: deviceById(id, enums)?.label || id }),
 	);
+	// Distinguish "the row never carried this key" (older/legacy rows, or a
+	// mock fixture that predates runs_on_for_model) from "the server computed
+	// it and there really is nothing compatible" — those are different facts
+	// and read very differently in the empty state below.
+	const runsOnReported = model.runs_on !== undefined;
 
 	// Context size (model's OWN limit — distinct from a slot's Context
 	// ceiling, which is hardware). registry/model.py `Model.metadata` reserves
@@ -1189,7 +1230,11 @@ function ModelDrawer({ open, onClose, model }) {
 							launch flags · tune remainder · exactly what launches
 						</span>
 						<span style={{ flex: 1 }} />
-						<SeedProfileButton options={fitProfiles} onPick={seedFromProfile} />
+						<SeedProfileButton
+							options={fitProfiles}
+							onPick={seedFromProfile}
+							disabled={seedProfile.isPending}
+						/>
 					</div>
 					<div style={{ padding: 14, background: "var(--bg-sunken)" }}>
 						<FlagsEditor
@@ -1479,7 +1524,11 @@ function ModelDrawer({ open, onClose, model }) {
 								</span>
 							))
 						) : (
-							<span className="hint">no compatible runner lanes detected</span>
+							<span className="hint">
+								{runsOnReported
+									? "no compatible runner lanes detected"
+									: "not reported"}
+							</span>
 						)}
 					</div>
 				</div>
@@ -1560,7 +1609,16 @@ function ModelDrawer({ open, onClose, model }) {
 					onConfirm={confirm.onConfirm}
 					title={confirm.title}
 					message={confirm.message}
-					confirmLabel={confirm.confirmLabel}
+					// Seeding is a real POST — block a second click firing a second
+					// one while the first is in flight. Only the seed confirm carries
+					// `kind: "seed"`; other confirms (e.g. the local, network-free
+					// "Reset to profile") aren't gated on this mutation.
+					confirmLabel={
+						confirm.kind === "seed" && seedProfile.isPending
+							? "Seeding…"
+							: confirm.confirmLabel
+					}
+					confirmDisabled={confirm.kind === "seed" && seedProfile.isPending}
 				/>
 			)}
 		</>

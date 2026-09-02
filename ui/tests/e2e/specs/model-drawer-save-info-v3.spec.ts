@@ -14,9 +14,11 @@
  * (`model-seed-profile-open` → `model-seed-profile-option-{name}`), which
  * POSTs /api/models/{id}/seed-profile instead of copying flags client-side.
  *
- * TODO(#2198): the seed-profile server route lands with #2198 (not merged as
- * of this branch) — mocked below per useModelSeedProfile.ts's documented
- * contract. Drop the mock once #2198 merges.
+ * The seed-profile server route shipped in #2198 (e31a451b, merged to main)
+ * — mockSeedProfile below stays regardless, because this whole harness is
+ * mock-driven (apiMock.ts: page.route stubs, Phase A/HAL0_DATA-seeded), the
+ * same reason mockDrawerLookups mocks /api/profiles and /api/chat-templates
+ * despite both existing server-side too.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -82,7 +84,8 @@ async function mockDrawerLookups(page: import('@playwright/test').Page) {
   )
 }
 
-/** TODO(#2198): stand-in for the not-yet-merged seed-profile route. */
+/** Route is live on main (#2198, e31a451b) — mocked because this harness is
+ * mock-driven, not because the server doesn't have it. */
 async function mockSeedProfile(page: import('@playwright/test').Page) {
   const requests: any[] = []
   await page.route(`**/api/models/${MODEL_ID}/seed-profile`, async (route) => {

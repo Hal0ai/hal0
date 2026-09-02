@@ -49,6 +49,24 @@ export interface ApiModelRaw {
    * marker — at most one holder per type, enforced server-side). Drives the
    * Models list / drawer "default" badge + the Set/Remove-default affordance. */
   default?: boolean
+  /** Engine identity write path (registry Model.provider —
+   * hal0.model_meta.derive_model_provider): llama-server | flm | kokoro |
+   * qwen3tts | moonshine | comfyui, or null/absent to derive server-side
+   * from the stored backend tags. */
+  provider?: string | null
+  /** Host-backend lanes this model can run under — derived, read-only
+   * (services/models_service.py:model_to_dict via
+   * capabilities.catalog.runs_on_for_model): gpu-rocm | gpu-vulkan | cpu |
+   * npu, the same vocabulary as MetaEnums.devices. Absent on rows from a
+   * backend/fixture that predates this field; an empty array means the
+   * server computed it and found nothing compatible — these read
+   * differently in the drawer's "Runs on" empty state. */
+  runs_on?: string[]
+  /** Provider-specific/user-defined extra metadata (registry
+   * Model.metadata, a free-form dict). Reserved key `context_length` (GGUF
+   * arch max / curated catalogue int) seeds the drawer's context-size
+   * placeholder. */
+  metadata?: { context_length?: number | null; [k: string]: unknown } | null
   // ── Legacy HAL0_DATA mock shape (data.jsx fixtures / mock.ts 404
   // fallback). Real /api/models rows never carry these; the normalizer
   // tolerates them so mock mode keeps working through the same code path.

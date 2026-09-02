@@ -4,7 +4,7 @@
  * Exercises the core "the model is the launchable thing" flow:
  *   1. STAMP — picking a profile from the "⤵ Seed from profile…" menu POSTs
  *      /api/models/{id}/seed-profile (Task 7's useModelSeedProfile hook,
- *      server route on PR #2198 — not merged, not on this branch); the
+ *      server route shipped in #2198 / e31a451b, merged to main); the
  *      response's `defaults.profile` / `defaults.extra_args` are spliced into
  *      the flags editor + provenance chip. Option A drawer (Task 8, PR-3)
  *      retired the old always-visible `model-template-select`, which copied
@@ -17,11 +17,13 @@
  * /api/profiles is networkFirst in the mock harness, so page.route wins; the
  * drawer auto-targets the first installed model (qwen3.6-27b-mtp).
  *
- * TODO(#2198): mockSeedProfile below stands in for the not-yet-merged server
- * route. Its response shape follows useModelSeedProfile.ts's documented
- * contract (POST {profile} → updated model dict, `defaults.profile` +
- * `defaults.extra_args` set to the profile's flags). Drop the mock once
- * #2198 merges and the harness's real backend serves the route.
+ * The seed-profile server route shipped in #2198 (e31a451b, merged to main)
+ * — mockSeedProfile below stays regardless, because this whole harness is
+ * mock-driven (apiMock.ts: page.route stubs, Phase A/HAL0_DATA-seeded), the
+ * same reason mockProfiles/mockChatTemplates mock routes that exist
+ * server-side too. Its response shape follows useModelSeedProfile.ts's
+ * documented contract (POST {profile} → updated model dict,
+ * `defaults.profile` + `defaults.extra_args` set to the profile's flags).
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -57,7 +59,8 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
   )
 }
 
-/** TODO(#2198): stand-in for the not-yet-merged seed-profile route. */
+/** Route is live on main (#2198, e31a451b) — mocked because this harness is
+ * mock-driven, not because the server doesn't have it. */
 async function mockSeedProfile(page: import('@playwright/test').Page) {
   const requests: any[] = []
   await page.route(`**/api/models/${MODEL_ID}/seed-profile`, async (route) => {

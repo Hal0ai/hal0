@@ -8,7 +8,12 @@
 //
 // Wording is exact per the drawer mockup's panel 06 — do not reflow it.
 
-export type FeasibilityVerdict = 'fits' | 'tight' | 'exceeds' | 'exceeds_total' | 'unknown'
+// Single source of truth is the API hook (useModelsFeasibility.ts) — this
+// file used to redefine the same four-verdict union independently, which
+// left two copies to keep in sync by hand. `import type` keeps this a
+// type-only dependency with zero runtime import.
+import type { FeasibilityVerdict } from '../api/hooks/useModelsFeasibility'
+export type { FeasibilityVerdict }
 
 export interface FeasibilityRow {
   verdict: FeasibilityVerdict | string

@@ -258,9 +258,11 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, he
 // Exported for real ESM consumers (P3-ui split, settings/ pages) in addition
 // to the window-globals publish below, which the not-yet-migrated dash/*.jsx
 // files still rely on.
-export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null, footerNote = null }) {
+export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false, typeToConfirm = null, footerNote = null, confirmDisabled = false }) {
   const [typed, setTyped] = useStateP("");
   useEffectP(() => { if (open) setTyped(""); }, [open]);
+  // confirmDisabled: caller-driven gate (e.g. a mutation already in flight)
+  // on top of the typeToConfirm text match — either can block Confirm.
   const canConfirm = !typeToConfirm || typed === typeToConfirm;
   return (
     <Modal
@@ -277,7 +279,7 @@ export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confi
             <button
               className={"btn sm" + (destructive ? " danger" : "")}
               onClick={onConfirm}
-              disabled={!canConfirm}
+              disabled={!canConfirm || confirmDisabled}
               style={destructive ? {background: "var(--err)", borderColor: "var(--err)", color: "#0a0a0a"} : {}}
             >{confirmLabel}</button>
           </span>

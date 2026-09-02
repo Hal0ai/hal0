@@ -14,11 +14,13 @@
  * only ever touched local form state (`sourceProfile.flags`), never the
  * network.
  *
- * TODO(#2198): the seed-profile server route lands with #2198 (not merged as
- * of this branch). Mocked here per the wire contract useModelSeedProfile.ts
- * documents (POST body {profile} → the updated model dict, {defaults:
- * {profile, extra_args}}) — unmock (drop mockSeedProfile) once #2198 merges
- * and the mock harness's real backend serves the route.
+ * The seed-profile server route shipped in #2198 (e31a451b, merged to main)
+ * — it's live, not a stand-in for missing server support. mockSeedProfile
+ * below stays because this whole harness is mock-driven (apiMock.ts:
+ * page.route stubs, Phase A/HAL0_DATA-seeded), the same reason
+ * mockProfiles/mockChatTemplates exist alongside a real /api/profiles and
+ * /api/chat-templates: it keeps the spec's request/response shapes pinned
+ * and independent of whatever a live backend happens to return.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -54,7 +56,8 @@ function mockChatTemplates(page: import('@playwright/test').Page) {
   )
 }
 
-/** TODO(#2198): stand-in for the not-yet-merged seed-profile route. */
+/** Route is live on main (#2198, e31a451b) — mocked because this harness is
+ * mock-driven, not because the server doesn't have it. */
 async function mockSeedProfile(page: import('@playwright/test').Page) {
   const requests: any[] = []
   await page.route(`**/api/models/${MODEL_ID}/seed-profile`, async (route) => {

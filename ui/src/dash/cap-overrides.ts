@@ -82,3 +82,30 @@ export function remainingCaps(flags: CapFlags): CapDef[] {
     return v === null || v === undefined
   })
 }
+
+/** Value-specific one-line summary for a single overridden chip (panel-07
+ * style — see docs/.devdocs/2026-09-01-slot-model-drawer-mockups.html panel
+ * 07's "Vision forced off — skips the mmproj projector, saves ~0.9 GB VRAM"
+ * hint). Replaces the ledger's old resting hint, which permanently joined
+ * every overridden cap's generic Auto/On/Off consequence text regardless of
+ * which value was actually picked — a chip reading "off" got the same
+ * blurb as one reading "on". Only the choice that changes host behavior in
+ * a way worth calling out earns elaboration; forcing something on is
+ * otherwise just the plain fact. */
+export function overrideSummary(id: CapId, value: boolean): string {
+  const def = CAP_DEFS.find((d) => d.id === id)
+  const label = def ? def.label : id
+  if (value) return `${label} forced on.`
+  switch (id) {
+    case 'thinking':
+      return 'Thinking forced off — reasoning steps stay hidden.'
+    case 'mtp':
+      return 'MTP forced off — speculative decoding never runs, even if the runtime would otherwise enable it.'
+    case 'jinja':
+      return 'Jinja forced off — chat-template rendering never uses jinja.'
+    case 'vision':
+      return 'Vision forced off — skips the mmproj projector, saves ~0.9 GB VRAM.'
+    default:
+      return `${label} forced off.`
+  }
+}
