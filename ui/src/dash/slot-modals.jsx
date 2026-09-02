@@ -1628,40 +1628,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								</span>
 							</span>
 						</span>
-						{/* Lifecycle pair (spec 2026-08-02 consolidation): Auto-Load =
-						    boot start only, Pin = residency only. Side by side so they
-						    read as one story instead of competing features. NPU trio
-						    shadows (flm-stt / flm-embed) have no unit or container of
-						    their own — the anchor's FLM process serves them — so
-						    Auto-Load is hidden there: writing { autoload } to a shadow
-						    TOML configures a boot start that can never happen.
-						    (Task 11b moves this pill down into the "When it unloads"
-						    row — kept here unchanged for the 11a regroup commit.) */}
-						{!isNpuShadow && (
-							<label
-								className="slot-enable-toggle drawer-enable"
-								data-testid="slot-autoload-toggle"
-								title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
-							>
-								<span className="drawer-enable-label mono">Auto-Load</span>
-								<input
-									type="checkbox"
-									checked={autoload}
-									onChange={() => onToggleAutoload(!autoload)}
-									aria-label={
-										autoload
-											? "Disable auto-load on start"
-											: "Enable auto-load on start"
-									}
-									aria-describedby={autoloadDescId}
-								/>
-								<span className="slot-enable-track" aria-hidden="true" />
-								<span id={autoloadDescId} className="sr-only">
-									Start this slot automatically at boot. Only controls
-									startup; eviction protection is the Pin toggle.
-								</span>
-							</label>
-						)}
+						{/* Task 11b: Auto-Load moves out of the header into the "When it
+						    unloads" lifecycle row below, next to Eviction priority — the
+						    two read as one "how this slot comes and goes" story there.
+						    Pin stays here: it's a mode of the whole slot (residency),
+						    not a lifecycle knob that trades off against priority. */}
 						<label
 							className="slot-enable-toggle drawer-enable"
 							data-testid="slot-pin-toggle"
@@ -2097,6 +2068,106 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						</div>
 					)}
 				</FieldGroup>
+
+				{/* Task 11b: lifecycle gets its own section — one row, "Unloading":
+				    Auto-Load pill (moved down from the header) + a compact
+				    Eviction-priority input (moved up from Advanced), same handlers
+				    as before. Pinning greys ONLY the priority input — priority has
+				    no effect while pinned, but Auto-Load still controls whether the
+				    slot starts at boot, pinned or not, so it stays live. Hidden
+				    entirely for NPU trio shadows: they have no unit/container of
+				    their own to start or evict (the anchor's FLM process owns
+				    lifecycle for all three). */}
+				{!isNpuShadow && (
+					<FieldGroup label="When it unloads" hint="lifecycle">
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Unloading</span>
+								<FieldInfoIcon description="Auto-Load starts this slot at boot. Eviction priority
+									(0-100, lower unloads first) only matters while unpinned —
+									pin the slot to exempt it from idle/pressure eviction
+									entirely." />
+							</div>
+							<div className="form-ctl">
+								<div
+									style={{
+										display: "flex",
+										gap: 14,
+										alignItems: "center",
+										flexWrap: "wrap",
+									}}
+								>
+									<label
+										className="slot-enable-toggle drawer-enable"
+										data-testid="slot-autoload-toggle"
+										title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
+									>
+										<span className="drawer-enable-label mono">Auto-Load</span>
+										<input
+											type="checkbox"
+											checked={autoload}
+											onChange={() => onToggleAutoload(!autoload)}
+											aria-label={
+												autoload
+													? "Disable auto-load on start"
+													: "Enable auto-load on start"
+											}
+											aria-describedby={autoloadDescId}
+										/>
+										<span className="slot-enable-track" aria-hidden="true" />
+										<span id={autoloadDescId} className="sr-only">
+											Start this slot automatically at boot. Only controls
+											startup; eviction protection is the Pin toggle.
+										</span>
+									</label>
+									<span
+										style={{
+											display: "inline-flex",
+											gap: 8,
+											alignItems: "center",
+											opacity: pinned ? 0.45 : 1,
+										}}
+									>
+										<span
+											className="mono"
+											style={{ fontSize: 12, color: "var(--fg-3)" }}
+										>
+											priority
+										</span>
+										<input
+											className="input mono"
+											data-testid="slot-priority-input"
+											type="number"
+											min={0}
+											max={100}
+											step={1}
+											value={prio}
+											disabled={pinned}
+											onChange={(e) => setPrio(e.target.value)}
+											onBlur={commitPriority}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") e.currentTarget.blur();
+											}}
+											style={{ width: 64 }}
+										/>
+									</span>
+								</div>
+								{pinned ? (
+									<div className="hint">
+										📌 Pinned — never evicted; priority has no effect while
+										pinned.
+									</div>
+								) : (
+									<div className="hint">
+										lower priority unloads first · ties go to least recently
+										used
+									</div>
+								)}
+							</div>
+						</div>
+					</FieldGroup>
+				)}
+
 				{/* NPU trio SHADOW (flm-stt / flm-embed): its own [npu] table is
 				    inert — the anchor's FLM process owns all three modalities, so
 				    editing toggles here wrote config the launcher never reads and
@@ -2585,40 +2656,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							);
 						})()}
 
-						{/* Eviction priority (spec 2026-08-02) lives under Advanced for
-						    this commit: its lifecycle siblings (Auto-Load / Pin) are
-						    header toggles, and it only matters for unpinned slots under
-						    memory pressure. Hidden for NPU trio shadows — no process of
-						    their own to evict. (Task 11b moves this row out into "When
-						    it unloads".) */}
-						{!isNpuShadow && (
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Eviction priority</span>
-								<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
-									Ties go to the least recently used. Pin the slot to exempt
-									it entirely." />
-							</div>
-							<div className="form-ctl">
-								<input
-									className="input mono"
-									data-testid="slot-priority-input"
-									type="number"
-									min={0}
-									max={100}
-									step={1}
-									value={prio}
-									onChange={(e) => setPrio(e.target.value)}
-									onBlur={commitPriority}
-									onKeyDown={(e) => {
-										if (e.key === "Enter") e.currentTarget.blur();
-									}}
-									style={{ width: 90 }}
-								/>
-								<div className="hint">lower unloads first</div>
-							</div>
-						</div>
-						)}
+						{/* Task 11b: Eviction priority moved out to the "When it
+						    unloads" lifecycle row (with Auto-Load) — Advanced no
+						    longer carries any lifecycle controls, only hardware/image
+						    facts and the resolved-command debug view. */}
 
 						{/* Flags preview — backend-provided resolved_command (real podman argv),
           computed SERVER-SIDE (profile + MTP + image resolution). #1379 removed
