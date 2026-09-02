@@ -27,6 +27,7 @@ from hal0.config import paths
 from hal0.db import repository
 from hal0.db.connection import connect, tx
 from hal0.db.migrate import migrate
+from hal0.model_meta import derive_model_provider
 from hal0.registry.model import Model
 
 log = logging.getLogger(__name__)
@@ -69,7 +70,16 @@ def _load_toml_models(registry_file: Path) -> tuple[dict[str, Model], int]:
                 skipped_invalid += 1
                 continue
             try:
-                out[mid] = Model.model_validate({**entry, "id": mid})
+                # Task 3: a legacy entry may only ever have carried
+                # ``backends`` tags — ``provider`` is the write-path source
+                # of truth now, so backfill it here rather than leaving a
+                # freshly-imported row to fall back on lazy derivation.
+                # ``setdefault`` never overrides an entry's own explicit
+                # ``provider`` (post-Task-1 registry.toml writes may already
+                # carry one).
+                payload = {**entry, "id": mid}
+                payload.setdefault("provider", derive_model_provider(payload.get("backends")))
+                out[mid] = Model.model_validate(payload)
             except Exception as exc:
                 log.warning("import_toml: entry %r failed validation: %s", mid, exc)
                 skipped_invalid += 1

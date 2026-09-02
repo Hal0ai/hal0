@@ -36,6 +36,7 @@ from hal0.config.schema import (
     StackSlotEntry,
 )
 from hal0.errors import BadRequest
+from hal0.model_meta import derive_model_provider
 from hal0.registry.curated import get_curated
 from hal0.registry.store import ModelRegistry
 
@@ -96,6 +97,10 @@ def embed_references(
                 size_bytes=m.size_bytes,
                 capabilities=list(m.capabilities),
                 backends=list(m.backends),
+                # Task 3: legacy backends is a vestigial lane hint now —
+                # embed the row's explicit provider verbatim, or derive it
+                # from those same backends when the row never got one.
+                provider=m.provider or derive_model_provider(m.backends),
                 mmproj="present" if m.mmproj else None,
             )
         else:

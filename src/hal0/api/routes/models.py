@@ -599,19 +599,24 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
-    Body accepts any subset of: ``name``, ``capabilities``, ``backends``,
-    ``provider``, ``defaults`` (nested ``ModelDefaults``), plus the legacy
-    fields (``license``, ``tags``, ``metadata`` …). Emits ``model.updated``
-    with ``changed_fields`` so the footer ticker can render a "you edited X"
-    chip.
+    Body accepts any subset of: ``name``, ``capabilities``, ``provider``,
+    ``defaults`` (nested ``ModelDefaults``), plus the legacy fields
+    (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
+    ``changed_fields`` so the footer ticker can render a "you edited X" chip.
+
+    ``backends`` is retired as an editable/authoritative surface (Task 3 of
+    the slot/model drawer overhaul): a client-sent ``backends`` key is
+    dropped silently before screening/update, logged as
+    ``model.backends_write_ignored``. ``provider`` is the write path now —
+    the stored tags keep existing as vestigial lane hints (a future column
+    removal), but never change via this endpoint again.
 
     ``defaults`` and ``capability_flags`` are the two tables where "any
     subset" reaches INSIDE the object (#1413): an absent sub-key keeps the
     stored value, an explicit ``null`` clears that one value, and
     ``{"defaults": null}`` drops the whole table. Every other field —
-    including ``metadata`` and the list-valued ``capabilities``/``tags``/
-    ``backends`` — is a flat replace. See
-    :func:`hal0.registry.store.merge_update`.
+    including ``metadata`` and the list-valued ``capabilities``/``tags`` —
+    is a flat replace. See :func:`hal0.registry.store.merge_update`.
 
     Errors:
       * ``400 model.defaults_invalid`` — a ``defaults`` value that isn't
@@ -631,6 +636,17 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+
+    # Task 3: ``backends`` is retired as an editable/authoritative surface —
+    # ``provider`` (screened below) is the write path now. A client-sent
+    # ``backends`` is dropped silently (not rejected) rather than erroring,
+    # since older dashboards/scripts may still send the field out of habit.
+    if "backends" in body:
+        log.info(
+            "model.backends_write_ignored",
+            extra={"model_id": model_id, "backends": body.get("backends")},
+        )
+        body.pop("backends", None)
 
     # Snapshot the pre-update model FIRST — it feeds two consumers: the
     # changed-fields diff below, and the write screen, which needs the stored row

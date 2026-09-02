@@ -1595,7 +1595,20 @@ class StackModelMeta(BaseModel):
         default_factory=list, description="Capability strings, e.g. ['chat','vision']."
     )
     backends: list[str] = Field(
-        default_factory=list, description="Runnable backends, e.g. ['rocm','vulkan']."
+        default_factory=list,
+        description=(
+            "Runnable backends, e.g. ['rocm','vulkan'] — vestigial lane hints kept for "
+            "transport; ``provider`` is the engine-identity source of truth (Task 3)."
+        ),
+    )
+    provider: str | None = Field(
+        default=None,
+        description=(
+            "Engine identity (a hal0.model_meta.RUNTIME_FAMILIES member), embedded "
+            "verbatim from the source row's explicit provider, or derived from "
+            "``backends`` via hal0.model_meta.derive_model_provider when the row had "
+            "none set. None only for a bare-id unresolvable ref."
+        ),
     )
     mmproj: str | None = Field(
         default=None,

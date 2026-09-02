@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.model_meta import classify
+from hal0.model_meta import classify, derive_model_provider
 from hal0.registry.detect import DetectionResult, detect, detected_architecture
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
@@ -348,11 +348,13 @@ async def commit_scan_rows(
     """Persist user-edited preview rows into the registry.
 
     Each row is a dict with at least ``path``. Optional fields override
-    detection: ``id``, ``name``, ``backends``, ``capabilities``,
+    detection: ``id``, ``name``, ``backends``, ``capabilities``, ``provider``,
     ``defaults`` (nested ``ModelDefaults`` shape). Missing fields are
     backfilled by re-running ``detect()`` on the path so the operator can
     edit only what matters and still get high-confidence defaults for the
-    rest.
+    rest. ``provider`` defaults to ``derive_model_provider(backends)`` when
+    not given, so a freshly-committed row always carries an explicit
+    provider (Task 3) instead of leaving it for lazy derivation.
     """
     from hal0.registry.model import Model, ModelDefaults
     from hal0.registry.store import ModelAlreadyExists
@@ -383,6 +385,13 @@ async def commit_scan_rows(
             backends = list(detection.suggested_backends)
         if not isinstance(capabilities, list):
             capabilities = list(detection.suggested_capabilities)
+        # Task 3: an operator-edited ``provider`` override always wins (same
+        # "explicit input wins" rule as backends/capabilities above);
+        # otherwise derive it from whichever backends this row actually
+        # landed on, so a NEW row never persists with provider=None.
+        provider = row.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            provider = derive_model_provider(backends)
 
         suggested_id = row.get("id") or suggest_id_from_path(resolved)
         name = row.get("name") or resolved.stem
@@ -413,6 +422,7 @@ async def commit_scan_rows(
                 quant=detection.quant,
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
+                provider=provider,
                 defaults=defaults_obj,
                 metadata=metadata,
                 # GGUF general.architecture from the header read detect()
@@ -824,6 +834,13 @@ async def list_all(
                 dumped["backends"] = _bes
             if _cat is not None:
                 dumped["comfyui_category"] = _cat
+            # Task 3: seed ``provider`` alongside the self-healed tag — a row
+            # with no explicit provider (the pre-Task-1 pull shape this
+            # heuristic exists for) must not keep reading as
+            # provider=None/llama-server just because this repair patches
+            # the response dict rather than the persisted row.
+            if not dumped.get("provider"):
+                dumped["provider"] = derive_model_provider(_bes)
         data.append(dumped)
         seen.add(entry.id)
         by_id[entry.id] = dumped
@@ -1131,6 +1148,9 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             quant=detection.quant,
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
+            # Task 3: stamp provider alongside the detected backends on this
+            # NEW row — see commit_scan_rows' matching stamp.
+            provider=derive_model_provider(detection.suggested_backends),
             metadata=metadata,
             # GGUF general.architecture from the header read above — see
             # commit_scan_rows' matching stamp (model↔runner arch fit-check,

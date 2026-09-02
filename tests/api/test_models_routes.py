@@ -860,6 +860,48 @@ def test_update_model_rejects_managed_args_in_extra_args(
     assert ok.status_code == 200, ok.text
 
 
+def test_update_model_ignores_backends_writes(
+    inspect_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Task 3: ``backends`` is retired as an editable/authoritative surface —
+    a PUT that sends ``backends`` is silently ignored (not rejected), leaving
+    the stored tags untouched. ``provider`` is the write surface now."""
+    fp = Path(tmp_hal0_home) / "tagged.gguf"
+    fp.write_bytes(b"\x00" * 8)
+    inspect_client.post(
+        "/api/models", json={"id": "tagged", "path": str(fp), "backends": ["vulkan"]}
+    )
+    before = inspect_client.get("/api/models/tagged").json()["backends"]
+
+    r = inspect_client.put("/api/models/tagged", json={"backends": ["comfyui"]})
+    assert r.status_code == 200, r.text
+
+    after = inspect_client.get("/api/models/tagged").json()["backends"]
+    assert after == before  # tag writes are dead
+
+
+def test_list_models_self_heals_provider_for_mistagged_comfyui_row(
+    inspect_client: TestClient,
+) -> None:
+    """The ComfyUI path-derived repair heuristic (models_service.list_all)
+    self-heals ``backends`` for a row an older pull mis-tagged — Task 3 also
+    stamps ``provider`` alongside that self-heal, not just the tag."""
+    inspect_client.post(
+        "/api/models",
+        json={
+            "id": "old-sdxl",
+            "path": "/var/lib/hal0/comfyui/models/checkpoints/sdxl.safetensors",
+            "capabilities": ["chat"],
+            "backends": [],
+        },
+    )
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    row = rows["old-sdxl"]
+    assert row["owned_by"] == "comfyui"
+    assert "comfyui" in row["backends"]
+    assert row["provider"] == "comfyui"
+
+
 # ── O10 guard: screen_extra_args_json (pure) ──────────────────────────────────
 
 

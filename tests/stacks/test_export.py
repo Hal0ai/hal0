@@ -94,6 +94,33 @@ class TestEmbedReferences:
         assert "custom-moe" in out.profiles
         assert out.profiles["custom-moe"].quant == "FP4"
 
+    def test_embeds_derived_provider_from_backends(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """Task 3: an exported model with no explicit ``provider`` carries
+        one derived from its legacy backends tag — ``rocm`` is a hardware
+        lane, not an engine, so it derives to the ``llama-server`` default."""
+        out = embed_references(_stack(), registry=reg)
+        assert out.models["ace-saber"].provider == "llama-server"
+
+    def test_embeds_respects_explicit_provider(self, tmp_path: Path) -> None:
+        """A registry row that already carries an explicit ``provider``
+        embeds that value verbatim — never re-derived from backends."""
+        r = ModelRegistry(registry_dir=tmp_path / "registry-explicit")
+        r.add(
+            Model(
+                id="kokoro-voice",
+                path="/models/kokoro.gguf",
+                backends=["kokoro"],
+                provider="kokoro",
+            )
+        )
+        stack = StackConfig(
+            name="Voice", slots=[StackSlotEntry(slot="tts", model="kokoro-voice")]
+        )
+        out = embed_references(stack, registry=r)
+        assert out.models["kokoro-voice"].provider == "kokoro"
+
     def test_stamps_hal0_version(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         from hal0 import __version__
 

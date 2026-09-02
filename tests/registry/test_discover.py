@@ -199,6 +199,10 @@ def test_register_candidate_curated_uses_curated_id(
     assert model.id == "qwen3-4b"
     assert "Qwen3" in model.name
     assert model.hf_repo  # populated from the curated entry
+    # Task 3: a NEW row's provider is stamped alongside backends — a
+    # non-comfyui curated match carries no backend tags, so this derives to
+    # the llama-server default rather than being left None.
+    assert model.provider == "llama-server"
 
 
 def test_register_candidate_non_curated_uses_suggested_id(
@@ -213,6 +217,7 @@ def test_register_candidate_non_curated_uses_suggested_id(
     model = register_candidate(registry, embed)
     assert model.id == "nomic-embed-text-v1"
     assert "embed" in model.capabilities
+    assert model.provider == "llama-server"
 
 
 def test_register_candidate_comfyui_checkpoint_tagged_image(
@@ -229,6 +234,8 @@ def test_register_candidate_comfyui_checkpoint_tagged_image(
     model = register_candidate(registry, cand)
     assert model.capabilities == ["image"]
     assert model.backends == ["comfyui"]
+    # Task 3: provider stamped alongside the comfyui backend tag.
+    assert model.provider == "comfyui"
 
 
 def test_scan_and_register_idempotent(model_root: Path, registry: ModelRegistry) -> None:

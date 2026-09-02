@@ -75,6 +75,26 @@ def test_add_from_path_registers_gguf(
     assert body["id"] in ids
 
 
+def test_add_from_path_stamps_provider_alongside_detected_backends(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """Task 3: a fresh add-from-path row gets ``provider`` derived from
+    detect()'s ``suggested_backends`` stamped on the row, not left ``None``
+    for lazy derivation. A "kokoro" filename hint detects a kokoro backend."""
+    client, drop = add_path_client
+    target = drop / "kokoro-en-v1.gguf"
+    target.write_bytes(b"\x00" * 32)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["backends"] == ["kokoro"]
+    assert body["provider"] == "kokoro"
+
+    row = client.get(f"/api/models/{body['id']}").json()
+    assert row["provider"] == "kokoro"
+
+
 def test_add_from_path_persists_detected_architecture(
     add_path_client: tuple[TestClient, Path],
 ) -> None:

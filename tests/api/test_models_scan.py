@@ -72,3 +72,24 @@ def test_scan_idempotent(
     assert "qwen3-4b" in first["added"]
     second = client.post("/api/models/scan").json()
     assert second["added"] == []
+
+
+def test_commit_rows_stamps_provider_alongside_backends(tmp_hal0_home: str) -> None:
+    """Task 3: committing a preview row (POST /api/models/scan {"rows": [...]})
+    stamps ``provider`` on the new registry row alongside the operator-edited
+    (or detection-derived) ``backends`` tag — not left ``None``."""
+    fp = Path(tmp_hal0_home) / "kokoro-voice.gguf"
+    fp.write_bytes(b"\x00" * 8)
+
+    app: FastAPI = create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/models/scan",
+            json={"rows": [{"path": str(fp), "id": "kokoro-voice", "backends": ["kokoro"]}]},
+        )
+        assert r.status_code == 200, r.text
+        assert "kokoro-voice" in r.json()["added"]
+
+        row = client.get("/api/models/kokoro-voice").json()
+        assert row["provider"] == "kokoro"
+        assert row["backends"] == ["kokoro"]

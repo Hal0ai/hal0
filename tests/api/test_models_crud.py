@@ -256,6 +256,10 @@ def test_update_accepts_new_editable_fields_and_emits(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
+    """Task 3: ``backends`` is retired from the PUT write path — sent
+    alongside real editable fields, it is silently ignored (not rejected,
+    not applied) while ``name``/``capabilities``/``defaults`` still save and
+    still surface in ``changed_fields``."""
     fpath = crud_models_root / "upd.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "upd", "path": str(fpath)})
@@ -274,14 +278,15 @@ def test_update_accepts_new_editable_fields_and_emits(
     body = r.json()
     assert body["name"] == "Updated Name"
     assert set(body["capabilities"]) == {"chat", "embed"}
-    assert set(body["backends"]) == {"vulkan", "rocm"}
+    assert body["backends"] == []  # never had any; the PUT's backends is dead
     assert body["defaults"]["context_size"] == 4096
 
     events = _events_since(crud_client, pre, "model.updated")
     assert events, "expected model.updated event"
     payload = next(ev for ev in events if ev["data"].get("id") == "upd")
     changed = set(payload["data"]["changed_fields"])
-    assert {"name", "capabilities", "backends", "defaults"} <= changed
+    assert {"name", "capabilities", "defaults"} <= changed
+    assert "backends" not in changed
 
 
 def test_update_changed_fields_only_lists_actual_changes(
