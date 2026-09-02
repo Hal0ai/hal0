@@ -106,3 +106,60 @@ def test_feasibility_empty_batch_returns_empty_results(crud_client: TestClient) 
     r = crud_client.post("/api/models/feasibility", json={"models": []})
     assert r.status_code == 200, r.text
     assert r.json() == {"results": []}
+
+
+def test_feasibility_row_error_degrades_to_unknown_without_500ing_batch(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row whose downstream computation raises (corrupt/unexpected stored
+    data — ``model_dump``/``estimate_file_size_kv_mb``/
+    ``gtt_feasibility_verdict`` are all reachable failure points past a
+    successful ``registry.get``) degrades to 'unknown' for just that row —
+    the rest of the batch still computes and the request never 500s.
+
+    Simulates the downstream failure by monkeypatching
+    ``estimate_file_size_kv_mb`` (imported into ``routes.models``) to raise
+    only for the "bad" model id, leaving the real implementation in place
+    for every other row — this exercises the route's own try/except rather
+    than a registry-internals quirk.
+    """
+    from hal0.api.routes import models as models_route
+
+    good_id = _create_minimal_model(crud_client, crud_models_root)
+    bad_id = "feas-bad"
+    fpath = crud_models_root / "feas-bad.gguf"
+    fpath.write_bytes(b"\x00" * 32)
+    r = crud_client.post("/api/models", json={"id": bad_id, "path": str(fpath)})
+    assert r.status_code == 201, r.text
+
+    class _Gpu:  # duck-type GPUMemorySample
+        gtt_free_mb = 69632.0
+        gtt_total_mb = 98304.0
+        is_uma = True
+
+    class _Stats:
+        def gpu_sample(self) -> _Gpu:
+            return _Gpu()
+
+    crud_client.app.state.hardware_stats = _Stats()
+
+    real_estimate = models_route.estimate_file_size_kv_mb
+
+    def _boom(model_mb: float, ctx_meta: dict | None, **kw: object) -> float:
+        if isinstance(ctx_meta, dict) and ctx_meta.get("id") == bad_id:
+            raise ValueError("simulated corrupt row")
+        return real_estimate(model_mb, ctx_meta, **kw)
+
+    monkeypatch.setattr(models_route, "estimate_file_size_kv_mb", _boom)
+
+    resp = crud_client.post(
+        "/api/models/feasibility",
+        json={"models": [{"model_id": good_id}, {"model_id": bad_id}]},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = {row["model_id"]: row for row in resp.json()["results"]}
+    assert rows[bad_id]["verdict"] == "unknown"
+    assert rows[bad_id]["needed_mb"] == 0.0
+    assert rows[good_id]["verdict"] in {"fits", "tight", "exceeds", "exceeds_total"}

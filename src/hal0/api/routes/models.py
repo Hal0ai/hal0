@@ -620,6 +620,7 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
             gpu = await asyncio.to_thread(stats.gpu_sample)
         except Exception:
             gpu = None
+            log.warning("models.feasibility_gpu_sample_failed", exc_info=True)
     free = getattr(gpu, "gtt_free_mb", None)
     total = getattr(gpu, "gtt_total_mb", None)
 
@@ -628,9 +629,27 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         mid = str(item.get("model_id") or "")
+        # The WHOLE per-row computation is guarded, not just the registry
+        # lookup: a malformed stored row (bad size_bytes, unparseable
+        # defaults, …) must degrade that one row to "unknown" rather than
+        # 500 the entire batch — this endpoint never blocks, not even on
+        # its own bugs.
         try:
             model = registry.get(mid)
+            model_mb = float(model.size_bytes or 0) / (1024 * 1024)
+            ctx_meta = model.model_dump(mode="json")
+            ctx = item.get("ctx")
+            if isinstance(ctx, int) and ctx > 0:
+                ctx_meta["defaults"] = {
+                    **(ctx_meta.get("defaults") or {}),
+                    "context_size": ctx,
+                }
+            needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
+            verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
         except Exception:
+            log.warning(
+                "models.feasibility_row_failed model_id=%s", mid, exc_info=True
+            )
             results.append(
                 {
                     "model_id": mid,
@@ -641,13 +660,6 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
                 }
             )
             continue
-        model_mb = float(model.size_bytes or 0) / (1024 * 1024)
-        ctx_meta = model.model_dump(mode="json")
-        ctx = item.get("ctx")
-        if isinstance(ctx, int) and ctx > 0:
-            ctx_meta["defaults"] = {**(ctx_meta.get("defaults") or {}), "context_size": ctx}
-        needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
-        verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
         results.append({"model_id": mid, **verdict})
     return {"results": results}
 
