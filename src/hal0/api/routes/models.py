@@ -24,6 +24,7 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
+from hal0.profiles import ProfileCatalog
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.pull import PullInvalidSource
@@ -647,9 +648,7 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
             needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
             verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
         except Exception:
-            log.warning(
-                "models.feasibility_row_failed model_id=%s", mid, exc_info=True
-            )
+            log.warning("models.feasibility_row_failed model_id=%s", mid, exc_info=True)
             results.append(
                 {
                     "model_id": mid,
@@ -782,6 +781,61 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             f"model:{model.id}",
             f"{model.id}: updated ({', '.join(changed) or 'no-op'})",
             data={"id": model.id, "changed_fields": changed},
+        )
+    return _model_to_dict(model)
+
+
+@router.post("/{model_id}/seed-profile")
+async def seed_model_profile(model_id: str, request: Request) -> dict[str, Any]:
+    """Stamp a profile's flags onto a model's tune.
+
+    Body: ``{"profile": "<name>"}``. Resolves the named profile and writes
+    ``defaults.extra_args``/``defaults.profile`` from it — the server-side
+    twin of the old model-drawer template select. The stamp is re-screened
+    through :func:`hal0.services.models_service.screen_model_write` exactly
+    like :func:`update_model`, so a stale or hand-edited profile can never
+    smuggle a slot- or authority-owned flag into the write.
+
+    Emits ``model.updated`` with
+    ``changed_fields=["defaults.extra_args", "defaults.profile"]``.
+
+    Errors:
+      * ``400 profiles.name_required`` — body missing/blank ``profile``.
+      * ``400 slot.managed_arg_denied`` — the profile's flags reach for a
+        managed arg.
+      * ``404 model.not_found`` — ``model_id`` not registered.
+      * ``404 profiles.not_found`` — ``profile`` not in the catalog.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    name = body.get("profile")
+    if not isinstance(name, str) or not name.strip():
+        raise BadRequest("body must carry {'profile': <name>}", code="profiles.name_required")
+
+    profile = ProfileCatalog().resolve(name.strip())  # unknown profile → 404
+
+    registry = request.app.state.model_registry
+    before = registry.get(model_id).model_dump(mode="python")  # unknown model → 404
+
+    updates = {"defaults": {"extra_args": profile.flags or "", "profile": profile.name}}
+    _svc.screen_model_write(updates, runner_images=_RUNNER_IMAGES, existing=before)
+    model = registry.update(model_id, updates)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.updated",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: seeded from profile {profile.name!r}",
+            data={
+                "id": model.id,
+                "changed_fields": ["defaults.extra_args", "defaults.profile"],
+            },
         )
     return _model_to_dict(model)
 
