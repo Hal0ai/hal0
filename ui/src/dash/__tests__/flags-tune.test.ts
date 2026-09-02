@@ -45,7 +45,7 @@ describe("groupFlagPairs", () => {
     expect(ids).toContain("sampling");
     expect(ids).toContain("cache-kv");
     const misc = groups.find((g) => g.id === "template-misc");
-    expect(misc.pairs).toEqual([{ flag: "--wat", canon: "--wat", value: "1" }]);
+    expect(misc!.pairs).toEqual([{ flag: "--wat", canon: "--wat", value: "1" }]);
   });
   it("omits empty groups and keeps CATEGORY_ORDER order", () => {
     const { groups } = groupFlagPairs("--temp 0.4");
