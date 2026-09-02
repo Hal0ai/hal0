@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -24,12 +24,14 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
+from hal0.profiles import ProfileCatalog
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.pull import PullInvalidSource
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
+from hal0.slots.capacity import estimate_file_size_kv_mb, gtt_feasibility_verdict
 
 # See slots.py for the writer-gate rationale.
 
@@ -590,6 +592,111 @@ async def update_model_from_hf(
     )
 
 
+@router.post("/feasibility")
+async def models_feasibility(request: Request) -> dict[str, Any]:
+    """Advisory GTT preflight for a batch of (model, ctx) picks.
+
+    Registered ABOVE the ``/{model_id}`` catch-all below so the literal
+    ``feasibility`` path never resolves as a model id (same reason
+    ``/pulls`` and ``/updates/check`` sit above it).
+
+    Never 404s, never blocks — an unknown model id or missing host GPU
+    truth (no ``hardware_stats`` wired, or the sample failed) yields a
+    ``verdict: "unknown"`` row rather than an error. A non-dict item in
+    ``models`` also degrades to an ``"unknown"`` row in place rather than
+    being dropped, so the response row count always matches the request
+    row count (after the soft cap below). This is a batch advisory
+    endpoint for the drawer's model picker, not a gate.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    items = body.get("models")
+    if items is None:
+        items = []
+    elif not isinstance(items, list):
+        raise BadRequest("'models' must be a list", code="models.feasibility_body_invalid")
+    # Soft cap: this is an advisory batch endpoint for the drawer's model
+    # picker, not a gate — an oversized batch is processed up to a sane
+    # limit rather than rejected outright.
+    items = items[:256]
+
+    registry = request.app.state.model_registry
+    stats = getattr(request.app.state, "hardware_stats", None)
+    gpu = None
+    if stats is not None:
+        try:
+            gpu = await asyncio.to_thread(stats.gpu_sample)
+        except Exception:
+            gpu = None
+            log.warning("models.feasibility_gpu_sample_failed", exc_info=True)
+    free = getattr(gpu, "gtt_free_mb", None)
+    total = getattr(gpu, "gtt_total_mb", None)
+
+    results: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            results.append(
+                {
+                    "model_id": "",
+                    "verdict": "unknown",
+                    "needed_mb": 0.0,
+                    "gtt_free_mb": free,
+                    "gtt_total_mb": total,
+                }
+            )
+            continue
+        mid = str(item.get("model_id") or "")
+        # The WHOLE per-row computation is guarded, not just the registry
+        # lookup: a malformed stored row (bad size_bytes, unparseable
+        # defaults, …) must degrade that one row to "unknown" rather than
+        # 500 the entire batch — this endpoint never blocks, not even on
+        # its own bugs.
+        try:
+            model = registry.get(mid)
+            model_mb = float(model.size_bytes or 0) / (1024 * 1024)
+            ctx_meta = model.model_dump(mode="json")
+            ctx = item.get("ctx")
+            if isinstance(ctx, int) and ctx > 0:
+                ctx_meta["defaults"] = {
+                    **(ctx_meta.get("defaults") or {}),
+                    "context_size": ctx,
+                }
+            needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
+            verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
+        except Exception:
+            log.warning("models.feasibility_row_failed model_id=%s", mid, exc_info=True)
+            results.append(
+                {
+                    "model_id": mid,
+                    "verdict": "unknown",
+                    "needed_mb": 0.0,
+                    "gtt_free_mb": free,
+                    "gtt_total_mb": total,
+                }
+            )
+            continue
+        results.append({"model_id": mid, **verdict})
+    return {"results": results}
+
+
+@router.get("/feasibility")
+async def models_feasibility_method_not_allowed() -> None:
+    """``/feasibility`` is POST-only.
+
+    A path-param route always fully matches GET on ANY single path
+    segment (Starlette matches by path+method independently per route,
+    not by "most specific literal wins"), so without this explicit
+    literal GET registered above the ``/{model_id}`` catch-all, a stray
+    GET here would silently resolve as model_id="feasibility" and 404
+    with a misleading "model not found" instead of the correct 405.
+    """
+    raise HTTPException(status_code=405, detail="POST required")
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
@@ -694,6 +801,64 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             f"model:{model.id}",
             f"{model.id}: updated ({', '.join(changed) or 'no-op'})",
             data={"id": model.id, "changed_fields": changed},
+        )
+    return _model_to_dict(model)
+
+
+@router.post("/{model_id}/seed-profile")
+async def seed_model_profile(model_id: str, request: Request) -> dict[str, Any]:
+    """Stamp a profile's flags onto a model's tune.
+
+    Body: ``{"profile": "<name>"}``. Resolves the named profile and writes
+    ``defaults.extra_args``/``defaults.profile`` from it — the server-side
+    twin of the old model-drawer template select. The stamp is re-screened
+    through :func:`hal0.services.models_service.screen_model_write` exactly
+    like :func:`update_model`, so a stale or hand-edited profile can never
+    smuggle a slot- or authority-owned flag into the write.
+
+    Emits ``model.updated`` with
+    ``changed_fields=["defaults.extra_args", "defaults.profile"]``.
+
+    Errors:
+      * ``400 profiles.name_required`` — body missing/blank ``profile``.
+      * ``400 slot.managed_arg_denied`` — the profile's flags reach for a
+        managed arg.
+      * ``404 model.not_found`` — ``model_id`` not registered.
+      * ``404 profiles.not_found`` — ``profile`` not in the catalog.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    name = body.get("profile")
+    if not isinstance(name, str) or not name.strip():
+        raise BadRequest("body must carry {'profile': <name>}", code="profiles.name_required")
+
+    profile = ProfileCatalog().resolve(name.strip())  # unknown profile → 404
+
+    registry = request.app.state.model_registry
+    # Fail-fast here (unlike update_model's try/except-to-{}): this route has
+    # nothing sparse to resolve a body against, so an unknown model_id should
+    # 404 immediately rather than silently screen against an empty ``before``.
+    before = registry.get(model_id).model_dump(mode="python")  # unknown model → 404
+
+    updates = {"defaults": {"extra_args": profile.flags or "", "profile": profile.name}}
+    _svc.screen_model_write(updates, runner_images=_RUNNER_IMAGES, existing=before)
+    model = registry.update(model_id, updates)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.updated",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: seeded from profile {profile.name!r}",
+            data={
+                "id": model.id,
+                "changed_fields": ["defaults.extra_args", "defaults.profile"],
+            },
         )
     return _model_to_dict(model)
 

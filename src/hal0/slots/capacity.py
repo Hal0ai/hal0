@@ -250,6 +250,38 @@ def gtt_fit_warning(
     )
 
 
+_TIGHT_FRACTION = 0.9  # within 10% of free = load may succeed with swap pressure
+
+
+def gtt_feasibility_verdict(
+    needed_mb: float, *, gtt_free_mb: float | None, gtt_total_mb: float | None
+) -> dict[str, Any]:
+    """Advisory GTT verdict for a projected footprint. Never blocks.
+
+    "unknown" when host truth is unavailable (None counters) or the
+    projection is empty — the caller renders NO hint for unknown, never
+    a fake verdict.
+    """
+    needed = round(float(needed_mb), 1)
+    out: dict[str, Any] = {
+        "needed_mb": needed,
+        "gtt_free_mb": gtt_free_mb,
+        "gtt_total_mb": gtt_total_mb,
+    }
+    if gtt_free_mb is None or gtt_total_mb is None or needed <= 0:
+        out["verdict"] = "unknown"
+        return out
+    if needed > gtt_total_mb:
+        out["verdict"] = "exceeds_total"
+    elif needed > gtt_free_mb:
+        out["verdict"] = "exceeds"
+    elif needed > _TIGHT_FRACTION * gtt_free_mb:
+        out["verdict"] = "tight"
+    else:
+        out["verdict"] = "fits"
+    return out
+
+
 def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     """Resolve the effective context window (tokens) for a model.
 
@@ -812,5 +844,6 @@ __all__ = [
     "_host_has_capable_gpu",
     "build_per_slot",
     "estimate_file_size_kv_mb",
+    "gtt_feasibility_verdict",
     "gtt_fit_warning",
 ]

@@ -453,3 +453,34 @@ class TestGttFitWarning:
         msg = gtt_fit_warning(1024.0, gtt_free_mb=0.0, gtt_total_mb=98304.0)
         assert msg is not None
         assert "0.0 GiB" in msg
+
+
+# ── gtt_feasibility_verdict — advisory verdict over host GTT truth (pure) ──
+#
+# Provides verdict states ("fits", "tight", "exceeds", "exceeds_total", "unknown")
+# for the dashboard form and pre-load capacity estimation paths. Never blocks.
+
+
+class TestGttFeasibilityVerdict:
+    def test_gtt_feasibility_verdict_states(self) -> None:
+        from hal0.slots.capacity import gtt_feasibility_verdict as v
+
+        assert v(1000.0, gtt_free_mb=None, gtt_total_mb=98304.0)["verdict"] == "unknown"
+        assert v(0.0, gtt_free_mb=50000.0, gtt_total_mb=98304.0)["verdict"] == "unknown"
+        assert v(40000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0)["verdict"] == "fits"
+        assert (
+            v(64000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0)["verdict"] == "tight"
+        )  # > 0.9 * free
+        assert v(75000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0)["verdict"] == "exceeds"
+        assert v(131072.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0)["verdict"] == "exceeds_total"
+
+    def test_gtt_feasibility_verdict_echoes_inputs(self) -> None:
+        from hal0.slots.capacity import gtt_feasibility_verdict as v
+
+        out = v(40000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0)
+        assert out == {
+            "verdict": "fits",
+            "needed_mb": 40000.0,
+            "gtt_free_mb": 69632.0,
+            "gtt_total_mb": 98304.0,
+        }
