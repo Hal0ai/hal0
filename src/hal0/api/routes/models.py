@@ -383,7 +383,8 @@ async def create_model(request: Request) -> dict[str, Any]:
     A body carrying tag-era ``backends`` tags but no ``provider`` gets one
     derived (``hal0.model_meta.derive_model_provider``) before screening, so
     create never mints a permanently ``provider=None`` row (Task 3) — an
-    explicit ``provider`` in the body is never overridden.
+    explicit non-empty ``provider`` in the body is never overridden; a null
+    or blank ``provider`` is replaced with the derived value (#2199).
     """
     from hal0.registry.store import Model
 

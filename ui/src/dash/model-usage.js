@@ -29,7 +29,7 @@ export function slotsUsingModel(slots, modelId) {
  * Maps field changes to display names, dedupes, and formats with slot restart info.
  * @param {Object} changes - Changes object from deriveModelChanges with boolean fields
  * @param {Array<{name: string}>} usingSlots - Slots using this model
- * @returns {string} Footer text: "no changes", or "N changes — {names} [⟳ restarts ...]"
+ * @returns {string} Footer text: "no changes", or "N change(s) — {names} [⟳ restarts N slot(s) ...]"
  */
 export function footSummary(changes, usingSlots) {
   if (!changes || !changes.any) {
@@ -83,12 +83,14 @@ export function footSummary(changes, usingSlots) {
   }
 
   const count = displayNames.length
-  let summary = `${count} changes — ${displayNames.join(' · ')}`
+  const changeNoun = count === 1 ? 'change' : 'changes'
+  let summary = `${count} ${changeNoun} — ${displayNames.join(' · ')}`
 
   // Add restart clause if any slots are using this model
   if (usingSlots && usingSlots.length > 0) {
     const slotNames = usingSlots.map((s) => s.name).join(' · ')
-    summary += ` ⟳ restarts ${usingSlots.length} slots: ${slotNames}`
+    const slotNoun = usingSlots.length === 1 ? 'slot' : 'slots'
+    summary += ` ⟳ restarts ${usingSlots.length} ${slotNoun}: ${slotNames}`
   }
 
   return summary

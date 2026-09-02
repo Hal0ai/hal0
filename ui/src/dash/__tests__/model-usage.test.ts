@@ -96,7 +96,7 @@ describe('footSummary', () => {
       any: true,
     }
     const usingSlots = [{ name: 'agent' }]
-    expect(footSummary(changes, usingSlots)).toBe('1 changes — source ⟳ restarts 1 slots: agent')
+    expect(footSummary(changes, usingSlots)).toBe('1 change — source ⟳ restarts 1 slot: agent')
   })
 
   it('override fields (mtp/thinking/jinja/vision) dedupe to one display name', () => {
@@ -117,6 +117,6 @@ describe('footSummary', () => {
       any: true,
     }
     const usingSlots = [{ name: 'agent' }]
-    expect(footSummary(changes, usingSlots)).toBe('1 changes — overrides ⟳ restarts 1 slots: agent')
+    expect(footSummary(changes, usingSlots)).toBe('1 change — overrides ⟳ restarts 1 slot: agent')
   })
 })

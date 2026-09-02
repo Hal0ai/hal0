@@ -1401,7 +1401,7 @@ describe('footer summary', () => {
 
     const footer = q<HTMLElement>(host, 'model-foot-summary')
     expect(footer).toBeTruthy()
-    expect(footer.textContent).toContain('1 changes')
+    expect(footer.textContent).toContain('1 change')
     expect(footer.textContent).toContain('context')
     expect(footer.textContent).toContain('restarts 2 slots')
     expect(footer.textContent).toContain('agent')
@@ -1419,7 +1419,7 @@ describe('footer summary', () => {
 
     const footer = q<HTMLElement>(host, 'model-foot-summary')
     expect(footer).toBeTruthy()
-    expect(footer.textContent).toContain('1 changes')
+    expect(footer.textContent).toContain('1 change')
     expect(footer.textContent).toContain('context')
     expect(footer.textContent).not.toContain('restarts')
     act(() => root.unmount())

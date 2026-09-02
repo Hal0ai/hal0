@@ -481,7 +481,8 @@ function SeedProfileButton({ options, onPick, disabled = false }) {
 // IS the confirm's message. Three parts:
 //   1. diff counts (changed/added/removed — each line omitted when its count
 //      is zero), naming the flags that move.
-//   2. the provenance line the pick commits to ("seeded from {name}").
+//   2. the provenance line the pick commits to (spec §5: `tune becomes
+//      "seeded from {name}" — divergence markers reset`).
 //   3. the restart consequence, from the slots that already load this model.
 //
 // Diff direction: `diffFlags(modelText, profileText)` describes going FROM
@@ -520,7 +521,7 @@ function SeedPreview({ targetName, targetFlags, currentFlags, slots }) {
 					{removed.length} removed: {removed.map((r) => r.flag).join(", ")}
 				</div>
 			)}
-			<div>seeded from {targetName}</div>
+			<div>tune becomes "seeded from {targetName}" — divergence markers reset</div>
 			<div>
 				{slots.length === 0
 					? "no slots currently load this model"
