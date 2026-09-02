@@ -53,12 +53,12 @@ export async function openRichSelect(trigger: Locator): Promise<Locator> {
 /**
  * Close a RichSelect's listbox (no-op if already closed), via Escape.
  *
- * Caution: the slot/model drawer (`primitives.jsx`'s `Drawer`) attaches its
- * OWN `document`-level Escape handler that closes the whole drawer, and
- * `rich-select.jsx`'s own Escape handling doesn't (can't, from a separate
- * listener) stop that from also firing. Inside a drawer, prefer closing via
- * a click on a neutral element instead (RichSelect's click-outside
- * listener) so this doesn't take the drawer down with it.
+ * Safe inside a drawer: `rich-select.jsx` consumes Escape on an OPEN
+ * listbox (`stopPropagation()` in its trigger keydown), so the drawer's
+ * `document`-level Escape handler (`primitives.jsx`'s `Drawer`) never sees
+ * the press — only the dropdown closes. Escape on an already-closed
+ * RichSelect still bubbles to the drawer, which is why this helper checks
+ * `aria-expanded` before pressing.
  */
 export async function closeRichSelect(trigger: Locator): Promise<void> {
   if ((await trigger.getAttribute('aria-expanded')) === 'true') {

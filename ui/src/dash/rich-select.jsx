@@ -100,10 +100,16 @@ export function RichSelect({
 
   const onKeyDown = (e) => {
     if (disabled) return;
+    const wasOpen = state.open;
     const outcome = handleKey(e.key, state, options, value ?? null);
     if (outcome.kind === 'none') return;
     // Tab must keep moving focus per normal browser behaviour — only close.
     if (e.key !== 'Tab') e.preventDefault();
+    // Escape on an OPEN listbox is consumed here: it closes only the
+    // dropdown, and must not also reach the drawer's document-level
+    // Escape→close listener (primitives.jsx). Escape while closed still
+    // bubbles so the drawer keeps its normal dismiss behaviour.
+    if (e.key === 'Escape' && wasOpen) e.stopPropagation();
     setState(outcome.state);
     if (outcome.kind === 'commit') fireChange(outcome.id);
   };

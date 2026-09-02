@@ -52,7 +52,7 @@ async function seedSlots(page: Page, slots: any[]) {
 }
 
 test.describe('Slot pin toggle (/slots drawer header)', () => {
-  test('P1 — header shows Auto-Load + Pinned/Unpinned, Enabled/Disabled copy is gone', async ({ page }) => {
+  test('P1 — header shows Pinned/Unpinned, lifecycle row shows Auto-Load, Enabled/Disabled copy is gone', async ({ page }) => {
     await seedSlots(page, [PRIMARY, UTILITY])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
@@ -94,7 +94,7 @@ test.describe('Slot pin toggle (/slots drawer header)', () => {
     ).toBeChecked()
   })
 
-  test('P4 — flipping the header Auto-Load toggle PUTs { autoload }', async ({ page }) => {
+  test('P4 — flipping the lifecycle-row Auto-Load toggle PUTs { autoload }', async ({ page }) => {
     const puts: any[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
       if (route.request().method() === 'PUT')

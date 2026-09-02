@@ -18,11 +18,16 @@
  *       hint shown.
  *   L3. a pinned anchor SEEDS disabled (no click needed) — the disabled
  *       state is a property of `slot.pinned`, not of having just clicked Pin.
+ *   L4. Escape layering: Escape inside an OPEN RichSelect closes only the
+ *       dropdown (rich-select.jsx consumes it via stopPropagation); the
+ *       drawer's document-level Escape handler only fires when no dropdown
+ *       is open. One press = one layer.
  *
  * List seeding mirrors slot-pin-toggle-v3.spec.ts (in-bundle HAL0_DATA;
  * mutations fall through to page.route).
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { openRichSelect, closeRichSelect } from '../fixtures/richSelect'
 
 const PRIMARY = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
@@ -131,5 +136,28 @@ test.describe('Slot drawer — lifecycle row ("When it unloads", Task 11b)', () 
     await expect(
       autoloadToggle(page).locator('input[type="checkbox"]'),
     ).toBeEnabled()
+  })
+
+  test('L4 — Escape in an open RichSelect closes only the dropdown; the drawer needs its own press', async ({ page }) => {
+    await seedSlots(page, [PRIMARY])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    const trigger = page.getByTestId('slot-hw-runtime')
+    const listbox = await openRichSelect(trigger)
+    await expect(listbox).toBeVisible()
+
+    // First Escape (closeRichSelect): consumed by the RichSelect — the
+    // dropdown unmounts, the drawer stays.
+    await closeRichSelect(trigger)
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(listbox).toHaveCount(0)
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    // Second Escape, with no dropdown open, DOES reach the drawer's
+    // document-level handler and closes it — proving the first press was
+    // consumed by the dropdown, not merely lagging behind an animation.
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.drawer')).toBeHidden()
   })
 })

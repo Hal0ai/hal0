@@ -10,14 +10,13 @@
  * disabled Name field with an inline-editable title field
  * (`slot-name-inline`) that commits on blur/Enter through the identical
  * `useSlotRename` mutation, gated offline-only exactly like the retired
- * dialog gated it (RenameSlotDialog.jsx is still mounted per the task's own
- * report, but nothing in the drawer opens it any more — `slot-rename-open`
- * no longer exists). One casualty of the move: the dialog's disabled state
- * used to surface a VISIBLE inline reason panel ("never a bare tooltip", per
- * its own header comment) naming both the stop-first requirement and the
- * stable slot_id; the inline field only carries that as a plain `title`
- * (hover) attribute now. Flagged as a concern in this task's report — out of
- * scope to fix here (this file only touches tests/e2e).
+ * dialog gated it (the drawer no longer mounts RenameSlotDialog at all —
+ * `slot-rename-open` no longer exists). Escape cancels the edit: it reverts
+ * the draft WITHOUT committing (the blur that follows must not fire the
+ * stale draft — nameCancelRef in slot-modals.jsx) and never bubbles to the
+ * drawer's own Escape→close handler. The disabled state carries its
+ * stop-first reason both as the `title` attribute and as an
+ * `aria-describedby` sr-only description for non-hover access.
  *
  * Delete (DeleteSlotDialog): unaffected by the drawer restructure — the
  * confirm states the true blast radius (unit, port → PortAuthority, state)
@@ -82,6 +81,36 @@ test.describe('Slot rename', () => {
     await nameField.fill('primary-2')
     await nameField.press('Enter')
     await expect.poll(() => body?.new_name).toBe('primary-2')
+  })
+
+  test('offline slot: Escape cancels the edit — draft reverts, no rename POST, drawer stays open', async ({ page }) => {
+    const posts: any[] = []
+    await page.route('**/api/slots/primary/rename', async (route) => {
+      posts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await seedSlots(page, [OFFLINE])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    const nameField = page.getByTestId('slot-name-inline')
+    await nameField.fill('primary-2')
+    await nameField.press('Escape')
+
+    // The draft reverts to the persisted name…
+    await expect(nameField).toHaveValue('primary')
+    // …the drawer survives (Escape in the field is consumed, it must not
+    // reach the drawer's document-level Escape→close handler)…
+    await expect(page.locator('.drawer')).toBeVisible()
+    // …and the blur Escape triggers must NOT commit the stale edited draft
+    // (the cancel-then-blur ordering bug this test pins).
+    expect(posts).toHaveLength(0)
+
+    // The field still works after a cancel: a fresh edit + Enter commits.
+    await nameField.fill('primary-3')
+    await nameField.press('Enter')
+    await expect.poll(() => posts.length).toBeGreaterThan(0)
+    expect(posts[0]).toEqual({ new_name: 'primary-3' })
   })
 })
 

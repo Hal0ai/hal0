@@ -319,7 +319,7 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 				</span>
 			),
 			right: verdictChipFor ? verdictChipFor(m.id) : null,
-			desc: `${quant || "—"} · ${caps.length ? caps.join(" + ") : "—"} · used by ${usedBy} slot${usedBy === 1 ? "" : "s"}`,
+			desc: `${m.params || "—"} · ${caps.length ? caps.join(" + ") : "—"} · used by ${usedBy} slot${usedBy === 1 ? "" : "s"}`,
 		});
 	}
 	return opts;
@@ -601,15 +601,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// below), committing on blur/Enter through the SAME useSlotRename
 	// mutation the dialog used. RenameSlotDialog.jsx keeps its own
 	// mutation+validation logic (still used as a component in its own
-	// right); this drawer no longer opens it, but the API plumbing it
-	// wraps is exactly what renameMut below also calls.
-	const [renameOpen, setRenameOpen] = useStateSM(false);
+	// right); this drawer no longer opens or mounts it — the API plumbing
+	// it wraps is exactly what renameMut below also calls.
 	const renameMut = useSlotRename();
 	// Inline name draft — seeded from the persisted name, resynced whenever
 	// the slot identity changes (a poll refresh mid-edit must not clobber an
 	// in-flight keystroke, same rule RenameSlotDialog's own seed effect
 	// follows).
 	const [nameDraft, setNameDraft] = useStateSM(slot?.name || "");
+	// Escape-cancel flag for the inline name field. The Escape branch calls
+	// blur() synchronously, so commitName (the blur handler) runs BEFORE the
+	// setNameDraft(slot.name) revert re-renders — it would still read the
+	// stale edited draft and commit the rename Escape meant to throw away.
+	// The ref is the synchronous channel: Escape sets it, commitName checks
+	// and clears it first thing and reverts without mutating.
+	const nameCancelRef = useRefSM(false);
 	// Inline model edit — stacks the reusable ModelDrawer over this drawer
 	// (equal z-index; later DOM order wins) so model-tune edits don't force a
 	// close → Models page → reopen round-trip. The slot drawer and its
@@ -1003,6 +1009,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks: must sit ABOVE the `!slot` early return (positional counting).
 	const autoloadDescId = React.useId();
 	const pinDescId = React.useId();
+	const nameDescId = React.useId();
 
 	if (!slot) return null;
 
@@ -1298,6 +1305,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// round-trip) rather than surfacing a submit error for a no-op edit.
 	const nameRunning = slotButtonPhase(slot) !== "off";
 	const commitName = async () => {
+		// Escape-cancel: the Escape keydown blurred us synchronously, before
+		// its draft revert could re-render — nameDraft may still hold the
+		// edited text here. Honour the cancel: revert, never mutate.
+		if (nameCancelRef.current) {
+			nameCancelRef.current = false;
+			setNameDraft(slot.name);
+			return;
+		}
 		const next = String(nameDraft).trim();
 		if (nameRunning || !next || !SLOT_NAME_RE.test(next) || next === slot.name) {
 			setNameDraft(slot.name);
@@ -1306,6 +1321,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		try {
 			await renameMut.mutateAsync({ name: slot.name, new_name: next });
 			window.__hal0Toast && window.__hal0Toast(`Renamed to ${next}`, "ok");
+			// The route still names the old slot (#slots/<old>); without this
+			// the drawer unmounts silently on the next poll because no slot
+			// matches the old name any more. Follow the rename in the URL.
+			window.location.hash = "#slots/" + next;
 		} catch (err) {
 			setNameDraft(slot.name);
 			window.__hal0Toast &&
@@ -1802,6 +1821,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							onKeyDown={(e) => {
 								if (e.key === "Enter") e.currentTarget.blur();
 								if (e.key === "Escape") {
+									// Cancel the edit: flag first (the blur below runs
+									// commitName synchronously, before the revert
+									// re-renders — see nameCancelRef), then revert and
+									// drop focus. Consumed here so the drawer's
+									// document-level Escape→close listener never sees
+									// this press — Escape in the field cancels the
+									// rename, it must not also close the drawer.
+									e.stopPropagation();
+									nameCancelRef.current = true;
 									setNameDraft(slot.name);
 									e.currentTarget.blur();
 								}
@@ -1812,8 +1840,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									: "Click to rename"
 							}
 							aria-label="Slot name"
+							aria-describedby={nameRunning ? nameDescId : undefined}
 							size={Math.max(6, nameDraft.length)}
 						/>
+						{nameRunning && (
+							<span id={nameDescId} className="sr-only">
+								Stop the slot to rename — the systemd unit is name-keyed.
+							</span>
+						)}
 						<span className="chip outlined" title={`Type is fixed once created — make a new slot for a different kind.`}>
 							{slot.type || "—"}
 						</span>
@@ -3130,11 +3164,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				slot={slot}
 				onClose={() => setDelOpen(false)}
 				onDeleted={onClose}
-			/>
-			<RenameSlotDialog
-				open={renameOpen}
-				slot={slot}
-				onClose={() => setRenameOpen(false)}
 			/>
 			{/* Stacked model editor — the reusable ModelDrawer (window-global,
 	        same instance contract as models.jsx). DrawerDock reaches the
