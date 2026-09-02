@@ -88,7 +88,14 @@ test.describe('Model drawer — reset to profile', () => {
 
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
-    await expect(page.getByTestId('model-flags-input')).toBeVisible()
+    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+
+    // model-drawer-2 Task 4: the tune editor rests on grouped pills and the
+    // flags textarea is the raw view behind the toggle — as is "↺ reset to
+    // profile", which lives on the raw-mode divergence panel (the pills carry
+    // per-flag revert inline instead). This spec is about the whole-text
+    // re-stamp, so it works in raw throughout, exactly as before.
+    await page.getByTestId('model-tune-raw-toggle').click()
 
     // Stamp (now a POST /api/models/{id}/seed-profile round-trip), then diverge.
     await stampFromProfile(page, 'rocm-moe')

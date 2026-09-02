@@ -68,7 +68,7 @@ test.describe('Model drawer — per-type default', () => {
 
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').first().click()
-    await expect(page.getByTestId('model-flags-input')).toBeVisible()
+    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 
     // Initially not the default.
     const toggle = page.getByTestId('model-default-toggle')

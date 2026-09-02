@@ -68,7 +68,7 @@ async function capturePut(page: import('@playwright/test').Page) {
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 }
 
 test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () => {

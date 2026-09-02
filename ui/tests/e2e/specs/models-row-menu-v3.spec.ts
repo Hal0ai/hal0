@@ -52,7 +52,7 @@ test.describe('Models row menu (kebab)', () => {
     // directly rather than guessing at uncovered page coordinates.
     await page.locator('.mdl-row-menu-backdrop').click({ position: { x: 5, y: 5 } })
     await expect(page.locator('.hal0-menu')).toHaveCount(0)
-    await expect(page.getByTestId('model-flags-input')).toHaveCount(0)
+    await expect(page.getByTestId('model-tune-raw-toggle')).toHaveCount(0)
   })
 
   test('"Edit model settings" opens the ModelDrawer directly for a non-selected row — no prior row-select needed', async ({ page }) => {
@@ -64,7 +64,7 @@ test.describe('Models row menu (kebab)', () => {
     await page.locator('.hal0-menu-item', { hasText: 'Edit model settings' }).click()
 
     // Drawer opened, targeted at the kebab'd row (not the auto-selected one).
-    await expect(page.getByTestId('model-flags-input')).toBeVisible()
+    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
     // Option A drawer (Task 8, PR-3): the title row now also carries the
     // modality tag + default badge/toggle (relocated here from their own
     // field-rows), so the h2 is no longer JUST the name.

@@ -215,6 +215,15 @@ test.describe('Model drawer — rejected writes', () => {
   async function openDrawer(page: Page) {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').first().click()
+    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+  }
+
+  /** model-drawer-2 Task 4: the tune editor rests on grouped pills, and the
+   *  flags TEXTAREA is the raw view behind the toggle. These cases are about
+   *  the flags string itself (managed-arg screening, an unbalanced quote), so
+   *  they reach it the way an operator would — through raw mode. */
+  async function showRawFlags(page: Page) {
+    await page.getByTestId('model-tune-raw-toggle').click()
     await expect(page.getByTestId('model-flags-input')).toBeVisible()
   }
 
@@ -274,6 +283,7 @@ test.describe('Model drawer — rejected writes', () => {
     })
 
     await openDrawer(page)
+    await showRawFlags(page)
     await page.getByTestId('model-flags-input').fill('--port 9999')
 
     await expect(page.getByTestId('model-save')).toBeDisabled()
@@ -297,6 +307,7 @@ test.describe('Model drawer — rejected writes', () => {
     })
 
     await openDrawer(page)
+    await showRawFlags(page)
     await page.getByTestId('model-flags-input').fill('--chat-template "broken')
 
     await expect(page.getByTestId('model-save')).toBeDisabled()

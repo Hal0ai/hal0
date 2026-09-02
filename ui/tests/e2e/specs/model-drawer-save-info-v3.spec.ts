@@ -121,7 +121,7 @@ async function setCapOverride(
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 }
 
 test.describe('Model drawer — complete save and compact field help', () => {
@@ -157,6 +157,10 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await page.getByTestId('model-hffile-input').fill('saved-q4.gguf')
     // Stamp now round-trips through POST /api/models/{id}/seed-profile.
     await stampFromProfile(page, 'rocm-save')
+    // model-drawer-2 Task 4: the flags textarea is the raw view behind
+    // `model-tune-raw-toggle` — the stamped STRING is what this asserts, so it
+    // reads it there.
+    await page.getByTestId('model-tune-raw-toggle').click()
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     expect(seedRequests).toEqual([{ profile: 'rocm-save' }])
     await page.getByTestId('model-ctx-input').fill('16384')

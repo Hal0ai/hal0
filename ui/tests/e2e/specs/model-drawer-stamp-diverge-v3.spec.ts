@@ -86,6 +86,15 @@ async function stampFromProfile(page: import('@playwright/test').Page, name: str
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').click()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+}
+
+/** model-drawer-2 Task 4: the tune editor rests on grouped pills; the flags
+ *  TEXTAREA is the raw view behind `model-tune-raw-toggle`. Every assertion
+ *  below is about the flags STRING, so it reads that string the way an
+ *  operator would — by flipping to raw. */
+async function showRawFlags(page: import('@playwright/test').Page) {
+  await page.getByTestId('model-tune-raw-toggle').click()
   await expect(page.getByTestId('model-flags-input')).toBeVisible()
 }
 
@@ -98,6 +107,17 @@ test.describe('Model drawer — stamp & diverge', () => {
 
     await stampFromProfile(page, 'rocm-moe')
 
+    // The stamp lands as pills first (the resting view): every flag the
+    // profile carries gets one, and the hardware flag it smuggles in wears the
+    // deny styling before anyone reads the error text.
+    await expect(page.getByTestId('model-tune-pill---flash-attn')).toBeVisible()
+    await expect(page.getByTestId('model-tune-pill---batch-size')).toBeVisible()
+    await expect(page.getByTestId('model-tune-pill---threads')).toHaveAttribute(
+      'data-divergence',
+      'denied',
+    )
+
+    await showRawFlags(page)
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     await expect(page.getByTestId('model-provenance-chip')).toHaveText(/seeded from rocm-moe/i)
     // Freshly stamped text equals the profile — no divergence yet.
@@ -123,14 +143,26 @@ test.describe('Model drawer — stamp & diverge', () => {
     await openDrawer(page)
 
     await stampFromProfile(page, 'rocm-moe')
+    await showRawFlags(page)
     await expect(page.getByTestId('model-flags-input')).toHaveValue(PROFILE_FLAGS)
     // Add a flag the profile doesn't carry → diverged (added token).
     await page.getByTestId('model-flags-input').fill(`${PROFILE_FLAGS} --cache-type-k q8_0`)
 
-    await expect(page.getByTestId('model-diverged-chip')).toBeVisible()
+    // The chip now counts the drift; the inline diff is the raw-mode view of it.
+    await expect(page.getByTestId('model-diverged-chip')).toHaveText('◆ 1 diverged')
     const diff = page.getByTestId('model-divergence-diff')
     await expect(diff).toBeVisible()
     await expect(diff).toContainText('--cache-type-k')
+
+    // Back on the pills, the same fact reads inline — the added flag is marked
+    // added, and the diff panel is not duplicated there.
+    await page.getByTestId('model-tune-raw-toggle').click()
+    await expect(page.getByTestId('model-tune-pill---cache-type-k')).toHaveAttribute(
+      'data-divergence',
+      'added',
+    )
+    await expect(page.getByTestId('model-divergence-diff')).toHaveCount(0)
+    await expect(page.getByTestId('model-diverged-chip')).toHaveText('◆ 1 diverged')
   })
 
   test('a managed flag in the tune text blocks Save with an inline error, no PUT', async ({ page }) => {
@@ -145,6 +177,7 @@ test.describe('Model drawer — stamp & diverge', () => {
     await mockProfiles(page)
     await mockChatTemplates(page)
     await openDrawer(page)
+    await showRawFlags(page)
 
     await page.getByTestId('model-flags-input').fill('-fa on --port 9000')
 

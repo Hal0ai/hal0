@@ -144,7 +144,7 @@ async function landConcurrentWrite(page: Page, patch: Record<string, unknown>) {
 async function openDrawer(page: Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-flags-input')).toBeVisible()
+  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
 }
 
 const saveBtn = (page: Page) => page.getByTestId('model-save')
