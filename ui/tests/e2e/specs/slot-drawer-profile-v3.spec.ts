@@ -9,6 +9,7 @@
  * (i3). Its save/restart contract lives in slot-drawer-inline-model-v3.
  */
 import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
+import { pickRichOption, richSelectOption } from '../fixtures/richSelect'
 
 // ─── Slot fixtures ──────────────────────────────────────────────────────────
 
@@ -53,7 +54,13 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   test('C7a2 — slot card still surfaces the bound profile chip', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER])
     await page.goto('/#slots/chat')
-    await expect(page.locator('button', { hasText: CHAT_CONTAINER.profile || '' })).toBeVisible()
+    // Scoped to the InferencePane card's own chip (`infer-profile-{slot}`) —
+    // a plain `button` text match now also catches the drawer's `slot-profile`
+    // RichSelect trigger (Task 11c turned it from a <select> into a
+    // `<button role="combobox">` whose closed-state text includes the same
+    // profile name), which strict-mode-violates on two matches.
+    await expect(page.getByTestId('infer-profile-chat')).toBeVisible()
+    await expect(page.getByTestId('infer-profile-chat')).toContainText(CHAT_CONTAINER.profile || '')
   })
 
   test.skip('C7b — obsolete: profile changes no longer drive slot config/restart', async ({ page }) => {
@@ -343,10 +350,12 @@ test.describe('slot profile divergence (#1636)', () => {
     await expect(page.locator('.drawer')).toBeVisible()
 
     // The gpu-rocm slot is offered the vulkan-backend profile (was filtered
-    // out pre-#1636) under the "Other backend" group…
+    // out pre-#1636) under the "Other backend" disabled-marker row (RichSelect
+    // has no <optgroup> — Task 11c's profileRichOptions stands in a disabled
+    // marker option instead; see rich-select.jsx).
     const sel = page.getByTestId('slot-profile')
-    await expect(sel.locator('optgroup option[value="vulkan"]')).toHaveCount(1)
-    await sel.selectOption('vulkan')
+    await expect(await richSelectOption(sel, 'vulkan')).toHaveCount(1)
+    await pickRichOption(sel, 'vulkan')
 
     // …and selecting it announces the device switch.
     await expect(page.getByTestId('slot-profile-device-switch')).toBeVisible()
@@ -361,7 +370,7 @@ test.describe('slot profile divergence (#1636)', () => {
     await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
-    await page.getByTestId('slot-profile').selectOption('rocm')
+    await pickRichOption(page.getByTestId('slot-profile'), 'rocm')
     await expect(page.getByTestId('slot-profile-device-switch')).toHaveCount(0)
   })
 })
@@ -478,7 +487,7 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
     // no preview yet.
     await expect(page.getByTestId('slot-profile-preview')).toHaveCount(0)
 
-    await page.getByTestId('slot-profile').selectOption('promptforge-apply')
+    await pickRichOption(page.getByTestId('slot-profile'), 'promptforge-apply')
 
     // Applying this profile previews the runtime it carries and that the
     // slot restarts on Save.
@@ -489,8 +498,10 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
 
     // The Hardware group's Runtime select mirrors the SAME pick immediately
     // (both read from the one hw-cascade.js cascade) — proving the preview
-    // isn't a display-only fiction.
-    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('promptforge')
+    // isn't a display-only fiction. A RichSelect trigger isn't a <select>, so
+    // this reads the closed trigger's rendered title text instead of
+    // `.toHaveValue()`.
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('Promptforge')
 
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)

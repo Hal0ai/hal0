@@ -113,10 +113,12 @@ const saveBtn = (page: Page) => page.locator('.drawer button:has-text("Save")')
 const stateChip = (page: Page) => page.getByTestId('slot-state-readonly')
 
 function ctxInput(page: Page) {
-  const modelGroup = page.locator('.drawer .field-group').filter({
-    has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+  // Context (ceiling) lives in the "How it runs" group now (Task 11a moved
+  // it IN from the old Model group, beside the hardware that enforces it).
+  const hwGroup = page.locator('.drawer .field-group').filter({
+    has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
   })
-  return modelGroup
+  return hwGroup
     .locator('.form-row')
     .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
     .locator('input')
@@ -238,6 +240,8 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
 
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
+    // NGL lives behind the Advanced disclosure now (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
 
     await page.evaluate(() => {

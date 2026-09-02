@@ -3029,6 +3029,26 @@ select.npu-sel {
 /* Drawer header internals (migrated from the deleted mcp.css; the <Drawer>
    primitive in primitives.jsx renders an h2 + eyebrow + close button). */
 .drawer-h h2 { font-size: 18px; font-weight: 500; margin: 0; letter-spacing: -0.02em; }
+/* Inline-editable slot name (Task 11a) — reads as title text until focused,
+   replacing the old disabled "Name" field + "Rename…" button. Sized via the
+   `size` attribute (JS-computed from the draft length) rather than a fixed
+   width, so it never clips or over-reserves relative to the actual name. */
+.drawer-title-input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  padding: 1px 4px;
+  margin: -1px -4px;
+}
+.drawer-title-input:hover:not(:disabled) { border-color: var(--line-soft); }
+.drawer-title-input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  background: var(--bg-2);
+}
+.drawer-title-input:disabled { color: var(--fg-4); cursor: not-allowed; }
 .drawer-h .modal-h-eye { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px; }
 .drawer-h .modal-close {
   position: absolute;
@@ -3424,6 +3444,78 @@ select.npu-sel {
   outline: 2px solid var(--ok);
   outline-offset: 1px;
 }
+
+/* ─── RichSelect (Task 10 — shared drawer listbox) ──────────────────
+   Two-line option rows: a top line (row content, chips right-aligned)
+   and a full-width muted desc line beneath. Trigger mirrors `.input`;
+   the popover mirrors `.swap-pop`/`.cp-shell` (same surface + shadow
+   vocabulary, sized to its own content instead of a fixed grid). */
+.rsel { position: relative; width: 100%; }
+.rsel-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13px;
+  padding: 8px 11px;
+  border-radius: var(--rad);
+  cursor: pointer;
+  text-align: left;
+}
+.rsel-trigger:focus-visible, .rsel-trigger[aria-expanded="true"] {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+.rsel-trigger[disabled] { opacity: 0.45; cursor: not-allowed; }
+/* Field-error state, passed via RichSelect's `className` prop (Task 11
+   review fix) — same error tokens the plain `.input-err` inputs elsewhere
+   in the drawer use (border/err color), since `.input-err` itself carries
+   no rule of its own to reuse here. */
+.rsel-trigger.rsel-err { border-color: var(--err-line); }
+.rsel-trigger.rsel-err:focus-visible { box-shadow: 0 0 0 3px var(--err-soft); }
+.rsel-trigger-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.rsel-trigger-placeholder { color: var(--fg-4); }
+.rsel-trigger-caret { color: var(--fg-3); flex-shrink: 0; display: inline-flex; transition: transform 0.12s ease; }
+.rsel-trigger[aria-expanded="true"] .rsel-trigger-caret { transform: rotate(180deg); color: var(--accent); }
+
+.rsel-listbox {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad);
+  box-shadow: var(--shadow-menu, 0 16px 48px -8px rgba(0, 0, 0, 0.65));
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.rsel-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+}
+.rsel-option:last-child { border-bottom: none; }
+.rsel-option-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--fg); }
+.rsel-option-row-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rsel-option-right { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.rsel-option-desc { font-size: 10.5px; color: var(--fg-4); line-height: 1.35; }
+.rsel-option:hover, .rsel-option[data-active="true"] { background: var(--bg-3); }
+.rsel-option[aria-selected="true"] { background: var(--accent-bg); }
+.rsel-option[aria-selected="true"] .rsel-option-row { color: var(--accent); }
+.rsel-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.4; }
+.rsel-option[aria-disabled="true"]:hover { background: transparent; }
+.rsel-empty { padding: 10px 12px; font-size: 11.5px; color: var(--fg-4); font-family: var(--jbm); }
 
 /* ─── Variant filter chips (HF coords modal) ────────────────────── */
 .variant-row {

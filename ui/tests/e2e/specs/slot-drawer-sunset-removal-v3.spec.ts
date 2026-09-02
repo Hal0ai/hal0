@@ -138,8 +138,10 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    const details = page.locator('.drawer details')
-    await details.first().click()
+    // The resolved-command preview is physically merged into the single
+    // consolidated Advanced disclosure now (Task 11a) — a controlled div,
+    // not a native <details>.
+    await page.getByTestId('slot-hw-advanced').click()
     const preview = page.locator('.drawer', { hasText: 'Resolved command' })
     await expect(preview).toBeVisible()
     await expect(page.locator('.drawer', { hasText: 'llama-server' }).first()).toBeVisible()
@@ -153,7 +155,9 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    // Touch a field that IS slot-owned, so a real write happens.
+    // Touch a field that IS slot-owned, so a real write happens. NGL lives
+    // behind the Advanced disclosure now (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
 
@@ -201,6 +205,8 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
+    // Threads lives behind the Advanced disclosure now (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-threads').fill('8')
     await page.locator('.drawer button:has-text("Save")').click()
 

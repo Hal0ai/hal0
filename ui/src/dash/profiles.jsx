@@ -226,7 +226,11 @@ export function pullTargetFor(runnerRow, images) {
   return { id: row.id, tag: known ? tag : undefined };
 }
 
-function useRunnerPull(runnerKey, backends) {
+// Exported (Task 11c, issue #2185): the slot drawer's Runtime RichSelect
+// reuses this SAME pull mutation for its own not-pulled rows, instead of
+// wiring a second pull hook that could drift from this one's target
+// resolution (splitImageRef/pullTargetFor above).
+export function useRunnerPull(runnerKey, backends) {
   const imagesQuery = useRunnerImages();
   const job = useRunnerImagePullJob();
   const target = pullTargetFor(backends?.[runnerKey], imagesQuery.data?.images);

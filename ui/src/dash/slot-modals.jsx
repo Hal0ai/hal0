@@ -14,9 +14,15 @@ import {
 	useSlotResolved,
 	useSlotDetail,
 	useSlots,
+	useSlotRename,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
+// Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 7/11d) —
+// same hook + copy mapper the PR-3 branch's model drawer uses; copied
+// verbatim rather than redesigned so the two branches dedupe at merge.
+import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
+import { feasibilityHint } from "./feasibility-copy";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
@@ -34,7 +40,12 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // the apply preview below chips a lane exactly the way the profile card and
 // the profile drawer do (one solid single-hue chip PER lane, muted AUTO for
 // a profile that pins nothing) — one authority, no third dialect.
-import { runtimeChips } from "./profiles.jsx";
+// useRunnerPull (issue #2185, Task 11c): the SAME pull mutation the
+// Profiles view's not-pulled runtime chip uses — reused verbatim here for
+// the Runtime RichSelect's inline Pull affordance rather than a second
+// hook that could resolve a pull target differently.
+import { runtimeChips, useRunnerPull } from "./profiles.jsx";
+import { RichSelect } from "./rich-select.jsx";
 // shlex-lite flag diff — the apply preview's "replaces N flags" count.
 import { diffFlags } from "./flags-tune.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
@@ -151,6 +162,14 @@ function crossDeviceTarget(profile, devBackend) {
 	return targetDevice;
 }
 
+// Slot display-name validity — mirrors RenameSlotDialog.jsx's own NAME_RE
+// (lowercase + dashes, ≤31 chars). Two copies rather than a shared export
+// because RenameSlotDialog is a window-global component file, not an ESM
+// module this file imports from; the pattern is small and stable enough
+// that keeping it inline here (Task 11a's inline-editable name field) costs
+// less than wiring a new export across that boundary.
+const SLOT_NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
+
 // Lane token → display title, for the Runtime select's option suffix and the
 // Lane pills (hw-cascade.js's runnerOptions/laneValues deal only in the raw
 // backend tokens — rocm/vulkan/cuda/cpu — so the JSX owns the display copy).
@@ -159,13 +178,208 @@ function laneTitle(lane) {
 	return LANE_TITLE[lane] || lane;
 }
 
-// Runtime select suffix for one runnerOptions() row: 'ROCm + Vulkan' for a
-// dual-lane runner, the single lane's title for one, '' for a backend-
-// agnostic runner (no lanes declared — it takes whatever device it's given).
-function laneLabel(option) {
-	return (option?.lanes || []).map(laneTitle).join(" + ");
+// ── Runtime RichSelect rows (Task 11c) ────────────────────────────────────
+// (laneLabel(), the old plain-text " · ROCm + Vulkan" suffix helper, is gone
+// with the native <select> it decorated — the RichSelect rows below chip
+// each lane instead, via profiles.jsx's runtimeChips.)
+// Plain install-state indicator — NOT a button. Lives in both the closed
+// trigger (RichSelect's `right`) and the open row, so it must never be
+// interactive (a nested <button> inside the trigger's own <button> would be
+// invalid HTML and double-fire clicks). The inline Pull action below lives
+// in `desc` instead, which only ever renders inside the <li> row.
+function runtimeInstallBadge(state) {
+	if (state === "installed") return <span className="chip ok">● installed</span>;
+	if (state === "installable") return <span className="chip warn">○ not pulled</span>;
+	if (!state) return null;
+	return <span className="chip">{state}</span>;
 }
 
+// Runtime row description: the runner's blurb, plus an inline Pull button
+// (issue #2185) for an `installable` (not-pulled) runtime — reusing
+// profiles.jsx's `useRunnerPull`, the SAME mutation the Profiles view's own
+// not-pulled chip fires, so a pull kicked off from either surface lands in
+// the same job. `e.stopPropagation()` keeps the click from also committing
+// this option (the <li> it lives in fires onOptionClick on any click).
+function RuntimeRowDesc({ runnerKey, blurb, installable, backends }) {
+	const pull = useRunnerPull(runnerKey, backends);
+	if (!blurb && !installable) return null;
+	return (
+		<span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+			{blurb ? <span>{blurb}</span> : null}
+			{installable && (
+				<button
+					type="button"
+					className="btn ghost sm"
+					style={{ alignSelf: "flex-start" }}
+					disabled={pull.inFlight || !pull.target}
+					onClick={(e) => {
+						e.stopPropagation();
+						pull.start();
+					}}
+					title={pull.error ? `Pull failed — ${pull.error}` : "Pull this runtime image now"}
+				>
+					{pull.inFlight ? "◌ pulling…" : "⇩ Pull now"}
+				</button>
+			)}
+		</span>
+	);
+}
+
+// Build the Runtime RichSelect's options from a runnerOptions() list — one
+// solid `.pf-be` chip per lane (via profiles.jsx's `runtimeChips`, fed a
+// bare `{runner: key}` "profile" shape so it reuses the exact lane/hue
+// logic the Profiles view and the profile-apply preview already use — one
+// authority for what a lane chip looks like), the install-state chip, and
+// the blurb+Pull desc. The Auto entry and an out-of-vocab persisted binary
+// keep their EXACT current plain-text copy — no chips, no desc — per the
+// "out-of-vocab rows keep current copy" rule.
+function runtimeRichOptions({ binary, runtimeSel, runtimeOptions, backends }) {
+	const opts = [];
+	if (!binary) {
+		opts.push({ id: "", row: "— auto · resolved from device —" });
+	}
+	if (runtimeSel === null) {
+		opts.push({ id: binary, row: `${binary} · not in this catalog` });
+	}
+	for (const o of runtimeOptions) {
+		opts.push({
+			id: o.key,
+			row: (
+				<span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+					<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{o.title}</span>
+					<span className="pf-be-row">
+						{runtimeChips({ runner: o.key }, backends).map((c) => (
+							<span
+								key={c.key}
+								className="pf-be mono"
+								style={c.hue ? { "--bk": c.hue } : null}
+							>
+								{c.label}
+							</span>
+						))}
+					</span>
+				</span>
+			),
+			right: runtimeInstallBadge(o.state),
+			desc: (
+				<RuntimeRowDesc
+					runnerKey={o.key}
+					blurb={o.blurb}
+					installable={o.state === "installable"}
+					backends={backends}
+				/>
+			),
+		});
+	}
+	return opts;
+}
+
+// ── Model RichSelect rows (Task 11c) ──────────────────────────────────────
+// The one non-"chat" capability worth calling out as a modality tag on the
+// row's name line (mockup panel 05: "qwen3.8-vl-8b … <tag mod>vision</tag>").
+// Plain chat/tool-calling/coding models get no modality tag — those are
+// covered in the desc line's capability list instead.
+const MODEL_MODALITY_CAPS = ["vision", "image", "embed", "rerank", "transcription", "tts"];
+function modelModalityTag(m) {
+	const caps = Array.isArray(m?.capabilities) ? m.capabilities : [];
+	return MODEL_MODALITY_CAPS.find((c) => caps.includes(c)) || null;
+}
+
+// Build the Model RichSelect's options from the already-filtered compatible
+// list. `verdictChipFor(modelId)` returns the right-aligned GTT feasibility
+// chip (`● fits · ~N GB` / `◐ tight` / `○ won't fit`, or null for an
+// unverdicted/unknown row) — a no-op placeholder here; Task 11d wires it to
+// the batch `useModelsFeasibility` call fired on dropdown open. `usedByCount`
+// is read from the slots list already queried in this drawer (`slotsQuery`),
+// never a second fetch.
+function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChipFor }) {
+	const opts = [];
+	if (cur && !has) {
+		opts.push({ id: cur, row: slotLong || cur });
+	}
+	if (!cur) {
+		opts.push({ id: "", row: "—" });
+	}
+	const countUsedBy = (id) =>
+		(allSlots || []).filter((s) => (s.model_id || s.model) === id).length;
+	for (const m of compatible) {
+		const quant = m.quant || null;
+		const modTag = modelModalityTag(m);
+		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
+		const usedBy = countUsedBy(m.id);
+		opts.push({
+			id: m.id,
+			row: (
+				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+					<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+						{m.longName || m.id}
+					</span>
+					{quant && <span className="chip amber">{quant}</span>}
+					{modTag && <span className="chip info">{modTag}</span>}
+				</span>
+			),
+			right: verdictChipFor ? verdictChipFor(m.id) : null,
+			desc: `${m.params || "—"} · ${caps.length ? caps.join(" + ") : "—"} · used by ${usedBy} slot${usedBy === 1 ? "" : "s"}`,
+		});
+	}
+	return opts;
+}
+
+// ── Profile RichSelect rows (Task 11c) ────────────────────────────────────
+// name + the runtime it carries (title/chips, via profiles.jsx's shared
+// runtimeChips) + an intent line — mirrors how the Profiles view itself
+// names a runtime (runnerTitleFor/runtimeLine there), so the slot drawer's
+// Profile row can't describe a runtime differently than the Profiles page
+// does for the same profile.
+function profileRuntimeTitle(key, backends) {
+	return key ? backends?.[key]?.title || key : "Auto";
+}
+function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND_DEVICE: deviceMap }) {
+	const opts = [];
+	// keep a none/out-of-vocab persisted profile selectable — exact current
+	// copy, no chips/desc (out-of-vocab rows keep their plain-text row).
+	if (none) opts.push({ id: "", row: "— none —" });
+	if (outOfVocab) opts.push({ id: outOfVocab, row: outOfVocab });
+	const rowFor = (p, crossTarget) => ({
+		id: p.name,
+		row: (
+			<span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+				<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+					{p.name}
+					{crossTarget ? ` · → ${crossTarget}` : ""}
+				</span>
+				<span className="pf-be-row">
+					{runtimeChips(p, backends).map((c) => (
+						<span
+							key={c.key}
+							className="pf-be mono"
+							style={c.hue ? { "--bk": c.hue } : null}
+						>
+							{c.label}
+						</span>
+					))}
+				</span>
+			</span>
+		),
+		desc: p.intent
+			? `${profileRuntimeTitle(p.runner, backends)} — ${p.intent}`
+			: profileRuntimeTitle(p.runner, backends),
+	});
+	for (const p of fit) opts.push(rowFor(p, null));
+	// RichSelect has no <optgroup> — a disabled marker row stands in for the
+	// old "Other backend — switches slot device" group label (disabled rows
+	// are skipped by arrow/Home/End nav and unclickable, same as a group
+	// header would be).
+	if (crossFit.length > 0) {
+		opts.push({
+			id: "__crossfit_header__",
+			disabled: true,
+			row: "— other backend — switches slot device —",
+		});
+		for (const p of crossFit) opts.push(rowFor(p, deviceMap[p.backend]));
+	}
+	return opts;
+}
 
 // Concatenate a flag base with an overlay the way the launcher does: the
 // profile's tune is appended AFTER the model tune, and diffFlags' pair map is
@@ -380,9 +594,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// them; render the drawer shell with a sentinel slot instead.
 	const editMut = useSlotEdit();
 	const defaultsMut = useSlotDefaults();
-	// Delete + rename are owned by their extracted dialogs (D2 decomposition):
-	// dash/slots/DeleteSlotDialog.jsx and dash/slots/RenameSlotDialog.jsx.
-	const [renameOpen, setRenameOpen] = useStateSM(false);
+	// Delete is owned by its extracted dialog (D2 decomposition):
+	// dash/slots/DeleteSlotDialog.jsx. Rename used to be too
+	// (dash/slots/RenameSlotDialog.jsx) — Task 11a replaces the "Rename…"
+	// button ceremony with an inline-editable title field (slot-name-inline,
+	// below), committing on blur/Enter through the SAME useSlotRename
+	// mutation the dialog used. RenameSlotDialog.jsx keeps its own
+	// mutation+validation logic (still used as a component in its own
+	// right); this drawer no longer opens or mounts it — the API plumbing
+	// it wraps is exactly what renameMut below also calls.
+	const renameMut = useSlotRename();
+	// Inline name draft — seeded from the persisted name, resynced whenever
+	// the slot identity changes (a poll refresh mid-edit must not clobber an
+	// in-flight keystroke, same rule RenameSlotDialog's own seed effect
+	// follows).
+	const [nameDraft, setNameDraft] = useStateSM(slot?.name || "");
+	// Escape-cancel flag for the inline name field. The Escape branch calls
+	// blur() synchronously, so commitName (the blur handler) runs BEFORE the
+	// setNameDraft(slot.name) revert re-renders — it would still read the
+	// stale edited draft and commit the rename Escape meant to throw away.
+	// The ref is the synchronous channel: Escape sets it, commitName checks
+	// and clears it first thing and reverts without mutating.
+	const nameCancelRef = useRefSM(false);
 	// Inline model edit — stacks the reusable ModelDrawer over this drawer
 	// (equal z-index; later DOM order wins) so model-tune edits don't force a
 	// close → Models page → reopen round-trip. The slot drawer and its
@@ -719,12 +952,64 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	useEffectSM(() => {
 		if (Number.isInteger(slot?.priority)) setPrio(slot.priority);
 	}, [slot?.priority]);
+	// Re-seed the inline name draft from server truth on identity change only
+	// — NOT on every poll re-reference, or an in-flight keystroke would be
+	// wiped every ~2.5s (same guard RenameSlotDialog's seed effect uses).
+	useEffectSM(() => {
+		setNameDraft(slot?.name || "");
+	}, [slot?.name]);
+
+	// GTT feasibility (Task 11d) — TWO separate mutation instances, not one
+	// shared between them: the ceiling hint and the model-row batch each hold
+	// their own `.data`, and a shared instance would let whichever fired last
+	// clobber the other's result.
+	const ceilingFeasibility = useModelsFeasibility();
+	const modelListFeasibility = useModelsFeasibility();
+	const ceilingFeasibilityTimer = useRefSM(null);
+	// Debounced 400ms probe for the bound model at the STAGED ceiling — fires
+	// on drawer open (curModelRow/ctx seed on mount) and again on every ctx
+	// edit. Advisory only (warn-never-block, 993ea3b6): a stale in-flight
+	// probe superseded by a newer keystroke is harmless — the render below
+	// always reads the mutation's latest `.data`.
+	useEffectSM(() => {
+		if (ceilingFeasibilityTimer.current) clearTimeout(ceilingFeasibilityTimer.current);
+		if (!open || !curModelRow?.id) return undefined;
+		const ctxNum = Number(ctx);
+		if (!Number.isFinite(ctxNum) || ctxNum <= 0) return undefined;
+		ceilingFeasibilityTimer.current = setTimeout(() => {
+			ceilingFeasibility.mutate({ models: [{ model_id: curModelRow.id, ctx: ctxNum }] });
+		}, 400);
+		return () => clearTimeout(ceilingFeasibilityTimer.current);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, curModelRow?.id, ctx]);
+	// The bound model's row from the last successful ceiling probe (or none —
+	// `feasibilityHint`'s default branch renders no hint for an absent row,
+	// same as an explicit "unknown" verdict).
+	const ctxFeasibilityRow = (ceilingFeasibility.data?.results || []).find(
+		(r) => r.model_id === curModelRow?.id,
+	);
+	const ctxHint = ctxFeasibilityRow ? feasibilityHint(ctxFeasibilityRow) : null;
+	// Per-row chip for the Model RichSelect's `right` slot, from the last
+	// batch probe (fired on dropdown open — see the Model select below). A
+	// row with no verdict in the batch (still loading, or the batch hasn't
+	// fired yet) renders no chip — never a stale/guessed one.
+	const modelFeasibilityChipFor = (id) => {
+		const row = (modelListFeasibility.data?.results || []).find((r) => r.model_id === id);
+		if (!row) return null;
+		const gb = Math.round((row.needed_mb ?? 0) / 1024);
+		if (row.verdict === "fits") return <span className="chip ok">● fits · ~{gb} GB</span>;
+		if (row.verdict === "tight") return <span className="chip warn">◐ tight</span>;
+		if (row.verdict === "exceeds" || row.verdict === "exceeds_total")
+			return <span className="chip err">○ won't fit</span>;
+		return null;
+	};
 
 	// Screen-reader descriptions for the header toggles — the hover `title`
 	// alone is unreachable for keyboard/touch/SR users (Codex review, #1638).
 	// Hooks: must sit ABOVE the `!slot` early return (positional counting).
 	const autoloadDescId = React.useId();
 	const pinDescId = React.useId();
+	const nameDescId = React.useId();
 
 	if (!slot) return null;
 
@@ -1013,6 +1298,39 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				);
 		}
 	};
+	// Slot rename requires the systemd unit OFFLINE (it re-templates
+	// hal0-slot@{name}) — same gate RenameSlotDialog enforces via
+	// slotButtonPhase. Committed on blur/Enter from the inline title field;
+	// an invalid or unchanged value reverts silently (no dialog, no modal
+	// round-trip) rather than surfacing a submit error for a no-op edit.
+	const nameRunning = slotButtonPhase(slot) !== "off";
+	const commitName = async () => {
+		// Escape-cancel: the Escape keydown blurred us synchronously, before
+		// its draft revert could re-render — nameDraft may still hold the
+		// edited text here. Honour the cancel: revert, never mutate.
+		if (nameCancelRef.current) {
+			nameCancelRef.current = false;
+			setNameDraft(slot.name);
+			return;
+		}
+		const next = String(nameDraft).trim();
+		if (nameRunning || !next || !SLOT_NAME_RE.test(next) || next === slot.name) {
+			setNameDraft(slot.name);
+			return;
+		}
+		try {
+			await renameMut.mutateAsync({ name: slot.name, new_name: next });
+			window.__hal0Toast && window.__hal0Toast(`Renamed to ${next}`, "ok");
+			// The route still names the old slot (#slots/<old>); without this
+			// the drawer unmounts silently on the next poll because no slot
+			// matches the old name any more. Follow the rename in the URL.
+			window.location.hash = "#slots/" + next;
+		} catch (err) {
+			setNameDraft(slot.name);
+			window.__hal0Toast &&
+				window.__hal0Toast(err?.message || `${slot.name}: rename failed`, "warn");
+		}
+	};
 	const commitPriority = async () => {
 		// An emptied/garbage input must never commit as 0 — that's the most
 		// aggressive evict-first priority, not "no input yet". Revert to the
@@ -1271,12 +1589,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						slot's device on save." />
 				</div>
 				<div className="form-ctl">
-					<select
-						className="input mono"
+					<RichSelect
 						data-testid="slot-profile"
 						value={profileSel}
-						onChange={(e) => {
-							const nextName = e.target.value;
+						options={profileRichOptions({
+							none: !slot.profile,
+							outOfVocab:
+								profileSel && !listedNames.includes(profileSel)
+									? profileSel
+									: null,
+							fit,
+							crossFit,
+							backends: runnerCat,
+							BACKEND_DEVICE,
+						})}
+						onChange={(nextName) => {
 							setProfileSel(nextName);
 							setFieldErrs((p) => ({ ...p, profile: undefined }));
 							// Profile wins (D4): a picked profile carrying `runner`
@@ -1296,29 +1623,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								setDevice(pick.device);
 							}
 						}}
-					>
-						{/* keep a none/out-of-vocab persisted profile selectable */}
-						{!slot.profile && <option value="">— none —</option>}
-						{profileSel && !listedNames.includes(profileSel) && (
-							<option value={profileSel}>{profileSel}</option>
-						)}
-						{fit.map((p) => (
-							<option key={p.name} value={p.name} title={p.intent}>
-								{p.name}
-								{p.intent ? ` · ${p.intent}` : ""}
-							</option>
-						))}
-						{crossFit.length > 0 && (
-							<optgroup label="Other backend — switches slot device">
-								{crossFit.map((p) => (
-									<option key={p.name} value={p.name} title={p.intent}>
-										{p.name} · → {BACKEND_DEVICE[p.backend]}
-										{p.intent ? ` · ${p.intent}` : ""}
-									</option>
-								))}
-							</optgroup>
-						)}
-					</select>
+					/>
 					{applyPreview && (
 						<div
 							className="hint sl-apply"
@@ -1458,6 +1763,33 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		);
 	})();
 
+	// Runtime cascade (hw-cascade.js, D3) — hoisted out of the old Hardware
+	// FieldGroup's render-local IIFE (Task 11a regroup) so BOTH the "How it
+	// runs" Runtime/Lane rows and the consolidated Advanced disclosure's
+	// Image/Debug-pin/Supersession rows (which used to sit in that same
+	// IIFE) can read the same computation — the split moved Threads/NGL/
+	// Advanced out of the Hardware group without duplicating this cascade.
+	// Reads `pendingDevice` (#1636 Codex fix) so a pending cross-backend
+	// profile switch previews the POST-save fit.
+	const hwBackends = systemInfoQuery.data?.backends ?? {};
+	const hwFlags = hostHwFlags(systemInfoQuery.data?.hardware);
+	const { options: runtimeOptions } = runnerOptions({
+		backends: hwBackends,
+		device: pendingDevice,
+		slotType: slot.type,
+		hw: hwFlags,
+	});
+	const runtimeSel = selectedRunnerKey({ binary, options: runtimeOptions });
+	// '' = Auto (no binary pinned); a real key = that option; null = a
+	// persisted binary this catalog doesn't offer for this slot right now —
+	// kept as its own option so the drawer never silently rewrites persisted
+	// state.
+	const runtimeValue = runtimeSel === null ? binary : runtimeSel;
+	const selectedRuntimeOption = runtimeSel
+		? runtimeOptions.find((o) => o.key === runtimeSel)
+		: null;
+	const laneVals = laneValues(selectedRuntimeOption);
+
 	return (
 		<>
 			{/* The Drawer's Esc/backdrop/✕ paths call onClose — routed through
@@ -1469,48 +1801,115 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				open={open}
 				onClose={requestClose}
 				eyebrow={`Slots · /slots/${slot.name}`}
-				title={`Edit ${slot.name}`}
+				title={
+					<span
+						style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}
+					>
+						{/* Inline-editable name (Task 11a) — replaces the disabled
+						    "Name" field + "Rename…" button ceremony. Commits through
+						    the SAME useSlotRename mutation on blur/Enter; Esc reverts
+						    the draft without saving. Disabled while the slot is
+						    running — a rename re-templates the systemd unit, same
+						    gate RenameSlotDialog enforces. */}
+						<input
+							className="mono drawer-title-input"
+							data-testid="slot-name-inline"
+							value={nameDraft}
+							disabled={nameRunning || renameMut.isPending}
+							onChange={(e) => setNameDraft(e.target.value)}
+							onBlur={commitName}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") e.currentTarget.blur();
+								if (e.key === "Escape") {
+									// Cancel the edit: flag first (the blur below runs
+									// commitName synchronously, before the revert
+									// re-renders — see nameCancelRef), then revert and
+									// drop focus. Consumed here so the drawer's
+									// document-level Escape→close listener never sees
+									// this press — Escape in the field cancels the
+									// rename, it must not also close the drawer.
+									e.stopPropagation();
+									nameCancelRef.current = true;
+									setNameDraft(slot.name);
+									e.currentTarget.blur();
+								}
+							}}
+							title={
+								nameRunning
+									? "Stop the slot to rename — the systemd unit is name-keyed"
+									: "Click to rename"
+							}
+							aria-label="Slot name"
+							aria-describedby={nameRunning ? nameDescId : undefined}
+							size={Math.max(6, nameDraft.length)}
+						/>
+						{nameRunning && (
+							<span id={nameDescId} className="sr-only">
+								Stop the slot to rename — the systemd unit is name-keyed.
+							</span>
+						)}
+						<span className="chip outlined" title={`Type is fixed once created — make a new slot for a different kind.`}>
+							{slot.type || "—"}
+						</span>
+					</span>
+				}
 				width={SLOT_DRAWER_WIDTH}
 				headRight={
 					<>
-						{/* Lifecycle pair (spec 2026-08-02 consolidation): Auto-Load =
-						    boot start only, Pin = residency only. Side by side so they
-						    read as one story instead of competing features. NPU trio
-						    shadows (flm-stt / flm-embed) have no unit or container of
-						    their own — the anchor's FLM process serves them — so
-						    Auto-Load is hidden there: writing { autoload } to a shadow
-						    TOML configures a boot start that can never happen. */}
-						{!isNpuShadow && (
-							<label
-								className="slot-enable-toggle drawer-enable"
-								data-testid="slot-autoload-toggle"
-								title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
+						{/* Identity + state facts (Task 11a): the two ReadOnlyStrip
+						    fact strips this used to be are gone — everything they
+						    carried either moved here (state/breaker/specialty chips,
+						    the #id·:port chip), onto the title (type), or into
+						    Advanced (image status). "runner · binary" was dropped
+						    outright: the Runtime select below already names it. */}
+						<span
+							className="drawer-h-facts"
+							style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+						>
+							<span
+								data-testid="slot-state-readonly"
+								className={stateChipClass(slot)}
 							>
-								<span className="drawer-enable-label mono">Auto-Load</span>
-								<input
-									type="checkbox"
-									checked={autoload}
-									onChange={() => onToggleAutoload(!autoload)}
-									aria-label={
-										autoload
-											? "Disable auto-load on start"
-											: "Enable auto-load on start"
-									}
-									aria-describedby={autoloadDescId}
-								/>
-								<span className="slot-enable-track" aria-hidden="true" />
-								<span id={autoloadDescId} className="sr-only">
-									Start this slot automatically at boot. Only controls
-									startup; eviction protection is the Pin toggle.
+								{slot.state}
+							</span>
+							<SlotBreakerChip s={slot} />
+							{specialtyDegraded && (
+								<span
+									className="tag-chip"
+									data-testid="slot-specialty-degraded"
+									title={specialtyDegraded.detail || "Specialty distribution degraded to GGUF-only"}
+									style={{
+										color: "var(--warn)",
+										borderColor: "var(--warn-line)",
+										background: "var(--warn-soft)",
+									}}
+								>
+									⚠ {specialtyDegraded.specialty || "specialty"} degraded
 								</span>
-							</label>
-						)}
+							)}
+							<span className="chip mono">
+								<span data-testid="slot-id-readonly">
+									{(slot.id != null ? slot.id : slot.slot_id) != null
+										? `#${slot.id != null ? slot.id : slot.slot_id}`
+										: "—"}
+								</span>
+								{" · "}
+								<span data-testid="slot-port-readonly" title="assigned by PortAuthority">
+									{`:${slot.port || "—"}`}
+								</span>
+							</span>
+						</span>
+						{/* Task 11b: Auto-Load moves out of the header into the "When it
+						    unloads" lifecycle row below, next to Eviction priority — the
+						    two read as one "how this slot comes and goes" story there.
+						    Pin stays here: it's a mode of the whole slot (residency),
+						    not a lifecycle knob that trades off against priority. */}
 						<label
 							className="slot-enable-toggle drawer-enable"
 							data-testid="slot-pin-toggle"
 							title={
 								pinned
-									? "Unpin slot — idle/pressure eviction applies again (order set by Eviction priority under Advanced)"
+									? "Unpin slot — idle/pressure eviction applies again (order set by the priority under \"When it unloads\")"
 									: "Pin slot — once loaded it stays resident: exempt from idle/pressure eviction, and unload/delete require ?force=true. Pinning never starts a slot — boot start is the Auto-Load toggle."
 							}
 						>
@@ -1574,578 +1973,169 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					</>
 				}
 			>
-				{/* Identity strip — read-only: stable slot id, PortAuthority-assigned
-          port, and state. The id is the API key for debugging (stable across a
-          rename); the port is display-only (assigned by PortAuthority). */}
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "1fr 1fr 1fr",
-						gap: 0,
-						border: "1px solid var(--line-soft)",
-						borderRadius: "var(--rad-sm)",
-						overflow: "hidden",
-						marginBottom: 16,
-					}}
-				>
-					<ReadOnlyStrip
-						k="slot_id"
-						v={
-							<span data-testid="slot-id-readonly">
-								{(slot.id != null ? slot.id : slot.slot_id) != null
-									? `#${slot.id != null ? slot.id : slot.slot_id}`
-									: "—"}
-							</span>
-						}
-					/>
-					<ReadOnlyStrip
-						k="port · PortAuthority"
-						v={
-							<span
-								data-testid="slot-port-readonly"
-								title="assigned by PortAuthority"
-							>{`:${slot.port || "—"}`}</span>
-						}
-					/>
-					<ReadOnlyStrip
-						k="state"
-						v={
-							<span
-								style={{ display: "inline-flex", gap: 6, alignItems: "center" }}
-							>
-								<span
-									data-testid="slot-state-readonly"
-									className={stateChipClass(slot)}
-								>
-									{slot.state}
-								</span>
-								{/* #2038: breaker view rides next to the lifecycle state so
-								    "error" + "parked · N failures" read as one story. */}
-								<SlotBreakerChip s={slot} />
-								{/* Specialty guard verdict (spec 2026-08-29 #1946): the runner
-								    serving this slot doesn't list the model's specialty, so it
-								    launched GGUF-only (degraded, not blocked) — loud amber badge,
-								    same warn tokens as SlotBreakerChip/backend-mismatch chips.
-								    `.detail` carries the human-readable reason as the tooltip. */}
-								{specialtyDegraded && (
-									<span
-										className="tag-chip"
-										data-testid="slot-specialty-degraded"
-										title={specialtyDegraded.detail || "Specialty distribution degraded to GGUF-only"}
-										style={{
-											color: "var(--warn)",
-											borderColor: "var(--warn-line)",
-											background: "var(--warn-soft)",
-										}}
-									>
-										⚠ {specialtyDegraded.specialty || "specialty"} degraded
-									</span>
-								)}
-							</span>
-						}
-					/>
-				</div>
-
-				{/* Runner + type + image status strip — read-only. Runner (BINARY)
-          resolves the launch image (RUNNER_IMAGES[binary]); image_pin overrides
-          it (§3). `type` sits between the two: it is fixed at creation (it rides
-          the model, exactly like device), so it belongs in the read-only strip
-          rather than as a disabled form control down in the Slot group.
-          image status keyed to slot_id so the operator knows which slot owns it. */}
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "1fr 1fr 1fr",
-						gap: 0,
-						border: "1px solid var(--line-soft)",
-						borderRadius: "var(--rad-sm)",
-						overflow: "hidden",
-						marginBottom: 16,
-					}}
-				>
-					<ReadOnlyStrip
-						k="runner · binary"
-						v={slot.binary || `auto · ${deviceBackend(device) || device}`}
-					/>
-					<ReadOnlyStrip
-						k="type"
-						v={
-							<span
-								data-testid="slot-type-readonly"
-								title="Type is fixed once created — make a new slot for a different kind."
-							>
-								{slot.type || "—"}
-							</span>
-						}
-					/>
-					<ReadOnlyStrip
-						k="image status"
-						v={
-							<span data-testid="slot-image-status">
-								{slotButtonPhase(slot) === "running"
-									? (slot.actual_image ||
-											slot.image_pin ||
-											slot.image ||
-											"present") +
-										(slot.id != null
-											? ` · #${slot.id}`
-											: slot.slot_id != null
-												? ` · #${slot.slot_id}`
-												: "")
-									: "—"}
-							</span>
-						}
-					/>
-				</div>
-
-				{/* Slot identity — names are mutable labels; the stable slot id is not. */}
-				<FieldGroup label="Slot">
-					<div className="form-row">
-						<div className="form-lbl">
-							<span>Name</span>
-							<FieldInfoIcon description="A display label. Rename any time — the stable slot number never
-								changes." />
-						</div>
-						<div
-							className="form-ctl"
-							style={{ display: "flex", gap: 8, alignItems: "center" }}
-						>
-							<input
-								className="input mono"
-								value={slot.name}
-								disabled
-								style={{ flex: 1 }}
-							/>
-							<button
-								className="btn ghost sm"
-								data-testid="slot-rename-open"
-								onClick={() => setRenameOpen(true)}
-							>
-								Rename…
-							</button>
-						</div>
-					</div>
-					{/* Type moved to the read-only strip above — it is fixed at
-					    creation, so a disabled select here was a control that could
-					    never do anything. */}
-				</FieldGroup>
+				{/* Task 11a: both ReadOnlyStrip fact strips (slot_id/port/state and
+				    runner·binary/type/image-status) are gone. state/breaker/
+				    specialty chips and the #id·:port chip moved into the drawer
+				    header row above; type became a title chip; "runner · binary"
+				    was dropped outright (the Runtime select below already names
+				    it); image status now lives in Advanced only (see below). The
+				    "Slot" FieldGroup's Name field + "Rename…" button are gone too
+				    — the title's inline-editable name field replaces both. */}
 
 
-				{/* Hardware ownership — changes apply on Save and require a restart. */}
-				<FieldGroup label="Hardware">
-					{(() => {
-						const backends = systemInfoQuery.data?.backends ?? {};
-						const hw = hostHwFlags(systemInfoQuery.data?.hardware);
-						// Runner-first cascade (hw-cascade.js, D3): one option per
-						// runtime, each carrying the lane(s) it can serve. Reads
-						// `pendingDevice` (#1636 Codex fix) so a pending cross-backend
-						// profile switch previews the POST-save fit.
-						const { options } = runnerOptions({
-							backends,
-							device: pendingDevice,
-							slotType: slot.type,
-							hw,
-						});
-						const runtimeSel = selectedRunnerKey({ binary, options });
-						// '' = Auto (no binary pinned); a real key = that option;
-						// null = a persisted binary this catalog doesn't offer for
-						// this slot right now — kept as its own option so the drawer
-						// never silently rewrites persisted state.
-						const runtimeValue = runtimeSel === null ? binary : runtimeSel;
-						const selectedOption = runtimeSel
-							? options.find((o) => o.key === runtimeSel)
-							: null;
-						const laneVals = laneValues(selectedOption);
-						return (
-							<>
-								{/* Device select removed: `device` is now DERIVED from the
-								    Runtime pick below (a single-lane runner's lane rides the
-								    pick; a dual-lane runner's Lane pills, further down) —
-								    the old standalone select let Device and Binary disagree.
-								    Save still persists it via PUT /config { device } and
-								    cold-restarts; non-GPU devices (npu/cpu/img) route to
-								    different runtime families, so they never flip here. */}
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Runtime</span>
-										<FieldInfoIcon description="Which engine build this slot launches. Options are what
-											this box's hardware can run; versions are managed on
-											the Runner Images page." />
-									</div>
-									<div className="form-ctl">
-										<select
-											className={
-												"input mono" + (fieldErrs.device ? " input-err" : "")
-											}
-											data-testid="slot-hw-runtime"
-											value={runtimeValue}
-											onChange={(e) => {
-												const pick = applyRunnerChoice({
-													options,
-													key: e.target.value,
-													currentDevice: device,
-												});
-												setBinary(pick.binary);
-												setDevice(pick.device);
-												setFieldErrs((p) => ({ ...p, device: undefined }));
-											}}
-										>
-											{/* Auto entry only while nothing is pinned — picking a
-											    real runtime is one-way, same as the old Backend
-											    select. */}
-											{!binary && (
-												<option value="">
-													— auto · resolved from device —
-												</option>
-											)}
-											{/* An out-of-vocab persisted binary (older release,
-											    hand-edited TOML, a runtime this box no longer offers
-											    for the slot) keeps its own option so the drawer
-											    never silently rewrites it. */}
-											{runtimeSel === null && (
-												<option value={binary}>
-													{binary} · not in this catalog
-												</option>
-											)}
-											{options.map((o) => (
-												<option key={o.key} value={o.key}>
-													{o.title}
-													{laneLabel(o) ? ` · ${laneLabel(o)}` : ""}
-													{o.state === "installable" ? " · not pulled" : ""}
-												</option>
-											))}
-										</select>
-										{selectedOption?.blurb ? (
-											<div className="hint">{selectedOption.blurb}</div>
-										) : null}
-										{deviceIsLiveEdit && (
-											<div
-												className="hint"
-												data-testid="slot-hw-consequence"
-												style={{
-													marginTop: 6,
-													padding: "6px 10px",
-													borderRadius: "var(--rad-sm)",
-													color: "var(--info)",
-													border: "1px solid var(--info-line)",
-													background: "var(--info-soft)",
-												}}
-											>
-												Switching moves this slot to the{" "}
-												{laneTitle(deviceBackend(device))} lane and restarts
-												it on Save.
-											</div>
-										)}
-										{fieldErrs.device && (
-											<div
-												className="hint"
-												data-testid="slot-hw-device-err"
-												style={{ color: "var(--err)" }}
-											>
-												{fieldErrs.device}
-											</div>
-										)}
-									</div>
-								</div>
-
-								{laneVals.length > 0 && (
+				{/* Task 11a regroup (mockup panel 03): "What runs" first — model +
+				    tune is the operator's first question. Model select + arch-fit
+				    warning are unchanged internals; the Profile row (+ apply
+				    preview) is unchanged too, just regrouped here. NPU slots have
+				    no Model select (the capability matrix further down replaces
+				    it) but their Profile row folds into this same section instead
+				    of keeping its own now-redundant group. */}
+				<FieldGroup label="What runs" hint="model & tune">
+					{device === "npu" ? (
+						profileRow
+					) : (
+						<>
+							{/* Task 1: live model swap — mirrors the card's ModelPicker but with the
+          full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
+          Swap is its own POST /slots/{name}/swap (not part of the batched
+          Save); container slots cold-restart to load, so we toast like the
+          popover does. */}
+							{(() => {
+								const isContainer = slot.runtime === "container";
+								// Derive the backend from the SELECTED device (reactive) so the rocmfp4
+								// filter re-evaluates immediately when the operator switches the HW-grid
+								// device — before Save is clicked. (Device is the single owner of the
+								// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
+								//
+								// Codex P1: deliberately `device` here, NOT `pendingDevice`. Swap fires
+								// its own immediate POST /slots/{name}/swap, independent of the batched
+								// Save — a pending cross-backend profile pick hasn't reached the server
+								// yet, so previewing the post-Save backend here would offer a model the
+								// CURRENTLY persisted runner can't load (the live swap has no idea a
+								// device switch is staged). Gate the whole control instead (below) while
+								// a switch is pending, and keep this list honest about the real device.
+								const selBackend = deviceBackend(device) || slot.backend;
+								const compatible = compatibleModels(modelsQuery.data, {
+									type: slot.type,
+									backend: selBackend,
+								});
+								const cur = slot.model_id || slot.model || "";
+								const has = compatible.some((m) => m.id === cur);
+								// A background swap is in flight — the select stays usable, but show a
+								// "Swapping…" hint so the operator knows the load is happening.
+								const swapping = swapMut.isPending;
+								return (
 									<div className="form-row">
 										<div className="form-lbl">
-											<span>Lane</span>
-											<FieldInfoIcon description="Which GPU stack the Standard runtime uses. Auto
-												follows the device." />
+											<span>Model</span>
+											<FieldInfoIcon description={isContainer ? "Swap restarts the container to load the new model" : "Applies immediately"} />
 										</div>
 										<div className="form-ctl">
 											<div
-												data-testid="slot-hw-lane"
-												style={{ display: "flex", gap: 6 }}
+												style={{ display: "flex", gap: 8, alignItems: "center" }}
 											>
-												{laneVals.map((lane) => {
-													const active = lane
-														? deviceBackend(pendingDevice) === lane
-														: !laneVals
-																.slice(1)
-																.includes(deviceBackend(pendingDevice));
-													return (
-														<button
-															key={lane || "auto"}
-															type="button"
-															className="btn ghost sm"
-															aria-pressed={active}
-															style={
-																active
-																	? {
-																			color: "var(--accent)",
-																			borderColor: "var(--accent-line)",
-																			background: "var(--accent-soft)",
-																		}
-																	: undefined
+												<div style={{ flex: 1, minWidth: 0 }}>
+													<RichSelect
+														data-testid="slot-model-swap"
+														aria-label={`Model for ${slot.name}`}
+														value={cur}
+														disabled={saving || !!pendingCrossDevice}
+														options={modelRichOptions({
+															compatible,
+															cur,
+															has,
+															slotLong: slot.modelLong || slot.model || cur,
+															allSlots: Array.isArray(slotsQuery.data)
+																? slotsQuery.data
+																: [],
+															verdictChipFor: modelFeasibilityChipFor,
+														})}
+														// Task 11d: one batch feasibility call for every listed
+														// model at the slot's CURRENT (persisted/staged) ceiling,
+														// fired once per dropdown open — not per keystroke, not
+														// per row. `has` rows with no verdict in the response
+														// render no chip (see modelFeasibilityChipFor above).
+														onOpenChange={(isOpen) => {
+															if (!isOpen || compatible.length === 0) return;
+															const ctxNum = Number(ctx);
+															modelListFeasibility.mutate({
+																models: compatible.map((m) => ({
+																	model_id: m.id,
+																	...(Number.isFinite(ctxNum) && ctxNum > 0
+																		? { ctx: ctxNum }
+																		: {}),
+																})),
+															});
+														}}
+														onChange={(id) => {
+															if (!id || id === cur) return;
+															const picked = compatible.find((m) => m.id === id);
+															const label = picked?.longName || id;
+															// UI-5: swapping the model on a LIVE container slot cold-restarts
+															// it (~model-load seconds). Confirm through the shared
+															// ConfirmDialog before firing — stashing the pick re-renders the
+															// select back to `cur` (value={cur}), so cancel needs no manual
+															// revert. Mirrors the delete/dirty-close confirm gates.
+															const live = slotButtonPhase(slot) === "running";
+															if (isContainer && live) {
+																setPendingSwap({ id, label });
+																return;
 															}
-															onClick={() =>
-																setDevice(
-																	lane
-																		? BACKEND_DEVICE[lane]
-																		: pendingDevice,
-																)
-															}
-														>
-															{lane ? laneTitle(lane) : "Auto"}
-														</button>
-													);
-												})}
-											</div>
-										</div>
-									</div>
-								)}
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Threads</span>
-										<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
-											decide." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.threads ? " input-err" : "")
-											}
-											data-testid="slot-hw-threads"
-											value={threads}
-											onChange={(e) => {
-												setThreads(e.target.value);
-												setFieldErrs((p) => ({ ...p, threads: undefined }));
-											}}
-											placeholder="0"
-											inputMode="numeric"
-										/>
-										{fieldErrs.threads && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.threads}
-											</div>
-										)}
-									</div>
-								</div>
-
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NGL</span>
-										<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
-											-1 = all layers, 0 = CPU only." />
-									</div>
-									<div className="form-ctl">
-										<input
-											className={
-												"input mono" + (fieldErrs.ngl ? " input-err" : "")
-											}
-											data-testid="slot-hw-ngl"
-											value={nGpuLayers}
-											onChange={(e) => {
-												setNGpuLayers(e.target.value);
-												setFieldErrs((p) => ({ ...p, ngl: undefined }));
-											}}
-											placeholder="-1"
-											inputMode="numeric"
-										/>
-										{fieldErrs.ngl && (
-											<div className="hint" style={{ color: "var(--err)" }}>
-												{fieldErrs.ngl}
-											</div>
-										)}
-									</div>
-								</div>
-
-								{/* Task 9: Advanced disclosure — image truth, debug pin,
-								    supersession banner. Collapsed by default; a controlled
-								    toggle (not native <details>) so the exact "▸"/"▾" glyph
-								    and label text are ours to own — mirrors the PanelHeader
-								    ▸/▾ pattern in
-								    dash/settings/pages/capabilities/shared.jsx. Everything
-								    inside is read-only or debug-only: the operator-facing
-								    hardware surface is Runtime/Lane above, and a pin here
-								    never widens or narrows those options (D1/D6 — no
-								    enumeration). "image"/"digest" language is permitted only
-								    inside this disclosure — the carve-out from the
-								    operator-noun rule that governs the rest of the group. */}
-								<div
-									className="form-section"
-									data-testid="slot-hw-advanced"
-									role="button"
-									tabIndex={0}
-									aria-expanded={advOpen}
-									style={{
-										cursor: "pointer",
-										userSelect: "none",
-										marginTop: 4,
-									}}
-									onClick={() => setAdvOpen((o) => !o)}
-									onKeyDown={(e) => {
-										if (e.key === "Enter" || e.key === " ") {
-											e.preventDefault();
-											setAdvOpen((o) => !o);
-										}
-									}}
-								>
-									<span
-										className="mono"
-										style={{ marginRight: 6, color: "var(--fg-4)" }}
-									>
-										{advOpen ? "▾" : "▸"}
-									</span>
-									Advanced — image & version
-								</div>
-								{advOpen &&
-									(() => {
-										// The effective ref this slot actually runs: a debug
-										// pin (persisted server-side) beats the Runtime's
-										// catalog image, which beats an honest "unresolved
-										// yet" sentinel — never fabricate a ref nothing backs.
-										const effectiveImage =
-											slot.image_pin ||
-											backends[binary]?.image ||
-											"resolved at launch";
-										const pinActive = !!imagePin.trim();
-										const supersededByCombinedUpstream = imagePin.includes(
-											"hal0-combined-upstream",
-										);
-										// The one-click fix commits binary="strix" — only offer
-										// it when "strix" is actually a live pick in the SAME
-										// `options` list the Runtime select above renders (already
-										// filtered by device_class/slotType/hw feasibility). Firing
-										// setBinary("strix") when it isn't would land the operator
-										// on an unresolvable "strix · not in this catalog" pick —
-										// worse than the pin they started with.
-										const strixAvailable = options.some(
-											(o) => o.key === "strix",
-										);
-										return (
-											<>
-												<div className="form-row">
-													<div className="form-lbl">
-														<span>Image</span>
-														<FieldInfoIcon description="The exact runtime image resolved for this
-															slot — a debug pin when one is set, otherwise
-															the release image for the picked Runtime." />
-													</div>
-													<div className="form-ctl">
-														<span
-															className="mono"
-															data-testid="slot-hw-advanced-image"
-														>
-															{effectiveImage}
-														</span>
-														<div className="hint">
-															{pinActive
-																? "debug pin"
-																: "pinned by release · reconciled by hal0 update"}
-														</div>
-													</div>
+															fireSwap(id, label);
+														}}
+													/>
 												</div>
-
-												<div className="form-row">
-													<div className="form-lbl">
-														<span>Version</span>
-													</div>
-													<div className="form-ctl">
-														<div className="hint">
-															Versions and rollback are managed per-runtime
-															on the{" "}
-															<a href="#slots/runner-images">
-																Runner Images page
-															</a>
-															.
-														</div>
-													</div>
+												{/* Inline model edit — the app-wide pencil affordance
+												    (Icons.edit), same bare `btn ghost sm` icon-button
+												    convention as the slot card. Opens the model drawer
+												    DOCKED to the left of this one, so the slot's unsaved
+												    edits stay visible and editable underneath. */}
+												<button
+													className="btn ghost sm"
+													data-testid="slot-model-edit-open"
+													disabled={!curModelRow}
+													title="Edit the bound model's tune (flags, template, caps) in place"
+													aria-label={`Edit model ${curModelRow?.longName || curModelRow?.name || ""}`.trim()}
+													onClick={(e) => {
+														e.stopPropagation();
+														setModelEditOpen(true);
+													}}
+												>
+													{Icons.edit}
+												</button>
+											</div>
+											{swapping && <div className="hint">Swapping…</div>}
+											{!swapping && pendingCrossDevice && (
+												<div
+													className="hint"
+													data-testid="slot-model-swap-blocked"
+												>
+													Model swap is unavailable while the profile pick
+													above is staged to switch this slot's device — Save
+													that change (or revert the profile) before swapping.
 												</div>
-
-												<div className="form-row">
-													<div className="form-lbl">
-														<span>Debug pin</span>
-														<FieldInfoIcon description="Optional: pin this slot to an exact build
-															reference instead of the Runtime's release
-															default. Debug/rollback use only — cleared by
-															leaving it empty." />
-													</div>
-													<div className="form-ctl">
-														{!pinActive && !pinCustom && (
-															<button
-																type="button"
-																className="btn ghost sm"
-																data-testid="slot-hw-debug-pin-open"
-																onClick={() => setPinCustom(true)}
-															>
-																Pin a custom image ref…
-															</button>
-														)}
-														{(pinCustom || pinActive) && (
-															<>
-																<input
-																	className={
-																		"input mono" +
-																		(fieldErrs.imagePin
-																			? " input-err"
-																			: "")
-																	}
-																	data-testid="slot-hw-image-pin"
-																	value={imagePin}
-																	onChange={(e) => {
-																		setImagePin(e.target.value);
-																		setFieldErrs((p) => ({
-																			...p,
-																			imagePin: undefined,
-																		}));
-																	}}
-																	placeholder={
-																		binary && backends[binary]?.image
-																			? backends[binary].image
-																			: "will resolve from the Runtime pick"
-																	}
-																	spellCheck={false}
-																/>
-																{fieldErrs.imagePin ? (
-																	<div
-																		className="hint"
-																		style={{ color: "var(--err)" }}
-																	>
-																		{fieldErrs.imagePin}
-																	</div>
-																) : null}
-															</>
-														)}
-														{pinActive && (
-															<>
-																<div
-																	className="hint"
-																	data-testid="slot-hw-debug-pin-warning"
-																	style={{ color: "var(--warn)" }}
-																>
-																	Debug-only. hal0 can't verify what a
-																	custom ref ships — the slot keeps its
-																	current runtime binary and may fail at
-																	spawn.
-																</div>
-																<button
-																	type="button"
-																	className="btn ghost sm"
-																	data-testid="slot-hw-image-pin-clear"
-																	onClick={() => {
-																		setImagePin("");
-																		setPinCustom(false);
-																		setFieldErrs((p) => ({
-																			...p,
-																			imagePin: undefined,
-																		}));
-																	}}
-																>
-																	Use release image
-																</button>
-															</>
-														)}
-													</div>
-												</div>
-
-												{supersededByCombinedUpstream && (
+											)}
+											{(() => {
+												// Model↔runner GGUF-arch fit-check (hal0#2118) — warn,
+												// never block, same idiom as the HW-grid fit warning
+												// below the Backend select. Reads the bound model's
+												// detected `architecture` against the effective
+												// runner's `unsupported_archs` denylist (system-info);
+												// an image_pin disarms it (the pin IS the escape
+												// hatch). Previews the post-save device/binary/pin so
+												// a live HW edit updates the verdict before Save.
+												const archWarn = archFitWarning({
+													arch: curModelRow?.architecture,
+													device: pendingDevice,
+													binary,
+													imagePin,
+													backends: systemInfoQuery.data?.backends ?? {},
+												});
+												if (!archWarn) return null;
+												return (
 													<div
-														data-testid="slot-hw-supersession-banner"
+														className="hint"
+														data-testid="slot-model-arch-fit-warning"
 														style={{
 															marginTop: 6,
 															padding: "6px 10px",
@@ -2153,198 +2143,168 @@ function EditSlotDrawer({ open, slot, onClose }) {
 															color: "var(--warn)",
 															border: "1px solid var(--warn-line)",
 															background: "var(--warn-soft)",
-															display: "flex",
-															alignItems: "center",
-															justifyContent: "space-between",
-															gap: 8,
 														}}
 													>
-														<span>
-															⚠{" "}
-															{strixAvailable
-																? "Superseded by the Strix runtime"
-																: "Superseded by the Strix runtime — available after the next update"}
-														</span>
-														{strixAvailable && (
-															<button
-																type="button"
-																className="btn ghost sm"
-																data-testid="slot-hw-supersession-fix"
-																onClick={() => {
-																	setBinary("strix");
-																	setDevice("gpu-vulkan");
-																	setImagePin("");
-																}}
-															>
-																Switch to Strix
-															</button>
-														)}
+														{archWarn}
 													</div>
-												)}
-											</>
-										);
-									})()}
-							</>
-						);
-					})()}
+												);
+											})()}
+										</div>
+									</div>
+								);
+							})()}
+
+							{profileRow}
+
+							{/* #1379: Template / Parallel / Extra Args were removed here.
+          All three persisted to the slot TOML and reached nothing —
+          `providers/container.py` does `del profile_flags, slot_parallel,
+          extra_args`, and `resolve_chat_template` no longer consults the
+          per-slot key. spec-flags-ownership §1/§4 puts the launch tune on the
+          MODEL; spec-hw-slot-ownership §8 prescribes this editor as the HW grid
+          + image_pin only. Removed outright rather than left read-only, the
+          same call made for Reasoning/MTP/Vision under §1. Anything already on
+          disk is folded into the bound model by `hal0 slot migrate-flags`
+          (#1396/#1397) — this drawer neither reads nor clears it. */}
+							<div className="hint" data-testid="slot-launch-tune-note">
+								Chat template and launch flags belong to the model — edit them
+								with “Edit model…” above. Flags set on a slot are not applied
+								at launch.
+							</div>
+						</>
+					)}
 				</FieldGroup>
 
-				{/* NPU slots have no Model group (the capability matrix replaces it),
-				    so the profile keeps its own group there. Everywhere else the row
-				    lives inside Model, under the model select. */}
-				{device === "npu" && (
-					<FieldGroup label="Profile">{profileRow}</FieldGroup>
-				)}
-
-				{device !== "npu" && (
-					<FieldGroup label="Model">
-						{/* Task 1: live model swap — mirrors the card's ModelPicker but with the
-          full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
-          Swap is its own POST /slots/{name}/swap (not part of the batched
-          Save); container slots cold-restart to load, so we toast like the
-          popover does. */}
-						{(() => {
-							const isContainer = slot.runtime === "container";
-							// Derive the backend from the SELECTED device (reactive) so the rocmfp4
-							// filter re-evaluates immediately when the operator switches the HW-grid
-							// device — before Save is clicked. (Device is the single owner of the
-							// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
-							//
-							// Codex P1: deliberately `device` here, NOT `pendingDevice`. Swap fires
-							// its own immediate POST /slots/{name}/swap, independent of the batched
-							// Save — a pending cross-backend profile pick hasn't reached the server
-							// yet, so previewing the post-Save backend here would offer a model the
-							// CURRENTLY persisted runner can't load (the live swap has no idea a
-							// device switch is staged). Gate the whole control instead (below) while
-							// a switch is pending, and keep this list honest about the real device.
-							const selBackend = deviceBackend(device) || slot.backend;
-							const compatible = compatibleModels(modelsQuery.data, {
-								type: slot.type,
-								backend: selBackend,
-							});
-							const cur = slot.model_id || slot.model || "";
-							const has = compatible.some((m) => m.id === cur);
-							// A background swap is in flight — the select stays usable, but show a
-							// "Swapping…" hint so the operator knows the load is happening.
-							const swapping = swapMut.isPending;
-							return (
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>Model</span>
-										<FieldInfoIcon description={isContainer ? "Swap restarts the container to load the new model" : "Applies immediately"} />
-									</div>
-									<div className="form-ctl">
-										<div
-											style={{ display: "flex", gap: 8, alignItems: "center" }}
-										>
-											<select
-												className="input mono"
-												style={{ flex: 1 }}
-												value={cur}
-												disabled={saving || !!pendingCrossDevice}
-												data-testid="slot-model-swap"
-												aria-label={`Model for ${slot.name}`}
-												onChange={(e) => {
-													const id = e.target.value;
-													if (!id || id === cur) return;
-													const picked = compatible.find((m) => m.id === id);
-													const label = picked?.longName || id;
-													// UI-5: swapping the model on a LIVE container slot cold-restarts
-													// it (~model-load seconds). Confirm through the shared
-													// ConfirmDialog before firing — stashing the pick re-renders the
-													// select back to `cur` (value={cur}), so cancel needs no manual
-													// revert. Mirrors the delete/dirty-close confirm gates.
-													const live = slotButtonPhase(slot) === "running";
-													if (isContainer && live) {
-														setPendingSwap({ id, label });
-														return;
-													}
-													fireSwap(id, label);
-												}}
-											>
-												{cur && !has && (
-													<option value={cur}>
-														{slot.modelLong || slot.model || cur}
-													</option>
-												)}
-												{!cur && <option value="">—</option>}
-												{compatible.map((m) => (
-													<option key={m.id} value={m.id}>
-														{m.longName || m.id}
-													</option>
-												))}
-											</select>
-											{/* Inline model edit — the app-wide pencil affordance
-											    (Icons.edit), same bare `btn ghost sm` icon-button
-											    convention as the slot card. Opens the model drawer
-											    DOCKED to the left of this one, so the slot's unsaved
-											    edits stay visible and editable underneath. */}
-											<button
-												className="btn ghost sm"
-												data-testid="slot-model-edit-open"
-												disabled={!curModelRow}
-												title="Edit the bound model's tune (flags, template, caps) in place"
-												aria-label={`Edit model ${curModelRow?.longName || curModelRow?.name || ""}`.trim()}
-												onClick={(e) => {
-													e.stopPropagation();
-													setModelEditOpen(true);
-												}}
-											>
-												{Icons.edit}
-											</button>
-										</div>
-										{swapping && <div className="hint">Swapping…</div>}
-										{!swapping && pendingCrossDevice && (
-											<div
-												className="hint"
-												data-testid="slot-model-swap-blocked"
-											>
-												Model swap is unavailable while the profile pick
-												above is staged to switch this slot's device — Save
-												that change (or revert the profile) before swapping.
-											</div>
-										)}
-										{(() => {
-											// Model↔runner GGUF-arch fit-check (hal0#2118) — warn,
-											// never block, same idiom as the HW-grid fit warning
-											// below the Backend select. Reads the bound model's
-											// detected `architecture` against the effective
-											// runner's `unsupported_archs` denylist (system-info);
-											// an image_pin disarms it (the pin IS the escape
-											// hatch). Previews the post-save device/binary/pin so
-											// a live HW edit updates the verdict before Save.
-											const archWarn = archFitWarning({
-												arch: curModelRow?.architecture,
-												device: pendingDevice,
-												binary,
-												imagePin,
-												backends: systemInfoQuery.data?.backends ?? {},
-											});
-											if (!archWarn) return null;
-											return (
-												<div
-													className="hint"
-													data-testid="slot-model-arch-fit-warning"
-													style={{
-														marginTop: 6,
-														padding: "6px 10px",
-														borderRadius: "var(--rad-sm)",
-														color: "var(--warn)",
-														border: "1px solid var(--warn-line)",
-														background: "var(--warn-soft)",
-													}}
-												>
-													{archWarn}
-												</div>
-											);
-										})()}
-									</div>
+				{/* How it runs — this slot's hardware. Runtime + Lane are
+				    unchanged internals (cascade hoisted above, Task 11a); Context
+				    ceiling moves IN from the old Model group — a hardware ceiling
+				    reads better beside the hardware that enforces it than the
+				    model whose window it clamps. Threads/NGL and the image-facing
+				    disclosure move OUT, into the single consolidated Advanced
+				    section further down (threads, NGL, image block, debug pin,
+				    supersession banner, resolved command all live there now). */}
+				<FieldGroup label="How it runs" hint="this slot's hardware">
+					{/* Device select removed: `device` is now DERIVED from the
+					    Runtime pick below (a single-lane runner's lane rides the
+					    pick; a dual-lane runner's Lane pills, further down) —
+					    the old standalone select let Device and Binary disagree.
+					    Save still persists it via PUT /config { device } and
+					    cold-restarts; non-GPU devices (npu/cpu/img) route to
+					    different runtime families, so they never flip here. */}
+					<div className="form-row">
+						<div className="form-lbl">
+							<span>Runtime</span>
+							<FieldInfoIcon description="Which engine build this slot launches. Options are what
+								this box's hardware can run; versions are managed on
+								the Runner Images page." />
+						</div>
+						<div className="form-ctl">
+							<RichSelect
+								data-testid="slot-hw-runtime"
+								className={fieldErrs.device ? "rsel-err" : undefined}
+								value={runtimeValue}
+								disabled={false}
+								options={runtimeRichOptions({
+									binary,
+									runtimeSel,
+									runtimeOptions,
+									backends: hwBackends,
+								})}
+								onChange={(key) => {
+									const pick = applyRunnerChoice({
+										options: runtimeOptions,
+										key,
+										currentDevice: device,
+									});
+									setBinary(pick.binary);
+									setDevice(pick.device);
+									setFieldErrs((p) => ({ ...p, device: undefined }));
+								}}
+							/>
+							{selectedRuntimeOption?.blurb ? (
+								<div className="hint">{selectedRuntimeOption.blurb}</div>
+							) : null}
+							{deviceIsLiveEdit && (
+								<div
+									className="hint"
+									data-testid="slot-hw-consequence"
+									style={{
+										marginTop: 6,
+										padding: "6px 10px",
+										borderRadius: "var(--rad-sm)",
+										color: "var(--info)",
+										border: "1px solid var(--info-line)",
+										background: "var(--info-soft)",
+									}}
+								>
+									Switching moves this slot to the{" "}
+									{laneTitle(deviceBackend(device))} lane and restarts
+									it on Save.
 								</div>
-							);
-						})()}
+							)}
+							{fieldErrs.device && (
+								<div
+									className="hint"
+									data-testid="slot-hw-device-err"
+									style={{ color: "var(--err)" }}
+								>
+									{fieldErrs.device}
+								</div>
+							)}
+						</div>
+					</div>
 
-						{profileRow}
+					{laneVals.length > 0 && (
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Lane</span>
+								<FieldInfoIcon description="Which GPU stack the Standard runtime uses. Auto
+									follows the device." />
+							</div>
+							<div className="form-ctl">
+								<div
+									data-testid="slot-hw-lane"
+									style={{ display: "flex", gap: 6 }}
+								>
+									{laneVals.map((lane) => {
+										const active = lane
+											? deviceBackend(pendingDevice) === lane
+											: !laneVals
+													.slice(1)
+													.includes(deviceBackend(pendingDevice));
+										return (
+											<button
+												key={lane || "auto"}
+												type="button"
+												className="btn ghost sm"
+												aria-pressed={active}
+												style={
+													active
+														? {
+																color: "var(--accent)",
+																borderColor: "var(--accent-line)",
+																background: "var(--accent-soft)",
+															}
+														: undefined
+												}
+												onClick={() =>
+													setDevice(
+														lane
+															? BACKEND_DEVICE[lane]
+															: pendingDevice,
+													)
+												}
+											>
+												{lane ? laneTitle(lane) : "Auto"}
+											</button>
+										);
+									})}
+								</div>
+							</div>
+						</div>
+					)}
 
+					{device !== "npu" && (
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Context (ceiling)</span>
@@ -2369,26 +2329,142 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										{fieldErrs.ctx}
 									</div>
 								)}
+								{/* GTT feasibility hint (Task 11d, mockup panel 06) — host-truth,
+								    warn-never-block (993ea3b6): ok is a plain hint, warn/err are
+								    boxed. An absent/unknown verdict renders nothing at all. */}
+								{ctxHint?.tone && (
+									<div
+										className="hint"
+										data-testid="slot-ctx-feasibility"
+										style={
+											ctxHint.tone === "warn"
+												? {
+														marginTop: 6,
+														padding: "6px 10px",
+														borderRadius: "var(--rad-sm)",
+														color: "var(--warn)",
+														border: "1px solid var(--warn-line)",
+														background: "var(--warn-soft)",
+													}
+												: ctxHint.tone === "err"
+													? {
+															marginTop: 6,
+															padding: "6px 10px",
+															borderRadius: "var(--rad-sm)",
+															color: "var(--err)",
+															border: "1px solid var(--err-line)",
+															background: "var(--err-soft)",
+														}
+													: undefined
+										}
+									>
+										{ctxHint.text}
+									</div>
+								)}
 							</div>
 						</div>
+					)}
+				</FieldGroup>
 
-						{/* #1379: Template / Parallel / Extra Args were removed here.
-          All three persisted to the slot TOML and reached nothing —
-          `providers/container.py` does `del profile_flags, slot_parallel,
-          extra_args`, and `resolve_chat_template` no longer consults the
-          per-slot key. spec-flags-ownership §1/§4 puts the launch tune on the
-          MODEL; spec-hw-slot-ownership §8 prescribes this editor as the HW grid
-          + image_pin only. Removed outright rather than left read-only, the
-          same call made for Reasoning/MTP/Vision under §1. Anything already on
-          disk is folded into the bound model by `hal0 slot migrate-flags`
-          (#1396/#1397) — this drawer neither reads nor clears it. */}
-						<div className="hint" data-testid="slot-launch-tune-note">
-							Chat template and launch flags belong to the model — edit them
-							with “Edit model…” above. Flags set on a slot are not applied
-							at launch.
+				{/* Task 11b: lifecycle gets its own section — one row, "Unloading":
+				    Auto-Load pill (moved down from the header) + a compact
+				    Eviction-priority input (moved up from Advanced), same handlers
+				    as before. Pinning greys ONLY the priority input — priority has
+				    no effect while pinned, but Auto-Load still controls whether the
+				    slot starts at boot, pinned or not, so it stays live. Hidden
+				    entirely for NPU trio shadows: they have no unit/container of
+				    their own to start or evict (the anchor's FLM process owns
+				    lifecycle for all three). */}
+				{!isNpuShadow && (
+					<FieldGroup label="When it unloads" hint="lifecycle">
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Unloading</span>
+								<FieldInfoIcon description="Auto-Load starts this slot at boot. Eviction priority
+									(0-100, lower unloads first) only matters while unpinned —
+									pin the slot to exempt it from idle/pressure eviction
+									entirely." />
+							</div>
+							<div className="form-ctl">
+								<div
+									style={{
+										display: "flex",
+										gap: 14,
+										alignItems: "center",
+										flexWrap: "wrap",
+									}}
+								>
+									<label
+										className="slot-enable-toggle drawer-enable"
+										data-testid="slot-autoload-toggle"
+										title="Auto-Load — start this slot automatically at boot. Only controls startup; eviction protection is the Pin toggle."
+									>
+										<span className="drawer-enable-label mono">Auto-Load</span>
+										<input
+											type="checkbox"
+											checked={autoload}
+											onChange={() => onToggleAutoload(!autoload)}
+											aria-label={
+												autoload
+													? "Disable auto-load on start"
+													: "Enable auto-load on start"
+											}
+											aria-describedby={autoloadDescId}
+										/>
+										<span className="slot-enable-track" aria-hidden="true" />
+										<span id={autoloadDescId} className="sr-only">
+											Start this slot automatically at boot. Only controls
+											startup; eviction protection is the Pin toggle.
+										</span>
+									</label>
+									<span
+										style={{
+											display: "inline-flex",
+											gap: 8,
+											alignItems: "center",
+											opacity: pinned ? 0.45 : 1,
+										}}
+									>
+										<span
+											className="mono"
+											style={{ fontSize: 12, color: "var(--fg-3)" }}
+										>
+											priority
+										</span>
+										<input
+											className="input mono"
+											data-testid="slot-priority-input"
+											type="number"
+											min={0}
+											max={100}
+											step={1}
+											value={prio}
+											disabled={pinned}
+											onChange={(e) => setPrio(e.target.value)}
+											onBlur={commitPriority}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") e.currentTarget.blur();
+											}}
+											style={{ width: 64 }}
+										/>
+									</span>
+								</div>
+								{pinned ? (
+									<div className="hint">
+										📌 Pinned — never evicted; priority has no effect while
+										pinned.
+									</div>
+								) : (
+									<div className="hint">
+										lower priority unloads first · ties go to least recently
+										used
+									</div>
+								)}
+							</div>
 						</div>
 					</FieldGroup>
 				)}
+
 				{/* NPU trio SHADOW (flm-stt / flm-embed): its own [npu] table is
 				    inert — the anchor's FLM process owns all three modalities, so
 				    editing toggles here wrote config the launcher never reads and
@@ -2571,51 +2647,318 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						);
 					})()}
 
-				{/* Task 4: Advanced fields (mostly read-only, profile-owned) are
-          collapsed by default — minimal native <details> disclosure (no
-          disclosure primitive exists in primitives.jsx). */}
-				<details className="adv-disclosure">
-					<summary
-						className="form-section"
-						style={{ cursor: "pointer", listStyle: "revert" }}
-					>
-						Advanced
-					</summary>
-
-					{/* Eviction priority (spec 2026-08-02) lives under Advanced: its
-					    lifecycle siblings (Auto-Load / Pin) are header toggles, and it
-					    only matters for unpinned slots under memory pressure. Hidden
-					    for NPU trio shadows — no process of their own to evict. */}
-					{!isNpuShadow && (
-					<div className="form-row">
-						<div className="form-lbl">
-							<span>Eviction priority</span>
-							<FieldInfoIcon description="0-100 — lower unloads first when memory is needed.
-								Ties go to the least recently used. Pin the slot to exempt
-								it entirely." />
+				{/* Task 11a: the two Advanced surfaces this used to be (a controlled
+				    slot-hw-advanced disclosure for image/debug-pin/supersession, and
+				    a separate native <details> for priority/resolved-command) are
+				    consolidated into ONE disclosure — threads, NGL, image block,
+				    debug pin, supersession banner and resolved command all live
+				    here now (mockup panel 03's "▸ Advanced — threads, layers,
+				    image, command"). Controlled (not native <details>) so the
+				    "▸"/"▾" glyph and label stay ours to own, same reasoning Task 9
+				    gave for the image sub-disclosure it replaces. Eviction
+				    priority stays here for this commit — Task 11b moves it out
+				    into the new "When it unloads" lifecycle row. */}
+				<div
+					className="form-section"
+					data-testid="slot-hw-advanced"
+					role="button"
+					tabIndex={0}
+					aria-expanded={advOpen}
+					style={{ cursor: "pointer", userSelect: "none", marginTop: 4 }}
+					onClick={() => setAdvOpen((o) => !o)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter" || e.key === " ") {
+							e.preventDefault();
+							setAdvOpen((o) => !o);
+						}
+					}}
+				>
+					<span className="mono" style={{ marginRight: 6, color: "var(--fg-4)" }}>
+						{advOpen ? "▾" : "▸"}
+					</span>
+					Advanced — threads, layers, image, command
+				</div>
+				{advOpen && (
+					<>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Threads</span>
+								<FieldInfoIcon description="CPU thread count for the runner. 0 = let the runtime
+									decide." />
+							</div>
+							<div className="form-ctl">
+								<input
+									className={
+										"input mono" + (fieldErrs.threads ? " input-err" : "")
+									}
+									data-testid="slot-hw-threads"
+									value={threads}
+									onChange={(e) => {
+										setThreads(e.target.value);
+										setFieldErrs((p) => ({ ...p, threads: undefined }));
+									}}
+									placeholder="0"
+									inputMode="numeric"
+								/>
+								{fieldErrs.threads && (
+									<div className="hint" style={{ color: "var(--err)" }}>
+										{fieldErrs.threads}
+									</div>
+								)}
+							</div>
 						</div>
-						<div className="form-ctl">
-							<input
-								className="input mono"
-								data-testid="slot-priority-input"
-								type="number"
-								min={0}
-								max={100}
-								step={1}
-								value={prio}
-								onChange={(e) => setPrio(e.target.value)}
-								onBlur={commitPriority}
-								onKeyDown={(e) => {
-									if (e.key === "Enter") e.currentTarget.blur();
-								}}
-								style={{ width: 90 }}
-							/>
-							<div className="hint">lower unloads first</div>
-						</div>
-					</div>
-					)}
 
-					{/* Flags preview — backend-provided resolved_command (real podman argv),
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>NGL</span>
+								<FieldInfoIcon description="GPU layers to offload — emits -ngl to the runner.
+									-1 = all layers, 0 = CPU only." />
+							</div>
+							<div className="form-ctl">
+								<input
+									className={
+										"input mono" + (fieldErrs.ngl ? " input-err" : "")
+									}
+									data-testid="slot-hw-ngl"
+									value={nGpuLayers}
+									onChange={(e) => {
+										setNGpuLayers(e.target.value);
+										setFieldErrs((p) => ({ ...p, ngl: undefined }));
+									}}
+									placeholder="-1"
+									inputMode="numeric"
+								/>
+								{fieldErrs.ngl && (
+									<div className="hint" style={{ color: "var(--err)" }}>
+										{fieldErrs.ngl}
+									</div>
+								)}
+							</div>
+						</div>
+
+						{(() => {
+							// The effective ref this slot actually runs: a debug
+							// pin (persisted server-side) beats the Runtime's
+							// catalog image, which beats an honest "unresolved
+							// yet" sentinel — never fabricate a ref nothing backs.
+							const effectiveImage =
+								slot.image_pin ||
+								hwBackends[binary]?.image ||
+								"resolved at launch";
+							const pinActive = !!imagePin.trim();
+							const supersededByCombinedUpstream = imagePin.includes(
+								"hal0-combined-upstream",
+							);
+							// The one-click fix commits binary="strix" — only offer
+							// it when "strix" is actually a live pick in the SAME
+							// `runtimeOptions` list the Runtime select above renders
+							// (already filtered by device_class/slotType/hw
+							// feasibility). Firing setBinary("strix") when it isn't
+							// would land the operator on an unresolvable "strix ·
+							// not in this catalog" pick — worse than the pin they
+							// started with.
+							const strixAvailable = runtimeOptions.some(
+								(o) => o.key === "strix",
+							);
+							return (
+								<>
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Image</span>
+											<FieldInfoIcon description="The exact runtime image resolved for this
+												slot — a debug pin when one is set, otherwise
+												the release image for the picked Runtime." />
+										</div>
+										<div className="form-ctl">
+											<span
+												className="mono"
+												data-testid="slot-hw-advanced-image"
+											>
+												{effectiveImage}
+											</span>
+											<div className="hint">
+												{pinActive
+													? "debug pin"
+													: "pinned by release · reconciled by hal0 update"}
+											</div>
+										</div>
+									</div>
+
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Image status</span>
+											<FieldInfoIcon description="The image this slot is ACTUALLY running right now,
+												while it's up — distinct from the resolved release
+												image above, which is what the next (re)start
+												would use." />
+										</div>
+										<div className="form-ctl">
+											<span className="mono" data-testid="slot-image-status">
+												{slotButtonPhase(slot) === "running"
+													? (slot.actual_image ||
+															slot.image_pin ||
+															slot.image ||
+															"present") +
+														(slot.id != null
+															? ` · #${slot.id}`
+															: slot.slot_id != null
+																? ` · #${slot.slot_id}`
+																: "")
+													: "—"}
+											</span>
+										</div>
+									</div>
+
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Version</span>
+										</div>
+										<div className="form-ctl">
+											<div className="hint">
+												Versions and rollback are managed per-runtime
+												on the{" "}
+												<a href="#slots/runner-images">
+													Runner Images page
+												</a>
+												.
+											</div>
+										</div>
+									</div>
+
+									<div className="form-row">
+										<div className="form-lbl">
+											<span>Debug pin</span>
+											<FieldInfoIcon description="Optional: pin this slot to an exact build
+												reference instead of the Runtime's release
+												default. Debug/rollback use only — cleared by
+												leaving it empty." />
+										</div>
+										<div className="form-ctl">
+											{!pinActive && !pinCustom && (
+												<button
+													type="button"
+													className="btn ghost sm"
+													data-testid="slot-hw-debug-pin-open"
+													onClick={() => setPinCustom(true)}
+												>
+													Pin a custom image ref…
+												</button>
+											)}
+											{(pinCustom || pinActive) && (
+												<>
+													<input
+														className={
+															"input mono" +
+															(fieldErrs.imagePin
+																? " input-err"
+																: "")
+														}
+														data-testid="slot-hw-image-pin"
+														value={imagePin}
+														onChange={(e) => {
+															setImagePin(e.target.value);
+															setFieldErrs((p) => ({
+																...p,
+																imagePin: undefined,
+															}));
+														}}
+														placeholder={
+															binary && hwBackends[binary]?.image
+																? hwBackends[binary].image
+																: "will resolve from the Runtime pick"
+														}
+														spellCheck={false}
+													/>
+													{fieldErrs.imagePin ? (
+														<div
+															className="hint"
+															style={{ color: "var(--err)" }}
+														>
+															{fieldErrs.imagePin}
+														</div>
+													) : null}
+												</>
+											)}
+											{pinActive && (
+												<>
+													<div
+														className="hint"
+														data-testid="slot-hw-debug-pin-warning"
+														style={{ color: "var(--warn)" }}
+													>
+														Debug-only. hal0 can't verify what a
+														custom ref ships — the slot keeps its
+														current runtime binary and may fail at
+														spawn.
+													</div>
+													<button
+														type="button"
+														className="btn ghost sm"
+														data-testid="slot-hw-image-pin-clear"
+														onClick={() => {
+															setImagePin("");
+															setPinCustom(false);
+															setFieldErrs((p) => ({
+																...p,
+																imagePin: undefined,
+															}));
+														}}
+													>
+														Use release image
+													</button>
+												</>
+											)}
+										</div>
+									</div>
+
+									{supersededByCombinedUpstream && (
+										<div
+											data-testid="slot-hw-supersession-banner"
+											style={{
+												marginTop: 6,
+												padding: "6px 10px",
+												borderRadius: "var(--rad-sm)",
+												color: "var(--warn)",
+												border: "1px solid var(--warn-line)",
+												background: "var(--warn-soft)",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "space-between",
+												gap: 8,
+											}}
+										>
+											<span>
+												⚠{" "}
+												{strixAvailable
+													? "Superseded by the Strix runtime"
+													: "Superseded by the Strix runtime — available after the next update"}
+											</span>
+											{strixAvailable && (
+												<button
+													type="button"
+													className="btn ghost sm"
+													data-testid="slot-hw-supersession-fix"
+													onClick={() => {
+														setBinary("strix");
+														setDevice("gpu-vulkan");
+														setImagePin("");
+													}}
+												>
+													Switch to Strix
+												</button>
+											)}
+										</div>
+									)}
+								</>
+							);
+						})()}
+
+						{/* Task 11b: Eviction priority moved out to the "When it
+						    unloads" lifecycle row (with Auto-Load) — Advanced no
+						    longer carries any lifecycle controls, only hardware/image
+						    facts and the resolved-command debug view. */}
+
+						{/* Flags preview — backend-provided resolved_command (real podman argv),
           computed SERVER-SIDE (profile + MTP + image resolution). #1379 removed
           the dim + Regenerate overlay that used to sit on top: it promised to
           "fold your slot extra_args into the resolved command", but the launch
@@ -2813,18 +3156,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						flags + slot hardware flags. Restart the slot to run with new
 						flags.
 					</div>
-				</details>
+					</>
+				)}
 			</Drawer>
 			<DeleteSlotDialog
 				open={delOpen}
 				slot={slot}
 				onClose={() => setDelOpen(false)}
 				onDeleted={onClose}
-			/>
-			<RenameSlotDialog
-				open={renameOpen}
-				slot={slot}
-				onClose={() => setRenameOpen(false)}
 			/>
 			{/* Stacked model editor — the reusable ModelDrawer (window-global,
 	        same instance contract as models.jsx). DrawerDock reaches the
@@ -2898,33 +3237,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	);
 }
 
-function ReadOnlyStrip({ k, v }) {
-	return (
-		<div
-			style={{
-				padding: "10px 12px",
-				borderRight: "1px solid var(--line-soft)",
-				background: "var(--bg)",
-			}}
-		>
-			<div
-				className="mono"
-				style={{
-					fontSize: 9,
-					color: "var(--fg-4)",
-					textTransform: "uppercase",
-					letterSpacing: "0.08em",
-					marginBottom: 3,
-				}}
-			>
-				{k}
-			</div>
-			<div className="mono" style={{ fontSize: 12, color: "var(--fg)" }}>
-				{v}
-			</div>
-		</div>
-	);
-}
+// (ReadOnlyStrip, the two fact-grid cells Task 11a's regroup replaced, is
+// gone — its last callers moved into the drawer header/title/Advanced in
+// that commit, leaving this with no callers at all.)
 
 // ─── Inline swap popover ────────────────────────────────────────
 function InlineSwapPopover({ slot, open, onClose, onPick }) {

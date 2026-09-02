@@ -147,6 +147,8 @@ test.describe('Slot drawer — stacked model editor', () => {
 
     // A slot HARDWARE control and a MODEL control are both visible together —
     // the old behaviour hid the slot drawer entirely behind the model drawer.
+    // NGL lives behind the slot drawer's Advanced disclosure (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     const ngl = page.getByTestId('slot-hw-ngl')
     const flags = modelDrawer(page).getByTestId('model-flags-input')
     await expect(ngl).toBeVisible()
@@ -218,7 +220,9 @@ test.describe('Slot drawer — stacked model editor', () => {
     await openStack(page)
 
     // Dirty the slot drawer first — a single Esc used to fire BOTH drawers'
-    // document-level keydown handlers.
+    // document-level keydown handlers. Threads lives behind the slot
+    // drawer's Advanced disclosure (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-threads').fill('12')
 
     await page.keyboard.press('Escape')

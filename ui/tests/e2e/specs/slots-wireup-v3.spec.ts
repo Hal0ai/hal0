@@ -94,13 +94,15 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
-    const modelGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    // Context (ceiling) lives in the "How it runs" group (Task 11a moved it
+    // IN from the old Model group, beside the hardware that enforces it).
+    const hwGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
     })
     // Label reads "Context (ceiling)": the bound model's own default
     // context_size is authoritative; this slot value only clamps it down for
     // lighter hardware, it never overrides it upward.
-    const contextRow = modelGroup.locator('.form-row').filter({
+    const contextRow = hwGroup.locator('.form-row').filter({
       has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
     })
     const ctxInput = contextRow.locator('input')

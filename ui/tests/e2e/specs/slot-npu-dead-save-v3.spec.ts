@@ -64,6 +64,8 @@ test.describe('NPU slot Save with malformed persisted extra_args (#1389)', () =>
     await page.goto('/#slots/agent')
     await expect(page.locator('.drawer')).toBeVisible()
 
+    // Threads moved behind the single Advanced disclosure (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-threads').fill('4')
     await page.locator('.drawer button:has-text("Save")').click()
 
