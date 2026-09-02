@@ -55,6 +55,19 @@ def _create_minimal_model(client: TestClient, models_root: Path) -> str:
     return mid
 
 
+def _events_since(client: TestClient, since: int, type_glob: str | None = None) -> list[dict]:
+    """Mirrors test_models_crud.py's event-polling idiom."""
+    params = f"?since={since}&limit=1000"
+    if type_glob:
+        params += f"&type={type_glob}"
+    return client.get(f"/api/events{params}").json().get("events", [])
+
+
+def _max_event_id(client: TestClient) -> int:
+    body = client.get("/api/events?limit=1000").json()
+    return max((ev["id"] for ev in body.get("events", [])), default=0)
+
+
 # ── tests ─────────────────────────────────────────────────────────────────
 
 
@@ -70,6 +83,40 @@ def test_seed_profile_stamps_flags_and_provenance(
     assert (
         "--jinja" in body["defaults"]["extra_args"]
     )  # chat's flags: -fa auto --jinja -b 2048 -ub 512
+
+
+def test_seed_profile_emits_model_updated_with_changed_fields(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    mid = _create_minimal_model(crud_client, crud_models_root)
+    pre = _max_event_id(crud_client)
+    r = crud_client.post(f"/api/models/{mid}/seed-profile", json={"profile": "chat"})
+    assert r.status_code == 200, r.text
+
+    events = _events_since(crud_client, pre, "model.updated")
+    assert events, "expected a model.updated event"
+    payload = next(ev for ev in events if ev["data"].get("id") == mid)
+    assert payload["data"]["changed_fields"] == ["defaults.extra_args", "defaults.profile"]
+
+
+def test_seed_profile_merge_preserves_sibling_defaults_keys(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    """``defaults`` is a 1-level merged subtable (registry/store.py) — a stamp
+    that only names ``extra_args``/``profile`` must leave a sibling default
+    (here ``context_size``) that was set earlier untouched."""
+    mid = _create_minimal_model(crud_client, crud_models_root)
+    r = crud_client.put(f"/api/models/{mid}", json={"defaults": {"context_size": 4096}})
+    assert r.status_code == 200, r.text
+    assert r.json()["defaults"]["context_size"] == 4096
+
+    r = crud_client.post(f"/api/models/{mid}/seed-profile", json={"profile": "chat"})
+    assert r.status_code == 200, r.text
+
+    body = crud_client.get(f"/api/models/{mid}").json()
+    assert body["defaults"]["profile"] == "chat"
+    assert "--jinja" in body["defaults"]["extra_args"]
+    assert body["defaults"]["context_size"] == 4096
 
 
 def test_seed_profile_unknown_model_404(crud_client: TestClient) -> None:

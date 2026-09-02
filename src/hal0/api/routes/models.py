@@ -819,6 +819,9 @@ async def seed_model_profile(model_id: str, request: Request) -> dict[str, Any]:
     profile = ProfileCatalog().resolve(name.strip())  # unknown profile → 404
 
     registry = request.app.state.model_registry
+    # Fail-fast here (unlike update_model's try/except-to-{}): this route has
+    # nothing sparse to resolve a body against, so an unknown model_id should
+    # 404 immediately rather than silently screen against an empty ``before``.
     before = registry.get(model_id).model_dump(mode="python")  # unknown model → 404
 
     updates = {"defaults": {"extra_args": profile.flags or "", "profile": profile.name}}
