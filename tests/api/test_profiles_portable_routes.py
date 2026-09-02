@@ -126,6 +126,23 @@ class TestImportDryRun:
         assert body["runner_stripped"] is False
         assert body["runtime_family"] == "llama-server"
 
+    def test_dry_run_reports_an_alias_runtime_under_its_canonical_key(
+        self, client: TestClient
+    ) -> None:
+        """A superseded key folds rather than strips, so the preview must name
+        the key the box actually has — the UI looks the reported key up in its
+        runtime registry, and the raw alias would render as 'unknown' for an
+        import that in fact lands the runtime fine."""
+        env = client.post(f"/api/profiles/{_seed_name()}/export").json()
+        env["profile"]["runner"] = "vulkanfpx"  # RUNNER_ALIASES → rocmfpx
+        r = client.post(
+            "/api/profiles/import",
+            json={"envelope": env, "name": "fresh-alias", "dry_run": True, "force": True},
+        )
+        body = r.json()
+        assert body["runner_stripped"] is False
+        assert body["runner"] == "rocmfpx"
+
     def test_dry_run_flags_a_runtime_this_box_does_not_have(self, client: TestClient) -> None:
         """An unavailable runtime is a WARNING, not a block: the dry run names
         the key it will drop and says the import lands as Auto."""

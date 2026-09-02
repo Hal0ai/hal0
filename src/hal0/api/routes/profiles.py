@@ -375,11 +375,19 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
         existing = {p.name for p in ProfileCatalog().list()}
         target = name or env.name
         collides = bool(target) and target in existing
-        # Runtime facts the preview renders: the key the envelope AUTHORS
-        # (not the one that will be stored), whether importing has to drop it
-        # because this box has no such runtime, and the family the profile
-        # resolves to. A dropped runtime warns and proceeds — it never blocks.
-        _kept, runner_stripped = envelope_runner_status(env.profile)
+        # Runtime facts the preview renders: the key the import will actually
+        # STORE, whether importing has to drop it because this box has no such
+        # runtime, and the family the profile resolves to. A dropped runtime
+        # warns and proceeds — it never blocks.
+        #
+        # Reporting the kept key matters for a superseded alias: it folds to
+        # its canonical entry rather than stripping, and the UI looks the
+        # reported key up in this box's runtime registry to title and chip it.
+        # The envelope's raw alias would miss that lookup and render "unknown"
+        # for an import that lands the runtime perfectly well. When the key IS
+        # stripped there is no canonical form to report, so the envelope's own
+        # key is returned — which is exactly what the warning names.
+        kept, runner_stripped = envelope_runner_status(env.profile)
         return {
             "dry_run": True,
             "valid": True,
@@ -387,7 +395,7 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
             "name": env.name or "",
             "schema_version": env.schema_version,
             "collides": collides,
-            "runner": env.profile.runner,
+            "runner": kept or env.profile.runner,
             "runner_stripped": runner_stripped,
             "runtime_family": runtime_family_of(env.name or "", env.profile),
         }
