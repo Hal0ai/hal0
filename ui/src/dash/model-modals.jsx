@@ -31,7 +31,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   const [repo, setRepo] = useStateMM("");
   const [variant, setVariant] = useStateMM(null);
   const [name, setName] = useStateMM("");
-  const [labels, setLabels] = useStateMM({ chat: true });
+  // No user-editable capability vocabulary on this modal any more (#2193) —
+  // the pull's `labels` are derived from this one choice: a projector
+  // selected here means `["chat","vision"]`, otherwise `["chat"]`.
   const [mmproj, setMmproj] = useStateMM("");
   // Optional chat-template pin, applied at pull time (WS-6). "auto" = use the
   // GGUF-embedded template — the common case, so it's the default.
@@ -42,17 +44,12 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   // Chat-template catalogue — gated on `open` like the Recipe editor so the
   // request only fires while the modal is visible.
   const templates = useChatTemplates(open);
-  // One canonical capability vocabulary for every add/edit surface —
-  // meta.model_capabilities (this modal used to carry its own ad-hoc list
-  // with legacy spellings: embeddings/reranking/transcription).
-  const enums = useMetaEnums();
 
   useEffectMM(() => {
     if (open) {
       setRepo(initialRepo || "");
       setVariant(null);
       setName("");
-      setLabels({ chat: true });
       setMmproj("");
       setChatTemplate("auto");
       inspect.reset();
@@ -69,6 +66,14 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
     () => variants.filter(v => /mmproj/i.test(v.id)).map(v => v.id),
     [variants],
   );
+
+  // mmproj-first pairing (#2193): when the repo ships projector files, offer
+  // them immediately and pre-select the first — vision is derived from this
+  // choice, not hand-ticked. One projector per repo is the overwhelming case.
+  useEffectMM(() => {
+    if (inspect.isSuccess) setMmproj(mmprojChoices[0] || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspect.isSuccess]);
 
   const onInspect = async () => {
     if (!repo) return;
@@ -90,21 +95,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 
   const inspected = inspect.isSuccess && !!inspect.data;
   const sel = variants.find(v => v.id === variant);
-  // The vision↔mmproj invariant on the CREATE path (#1394) — the exact twin of
-  // the edit drawer's #1380 gate. The message used to render as decoration next
-  // to a live Pull button; it is now folded into the single `canPull` gate so
-  // the modal can't seed a projector-less vision row. Escape hatch: a repo that
-  // ships no mmproj at all can't satisfy "pick one below", so the wording points
-  // at the label instead — the pull itself is fine, only the label is
-  // unsupportable. (The server refuses this shape too, via
-  // `model.vision_requires_mmproj` on POST /pull, so a stale client can't
-  // route around the gate.)
-  const mmprojError = !(labels.vision && !mmproj)
-    ? null
-    : inspected && mmprojChoices.length === 0
-      ? "vision label requires an mmproj file — this repo ships none, so untick vision to pull"
-      : "vision label requires an mmproj file — pick one below";
-  const canPull = inspected && variant && name && !pullJob.inFlight && !mmprojError;
+  const canPull = inspected && variant && name && !pullJob.inFlight;
 
   const onPull = async () => {
     if (!canPull) return;
@@ -115,7 +106,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
       // pull job body — the backend resolves them against the registry
       // entry's hf_repo/hf_filename it writes during the curated
       // ``pick-default`` flow.
-      const labelList = Object.entries(labels).filter(([, v]) => v).map(([k]) => k);
+      // vision is derived from the projector choice (#2193) — the registry row's
+      // dispatch classification still keys off these labels server-side.
+      const labelList = mmproj ? ["chat", "vision"] : ["chat"];
       await pullJob.start(name, {
         hf_repo: inspect.data?.repo ?? repo,
         hf_filename: variant,
@@ -222,39 +215,11 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
             </div>
           </div>
 
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>Labels</span>
-              <span className="sub">drives OmniRouter eligibility</span>
-            </div>
-            <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-              {enums.model_capabilities.map(l => (
-                <label key={l} className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={!!labels[l]}
-                    onChange={e => setLabels({ ...labels, [l]: e.target.checked })}
-                  />
-                  <span className="mono">{l}</span>
-                </label>
-              ))}
-              {mmprojError && (
-                <div
-                  className="err"
-                  data-testid="hf-add-mmproj-error"
-                  style={{flexBasis: "100%"}}
-                >
-                  {mmprojError}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {labels.vision && (
+          {mmprojChoices.length > 0 && (
             <div className="form-row">
               <div className="form-lbl">
-                <span>mmproj file</span>
-                <span className="warn">required for vision-labeled models</span>
+                <span>Vision projector</span>
+                <span className="sub">mmproj sidecar found in this repo — pulled alongside the model and paired automatically</span>
               </div>
               <div className="form-ctl">
                 <select
@@ -263,11 +228,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                   value={mmproj}
                   onChange={e => setMmproj(e.target.value)}
                 >
-                  <option value="">
-                    {mmprojChoices.length === 0
-                      ? "— no mmproj files in repo —"
-                      : "— pick from repo files… —"}
-                  </option>
+                  <option value="">None — text only</option>
                   {mmprojChoices.map(id => <option key={id} value={id}>{id}</option>)}
                 </select>
               </div>
