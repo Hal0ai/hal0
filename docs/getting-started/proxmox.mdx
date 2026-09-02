@@ -1,6 +1,6 @@
 ---
 title: Install on Proxmox
-description: Run hal0 on Proxmox VE — the unprivileged one-liner for CPU-only, and the full GPU/NPU passthrough recipe for AMD Strix Halo LXCs.
+description: Run hal0 on Proxmox VE — the one-liner that creates a privileged Ubuntu LXC with GPU/NPU passthrough already wired, and the manual recipe behind it.
 sidebar:
   order: 13
 ---
@@ -10,9 +10,9 @@ import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/
 Proxmox VE is a common host for hal0, especially on AMD Strix Halo (Ryzen
 AI Max+) hardware where an LXC shares the host kernel and the iGPU + XDNA
 NPU pass through as ordinary device nodes — no VM, no vGPU shim, near-native
-throughput. This guide covers the unprivileged quick-start script for
-CPU-only trials, the full GPU/NPU passthrough recipe, and running hal0 in
-a Proxmox VM instead of a container.
+throughput. This guide covers the quick-start script — which creates that
+container and forwards the accelerators for you — the manual passthrough
+recipe it automates, and running hal0 in a Proxmox VM instead.
 
 ## 1. Prepare the PVE host
 
@@ -24,10 +24,11 @@ Size the GTT pool section for
 the GRUB parameters that raise the amdgpu GTT window — both are set on the
 **Proxmox host**, not inside the container.
 
-If you only want a CPU-only trial, skip straight to the quick path below;
-GTT sizing and driver checks only matter once you attach a GPU.
+If you only want a CPU-only trial, skip straight to the quick path below
+and pass `GPU_PASSTHROUGH=0`; GTT sizing and driver checks only matter once
+you attach a GPU.
 
-## 2. Quick path: unprivileged CT, no GPU
+## 2. Quick path: one command
 
 The fastest way to get hal0 running on Proxmox is the bundled installer
 script, run **on the Proxmox host**:
@@ -36,35 +37,52 @@ script, run **on the Proxmox host**:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
 ```
 
-It creates an **unprivileged Debian 13** LXC (default CTID from
+It creates a **privileged Ubuntu 26.04** LXC (default CTID from
 `pvesh get /cluster/nextid`, 4 cores, 8 GB RAM, 20 GB disk — all
-overridable via env vars) and runs the standard hal0 bootstrap inside it.
-This path intentionally has **no GPU passthrough** — it's the generic,
-hardware-agnostic homelab case, CPU-only inference. For Strix Halo
-iGPU/NPU passthrough, use the recipe in the next section instead.
+overridable via env vars), forwards every GPU/NPU device node the host
+actually has, writes the matching cgroup2 device rules, `memlock` limit and
+AppArmor profile, and then runs the standard hal0 bootstrap inside it. The
+guest installs its own prerequisites (curl, jq, Python + venv, podman,
+cosign) — there is nothing to pre-stage by hand.
+
+Two defaults worth knowing before you run it:
+
+- **Privileged.** hal0's slots are rootful podman containers that open the
+  GPU compute node directly, and a privileged CT can repair a mis-mapped
+  `/dev/kfd` from inside (see §3). The trade is real: a privileged
+  container's root is effectively host root. Pass `UNPRIVILEGED=1` for the
+  older, narrower container — GPU passthrough still works, but device
+  ownership is host-mapped and repairs must happen on the host.
+- **GPU passthrough on by default** (`GPU_PASSTHROUGH=auto`). On a host with
+  no accelerator nodes it warns and builds a CPU-only container; set
+  `GPU_PASSTHROUGH=0` to skip passthrough deliberately.
 
 <Aside type="tip">
 Pass `--advanced` to open `whiptail` prompts for CTID, hostname, cores,
-RAM, disk, storage, and bridge instead of accepting the defaults.
+RAM, disk, storage, bridge, static IP, privilege and passthrough instead of
+accepting the defaults. Everything is also settable per-run as an env var —
+see the [script's README](https://github.com/Hal0ai/hal0/blob/main/scripts/proxmox-ve/README.md).
 </Aside>
 
-## 3. GPU/NPU passthrough CT
+## 3. Manual GPU/NPU passthrough
 
-To get the iGPU and XDNA NPU into a container, create the LXC yourself and
-forward the accelerator device nodes from the host (PVE 8.2+ `devN`
-syntax). A minimal, generic starting point:
+The script in §2 does all of this for you; this section is what it
+automates, for anyone building the container by hand or retrofitting an
+existing one. To get the iGPU and XDNA NPU into a container, create the LXC
+and forward the accelerator device nodes from the host (PVE 8.2+ `devN`
+syntax). A minimal starting point:
 
 ```sh
-pct create <CTID> local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
-  --unprivileged 1 --cores 4 --memory 8192 --rootfs local-lvm:20
+pct create <CTID> local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst \
+  --unprivileged 0 --features nesting=1,keyctl=1,fuse=1,mknod=1 \
+  --cores 4 --memory 8192 --rootfs local-lvm:20
 ```
 
-(the quick-path script in §2 automates exactly this step, plus the
-hal0 bootstrap, in one command). This GPU/NPU passthrough recipe
-assumes an **unprivileged** CT — the `devN` gid-mapping mechanism below
-is designed for the unprivileged uid/gid shift; the AppArmor purge note
-later in this section applies only when you're migrating an older
-**privileged** CT onto this path.
+The `devN` gid-mapping mechanism below works on both privileged and
+unprivileged containers. The difference is who can repair a wrong mapping
+afterwards: on a privileged CT hal0 aligns `/dev/kfd` to the render gid
+itself, while on an unprivileged one the node's ownership is host-mapped
+and only the host's `devN:` entry can fix it.
 
 Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
 
@@ -73,6 +91,14 @@ Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
 dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>
 dev1: /dev/kfd                    # ROCm compute (optional)
 dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)
+
+# Device-cgroup rules for the majors above (226 = dri, 234 = kfd,
+# 261 = accel on most kernels — read yours with `stat -c %t`), plus the
+# memlock limit ROCm needs to pin buffers.
+lxc.cgroup2.devices.allow: c 226:* rwm
+lxc.cgroup2.devices.allow: c 234:* rwm
+lxc.cgroup2.devices.allow: c 261:* rwm
+lxc.prlimit.memlock: unlimited
 ```
 
 Then apply it:
@@ -110,12 +136,13 @@ then re-run `install.sh` inside the container. Persist the values in
 
 ### AppArmor
 
-GPU/NPU passthrough needs an unconfined AppArmor profile
-(`lxc.apparmor.profile: unconfined` in the container's `.conf`) for the
-container runtime to launch slots inside the LXC. If you previously ran a
-**privileged** container for this, purge that config when moving to the
-unprivileged CT this section assumes — an unconfined profile on a
-privileged container is a wider trust boundary than you need.
+GPU/NPU passthrough on a **privileged** container needs an unconfined
+AppArmor profile (`lxc.apparmor.profile: unconfined` in the container's
+`.conf`) for the container runtime to launch slots inside the LXC — the
+quick-path script writes it for you, and the installer detects and repairs
+the in-guest half of the same failure (#1563). On an **unprivileged**
+container leave the stock profile in place: it is a narrower trust boundary
+and the runtime works without the override.
 
 ### Unprivileged podman network fix
 

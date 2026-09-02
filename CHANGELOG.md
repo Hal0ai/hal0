@@ -48,6 +48,26 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- The Proxmox VE quick-start script (`scripts/proxmox-ve/hal0.sh`) now builds
+  the production hal0 container shape instead of a vanilla CPU-only one: a
+  **privileged Ubuntu 26.04** LXC with `nesting/keyctl/fuse/mknod`, every
+  GPU/NPU device node the host exposes forwarded as `devN`, the matching
+  `lxc.cgroup2.devices.allow` rules, `lxc.prlimit.memlock: unlimited`, and
+  `lxc.apparmor.profile: unconfined`. It verifies the forwarded nodes are
+  actually visible inside the container before installing anything, so a
+  broken passthrough fails loudly instead of quietly seeding CPU slots. New
+  env knobs: `IP_CIDR`/`GATEWAY`, `NAMESERVER`, `SEARCHDOMAIN`, `TIMEZONE`,
+  `TAGS`, `ONBOOT`, `STARTUP`, `MOUNTS`, `FEATURES`, `GPU_PASSTHROUGH`,
+  `RUN_BOOTSTRAP`. `UNPRIVILEGED=1 GPU_PASSTHROUGH=0 OS_TYPE=debian
+  OS_VERSION=13` reproduces the previous behaviour. Guest prerequisites are
+  no longer pre-staged by the script — bootstrap and install.sh install
+  their own (curl excepted: it is what fetches the bootstrap).
+- `hal0_lxc_kind` in `installer/lib/preflight.sh` classifies the platform as
+  `none` / `lxc-privileged` / `lxc-unprivileged` from `/proc/self/uid_map`,
+  and the installer's `/dev/kfd` gid-repair fallback and container-runtime
+  gate now narrate the remedy that is actually possible on the container at
+  hand instead of always describing the unprivileged one.
+
 - The dashboard now surfaces the decisive crash line when a slot container
   dies during model load. On a load failure the slot manager tails the
   unit's journal, extracts the one line that names the fault (e.g.

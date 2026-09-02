@@ -8,6 +8,12 @@
 #
 # Public API (all functions return 0 on success, non-zero on failure;
 # none of them exit the calling shell):
+#   hal0_lxc_kind              — platform classification: none |
+#                                lxc-privileged | lxc-unprivileged. Decides
+#                                which remedies are possible from inside (a
+#                                privileged LXC can repair a forwarded device
+#                                node itself; an unprivileged one cannot).
+#                                hal0_in_lxc is the "any LXC?" predicate.
 #   preflight_systemd          — systemctl on PATH
 #   preflight_python           — `${PY:-python3}` resolvable + version 3.12–3.14
 #                                (matches pyproject.toml's requires-python
@@ -124,6 +130,51 @@ if ! declare -F pkg_install_cmd >/dev/null 2>&1; then
     # shellcheck source=distro.sh
     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/distro.sh"
 fi
+
+# ── platform classification ─────────────────────────────────────────────────
+
+# hal0_lxc_kind — where is this install running?
+#
+#   none              — bare metal, a VM, or any container that is not LXC
+#   lxc-privileged    — an LXC whose root IS host root (no uid remap)
+#   lxc-unprivileged  — an LXC behind a uid/gid remap
+#
+# The distinction is not cosmetic: it decides which remedies are even
+# possible from inside. A privileged container can chgrp a forwarded device
+# node and repair a mis-mapped /dev/kfd itself (#1953); an unprivileged one
+# gets EPERM on the same call because the node's ownership belongs to the
+# host's idmap, so the only real fix is on the Proxmox host's `devN:` entry.
+# Emitting the unprivileged remedy on a privileged box (or the reverse) sends
+# operators to change something that was never the cause.
+#
+# The uid_map test: a privileged container maps the whole host uid range
+# 1:1 ("0 0 4294967295"); an unprivileged one maps a slice starting at the
+# host offset ("0 100000 65536").
+#
+# HAL0_LXC_KIND_OVERRIDE is a test seam (unit tests cannot fake /proc).
+hal0_lxc_kind() {
+    if [[ -n "${HAL0_LXC_KIND_OVERRIDE:-}" ]]; then
+        printf '%s\n' "${HAL0_LXC_KIND_OVERRIDE}"
+        return 0
+    fi
+    if [[ ! -f /run/systemd/container ]] \
+        && ! grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+        printf 'none\n'
+        return 0
+    fi
+    local inside outside length
+    if read -r inside outside length < /proc/self/uid_map 2>/dev/null \
+        && [[ "${inside}" == "0" && "${outside}" == "0" && "${length}" == "4294967295" ]]; then
+        printf 'lxc-privileged\n'
+        return 0
+    fi
+    printf 'lxc-unprivileged\n'
+}
+
+# Convenience predicate for the common "is this any LXC at all" question.
+hal0_in_lxc() {
+    [[ "$(hal0_lxc_kind)" != "none" ]]
+}
 
 # ── individual checks ───────────────────────────────────────────────────────
 
@@ -615,9 +666,13 @@ _container_runtime_gate() {
         warn "  remedy: reboot this container to clear leaked session keyrings, or as root: keyctl clear @s /"
         warn "  find + kill the leaked keyring holders, or raise the quota: sysctl kernel.keys.maxbytes (and"
         warn "  kernel.keys.maxkeys) higher on the PROXMOX HOST, then re-run install.sh"
-    elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+    elif [[ "$(hal0_lxc_kind)" == "lxc-unprivileged" ]]; then
         warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
         warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+    elif [[ "$(hal0_lxc_kind)" == "lxc-privileged" ]]; then
+        warn "  inside a PRIVILEGED Proxmox/LXC container the usual cause is missing container features rather"
+        warn "  than the uid map: set 'features: nesting=1,keyctl=1,fuse=1,mknod=1' in /etc/pve/lxc/<CTID>.conf"
+        warn "  on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
     else
         warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
     fi
@@ -939,10 +994,9 @@ HAL0_GPU_RC_KFD_GID=6
 preflight_gpu() {
     local gate="${HAL0_GPU_GATE:-0}"
 
-    local in_container=""
-    if [[ -f /run/systemd/container ]] || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
-        in_container="lxc"
-    fi
+    local lxc_kind in_container=""
+    lxc_kind="$(hal0_lxc_kind)"
+    [[ "${lxc_kind}" != "none" ]] && in_container="lxc"
     # Test seam: force the container classification (unit tests can't fake
     # /proc/1/environ). Never set in production.
     [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
