@@ -21,6 +21,7 @@
  * raises when a second device=npu llm anchor is enabled.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { pickRichOption } from '../fixtures/richSelect'
 
 const PRIMARY = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
@@ -73,6 +74,8 @@ test.describe('Slot drawer — rejected writes', () => {
     await seedSlots(page, [PRIMARY])
 
     await page.goto('/#slots/primary')
+    // NGL lives behind the Advanced disclosure now (Task 11a).
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
     await drawer(page).locator('button:has-text("Save")').click()
 
@@ -102,15 +105,18 @@ test.describe('Slot drawer — rejected writes', () => {
     await seedSlots(page, [PRIMARY])
 
     await page.goto('/#slots/primary')
-    // Touch BOTH legs: ctx_size rides /defaults, NGL rides /config.
-    const modelGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    // Touch BOTH legs: ctx_size rides /defaults, NGL rides /config. Context
+    // (ceiling) lives in the "How it runs" group now (Task 11a moved it IN
+    // from the old Model group); NGL is behind the Advanced disclosure.
+    const hwGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
     })
-    await modelGroup
+    await hwGroup
       .locator('.form-row')
       .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
       .locator('input')
       .fill('16384')
+    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
     await drawer(page).locator('button:has-text("Save")').click()
 
@@ -139,7 +145,7 @@ test.describe('Slot drawer — rejected writes', () => {
     ])
 
     await page.goto('/#slots/primary')
-    await drawer(page).getByLabel('Model for primary').selectOption('qwen3-coder-30b')
+    await pickRichOption(drawer(page).getByLabel('Model for primary'), 'qwen3-coder-30b')
 
     await expect(drawer(page)).toContainText('slot primary is warming — retry once it is ready')
     await expect(drawer(page)).toBeVisible()

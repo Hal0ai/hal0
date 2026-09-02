@@ -1,14 +1,28 @@
 /**
  * slot-rename-delete-v3 — D2 decomposed rename + delete dialogs.
  *
- * Rename (RenameSlotDialog): the slot name is a mutable display label; the
- * stable slot_id never changes. Rename requires the unit OFFLINE — while the
- * slot runs, the field + Save are disabled with an inline reason (not a bare
- * tooltip). Offline, a rename POSTs /api/slots/{name}/rename { new_name }.
+ * Rename: the slot name is a mutable display label; the stable slot_id never
+ * changes. Rename requires the unit OFFLINE — while the slot runs, the field
+ * is disabled. Offline, a rename commits through the SAME wire contract:
+ * POST /api/slots/{name}/rename { new_name }.
  *
- * Delete (DeleteSlotDialog): the confirm states the true blast radius (unit,
- * port → PortAuthority, state) and that the model + weights are untouched;
- * type-to-confirm the name, then DELETE /api/slots/{name}.
+ * Task 11a replaced the standalone RenameSlotDialog's "Rename…" button +
+ * disabled Name field with an inline-editable title field
+ * (`slot-name-inline`) that commits on blur/Enter through the identical
+ * `useSlotRename` mutation, gated offline-only exactly like the retired
+ * dialog gated it (RenameSlotDialog.jsx is still mounted per the task's own
+ * report, but nothing in the drawer opens it any more — `slot-rename-open`
+ * no longer exists). One casualty of the move: the dialog's disabled state
+ * used to surface a VISIBLE inline reason panel ("never a bare tooltip", per
+ * its own header comment) naming both the stop-first requirement and the
+ * stable slot_id; the inline field only carries that as a plain `title`
+ * (hover) attribute now. Flagged as a concern in this task's report — out of
+ * scope to fix here (this file only touches tests/e2e).
+ *
+ * Delete (DeleteSlotDialog): unaffected by the drawer restructure — the
+ * confirm states the true blast radius (unit, port → PortAuthority, state)
+ * and that the model + weights are untouched; type-to-confirm the name, then
+ * DELETE /api/slots/{name}.
  *
  * Slot GETs are served from the in-bundle mock (VITE_MOCK_HAL0) off
  * window.HAL0_DATA, so we seed slot STATE via addInitScript; the mutations
@@ -42,20 +56,17 @@ const OFFLINE = {
 }
 
 test.describe('Slot rename', () => {
-  test('running slot: rename disabled with an inline stop-first reason', async ({ page }) => {
+  test('running slot: the inline name field is disabled with a stop-first title', async ({ page }) => {
     await seedSlots(page, [RUNNING])
     await page.goto('/#slots/primary')
-    await page.getByTestId('slot-rename-open').click()
+    await expect(page.locator('.drawer')).toBeVisible()
 
-    await expect(page.getByTestId('rename-slot-input')).toBeDisabled()
-    await expect(page.getByTestId('rename-slot-save')).toBeDisabled()
-    const reason = page.getByTestId('rename-slot-reason')
-    await expect(reason).toBeVisible()
-    await expect(reason).toContainText(/Stop the slot to rename/i)
-    await expect(reason).toContainText(/slot_id/i)
+    const nameField = page.getByTestId('slot-name-inline')
+    await expect(nameField).toBeDisabled()
+    await expect(nameField).toHaveAttribute('title', /Stop the slot to rename/i)
   })
 
-  test('offline slot: rename POSTs /api/slots/{name}/rename', async ({ page }) => {
+  test('offline slot: committing the inline name field POSTs /api/slots/{name}/rename', async ({ page }) => {
     let body: any = null
     await page.route('**/api/slots/primary/rename', async (route) => {
       body = JSON.parse(route.request().postData() || '{}')
@@ -63,12 +74,13 @@ test.describe('Slot rename', () => {
     })
     await seedSlots(page, [OFFLINE])
     await page.goto('/#slots/primary')
-    await page.getByTestId('slot-rename-open').click()
+    await expect(page.locator('.drawer')).toBeVisible()
 
-    const input = page.getByTestId('rename-slot-input')
-    await expect(input).toBeEnabled()
-    await input.fill('primary-2')
-    await page.getByTestId('rename-slot-save').click()
+    const nameField = page.getByTestId('slot-name-inline')
+    await expect(nameField).toBeEnabled()
+    await expect(nameField).toHaveAttribute('title', /click to rename/i)
+    await nameField.fill('primary-2')
+    await nameField.press('Enter')
     await expect.poll(() => body?.new_name).toBe('primary-2')
   })
 })

@@ -27,6 +27,7 @@
  * surface is owned by slot-pin-toggle-v3.spec.ts.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 const PRIMARY = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
@@ -108,8 +109,10 @@ test.describe('Slot drawer — model swap wiring', () => {
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
     const select = page.locator('.drawer').getByLabel('Model for primary')
-    await expect(select).toHaveValue('qwen3.6-27b-mtp')
-    await select.selectOption(SWAP_TARGET)
+    // RichSelect's closed trigger renders the selected row's text directly
+    // (Task 11c) — `longName` here, not a native <select> value.
+    await expect(select).toContainText('Qwen3.6-27B-MTP')
+    await pickRichOption(select, SWAP_TARGET)
 
     await expect.poll(() => swaps.length).toBe(1)
     expect(swaps[0]).toEqual({ model_id: SWAP_TARGET })
@@ -123,7 +126,7 @@ test.describe('Slot drawer — model swap wiring', () => {
 
     await page.goto('/#slots/primary')
     const select = page.locator('.drawer').getByLabel('Model for primary')
-    await select.selectOption('qwen3.6-27b-mtp')
+    await pickRichOption(select, 'qwen3.6-27b-mtp')
     await page.waitForTimeout(200)
     expect(swaps).toEqual([])
   })
@@ -136,7 +139,7 @@ test.describe('Slot drawer — model swap wiring', () => {
     ])
 
     await page.goto('/#slots/primary')
-    await page.locator('.drawer').getByLabel('Model for primary').selectOption(SWAP_TARGET)
+    await pickRichOption(page.locator('.drawer').getByLabel('Model for primary'), SWAP_TARGET)
 
     const dialog = page.locator('.modal-shell', { hasText: 'Swap model' })
     await expect(dialog).toBeVisible()
@@ -147,7 +150,7 @@ test.describe('Slot drawer — model swap wiring', () => {
     await page.waitForTimeout(200)
     expect(swaps).toEqual([])
     // Cancelling reverts the select to the bound model (value={cur}).
-    await expect(page.locator('.drawer').getByLabel('Model for primary')).toHaveValue('qwen3.6-27b-mtp')
+    await expect(page.locator('.drawer').getByLabel('Model for primary')).toContainText('Qwen3.6-27B-MTP')
   })
 
   test('W2 — confirming the live-swap dialog POSTs /swap { model_id }', async ({ page }) => {
@@ -158,11 +161,117 @@ test.describe('Slot drawer — model swap wiring', () => {
     ])
 
     await page.goto('/#slots/primary')
-    await page.locator('.drawer').getByLabel('Model for primary').selectOption(SWAP_TARGET)
+    await pickRichOption(page.locator('.drawer').getByLabel('Model for primary'), SWAP_TARGET)
     await page.locator('.modal-shell').getByRole('button', { name: 'Swap model' }).click()
 
     await expect.poll(() => swaps.length).toBe(1)
     expect(swaps[0]).toEqual({ model_id: SWAP_TARGET })
+  })
+})
+
+// ─── GTT feasibility (Task 11d, host-truth signal 993ea3b6) ────────────────
+//
+// Task 12: cascades the drawer's two feasibility call sites into this file
+// (rather than a new spec) since both hang off the same Model group this
+// file already exercises. Mocked at the Playwright layer, following the
+// mockProfiles/mockChatTemplates idiom (page.route per spec, request body
+// captured/echoed rather than a fixed canned response) — the wire contract
+// is `POST /api/models/feasibility {models:[{model_id, ctx?}]}` →
+// `{results: [{model_id, verdict, needed_mb, gtt_free_mb, gtt_total_mb}]}`
+// (`useModelsFeasibility.ts`). warn-never-block: a `fits`/`tight`/`exceeds`/
+// `exceeds_total` verdict maps to `feasibility-copy.ts`'s exact hint text;
+// this file only pins that the right verdict reaches the right surface, not
+// the copy itself (already vitest-pinned in `feasibility-hint.test.ts`).
+test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chips)', () => {
+  /** Echo a per-model-id verdict for every probed model in the request body. */
+  function mockFeasibility(page: Page, verdictById: Record<string, string>) {
+    return page.route('**/api/models/feasibility', async (route) => {
+      const body = route.request().postDataJSON() as { models: { model_id: string; ctx?: number }[] }
+      const results = body.models.map((m) => ({
+        model_id: m.model_id,
+        verdict: verdictById[m.model_id] ?? 'unknown',
+        needed_mb: 14_000,
+        gtt_free_mb: 15_000,
+        gtt_total_mb: 24_000,
+      }))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results }) })
+    })
+  }
+
+  function ctxCeilingInput(page: Page) {
+    const hwGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
+    })
+    return hwGroup
+      .locator('.form-row')
+      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
+      .locator('input')
+  }
+
+  test('the ceiling hint renders per verdict and re-probes (debounced) on a ctx edit', async ({ page }) => {
+    await mockFeasibility(page, { 'qwen3.6-27b-mtp': 'fits' })
+    await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    const hint = page.getByTestId('slot-ctx-feasibility')
+    // Fires on drawer open (400ms debounce) — no keystroke needed yet.
+    await expect(hint).toContainText('fits', { timeout: 2_000 })
+    await expect(hint).toContainText('14 GB')
+
+    // Re-mock to a verdict that maps to the "exceeds" copy, then edit ctx —
+    // the SAME probe re-fires (debounced) for the new ceiling.
+    await mockFeasibility(page, { 'qwen3.6-27b-mtp': 'exceeds' })
+    await ctxCeilingInput(page).fill('32768')
+    await expect(hint).toContainText('exceeds', { timeout: 2_000 })
+  })
+
+  test('an absent/unknown verdict renders no hint at all (warn-never-block)', async ({ page }) => {
+    // No model_id in the map ⇒ every probed row echoes back 'unknown'.
+    await mockFeasibility(page, {})
+    await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await page.waitForTimeout(700) // past the 400ms debounce
+    await expect(page.getByTestId('slot-ctx-feasibility')).toHaveCount(0)
+  })
+
+  test('model dropdown rows carry a per-model fit chip from ONE batch probe fired on open', async ({ page }) => {
+    const probes: any[] = []
+    await page.route('**/api/models/feasibility', async (route) => {
+      const body = route.request().postDataJSON() as { models: { model_id: string }[] }
+      probes.push(body)
+      const verdictById: Record<string, string> = {
+        'qwen3.6-27b-mtp': 'fits',
+        [SWAP_TARGET]: 'exceeds',
+      }
+      const results = body.models.map((m) => ({
+        model_id: m.model_id,
+        verdict: verdictById[m.model_id] ?? 'unknown',
+        needed_mb: 14_000,
+        gtt_free_mb: 15_000,
+        gtt_total_mb: 24_000,
+      }))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results }) })
+    })
+    await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    const trigger = page.locator('.drawer').getByLabel('Model for primary')
+    const listbox = await openRichSelect(trigger)
+    // Fired once on the open transition — never per keystroke, never per row.
+    await expect.poll(() => probes.length).toBe(1)
+    await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('● fits · ~14 GB')
+    await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"]`)).toContainText("○ won't fit")
+    // Each fresh open→true transition fires exactly one more probe (still
+    // never per keystroke/per row); closing itself fires nothing. Click a
+    // plain label (not Escape — the drawer's OWN document-level Escape
+    // handler closes the whole drawer, not just the open listbox) to close
+    // it via RichSelect's click-outside listener instead.
+    await page.locator('.drawer .form-lbl', { hasText: 'Runtime' }).first().click()
+    await openRichSelect(trigger)
+    await expect.poll(() => probes.length).toBe(2)
   })
 })
 

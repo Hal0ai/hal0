@@ -11,8 +11,9 @@
  *       { enabled }.
  *   P3. a pinned slot (fresh-install utility anchor) seeds the toggle on.
  *   P4. flipping the header Auto-Load toggle fires PUT /config { autoload }.
- *   P5. Eviction priority lives under the Advanced disclosure (not in the
- *       Model section) and commits PUT /config { priority } on blur.
+ *   P5. Eviction priority lives in the "When it unloads" lifecycle row
+ *       (Task 11b re-homed it OUT of Advanced, next to Auto-Load) and
+ *       commits PUT /config { priority } on blur.
  *
  * List seeding mirrors slot-edit-controls-v3.spec.ts (in-bundle HAL0_DATA,
  * mutations fall through to page.route).
@@ -108,7 +109,7 @@ test.describe('Slot pin toggle (/slots drawer header)', () => {
     expect(puts[0]).toEqual({ autoload: true })
   })
 
-  test('P5 — Eviction priority lives under Advanced and PUTs { priority } on blur', async ({ page }) => {
+  test('P5 — Eviction priority lives in the lifecycle row, visible+editable while unpinned, and PUTs { priority } on blur', async ({ page }) => {
     const puts: any[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
       if (route.request().method() === 'PUT')
@@ -118,11 +119,12 @@ test.describe('Slot pin toggle (/slots drawer header)', () => {
     await seedSlots(page, [PRIMARY, UTILITY])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
+    // Task 11b: the priority input now lives in the "When it unloads"
+    // lifecycle row, always rendered (no disclosure to open) — only pinning
+    // the slot disables it. PRIMARY is unpinned, so it starts enabled.
     const prio = page.locator('[data-testid="slot-priority-input"]')
-    // Collapsed by default — the row sits inside the Advanced disclosure.
-    await expect(prio).toBeHidden()
-    await page.locator('details.adv-disclosure > summary').click()
     await expect(prio).toBeVisible()
+    await expect(prio).toBeEnabled()
     await prio.fill('10')
     await prio.blur()
     await expect.poll(() => puts.length).toBeGreaterThan(0)

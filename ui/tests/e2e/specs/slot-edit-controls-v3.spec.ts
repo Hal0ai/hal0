@@ -43,6 +43,7 @@
  * through to real fetch and page.route captures their bodies.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 const PRIMARY = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
@@ -89,6 +90,18 @@ async function seedSlots(page: Page, slots: any[]) {
   }, slots)
 }
 
+/**
+ * Open the drawer's single consolidated Advanced disclosure
+ * (`data-testid="slot-hw-advanced"`, Task 11a) — no-op if already open.
+ * Threads/NGL/the image block/debug pin all moved OUT of the top-level
+ * Hardware grid and behind this disclosure in the Option B regroup, so
+ * every test below that edits one of those fields opens it first.
+ */
+async function openAdvanced(page: Page) {
+  const adv = page.getByTestId('slot-hw-advanced')
+  if ((await adv.getAttribute('aria-expanded')) !== 'true') await adv.click()
+}
+
 // NOTE: the per-card enable toggle, the fade modifier, and the
 // configured-first sort were SlotCard-grid features. Both grids (Chat +
 // Capabilities) were retired in favour of the InferencePane, so those tests
@@ -123,6 +136,7 @@ test.describe('Slot edit controls (/slots)', () => {
     )
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
+    await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -131,12 +145,13 @@ test.describe('Slot edit controls (/slots)', () => {
     }
   })
 
-  test('C5 — NGL lives in the HW grid, editable with the -1 default', async ({ page }) => {
+  test('C5 — NGL lives behind Advanced, editable with the -1 default', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // NGL moved out of Advanced into the top-level Hardware grid
-    // (spec-hw-slot-ownership §2) — no disclosure to open.
+    // Task 11a consolidation: NGL moved from the top-level Hardware grid into
+    // the single Advanced disclosure (slot-hw-advanced) — open it first.
+    await openAdvanced(page)
     const input = page.getByTestId('slot-hw-ngl')
     await expect(input).toBeVisible()
     await expect(input).not.toHaveAttribute('readonly', '')
@@ -172,6 +187,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
+    await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -197,13 +213,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, n_gpu_layers: 24 }, EMBED])
 
     await page.goto('/#slots/primary')
+    await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
 
-  test('HW grid — Runtime + Threads + NGL render; Device select is gone; image pin hidden until Advanced opens (§2)', async ({ page }) => {
+  test('HW grid — Runtime renders top-level; Device select is gone; Threads/NGL/image pin live behind Advanced', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     // The standalone Device select is GONE (hw-cascade): `device` is derived
@@ -213,14 +230,17 @@ test.describe('Slot edit controls (/slots)', () => {
     // gone too — replaced by the single Runtime select.
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
-    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
     await expect(page.getByTestId('slot-hw-runtime')).toBeVisible()
     await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
-    // The image/version truth + debug pin live behind the collapsed
-    // Advanced disclosure — not visible until it's opened.
+    // Task 11a consolidation: Threads/NGL moved OUT of the top-level grid
+    // alongside the image/version truth + debug pin, all behind the single
+    // collapsed Advanced disclosure — none visible until it's opened.
+    await expect(page.getByTestId('slot-hw-threads')).toHaveCount(0)
+    await expect(page.getByTestId('slot-hw-ngl')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-image-pin')).toHaveCount(0)
-    await page.getByTestId('slot-hw-advanced').click()
+    await openAdvanced(page)
+    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
+    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
     await expect(page.getByTestId('slot-hw-advanced-image')).toBeVisible()
   })
 
@@ -265,8 +285,10 @@ test.describe('Slot edit controls (/slots)', () => {
     // rocmfpx is a dual-lane runner (rocm + vulkan) — the Runtime select
     // already resolves to it (the slot's persisted binary), so the Lane
     // pills render immediately; picking the Vulkan lane derives
-    // device=gpu-vulkan without touching Runtime at all.
-    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('rocmfpx')
+    // device=gpu-vulkan without touching Runtime at all. RichSelect's closed
+    // trigger renders the selected option's title text (no declared `title`
+    // on this backend row, so it falls back to the raw key).
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('rocmfpx')
     await page.getByTestId('slot-hw-lane').getByRole('button', { name: 'Vulkan' }).click()
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -313,12 +335,13 @@ test.describe('Slot edit controls (/slots)', () => {
 
     await page.goto('/#slots/primary')
     // Pick the Runtime — a single-lane runner's device is derived from it.
-    await page.getByTestId('slot-hw-runtime').selectOption('rocmfpx')
+    await pickRichOption(page.getByTestId('slot-hw-runtime'), 'rocmfpx')
+    // Threads/NGL/the debug pin (a free-text escape hatch, never an
+    // enumerated catalog dropdown) all live behind the single Advanced
+    // disclosure now (Task 11a) — open it once before touching any of them.
+    await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('0')
     await page.getByTestId('slot-hw-threads').fill('8')
-    // The debug pin is a free-text escape hatch behind the Advanced
-    // disclosure now — never an enumerated catalog dropdown.
-    await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-debug-pin-open').click()
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
     await page.locator('.drawer button:has-text("Save")').click()
@@ -378,10 +401,15 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(sel).toBeVisible()
     // Registry entries by TITLE — no optgroup split (the old
     // "catalogued · downloaded" grouping is gone) and no separate Runner
-    // Image / Backend selects.
-    await expect(sel.locator('option', { hasText: 'ROCm FPX (default)' })).toHaveCount(1)
-    await expect(sel.locator('option', { hasText: 'Strix (Vulkan optional)' })).toHaveCount(1)
-    await expect(sel.locator('optgroup')).toHaveCount(0)
+    // Image / Backend selects. RichSelect has no <optgroup>/<option> DOM —
+    // open the listbox and read its rows instead.
+    const listbox = await openRichSelect(sel)
+    await expect(listbox.getByText('ROCm FPX (default)')).toHaveCount(1)
+    await expect(listbox.getByText('Strix (Vulkan optional)')).toHaveCount(1)
+    // No disabled-marker "group header" row either (Task 11c's stand-in for
+    // <optgroup>, used only by the Profile select's cross-backend group) —
+    // a plain Runtime list has nothing to group.
+    await expect(listbox.locator('[aria-disabled="true"]')).toHaveCount(0)
     await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
   })
 
@@ -419,8 +447,8 @@ test.describe('Slot edit controls (/slots)', () => {
     ])
     await page.goto('/#slots/primary')
 
-    await expect(page.getByTestId('slot-hw-runtime')).toHaveValue('rocmfpx')
-    await page.getByTestId('slot-hw-advanced').click()
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('ROCm FPX')
+    await openAdvanced(page)
     await expect(page.getByTestId('slot-hw-image-pin')).toHaveValue(
       'ghcr.io/hal0ai/hal0-combined-upstream:0829',
     )
@@ -462,8 +490,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
     await page.goto('/#slots/primary')
     const sel = page.getByTestId('slot-hw-runtime')
-    await expect(sel).toHaveValue('rocmfpx')
-    await expect(sel.locator('option', { hasText: 'not in this catalog' })).toHaveCount(1)
+    // The closed trigger renders the persisted binary's own "· not in this
+    // catalog" row text directly (Task 11c) — no silent rewrite to auto.
+    await expect(sel).toContainText('rocmfpx')
+    await expect(sel).toContainText('not in this catalog')
+    const listbox = await openRichSelect(sel)
+    await expect(listbox.locator('[data-option-id="rocmfpx"]')).toContainText(
+      'not in this catalog',
+    )
   })
 
   test('NPU modality controls remain visible and wire ASR updates', async ({ page }) => {
@@ -513,14 +547,16 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // Context is directly visible in the Model group (not inside Advanced).
-    // Label reads "Context (ceiling)": the bound model's own default
-    // context_size is authoritative; this slot value only clamps it down for
-    // lighter hardware, it never overrides it upward.
-    const modelGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^Model$/ }),
+    // Context is directly visible in the "How it runs" group (not inside
+    // Advanced) — Task 11a moved the ceiling IN from the old Model group
+    // beside the hardware that enforces it. Label reads "Context (ceiling)":
+    // the bound model's own default context_size is authoritative; this
+    // slot value only clamps it down for lighter hardware, it never
+    // overrides it upward.
+    const hwGroup = page.locator('.drawer .field-group').filter({
+      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
     })
-    const contextRow = modelGroup.locator('.form-row').filter({
+    const contextRow = hwGroup.locator('.form-row').filter({
       has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
     })
     await expect(contextRow).toBeVisible()
@@ -586,21 +622,25 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'workers' })).toHaveCount(0)
   })
 
-  test('drawer fields are grouped under SLOT / HARDWARE / MODEL (no Inference group)', async ({ page }) => {
+  test('drawer fields are grouped under What runs / How it runs / When it unloads (no separate Profile/Inference group)', async ({ page }) => {
+    // Task 11a's Option B regroup replaced the old SLOT / HARDWARE / MODEL
+    // FieldGroups with three task-oriented sections; the underlying claims
+    // this test protects survive verbatim under the new names: no separate
+    // Inference or Profile group, and Model + Profile both live together.
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
-    for (const label of ['Slot', 'Hardware', 'Model']) {
+    for (const label of ['What runs', 'How it runs', 'When it unloads']) {
       await expect(page.locator('.field-group-label', { hasText: new RegExp(`^${label}$`, 'i') })).toHaveCount(1)
     }
     // spec-hw-slot-ownership §1: the former "Inference" group (Reasoning/MTP/
     // Vision) was removed outright — those caps moved to the model drawer.
     await expect(page.locator('.field-group-label', { hasText: /^Inference$/i })).toHaveCount(0)
-    const modelGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Model$/i }) })
-    await expect(modelGroup.getByLabel('Model for primary')).toBeVisible()
-    // The Profile row moved INTO the Model group (under the model select) —
+    const whatRuns = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^What runs$/i }) })
+    await expect(whatRuns.getByLabel('Model for primary')).toBeVisible()
+    // The Profile row lives INSIDE "What runs" (under the model select) —
     // no standalone Profile group on non-NPU slots.
-    await expect(modelGroup.getByTestId('slot-profile')).toBeVisible()
+    await expect(whatRuns.getByTestId('slot-profile')).toBeVisible()
     await expect(page.locator('.field-group-label', { hasText: /^Profile$/i })).toHaveCount(0)
   })
 
@@ -617,6 +657,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.locator('.drawer .form-row', { hasText: 'Default for type' })).toHaveCount(0)
     // Make a real config change so the emitted body can prove `default` stays absent.
+    await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
