@@ -18,7 +18,6 @@ import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview,
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
-import { useMetaEnums } from '@/api/hooks/useMeta'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -495,33 +494,26 @@ function DownloadRow({ modelId, onRemove }) {
 // PR feat/models-scan-and-add-by-path: minimal modal around
 // /api/models/add-from-path. The operator types (or pastes) an
 // absolute file path; we POST and let the backend's detect() pass
-// derive capabilities/backends/size. The id + name + labels overrides
-// are surfaced for the cases where the auto-derived ones aren't what
-// the operator wants.
+// derive capabilities/backends/size. The id + name overrides are
+// surfaced; labels are always auto-detected from header/filename.
 function AddByPathModal({ open, onClose }) {
   const [path, setPath] = useStateMM("");
   const [id, setId] = useStateMM("");
   const [name, setName] = useStateMM("");
-  const [labelSel, setLabelSel] = useStateMM({ chat: true });
   const add = useAddModelFromPath();
   const settings = useSettings();
-  // Canonical capability vocabulary — same meta-driven list as the HF modal
-  // and the recipe editor (this surface used to hand-roll a third variant).
-  const enums = useMetaEnums();
 
   useEffectMM(() => {
     if (open) {
       setPath("");
       setId("");
       setName("");
-      setLabelSel({ chat: true });
       add.reset();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const scanRoot = settings.data?.models?.roots?.[0] || "";
-  const labels = Object.entries(labelSel).filter(([, v]) => v).map(([k]) => k);
 
   const onSubmit = async () => {
     if (!path.trim()) return;
@@ -529,7 +521,6 @@ function AddByPathModal({ open, onClose }) {
       const body = { path: path.trim() };
       if (id.trim()) body.id = id.trim();
       if (name.trim()) body.name = name.trim();
-      if (labels.length) body.labels = labels;
       const res = await add.mutateAsync(body);
       window.__hal0Toast && window.__hal0Toast(
         `Registered ${res?.name || res?.id || "model"}`, "ok",
@@ -598,25 +589,6 @@ function AddByPathModal({ open, onClose }) {
         </div>
         <div className="form-ctl">
           <input className="input mono" value={name} onChange={e => setName(e.target.value)} />
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Labels</span>
-          <span className="sub">empty → auto-detect from header / filename</span>
-        </div>
-        <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-          {enums.model_capabilities.map(l => (
-            <label key={l} className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={!!labelSel[l]}
-                onChange={e => setLabelSel({ ...labelSel, [l]: e.target.checked })}
-              />
-              <span className="mono">{l}</span>
-            </label>
-          ))}
         </div>
       </div>
 
