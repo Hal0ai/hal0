@@ -18,6 +18,11 @@ import {
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
+// Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 7/11d) —
+// same hook + copy mapper the PR-3 branch's model drawer uses; copied
+// verbatim rather than redesigned so the two branches dedupe at merge.
+import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
+import { feasibilityHint } from "./feasibility-copy";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
@@ -947,6 +952,51 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	useEffectSM(() => {
 		setNameDraft(slot?.name || "");
 	}, [slot?.name]);
+
+	// GTT feasibility (Task 11d) — TWO separate mutation instances, not one
+	// shared between them: the ceiling hint and the model-row batch each hold
+	// their own `.data`, and a shared instance would let whichever fired last
+	// clobber the other's result.
+	const ceilingFeasibility = useModelsFeasibility();
+	const modelListFeasibility = useModelsFeasibility();
+	const ceilingFeasibilityTimer = useRefSM(null);
+	// Debounced 400ms probe for the bound model at the STAGED ceiling — fires
+	// on drawer open (curModelRow/ctx seed on mount) and again on every ctx
+	// edit. Advisory only (warn-never-block, 993ea3b6): a stale in-flight
+	// probe superseded by a newer keystroke is harmless — the render below
+	// always reads the mutation's latest `.data`.
+	useEffectSM(() => {
+		if (ceilingFeasibilityTimer.current) clearTimeout(ceilingFeasibilityTimer.current);
+		if (!open || !curModelRow?.id) return undefined;
+		const ctxNum = Number(ctx);
+		if (!Number.isFinite(ctxNum) || ctxNum <= 0) return undefined;
+		ceilingFeasibilityTimer.current = setTimeout(() => {
+			ceilingFeasibility.mutate({ models: [{ model_id: curModelRow.id, ctx: ctxNum }] });
+		}, 400);
+		return () => clearTimeout(ceilingFeasibilityTimer.current);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, curModelRow?.id, ctx]);
+	// The bound model's row from the last successful ceiling probe (or none —
+	// `feasibilityHint`'s default branch renders no hint for an absent row,
+	// same as an explicit "unknown" verdict).
+	const ctxFeasibilityRow = (ceilingFeasibility.data?.results || []).find(
+		(r) => r.model_id === curModelRow?.id,
+	);
+	const ctxHint = ctxFeasibilityRow ? feasibilityHint(ctxFeasibilityRow) : null;
+	// Per-row chip for the Model RichSelect's `right` slot, from the last
+	// batch probe (fired on dropdown open — see the Model select below). A
+	// row with no verdict in the batch (still loading, or the batch hasn't
+	// fired yet) renders no chip — never a stale/guessed one.
+	const modelFeasibilityChipFor = (id) => {
+		const row = (modelListFeasibility.data?.results || []).find((r) => r.model_id === id);
+		if (!row) return null;
+		const gb = Math.round((row.needed_mb ?? 0) / 1024);
+		if (row.verdict === "fits") return <span className="chip ok">● fits · ~{gb} GB</span>;
+		if (row.verdict === "tight") return <span className="chip warn">◐ tight</span>;
+		if (row.verdict === "exceeds" || row.verdict === "exceeds_total")
+			return <span className="chip err">○ won't fit</span>;
+		return null;
+	};
 
 	// Screen-reader descriptions for the header toggles — the hover `title`
 	// alone is unreachable for keyboard/touch/SR users (Codex review, #1638).
@@ -1963,9 +2013,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 															allSlots: Array.isArray(slotsQuery.data)
 																? slotsQuery.data
 																: [],
-															// Task 11d wires the real per-row fit chip here.
-															verdictChipFor: null,
+															verdictChipFor: modelFeasibilityChipFor,
 														})}
+														// Task 11d: one batch feasibility call for every listed
+														// model at the slot's CURRENT (persisted/staged) ceiling,
+														// fired once per dropdown open — not per keystroke, not
+														// per row. `has` rows with no verdict in the response
+														// render no chip (see modelFeasibilityChipFor above).
+														onOpenChange={(isOpen) => {
+															if (!isOpen || compatible.length === 0) return;
+															const ctxNum = Number(ctx);
+															modelListFeasibility.mutate({
+																models: compatible.map((m) => ({
+																	model_id: m.id,
+																	...(Number.isFinite(ctxNum) && ctxNum > 0
+																		? { ctx: ctxNum }
+																		: {}),
+																})),
+															});
+														}}
 														onChange={(id) => {
 															if (!id || id === cur) return;
 															const picked = compatible.find((m) => m.id === id);
@@ -2225,6 +2291,38 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{fieldErrs.ctx && (
 									<div className="hint" style={{ color: "var(--err)" }}>
 										{fieldErrs.ctx}
+									</div>
+								)}
+								{/* GTT feasibility hint (Task 11d, mockup panel 06) — host-truth,
+								    warn-never-block (993ea3b6): ok is a plain hint, warn/err are
+								    boxed. An absent/unknown verdict renders nothing at all. */}
+								{ctxHint?.tone && (
+									<div
+										className="hint"
+										data-testid="slot-ctx-feasibility"
+										style={
+											ctxHint.tone === "warn"
+												? {
+														marginTop: 6,
+														padding: "6px 10px",
+														borderRadius: "var(--rad-sm)",
+														color: "var(--warn)",
+														border: "1px solid var(--warn-line)",
+														background: "var(--warn-soft)",
+													}
+												: ctxHint.tone === "err"
+													? {
+															marginTop: 6,
+															padding: "6px 10px",
+															borderRadius: "var(--rad-sm)",
+															color: "var(--err)",
+															border: "1px solid var(--err-line)",
+															background: "var(--err-soft)",
+														}
+													: undefined
+										}
+									>
+										{ctxHint.text}
 									</div>
 								)}
 							</div>

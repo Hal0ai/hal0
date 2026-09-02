@@ -26,12 +26,21 @@ import {
 
 const { useEffect, useId, useRef, useState } = React
 
-export function RichSelect({ value, options, onChange, disabled, 'data-testid': testId }) {
+export function RichSelect({ value, options, onChange, disabled, onOpenChange, 'data-testid': testId }) {
   const generatedId = useId()
   const baseId = testId || generatedId
   const rootRef = useRef(null)
   const listRef = useRef(null)
   const [state, setState] = useState(() => initialState(value ?? null))
+
+  // Optional open/close notification (Task 11d) — the Model select's caller
+  // fires its one-shot batch feasibility probe here, on the transition into
+  // `open`, rather than on every render while open. No consumer is required
+  // to pass this; the effect is a no-op without it.
+  useEffect(() => {
+    if (onOpenChange) onOpenChange(state.open)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.open])
 
   // A `value` change from outside while closed (e.g. a sibling control
   // driving this select, or the initial load resolving) re-seeds activeId
