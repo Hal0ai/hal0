@@ -3029,6 +3029,26 @@ select.npu-sel {
 /* Drawer header internals (migrated from the deleted mcp.css; the <Drawer>
    primitive in primitives.jsx renders an h2 + eyebrow + close button). */
 .drawer-h h2 { font-size: 18px; font-weight: 500; margin: 0; letter-spacing: -0.02em; }
+/* Inline-editable slot name (Task 11a) — reads as title text until focused,
+   replacing the old disabled "Name" field + "Rename…" button. Sized via the
+   `size` attribute (JS-computed from the draft length) rather than a fixed
+   width, so it never clips or over-reserves relative to the actual name. */
+.drawer-title-input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--rad-sm);
+  padding: 1px 4px;
+  margin: -1px -4px;
+}
+.drawer-title-input:hover:not(:disabled) { border-color: var(--line-soft); }
+.drawer-title-input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  background: var(--bg-2);
+}
+.drawer-title-input:disabled { color: var(--fg-4); cursor: not-allowed; }
 .drawer-h .modal-h-eye { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px; }
 .drawer-h .modal-close {
   position: absolute;
