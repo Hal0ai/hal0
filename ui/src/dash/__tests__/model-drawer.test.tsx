@@ -1146,6 +1146,50 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     act(() => root.unmount())
   })
 
+  it('a variant nested in a repo subdirectory is basenamed onto the model directory', async () => {
+    // Inspect variant ids are repo-RELATIVE PATHS (huggingface.py:357 `"id": rel`,
+    // recursive tree walk), and nested projector/quant layouts are routine. The
+    // pull worker basenames before persisting (pull.py:1071), so joining the id
+    // verbatim would write a path no pull ever produces — and one that fails
+    // screen_vision_mmproj's on-disk check.
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: [
+        {
+          id: 'UD-Q4_K_XL/mmproj-F16.gguf',
+          size_bytes: 644245094,
+          size: '0.6 GB',
+          info: 'mmproj sidecar',
+        },
+      ],
+    })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+
+    // The row still shows the full repo-relative id (two projectors that
+    // flatten onto one filename stay distinguishable)…
+    const pick = host.querySelector(
+      `[data-option-id="${MODEL_DIR}/mmproj-F16.gguf"]`,
+    ) as HTMLElement
+    expect(pick).toBeTruthy()
+    expect(pick.textContent).toContain('UD-Q4_K_XL/mmproj-F16.gguf')
+    // …but the directory segment never reaches the stored value.
+    expect(host.querySelector(`[data-option-id="${MODEL_DIR}/UD-Q4_K_XL/mmproj-F16.gguf"]`)).toBeNull()
+
+    act(() => pick.click())
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-save').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const call = updateCalls[0] as { body: { mmproj?: string | null } }
+    expect(call.body.mmproj).toBe(`${MODEL_DIR}/mmproj-F16.gguf`)
+    act(() => root.unmount())
+  })
+
   it('stored mmproj value missing from the listing renders as its own row', () => {
     withVariants()
     const stored = '/srv/projectors/mmproj-handpicked.gguf'
@@ -1171,6 +1215,19 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
       host.querySelector('[data-option-id="/srv/projectors/mmproj-Q8_0.gguf"]'),
     ).toBeTruthy()
     // Nothing was saved: an untouched picker leaves the row unchanged.
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+
+    // The stored row survives a pick away from it — otherwise "— none —" is a
+    // one-way door and the only way back is closing the drawer, losing every
+    // other unsaved edit with it.
+    act(() => (host.querySelector('[data-option-id=""]') as HTMLElement).click())
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+    const again = host.querySelector(`[data-option-id="${stored}"]`) as HTMLElement
+    expect(again).toBeTruthy()
+    act(() => again.click())
+    expect(q<HTMLButtonElement>(host, 'model-mmproj-select').textContent).toContain(
+      'mmproj-handpicked.gguf',
+    )
     expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
     act(() => root.unmount())
   })
@@ -1276,6 +1333,47 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     act(() => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
     act(() => q<HTMLButtonElement>(host, 'model-source-copy-mmproj').click())
     expect(copied).toEqual([`${MODEL_DIR}/qwen-q8.gguf`, stored])
+    act(() => root.unmount())
+  })
+
+  it('the mmproj path line flags an unsaved pick instead of implying on-disk truth', () => {
+    withVariants()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    // Nothing picked yet: the line is a plain readback of the stored value.
+    expect(q<HTMLElement>(host, 'model-source-paths').textContent).not.toContain('unsaved')
+
+    act(() => q<HTMLButtonElement>(host, 'model-mmproj-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/mmproj-Q8_0.gguf"]`) as HTMLElement).click(),
+    )
+    const paths = q<HTMLElement>(host, 'model-source-paths')
+    expect(paths.textContent).toContain(`${MODEL_DIR}/mmproj-Q8_0.gguf`)
+    expect(paths.textContent).toContain('unsaved selection')
+    act(() => root.unmount())
+  })
+
+  it('a clipboard that throws reports the failure instead of a false success', () => {
+    const toasts: [string, string][] = []
+    ;(globalThis as unknown as { __hal0Toast: unknown }).__hal0Toast = (m: string, k: string) =>
+      toasts.push([m, k])
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: {
+        writeText: () => {
+          throw new Error('NotAllowedError')
+        },
+      },
+      configurable: true,
+    })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
+    expect(toasts).toEqual([['Copy failed — clipboard unavailable', 'err']])
+    delete (globalThis as unknown as { __hal0Toast?: unknown }).__hal0Toast
     act(() => root.unmount())
   })
 })

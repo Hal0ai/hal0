@@ -1205,12 +1205,23 @@ function engineRichOptions(runtimeFamilies, providerEffective) {
 //     does the discover scan (`model.mmproj = str(candidate.mmproj)`,
 //     src/hal0/registry/discover.py:404).
 //
-// So the picker lists repo FILENAMES but must write `<dir>/<filename>`, with
+// So the picker lists repo files but must write `<dir>/<basename>`, with
 // `<dir>` the directory the sidecar sits in beside the model — exactly what
 // the pull worker would have produced. `mmprojDirOf` prefers the stored
 // projector's own directory (a row whose sidecar lives elsewhere keeps it) and
 // falls back to the model file's directory. No derivable directory ⇒ no
 // picker: this drawer resolves a path, it never invents one.
+//
+// BASENAME, not the variant id: an inspect variant's `id` is the repo-RELATIVE
+// PATH (`"id": rel` from the recursive tree walk,
+// src/hal0/upstreams/huggingface.py:357), and repos really do nest projectors
+// and quants in subdirectories — the same file's own comment cites
+// `vision/Foo.mmproj` (huggingface.py:270-274), and `recursive=true` exists for
+// exactly that (registry/update_check.py:39-40, registry/fileset.py:208-210).
+// The pull worker flattens that away (`Path(mm_rec.hf_filename).name`,
+// pull.py:1071), so joining a variant id verbatim would write
+// `<dir>/UD-Q4_K_XL/mmproj-F16.gguf` — a path no pull ever produces, and one
+// that fails `screen_vision_mmproj`'s on-disk check on save.
 function mmprojDirOf(storedMmproj, modelPath) {
 	const src = String(storedMmproj || modelPath || "").trim();
 	const cut = src.lastIndexOf("/");
@@ -1238,13 +1249,19 @@ function sizeChipText(variant) {
 // stores (the resolved absolute path), so `onChange` is a plain `setMmproj`
 // and the control's `value` compares against the stored string directly —
 // there is no second place where a filename could be re-derived into a
-// different path than the one that was saved.
+// different path than the one that was saved. The ROW keeps the variant's full
+// repo-relative id, so two projectors that flatten onto the same filename are
+// still told apart by eye; `seen` keeps the first (smallest, the list arrives
+// size-sorted), which is the same one-file-per-directory outcome a pull of both
+// would leave behind.
 //
-// `current` (a projector stored on the row that this repo's listing doesn't
-// offer — a hand-placed sidecar, or a repo that has since dropped the file)
-// always gets its own row, verbatim. A value this picker cannot explain is
-// still a value the operator chose; it is never silently rewritten or dropped.
-function mmprojRichOptions(dir, variants, current) {
+// `extras` are values the row already carries — the stored projector and the
+// current draft — that this repo's listing doesn't offer (a hand-placed
+// sidecar, or a repo that has since dropped the file). Each gets its own row,
+// verbatim. A value this picker cannot explain is still a value the operator
+// chose: it is never silently rewritten, and never disappears out from under a
+// pick that could otherwise not be undone without closing the drawer.
+function mmprojRichOptions(dir, variants, extras) {
 	const opts = [
 		{
 			id: "",
@@ -1254,14 +1271,16 @@ function mmprojRichOptions(dir, variants, current) {
 	];
 	const seen = new Set([""]);
 	for (const v of variants) {
-		const id = joinMmprojPath(dir, v.id);
+		const id = joinMmprojPath(dir, basenameOf(v.id));
 		if (seen.has(id)) continue;
 		seen.add(id);
 		const chip = sizeChipText(v);
 		opts.push({ id, row: v.id, right: chip ? mutedChip(chip) : null });
 	}
-	const cur = String(current || "").trim();
-	if (cur && !seen.has(cur)) {
+	for (const extra of extras) {
+		const cur = String(extra || "").trim();
+		if (!cur || seen.has(cur)) continue;
+		seen.add(cur);
 		opts.push({
 			id: cur,
 			row: basenameOf(cur),
@@ -1275,33 +1294,51 @@ function mmprojRichOptions(dir, variants, current) {
 // One read-only path line for the Source disclosure's paths block: mono text
 // that wraps mid-token (#2210's overflow-wrap:anywhere pattern — a projector
 // path is long, unbreakable, and must not push the drawer sideways) plus the
-// house copy affordance (model-modals.jsx:391).
-function SourcePathLine({ label, value, testId, empty }) {
+// house copy affordance. The copy goes through the sturdier of the two house
+// idioms (command-palette.jsx's `cpCopy`, :35-42): a clipboard write can throw
+// (no permission, insecure origin, no API at all), and reporting "copied" for
+// a write that never happened is worse than saying nothing.
+//
+// `note` is for a line whose value is NOT on-disk truth — the projector line
+// shows the unsaved pick, and says so rather than implying the file is there.
+function SourcePathLine({ label, value, testId, empty, note }) {
 	const has = !!String(value || "").trim();
 	return (
-		<div style={{ display: "flex", gap: 8, alignItems: "baseline", marginTop: 4 }}>
-			<span className="hint" style={{ minWidth: 52, flex: "0 0 auto" }}>
-				{label}
-			</span>
-			<span
-				className="mono"
-				style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", fontSize: 12 }}
-			>
-				{has ? value : <span className="hint">{empty}</span>}
-			</span>
-			{has && (
-				<button
-					type="button"
-					className="btn ghost sm"
-					data-testid={testId}
-					onClick={() => {
-						navigator.clipboard?.writeText(String(value));
-						window.__hal0Toast &&
-							window.__hal0Toast(`${label} path copied to clipboard`, "ok");
-					}}
+		<div style={{ marginTop: 4 }}>
+			<div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+				<span className="hint" style={{ minWidth: 52, flex: "0 0 auto" }}>
+					{label}
+				</span>
+				<span
+					className="mono"
+					style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", fontSize: 12 }}
 				>
-					Copy
-				</button>
+					{has ? value : <span className="hint">{empty}</span>}
+				</span>
+				{has && (
+					<button
+						type="button"
+						className="btn ghost sm"
+						data-testid={testId}
+						onClick={() => {
+							try {
+								navigator.clipboard.writeText(String(value));
+								window.__hal0Toast &&
+									window.__hal0Toast(`${label} path copied to clipboard`, "ok");
+							} catch {
+								window.__hal0Toast &&
+									window.__hal0Toast("Copy failed — clipboard unavailable", "err");
+							}
+						}}
+					>
+						Copy
+					</button>
+				)}
+			</div>
+			{note && (
+				<div className="hint" style={{ marginLeft: 60, marginTop: 2 }}>
+					{note}
+				</div>
 			)}
 		</div>
 	);
@@ -1539,9 +1576,16 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// Each degrades to the free-text path input rather than to a dead control.
 	const mmprojPicker =
 		!!hfRepo.trim() && !inspect.isError && !!mmprojDir && mmprojVariants.length > 0;
+	// Both the STORED projector and the current draft ride as extra rows: a
+	// stored value the repo doesn't list must stay pickable after the operator
+	// tries "— none —", or the only way back to it is closing the drawer and
+	// losing every other unsaved edit.
 	const mmprojOptions = useMemoMD(
-		() => (mmprojPicker ? mmprojRichOptions(mmprojDir, mmprojVariants, mmproj) : []),
-		[mmprojPicker, mmprojDir, mmprojVariants, mmproj],
+		() =>
+			mmprojPicker
+				? mmprojRichOptions(mmprojDir, mmprojVariants, [baseline?.mmproj, mmproj])
+				: [],
+		[mmprojPicker, mmprojDir, mmprojVariants, baseline?.mmproj, mmproj],
 	);
 
 	// Context size validation (#1378). A lenient parseInt destroyed data twice
@@ -2585,7 +2629,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Paths</span>
-								<FieldInfoIcon description="where these files sit on this host · read-only — the model file is registry-owned, and the projector is set by the control above" />
+								<FieldInfoIcon description="read-only · the model path is the registry's stored value; the mmproj line reads back whatever the control above currently has selected, saved or not" />
 							</div>
 							<div className="form-ctl" data-testid="model-source-paths">
 								<SourcePathLine
@@ -2596,12 +2640,18 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 								/>
 								{/* The DRAFT projector, not the stored one: this line is
                     where a pick made above reads back as the resolved
-                    absolute path it will save as. */}
+                    absolute path it WOULD save as — so an unsaved pick says
+                    so rather than passing itself off as a file on disk. */}
 								<SourcePathLine
 									label="mmproj"
 									value={mmproj}
 									testId="model-source-copy-mmproj"
 									empty="no projector paired"
+									note={
+										baseline && mmproj.trim() !== baseline.mmproj
+											? "unsaved selection — this is the path Save will write, not what is stored today"
+											: null
+									}
 								/>
 							</div>
 						</div>

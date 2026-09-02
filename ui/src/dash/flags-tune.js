@@ -89,7 +89,7 @@ export function findNewSlotHardwareFlags(text, storedText = "") {
 // Where each managed flag is actually controlled from — surfaced in the inline
 // rejection so the operator knows why it's off-limits and where to set it.
 export const MANAGED_FLAG_SOURCE = {
-  "--model": "the model's on-disk path (Source · re-pull coords)",
+  "--model": "the model's on-disk path (Source — repo · file · mmproj · paths)",
   "--ctx-size": "the context_size field",
   "--host": "the server bind host (authority-owned)",
   "--port": "PortAuthority (shown read-only on the slot)",
