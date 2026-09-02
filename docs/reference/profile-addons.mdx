@@ -18,8 +18,9 @@ compatibility rules a publisher must respect.
 
 An addon is **a portable profile envelope and nothing else**:
 
-- **A profile, not an image.** Profiles carry no image reference at all
-  (spec-hw-slot-ownership §3). `ProfileConfig` is a flag bundle plus display
+- **A profile, not an image.** Profiles carry no image reference at all —
+  hardware and image are [slot-owned](/docs/concepts/slots), not profile-owned.
+  `ProfileConfig` is a flag bundle plus display
   facts — `flags`, `mtp`, `device_class`, `backend`, `runner`, `intent`,
   `quant`, `cloned_from` (`src/hal0/config/schema.py`, `ProfileConfig`).
 - **No secrets, no host paths.** `export_envelope` serializes the profile
@@ -171,7 +172,7 @@ The **commit** path verifies the checksum, not just the dry run (#1416). A
 missing or empty `checksum` is still accepted — hand-authored envelopes
 legitimately omit it — but a checksum that is *present and wrong* is a 400
 `profiles.checksum_mismatch`. `"force": true` waives **that check only**; the
-§5/§21.7 flag screen in `ProfileCatalog.create` still applies, so an envelope
+hardware-flag screen in `ProfileCatalog.create` still applies, so an envelope
 can never back-door a hardware or hal0-managed flag past the guards `POST`
 and `PUT` enforce. A forced import is logged.
 </Aside>
@@ -205,7 +206,9 @@ listing the available keys in `details.available`
 first so the UI can offer a different name.
 
 **Flags.** Screened unconditionally on every import, forced or not: a profile
-may not carry slot-owned hardware flags (§5) or hal0-managed args (§21.7).
+may not carry hardware flags the slot owns as typed fields (`--device`,
+`--n-gpu-layers`, `--threads`) or arguments hal0 supplies itself (`--model`,
+`--ctx-size`, `--host`, `--port`, `--alias`).
 Violations are 400 `slot.hardware_flag_denied` / `slot.managed_arg_denied`.
 
 ## Publishing your own
