@@ -1,16 +1,14 @@
 /**
- * hf-add-mmproj-gate — the Add-model-from-HF modal's vision/mmproj error must
- * gate Pull, not decorate it (#1394).
+ * hf-add-mmproj-gate — the Add-model-from-HF modal treats the mmproj
+ * projector as first-class (#2193).
  *
- * Structural twin of #1380 (drawer, PR #1392): the modal rendered
- * "vision label requires an mmproj file" while `canPull` ignored it entirely,
- * so ticking `vision` with no projector selected pulled anyway and
- * `seed_registry_from_body` landed a registry row labelled `vision` with no
- * mmproj — the same broken state, created rather than edited.
- *
- * The no-projector-in-repo case gets its own assertion: "pick one below" is
- * unactionable when the repo ships no mmproj, so the gate points at the label
- * instead (the pull itself is fine — only the label is unsupportable).
+ * Labels checkboxes are gone from this modal entirely — there is no
+ * user-editable capability vocabulary here any more. Instead, when a repo
+ * ships a projector file the modal auto-offers it (pre-selected, since one
+ * projector per repo is the overwhelming case) and the `vision` pull label
+ * is *derived* from that choice rather than hand-ticked. A repo with no
+ * mmproj files renders no projector row at all, and Pull is never gated on
+ * anything projector-related.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -60,65 +58,56 @@ async function openAndInspect(page: import('@playwright/test').Page, repo: strin
 const pullButton = (page: import('@playwright/test').Page) =>
   page.locator('button:has-text("Pull")')
 
-test.describe('Add-by-HF modal — the vision/mmproj error gates Pull (#1394)', () => {
-  test('ticking vision with no mmproj selected disables Pull until one is picked', async ({ page }) => {
+test.describe('Add-by-HF modal — mmproj pairing is first-class (#2193)', () => {
+  test('a repo shipping an mmproj auto-offers it and derives the vision label', async ({ page }) => {
     const pulls = await mockInspectAndPulls(page)
     await openAndInspect(page, VISION_REPO)
 
-    // Pick the main quant — every other gate term (inspected/variant/name) is
-    // satisfied, so Pull is live and only the mmproj term is under test.
+    // No Labels checkboxes anywhere:
+    await expect(page.locator('.checkbox-row')).toHaveCount(0)
+
+    // The projector row is offered without any prior toggle, pre-selected:
+    const sel = page.getByTestId('hf-add-mmproj-select')
+    await expect(sel).toBeVisible()
+    await expect(sel).toHaveValue('mmproj-F16.gguf')
+
+    // Pick the main quant — name is already auto-derived from the repo tail.
     await page.locator('.variant-row:has-text("vision-Q4_K_M.gguf")').click()
-    await expect(page.getByTestId('hf-add-mmproj-error')).toHaveCount(0)
-    await expect(pullButton(page)).toBeEnabled()
-
-    // Tick `vision` with nothing selected in the projector picker.
-    await page.locator('label.checkbox-row:has-text("vision") input').check()
-
-    const err = page.getByTestId('hf-add-mmproj-error')
-    await expect(err).toBeVisible()
-    await expect(err).toContainText('vision label requires an mmproj file')
-    await expect(err).toContainText('pick one below')
-
-    // The gate, not the decoration: the button is dead and a forced click is
-    // a no-op (onPull early-returns on !canPull).
-    await expect(pullButton(page)).toBeDisabled()
-    await pullButton(page).click({ force: true })
-    await page.waitForTimeout(300)
-    expect(pulls).toEqual([])
-
-    // Selecting the repo's projector clears the error and re-arms Pull.
-    await page.getByTestId('hf-add-mmproj-select').selectOption('mmproj-F16.gguf')
-    await expect(page.getByTestId('hf-add-mmproj-error')).toHaveCount(0)
     await expect(pullButton(page)).toBeEnabled()
 
     await pullButton(page).click()
     await expect.poll(() => pulls.length).toBe(1)
     expect(pulls[0].body.mmproj_filename).toBe('mmproj-F16.gguf')
-    expect(pulls[0].body.labels).toContain('vision')
+    expect(pulls[0].body.labels).toEqual(['chat', 'vision'])
   })
 
-  test('a repo with no mmproj files points at the label, not at an empty picker', async ({ page }) => {
+  test('choosing "None" pulls text-only with no vision label', async ({ page }) => {
     const pulls = await mockInspectAndPulls(page)
-    await openAndInspect(page, TEXT_REPO)
-    await page.locator('.variant-row:has-text("text-Q4_K_M.gguf")').click()
+    await openAndInspect(page, VISION_REPO)
 
-    await page.locator('label.checkbox-row:has-text("vision") input').check()
-
-    // "pick one below" would be a lie — the picker's only option is the
-    // "— no mmproj files in repo —" placeholder.
-    const err = page.getByTestId('hf-add-mmproj-error')
-    await expect(err).toBeVisible()
-    await expect(err).toContainText('untick vision to pull')
-    await expect(pullButton(page)).toBeDisabled()
-
-    // Unticking the label is the escape hatch: the pull itself was always fine.
-    await page.locator('label.checkbox-row:has-text("vision") input').uncheck()
-    await expect(page.getByTestId('hf-add-mmproj-error')).toHaveCount(0)
+    await page.locator('.variant-row:has-text("vision-Q4_K_M.gguf")').click()
+    await page.getByTestId('hf-add-mmproj-select').selectOption('')
     await expect(pullButton(page)).toBeEnabled()
 
     await pullButton(page).click()
     await expect.poll(() => pulls.length).toBe(1)
-    expect(pulls[0].body.labels).not.toContain('vision')
     expect(pulls[0].body.mmproj_filename).toBeUndefined()
+    expect(pulls[0].body.labels).toEqual(['chat'])
+  })
+
+  test('a repo with no mmproj files renders no projector row at all', async ({ page }) => {
+    const pulls = await mockInspectAndPulls(page)
+    await openAndInspect(page, TEXT_REPO)
+
+    await expect(page.getByTestId('hf-add-mmproj-select')).toHaveCount(0)
+
+    // Pull is not gated on anything projector-related:
+    await page.locator('.variant-row:has-text("text-Q4_K_M.gguf")').click()
+    await expect(pullButton(page)).toBeEnabled()
+
+    await pullButton(page).click()
+    await expect.poll(() => pulls.length).toBe(1)
+    expect(pulls[0].body.mmproj_filename).toBeUndefined()
+    expect(pulls[0].body.labels).toEqual(['chat'])
   })
 })

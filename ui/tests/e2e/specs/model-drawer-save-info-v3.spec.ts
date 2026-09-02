@@ -95,7 +95,6 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await openDrawer(page)
 
     await page.getByTestId('model-name-input').fill('Saved model name')
-    await page.getByTestId('cap-toggle-vision').click()
     await page.getByTestId('backend-toggle-vulkan').click()
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
     await page.getByTestId('model-hfrepo-input').fill('org/saved-repo')
@@ -114,7 +113,7 @@ test.describe('Model drawer — complete save and compact field help', () => {
     expect(putBody.name).toBe('Saved model name')
     // Type-tag chips are retired — saves never touch tags.
     expect(putBody).not.toHaveProperty('tags')
-    expect(putBody.capabilities).toEqual(['chat', 'vision'])
+    expect(putBody.capabilities).toBeUndefined()
     expect(putBody.backends).toEqual(['rocm', 'vulkan'])
     expect(putBody.mmproj).toBe('/models/mmproj-saved.gguf')
     expect(putBody.hf_repo).toBe('org/saved-repo')
@@ -148,12 +147,14 @@ test.describe('Model drawer — complete save and compact field help', () => {
 
     const drawer = page.locator('.drawer.open')
     const labels = drawer.locator('.form-lbl')
-    // 14 rows: the Vision tri-state row (+1, spec-hw-slot-ownership §1) and
-    // the retired Types chip row (−1 — type tags are inert, typed fields own
-    // behaviour) net out against the pre-existing 14.
-    await expect(labels).toHaveCount(14)
+    // 13 rows: the pre-existing 14 (Vision tri-state row +1,
+    // spec-hw-slot-ownership §1; retired Types chip row −1 — type tags are
+    // inert, typed fields own behaviour) minus the retired editable
+    // Capabilities chip row (−1, #2193 — capabilities are read-only now, so
+    // there's no control left here to describe).
+    await expect(labels).toHaveCount(13)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(14)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(13)
 
     const displayNameLabel = labels.filter({ hasText: 'Display name' })
     const info = displayNameLabel.getByRole('button', { name: 'Info' })
