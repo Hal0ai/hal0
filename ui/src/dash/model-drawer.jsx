@@ -22,15 +22,18 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
+import { useQueryClient } from "@tanstack/react-query";
 import {
 	useModelUpdate,
 	useModelSetDefault,
 } from "@/api/hooks/useModels";
+import { useModelSeedProfile } from "@/api/hooks/useModelSeedProfile";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useMetaEnums } from "@/api/hooks/useMeta";
 import {
 	canonicalCapabilities,
+	deviceById,
 	modelDeviceClasses,
 	profileDeviceClass,
 } from "@/lib/deviceMeta";
@@ -42,6 +45,7 @@ import {
 	diffFlags,
 	tokenizeFlags,
 } from "@/dash/flags-tune.js";
+import { CAP_DEFS, overriddenCaps, remainingCaps } from "@/dash/cap-overrides";
 
 const {
 	useState: useStateMD,
@@ -49,14 +53,6 @@ const {
 	useMemo: useMemoMD,
 	useRef: useRefMD,
 } = React;
-
-// Order-insensitive set equality for array fields (capabilities/backends), so a
-// defaults-only save doesn't spuriously report those as changed.
-function sameSet(a, b) {
-	const sa = [...a].sort();
-	const sb = [...b].sort();
-	return sa.length === sb.length && sa.join(" ") === sb.join(" ");
-}
 
 // spec-hw-slot-ownership §1/§8: the model is device-agnostic — it carries no
 // device, runner, or image. The former deviceFlavour() chip (and the read-only
@@ -83,31 +79,167 @@ function triFromDefault(v) {
 	return "auto";
 }
 
-// ─── TypedCapSeg — Auto / On / Off segmented control (1a rhythm) ─────────────
-function TypedCapSeg({ id, value, onChange }) {
-	const OPTS = [
-		{ key: "auto", label: "auto" },
-		{ key: "on", label: "on" },
-		{ key: "off", label: "off" },
-	];
+// ─── CapOverrideAdd — "+ Override…" menu (overrides ledger, panel 09 V1) ─────
+// Auto is invisible; this is the only place an override gets created, and the
+// only place its consequence copy renders (decision time, not permanently).
+// Same click-outside/Escape idiom as chrome.jsx's NotificationBell popover.
+function CapOverrideAdd({ remaining, onPick }) {
+	const [open, setOpen] = useStateMD(false);
+	const wrapRef = useRefMD(null);
+	useEffectMD(() => {
+		if (!open) return;
+		const onDown = (e) => {
+			if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("mousedown", onDown);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("keydown", onKey);
+		};
+	}, [open]);
+	if (!remaining.length) return null; // every cap already overridden
 	return (
-		<div style={{ display: "flex", gap: 6 }} role="radiogroup" aria-label={id}>
-			{OPTS.map((o) => {
-				const on = value === o.key;
-				return (
-					<button
-						key={o.key}
-						type="button"
-						role="radio"
-						aria-checked={on}
-						data-testid={`cap-${id}-${o.key}`}
-						className={"mdl-chip" + (on ? " on" : "")}
-						onClick={() => onChange(o.key)}
+		<div ref={wrapRef} style={{ position: "relative", display: "inline-block" }}>
+			<button
+				type="button"
+				className="btn ghost sm"
+				data-testid="model-cap-override-add"
+				aria-haspopup="menu"
+				aria-expanded={open}
+				onClick={() => setOpen((o) => !o)}
+			>
+				+ Override…
+			</button>
+			{open && (
+				<>
+					<div className="mdl-row-menu-backdrop" onClick={() => setOpen(false)} />
+					<div
+						role="menu"
+						style={{
+							position: "absolute",
+							top: "calc(100% + 4px)",
+							left: 0,
+							zIndex: 60,
+							minWidth: 320,
+							background: "var(--bg-2)",
+							border: "1px solid var(--line-strong)",
+							borderRadius: 8,
+							boxShadow: "0 16px 48px -8px rgba(0,0,0,.65)",
+							overflow: "hidden",
+						}}
 					>
-						{o.label}
-					</button>
-				);
-			})}
+						{remaining.map((def, i) => (
+							<div
+								key={def.id}
+								style={{
+									padding: "9px 12px",
+									borderBottom:
+										i < remaining.length - 1 ? "1px solid var(--line)" : "none",
+								}}
+							>
+								<div
+									style={{
+										display: "flex",
+										justifyContent: "space-between",
+										alignItems: "center",
+										gap: 10,
+									}}
+								>
+									<span className="mono" style={{ fontSize: 12.5 }}>
+										{def.label}
+									</span>
+									<span style={{ display: "flex", gap: 6 }}>
+										<button
+											type="button"
+											className="mdl-chip"
+											data-testid={`model-cap-override-add-${def.id}-on`}
+											onClick={() => {
+												onPick(def.id, true);
+												setOpen(false);
+											}}
+										>
+											on
+										</button>
+										<button
+											type="button"
+											className="mdl-chip"
+											data-testid={`model-cap-override-add-${def.id}-off`}
+											onClick={() => {
+												onPick(def.id, false);
+												setOpen(false);
+											}}
+										>
+											off
+										</button>
+									</span>
+								</div>
+								<div
+									className="mono"
+									style={{ fontSize: 10.5, color: "var(--fg-4)", marginTop: 4 }}
+								>
+									{def.consequence}
+								</div>
+							</div>
+						))}
+					</div>
+				</>
+			)}
+		</div>
+	);
+}
+
+// ─── CapOverridesLedger — resting-state chips + the add menu (panel 09 V1) ──
+// Auto (null) is invisible: only overridden caps render, one chip each, ✕
+// returns that cap to Auto via the existing save-gated defaults path.
+function CapOverridesLedger({ flags, onSet, onClear }) {
+	const overridden = overriddenCaps(flags);
+	const remaining = remainingCaps(flags);
+	return (
+		<div>
+			<div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+				{overridden.map(({ id, value }) => {
+					const def = CAP_DEFS.find((d) => d.id === id);
+					return (
+						<span
+							key={id}
+							className="mdl-chip on"
+							data-testid={`model-cap-override-${id}`}
+							style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+						>
+							{def ? def.label : id} · {value ? "on" : "off"}
+							<button
+								type="button"
+								aria-label={`Remove ${def ? def.label : id} override`}
+								onClick={() => onClear(id)}
+								style={{
+									background: "transparent",
+									border: "none",
+									color: "inherit",
+									font: "inherit",
+									cursor: "pointer",
+									padding: 0,
+									lineHeight: 1,
+								}}
+							>
+								✕
+							</button>
+						</span>
+					);
+				})}
+				<CapOverrideAdd remaining={remaining} onPick={onSet} />
+			</div>
+			{overridden.length > 0 && (
+				<div className="hint" style={{ marginTop: 6 }}>
+					{overridden
+						.map(({ id }) => CAP_DEFS.find((d) => d.id === id)?.consequence)
+						.filter(Boolean)
+						.join(" ")}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -199,27 +331,96 @@ function FlagsEditor({ value, onChange, invalid }) {
 	);
 }
 
-// ─── TemplatePicker — profile dropdown grouped by device flavour ─────────────
-// Selecting a profile is the STAMP gesture (copy its flags into the editor) and
-// the device gesture (templates are device-flavoured). Grouped options, filtered
-// to profiles that fit this model.
-function TemplatePicker({ value, options, onPick }) {
+// ─── SeedProfileButton — "⤵ Seed from profile…" ghost button ────────────────
+// Replaces the always-visible template select (panel 12, Fix 2/3): seeding is
+// a deliberate action, not a persistent field. Same profile list the old
+// select offered (fitProfiles — filtered to what fits this model); picking
+// one is the caller's job (onPick), same click-outside/Escape idiom as
+// CapOverrideAdd above.
+function SeedProfileButton({ options, onPick }) {
+	const [open, setOpen] = useStateMD(false);
+	const wrapRef = useRefMD(null);
+	useEffectMD(() => {
+		if (!open) return;
+		const onDown = (e) => {
+			if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("mousedown", onDown);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("keydown", onKey);
+		};
+	}, [open]);
 	return (
-		<select
-			className="input mono"
-			data-testid="model-template-select"
-			value={value || ""}
-			onChange={(e) => onPick(e.target.value)}
-			style={{ width: "100%" }}
-		>
-			<option value="">— no template —</option>
-			{options.map((p) => (
-				<option key={p.name} value={p.name}>
-					{p.name}
-					{p.intent ? ` · ${p.intent}` : ""}
-				</option>
-			))}
-		</select>
+		<div ref={wrapRef} style={{ position: "relative", display: "inline-block" }}>
+			<button
+				type="button"
+				className="btn ghost sm"
+				data-testid="model-seed-profile-open"
+				aria-haspopup="menu"
+				aria-expanded={open}
+				disabled={!options.length}
+				title={options.length ? undefined : "no profiles fit this model"}
+				onClick={() => setOpen((o) => !o)}
+			>
+				⤵ Seed from profile…
+			</button>
+			{open && options.length > 0 && (
+				<>
+					<div className="mdl-row-menu-backdrop" onClick={() => setOpen(false)} />
+					<div
+						role="menu"
+						style={{
+							position: "absolute",
+							top: "calc(100% + 4px)",
+							right: 0,
+							zIndex: 60,
+							minWidth: 220,
+							maxHeight: 280,
+							overflowY: "auto",
+							background: "var(--bg-2)",
+							border: "1px solid var(--line-strong)",
+							borderRadius: 8,
+							boxShadow: "0 16px 48px -8px rgba(0,0,0,.65)",
+						}}
+					>
+						{options.map((p) => (
+							<button
+								key={p.name}
+								type="button"
+								role="menuitem"
+								className="mono"
+								data-testid={`model-seed-profile-option-${p.name}`}
+								style={{
+									display: "block",
+									width: "100%",
+									textAlign: "left",
+									padding: "8px 12px",
+									fontSize: 12,
+									background: "transparent",
+									border: "none",
+									color: "var(--fg)",
+									cursor: "pointer",
+								}}
+								onClick={() => {
+									setOpen(false);
+									onPick(p.name);
+								}}
+							>
+								{p.name}
+								{p.intent ? (
+									<span style={{ color: "var(--fg-4)" }}> · {p.intent}</span>
+								) : null}
+							</button>
+						))}
+					</div>
+				</>
+			)}
+		</div>
 	);
 }
 
@@ -363,7 +564,12 @@ function modelBaseline(model, enums) {
 		id: model.id,
 		name: model.name || "",
 		caps: canonicalCapabilities(model.capabilities, enums),
-		backends: Array.isArray(model.backends) ? model.backends : [],
+		// Task 3 (PR-1): `backends` is retired as an editable/authoritative
+		// surface — the server drops a client-sent `backends` key silently
+		// (models.py:update_model). `provider` is the write path now (engine
+		// identity — see the Runner compatibility section below); `runs_on`
+		// (derived, read-only) is served alongside it on every row.
+		provider: model.provider || "",
 		mmproj: model.mmproj || "",
 		hfRepo: model.hf_repo || "",
 		hfFilename: model.hf_filename || "",
@@ -396,7 +602,7 @@ function deriveModelChanges(baseline, form) {
 		// name could never be cleared.
 		name: trimmedName !== baseline.name,
 		trimmedName,
-		backends: !sameSet(form.backends, baseline.backends),
+		provider: form.provider !== baseline.provider,
 		mmproj: form.mmproj.trim() !== baseline.mmproj,
 		trimmedMmproj: form.mmproj.trim(),
 		hfRepo: form.hfRepo.trim() !== baseline.hfRepo,
@@ -414,7 +620,7 @@ function deriveModelChanges(baseline, form) {
 	};
 	c.any =
 		c.name ||
-		c.backends ||
+		c.provider ||
 		c.mmproj ||
 		c.hfRepo ||
 		c.hfFilename ||
@@ -433,13 +639,18 @@ function deriveModelChanges(baseline, form) {
 function ModelDrawer({ open, onClose, model }) {
 	const update = useModelUpdate();
 	const setDefault = useModelSetDefault();
+	const seedProfile = useModelSeedProfile();
+	const qc = useQueryClient();
 	const templates = useChatTemplates(open);
 	const profilesQuery = useProfiles();
 	const enums = useMetaEnums();
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
-	const [backends, setBackends] = useStateMD([]);
+	// Engine identity (Runner compatibility section) — the write path now;
+	// `backends` died with it (Task 3 of PR-1, models.py:update_model drops a
+	// client-sent `backends` silently). Empty string = derive server-side.
+	const [provider, setProvider] = useStateMD("");
 	const [mmproj, setMmproj] = useStateMD("");
 	const [hfRepo, setHfRepo] = useStateMD("");
 	const [hfFilename, setHfFilename] = useStateMD("");
@@ -485,7 +696,7 @@ function ModelDrawer({ open, onClose, model }) {
 		const b = modelBaseline(model, enums);
 		setBaseline(b);
 		setName(b.name);
-		setBackends(b.backends);
+		setProvider(b.provider);
 		setMmproj(b.mmproj);
 		setHfRepo(b.hfRepo);
 		setHfFilename(b.hfFilename);
@@ -500,9 +711,6 @@ function ModelDrawer({ open, onClose, model }) {
 		setDefaultOverride(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
-
-	const toggleBackend = (b) =>
-		setBackends((p) => (p.includes(b) ? p.filter((x) => x !== b) : [...p, b]));
 
 	// Profiles that fit this model (same filter the old RecipeEditor used), so the
 	// template dropdown offers device-appropriate seeds.
@@ -606,31 +814,65 @@ function ModelDrawer({ open, onClose, model }) {
 	// the DOM (colliding with the AddByHF modal's fields). All hooks run above.
 	if (!open || !model) return null;
 
-	// STAMP: selecting a profile copies its flags into the editor. Confirm if the
-	// current flags would be clobbered (non-empty and not already the target text).
-	const stampProfile = (nextName) => {
+	// SEED (panel 12, Fix 3 — the server-side seed route): picking a profile
+	// from the "⤵ Seed from profile…" menu POSTs /api/models/{id}/seed-profile
+	// (useModelSeedProfile, Task 7), which materialises the profile's flags
+	// into the model's `defaults` server-side and returns the updated row.
+	// Confirm first if the current flags would be clobbered (non-empty and not
+	// already the target text) — the write is immediate, there is no Cancel
+	// once it lands. On success, splice just the two fields the route owns
+	// (profile provenance + extra_args) into the local form AND the frozen
+	// baseline, so the provenance/diverged chips read the new truth without
+	// the Save-model gate reporting a false "unsaved change" for a value the
+	// server already persisted.
+	const doSeed = async (nextName) => {
+		try {
+			const res = await seedProfile.mutateAsync({ id: model.id, profile: nextName });
+			qc.invalidateQueries({ queryKey: ["models", model.id] });
+			const newProfile = res?.defaults?.profile || "";
+			const newExtra = res?.defaults?.extra_args || "";
+			setProfile(newProfile);
+			setExtra(newExtra);
+			setBaseline((prev) =>
+				prev
+					? {
+							...prev,
+							profile: newProfile,
+							extra: newExtra,
+							defaults: {
+								...prev.defaults,
+								profile: res?.defaults?.profile ?? null,
+								extra_args: res?.defaults?.extra_args ?? null,
+							},
+						}
+					: prev,
+			);
+			setConfirm(null);
+			window.__hal0Toast &&
+				window.__hal0Toast(
+					`Seeded ${model.longName || model.id} from ${nextName}`,
+					"ok",
+				);
+		} catch (e) {
+			window.__hal0Toast &&
+				window.__hal0Toast(`Seed failed — ${e?.message || "see logs"}`, "err");
+		}
+	};
+
+	const seedFromProfile = (nextName) => {
+		if (!nextName) return;
 		const target = (profilesQuery.data || []).find((p) => p.name === nextName);
 		const targetFlags = target ? target.flags || "" : "";
-		const doStamp = () => {
-			setProfile(nextName);
-			setExtra(targetFlags);
-			setConfirm(null);
-		};
-		if (!nextName) {
-			setProfile("");
-			setConfirm(null);
-			return;
-		}
 		const wouldClobber = extra.trim() && diffFlags(extra, targetFlags).diverged;
 		if (wouldClobber) {
 			setConfirm({
 				title: "Replace launch flags?",
-				message: `Replace flags with ${nextName}'s template? Unsaved edits to the current flags are lost.`,
-				confirmLabel: "Replace flags",
-				onConfirm: doStamp,
+				message: `Seed from ${nextName}? Unsaved edits to the current flags are lost — this writes immediately.`,
+				confirmLabel: "Seed from profile",
+				onConfirm: () => doSeed(nextName),
 			});
 		} else {
-			doStamp();
+			doSeed(nextName);
 		}
 	};
 
@@ -682,7 +924,7 @@ function ModelDrawer({ open, onClose, model }) {
 	// predicate and nothing touches the live `model` prop.
 	const changes = deriveModelChanges(baseline, {
 		name,
-		backends,
+		provider,
 		mmproj,
 		hfRepo,
 		hfFilename,
@@ -735,7 +977,7 @@ function ModelDrawer({ open, onClose, model }) {
 		// the one derived comparison above (`changes`) — the same values the
 		// dirty aggregate and the Save gate read.
 		if (changes.name) body.name = changes.trimmedName;
-		if (changes.backends) body.backends = backends;
+		if (changes.provider) body.provider = provider || null;
 		if (changes.mmproj) body.mmproj = changes.trimmedMmproj || null;
 		if (changes.hfRepo) body.hf_repo = changes.trimmedRepo;
 		if (changes.hfFilename) body.hf_filename = changes.trimmedFile;
@@ -753,6 +995,114 @@ function ModelDrawer({ open, onClose, model }) {
 
 	const modality = modalityLabel(baseline?.caps || [], model.type);
 
+	// Overrides ledger (cap-overrides.ts): the four tri-state strings above
+	// are still the save-body source of truth (defaults.mtp/enable_thinking/
+	// jinja/vision) — the ledger just reads/writes them through the
+	// null|true|false shape those defaults already use.
+	const capFlags = {
+		thinking: thinking === "on" ? true : thinking === "off" ? false : null,
+		mtp: mtp === "on" ? true : mtp === "off" ? false : null,
+		jinja: jinja === "on" ? true : jinja === "off" ? false : null,
+		vision: vision === "on" ? true : vision === "off" ? false : null,
+	};
+	const CAP_SETTERS = { thinking: setThinking, mtp: setMtp, jinja: setJinja, vision: setVision };
+	const setCapOverride = (id, value) => CAP_SETTERS[id](value ? "on" : "off");
+	const clearCapOverride = (id) => CAP_SETTERS[id]("auto");
+
+	// Runner compatibility · Runs on (derived, read-only — Task 3 of PR-1
+	// retired the editable Backends chips). `runs_on` is served on every
+	// /api/models row (services/models_service.py:model_to_dict, via
+	// capabilities.catalog.runs_on_for_model) as host-backend lane ids
+	// (gpu-rocm | gpu-vulkan | cpu | npu) — the same vocabulary as
+	// MetaEnums.devices, so deviceById() resolves the display label.
+	const runsOnLanes = (Array.isArray(model.runs_on) ? model.runs_on : []).map(
+		(id) => ({ id, label: deviceById(id, enums)?.label || id }),
+	);
+
+	// Context size (model's OWN limit — distinct from a slot's Context
+	// ceiling, which is hardware). registry/model.py `Model.metadata` reserves
+	// `context_length` (GGUF arch max / curated catalogue) — seed the empty-
+	// input placeholder from it when the row carries one, same idea as the
+	// slot drawer's ceiling placeholder.
+	const modelContextLength = Number(model?.metadata?.context_length) || null;
+
+	// Title row: modality tag + default badge ride the header now (panel 07,
+	// callout K) — both are facts/actions, not field rows, so the old
+	// "Modality" and "Default for {type}" rows are gone below.
+	const titleNode = (
+		<span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+			<span>{model.longName || model.name || model.id}</span>
+			<span
+				className="tag"
+				data-testid="model-modality"
+				style={{
+					color: "var(--fg-3)",
+					fontFamily: "var(--jbm)",
+					fontSize: 11,
+					padding: "3px 9px",
+					borderRadius: 4,
+					border: "1px solid var(--line)",
+					background: "var(--bg-2)",
+				}}
+			>
+				{modality}
+			</span>
+			{isTypeDefault ? (
+				<span
+					className="tag"
+					data-testid="model-default-badge"
+					style={{
+						color: "var(--ok)",
+						borderColor: "var(--ok)",
+						background: "var(--bg-2)",
+						fontFamily: "var(--jbm)",
+						fontSize: 9,
+						letterSpacing: ".05em",
+						textTransform: "uppercase",
+						padding: "2px 6px",
+						borderRadius: 3,
+						border: "1px solid var(--ok)",
+					}}
+				>
+					✓ {typeLabel} default
+				</span>
+			) : (
+				<span
+					className="tag"
+					data-testid="model-default-none"
+					style={{
+						color: "var(--fg-4)",
+						borderColor: "var(--line)",
+						background: "var(--bg-2)",
+						fontFamily: "var(--jbm)",
+						fontSize: 9,
+						letterSpacing: ".05em",
+						textTransform: "uppercase",
+						padding: "2px 6px",
+						borderRadius: 3,
+						border: "1px solid var(--line)",
+					}}
+				>
+					not the default
+				</span>
+			)}
+			<button
+				type="button"
+				className="btn ghost sm"
+				data-testid="model-default-toggle"
+				onClick={onToggleDefault}
+				disabled={setDefault.isPending}
+				style={{ fontSize: 10.5 }}
+			>
+				{setDefault.isPending
+					? "Saving…"
+					: isTypeDefault
+						? "Remove default"
+						: "Set as default"}
+			</button>
+		</span>
+	);
+
 	return (
 		<>
 			<Drawer
@@ -761,7 +1111,7 @@ function ModelDrawer({ open, onClose, model }) {
 				width={600}
 				dirty={dirty}
 				eyebrow="Edit model · the launchable thing"
-				title={model.longName || model.name || model.id}
+				title={titleNode}
 				foot={
 					<>
 						<span style={{ color: "var(--warn)" }}>
@@ -807,77 +1157,8 @@ function ModelDrawer({ open, onClose, model }) {
 						/>
 					</div>
 				</div>
-				{/* ── Per-type default marker (Set / Remove) ── */}
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Default for {typeLabel}</span>
-						<FieldInfoIcon description="the model this type falls back to · one per type" />
-					</div>
-					<div
-						className="form-ctl"
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 10,
-							flexWrap: "wrap",
-						}}
-					>
-						{isTypeDefault ? (
-							<span
-								className="tag"
-								data-testid="model-default-badge"
-								style={{
-									color: "var(--ok)",
-									borderColor: "var(--ok)",
-									background: "var(--bg-2)",
-									fontFamily: "var(--jbm)",
-									fontSize: 9,
-									letterSpacing: ".05em",
-									textTransform: "uppercase",
-									padding: "2px 6px",
-									borderRadius: 3,
-									border: "1px solid var(--ok)",
-								}}
-							>
-								✓ {typeLabel} default
-							</span>
-						) : (
-							<span
-								className="tag"
-								data-testid="model-default-none"
-								style={{
-									color: "var(--fg-4)",
-									borderColor: "var(--line)",
-									background: "var(--bg-2)",
-									fontFamily: "var(--jbm)",
-									fontSize: 9,
-									letterSpacing: ".05em",
-									textTransform: "uppercase",
-									padding: "2px 6px",
-									borderRadius: 3,
-									border: "1px solid var(--line)",
-								}}
-							>
-								not the default
-							</span>
-						)}
-						<button
-							type="button"
-							className="btn ghost sm"
-							data-testid="model-default-toggle"
-							onClick={onToggleDefault}
-							disabled={setDefault.isPending}
-						>
-							{setDefault.isPending
-								? "Saving…"
-								: isTypeDefault
-									? "Remove default"
-									: "Set as default"}
-						</button>
-					</div>
-				</div>
 
-				{/* ── Launch-command hero: template + flags (1b) ── */}
+				{/* ── Launch-command hero: seed button + flags (1b / panel 12 Fix 2/3) ── */}
 				<div
 					style={{
 						margin: "16px 0 4px",
@@ -908,13 +1189,7 @@ function ModelDrawer({ open, onClose, model }) {
 							launch flags · tune remainder · exactly what launches
 						</span>
 						<span style={{ flex: 1 }} />
-						<div style={{ minWidth: 190 }}>
-							<TemplatePicker
-								value={profile}
-								options={fitProfiles}
-								onPick={stampProfile}
-							/>
-						</div>
+						<SeedProfileButton options={fitProfiles} onPick={seedFromProfile} />
 					</div>
 					<div style={{ padding: 14, background: "var(--bg-sunken)" }}>
 						<FlagsEditor
@@ -1055,51 +1330,9 @@ function ModelDrawer({ open, onClose, model }) {
 					/>
 				)}
 
-				{/* ── Typed capabilities (1a form-row rhythm) ── */}
+				{/* ── Capabilities (1a form-row rhythm; panel 07) ── */}
 				<div className="form-section" style={{ marginTop: 16 }}>
-					Typed capabilities
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Thinking</span>
-						<FieldInfoIcon description="Show reasoning steps before the answer. Auto defers to profile." />
-					</div>
-					<div className="form-ctl">
-						<TypedCapSeg
-							id="thinking"
-							value={thinking}
-							onChange={setThinking}
-						/>
-					</div>
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>MTP</span>
-						<FieldInfoIcon description="Speculative decode. Auto defers to eligibility." />
-					</div>
-					<div className="form-ctl">
-						<TypedCapSeg id="mtp" value={mtp} onChange={setMtp} />
-					</div>
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Jinja</span>
-						<FieldInfoIcon description="jinja chat-template rendering" />
-					</div>
-					<div className="form-ctl">
-						<TypedCapSeg id="jinja" value={jinja} onChange={setJinja} />
-					</div>
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Vision</span>
-						<FieldInfoIcon description="Load the mmproj vision projector when the model ships one.
-							Auto = on whenever a sidecar is present. Off force-suppresses it
-							(saves ~0.9 GB VRAM) even on a vision-capable model." />
-					</div>
-					<div className="form-ctl">
-						<TypedCapSeg id="vision" value={vision} onChange={setVision} />
-					</div>
+					Capabilities
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
@@ -1124,30 +1357,31 @@ function ModelDrawer({ open, onClose, model }) {
 						</select>
 					</div>
 				</div>
+				{/* Overrides ledger (panel 09 V1): Auto is invisible — only an
+            overridden Thinking/MTP/Jinja/Vision renders a chip. Replaces the
+            four always-on TypedCapSeg rows the old drawer wore permanently. */}
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>Modality</span>
+						<span>Overrides</span>
+						<FieldInfoIcon description="Auto is invisible here — thinking, MTP, jinja and vision default to it. '+ Override…' forces one on or off; ✕ returns it to Auto." />
+					</div>
+					<div className="form-ctl">
+						<CapOverridesLedger
+							flags={capFlags}
+							onSet={setCapOverride}
+							onClear={clearCapOverride}
+						/>
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Capabilities</span>
 						<FieldInfoIcon description="capabilities come from the registry row (pull metadata / auto-detect) — read-only here" />
 					</div>
 					<div
 						className="form-ctl"
 						style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
 					>
-						<span
-							className="tag"
-							data-testid="model-modality"
-							style={{
-								color: "var(--fg-3)",
-								fontFamily: "var(--jbm)",
-								fontSize: 11,
-								padding: "3px 9px",
-								borderRadius: 4,
-								border: "1px solid var(--line)",
-								background: "var(--bg-2)",
-							}}
-						>
-							{modality}
-						</span>
 						<span
 							data-testid="model-caps-readout"
 							style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}
@@ -1169,14 +1403,14 @@ function ModelDrawer({ open, onClose, model }) {
 				<div className="form-row">
 					<div className="form-lbl">
 						<span>Context size</span>
-						<FieldInfoIcon description="tokens · empty = launcher default · sets managed --ctx-size" />
+						<FieldInfoIcon description="tokens · the model's own limit — a slot's Context ceiling is hardware · empty = launcher default · sets managed --ctx-size" />
 					</div>
 					<div className="form-ctl">
 						<input
 							className={"input mono" + (ctxError ? " input-err" : "")}
 							data-testid="model-ctx-input"
 							inputMode="numeric"
-							placeholder="e.g. 8192"
+							placeholder={modelContextLength ? String(modelContextLength) : "e.g. 8192"}
 							value={ctx}
 							onChange={(e) => setCtx(e.target.value)}
 						/>
@@ -1195,35 +1429,58 @@ function ModelDrawer({ open, onClose, model }) {
             slot-owned hardware now (the slot's HW grid), not a model default.
             The one-shot migration folds model.defaults.n_gpu_layers → slot NGL. */}
 
-				{/* ── Runner compatibility (backends) ── */}
+				{/* ── Runner compatibility (Engine + Runs on; panel 07/13) ── */}
 				<div className="form-section" style={{ marginTop: 16 }}>
 					Runner compatibility
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
-						<span>Backends</span>
-						<FieldInfoIcon description="runners this model can bind · drives compatible-runner filtering" />
+						<span>Engine</span>
+						<FieldInfoIcon description="engine identity that serves this model's launch (llama-server · flm · kokoro · qwen3tts · moonshine · comfyui) · empty = derive from the stored backend tags" />
+					</div>
+					<div className="form-ctl">
+						<select
+							className="input mono"
+							data-testid="model-provider-select"
+							value={provider}
+							onChange={(e) => setProvider(e.target.value)}
+						>
+							<option value="">Auto (derive from tags)</option>
+							{enums.runtime_families.map((rf) => (
+								<option key={rf} value={rf}>
+									{rf}
+								</option>
+							))}
+						</select>
+					</div>
+				</div>
+				<div className="form-row">
+					<div className="form-lbl">
+						<span>Runs on</span>
+						<FieldInfoIcon description="host-backend lanes this model can run under · derived from architecture × the runner catalogue — computed, not editable" />
 					</div>
 					<div
 						className="form-ctl"
+						data-testid="model-runs-on"
 						style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
 					>
-						{enums.model_backends.map((b) => {
-							const on = backends.includes(b);
-							return (
-								<button
-									key={b}
-									type="button"
-									role="switch"
-									aria-checked={on}
-									data-testid={`backend-toggle-${b}`}
-									className={"mdl-chip" + (on ? " on" : "")}
-									onClick={() => toggleBackend(b)}
+						{runsOnLanes.length ? (
+							runsOnLanes.map((lane) => (
+								<span
+									key={lane.id}
+									className="mdl-chip"
+									style={{
+										borderStyle: "dashed",
+										pointerEvents: "none",
+										opacity: 0.85,
+									}}
 								>
-									{b}
-								</button>
-							);
-						})}
+									{lane.label}
+								</span>
+							))
+						) : (
+							<span className="hint">no compatible runner lanes detected</span>
+						)}
 					</div>
 				</div>
 
