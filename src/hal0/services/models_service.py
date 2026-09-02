@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.model_meta import classify
+from hal0.model_meta import RUNTIME_FAMILIES, classify, derive_model_provider
 from hal0.registry.detect import DetectionResult, detect, detected_architecture
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
@@ -213,6 +213,12 @@ def model_to_dict(model: Any) -> dict[str, Any]:
       derived from the filename (path basename, then ``hf_filename``) so
       registries written before the field existed surface quant without
       re-registration. Filename-only on this hot path — no header read.
+    * ``runs_on`` — derived host-backend lanes (``gpu-rocm`` / ``gpu-vulkan``
+      / ``cpu`` / ``npu``) this model can run under, via
+      :func:`hal0.capabilities.catalog.runs_on_for_model`. Imported lazily
+      below: ``hal0.capabilities.catalog`` imports from ``hal0.registry``,
+      which this module is itself imported by, so a module-level import
+      here would cycle.
     """
     if hasattr(model, "model_dump"):
         dumped = model.model_dump(mode="json")
@@ -230,6 +236,9 @@ def model_to_dict(model: Any) -> dict[str, Any]:
         quant = lazy_quant(dumped)
         if quant:
             dumped["quant"] = quant
+    from hal0.capabilities.catalog import runs_on_for_model
+
+    dumped["runs_on"] = runs_on_for_model(model)
     return dumped
 
 
@@ -339,11 +348,13 @@ async def commit_scan_rows(
     """Persist user-edited preview rows into the registry.
 
     Each row is a dict with at least ``path``. Optional fields override
-    detection: ``id``, ``name``, ``backends``, ``capabilities``,
+    detection: ``id``, ``name``, ``backends``, ``capabilities``, ``provider``,
     ``defaults`` (nested ``ModelDefaults`` shape). Missing fields are
     backfilled by re-running ``detect()`` on the path so the operator can
     edit only what matters and still get high-confidence defaults for the
-    rest.
+    rest. ``provider`` defaults to ``derive_model_provider(backends)`` when
+    not given, so a freshly-committed row always carries an explicit
+    provider (Task 3) instead of leaving it for lazy derivation.
     """
     from hal0.registry.model import Model, ModelDefaults
     from hal0.registry.store import ModelAlreadyExists
@@ -374,6 +385,22 @@ async def commit_scan_rows(
             backends = list(detection.suggested_backends)
         if not isinstance(capabilities, list):
             capabilities = list(detection.suggested_capabilities)
+        # Task 3: an operator-edited ``provider`` override always wins (same
+        # "explicit input wins" rule as backends/capabilities above);
+        # otherwise derive it from whichever backends this row actually
+        # landed on, so a NEW row never persists with provider=None.
+        provider = row.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            provider = derive_model_provider(backends)
+        elif provider not in RUNTIME_FAMILIES:
+            # Final-review fix: an operator-supplied provider string was
+            # persisted unscreened, letting POST /api/models/scan mint an
+            # out-of-vocab row (e.g. "whispercpp", a curated-only tag the
+            # spec forbids on registry rows). Screen it against the same
+            # vocab the create path enforces (see the ``model.provider_invalid``
+            # check further down this module) and reject the row instead.
+            skipped.append({"path": str(resolved), "reason": f"invalid_provider:{provider!r}"})
+            continue
 
         suggested_id = row.get("id") or suggest_id_from_path(resolved)
         name = row.get("name") or resolved.stem
@@ -404,6 +431,7 @@ async def commit_scan_rows(
                 quant=detection.quant,
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
+                provider=provider,
                 defaults=defaults_obj,
                 metadata=metadata,
                 # GGUF general.architecture from the header read detect()
@@ -815,6 +843,18 @@ async def list_all(
                 dumped["backends"] = _bes
             if _cat is not None:
                 dumped["comfyui_category"] = _cat
+            # Task 3: force ``provider`` alongside the self-healed tag — this
+            # whole branch already treats the ON-DISK PATH as more
+            # authoritative than whatever the row's own ``backends`` says
+            # (it force-appends "comfyui" unconditionally, above), so
+            # ``provider`` gets the same treatment rather than only filling
+            # a falsy value. Otherwise a row created with a comfyui path but
+            # ``backends=[]`` and no explicit provider — via the create-model
+            # write path, which now stamps ``derive_model_provider([]) ==
+            # "llama-server"`` at write time (see create_model) — would read
+            # back "llama-server" forever, since a truthy stored value would
+            # never again look like "needs healing".
+            dumped["provider"] = derive_model_provider(_bes)
         data.append(dumped)
         seen.add(entry.id)
         by_id[entry.id] = dumped
@@ -1122,6 +1162,9 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             quant=detection.quant,
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
+            # Task 3: stamp provider alongside the detected backends on this
+            # NEW row — see commit_scan_rows' matching stamp.
+            provider=derive_model_provider(detection.suggested_backends),
             metadata=metadata,
             # GGUF general.architecture from the header read above — see
             # commit_scan_rows' matching stamp (model↔runner arch fit-check,
@@ -1457,6 +1500,9 @@ def screen_model_write(
       worker — stay editable, so an unrelated rename does not have to fix an
       invariant it never violated. Every write that could CREATE or PRESERVE the
       broken pairing is still screened.
+    * ``provider`` — must be a ``hal0.model_meta.RUNTIME_FAMILIES`` member when
+      present, else ``400 model.provider_invalid``. ``None``/absent means
+      "derive" and is never screened here.
 
     spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
     runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
@@ -1503,6 +1549,16 @@ def screen_model_write(
         # managed-arg one — ``-ngl`` is in both sets.
         _deny_slot_hardware_flags(tokens, segment=seg)
         _deny_managed_flags(tokens, segment=seg)
+
+    provider = body.get("provider")
+    if provider is not None:
+        from hal0.model_meta import RUNTIME_FAMILIES
+
+        if provider not in RUNTIME_FAMILIES:
+            raise BadRequest(
+                f"provider must be one of {', '.join(RUNTIME_FAMILIES)} (got {provider!r})",
+                code="model.provider_invalid",
+            )
 
 
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was

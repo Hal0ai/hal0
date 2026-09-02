@@ -1854,3 +1854,77 @@ def test_register_flm_pulled_re_pull_corrects_stale_capabilities(
         capabilities=["embed"],
     )
     assert registry.get("embed-gemma:300m").capabilities == ["embed"]
+
+
+# ── Task 3: provider seeded alongside backends on fresh registration ────────
+
+
+def test_register_flm_pulled_stamps_provider_on_new_row(tmp_hal0_home: str) -> None:
+    """A brand-new FLM-pulled row gets ``provider="flm"`` stamped alongside
+    the legacy ``backends=["npu"]`` tag — not left for lazy derivation."""
+    registry = ModelRegistry()
+    _register_flm_pulled(
+        registry,
+        tag="qwen3-embed:4b",
+        path="/models/qwen3-embed",
+        size_bytes=100,
+        capabilities=["embed"],
+    )
+    entry = registry.get("qwen3-embed:4b")
+    assert entry.provider == "flm"
+    assert entry.backends == ["npu"]  # tag still written — vestigial lane hint
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_llama_server_provider_on_fresh_registration(
+    tmp_hal0_home: str,
+) -> None:
+    """A plain GGUF chat pull (no comfyui/npu routing) gets the
+    ``derive_model_provider`` default, ``"llama-server"``, stamped on the
+    fresh row rather than left ``None``."""
+    body = _payload(4096)
+    job = make_job("some-plain-chat-gguf")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/plain-chat-GGUF",
+            hf_file="plain-chat-Q4_K_M.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("some-plain-chat-gguf")
+    assert entry.provider == "llama-server"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_stamps_comfyui_provider_on_fresh_registration(
+    tmp_hal0_home: str,
+) -> None:
+    """A pull routed into the ComfyUI tree gets ``provider="comfyui"``
+    stamped alongside the ``backends=["comfyui"]`` tag on the new row."""
+    body = _payload(4096)
+    job = make_job("some-comfyui-checkpoint")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/comfyui-checkpoint",
+            hf_file="checkpoint.safetensors",
+            registry=registry,
+            client=client,
+            comfyui_subdir="checkpoints",
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    entry = registry.get("some-comfyui-checkpoint")
+    assert entry.provider == "comfyui"
+    assert entry.backends == ["comfyui"]

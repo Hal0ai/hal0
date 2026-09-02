@@ -40,6 +40,7 @@ from hal0.db import repository
 from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
+from hal0.model_meta import derive_model_provider
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
@@ -1314,6 +1315,10 @@ def _register_pulled(
                 quant=detected_quant,
                 capabilities=caps,
                 backends=backends,
+                # Task 3: stamp provider alongside the tag-era backends tag on
+                # a NEW row — backends stays a vestigial lane hint, provider
+                # is the write-path source of truth.
+                provider=derive_model_provider(backends),
                 mmproj=mmproj,
                 metadata=dict(fresh_meta),
                 architecture=detected_arch,
@@ -2129,6 +2134,9 @@ def _register_flm_pulled(
                 size_bytes=size_bytes,
                 capabilities=caps,
                 backends=["npu"],
+                # Task 3: stamp provider alongside the tag-era backends tag on
+                # a NEW row — see the matching comment in ``_register_pulled``.
+                provider=derive_model_provider(["npu"]),
                 metadata={"runtime": "flm"},
             )
         )

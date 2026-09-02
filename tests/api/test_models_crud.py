@@ -249,6 +249,47 @@ def test_create_defaults_source_to_manual(
     ), events
 
 
+def test_create_derives_provider_from_backends_when_absent(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """Task 3 fix: POST /api/models with ``backends`` but no ``provider``
+    must not mint a permanently ``provider=None`` row — the create path
+    derives it the same way the PUT/import/seed paths do."""
+    fpath = crud_models_root / "kokoro-voice.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "kokoro-voice", "path": str(fpath), "backends": ["kokoro"]},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["provider"] == "kokoro"
+
+    row = crud_client.get("/api/models/kokoro-voice").json()
+    assert row["provider"] == "kokoro"
+
+
+def test_create_explicit_provider_wins_over_backends(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """An explicit ``provider`` in the create body is never overridden by
+    the tag-derived guess, even when the tags disagree."""
+    fpath = crud_models_root / "explicit-provider.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "explicit-provider",
+            "path": str(fpath),
+            "backends": ["kokoro"],
+            "provider": "llama-server",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["provider"] == "llama-server"
+
+
 # ── PUT /api/models/{id} ───────────────────────────────────────────────────
 
 
@@ -256,6 +297,10 @@ def test_update_accepts_new_editable_fields_and_emits(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
+    """Task 3: ``backends`` is retired from the PUT write path — sent
+    alongside real editable fields, it is silently ignored (not rejected,
+    not applied) while ``name``/``capabilities``/``defaults`` still save and
+    still surface in ``changed_fields``."""
     fpath = crud_models_root / "upd.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "upd", "path": str(fpath)})
@@ -274,14 +319,15 @@ def test_update_accepts_new_editable_fields_and_emits(
     body = r.json()
     assert body["name"] == "Updated Name"
     assert set(body["capabilities"]) == {"chat", "embed"}
-    assert set(body["backends"]) == {"vulkan", "rocm"}
+    assert body["backends"] == []  # never had any; the PUT's backends is dead
     assert body["defaults"]["context_size"] == 4096
 
     events = _events_since(crud_client, pre, "model.updated")
     assert events, "expected model.updated event"
     payload = next(ev for ev in events if ev["data"].get("id") == "upd")
     changed = set(payload["data"]["changed_fields"])
-    assert {"name", "capabilities", "backends", "defaults"} <= changed
+    assert {"name", "capabilities", "defaults"} <= changed
+    assert "backends" not in changed
 
 
 def test_update_changed_fields_only_lists_actual_changes(
@@ -1070,3 +1116,29 @@ def test_put_clearing_mmproj_and_vision_together_accepted(
     )
     assert r.status_code == 200, r.text
     assert r.json()["mmproj"] is None
+
+
+# ── Task 1: Model.provider explicit engine identity ─────────────────────────
+
+
+def test_update_model_provider_valid_and_invalid(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """PUT accepts a RUNTIME_FAMILIES member into ``provider``, it survives
+    the extra-JSON round trip, and a non-member is rejected with
+    ``model.provider_invalid`` (screened before the row is touched)."""
+    fpath = crud_models_root / "prov1.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "prov1", "path": str(fpath)})
+
+    r = crud_client.put("/api/models/prov1", json={"provider": "kokoro"})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "kokoro"
+
+    r2 = crud_client.get("/api/models/prov1")
+    assert r2.json()["provider"] == "kokoro"  # survives the extra-JSON round trip
+
+    bad = crud_client.put("/api/models/prov1", json={"provider": "whispercpp"})
+    assert bad.status_code == 400, bad.text
+    assert bad.json()["error"]["code"] == "model.provider_invalid"

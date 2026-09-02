@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hal0.config.schema import ModelsConfig
-from hal0.model_meta import capability_from_filename
+from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.model import Model
@@ -372,6 +372,10 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             if curated.capability
             else (["image"] if is_comfyui else ["chat"]),
             backends=comfyui_backends,
+            # Task 3: stamp provider alongside the tag-era backends tag on a
+            # NEW row — backends stays a vestigial lane hint (non-comfyui
+            # rows carry none), provider is the write-path source of truth.
+            provider=derive_model_provider(comfyui_backends),
             hf_repo=curated.hf_repo,
             hf_filename=curated.hf_file,
             tags=list(curated.tags),
@@ -391,6 +395,7 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             size_bytes=candidate.size_bytes,
             capabilities=["image"] if is_comfyui else [candidate.capability_guess],
             backends=comfyui_backends,
+            provider=derive_model_provider(comfyui_backends),
             metadata={"discovered": True, "source": "auto-scan"},
         )
     # Carry a discovered mmproj sidecar onto the model so the llama-server

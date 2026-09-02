@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
+from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.pull import PullInvalidSource
@@ -376,6 +377,11 @@ async def create_model(request: Request) -> dict[str, Any]:
     Optional ``source`` (top-level, not part of ``Model``) tags the
     emitted ``model.registered`` event so the footer can colour-code
     catalogue picks vs hand-registered files. Defaults to ``"manual"``.
+
+    A body carrying tag-era ``backends`` tags but no ``provider`` gets one
+    derived (``hal0.model_meta.derive_model_provider``) before screening, so
+    create never mints a permanently ``provider=None`` row (Task 3) — an
+    explicit ``provider`` in the body is never overridden.
     """
     from hal0.registry.store import Model
 
@@ -389,6 +395,13 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
+    # Task 3 fix: a create body can still hand-carry tag-era ``backends``
+    # tags (create, unlike PUT, isn't retiring the field as an input) — but
+    # a create with ``backends`` and no ``provider`` must not mint a
+    # permanently provider=None row. Derive only when provider is absent;
+    # an explicit ``provider`` keeps flowing through screen_model_write's
+    # validity check unchanged.
+    body.setdefault("provider", derive_model_provider(body.get("backends")))
     # Screen launch-affecting fields at CREATE time too (UI-API-1 item 1): PUT
     # already screened, but create wrote straight to the registry, so a row
     # born with an extra_args that smuggles --port/--model/… would only fail at
@@ -599,19 +612,24 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
-    Body accepts any subset of: ``name``, ``capabilities``, ``backends``,
+    Body accepts any subset of: ``name``, ``capabilities``, ``provider``,
     ``defaults`` (nested ``ModelDefaults``), plus the legacy fields
     (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
-    ``changed_fields`` so the footer ticker can render a "you edited X"
-    chip.
+    ``changed_fields`` so the footer ticker can render a "you edited X" chip.
+
+    ``backends`` is retired as an editable/authoritative surface (Task 3 of
+    the slot/model drawer overhaul): a client-sent ``backends`` key is
+    dropped silently before screening/update, logged as
+    ``model.backends_write_ignored``. ``provider`` is the write path now —
+    the stored tags keep existing as vestigial lane hints (a future column
+    removal), but never change via this endpoint again.
 
     ``defaults`` and ``capability_flags`` are the two tables where "any
     subset" reaches INSIDE the object (#1413): an absent sub-key keeps the
     stored value, an explicit ``null`` clears that one value, and
     ``{"defaults": null}`` drops the whole table. Every other field —
-    including ``metadata`` and the list-valued ``capabilities``/``tags``/
-    ``backends`` — is a flat replace. See
-    :func:`hal0.registry.store.merge_update`.
+    including ``metadata`` and the list-valued ``capabilities``/``tags`` —
+    is a flat replace. See :func:`hal0.registry.store.merge_update`.
 
     Errors:
       * ``400 model.defaults_invalid`` — a ``defaults`` value that isn't
@@ -620,6 +638,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         outside the launchable range (#1414).
       * ``400 slot.hardware_flag_denied`` / ``400 slot.managed_arg_denied`` —
         ``defaults.extra_args`` reaching for slot- or authority-owned flags.
+      * ``400 model.provider_invalid`` — ``provider`` not a
+        ``hal0.model_meta.RUNTIME_FAMILIES`` member.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
@@ -629,6 +649,17 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+
+    # Task 3: ``backends`` is retired as an editable/authoritative surface —
+    # ``provider`` (screened below) is the write path now. A client-sent
+    # ``backends`` is dropped silently (not rejected) rather than erroring,
+    # since older dashboards/scripts may still send the field out of habit.
+    if "backends" in body:
+        log.info(
+            "model.backends_write_ignored",
+            extra={"model_id": model_id, "backends": body.get("backends")},
+        )
+        body.pop("backends", None)
 
     # Snapshot the pre-update model FIRST — it feeds two consumers: the
     # changed-fields diff below, and the write screen, which needs the stored row

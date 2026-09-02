@@ -61,6 +61,7 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
     "whispercpp": "whispercpp",  # the whisper.cpp STT recipe
     "vibevoice": "kokoro",  # closest existing provider; the UI lets the user override
     "comfyui": "comfyui",
+    "qwen3tts": "qwen3tts",
 }
 
 # Per-runtime allow-list of host backends the toolbox image can actually
@@ -76,6 +77,7 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "kokoro": ("gpu-vulkan", "cpu"),
     "vibevoice": ("gpu-vulkan", "cpu"),
     "comfyui": ("gpu-vulkan",),
+    "qwen3tts": ("gpu-rocm",),  # Qwen3-TTS runner is ROCm-only (needs /dev/kfd)
 }
 
 _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
@@ -385,6 +387,26 @@ def _backend_variants(entry: Any) -> list[str]:
     will surface a clear error if the specific model doesn't have an
     FLM-packaged variant.
     """
+    explicit = getattr(entry, "provider", None)
+    if explicit and explicit != "llama-server":
+        if explicit == "flm":
+            # Mirrors the untouched original ``{"flm", "npu"}`` tag branch
+            # below: NPU is offered unconditionally, with no
+            # ``available_backends()`` intersection — host-truth NPU
+            # gating lives downstream, in the load-time FLM probe
+            # (:func:`_flm_rows_for_capability` / :func:`available_backends`
+            # itself), not here.
+            return ["npu"]
+        # Same host-presence intersection as the tag-driven
+        # ``_RUNTIME_TO_HOST_BACKENDS`` branch further down (moonshine's
+        # CPU-only ONNX wheel, ComfyUI's Vulkan-only image, …) — an
+        # explicit provider still can't advertise a lane the host can't
+        # actually serve.
+        host_backends = {b["id"] for b in available_backends()}
+        return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(explicit, ()) if c in host_backends]
+    # explicit llama-server (or unset) falls through to the existing
+    # lane fan-out, which already encodes host-present AMD/CPU logic.
+
     raw: list[str] = []
     backend = getattr(entry, "backend", None)
     if isinstance(backend, str) and backend:
@@ -406,6 +428,20 @@ def _backend_variants(entry: Any) -> list[str]:
         cap_str = getattr(entry, "capability", "") or ""
         if comfy_subdir or cap_str == "image":
             raw.append("comfyui")
+
+    # An untagged row (backends=[], no .backend, no comfy signal) whose
+    # resolved engine is llama-server — explicit provider="llama-server",
+    # OR provider absent/None (derive_model_provider's total default) — has
+    # nothing in ``raw`` to fan out on, so ``out`` would stay empty and
+    # runs_on_for_model() would silently report zero lanes for a model that
+    # actually runs everywhere llama.cpp does. Reaching this point already
+    # proves ``explicit`` is not any OTHER provider (those paths returned
+    # above, including "flm" → ["npu"]) — so a remaining untagged case is
+    # llama-server by construction. Treat it as a bare
+    # ``backends=["llama-server"]`` row and let the fan-out below run its
+    # normal host-present AMD/CPU logic.
+    if not raw:
+        raw.append("llama-server")
 
     out: list[str] = []
     for b in raw:
@@ -485,6 +521,9 @@ def _provider_for_backend(entry_backend: str, backend_id: str, *, entry: Any = N
     """Pick the provider that pairs with this backend / entry combo.
 
     Resolution order:
+      0. The explicit ``entry.provider`` field (Task 1 — a registry Model
+         may carry it, set by the operator or a prior pull). Wins over
+         every tag-derived guess below: it's the source of truth once set.
       1. NPU backend → always FLM.
       2. The singular ``entry.backend`` tag (CuratedModel uses this).
       3. The ``entry.backends`` list (registry Model uses this; .backend
@@ -500,6 +539,9 @@ def _provider_for_backend(entry_backend: str, backend_id: str, *, entry: Any = N
     moonshine selection in capabilities.toml and the underlying slot
     TOML the next time they touched the card.
     """
+    explicit = getattr(entry, "provider", None)
+    if explicit:
+        return str(explicit)
     if backend_id == "npu":
         return "flm"
     if entry_backend in _BACKEND_TO_PROVIDER:
@@ -1062,9 +1104,21 @@ def catalogs_by_slot(
     }
 
 
+def runs_on_for_model(model: Any) -> list[str]:
+    """Host-backend lanes a registry model can run on (derived; UI 'Runs on').
+
+    Thin public wrapper over :func:`_backend_variants` so callers outside
+    this module (the models-service row serialiser) don't reach for a
+    private symbol. Honors the explicit ``model.provider`` field first,
+    same as every other catalog resolution (see :func:`_backend_variants`).
+    """
+    return _backend_variants(model)
+
+
 __all__ = [
     "available_backends",
     "catalogs_by_slot",
     "get_backend",
     "models_for_capability",
+    "runs_on_for_model",
 ]

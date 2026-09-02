@@ -36,6 +36,7 @@ from hal0.config.schema import (
     StackSlotEntry,
 )
 from hal0.errors import BadRequest
+from hal0.model_meta import derive_model_provider
 from hal0.registry.curated import get_curated
 from hal0.registry.store import ModelRegistry
 
@@ -96,6 +97,10 @@ def embed_references(
                 size_bytes=m.size_bytes,
                 capabilities=list(m.capabilities),
                 backends=list(m.backends),
+                # Task 3: tag-era backends is a vestigial lane hint now —
+                # embed the row's explicit provider verbatim, or derive it
+                # from those same backends when the row never got one.
+                provider=m.provider or derive_model_provider(m.backends),
                 mmproj="present" if m.mmproj else None,
             )
         else:
@@ -272,7 +277,9 @@ def import_stack(
             code="stacks.envelope_too_new",
             details={"got": env.stack.schema_version, "supported": STACK_SCHEMA_VERSION_CURRENT},
         )
-    # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
+    # (forward-compat seam: older schema_version would migrate here; v1 and v2
+    # both import cleanly today — v2 only added StackModelMeta.provider, which
+    # v1 importers never wrote and v2 readers treat as optional.)
     _reconcile_profiles(env.stack, profiles_path)
     resolved = catalog.create(slug, env.stack)
     report = resolve_models(env.stack, registry)
