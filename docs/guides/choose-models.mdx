@@ -154,14 +154,18 @@ The drawer is organized top to bottom as:
   divergence" below).
 - **Typed capabilities** — Thinking, MTP, Jinja, and Vision, each an
   Auto/On/Off toggle, plus an editable Chat template picker (saved as
-  `defaults.chat_template`) and a read-only Modality readout derived from
-  capabilities.
+  `defaults.chat_template`), a read-only Modality readout, and a
+  read-only capabilities readout — the model's registry capabilities
+  (pull metadata / auto-detect). As of #2193 capabilities have no
+  chip-editing UI anywhere in the drawer; see "Vision and MTP" below for
+  how a pulled model picks up `vision` in the first place.
 - **Context size** — tokens; empty means the launcher default. Must be a
   whole number ≥ 128 if set; the server enforces the same floor
   (`400 model.context_size_out_of_range`).
-- **Routing** — the Capabilities and Backends chip sets (dispatch/omni
-  eligibility and slot-compat filtering).
-- **Source · re-pull coords** — MMProj sidecar path, HF repo, HF filename.
+- **Runner compatibility** — the Backends chip set (slot-compat
+  filtering); still editable here.
+- **Source · re-pull coords** — MMProj sidecar path (editable; gated by
+  the vision↔mmproj invariant below), HF repo, HF filename.
 
 Saving writes only the fields that changed, plus the full `defaults` block
 (model defaults merge one level deep server-side, so every typed-capability
@@ -192,8 +196,16 @@ current text over your edits.
 Vision is Auto/On/Off, same as the other typed caps: Auto loads the
 `mmproj` sidecar whenever the model carries one; Off force-suppresses it
 even on a vision-capable model (frees roughly 0.9 GB of resident VRAM).
-Setting `capabilities` to include `vision` with no `mmproj` path blocks
-save with an inline error.
+Capabilities — including `vision` — are read-only in this drawer; they
+come from the registry row, not from anything hand-ticked here. A model
+whose capabilities already include `vision` still needs a non-empty
+`mmproj` path to save — clearing the path blocks save with an inline
+error. What changed under #2193 is how a pulled model picks up `vision`
+in the first place: the Add-from-HF modal's projector picker offers any
+mmproj sidecar the repo ships (auto-preselected, with a "None — text
+only" option), and the `vision` label is derived automatically from that
+choice — there's no separate hand-ticked vision toggle in that flow
+anymore.
 
 MTP eligibility is a tri-state on `defaults.mtp`: an explicit `true` or
 `false` wins in either direction over the registry's legacy `mtp` tag;

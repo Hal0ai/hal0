@@ -143,6 +143,13 @@ applying. Add those subsections to a version's section to surface them; see
   restoring that copy (or deleting the two keys) makes the file readable by
   1.1.0 again.
 
+### Changed
+
+- Dashboard: the model Capabilities/Labels editors are retired (#2193). Capabilities
+  display read-only in the model drawer; the Add-from-HF flow now offers a repo's
+  mmproj projector directly and derives the vision label from that choice; the
+  add-by-path flow always auto-detects labels. `/api/models` contracts are unchanged.
+
 ## [1.1.0] — 2026-08-31
 
 ### Highlights
