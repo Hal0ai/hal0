@@ -2,9 +2,12 @@
  * model-drawer-validation-gates — the drawer's inline errors must actually gate
  * the PUT, and an emptied Display name must clear the stored name.
  *
- * #1380: toggling the `vision` capability with no mmproj sidecar renders a red
- *        inline error but used to let the save through, so the registry row
- *        advertised `vision` with no projector for the launch path to load.
+ * #1380: clearing the mmproj sidecar path on a model that advertises `vision`
+ *        renders a red inline error but used to let the save through, so the
+ *        registry row could advertise `vision` with no projector for the
+ *        launch path to load. Capabilities are read-only in the drawer since
+ *        #2193 — `vision` comes from the registry row, so clearing mmproj is
+ *        the only way left to violate the invariant here.
  * #1381: emptying Display name dropped the `name` key from the PUT entirely —
  *        the old name survived while the drawer closed with a success toast.
  *        `Model.name` is `str` with `default=""`, and normalizeApiModel falls
@@ -17,9 +20,9 @@ const MODEL_ID = 'qwen3.6-27b-mtp'
 const BASE_MODEL = {
   name: 'Original name',
   tags: ['curated'],
-  capabilities: ['chat'],
+  capabilities: ['chat', 'vision'],
   backends: ['rocm'],
-  mmproj: null,
+  mmproj: '/models/mmproj-Q8.gguf',
   hf_repo: 'org/original-repo',
   hf_filename: 'original.gguf',
   defaults: {},
@@ -69,18 +72,18 @@ async function openDrawer(page: import('@playwright/test').Page) {
 }
 
 test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () => {
-  test('vision capability without an mmproj sidecar blocks the PUT until a path is supplied', async ({ page }) => {
+  test('clearing mmproj on a vision model blocks the PUT until a path is restored', async ({ page }) => {
     await seedModel(page)
     const puts = await capturePut(page)
     await openDrawer(page)
 
     await expect(page.getByTestId('model-mmproj-error')).toHaveCount(0)
-    await page.getByTestId('cap-toggle-vision').click()
+    await page.getByTestId('model-mmproj-input').fill('')
 
-    // The invariant is violated: vision is on, mmproj is empty.
+    // The invariant is violated: the row advertises vision, mmproj is empty.
     const err = page.getByTestId('model-mmproj-error')
     await expect(err).toBeVisible()
-    await expect(err).toContainText('vision capability requires an mmproj sidecar path')
+    await expect(err).toContainText('mmproj')
 
     // The error must gate Save the way flagsError does — not decorate it.
     const save = page.getByTestId('model-save')
@@ -90,15 +93,19 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     expect(puts).toEqual([])
     await expect(page.locator('.drawer.open')).toHaveCount(1)
 
-    // Supplying the projector clears the error and re-arms the save.
+    // Restoring the projector path clears the error. (It also restores the
+    // form to the baseline value, so Save stays disabled on "no changes to
+    // save" — a different gate, not this one.)
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-Q8.gguf')
     await expect(page.getByTestId('model-mmproj-error')).toHaveCount(0)
-    await expect(save).toBeEnabled()
-    await save.click()
+  })
 
-    await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0].capabilities).toEqual(['chat', 'vision'])
-    expect(puts[0].mmproj).toBe('/models/mmproj-Q8.gguf')
+  test('capability chips are no longer editable in the drawer', async ({ page }) => {
+    await seedModel(page)
+    await openDrawer(page)
+
+    await expect(page.locator('[data-testid^="cap-toggle-"]')).toHaveCount(0)
+    await expect(page.getByTestId('model-caps-readout')).toBeVisible()
   })
 
   test('an emptied Display name sends name:"" so the stored name is cleared', async ({ page }) => {

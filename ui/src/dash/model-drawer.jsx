@@ -63,7 +63,8 @@ function sameSet(a, b) {
 // Runner section) were removed; device lives on the slot's HW grid now.
 
 // Modality read-out derived from the model's capabilities/type (typed field —
-// shown read-only in the drawer; the capability toggles below are the control).
+// capabilities themselves are read-only in the drawer since #2193; they come
+// from the registry row, not from a control here).
 function modalityLabel(caps, type) {
 	const c = new Set((caps || []).map((x) => String(x).toLowerCase()));
 	if (c.has("vision")) return "vision";
@@ -395,7 +396,6 @@ function deriveModelChanges(baseline, form) {
 		// name could never be cleared.
 		name: trimmedName !== baseline.name,
 		trimmedName,
-		caps: !sameSet(form.caps, baseline.caps),
 		backends: !sameSet(form.backends, baseline.backends),
 		mmproj: form.mmproj.trim() !== baseline.mmproj,
 		trimmedMmproj: form.mmproj.trim(),
@@ -414,7 +414,6 @@ function deriveModelChanges(baseline, form) {
 	};
 	c.any =
 		c.name ||
-		c.caps ||
 		c.backends ||
 		c.mmproj ||
 		c.hfRepo ||
@@ -440,7 +439,6 @@ function ModelDrawer({ open, onClose, model }) {
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
-	const [caps, setCaps] = useStateMD([]);
 	const [backends, setBackends] = useStateMD([]);
 	const [mmproj, setMmproj] = useStateMD("");
 	const [hfRepo, setHfRepo] = useStateMD("");
@@ -487,7 +485,6 @@ function ModelDrawer({ open, onClose, model }) {
 		const b = modelBaseline(model, enums);
 		setBaseline(b);
 		setName(b.name);
-		setCaps(b.caps);
 		setBackends(b.backends);
 		setMmproj(b.mmproj);
 		setHfRepo(b.hfRepo);
@@ -504,8 +501,6 @@ function ModelDrawer({ open, onClose, model }) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
 
-	const toggleCap = (c) =>
-		setCaps((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
 	const toggleBackend = (b) =>
 		setBackends((p) => (p.includes(b) ? p.filter((x) => x !== b) : [...p, b]));
 
@@ -569,10 +564,14 @@ function ModelDrawer({ open, onClose, model }) {
 	// The vision↔mmproj invariant (#1380). A row advertising `vision` with no
 	// projector leaves the launch path no `--mmproj` to load. This used to be a
 	// decorative red div the save ignored, so it now joins flagsError in the one
-	// gate both `onSave` and the Save button consult.
+	// gate both `onSave` and the Save button consult. Capabilities are no longer
+	// editable here (#2193): `vision` comes from the registry row, so the only
+	// way an operator can violate the invariant in this drawer is clearing the
+	// projector path on a model that advertises vision.
+	const visionModel = (baseline?.caps || []).includes("vision");
 	const mmprojError =
-		caps.includes("vision") && !mmproj.trim()
-			? "vision capability requires an mmproj sidecar path"
+		visionModel && !mmproj.trim()
+			? "this model advertises vision — an mmproj sidecar path is required"
 			: null;
 
 	// Context size validation (#1378). A lenient parseInt destroyed data twice
@@ -683,7 +682,6 @@ function ModelDrawer({ open, onClose, model }) {
 	// predicate and nothing touches the live `model` prop.
 	const changes = deriveModelChanges(baseline, {
 		name,
-		caps,
 		backends,
 		mmproj,
 		hfRepo,
@@ -737,7 +735,6 @@ function ModelDrawer({ open, onClose, model }) {
 		// the one derived comparison above (`changes`) — the same values the
 		// dirty aggregate and the Save gate read.
 		if (changes.name) body.name = changes.trimmedName;
-		if (changes.caps) body.capabilities = caps;
 		if (changes.backends) body.backends = backends;
 		if (changes.mmproj) body.mmproj = changes.trimmedMmproj || null;
 		if (changes.hfRepo) body.hf_repo = changes.trimmedRepo;
@@ -754,7 +751,7 @@ function ModelDrawer({ open, onClose, model }) {
 		}
 	};
 
-	const modality = modalityLabel(caps, model.type);
+	const modality = modalityLabel(baseline?.caps || [], model.type);
 
 	return (
 		<>
@@ -1130,9 +1127,12 @@ function ModelDrawer({ open, onClose, model }) {
 				<div className="form-row">
 					<div className="form-lbl">
 						<span>Modality</span>
-						<FieldInfoIcon description="derived from capabilities" />
+						<FieldInfoIcon description="capabilities come from the registry row (pull metadata / auto-detect) — read-only here" />
 					</div>
-					<div className="form-ctl">
+					<div
+						className="form-ctl"
+						style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+					>
 						<span
 							className="tag"
 							data-testid="model-modality"
@@ -1147,6 +1147,20 @@ function ModelDrawer({ open, onClose, model }) {
 							}}
 						>
 							{modality}
+						</span>
+						<span
+							data-testid="model-caps-readout"
+							style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}
+						>
+							{(baseline?.caps || []).map((cap) => (
+								<span
+									key={cap}
+									className="mdl-chip"
+									style={{ pointerEvents: "none", opacity: 0.7 }}
+								>
+									{cap}
+								</span>
+							))}
 						</span>
 					</div>
 				</div>
@@ -1181,36 +1195,9 @@ function ModelDrawer({ open, onClose, model }) {
             slot-owned hardware now (the slot's HW grid), not a model default.
             The one-shot migration folds model.defaults.n_gpu_layers → slot NGL. */}
 
-				{/* ── Routing (capabilities + backends) ── */}
+				{/* ── Runner compatibility (backends) ── */}
 				<div className="form-section" style={{ marginTop: 16 }}>
-					Routing
-				</div>
-				<div className="form-row">
-					<div className="form-lbl">
-						<span>Capabilities</span>
-						<FieldInfoIcon description="dispatch / omni eligibility · canonical vocab" />
-					</div>
-					<div
-						className="form-ctl"
-						style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
-					>
-						{enums.model_capabilities.map((cap) => {
-							const on = caps.includes(cap);
-							return (
-								<button
-									key={cap}
-									type="button"
-									role="switch"
-									aria-checked={on}
-									data-testid={`cap-toggle-${cap}`}
-									className={"mdl-chip" + (on ? " on" : "")}
-									onClick={() => toggleCap(cap)}
-								>
-									{cap}
-								</button>
-							);
-						})}
-					</div>
+					Runner compatibility
 				</div>
 				<div className="form-row">
 					<div className="form-lbl">
