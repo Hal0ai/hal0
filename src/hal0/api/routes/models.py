@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
+from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.pull import PullInvalidSource
@@ -376,6 +377,11 @@ async def create_model(request: Request) -> dict[str, Any]:
     Optional ``source`` (top-level, not part of ``Model``) tags the
     emitted ``model.registered`` event so the footer can colour-code
     catalogue picks vs hand-registered files. Defaults to ``"manual"``.
+
+    A body carrying legacy ``backends`` tags but no ``provider`` gets one
+    derived (``hal0.model_meta.derive_model_provider``) before screening, so
+    create never mints a permanently ``provider=None`` row (Task 3) — an
+    explicit ``provider`` in the body is never overridden.
     """
     from hal0.registry.store import Model
 
@@ -389,6 +395,13 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
+    # Task 3 fix: a create body can still hand-carry legacy ``backends``
+    # tags (create, unlike PUT, isn't retiring the field as an input) — but
+    # a create with ``backends`` and no ``provider`` must not mint a
+    # permanently provider=None row. Derive only when provider is absent;
+    # an explicit ``provider`` keeps flowing through screen_model_write's
+    # validity check unchanged.
+    body.setdefault("provider", derive_model_provider(body.get("backends")))
     # Screen launch-affecting fields at CREATE time too (UI-API-1 item 1): PUT
     # already screened, but create wrote straight to the registry, so a row
     # born with an extra_args that smuggles --port/--model/… would only fail at

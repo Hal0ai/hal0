@@ -249,6 +249,47 @@ def test_create_defaults_source_to_manual(
     ), events
 
 
+def test_create_derives_provider_from_backends_when_absent(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """Task 3 fix: POST /api/models with ``backends`` but no ``provider``
+    must not mint a permanently ``provider=None`` row — the create path
+    derives it the same way the PUT/import/seed paths do."""
+    fpath = crud_models_root / "kokoro-voice.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={"id": "kokoro-voice", "path": str(fpath), "backends": ["kokoro"]},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["provider"] == "kokoro"
+
+    row = crud_client.get("/api/models/kokoro-voice").json()
+    assert row["provider"] == "kokoro"
+
+
+def test_create_explicit_provider_wins_over_backends(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """An explicit ``provider`` in the create body is never overridden by
+    the tag-derived guess, even when the tags disagree."""
+    fpath = crud_models_root / "explicit-provider.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
+        json={
+            "id": "explicit-provider",
+            "path": str(fpath),
+            "backends": ["kokoro"],
+            "provider": "llama-server",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["provider"] == "llama-server"
+
+
 # ── PUT /api/models/{id} ───────────────────────────────────────────────────
 
 

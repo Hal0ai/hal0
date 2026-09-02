@@ -834,13 +834,18 @@ async def list_all(
                 dumped["backends"] = _bes
             if _cat is not None:
                 dumped["comfyui_category"] = _cat
-            # Task 3: seed ``provider`` alongside the self-healed tag — a row
-            # with no explicit provider (the pre-Task-1 pull shape this
-            # heuristic exists for) must not keep reading as
-            # provider=None/llama-server just because this repair patches
-            # the response dict rather than the persisted row.
-            if not dumped.get("provider"):
-                dumped["provider"] = derive_model_provider(_bes)
+            # Task 3: force ``provider`` alongside the self-healed tag — this
+            # whole branch already treats the ON-DISK PATH as more
+            # authoritative than whatever the row's own ``backends`` says
+            # (it force-appends "comfyui" unconditionally, above), so
+            # ``provider`` gets the same treatment rather than only filling
+            # a falsy value. Otherwise a row created with a comfyui path but
+            # ``backends=[]`` and no explicit provider — via the create-model
+            # write path, which now stamps ``derive_model_provider([]) ==
+            # "llama-server"`` at write time (see create_model) — would read
+            # back "llama-server" forever, since a truthy stored value would
+            # never again look like "needs healing".
+            dumped["provider"] = derive_model_provider(_bes)
         data.append(dumped)
         seen.add(entry.id)
         by_id[entry.id] = dumped
