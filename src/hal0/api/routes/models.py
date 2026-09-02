@@ -602,8 +602,11 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
 
     Never 404s, never blocks — an unknown model id or missing host GPU
     truth (no ``hardware_stats`` wired, or the sample failed) yields a
-    ``verdict: "unknown"`` row rather than an error. This is a batch
-    advisory endpoint for the drawer's model picker, not a gate.
+    ``verdict: "unknown"`` row rather than an error. A non-dict item in
+    ``models`` also degrades to an ``"unknown"`` row in place rather than
+    being dropped, so the response row count always matches the request
+    row count (after the soft cap below). This is a batch advisory
+    endpoint for the drawer's model picker, not a gate.
     """
     try:
         body = await request.json()
@@ -611,7 +614,15 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-    items = body.get("models") or []
+    items = body.get("models")
+    if items is None:
+        items = []
+    elif not isinstance(items, list):
+        raise BadRequest("'models' must be a list", code="models.feasibility_body_invalid")
+    # Soft cap: this is an advisory batch endpoint for the drawer's model
+    # picker, not a gate — an oversized batch is processed up to a sane
+    # limit rather than rejected outright.
+    items = items[:256]
 
     registry = request.app.state.model_registry
     stats = getattr(request.app.state, "hardware_stats", None)
@@ -628,6 +639,15 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
+            results.append(
+                {
+                    "model_id": "",
+                    "verdict": "unknown",
+                    "needed_mb": 0.0,
+                    "gtt_free_mb": free,
+                    "gtt_total_mb": total,
+                }
+            )
             continue
         mid = str(item.get("model_id") or "")
         # The WHOLE per-row computation is guarded, not just the registry

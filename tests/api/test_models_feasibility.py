@@ -163,3 +163,45 @@ def test_feasibility_row_error_degrades_to_unknown_without_500ing_batch(
     assert rows[bad_id]["verdict"] == "unknown"
     assert rows[bad_id]["needed_mb"] == 0.0
     assert rows[good_id]["verdict"] in {"fits", "tight", "exceeds", "exceeds_total"}
+
+
+def test_feasibility_non_list_models_is_400(crud_client: TestClient) -> None:
+    """``models`` present but not a list is a client error, not a silent no-op."""
+    r = crud_client.post("/api/models/feasibility", json={"models": "not-a-list"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "models.feasibility_body_invalid"
+    assert "list" in r.json()["error"]["message"]
+
+
+def test_feasibility_missing_models_key_returns_empty_results(crud_client: TestClient) -> None:
+    r = crud_client.post("/api/models/feasibility", json={})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"results": []}
+
+
+def test_feasibility_batch_soft_capped_at_256(crud_client: TestClient) -> None:
+    """More than 256 items is not an error — only the first 256 are processed."""
+    items = [{"model_id": f"m{i}"} for i in range(300)]
+    r = crud_client.post("/api/models/feasibility", json={"models": items})
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert len(results) == 256
+    assert results[0]["model_id"] == "m0"
+    assert results[-1]["model_id"] == "m255"
+
+
+def test_feasibility_non_dict_item_degrades_in_place(crud_client: TestClient) -> None:
+    """A non-dict entry degrades to an 'unknown' row in place rather than being
+    dropped — response row count always equals request row count (capped)."""
+    good_id = "whatever"
+    r = crud_client.post(
+        "/api/models/feasibility",
+        json={"models": [{"model_id": good_id}, 42, {"model_id": "other"}]},
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert len(results) == 3
+    middle = results[1]
+    assert middle["model_id"] == ""
+    assert middle["verdict"] == "unknown"
+    assert middle["needed_mb"] == 0.0
