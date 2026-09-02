@@ -240,7 +240,15 @@ test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chi
     const probes: any[] = []
     await page.route('**/api/models/feasibility', async (route) => {
       const body = route.request().postDataJSON() as { models: { model_id: string }[] }
-      probes.push(body)
+      // The 400ms-debounced CEILING probe (fired on drawer open and on ctx
+      // edits — pinned by the ceiling-hint tests above) shares this endpoint
+      // but always carries exactly ONE model: the bound one. Count only
+      // BATCH probes (every compatible model) here — this test pins the
+      // dropdown's own contract (one batch per open, never per keystroke or
+      // per row), not a ban on the ceiling probe's independent traffic.
+      // Counting both made this test a race between the poll assertions and
+      // the ceiling debounce timer.
+      if (body.models.length > 1) probes.push(body)
       const verdictById: Record<string, string> = {
         'qwen3.6-27b-mtp': 'fits',
         [SWAP_TARGET]: 'exceeds',
@@ -265,10 +273,10 @@ test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chi
     await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('● fits · ~14 GB')
     await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"]`)).toContainText("○ won't fit")
     // Each fresh open→true transition fires exactly one more probe (still
-    // never per keystroke/per row); closing itself fires nothing. Click a
-    // plain label (not Escape — the drawer's OWN document-level Escape
-    // handler closes the whole drawer, not just the open listbox) to close
-    // it via RichSelect's click-outside listener instead.
+    // never per keystroke/per row); closing itself fires nothing. Close via
+    // a click on a plain label (RichSelect's click-outside listener);
+    // Escape would work too now that rich-select.jsx consumes it on an open
+    // listbox, but the click path is what this test has always pinned.
     await page.locator('.drawer .form-lbl', { hasText: 'Runtime' }).first().click()
     await openRichSelect(trigger)
     await expect.poll(() => probes.length).toBe(2)
