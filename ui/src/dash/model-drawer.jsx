@@ -1073,6 +1073,49 @@ function chatTemplateRichOptions(templates) {
 	return opts;
 }
 
+// Engine identity (Runner compatibility · Task 6). UI copy ONLY — the family
+// VOCABULARY always comes from enums.runtime_families (see engineRichOptions
+// below); this map never grows a family enums doesn't already list, and a
+// family enums adds before this map catches up still renders a plain row
+// with no description rather than being dropped.
+const ENGINE_BLURBS = {
+	"llama-server": "GGUF chat · vision · embeddings · the default engine",
+	flm: "FastLLM · NPU-lane models",
+	kokoro: "TTS voices",
+	qwen3tts: "TTS voices · Qwen",
+	moonshine: "streaming ASR",
+	comfyui: "image gen graphs — rows owned by the ComfyUI catalog",
+};
+
+function mutedChip(text) {
+	return <span className="chip">{text}</span>;
+}
+
+// Build the engine RichSelect's options. `providerEffective` is the row's
+// server-computed provider_effective (model_to_dict, Task 6 of the drawer
+// overhaul) — the Auto row's closed-control preview and blurb. Mock fixtures
+// predating that field won't carry it, so "llama-server" (the resolver's own
+// total default — hal0.model_meta.derive_model_provider never returns
+// anything else for an empty/unrecognised tag set) is the fallback, never a
+// blank chip.
+function engineRichOptions(runtimeFamilies, providerEffective) {
+	const families = Array.isArray(runtimeFamilies) ? runtimeFamilies : [];
+	const resolved = providerEffective || "llama-server";
+	return [
+		{
+			id: "",
+			row: "Auto",
+			right: mutedChip("→ " + resolved),
+			desc: "derived from the stored backend tags",
+		},
+		...families.map((rf) => ({
+			id: rf,
+			row: rf,
+			desc: ENGINE_BLURBS[rf],
+		})),
+	];
+}
+
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 // `onOpenSlot` is optional (Task 3, facts-band used-by cell): when a host
 // passes it, each slot name in the used-by list is a jump button; absent, the
@@ -2038,19 +2081,13 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 						<FieldInfoIcon description="engine identity that serves this model's launch (llama-server · flm · kokoro · qwen3tts · moonshine · comfyui) · empty = derive from the stored backend tags" />
 					</div>
 					<div className="form-ctl">
-						<select
-							className="input mono"
+						<RichSelect
 							data-testid="model-provider-select"
+							aria-label="Engine"
 							value={provider}
-							onChange={(e) => setProvider(e.target.value)}
-						>
-							<option value="">Auto (derive from tags)</option>
-							{enums.runtime_families.map((rf) => (
-								<option key={rf} value={rf}>
-									{rf}
-								</option>
-							))}
-						</select>
+							options={engineRichOptions(enums.runtime_families, model.provider_effective)}
+							onChange={setProvider}
+						/>
 					</div>
 				</div>
 				<div className="form-row">

@@ -27,13 +27,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { ReactDOM: unknown }).ReactDOM = { ...ReactDOMClient, createPortal }
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 
-const { updateCalls, setDefaultCalls, setDefaultResult, slotsBox, profilesBox, templatesBox } = vi.hoisted(() => ({
+const { updateCalls, setDefaultCalls, setDefaultResult, slotsBox, profilesBox, templatesBox, enumsBox } = vi.hoisted(() => ({
   updateCalls: [] as unknown[],
   setDefaultCalls: [] as unknown[],
   setDefaultResult: { current: { default: true, type: 'llm' } as Record<string, unknown> },
   slotsBox: { current: [] as Record<string, unknown>[] },
   profilesBox: { current: [] as Record<string, unknown>[] },
   templatesBox: { current: [] as Record<string, unknown>[] },
+  // Task 6: override hook for the one engine test that needs a
+  // runtime_families entry ENGINE_BLURBS doesn't know about — every other
+  // test leaves this undefined so useMetaEnums keeps resolving the same
+  // fallback table it always has.
+  enumsBox: { current: undefined as Record<string, unknown> | undefined },
 }))
 
 vi.mock('@/api/hooks/useModels', () => ({
@@ -71,7 +76,11 @@ vi.mock('@/api/hooks/useProfiles', () => ({
 // profiles.test.tsx.
 vi.mock('@/api/hooks/useMeta', async () => {
   const actual = await vi.importActual<typeof import('@/api/hooks/useMeta')>('@/api/hooks/useMeta')
-  return { ...actual, useMeta: () => ({ data: undefined }), useMetaEnums: () => actual.resolveMetaEnums(undefined) }
+  return {
+    ...actual,
+    useMeta: () => ({ data: undefined }),
+    useMetaEnums: () => actual.resolveMetaEnums(enumsBox.current),
+  }
 })
 
 vi.mock('@/api/hooks/useSlots', () => ({
@@ -136,6 +145,7 @@ beforeEach(() => {
   slotsBox.current = []
   profilesBox.current = []
   templatesBox.current = []
+  enumsBox.current = undefined
 })
 
 afterEach(() => {
@@ -575,6 +585,122 @@ describe('ModelDrawer chat template (Task 5)', () => {
 
     const call = updateCalls[0] as { id: string; body: { defaults: Record<string, unknown> } }
     expect(call.body.defaults.chat_template).toBe('broken')
+    act(() => root.unmount())
+  })
+})
+
+// ─── Task 6 — engine RichSelect ──────────────────────────────────────────────
+// The Engine select (Runner compatibility) was a native <select> keyed off
+// enums.runtime_families; families still come ONLY from that enum (never
+// hand-listed), but the native <select> becomes a RichSelect so the Auto row
+// can preview the server-derived engine (model.provider_effective) instead of
+// a bare "derive from tags" label, and each family row can carry a blurb.
+describe('ModelDrawer engine (Task 6)', () => {
+  it('engine renders rich rows; Auto previews the derived engine', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...MODEL, provider: '', provider_effective: 'llama-server' },
+      }),
+    )
+    const trigger = q<HTMLButtonElement>(host, 'model-provider-select')
+    // Closed control: "Auto → llama-server".
+    expect(trigger.textContent).toContain('Auto')
+    expect(trigger.textContent).toContain('llama-server')
+
+    act(() => trigger.click())
+
+    const autoRow = host.querySelector('[data-option-id=""]') as HTMLElement
+    expect(autoRow).toBeTruthy()
+    expect(autoRow.textContent).toContain('derived')
+
+    // Every family from enums.runtime_families renders, each with its blurb.
+    const blurbs: Record<string, string> = {
+      'llama-server': 'the default engine',
+      flm: 'FastLLM',
+      kokoro: 'TTS voices',
+      qwen3tts: 'Qwen',
+      moonshine: 'streaming ASR',
+      comfyui: 'ComfyUI catalog',
+    }
+    for (const [rf, snippet] of Object.entries(blurbs)) {
+      const row = host.querySelector(`[data-option-id="${rf}"]`) as HTMLElement
+      expect(row, `missing row for ${rf}`).toBeTruthy()
+      expect(row.textContent).toContain(snippet)
+    }
+    act(() => root.unmount())
+  })
+
+  it('a runtime family absent from ENGINE_BLURBS still renders, with no desc', () => {
+    enumsBox.current = { runtime_families: ['llama-server', 'newfamily'] }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...MODEL, provider: '', provider_effective: 'llama-server' },
+      }),
+    )
+    act(() => q<HTMLButtonElement>(host, 'model-provider-select').click())
+    const row = host.querySelector('[data-option-id="newfamily"]') as HTMLElement
+    expect(row).toBeTruthy()
+    expect(row.querySelector('.rsel-option-desc')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('falls back to llama-server when a mock fixture lacks provider_effective', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: MODEL }),
+    )
+    const trigger = q<HTMLButtonElement>(host, 'model-provider-select')
+    expect(trigger.textContent).toContain('llama-server')
+    act(() => root.unmount())
+  })
+
+  it('picking an engine ships provider in the save body', async () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...MODEL, provider: '', provider_effective: 'llama-server' },
+      }),
+    )
+    act(() => q<HTMLButtonElement>(host, 'model-provider-select').click())
+    act(() => (host.querySelector('[data-option-id="flm"]') as HTMLElement).click())
+
+    const saveBtn = q<HTMLButtonElement>(host, 'model-save')
+    expect(saveBtn.disabled).toBe(false)
+    await act(async () => {
+      saveBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const call = updateCalls[0] as { id: string; body: { provider?: string | null } }
+    expect(call.body.provider).toBe('flm')
+    act(() => root.unmount())
+  })
+
+  it('picking Auto on a changed row ships provider: null', async () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...MODEL, provider: 'flm', provider_effective: 'flm' },
+      }),
+    )
+    act(() => q<HTMLButtonElement>(host, 'model-provider-select').click())
+    act(() => (host.querySelector('[data-option-id=""]') as HTMLElement).click())
+
+    const saveBtn = q<HTMLButtonElement>(host, 'model-save')
+    await act(async () => {
+      saveBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const call = updateCalls[0] as { id: string; body: { provider?: string | null } }
+    expect(call.body.provider).toBeNull()
     act(() => root.unmount())
   })
 })

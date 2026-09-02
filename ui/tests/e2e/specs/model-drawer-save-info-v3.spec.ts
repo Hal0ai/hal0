@@ -152,7 +152,8 @@ test.describe('Model drawer — complete save and compact field help', () => {
     await page.getByTestId('model-title-input').press('Enter')
     // Backends is retired (spec-hw-slot-ownership §1/§8) — Engine is the
     // write path now; "Runs on" is derived/read-only and not editable here.
-    await page.getByTestId('model-provider-select').selectOption('flm')
+    // Task 6: the native <select> became a RichSelect (rich-select.jsx).
+    await pickRichOption(page.getByTestId('model-provider-select'), 'flm')
     await page.getByTestId('model-mmproj-input').fill('/models/mmproj-saved.gguf')
     await page.getByTestId('model-hfrepo-input').fill('org/saved-repo')
     await page.getByTestId('model-hffile-input').fill('saved-q4.gguf')

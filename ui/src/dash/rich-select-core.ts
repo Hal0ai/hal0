@@ -113,6 +113,15 @@ export function handleKey(
     if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Enter' || key === ' ') {
       return { kind: 'state', state: openList(options, value) }
     }
+    // #2204: Home/End used to be inert while closed (wired only for the
+    // open branch below) — mirror Arrow's "opens the list" behaviour so a
+    // keyboard user gets the jump-to-first/last affordance before opening.
+    if (key === 'Home') {
+      return { kind: 'state', state: { open: true, activeId: firstEnabledId(options) } }
+    }
+    if (key === 'End') {
+      return { kind: 'state', state: { open: true, activeId: lastEnabledId(options) } }
+    }
     return { kind: 'none' }
   }
   switch (key) {

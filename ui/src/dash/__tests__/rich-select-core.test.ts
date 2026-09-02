@@ -173,6 +173,20 @@ describe('handleKey', () => {
     expect(handleKey('a', { open: true, activeId: 'c' }, OPTIONS, 'a')).toEqual({ kind: 'none' })
     expect(handleKey('Escape', { open: false, activeId: 'c' }, OPTIONS, 'a')).toEqual({ kind: 'none' })
   })
+
+  // #2204: Home/End used to be wired only for the OPEN branch, so a keyboard
+  // user landed on the closed trigger got no jump-to-first/last — mirrors
+  // ArrowDown/ArrowUp's existing "opens the closed list" behaviour instead of
+  // being a silent no-op.
+  it('Home on a closed list opens it, activating the first enabled option', () => {
+    const outcome = handleKey('Home', { open: false, activeId: 'c' }, OPTIONS, 'c')
+    expect(outcome).toEqual({ kind: 'state', state: { open: true, activeId: 'a' } })
+  })
+
+  it('End on a closed list opens it, activating the last enabled option', () => {
+    const outcome = handleKey('End', { open: false, activeId: 'c' }, OPTIONS, 'c')
+    expect(outcome).toEqual({ kind: 'state', state: { open: true, activeId: 'e' } })
+  })
 })
 
 describe('activeDescendantId / optionDomId', () => {
