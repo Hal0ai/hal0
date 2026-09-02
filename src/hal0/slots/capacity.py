@@ -264,7 +264,9 @@ def gtt_feasibility_verdict(
     """
     needed = round(float(needed_mb), 1)
     out: dict[str, Any] = {
-        "needed_mb": needed, "gtt_free_mb": gtt_free_mb, "gtt_total_mb": gtt_total_mb,
+        "needed_mb": needed,
+        "gtt_free_mb": gtt_free_mb,
+        "gtt_total_mb": gtt_total_mb,
     }
     if gtt_free_mb is None or gtt_total_mb is None or needed <= 0:
         out["verdict"] = "unknown"
