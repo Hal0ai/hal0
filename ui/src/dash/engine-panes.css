@@ -1241,6 +1241,9 @@
   white-space: nowrap;
   min-width: 0;
 }
+:is(.infer-pane, .npu-pane) .scard-profile-row .prov .rsel {
+  min-width: 0;
+}
 
 /* expanded-body status line — right-aligned mono */
 :is(.infer-pane, .npu-pane) .body-status {
@@ -1328,10 +1331,20 @@
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
-:is(.infer-pane, .npu-pane) .profile-pill {
+/* The profile side of the joined [ device | PROFILE ] tag. It is a RichSelect
+   trigger (card-dropdowns Task 2), so `.rsel` — which is `width: 100%` for the
+   full-width drawer fields it was written for — is pulled back to the pill's
+   own content width and the popover is released from the trigger's narrow
+   `left: 0; right: 0` box, which would otherwise force every profile row to
+   wrap inside ~90px. */
+:is(.infer-pane, .npu-pane) .prov .rsel {
+  width: auto;
+}
+:is(.infer-pane, .npu-pane) .rsel-trigger.profile-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  width: auto;
   padding: 2px 7px;
   border: 1px solid var(--line);
   border-left: none;
@@ -1344,12 +1357,38 @@
   letter-spacing: 0.04em;
   cursor: pointer;
 }
-:is(.infer-pane, .npu-pane) .profile-pill:hover {
+:is(.infer-pane, .npu-pane) .rsel-trigger.profile-pill:hover {
   color: var(--comfy);
   border-color: var(--comfy-line);
 }
-:is(.infer-pane, .npu-pane) .profile-pill svg {
+:is(.infer-pane, .npu-pane) .rsel-trigger.profile-pill .rsel-trigger-caret {
+  font-size: 8px;
   color: var(--fg-4);
+}
+/* The closed pill stays a chip: the runtime lane chips a row carries belong to
+   the open menu, where there is room for them. */
+:is(.infer-pane, .npu-pane) .rsel-trigger.profile-pill .pf-be-row {
+  display: none;
+}
+:is(.infer-pane, .npu-pane) .prov .rsel-listbox {
+  right: auto;
+  min-width: 260px;
+  max-width: 340px;
+}
+/* Profile row layout — name + lane chips. Applies in the open menu AND in the
+   closed trigger (which renders the selected option's row), so a long custom
+   profile name ellipsises inside the pill instead of stretching the card. */
+:is(.infer-pane, .npu-pane) .prov .rsel-trigger-row-main,
+:is(.infer-pane, .npu-pane) .prov .prof-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+:is(.infer-pane, .npu-pane) .prov .prof-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* per-slot control icons */

@@ -10,7 +10,9 @@
  *     green loaded epill collapsed into it) + ALL slots as full cards, always
  *     visible (the old collapse/expand accordion + qcaret were removed)
  *   - the serving card's status pill shows live tok/s (no fabricated numbers)
- *   - the profile pill surfaces the slot's runtime profile name (slot.profile)
+ *   - the profile pill surfaces the slot's runtime profile name (slot.profile),
+ *     opens a real profile picker, and applies a pick only through its
+ *     consequence confirm (PUT /config + POST /restart)
  *   - NPU/FLM slots are cordoned off — absent from the inference pane, present
  *     in the NPU · FLM stack pane below
  *   - a lifecycle control fires the real mutation (Stop → POST /unload)
@@ -66,10 +68,59 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
   test('profile pill surfaces the runtime profile name (slot.profile)', async ({ page }) => {
     await page.goto('/#slots')
     // primary carries profile "rocm" in the seed; the [ device | PROFILE ]
-    // provider tag renders it on the full card.
+    // provider tag renders it on the full card. The pill is now a RichSelect
+    // trigger (card-dropdowns Task 2) — a closed trigger renders its selected
+    // option's row, so the claim is unchanged.
     const pill = body(page).getByTestId('infer-profile-primary')
     await expect(pill).toBeVisible()
     await expect(pill).toContainText('rocm')
+  })
+
+  test('profile picker lists profiles + an "Edit slot" row that opens the editor', async ({ page }) => {
+    await page.goto('/#slots')
+    const pill = body(page).getByTestId('infer-profile-primary')
+    const listbox = await openRichSelect(pill)
+    // seed profiles are listed as rich rows, current one selected.
+    await expect(listbox.locator('[data-option-id="rocm"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await expect(listbox.locator('[data-option-id="vulkan"]')).toBeVisible()
+    // The pill's OLD gesture — "opens the slot editor" — lives on as the last
+    // row, so it stays reachable from the card.
+    await pickRichOption(pill, '__edit_slot__')
+    await expect.poll(() => page.url()).toContain('#slots/primary')
+  })
+
+  test('picking a profile confirms first, then PUTs /config + POSTs /restart', async ({ page }) => {
+    const configPuts: unknown[] = []
+    const restarts: string[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      configPuts.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/restart', async (route) => {
+      restarts.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/#slots')
+    const pill = body(page).getByTestId('infer-profile-primary')
+    await pickRichOption(pill, 'vulkan')
+    // Consequence BEFORE commit: the apply preview box, and NOTHING written.
+    const preview = page.getByTestId('infer-profile-preview')
+    await expect(preview).toBeVisible()
+    await expect(preview).toContainText('restarts')
+    expect(configPuts).toEqual([])
+    // Cancel writes nothing at all.
+    await page.locator('.modal-foot button', { hasText: 'Cancel' }).click()
+    await expect(preview).toHaveCount(0)
+    expect(configPuts).toEqual([])
+    expect(restarts).toEqual([])
+    // Apply performs the drawer's own two-call save in one gesture.
+    await pickRichOption(pill, 'vulkan')
+    await page.locator('.modal-foot button', { hasText: 'Apply profile' }).click()
+    await expect.poll(() => configPuts).toEqual([{ profile: 'vulkan' }])
+    await expect.poll(() => restarts.length).toBeGreaterThan(0)
   })
 
   test('device/profile pill has its own row, out of the bottom action bar (#squished-controls fix)', async ({ page }) => {
