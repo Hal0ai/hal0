@@ -1178,49 +1178,45 @@
   background: var(--bg-1);
 }
 
-/* model picker (full cards) — a real <select> styled as the design's
-   full-width bordered control */
-:is(.infer-pane, .npu-pane) .model-picker {
-  appearance: none;
-  -webkit-appearance: none;
+/* model picker (full cards) — RichSelect's trigger button (card-dropdowns
+   Task 1: migrated off the native <select> this block used to style
+   directly). RichSelect renders its own caret glyph and truncates each row's
+   content itself (rich-select.jsx / modelPickerOptions' row markup), so the
+   select-only appearance-reset + background-image chevron hack is gone with
+   it — these overrides just pull the shared `.rsel-trigger` chrome (Task 10,
+   dashboard.css) back to the card's tighter mono identity. */
+:is(.infer-pane, .npu-pane) .rsel-trigger.model-picker {
   width: 100%;
   min-width: 0;
-  padding: 7px 28px 7px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--rad-sm);
-  background-color: var(--bg-1);
+  background: var(--bg-1);
   color: var(--fg);
   font-family: var(--jbm);
   font-size: 11.5px;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 11px;
   transition: border-color var(--dur-fast) var(--ease);
 }
-:is(.infer-pane, .npu-pane) .model-picker:hover {
+:is(.infer-pane, .npu-pane) .rsel-trigger.model-picker:hover {
   border-color: var(--comfy-line);
 }
-:is(.infer-pane, .npu-pane) .model-picker:disabled {
+:is(.infer-pane, .npu-pane) .rsel-trigger.model-picker[disabled] {
   opacity: 0.6;
   cursor: default;
 }
 
 /* model row + inline model-edit pencil (slot card).
    The pencil is a SIBLING of the model control, never nested inside it: the
-   LLM row is a <select> whose own click gesture must stay uncontested. The
-   picker keeps flexing to fill; the button is a fixed square. */
+   LLM row is a RichSelect (`.model-picker-cell` wrapping `.rsel`) whose own
+   click gesture must stay uncontested. The picker keeps flexing to fill; the
+   button is a fixed square. */
 :is(.infer-pane, .npu-pane) .smodel-row {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
-:is(.infer-pane, .npu-pane) .smodel-row > .model-picker,
+:is(.infer-pane, .npu-pane) .smodel-row > .model-picker-cell,
 :is(.infer-pane, .npu-pane) .smodel-row > .smodel {
   flex: 1;
   min-width: 0;

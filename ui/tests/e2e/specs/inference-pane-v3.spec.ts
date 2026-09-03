@@ -14,7 +14,7 @@
  *   - NPU/FLM slots are cordoned off — absent from the inference pane, present
  *     in the NPU · FLM stack pane below
  *   - a lifecycle control fires the real mutation (Stop → POST /unload)
- *   - the full card exposes a real model-picker <select> (useModels)
+ *   - the full card exposes a real model-picker RichSelect (useModels)
  *   - the NPU/FLM pane renders its own engine shell + trio
  *   - the Inference tab carries the yellow `infer` accent class
  *
@@ -27,6 +27,7 @@
  * stay valid either way.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 const pane = (page: Page) => page.locator('.infer-pane:not(.infer-hero-top)').first()
 const engine = (page: Page) => pane(page).locator('.engine').first()
@@ -207,25 +208,28 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
     await page.goto('/#slots')
-    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
-    const opts = await picker.locator('option').evaluateAll((els) =>
-      els.map((e) => (e as HTMLOptionElement).value).filter(Boolean),
+    const trigger = page.getByTestId('infer-model-primary')
+    const listbox = await openRichSelect(trigger)
+    const ids = await listbox.locator('[data-option-id]').evaluateAll((els) =>
+      els.map((e) => e.getAttribute('data-option-id') || '').filter(Boolean),
     )
-    const cur = await picker.inputValue()
-    const next = opts.find((v) => v !== cur)
+    const curEl = listbox.locator('[aria-selected="true"]')
+    const cur = (await curEl.count()) > 0 ? await curEl.first().getAttribute('data-option-id') : null
+    const next = ids.find((id) => id !== cur)
     test.skip(!next, 'need ≥2 llm models in the catalog to swap')
-    await picker.selectOption(next!)
+    await pickRichOption(trigger, next!)
     await expect.poll(() => swaps.length).toBeGreaterThan(0)
     expect(typeof swaps[0].model_id).toBe('string')
   })
 
-  test('full card exposes a real model-picker <select> (useModels)', async ({ page }) => {
+  test('full card exposes a real model-picker RichSelect (useModels)', async ({ page }) => {
     await page.goto('/#slots')
     // The full-card model picker is always rendered in the engine body now.
-    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
-    await expect(picker).toHaveCount(1)
+    const trigger = body(page).getByTestId('infer-slot-primary').getByTestId('infer-model-primary')
+    await expect(trigger).toHaveCount(1)
     // the picker is populated (at minimum the current model is an option).
-    await expect.poll(async () => picker.locator('option').count()).toBeGreaterThan(0)
+    const listbox = await openRichSelect(trigger)
+    await expect.poll(async () => listbox.locator('[role="option"]').count()).toBeGreaterThan(0)
   })
 
   test('utility-type slots route to the support footer regardless of group', async ({ page }) => {

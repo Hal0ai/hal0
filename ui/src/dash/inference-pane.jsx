@@ -36,18 +36,22 @@ import {
   useSlotEdit,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { useModelsFeasibility } from '@/api/hooks/useModelsFeasibility'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { SlotBreakerChip } from './breaker-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
+import { RichSelect } from './rich-select.jsx'
+import { feasibilityHint } from './feasibility-copy'
+import { slotsUsingModel } from './model-usage.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
 import { devKind } from '@/lib/deviceMeta'
 
-const { useState: useStateI } = React
+const { useState: useStateI, useRef: useRefI } = React
 
 // Last live serving metrics per slot+model, so a paused/stopped slot keeps
 // showing its most recent real reading instead of collapsing to an em-dash.
@@ -287,9 +291,101 @@ function BackendMismatch({ s, onEdit }) {
   )
 }
 
-// full cards get a real model picker (a styled <select> wired to useModels);
-// non-LLM slots keep their static model line.
-export function ModelPicker({ s, models, disabled, onSwap }) {
+// ── card model picker rich rows (card-dropdowns Task 1) ────────────────────
+// The one non-"chat" capability worth calling out as a modality tag on the
+// row's name line (mockup panel 01 callout C) — plain chat/tool-calling/coding
+// models get no modality tag. "asr" is the display label for either
+// capability spelling the backend may send (transcription | asr).
+const MODEL_MODALITY_CAPS = ['vision', 'embed', 'rerank', 'asr', 'tts', 'image']
+function modelModalityTag(m) {
+  const caps = Array.isArray(m?.capabilities) ? m.capabilities : []
+  if (caps.includes('transcription') || caps.includes('asr')) return 'asr'
+  return MODEL_MODALITY_CAPS.find((c) => c !== 'asr' && caps.includes(c)) || null
+}
+
+// Size in whole-tenth GB from `size_bytes`, matching model-drawer's facts-band
+// rounding (Number(size_bytes) / 1024**3, one decimal) — one authority for
+// "how big is this model" so the two surfaces can't disagree. null when the
+// row carries no size at all (never fabricate a 0.0 GB).
+function modelSizeGb(m) {
+  const b = Number(m?.size_bytes)
+  return b > 0 ? (b / 1024 ** 3).toFixed(1) : null
+}
+
+// Right-aligned GTT fit chip for a `/api/models/feasibility` result row — tone
+// comes from the shared `feasibilityHint` mapper (one source of truth for
+// verdict→tone), so this can't drift from the drawer's own hint copy. An
+// absent row (never probed, or a verdict of "unknown") renders no chip at
+// all — warn-never-block means a missing signal must not read as an error.
+function modelFitChip(row) {
+  if (!row) return null
+  const hint = feasibilityHint(row)
+  if (!hint.tone) return null
+  const gb = Math.round((row.needed_mb ?? 0) / 1024)
+  if (hint.tone === 'ok') return <span className="chip ok">● fits · ~{gb} GB</span>
+  if (hint.tone === 'warn') return <span className="chip warn">◐ tight · ~{gb} GB</span>
+  return <span className="chip err">○ won't fit · ~{gb} GB</span>
+}
+
+// Build the card model picker's RichSelect options from the already-filtered
+// llm/local candidate list. `usedBy` excludes THIS slot from its count/names —
+// binding count is only interesting for OTHER slots — but marks the row
+// sensibly when it IS this slot's current model ("used by this slot" rather
+// than "used by 0 slots", which would misreport a real binding as unbound).
+function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
+  const list = []
+  if (cur && !has) {
+    list.push({ id: cur, row: s.model || cur })
+  }
+  if (!cur) {
+    list.push({ id: '', row: '—' })
+  }
+  for (const m of opts) {
+    const quant = m.quant || null
+    const modTag = modelModalityTag(m)
+    const usedBy = slotsUsingModel(allSlots, m.id).filter((u) => u.name !== s.name)
+    const isCurrent = m.id === cur
+    const names = usedBy.map((u) => u.name).join(', ')
+    const usedByText = isCurrent
+      ? usedBy.length > 0
+        ? `used by this slot + ${usedBy.length} other${usedBy.length === 1 ? '' : 's'} (${names})`
+        : 'used by this slot'
+      : usedBy.length > 0
+        ? `used by ${usedBy.length} slot${usedBy.length === 1 ? '' : 's'} (${names})`
+        : 'used by 0 slots'
+    const sizeGb = modelSizeGb(m)
+    const descBits = []
+    if (sizeGb) descBits.push(`${sizeGb} GB`)
+    descBits.push(usedByText)
+    if (m.provider_effective && m.provider_effective !== 'llama-server') {
+      descBits.push(m.provider_effective)
+    }
+    list.push({
+      id: m.id,
+      row: (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {m.longName || m.id}
+          </span>
+          {quant && <span className="chip amber">{quant}</span>}
+          {modTag && <span className="chip info">{modTag}</span>}
+        </span>
+      ),
+      right: verdictFor ? verdictFor(m.id) : null,
+      desc: descBits.join(' · '),
+    })
+  }
+  return list
+}
+
+// full cards get a real model picker (RichSelect, wired to useModels + the
+// GTT feasibility probe); non-LLM slots keep their static model line.
+export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
+  const feasibility = useModelsFeasibility()
+  // Fires the batch probe on the FIRST dropdown open only (mockup callout A)
+  // — the slot's ctx_max is fixed for the life of this card, so a second open
+  // has nothing new to learn and would just re-ask the same question.
+  const firedRef = useRefI(false)
   if (s.type !== 'llm')
     return (
       <div className="smodel" title={s.model || ''}>
@@ -303,26 +399,35 @@ export function ModelPicker({ s, models, disabled, onSwap }) {
   )
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
+  const ctx = typeof s.ctx_max === 'number' && s.ctx_max > 0 ? s.ctx_max : undefined
+  const verdictFor = (id) => {
+    const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
+    return modelFitChip(row)
+  }
+  const options = modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor })
   return (
-    <select
-      className="model-picker mono"
-      value={cur}
-      disabled={disabled}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => {
-        const id = e.target.value
-        if (id && id !== cur) onSwap(id)
-      }}
-      aria-label={`Model for ${s.name}`}
-    >
-      {cur && !has && <option value={cur}>{s.model || cur}</option>}
-      {!cur && <option value="">—</option>}
-      {opts.map((m) => (
-        <option key={m.id} value={m.id}>
-          {m.longName || m.id}
-        </option>
-      ))}
-    </select>
+    <span className="model-picker-cell" onClick={(e) => e.stopPropagation()}>
+      <RichSelect
+        className="model-picker"
+        value={cur}
+        options={options}
+        disabled={disabled}
+        aria-label={`Model for ${s.name}`}
+        data-testid={`infer-model-${s.name}`}
+        onOpenChange={(open) => {
+          if (!open || firedRef.current) return
+          const ids = opts.map((m) => m.id)
+          if (ids.length === 0) return
+          firedRef.current = true
+          feasibility.mutate({
+            models: ids.map((id) => ({ model_id: id, ...(ctx ? { ctx } : {}) })),
+          })
+        }}
+        onChange={(id) => {
+          if (id && id !== cur) onSwap(id)
+        }}
+      />
+    </span>
   )
 }
 
@@ -545,7 +650,7 @@ export function SlotScard({
   )
 }
 
-function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows }) {
+function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, modelRows }) {
   // Operator-arranged order + drag wiring. Called before the early returns so
   // the hook order is stable across the loading/empty/populated renders.
   const reorder = useCardReorder('inference.chat', rows)
@@ -568,6 +673,7 @@ function SlotCards({ rows, full, models, busyName, handlers, loading, modelRows 
           <ModelPicker
             s={s}
             models={models}
+            allSlots={allSlots}
             disabled={busy}
             onSwap={(id) => handlers.onSwap(s, id)}
           />
@@ -877,6 +983,7 @@ export function InferencePane() {
                 full
                 loading={loading}
                 models={modelsQuery.data}
+                allSlots={allSlots}
                 modelRows={modelRowFor}
                 busyName={busyName}
                 handlers={handlers}
