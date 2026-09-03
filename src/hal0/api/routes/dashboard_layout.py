@@ -29,7 +29,7 @@ so a v2 file already on disk keeps round-tripping under the v2 rules. The
 client's own ``reconcile()`` fail-softs an unrecognised payload to its default
 layout, so an operator holding a pre-#1061 file sees defaults, not an error.
 
-HAL0-SUNSET: v1.2 — drop the v2 branch once no cached pre-#1061 UI bundle can
+HAL0-SUNSET: v1.3.0 — drop the v2 branch once no cached pre-#1061 UI bundle can
 still be in a browser. v3 is then the only accepted body.
 
 Unknown CardIds in ``enabled`` or ``order`` are rejected with 422; so is any
@@ -115,7 +115,7 @@ class DashLayoutV3(BaseModel):
 class DashLayout(BaseModel):
     """Validated dashboard layout body (v2 — superseded, still tolerated).
 
-    HAL0-SUNSET: v1.2 — see the module docstring.
+    HAL0-SUNSET: v1.3.0 — see the module docstring.
     """
 
     v: int

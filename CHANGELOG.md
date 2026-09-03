@@ -24,6 +24,37 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-03
+
+### Highlights
+
+- **Profiles carry a runtime, and the dashboard shows it everywhere a profile
+  appears.** A profile can pin a `runner`; profile cards carry a runtime badge,
+  the import preview shows the envelope's runtime before commit, and the slot
+  Edit drawer's apply preview enumerates the runtime, lane, flags and restart a
+  profile change would actually cause before you save it.
+- **The seed profile catalog is pruned from 18 to a 10-profile minimal core**,
+  and the eight demoted tunes ship as portable `.hal0profile.json` addon
+  envelopes under `community/addons/` that Profiles → Import installs from a
+  paste or an upload.
+- **The model and slot drawers were reworked end to end** — task-grouped slot
+  fields, rich selects, GTT hints, inline model pull, tune pills, a facts band,
+  and an overrides ledger naming every field that diverges from the stamped
+  profile.
+- **Host-truth GTT feasibility.** `GET /api/hardware` carries live
+  `gtt_used_mb`/`gtt_free_mb` from the amdgpu sysfs counters, and the slot load
+  path emits an advisory `slot.gtt_feasibility` warning — never a block — when a
+  model's weights exceed the free GTT pool.
+- **Arch-aware model↔runner fit-check.** GGUF `general.architecture` is detected
+  and persisted at registration, and binding a model whose arch the runner
+  denylists now WARNS at assignment, naming the catalogued image that can serve
+  it, instead of leaving the operator at a silent crash-loop.
+- **The dashboard surfaces the decisive crash line** when a slot container dies
+  during model load, stamped on slot state and carried by the crash-breaker
+  chip's tooltip.
+- **The Proxmox VE quick-start script builds a privileged GPU-passthrough LXC by
+  default**, so a fresh container reaches the GPU without a manual pass.
+
 ### Fixed
 
 - Editing a profile whose stored runtime key has left this box's runner
@@ -146,6 +177,18 @@ applying. Add those subsections to a version's section to surface them; see
   the kyuz0 layout by construction, so existing img slots need no
   reconfiguration; `--purge` uninstall still removes the old kyuz0 image on
   upgraded boxes (#2171).
+- The model and slot drawers were reworked end to end. The slot drawer
+  regroups its fields by task, uses rich selects for model/profile/runtime,
+  carries GTT hints and an inline pull for a model it does not have yet, and
+  shows one Advanced image row (a single ref with a live-state chip) instead
+  of the previous overflow. The model drawer gains header meta, a
+  seed-from-profile button, tune pills, a facts band, an explicit engine
+  field, and an overrides ledger that names every field diverging from the
+  stamped profile (#2206, #2208, #2210, #2215).
+- Dashboard: the model Capabilities/Labels editors are retired (#2193). Capabilities
+  display read-only in the model drawer; the Add-from-HF flow now offers a repo's
+  mmproj projector directly and derives the vision label from that choice; the
+  add-by-path flow always auto-detects labels. `/api/models` contracts are unchanged.
 
 ### Migrations
 
@@ -162,13 +205,6 @@ applying. Add those subsections to a version's section to surface them; see
   Back up `/etc/hal0/profiles.toml` before upgrading if you may downgrade;
   restoring that copy (or deleting the two keys) makes the file readable by
   1.1.0 again.
-
-### Changed
-
-- Dashboard: the model Capabilities/Labels editors are retired (#2193). Capabilities
-  display read-only in the model drawer; the Add-from-HF flow now offers a repo's
-  mmproj projector directly and derives the vision label from that choice; the
-  add-by-path flow always auto-detects labels. `/api/models` contracts are unchanged.
 
 ## [1.1.0] — 2026-08-31
 
@@ -864,7 +900,6 @@ serving again quickly, not as an undo.
   bound its blast radius. `/mcp/admin` and any future `/mcp/*` mount
   remain ADMIN. Docs that still claimed "no built-in network auth"
   (pre-KB-1) are corrected everywhere.
-
 
 ## [1.0.0-rc.12] — 2026-08-28
 
