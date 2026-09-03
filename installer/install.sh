@@ -508,8 +508,26 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             # serving (the identity fix in #1953 is what changed this).
             warn "gpu: ${_kfd_path} has a different group (${_render_gid:-?} expected) and could not be changed from inside this container."
             warn "  GPU slots still work — they run rootful — but hal0-user probes and diagnostics cannot read the compute node."
-            warn "  To fix, set it on the Proxmox host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
-            warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
+            case "$(hal0_lxc_kind)" in
+                lxc-unprivileged)
+                    warn "  Unprivileged LXC: the node's ownership is host-mapped, so this can only be fixed on the Proxmox"
+                    warn "  host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
+                    warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
+                    ;;
+                lxc-privileged)
+                    # Privileged: chgrp should have worked. It didn't, so the
+                    # cause is local (read-only /dev, a stale gid that no group
+                    # owns, an LSM denial) — sending the operator to re-forward
+                    # the device would fix nothing.
+                    warn "  Privileged LXC: chgrp is normally permitted here, so this is a local condition rather than the"
+                    warn "  host's dev entry — check that /dev is writable, that gid ${_render_gid:-?} exists, and that no"
+                    warn "  LSM denial is logged. See hal0 issue #1953."
+                    ;;
+                *)
+                    warn "  Set the owning group of ${_kfd_path} to ${_render_gid:-<render node gid>} (matching the render"
+                    warn "  node) so hal0-user probes can open it. See hal0 issue #1953."
+                    ;;
+            esac
         fi
     elif (( gpu_rc == HAL0_GPU_RC_NO_DEVICE )); then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
