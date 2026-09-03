@@ -1109,7 +1109,7 @@ def _llama_argv_segments(
     ignored (kept for call-site compat until the sunset ratchet drops the
     plumbing).
     """
-    # HAL0-SUNSET: v1.2.0 — profile flags + slot parallel/extra_args lost their
+    # HAL0-SUNSET: v2.0.0 — profile flags + slot parallel/extra_args lost their
     # launch surface (spec-flags-ownership §2/§4). These params are inert; drop
     # them (and the callers threading them) once the sunset ratchet lands.
     del profile_flags, slot_parallel, extra_args
