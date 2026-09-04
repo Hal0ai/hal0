@@ -4,10 +4,12 @@
 //   Task 1 — the card model picker (ModelPicker) migrated from a native
 //   <select> to RichSelect: multi-line rows (quant tag, modality tag, size +
 //   used-by + engine desc line) and a lazy GTT fit-chip batch on first open.
-//   Task 2 — the card profile pill (DevCell) migrated to RichSelect: rich
-//   profile rows filtered to the slot type, an "✎ Edit slot…" row keeping the
-//   old open-the-editor gesture, and a consequence confirm that owns the only
-//   write.
+//   Task 2 — the card profile pill migrated to RichSelect: rich profile rows
+//   filtered to the slot type, an "✎ Edit slot…" row keeping the old
+//   open-the-editor gesture, and a consequence confirm that owns the only
+//   write. Driven through SlotCards, since the confirm is mounted by the card
+//   LIST (it must not sit inside a `.scard`) — so these tests exercise the
+//   real card→pane wiring, not a card in isolation.
 //
 // inference-pane.jsx is a window-globals dash module (bare `React.Fragment`/
 // `React.cloneElement` identifiers resolve off `window` under vitest's
@@ -19,10 +21,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
-// slot-modals.jsx rides in on inference-pane's `profileApplyPreview` import
-// and reads `Icons` at render time; the module graph only needs the global to
-// exist. (Same shim slot-profile-preview.test.ts installs.)
+// primitives.jsx's Modal (the apply confirm's shell) reads `Icons` for its
+// close glyph at render time.
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
+// React's act() contract — without it every act() call warns that the
+// environment is unconfigured.
+;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // GTT feasibility probe — a real useState-backed mutation stand-in so calling
 // `mutate()` from ModelPicker's onOpenChange handler genuinely re-renders the
@@ -98,7 +102,7 @@ vi.mock('@/api/hooks/useSlots', () => ({
   }),
 }))
 
-const { ModelPicker, DevCell } = await import('../inference-pane.jsx')
+const { ModelPicker, SlotCards } = await import('../inference-pane.jsx')
 
 function mount(el: React.ReactElement) {
   const host = document.createElement('div')
@@ -218,12 +222,62 @@ const P_TTS = {
   intent: 'kokoro synth tune',
   supported_slot_types: ['tts'],
 }
+// A serving slot (container running + healthy → slotCtrlPhase "running") and
+// a stopped one, so the confirm's lifecycle line has both branches to take.
 const PROFILE_SLOT = {
   name: 'primary',
   type: 'llm',
   device: 'gpu-vulkan',
   profile: 'rocm',
   binary: '',
+  container_status: 'running',
+  container_health: true,
+}
+const OFF_SLOT = {
+  name: 'spare',
+  type: 'llm',
+  device: 'gpu-vulkan',
+  profile: 'rocm',
+  binary: '',
+  container_status: 'exited',
+  container_health: false,
+}
+
+// The profile picker lives on the CARD but its apply confirm is owned by the
+// card LIST (it is a fixed overlay and `.scard` both clips and, on hover,
+// becomes its containing block), so every profile test drives the real
+// SlotCards wiring rather than a card in isolation.
+function mountCards(slots: Record<string, unknown>[]) {
+  const handlers = {
+    onSwap: () => {},
+    onStart: () => {},
+    onStop: () => {},
+    onRestart: () => {},
+    onLogs: () => {},
+    onEdit: vi.fn(),
+    onSetDefault: () => {},
+  }
+  const el = () => (
+    <SlotCards
+      rows={slots.map((s) => ({ s, ind: { cls: 'offline', tooltip: '' } }))}
+      full={false}
+      models={MODELS}
+      allSlots={slots}
+      busyName={null}
+      handlers={handlers}
+      loading={false}
+      modelRows={() => ({ id: 'm1', longName: 'Qwen3.6-8B', defaults: { extra_args: '' } })}
+    />
+  )
+  const mounted = mount(el())
+  // Re-render — how a landing /api/profiles poll reaches an already-open
+  // confirm. A FRESH element each time: React bails out of reconciling a
+  // referentially identical one, which would silently no-op the re-render.
+  const rerender = () =>
+    act(() => {
+      mounted.root.render(el())
+    })
+  return { ...mounted, handlers, rerender }
 }
 
 function profileTrigger(host: HTMLElement, name: string) {
@@ -236,9 +290,18 @@ function openProfileMenu(host: HTMLElement, name: string) {
   })
 }
 
-function pickOption(host: HTMLElement, id: string) {
+// The open listbox is the one hanging off the trigger we just clicked — with
+// more than one card mounted, `data-option-id` is not unique across the page.
+function openListbox(host: HTMLElement, name: string) {
+  const id = profileTrigger(host, name).getAttribute('aria-controls')!
+  return host.querySelector(`[id="${id}"]`) as HTMLElement
+}
+
+function pickProfile(host: HTMLElement, name: string, id: string) {
   act(() => {
-    optionById(host, id)!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    openListbox(host, name)
+      .querySelector(`[data-option-id="${id}"]`)!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }))
   })
 }
 
@@ -355,47 +418,54 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
   })
 })
 
-describe('DevCell profile picker (card-dropdowns Task 2)', () => {
+describe('card profile picker + apply confirm (card-dropdowns Task 2)', () => {
   it("profile pill opens rich rows filtered to the slot's type, current ticked", () => {
-    const { host } = mount(<DevCell s={PROFILE_SLOT} onProfile={() => {}} modelFlags="" />)
+    const { host } = mountCards([PROFILE_SLOT])
     // the pill still surfaces the slot's profile name (the e2e claim)
     expect(profileTrigger(host, 'primary').textContent).toContain('rocm')
     openProfileMenu(host, 'primary')
+    const listbox = openListbox(host, 'primary')
     // the tts-only profile is fenced out by supported_slot_types.
-    expect(optionById(host, 'voice')).toBeNull()
-    expect(optionById(host, 'rocm')).not.toBeNull()
-    expect(optionById(host, 'brainy')).not.toBeNull()
+    expect(listbox.querySelector('[data-option-id="voice"]')).toBeNull()
+    expect(listbox.querySelector('[data-option-id="rocm"]')).not.toBeNull()
+    expect(listbox.querySelector('[data-option-id="brainy"]')).not.toBeNull()
     // current is the ticked row — RichSelect's own selected affordance.
-    expect(optionById(host, 'rocm')!.getAttribute('aria-selected')).toBe('true')
-    expect(optionById(host, 'brainy')!.getAttribute('aria-selected')).toBe('false')
+    expect(
+      listbox.querySelector('[data-option-id="rocm"]')!.getAttribute('aria-selected'),
+    ).toBe('true')
+    expect(
+      listbox.querySelector('[data-option-id="brainy"]')!.getAttribute('aria-selected'),
+    ).toBe('false')
   })
 
   it('rows show runtime chip + blurb; Edit slot row present and calls onProfile', () => {
-    const onProfile = vi.fn()
-    const { host } = mount(<DevCell s={PROFILE_SLOT} onProfile={onProfile} modelFlags="" />)
+    const { host, handlers } = mountCards([PROFILE_SLOT])
     openProfileMenu(host, 'primary')
-    const pf = optionById(host, 'brainy')!
+    const listbox = openListbox(host, 'primary')
+    const pf = listbox.querySelector('[data-option-id="brainy"]') as HTMLElement
     // one solid chip per lane (runtimeChips), and the profile's intent line.
     expect(Array.from(pf.querySelectorAll('.pf-be')).map((c) => c.textContent)).toEqual(['ROCm'])
     expect(pf.querySelector('.rsel-option-desc')!.textContent).toBe('low-temp reasoning tune')
     // an unpinned profile chips AUTO rather than claiming a lane.
     expect(
-      Array.from(optionById(host, 'rocm')!.querySelectorAll('.pf-be')).map((c) => c.textContent),
+      Array.from(
+        listbox.querySelector('[data-option-id="rocm"]')!.querySelectorAll('.pf-be'),
+      ).map((c) => c.textContent),
     ).toEqual(['AUTO'])
     // the last row keeps today's gesture: the pill opened the slot editor.
-    const edit = optionById(host, '__edit_slot__')!
+    const edit = listbox.querySelector('[data-option-id="__edit_slot__"]') as HTMLElement
     expect(edit.textContent).toContain('Edit slot')
-    pickOption(host, '__edit_slot__')
-    expect(onProfile).toHaveBeenCalledTimes(1)
+    pickProfile(host, 'primary', '__edit_slot__')
+    expect(handlers.onEdit).toHaveBeenCalledTimes(1)
     // …and it is NOT a profile pick: no confirm, no write.
     expect(q(host, 'infer-profile-preview')).toBeNull()
     expect(editCalls).toEqual([])
   })
 
   it('pick opens the consequence confirm with flag/runtime/restart lines', () => {
-    const { host } = mount(<DevCell s={PROFILE_SLOT} onProfile={() => {}} modelFlags="" />)
+    const { host } = mountCards([PROFILE_SLOT])
     openProfileMenu(host, 'primary')
-    pickOption(host, 'brainy')
+    pickProfile(host, 'primary', 'brainy')
     const box = q(host, 'infer-profile-preview')!
     expect(box).not.toBeNull()
     const text = box.textContent || ''
@@ -407,17 +477,62 @@ describe('DevCell profile picker (card-dropdowns Task 2)', () => {
     // flags → the 3 pairs in brainy's tune the slot does not already launch
     // with (its current tune is rocm's `-fa auto`).
     expect(text).toContain('replaces 3 flags')
-    // …and the restart line the apply actually performs.
+    // …and the lifecycle line for a RUNNING slot.
     expect(text).toContain('restarts')
     // nothing has been written yet.
     expect(editCalls).toEqual([])
     expect(restartCalls).toEqual([])
   })
 
-  it('cancel writes nothing', () => {
-    const { host } = mount(<DevCell s={PROFILE_SLOT} onProfile={() => {}} modelFlags="" />)
+  it('the confirm is mounted by the card LIST — one dialog for N cards', () => {
+    const { host } = mountCards([PROFILE_SLOT, OFF_SLOT])
+    expect(host.querySelectorAll('.scard').length).toBe(2)
+    expect(host.querySelectorAll('.rsel-trigger.profile-pill').length).toBe(2)
     openProfileMenu(host, 'primary')
-    pickOption(host, 'brainy')
+    pickProfile(host, 'primary', 'brainy')
+    // exactly ONE confirm in the tree…
+    expect(host.querySelectorAll('[data-testid="infer-profile-preview"]').length).toBe(1)
+    // …and it is a sibling of the card grid, NOT inside a `.scard` (which
+    // clips with overflow:hidden and becomes the containing block for fixed
+    // descendants on hover).
+    const box = q(host, 'infer-profile-preview')!
+    expect(box.closest('.scard')).toBeNull()
+    expect(box.closest('.scards')).toBeNull()
+    // it names the slot the pick came from.
+    expect(box.textContent).toContain('primary')
+  })
+
+  it('a stopped slot is told it will START and load the model, not restart', () => {
+    const { host } = mountCards([OFF_SLOT])
+    openProfileMenu(host, 'spare')
+    pickProfile(host, 'spare', 'brainy')
+    const text = q(host, 'infer-profile-preview')!.textContent || ''
+    // SlotManager.restart is unload+load, so an off slot STARTS.
+    expect(text).toContain('starts')
+    expect(text).toContain('loads the model')
+    expect(text).not.toContain('restarts')
+  })
+
+  it('the lifecycle line renders even when the picked profile no longer resolves', () => {
+    const { host, rerender } = mountCards([PROFILE_SLOT])
+    openProfileMenu(host, 'primary')
+    pickProfile(host, 'primary', 'brainy')
+    // the catalogue drops the profile out from under the OPEN confirm (a 5s
+    // /api/profiles poll landing mid-decision).
+    profilesBox.current = [P_CUR, P_TTS]
+    rerender()
+    const box = q(host, 'infer-profile-preview')!
+    expect(box).not.toBeNull()
+    // no derived lines (nothing true left to say)…
+    expect(box.textContent).not.toContain('runtime →')
+    // …but the consequence of pressing Apply is still stated.
+    expect(box.textContent).toContain('restarts')
+  })
+
+  it('cancel writes nothing', () => {
+    const { host } = mountCards([PROFILE_SLOT])
+    openProfileMenu(host, 'primary')
+    pickProfile(host, 'primary', 'brainy')
     act(() => {
       footButton('Cancel')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -430,14 +545,14 @@ describe('DevCell profile picker (card-dropdowns Task 2)', () => {
   })
 
   it('apply follows the verified path: PUT /config {profile} then a background restart', () => {
-    const { host } = mount(<DevCell s={PROFILE_SLOT} onProfile={() => {}} modelFlags="" />)
+    const { host } = mountCards([PROFILE_SLOT])
     openProfileMenu(host, 'primary')
-    pickOption(host, 'brainy')
+    pickProfile(host, 'primary', 'brainy')
     act(() => {
       footButton('Apply profile')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
-    // Branch (a) of the plan's riddle, verified from slot-modals.jsx:1120/1130
-    // + :1143 — the drawer's own two-call save, reachable as one gesture.
+    // Branch (a) of the plan's riddle, verified from slot-modals.jsx:1013/1023
+    // + :1036 — the drawer's own two-call save, reachable as one gesture.
     expect(editCalls).toEqual([{ name: 'primary', body: { profile: 'brainy' } }])
     expect(restartCalls).toEqual(['primary'])
     // the confirm closes on apply; the slots poll re-renders the pill.
@@ -446,9 +561,11 @@ describe('DevCell profile picker (card-dropdowns Task 2)', () => {
 
   it('a slot with no profile keeps the "default" word as a listed row', () => {
     const bare = { ...PROFILE_SLOT, profile: '' }
-    const { host } = mount(<DevCell s={bare} onProfile={() => {}} modelFlags="" />)
+    const { host } = mountCards([bare])
     expect(profileTrigger(host, 'primary').textContent).toContain('default')
     openProfileMenu(host, 'primary')
-    expect(optionById(host, '')!.getAttribute('aria-selected')).toBe('true')
+    expect(
+      openListbox(host, 'primary').querySelector('[data-option-id=""]')!.getAttribute('aria-selected'),
+    ).toBe('true')
   })
 })

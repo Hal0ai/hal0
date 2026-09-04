@@ -46,8 +46,11 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // hook that could resolve a pull target differently.
 import { runtimeChips, useRunnerPull } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
-// shlex-lite flag diff — the apply preview's "replaces N flags" count.
-import { diffFlags } from "./flags-tune.js";
+// The profile apply preview + its lane-title table. Pure derivations, so they
+// live in their own module (profile-apply-preview.js) rather than in this view
+// file — the slot CARD's apply confirm asks the same question and must get the
+// same answer from the same code, without importing this drawer.
+import { laneTitle, profileApplyPreview } from "./profile-apply-preview.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -174,13 +177,6 @@ function crossDeviceTarget(profile, devBackend) {
 // less than wiring a new export across that boundary.
 const SLOT_NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
 
-// Lane token → display title, for the Runtime select's option suffix and the
-// Lane pills (hw-cascade.js's runnerOptions/laneValues deal only in the raw
-// backend tokens — rocm/vulkan/cuda/cpu — so the JSX owns the display copy).
-const LANE_TITLE = { rocm: "ROCm", vulkan: "Vulkan", cuda: "CUDA", cpu: "CPU" };
-function laneTitle(lane) {
-	return LANE_TITLE[lane] || lane;
-}
 
 // ── Runtime RichSelect rows (Task 11c) ────────────────────────────────────
 // (laneLabel(), the old plain-text " · ROCm + Vulkan" suffix helper, is gone
@@ -383,109 +379,6 @@ function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND
 		for (const p of crossFit) opts.push(rowFor(p, deviceMap[p.backend]));
 	}
 	return opts;
-}
-
-// Concatenate a flag base with an overlay the way the launcher does: the
-// profile's tune is appended AFTER the model tune, and diffFlags' pair map is
-// last-wins, so the joined text reads as the effective launch tune.
-function joinFlags(base, overlay) {
-	return [base, overlay]
-		.map((s) => String(s || "").trim())
-		.filter(Boolean)
-		.join(" ");
-}
-
-/**
- * Apply preview for the drawer's profile row — every consequence of
- * "profile wins" in one structure, computed BEFORE Save (mockup panel 12).
- *
- * The lines are DERIVED, never re-guessed: the runtime and lane come out of
- * the same hw-cascade.js `applyRunnerChoice` the Hardware group's Runtime
- * select drives (and that the server's profile-wins reconcile mirrors, Task
- * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`
- * — the same tokenizer the model drawer's divergence hint uses.
- *
- * A line with nothing true to say is OMITTED rather than faked (`lane: null`,
- * `flags: 0`), with ONE exception the mockup calls out: a profile pinning no
- * runtime (Auto) reports runtime/lane as `unchanged` instead of dropping
- * them, so "this profile has no runtime opinion" can't be misread as "the
- * preview failed to load".
- *
- * @param profile             the SELECTED profile row (null → no preview)
- * @param backends            system-info `backends` catalog (key → row)
- * @param options             runnerOptions() rows for this slot
- * @param baselineRunner      the slot's FROZEN persisted binary ('' = auto)
- * @param currentDevice       the slot's pending device enum, e.g. "gpu-rocm"
- * @param modelFlags          the bound model's stamped tune (defaults.extra_args)
- * @param currentProfileFlags the OUTGOING profile's tune ('' = none)
- *
- * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, restart }`
- * or null.
- */
-export function profileApplyPreview({
-	profile,
-	backends,
-	options,
-	baselineRunner,
-	currentDevice,
-	modelFlags,
-	currentProfileFlags,
-}) {
-	if (!profile) return null;
-	const key = profile.runner || "";
-	const cat = (backends || {})[key] || null;
-	const hit = (options || []).find((o) => o.key === key) || null;
-	// Lanes from the cascade row first, the raw catalog row second; an
-	// out-of-catalog key claims NO lane rather than borrowing one.
-	const lanes = key
-		? hit?.lanes ||
-			(Array.isArray(cat?.supported_backends) ? cat.supported_backends : [])
-		: [];
-	const runtime = {
-		unchanged: !key || key === (baselineRunner || ""),
-		title: key ? hit?.title || cat?.title || key : null,
-		lanes,
-	};
-
-	// Post-save device truth. applyRunnerChoice moves the device only for a
-	// single-lane runner inside the same device class, and returns the current
-	// device untouched for an unknown key — so an invented lane move is
-	// unrepresentable here.
-	const nextDevice = key
-		? applyRunnerChoice({ options, key, currentDevice }).device
-		: currentDevice;
-	const curLane = deviceBackend(currentDevice);
-	const nextLane = deviceBackend(nextDevice);
-	let lane = null;
-	if (nextLane !== curLane) {
-		lane = {
-			unchanged: false,
-			from: laneTitle(curLane),
-			to: laneTitle(nextLane),
-		};
-	} else if (curLane && (!key || lanes.length !== 1)) {
-		// Auto, a multi-lane runtime (the lane stays a live choice) or an
-		// unknown key: say the lane holds. A single-lane runtime already
-		// sitting on its one lane — or a slot with no lane to name at all —
-		// has nothing to report, and an empty "lane → unchanged ()" is
-		// exactly the faked line the panel forbids.
-		lane = { unchanged: true, from: laneTitle(curLane), to: laneTitle(curLane) };
-	}
-
-	// "replaces N flags": the pairs in THIS profile's tune that the slot does
-	// not already launch with — diffed against the effective current tune
-	// (model stamp + the outgoing profile's overlay), so switching between two
-	// profiles that agree on a flag doesn't bill it as a change.
-	const d = diffFlags(
-		profile.flags || "",
-		joinFlags(modelFlags, currentProfileFlags),
-	);
-	return {
-		runtime,
-		lane,
-		flags: d.added.length + d.changed.length,
-		restart: true,
-	};
 }
 
 // ─── Create-slot modal ──────────────────────────────────────────

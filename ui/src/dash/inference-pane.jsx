@@ -40,7 +40,7 @@ import { useModelsFeasibility } from '@/api/hooks/useModelsFeasibility'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { hostHwFlags, runnerOptions } from './hw-cascade.js'
-import { profileApplyPreview } from './slot-modals.jsx'
+import { profileApplyPreview } from './profile-apply-preview.js'
 import { runtimeChips } from './profiles.jsx'
 import { ConfirmDialog } from './primitives.jsx'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
@@ -216,7 +216,7 @@ const PROFILE_EDIT_ROW = '__edit_slot__'
 // differently here) + the profile's intent line.
 //
 // Filtered exactly like the drawer's picker: `supported_slot_types` first
-// (slot-modals.jsx:1496-1500, mirroring the backend's profile_fits_slot —
+// (slot-modals.jsx:1389-1393, mirroring the backend's profile_fits_slot —
 // model_fit.py:80). The drawer additionally splits device_class/backend
 // matches into `fit` vs a cross-device group; the card lists the type-fitting
 // set flat and lets the apply preview below announce a lane move, per
@@ -264,40 +264,12 @@ function profileCardOptions({ s, profiles, backends }) {
 }
 
 // provider tag — a joined [ device | PROFILE ] control. The device chip is
-// static; the profile side is a real picker over /api/profiles, and a pick
-// routes through a consequence confirm (the drawer's own `profileApplyPreview`
-// lines) before anything is written. Cancel writes nothing.
-//
-// ── THE APPLY PATH, VERIFIED FROM SOURCE (mockup callout F) ────────────────
-// The slot drawer persists a profile pick as exactly TWO plain mutations,
-// with no drawer-only state between them:
-//   1. PUT /api/slots/{name}/config {profile: name|null} — assembled at
-//      slot-modals.jsx:1120 and fired at :1130 through useSlotEdit
-//      (api/hooks/useSlots.ts:617). The route is a PURE config write with no
-//      lifecycle side effect (api/routes/slots.py:1386, note at :1441), and
-//      the server re-derives the slot's `device` from the new profile itself
-//      (slots/config_write.py:444 → _reconcile_device_profile(merged,
-//      {"profile"}) at :91) — the drawer sends no device of its own.
-//   2. POST /api/slots/{name}/restart, fired in the BACKGROUND (never
-//      awaited) because `changes.profile` is part of `hwChanged`
-//      (slot-modals.jsx:1097-1103, restart at :1143) via useSlotRestart.
-// Both are reachable from any component, so this is branch (a) of the plan's
-// riddle: Apply performs the write here, one gesture, no half-applied state.
-// The drawer's extra Save-time gates guard fields this control cannot touch —
-// a device+profile pair edited together (slot-modals.jsx:1075) and a bound
-// model stranded by a device switch the operator drove (:1242) — and the one
-// consequence that does reach a card pick, a lane move, is announced by the
-// preview's `lane` line instead of blocking (§4 warn-never-block).
-export function DevCell({ s, onProfile, modelFlags }) {
+// static; the profile side is a real picker over /api/profiles. Picking a row
+// WRITES NOTHING: it hands the pick up to the pane (`onPickProfile`), which
+// owns the consequence confirm. This component holds no data hooks and no
+// mutations — the card is a leaf.
+function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
   const kind = devKind(s.device)
-  const profilesQuery = useProfiles()
-  const systemInfoQuery = useSystemInfo()
-  const editMut = useSlotEdit()
-  const restartMut = useSlotRestart()
-  // The picked-but-not-yet-applied profile name; null = no confirm open.
-  // Nothing is written while this holds a value — it IS the "before the
-  // confirm" state.
-  const [pending, setPending] = useStateI(null)
   const dchip =
     kind === 'npu' ? (
       <span className="flm-chip">FLM · npu</span>
@@ -308,143 +280,214 @@ export function DevCell({ s, onProfile, modelFlags }) {
       </span>
     )
   const cur = s.profile || ''
-  const profiles = Array.isArray(profilesQuery.data) ? profilesQuery.data : []
-  const backends = systemInfoQuery.data?.backends ?? {}
-  const pendingRow = pending ? profiles.find((p) => p.name === pending) || null : null
-  // Same cascade the drawer's preview reads (slot-modals.jsx:1466-1472), fed
+  return (
+    <span className="prov">
+      {dchip}
+      <RichSelect
+        className="profile-pill"
+        value={cur}
+        options={profileCardOptions({ s, profiles, backends })}
+        aria-label={`Runtime profile for ${s.name}`}
+        data-testid={`infer-profile-${s.name}`}
+        onChange={(id) => {
+          if (id === PROFILE_EDIT_ROW) {
+            onProfile()
+            return
+          }
+          if (id !== cur) onPickProfile(id)
+        }}
+      />
+    </span>
+  )
+}
+
+// The consequence confirm for a card profile pick — mounted ONCE by the card
+// list, never inside a card.
+//
+// It must live outside `.scard`: that card carries `overflow: hidden`
+// (engine-panes.css `.scard`) and grows a `transform` on hover
+// (`.scard:hover`), and a transformed ancestor becomes the containing block
+// for `position: fixed` descendants. A dialog rendered inside the card would
+// therefore be laid out against the ~250px card box and clipped by it, and
+// would jump between card-box and viewport as the pointer crossed the card.
+// (Neither happy-dom nor Playwright's rect-based visibility notices that —
+// only the eye does.) One dialog for N cards also matches the truth that the
+// confirm is modal: there is only ever one pending pick.
+//
+// ── THE APPLY PATH, VERIFIED FROM SOURCE (mockup callout F) ────────────────
+// The slot drawer persists a profile pick as exactly TWO plain mutations,
+// with no drawer-only state between them:
+//   1. PUT /api/slots/{name}/config {profile} — assembled at
+//      slot-modals.jsx:1013 and fired at :1023 through useSlotEdit
+//      (api/hooks/useSlots.ts:617). The route is a PURE config write with no
+//      lifecycle side effect (api/routes/slots.py:1386, note at :1441), and
+//      the server re-derives the slot's `device` from the new profile itself
+//      (slots/config_write.py:444 → _reconcile_device_profile(merged,
+//      {"profile"}) at :91) — the drawer sends no device of its own.
+//   2. POST /api/slots/{name}/restart, fired in the BACKGROUND (never
+//      awaited) because `changes.profile` is part of `hwChanged`
+//      (slot-modals.jsx:990-996, restart at :1036) via useSlotRestart.
+// Both are reachable from any component, so this is branch (a) of the plan's
+// riddle: Apply performs the write here, one gesture, no half-applied state.
+// The drawer's extra Save-time gates guard fields this control cannot touch —
+// a device+profile pair edited together (slot-modals.jsx:968) and a bound
+// model stranded by a device switch the operator drove (:1135) — and the one
+// consequence that does reach a card pick, a lane move, is announced by the
+// preview's `lane` line instead of blocking (§4 warn-never-block).
+//
+// `pending` is `{ s, profile, modelFlags }` or null; null renders nothing.
+function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose }) {
+  const editMut = useSlotEdit()
+  const restartMut = useSlotRestart()
+  const s = pending?.s || null
+  const name = pending?.profile ?? null
+  const row = name ? (profiles || []).find((p) => p.name === name) || null : null
+  // Same cascade the drawer's preview reads (slot-modals.jsx:1359-1365), fed
   // the slot's PERSISTED device — the card has no pending-device state of its
   // own, so there is nothing to preview but the write it is about to make.
-  const preview = pendingRow
-    ? profileApplyPreview({
-        profile: pendingRow,
-        backends,
-        options: runnerOptions({
+  const preview =
+    row && s
+      ? profileApplyPreview({
+          profile: row,
           backends,
-          device: s.device || '',
-          slotType: s.type,
-          hw: hostHwFlags(systemInfoQuery.data?.hardware),
-        }).options,
-        baselineRunner: s.binary || '',
-        currentDevice: s.device || '',
-        modelFlags: modelFlags || '',
-        currentProfileFlags: profiles.find((p) => p.name === cur)?.flags || '',
-      })
-    : null
+          options: runnerOptions({
+            backends,
+            device: s.device || '',
+            slotType: s.type,
+            hw: hostHwFlags(hardware),
+          }).options,
+          baselineRunner: s.binary || '',
+          currentDevice: s.device || '',
+          modelFlags: pending?.modelFlags || '',
+          currentProfileFlags:
+            (profiles || []).find((p) => p.name === (s.profile || ''))?.flags || '',
+        })
+      : null
+  // A stopped slot does not "restart": SlotManager.restart is unload-then-load
+  // (src/hal0/slots/manager.py:2002 → `await self.unload(...)` +
+  // `return await self.load(...)` at :2028-2029), so applying to an off slot
+  // STARTS it and loads its model — minutes of GPU work the operator did not
+  // ask for if the confirm only said "restarts". Name the lifecycle that will
+  // actually run.
+  const starts = s ? slotCtrlPhase(s) === 'off' : false
   const onApply = () => {
-    const next = pending
-    if (next == null) return
-    setPending(null)
+    if (!s || name == null) return
+    onClose()
     editMut.mutate(
-      { name: s.name, body: { profile: next || null } },
+      // `profile` is always a real name here: the only ''-id row is the
+      // "default" one, and it is offered ONLY when the slot already has no
+      // profile — so picking it is a no-op, not a change. Clearing a profile
+      // is deliberately not a card gesture; "✎ Edit slot…" is where a slot
+      // gets un-profiled.
+      { name: s.name, body: { profile: name } },
       {
         onError: (err) =>
           toast(`${s.name}: profile apply failed — ${err?.message || 'see logs'}`, 'warn'),
         onSuccess: () => {
           restartMut.mutate(s.name, {
             onError: (err) =>
-              toast(`${s.name}: restart failed — ${err?.message || 'see logs'}`, 'warn'),
+              toast(
+                `${s.name}: ${starts ? 'start' : 'restart'} failed — ${err?.message || 'see logs'}`,
+                'warn',
+              ),
           })
-          toast(`${s.name} → profile "${next}" — restarting in the background`, 'info')
+          toast(
+            `${s.name} → profile "${name}" — ${starts ? 'starting' : 'restarting'} in the background`,
+            'info',
+          )
         },
       },
     )
   }
   return (
-    <React.Fragment>
-      <span className="prov" onClick={(e) => e.stopPropagation()}>
-        {dchip}
-        <RichSelect
-          className="profile-pill"
-          value={cur}
-          options={profileCardOptions({ s, profiles, backends })}
-          aria-label={`Runtime profile for ${s.name}`}
-          data-testid={`infer-profile-${s.name}`}
-          onChange={(id) => {
-            if (id === PROFILE_EDIT_ROW) {
-              onProfile()
-              return
-            }
-            if (id !== cur) setPending(id)
-          }}
-        />
-      </span>
-      <ConfirmDialog
-        open={pending != null}
-        title={`Apply profile "${pending}"`}
-        confirmLabel="Apply profile"
-        cancelLabel="Cancel"
-        footerNote="Nothing is written until you apply."
-        onCancel={() => setPending(null)}
-        onConfirm={onApply}
-        message={
-          <div className="hint sl-apply" data-testid="infer-profile-preview">
-            <div>
-              Applying <b>{pending}</b> to this slot:
-            </div>
-            {preview && (
-              <React.Fragment>
-                <div className="sl-apply-line">
-                  · runtime →{' '}
-                  {preview.runtime.unchanged ? (
-                    <React.Fragment>
-                      <b>unchanged</b>
-                      {preview.runtime.title ? (
-                        <React.Fragment>
-                          {' '}
-                          — already on <b>{preview.runtime.title}</b>
-                        </React.Fragment>
-                      ) : (
-                        ' — this profile pins none'
-                      )}
-                    </React.Fragment>
-                  ) : (
-                    <b>{preview.runtime.title}</b>
-                  )}
-                  <span className="pf-be-row">
-                    {runtimeChips(pendingRow, backends).map((c) => (
-                      <span
-                        key={c.key}
-                        className="pf-be mono"
-                        style={c.hue ? { '--bk': c.hue } : null}
-                      >
-                        {c.label}
-                      </span>
-                    ))}
-                  </span>
-                </div>
-                {preview.lane && (
-                  <div className="sl-apply-line">
-                    · lane →{' '}
-                    {preview.lane.unchanged ? (
+    <ConfirmDialog
+      open={pending != null}
+      title={`Apply profile "${name}"`}
+      confirmLabel="Apply profile"
+      cancelLabel="Cancel"
+      footerNote="Nothing is written until you apply."
+      onCancel={onClose}
+      onConfirm={onApply}
+      message={
+        <div className="hint sl-apply" data-testid="infer-profile-preview">
+          <div>
+            Applying <b>{name}</b> to {s ? <b>{s.name}</b> : 'this slot'}:
+          </div>
+          {preview && (
+            <React.Fragment>
+              <div className="sl-apply-line">
+                · runtime →{' '}
+                {preview.runtime.unchanged ? (
+                  <React.Fragment>
+                    <b>unchanged</b>
+                    {preview.runtime.title ? (
                       <React.Fragment>
-                        <b>unchanged</b> ({preview.lane.from})
+                        {' '}
+                        — already on <b>{preview.runtime.title}</b>
                       </React.Fragment>
                     ) : (
-                      <React.Fragment>
-                        {preview.lane.from} → <b>{preview.lane.to}</b>, this slot leaves the{' '}
-                        {preview.lane.from} lane
-                      </React.Fragment>
+                      ' — this profile pins none'
                     )}
-                  </div>
+                  </React.Fragment>
+                ) : (
+                  <b>{preview.runtime.title}</b>
                 )}
-                {preview.flags > 0 && (
-                  <div className="sl-apply-line">
-                    · flags → profile tune{' '}
-                    <b>
-                      replaces {preview.flags} flag{preview.flags === 1 ? '' : 's'}
-                    </b>{' '}
-                    on this slot
-                  </div>
-                )}
+                <span className="pf-be-row">
+                  {runtimeChips(row, backends).map((c) => (
+                    <span
+                      key={c.key}
+                      className="pf-be mono"
+                      style={c.hue ? { '--bk': c.hue } : null}
+                    >
+                      {c.label}
+                    </span>
+                  ))}
+                </span>
+              </div>
+              {preview.lane && (
                 <div className="sl-apply-line">
-                  · slot <b>restarts</b> to apply
+                  · lane →{' '}
+                  {preview.lane.unchanged ? (
+                    <React.Fragment>
+                      <b>unchanged</b> ({preview.lane.from})
+                    </React.Fragment>
+                  ) : (
+                    <React.Fragment>
+                      {preview.lane.from} → <b>{preview.lane.to}</b>, this slot leaves the{' '}
+                      {preview.lane.from} lane
+                    </React.Fragment>
+                  )}
                 </div>
+              )}
+              {preview.flags > 0 && (
+                <div className="sl-apply-line">
+                  · flags → profile tune{' '}
+                  <b>
+                    replaces {preview.flags} flag{preview.flags === 1 ? '' : 's'}
+                  </b>{' '}
+                  on this slot
+                </div>
+              )}
+            </React.Fragment>
+          )}
+          {/* OUTSIDE the `preview` guard: this line states what Apply itself
+              does, which is true whether or not the picked profile still
+              resolves to a catalogue row. A confirm that writes must never
+              render without it. */}
+          <div className="sl-apply-line">
+            {starts ? (
+              <React.Fragment>
+                · slot <b>starts</b> to apply — this loads the model
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                · slot <b>restarts</b> to apply
               </React.Fragment>
             )}
           </div>
-        }
-      />
-    </React.Fragment>
+        </div>
+      }
+    />
   )
 }
 
@@ -740,15 +783,18 @@ export function slotCtrlPhase(slot) {
 //               from their modality toggle, not the slot's own state).
 //   onEditModel / modelName — inline model-edit affordance. Omit both and the
 //               model row renders exactly as before (the NPU stack does).
-//   modelFlags — the bound model's stamped tune (registry row
-//               `defaults.extra_args`), read only by the profile picker's apply
-//               preview to count the flags a profile's tune would replace.
-//               Absent = the preview counts against an empty base tune.
+//   profiles / backends — the /api/profiles rows and the system-info runtime
+//               catalog, for the profile pill's rows. Passed down (not hooked
+//               per card) so N cards share one query subscription.
+//   onPickProfile — called with the picked profile name. The card writes
+//               NOTHING itself: the caller owns the apply confirm, which has to
+//               live outside `.scard` (see ProfileApplyConfirm).
 //   grip / dragging / dropProps — drag-to-reorder wiring (see slots/card-order).
 //               Omit `grip` and the card carries no handle at all, which is how
 //               every non-reorderable caller renders it.
 export function SlotScard({
-  s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName, modelFlags,
+  s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName,
+  profiles, backends, onPickProfile,
   grip, dragging, dropProps,
 }) {
   const dot = dotCls(ind)
@@ -833,7 +879,13 @@ export function SlotScard({
             its own means .scard-foot only ever holds short, fixed-width
             chips + controls, so the controls stop competing for space. */}
         <div className="scard-profile-row">
-          <DevCell s={s} onProfile={onEdit} modelFlags={modelFlags} />
+          <DevCell
+            s={s}
+            onProfile={onEdit}
+            profiles={profiles}
+            backends={backends}
+            onPickProfile={onPickProfile}
+          />
         </div>
         {full && (
           <div className="scard-meta">
@@ -872,10 +924,22 @@ export function SlotScard({
   )
 }
 
-function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, modelRows }) {
+// The headline (full/compact) card grid. Exported for the picker tests, which
+// drive the real card→pane wiring (the profile confirm lives HERE, one per
+// list) rather than a card in isolation.
+export function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, modelRows }) {
   // Operator-arranged order + drag wiring. Called before the early returns so
   // the hook order is stable across the loading/empty/populated renders.
   const reorder = useCardReorder('inference.chat', rows)
+  // Profile picker data, fetched ONCE for the whole card list rather than per
+  // card — react-query would dedupe the requests, but not the subscriptions.
+  const profilesQuery = useProfiles()
+  const systemInfoQuery = useSystemInfo()
+  // The picked-but-unwritten profile: `{ s, profile, modelFlags }` or null.
+  // It lives here, not in the card, because the confirm it drives has to be
+  // rendered outside `.scard` (overflow-clipped, and a hover-transform
+  // containing block) — see ProfileApplyConfirm.
+  const [pendingProfile, setPendingProfile] = useStateI(null)
   if (!rows.length) {
     if (loading)
       return (
@@ -887,7 +951,10 @@ function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, 
       )
     return <div className="scards-empty">no inference slots — create one to start</div>
   }
+  const profiles = Array.isArray(profilesQuery.data) ? profilesQuery.data : []
+  const backends = systemInfoQuery.data?.backends ?? {}
   return (
+    <React.Fragment>
     <div className={'scards ' + (full ? 'full' : 'compact')}>
       {reorder.rows.map(({ s, ind }) => {
         const busy = busyName === s.name
@@ -936,7 +1003,18 @@ function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, 
               handlers.onEditModel ? () => handlers.onEditModel(s) : undefined
             }
             modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
-            modelFlags={modelRow?.defaults?.extra_args || ''}
+            profiles={profiles}
+            backends={backends}
+            onPickProfile={(profile) =>
+              setPendingProfile({
+                s,
+                profile,
+                // The base tune the preview's flag count diffs against —
+                // captured with the pick so the confirm reads the model that
+                // was bound when the operator chose.
+                modelFlags: modelRow?.defaults?.extra_args || '',
+              })
+            }
             grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
             dragging={reorder.dragName === s.name}
             dropProps={reorder.dropProps(s.name)}
@@ -944,6 +1022,16 @@ function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, 
         )
       })}
     </div>
+    {/* Sibling of the grid, not a child of any card — the confirm is a fixed
+        overlay and must not sit inside `.scard`'s overflow/transform box. */}
+    <ProfileApplyConfirm
+      pending={pendingProfile}
+      profiles={profiles}
+      backends={backends}
+      hardware={systemInfoQuery.data?.hardware}
+      onClose={() => setPendingProfile(null)}
+    />
+    </React.Fragment>
   )
 }
 

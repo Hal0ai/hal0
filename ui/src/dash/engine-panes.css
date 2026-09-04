@@ -948,6 +948,34 @@
   overflow: hidden;
   transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
+/* Open-dropdown escape hatch (card-dropdowns). Two card properties fight the
+   two RichSelects a full card carries (model picker, profile pill), whose
+   `.rsel-listbox` is an absolutely-positioned popover that must overflow the
+   card:
+     · `overflow: hidden` above decapitates it — on a card near the bottom of
+       the grid only the first row or two survived. The clip is not
+       incidental: `.scard-foot` is a full-bleed bar and `.scard::before` a
+       full-height accent stripe, and both need the radius to cut them, so
+       `overflow: visible` outright is wrong — it would leak those on every
+       card all the time. Release it only while a listbox is open.
+     · `.scard:hover`'s `transform` (and `.scard.dim`'s `opacity`) makes the
+       card a stacking context, which traps the listbox's `z-index: 30` inside
+       the card's own layer — and since the card sits in DOM order before the
+       utility grid below, the escaped menu painted UNDERNEATH the next row of
+       cards. Lifting the card itself while its menu is open puts that whole
+       layer on top.
+     · `.scard.dim`'s `opacity: 0.55` (an off slot) composites the menu at 55%
+       too, so a dropdown opened on a stopped slot was legibly see-through —
+       the cards behind it read straight through the rows. A card the operator
+       is actively choosing on is not passive furniture: full opacity while
+       its menu is open.
+   All three are keyed on the open state, so a closed card is byte-for-byte
+   what it was. */
+:is(.infer-pane, .npu-pane) .scard:has(.rsel-trigger[aria-expanded='true']) {
+  overflow: visible;
+  z-index: 20;
+  opacity: 1;
+}
 /* left accent — colour per state, matching the profile-card .pf-accent treatment */
 :is(.infer-pane, .npu-pane) .scard::before {
   content: '';
@@ -1374,6 +1402,18 @@
   right: auto;
   min-width: 260px;
   max-width: 340px;
+}
+/* The "✎ Edit slot…" row is a different KIND of thing from the profiles above
+   it — it opens the editor rather than picking a profile — so it is ruled off
+   and set in the muted secondary colour instead of reading as one more
+   profile. */
+:is(.infer-pane, .npu-pane) .prov .rsel-option[data-option-id='__edit_slot__'] {
+  border-top: 1px solid var(--line-strong);
+  margin-top: 4px;
+  color: var(--fg-3);
+}
+:is(.infer-pane, .npu-pane) .prov .rsel-option[data-option-id='__edit_slot__'] .rsel-option-row {
+  color: var(--fg-3);
 }
 /* Profile row layout — name + lane chips. Applies in the open menu AND in the
    closed trigger (which renders the selected option's row), so a long custom

@@ -1,27 +1,21 @@
-// profileApplyPreview (slot-modals.jsx) — the slot drawer's profile apply
-// preview, the `slot-profile-preview` box (mockup panel 12).
+// profileApplyPreview (profile-apply-preview.js) — the profile apply preview
+// BOTH profile surfaces speak: the slot drawer's `slot-profile-preview` box
+// (mockup panel 12) and the slot card's `infer-profile-preview` apply confirm
+// (panel 02).
 //
-// Every consequence of "profile wins" enumerated in one place, BEFORE Save:
-// which runtime the profile pins, which lane the slot lands on, how many
-// flags the profile's tune replaces, and that the slot restarts. The box is
+// Every consequence of "profile wins" enumerated in one place, BEFORE the
+// write: which runtime the profile pins, which lane the slot lands on, how
+// many flags the profile's tune replaces, and that the slot restarts. It is
 // the operator's only chance to see the server-side reconcile (Task 5) before
 // it happens, so the lines must be derived from the SAME hw-cascade the
 // Hardware group drives (runnerOptions/applyRunnerChoice) rather than
 // re-guessed — and a line with nothing true to say is OMITTED, never faked.
 //
-// slot-modals.jsx is a window-globals dash module (`const {...} = React` at
-// module top, `Object.assign(window, {...})` at the bottom), so the globals
-// must be installed before the dynamic import — same pattern as
-// host-hw-flags.test.ts / runner-images-view.test.tsx.
-import React from 'react'
+// The function is pure and lives in its own module, so this file needs no
+// window/React globals shim.
 import { describe, expect, it } from 'vitest'
 import { runnerOptions } from '../hw-cascade.js'
-
-;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
-;(globalThis as unknown as { React: typeof React }).React = React
-;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
-
-const { profileApplyPreview } = await import('../slot-modals.jsx')
+import { profileApplyPreview } from '../profile-apply-preview.js'
 
 // system-info `backends` rows (Task 2 shape) — a dual-lane default, a
 // single-lane ROCm runtime and a single-lane Vulkan one, so both the

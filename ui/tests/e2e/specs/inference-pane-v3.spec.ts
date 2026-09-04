@@ -109,7 +109,14 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     // Consequence BEFORE commit: the apply preview box, and NOTHING written.
     const preview = page.getByTestId('infer-profile-preview')
     await expect(preview).toBeVisible()
+    // `primary` is serving, so the lifecycle line is the restart one.
     await expect(preview).toContainText('restarts')
+    // The confirm is mounted by the card LIST, never inside a card: `.scard`
+    // clips (overflow:hidden) and becomes the containing block for fixed
+    // descendants once it carries a hover transform, which would lay the
+    // dialog out inside the ~250px card box.
+    await expect(page.locator('.scard .modal-shell')).toHaveCount(0)
+    await expect(page.locator('.modal-shell')).toHaveCount(1)
     expect(configPuts).toEqual([])
     // Cancel writes nothing at all.
     await page.locator('.modal-foot button', { hasText: 'Cancel' }).click()
@@ -121,6 +128,19 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await page.locator('.modal-foot button', { hasText: 'Apply profile' }).click()
     await expect.poll(() => configPuts).toEqual([{ profile: 'vulkan' }])
     await expect.poll(() => restarts.length).toBeGreaterThan(0)
+  })
+
+  test('a stopped slot is told the apply will START it, not restart it', async ({ page }) => {
+    await page.goto('/#slots')
+    // `legacy` is the off seed slot. POST /restart is unload+load, so applying
+    // to it starts the slot and loads its model — minutes of GPU work, which
+    // the confirm must not hide behind the word "restart".
+    const pill = body(page).getByTestId('infer-profile-legacy')
+    await pickRichOption(pill, 'rocm-mtp')
+    const preview = page.getByTestId('infer-profile-preview')
+    await expect(preview).toContainText('starts')
+    await expect(preview).toContainText('loads the model')
+    await expect(preview).not.toContainText('restarts')
   })
 
   test('device/profile pill has its own row, out of the bottom action bar (#squished-controls fix)', async ({ page }) => {
