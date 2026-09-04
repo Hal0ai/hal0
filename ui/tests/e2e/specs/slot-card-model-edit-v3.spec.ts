@@ -69,9 +69,15 @@ test.describe('Slot card — inline model edit', () => {
     await page.goto('/#slots')
     await expect(card(page, 'primary')).toBeVisible()
 
-    // Sibling of the picker inside the model row, not nested inside it.
+    // Sibling of the picker inside the model row, not nested inside it. The
+    // model picker is a RichSelect now — `.model-picker-cell` is its own hit
+    // area (the click-stopPropagation guard the native <select> used to carry
+    // directly), wrapping the `.rsel` trigger+listbox. Neither lives inside
+    // the other, so the pencil's "only direct-child button" assertion below
+    // still holds unchanged.
     const row = card(page, 'primary').locator('.smodel-row')
-    await expect(row.locator('> select.model-picker')).toHaveCount(1)
+    await expect(row.locator('> .model-picker-cell')).toHaveCount(1)
+    await expect(row.locator('> .model-picker-cell .rsel')).toHaveCount(1)
     await expect(row.locator('> button')).toHaveCount(1)
     await expect(pencil(page, 'primary')).toBeEnabled()
     await expect(pencil(page, 'primary').locator('svg')).toHaveCount(1)
@@ -99,8 +105,8 @@ test.describe('Slot card — inline model edit', () => {
     await seedSlots(page, [PRIMARY])
     await page.goto('/#slots')
 
-    const select = card(page, 'primary').locator('select.model-picker')
-    await expect(select).toHaveValue('qwen3.6-27b-mtp')
+    const trigger = page.getByTestId('infer-model-primary')
+    await expect(trigger).toContainText('Qwen3.6-27B-MTP')
 
     await pencil(page, 'primary').click()
     await expect(drawer(page)).toBeVisible()
@@ -109,7 +115,7 @@ test.describe('Slot card — inline model edit', () => {
     // container here, so an accidental swap would also cold-restart it.
     await page.waitForTimeout(250)
     expect(swaps).toEqual([])
-    await expect(select).toHaveValue('qwen3.6-27b-mtp')
+    await expect(trigger).toContainText('Qwen3.6-27B-MTP')
   })
 
   test('K3 — the pencil does not open the slot edit drawer', async ({ page }) => {

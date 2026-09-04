@@ -10,11 +10,13 @@
  *     green loaded epill collapsed into it) + ALL slots as full cards, always
  *     visible (the old collapse/expand accordion + qcaret were removed)
  *   - the serving card's status pill shows live tok/s (no fabricated numbers)
- *   - the profile pill surfaces the slot's runtime profile name (slot.profile)
+ *   - the profile pill surfaces the slot's runtime profile name (slot.profile),
+ *     opens a real profile picker, and applies a pick only through its
+ *     consequence confirm (PUT /config + POST /restart)
  *   - NPU/FLM slots are cordoned off — absent from the inference pane, present
  *     in the NPU · FLM stack pane below
  *   - a lifecycle control fires the real mutation (Stop → POST /unload)
- *   - the full card exposes a real model-picker <select> (useModels)
+ *   - the full card exposes a real model-picker RichSelect (useModels)
  *   - the NPU/FLM pane renders its own engine shell + trio
  *   - the Inference tab carries the yellow `infer` accent class
  *
@@ -27,6 +29,7 @@
  * stay valid either way.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 const pane = (page: Page) => page.locator('.infer-pane:not(.infer-hero-top)').first()
 const engine = (page: Page) => pane(page).locator('.engine').first()
@@ -65,10 +68,79 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
   test('profile pill surfaces the runtime profile name (slot.profile)', async ({ page }) => {
     await page.goto('/#slots')
     // primary carries profile "rocm" in the seed; the [ device | PROFILE ]
-    // provider tag renders it on the full card.
+    // provider tag renders it on the full card. The pill is now a RichSelect
+    // trigger (card-dropdowns Task 2) — a closed trigger renders its selected
+    // option's row, so the claim is unchanged.
     const pill = body(page).getByTestId('infer-profile-primary')
     await expect(pill).toBeVisible()
     await expect(pill).toContainText('rocm')
+  })
+
+  test('profile picker lists profiles + an "Edit slot" row that opens the editor', async ({ page }) => {
+    await page.goto('/#slots')
+    const pill = body(page).getByTestId('infer-profile-primary')
+    const listbox = await openRichSelect(pill)
+    // seed profiles are listed as rich rows, current one selected.
+    await expect(listbox.locator('[data-option-id="rocm"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await expect(listbox.locator('[data-option-id="vulkan"]')).toBeVisible()
+    // The pill's OLD gesture — "opens the slot editor" — lives on as the last
+    // row, so it stays reachable from the card.
+    await pickRichOption(pill, '__edit_slot__')
+    await expect.poll(() => page.url()).toContain('#slots/primary')
+  })
+
+  test('picking a profile confirms first, then PUTs /config + POSTs /restart', async ({ page }) => {
+    const configPuts: unknown[] = []
+    const restarts: string[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      configPuts.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/restart', async (route) => {
+      restarts.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/#slots')
+    const pill = body(page).getByTestId('infer-profile-primary')
+    await pickRichOption(pill, 'vulkan')
+    // Consequence BEFORE commit: the apply preview box, and NOTHING written.
+    const preview = page.getByTestId('infer-profile-preview')
+    await expect(preview).toBeVisible()
+    // `primary` is serving, so the lifecycle line is the restart one.
+    await expect(preview).toContainText('restarts')
+    // The confirm is mounted by the card LIST, never inside a card: `.scard`
+    // clips (overflow:hidden) and becomes the containing block for fixed
+    // descendants once it carries a hover transform, which would lay the
+    // dialog out inside the ~250px card box.
+    await expect(page.locator('.scard .modal-shell')).toHaveCount(0)
+    await expect(page.locator('.modal-shell')).toHaveCount(1)
+    expect(configPuts).toEqual([])
+    // Cancel writes nothing at all.
+    await page.locator('.modal-foot button', { hasText: 'Cancel' }).click()
+    await expect(preview).toHaveCount(0)
+    expect(configPuts).toEqual([])
+    expect(restarts).toEqual([])
+    // Apply performs the drawer's own two-call save in one gesture.
+    await pickRichOption(pill, 'vulkan')
+    await page.locator('.modal-foot button', { hasText: 'Apply profile' }).click()
+    await expect.poll(() => configPuts).toEqual([{ profile: 'vulkan' }])
+    await expect.poll(() => restarts.length).toBeGreaterThan(0)
+  })
+
+  test('a stopped slot is told the apply will START it, not restart it', async ({ page }) => {
+    await page.goto('/#slots')
+    // `legacy` is the off seed slot. POST /restart is unload+load, so applying
+    // to it starts the slot and loads its model — minutes of GPU work, which
+    // the confirm must not hide behind the word "restart".
+    const pill = body(page).getByTestId('infer-profile-legacy')
+    await pickRichOption(pill, 'rocm-mtp')
+    const preview = page.getByTestId('infer-profile-preview')
+    await expect(preview).toContainText('starts')
+    await expect(preview).toContainText('loads the model')
+    await expect(preview).not.toContainText('restarts')
   })
 
   test('device/profile pill has its own row, out of the bottom action bar (#squished-controls fix)', async ({ page }) => {
@@ -207,25 +279,28 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
     await page.goto('/#slots')
-    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
-    const opts = await picker.locator('option').evaluateAll((els) =>
-      els.map((e) => (e as HTMLOptionElement).value).filter(Boolean),
+    const trigger = page.getByTestId('infer-model-primary')
+    const listbox = await openRichSelect(trigger)
+    const ids = await listbox.locator('[data-option-id]').evaluateAll((els) =>
+      els.map((e) => e.getAttribute('data-option-id') || '').filter(Boolean),
     )
-    const cur = await picker.inputValue()
-    const next = opts.find((v) => v !== cur)
+    const curEl = listbox.locator('[aria-selected="true"]')
+    const cur = (await curEl.count()) > 0 ? await curEl.first().getAttribute('data-option-id') : null
+    const next = ids.find((id) => id !== cur)
     test.skip(!next, 'need ≥2 llm models in the catalog to swap')
-    await picker.selectOption(next!)
+    await pickRichOption(trigger, next!)
     await expect.poll(() => swaps.length).toBeGreaterThan(0)
     expect(typeof swaps[0].model_id).toBe('string')
   })
 
-  test('full card exposes a real model-picker <select> (useModels)', async ({ page }) => {
+  test('full card exposes a real model-picker RichSelect (useModels)', async ({ page }) => {
     await page.goto('/#slots')
     // The full-card model picker is always rendered in the engine body now.
-    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
-    await expect(picker).toHaveCount(1)
+    const trigger = body(page).getByTestId('infer-slot-primary').getByTestId('infer-model-primary')
+    await expect(trigger).toHaveCount(1)
     // the picker is populated (at minimum the current model is an option).
-    await expect.poll(async () => picker.locator('option').count()).toBeGreaterThan(0)
+    const listbox = await openRichSelect(trigger)
+    await expect.poll(async () => listbox.locator('[role="option"]').count()).toBeGreaterThan(0)
   })
 
   test('utility-type slots route to the support footer regardless of group', async ({ page }) => {
