@@ -10,7 +10,13 @@
 // doctor feed via useDiagnoses. A backend without that route degrades to
 // synthesised GET /api/system-info evidence plus a stub-with-reason.
 
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { useDiagnoses } from '@/api/hooks/useDiagnoses'
+import { openDocTarget } from './next-step-actions'
+import { useNextStepRunner } from './useNextStepRunner'
+import { StepsDrawer } from './StepsDrawer.jsx'
+
+const { useState } = React
 
 // severity → hue. hal0's Severity is info|warn|fail|critical; the CSS palette
 // has --info/--warn/--err/--ok, so fail+critical both map to --err (critical
@@ -28,23 +34,86 @@ const VERDICT = {
   critical: { label: 'critical', hue: 'var(--err)' },
 }
 
-function NextStep({ step }) {
-  const isDoc = step.kind === 'doc'
-  const isCmd = step.kind === 'command'
+const CHIP_STYLE = {
+  fontSize: 10.5,
+  color: 'var(--fg-3)',
+  borderColor: 'var(--line)',
+  background: 'var(--bg-2)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+}
+
+// One acting chip per NextStep: `command` copies (and, where the command
+// maps to an existing typed mutation, offers Run); `doc` opens the link;
+// `manual` expands the full instruction inline. The command text itself
+// renders in mono next to the label — no longer tooltip-only (D6 chips).
+function NextStep({ step, runner }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (step.kind === 'doc') {
+    return (
+      <button type="button" className="chip mono" data-testid="diagnosis-next-step" style={CHIP_STYLE} onClick={() => openDocTarget(step.target)}>
+        ↗ {step.label}
+      </button>
+    )
+  }
+
+  if (step.kind === 'manual') {
+    return (
+      <span className="chip mono" data-testid="diagnosis-next-step" style={{ ...CHIP_STYLE, flexDirection: 'column', alignItems: 'flex-start' }}>
+        <button
+          type="button"
+          data-testid="diagnosis-next-step-manual-toggle"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          style={{ background: 'none', border: 'none', color: 'inherit', font: 'inherit', padding: 0, cursor: 'pointer' }}
+        >
+          • {step.label}
+        </button>
+        {expanded && <span style={{ color: 'var(--fg-4)' }}>{step.target}</span>}
+      </span>
+    )
+  }
+
+  // command
+  const action = runner.actionFor(step)
   return (
-    <span
-      className="chip mono"
-      data-testid="diagnosis-next-step"
-      title={step.target}
-      style={{ fontSize: 10.5, color: 'var(--fg-3)', borderColor: 'var(--line)', background: 'var(--bg-2)' }}
-    >
-      {isCmd ? '$ ' : isDoc ? '↗ ' : '• '}{step.label}
+    <span className="chip mono" data-testid="diagnosis-next-step" style={CHIP_STYLE}>
+      $ {step.label}
+      <code style={{ color: 'var(--fg-4)' }}>{step.target}</code>
+      <button
+        type="button"
+        data-testid="diagnosis-next-step-copy"
+        aria-label={`Copy ${step.target}`}
+        onClick={async () => {
+          const ok = await copyTextToClipboard(step.target)
+          toast(ok ? 'Copied to clipboard' : 'Copy failed', ok ? 'ok' : 'err')
+        }}
+        style={{ background: 'none', border: '1px solid var(--line)', borderRadius: 4, color: 'inherit', font: 'inherit', padding: '1px 5px', cursor: 'pointer' }}
+      >
+        Copy
+      </button>
+      {action && (
+        <button
+          type="button"
+          data-testid="diagnosis-next-step-run"
+          disabled={runner.pending}
+          onClick={() => runner.run(step)}
+          style={{ background: 'none', border: '1px solid var(--line)', borderRadius: 4, color: 'inherit', font: 'inherit', padding: '1px 5px', cursor: 'pointer' }}
+        >
+          Run
+        </button>
+      )}
     </span>
   )
 }
 
 function DiagnosisCard({ d }) {
   const sev = SEV[d.severity] || SEV.info
+  const runner = useNextStepRunner()
+  const [stepsOpen, setStepsOpen] = useState(false)
+  const steps = Array.isArray(d.next_steps) ? d.next_steps : []
   return (
     <div
       className="s-row"
@@ -64,6 +133,16 @@ function DiagnosisCard({ d }) {
         <span className="mono" data-testid="diagnosis-id" style={{ fontSize: 11, color: 'var(--fg-4)' }}>{d.id}</span>
         <span style={{ fontSize: 13, color: 'var(--fg)' }}>{d.summary}</span>
         <span style={{ flex: 1 }} />
+        {steps.length >= 2 && (
+          <button
+            type="button"
+            className="btn ghost sm"
+            data-testid="diagnosis-open-steps"
+            onClick={() => setStepsOpen(true)}
+          >
+            Steps ({steps.length})
+          </button>
+        )}
         {d.confidence && (
           <span className="mono" style={{ fontSize: 9.5, color: 'var(--fg-5)' }}>{d.confidence} confidence</span>
         )}
@@ -85,10 +164,20 @@ function DiagnosisCard({ d }) {
       )}
 
       {/* next steps */}
-      {Array.isArray(d.next_steps) && d.next_steps.length > 0 && (
+      {steps.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
-          {d.next_steps.map((s, i) => <NextStep key={i} step={s} />)}
+          {steps.map((s, i) => <NextStep key={i} step={s} runner={runner} />)}
         </div>
+      )}
+
+      {steps.length >= 2 && (
+        <StepsDrawer
+          open={stepsOpen}
+          onClose={() => setStepsOpen(false)}
+          eyebrow={d.id}
+          title={d.summary}
+          steps={steps}
+        />
       )}
     </div>
   )
