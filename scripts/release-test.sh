@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # single-quoted ssh_exec blocks expand on the remote LXC, not locally — intentional throughout
 # hal0 release-test driver (tier γ).
 #
 # SSHes into the hal0-test LXC (set HAL0_TEST_HOST) and walks the
@@ -21,8 +22,19 @@
 #   - Team A owns toolbox image presence in manifest.json. Rows that need
 #     an image not yet published (flm, rocm) are reported as "skip" with
 #     a clear "image-not-available" detail — not a hard failure.
-#   - Team D owns the updater CLI. If `hal0 update --check` is still a
-#     stub, the updater row is reported as "deferred".
+#   - The updater row is check-only by design: a headless
+#     `hal0 update --rollback` proceeds WITHOUT confirmation
+#     (src/hal0/cli/update_commands.py::update) and would revert the very
+#     install this gate is exercising.
+#
+# CLI contract (issue #2050): the slot rows speak the CURRENT CLI —
+# `slot create NAME --type <llm|transcription|tts|…> --hardware
+# <vulkan|rocm|cpu> -m MODEL` then `slot load NAME`
+# (src/hal0/cli/slot_commands.py::slot_create / ::slot_load; load blocks
+# until the server-side state machine converges, so a 0 exit == ready).
+# Models are discovered from the box's own registry (`hal0 model list
+# --json` → /api/models rows carry `type` + `installed`) rather than
+# hardcoding ids the box may not have.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -145,42 +157,111 @@ since_ms() {
 
 # ── cleanup hook ─────────────────────────────────────────────────────────────
 # Ensure every slot we created on the LXC is torn down even on early exit.
+# `slot delete` needs --force: over a non-tty ssh channel the typer confirm
+# prompt cannot be answered and aborts (slot_commands.py::slot_delete).
+# Seeded slots we merely loaded (flm) are unloaded, never deleted.
 CREATED_SLOTS=()
+LOADED_SEEDED_SLOTS=()
+# shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup() {
-    if [[ ${#CREATED_SLOTS[@]} -eq 0 ]]; then return; fi
+    if [[ ${#CREATED_SLOTS[@]} -eq 0 && ${#LOADED_SEEDED_SLOTS[@]} -eq 0 ]]; then return; fi
     log_step "Cleanup"
-    for slot in "${CREATED_SLOTS[@]}"; do
-        ssh_exec "${REMOTE_HAL0_BIN} slot unload ${slot} 2>/dev/null || true" || true
-        ssh_exec "${REMOTE_HAL0_BIN} slot delete ${slot} 2>/dev/null || true" || true
-        log_info "cleaned up ${slot}"
-    done
+    if [[ ${#LOADED_SEEDED_SLOTS[@]} -gt 0 ]]; then
+        for slot in "${LOADED_SEEDED_SLOTS[@]}"; do
+            ssh_exec "${REMOTE_HAL0_BIN} slot unload ${slot} 2>/dev/null || true" || true
+            log_info "unloaded seeded ${slot}"
+        done
+    fi
+    if [[ ${#CREATED_SLOTS[@]} -gt 0 ]]; then
+        for slot in "${CREATED_SLOTS[@]}"; do
+            ssh_exec "${REMOTE_HAL0_BIN} slot unload ${slot} 2>/dev/null || true" || true
+            ssh_exec "${REMOTE_HAL0_BIN} slot delete ${slot} --force 2>/dev/null || true" || true
+            log_info "cleaned up ${slot}"
+        done
+    fi
 }
 trap cleanup EXIT
 
 # Track + create a unique slot on the LXC.
+# Current create contract (slot_commands.py::slot_create): positional NAME,
+# --type (dispatcher slot type), --hardware (vulkan|rocm|cpu), -m/--model
+# (required). Provider + runtime profile are inferred from type/hardware
+# (e.g. tts+cpu → kokoro, transcription+cpu → moonshine); there is no
+# --no-start (creation never starts a slot — loading is `slot load`).
 remote_slot_create() {
-    # remote_slot_create <suffix> <backend> <provider> <model_id>
-    local slot="${HAL0_TEST_PREFIX}-$1" backend="$2" provider="$3" model="$4"
+    # remote_slot_create <suffix> <type> <hardware> <model_id>
+    local slot="${HAL0_TEST_PREFIX}-$1" type="$2" hardware="$3" model="$4"
     CREATED_SLOTS+=("${slot}")
-    ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --backend ${backend} --provider ${provider} --model ${model} --no-start" \
-        2>/dev/null || true
+    ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --type ${type} --hardware ${hardware} -m '${model}'" \
+        >/dev/null 2>&1 || true
     echo "${slot}"
+}
+
+# First installed registry model of the given dispatcher type, or empty.
+# `hal0 model list --json` emits the raw /api/models aggregate; each row
+# carries `type` (services/models_service.py::dispatch_type — llm |
+# embedding | reranking | transcription | tts | image) and `installed`.
+remote_model_for_type() {
+    # -c (not a heredoc): the JSON arrives on the pipe, so stdin must stay
+    # attached to it rather than being overridden by a heredoc program.
+    ssh_exec "${REMOTE_HAL0_BIN} model list --json 2>/dev/null" 2>/dev/null \
+        | python3 -c '
+import json, sys
+
+want = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+models = data.get("models", []) if isinstance(data, dict) else data
+for m in models:
+    if m.get("installed") and m.get("type") == want:
+        print(m.get("id", ""))
+        break
+' "$1"
+}
+
+# Assigned model of an existing slot (empty if the slot is absent or is a
+# model-less grey seed). `hal0 slot list --json` emits the raw /api/slots
+# array (slot_commands.py::slot_list).
+remote_slot_model() {
+    ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null" 2>/dev/null \
+        | python3 -c '
+import json, sys
+
+name = sys.argv[1]
+try:
+    slots = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for s in slots if isinstance(slots, list) else []:
+    if s.get("name") == name:
+        print(s.get("model") or s.get("model_id") or "")
+        break
+' "$1"
 }
 
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
 DIGEST="$(manifest_digest vulkan || true)"
+MODEL="$(remote_model_for_type llm || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.vulkan.digest] is null — Team A pending)"
+elif [[ -z "${MODEL}" ]]; then
+    add_row "vulkan" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
-    SLOT="$(remote_slot_create vulkan vulkan llama-server qwen2.5-0.5b-q4_k_m)"
+    SLOT="$(remote_slot_create vulkan llm vulkan "${MODEL}")"
+    # Auth: any /v1 call needs the admin bearer when HAL0_ADMIN_KEY is set;
+    # source it from api.env the same way the unit's EnvironmentFile does.
     if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
-        && ssh_exec "curl -fsS -m 30 ${REMOTE_HAL0_API}/v1/chat/completions \
+        && ssh_exec "[ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; \
+            curl -fsS -m 60 ${REMOTE_HAL0_API}/v1/chat/completions \
+            \${HAL0_ADMIN_KEY:+-H \"Authorization: Bearer \${HAL0_ADMIN_KEY}\"} \
             -H 'content-type: application/json' \
-            -d '{\"model\":\"qwen2.5-0.5b-q4_k_m\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
+            -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
             >/dev/null"; then
-        add_row "vulkan" "pass" "$(since_ms "${start}")" "chat/completions returned non-empty body"
+        add_row "vulkan" "pass" "$(since_ms "${start}")" "chat/completions answered on a gpu-vulkan slot serving ${MODEL}"
     else
         add_row "vulkan" "fail" "$(since_ms "${start}")" "slot load or chat/completions smoke failed — check journalctl -u hal0-slot@${SLOT}"
     fi
@@ -190,14 +271,22 @@ fi
 log_step "Row: rocm"
 start=$(date +%s%N)
 DIGEST="$(manifest_digest rocm || true)"
+MODEL="$(remote_model_for_type llm || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "rocm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.rocm.digest] is null — Team A pending)"
+elif ! ssh_exec "test -e /dev/kfd"; then
+    # gpu-rocm llama.cpp slots refuse loudly on a kfd-less host
+    # (providers/_gpu.py::require_kfd_for_gpu_slot) — that refusal is
+    # correct behaviour, not a release regression, so this is a skip.
+    add_row "rocm" "skip" "$(since_ms "${start}")" "no /dev/kfd on ${HAL0_TEST_HOST} — gpu-rocm slots correctly refuse without an ROCm compute node"
+elif [[ -z "${MODEL}" ]]; then
+    add_row "rocm" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
-    SLOT="$(remote_slot_create rocm rocm llama-server qwen2.5-0.5b-q4_k_m)"
+    SLOT="$(remote_slot_create rocm llm rocm "${MODEL}")"
     if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
-        add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready state on ROCm backend"
+        add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready on the gpu-rocm backend serving ${MODEL} (readiness includes the #1922 output-sanity probe)"
     else
-        add_row "rocm" "fail" "$(since_ms "${start}")" "rocm slot failed to reach ready"
+        add_row "rocm" "fail" "$(since_ms "${start}")" "rocm slot failed to reach ready — check journalctl -u hal0-slot@${SLOT}"
     fi
 fi
 
@@ -207,12 +296,24 @@ start=$(date +%s%N)
 DIGEST="$(manifest_digest flm || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "flm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.flm.digest] is null — Team A marked FLM as a stretch)"
+elif ! ssh_exec "test -e /dev/accel/accel0"; then
+    add_row "flm" "skip" "$(since_ms "${start}")" "npu-not-present (/dev/accel/accel0 missing on ${HAL0_TEST_HOST})"
 else
-    SLOT="$(remote_slot_create flm flm flm llama3.2-3b-q4)"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
-        add_row "flm" "pass" "$(since_ms "${start}")" "FLM/NPU slot reached ready"
+    # `slot create --hardware` only speaks vulkan|rocm|cpu — npu has no
+    # v0.1 hardware token (slot_commands.py::SlotHardware), so this row
+    # exercises the SEEDED flm slot (installer/etc-hal0/slots/flm.toml,
+    # device=npu). The seed ships model-less (grey tile, #1369); a box
+    # with no FLM model assigned skips rather than fails.
+    FLM_MODEL="$(remote_slot_model flm || true)"
+    if [[ -z "${FLM_MODEL}" ]]; then
+        add_row "flm" "skip" "$(since_ms "${start}")" "seeded flm slot absent or model-less (grey seed, #1369) — assign an FLM model to it first"
     else
-        add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed; check /sys/class/accel and xdna driver"
+        LOADED_SEEDED_SLOTS+=("flm")
+        if ssh_exec "${REMOTE_HAL0_BIN} slot load flm" >/dev/null 2>&1; then
+            add_row "flm" "pass" "$(since_ms "${start}")" "seeded flm slot (device=npu) reached ready serving ${FLM_MODEL}"
+        else
+            add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load; check /sys/class/accel and the xdna driver"
+        fi
     fi
 fi
 
@@ -220,11 +321,24 @@ fi
 log_step "Row: moonshine (STT)"
 start=$(date +%s%N)
 DIGEST="$(manifest_digest moonshine || true)"
+MODEL="$(remote_model_for_type transcription || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "moonshine" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.moonshine.digest] is null)"
+elif [[ -z "${MODEL}" ]]; then
+    add_row "moonshine" "skip" "$(since_ms "${start}")" "no installed transcription model in the registry — pull/register a moonshine model first"
 else
-    # Generate a 1s 440Hz sine WAV on the remote, post it to /v1/audio/transcriptions.
-    if ssh_exec '
+    # A transcription+cpu slot infers the moonshine provider + profile
+    # (slot_commands.py::slot_create help; install/profile_derive.py).
+    SLOT="$(remote_slot_create moonshine transcription cpu "${MODEL}")"
+    # Generate a 1s 440Hz sine WAV on the remote, post it to
+    # /v1/audio/transcriptions. The `model` form field is REQUIRED by the
+    # gateway (v1.py::audio_transcriptions, require_model=True) and routes
+    # to the slot bound to that model id; the moonshine child itself does
+    # not validate the field, so the registry id we just bound is correct.
+    # Auth header is required on any box with HAL0_ADMIN_KEY set
+    # (unauthenticated is 401); sourced from api.env like an operator would.
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+        && ssh_exec '
         set -e
         TMP=$(mktemp -d)
         python3 -c "
@@ -233,22 +347,16 @@ with wave.open(\"$TMP/t.wav\",\"wb\") as w:
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
     w.writeframes(b\"\".join(struct.pack(\"<h\", int(32000*math.sin(2*math.pi*440*i/16000))) for i in range(16000)))
 "
-        # The served id is moonshine-<arch>-en (moonshine_server /v1/models),
-        # NOT moonshine-<arch> — a bare "moonshine-base" falls through the
-        # router to an upstream that answers 501 "does not support audio
-        # input", so this row could never pass as written. Auth header is
-        # required on any box with HAL0_ADMIN_KEY set (unauthenticated is
-        # 401); it is sourced from api.env the same way an operator would.
         set +u; [ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; set -u
-        curl -fsS -m 30 '"${REMOTE_HAL0_API}"'/v1/audio/transcriptions \
+        curl -fsS -m 60 '"${REMOTE_HAL0_API}"'/v1/audio/transcriptions \
             ${HAL0_ADMIN_KEY:+-H "Authorization: Bearer $HAL0_ADMIN_KEY"} \
-            -F file=@$TMP/t.wav -F model=moonshine-base-en \
+            -F file=@$TMP/t.wav -F model='"'${MODEL}'"' \
             -o $TMP/out.json
         rm -rf $TMP
     '; then
-        add_row "moonshine" "pass" "$(since_ms "${start}")" "transcription endpoint returned a JSON body for 1s sine WAV"
+        add_row "moonshine" "pass" "$(since_ms "${start}")" "transcription slot loaded (${MODEL}) and /v1/audio/transcriptions answered for a 1s sine WAV"
     else
-        add_row "moonshine" "fail" "$(since_ms "${start}")" "audio/transcriptions smoke failed"
+        add_row "moonshine" "fail" "$(since_ms "${start}")" "slot load or audio/transcriptions smoke failed — check journalctl -u hal0-slot@${SLOT}"
     fi
 fi
 
@@ -256,48 +364,58 @@ fi
 log_step "Row: kokoro (TTS)"
 start=$(date +%s%N)
 DIGEST="$(manifest_digest kokoro || true)"
+MODEL="$(remote_model_for_type tts || true)"
 if [[ -z "${DIGEST}" ]]; then
     add_row "kokoro" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.kokoro.digest] is null)"
+elif [[ -z "${MODEL}" ]]; then
+    add_row "kokoro" "skip" "$(since_ms "${start}")" "no installed tts model in the registry — pull/register a kokoro model first"
 else
-    if ssh_exec '
+    # A tts+cpu slot infers the kokoro profile (install/profile_derive.py:
+    # cpu + tts → kokoro). The gateway requires `model` in the body
+    # (v1.py::audio_speech) and routes it to the tts slot bound to that id.
+    # `voice` is optional (the kokoro server falls back to its default
+    # voice); response_format must be requested as wav explicitly — the
+    # kokoro server's default is mp3, which would fail the RIFF check.
+    SLOT="$(remote_slot_create kokoro tts cpu "${MODEL}")"
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+        && ssh_exec '
         set -e
         TMP=$(mktemp -d)
-        curl -fsS -m 30 '"${REMOTE_HAL0_API}"'/v1/audio/speech \
+        set +u; [ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; set -u
+        curl -fsS -m 60 '"${REMOTE_HAL0_API}"'/v1/audio/speech \
+            ${HAL0_ADMIN_KEY:+-H "Authorization: Bearer $HAL0_ADMIN_KEY"} \
             -H "content-type: application/json" \
-            -d "{\"model\":\"kokoro\",\"input\":\"hello hal0\",\"voice\":\"af\"}" \
+            -d "{\"model\":\"'"${MODEL}"'\",\"input\":\"hello hal0\",\"response_format\":\"wav\"}" \
             -o $TMP/out.wav
         # Non-empty WAV check: RIFF header + > 1KB body.
         head -c 4 "$TMP/out.wav" | grep -q RIFF
         test "$(wc -c < "$TMP/out.wav")" -gt 1024
         rm -rf $TMP
     '; then
-        add_row "kokoro" "pass" "$(since_ms "${start}")" "audio/speech returned a non-empty RIFF WAV (>1KiB)"
+        add_row "kokoro" "pass" "$(since_ms "${start}")" "tts slot loaded (${MODEL}) and audio/speech returned a non-empty RIFF WAV (>1KiB)"
     else
-        add_row "kokoro" "fail" "$(since_ms "${start}")" "audio/speech smoke failed"
+        add_row "kokoro" "fail" "$(since_ms "${start}")" "slot load or audio/speech smoke failed — check journalctl -u hal0-slot@${SLOT}"
     fi
 fi
 
-# ── ROW: updater end-to-end (Team D) ─────────────────────────────────────────
-log_step "Row: updater (check / apply / rollback)"
+# ── ROW: updater (check-only) ────────────────────────────────────────────────
+log_step "Row: updater (check)"
 start=$(date +%s%N)
-# Probe whether Team D's CLI flow is real or still the stub from cli/main.py.
-# We use a fake test manifest URL via HAL0_UPDATE_MANIFEST_URL so a stub'd
-# response is harmless.
-UPDATER_CHECK_OUT="$(ssh_exec "HAL0_UPDATE_MANIFEST_URL=https://hal0.dev/releases/test.json ${REMOTE_HAL0_BIN} update --check 2>&1 || true")"
-if echo "${UPDATER_CHECK_OUT}" | grep -qiE "not implemented|TODO|stub"; then
-    add_row "updater" "deferred" "$(since_ms "${start}")" "Team D's update CLI is still a stub (cli/main.py:172); re-run after their merge"
+# Check-only, deliberately. The old apply/rollback round-trip is retired:
+#   - a headless `hal0 update --rollback` proceeds WITHOUT confirmation
+#     (update_commands.py::update — no TTY means no prompt) and would
+#     genuinely revert the install tree this gate is exercising;
+#   - `--channel nightly` PERSISTS a channel change on the box;
+#   - the old HAL0_UPDATE_MANIFEST_URL "safety net" never existed in the
+#     product (the updater reads HAL0_RELEASES_URL, and the check runs in
+#     the daemon via GET /api/updates/check, so a CLI-side env var never
+#     reached it anyway).
+# `hal0 update --check` is a real, side-effect-free verb; exit 0 means the
+# daemon answered /api/updates/check.
+if ssh_exec "${REMOTE_HAL0_BIN} update --check" >/dev/null 2>&1; then
+    add_row "updater" "pass" "$(since_ms "${start}")" "update --check completed (daemon answered /api/updates/check)"
 else
-    # Apply + rollback round-trip — best-effort. If apply fails because
-    # the test manifest URL doesn't exist, mark deferred not fail.
-    APPLY_OUT="$(ssh_exec "HAL0_UPDATE_MANIFEST_URL=https://hal0.dev/releases/test.json ${REMOTE_HAL0_BIN} update --channel nightly 2>&1 || true")"
-    ROLLBACK_OUT="$(ssh_exec "${REMOTE_HAL0_BIN} update --rollback 2>&1 || true")"
-    if echo "${APPLY_OUT}${ROLLBACK_OUT}" | grep -qiE "not implemented|TODO|stub"; then
-        add_row "updater" "deferred" "$(since_ms "${start}")" "Team D partial: check works, apply/rollback still stubbed"
-    elif echo "${ROLLBACK_OUT}" | grep -qiE "error|failed"; then
-        add_row "updater" "fail" "$(since_ms "${start}")" "rollback raised an error: $(echo "${ROLLBACK_OUT}" | head -n1)"
-    else
-        add_row "updater" "pass" "$(since_ms "${start}")" "update --check, --apply, --rollback completed"
-    fi
+    add_row "updater" "fail" "$(since_ms "${start}")" "hal0 update --check failed — daemon down or /api/updates/check errored"
 fi
 
 # ── ROW: OpenWebUI ───────────────────────────────────────────────────────────
