@@ -24,6 +24,37 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Installer forensics**: every install now leaves evidence behind instead of
+  only a terminal scrollback. `install.sh` tees the whole run to
+  `/var/log/hal0/install-<ts>.log` (falling back to `/tmp/hal0-install-<ts>.log`
+  when not root), prints that path at the start and end, and includes the
+  latest one in `hal0 doctor bundle`'s `logs/` section. An ERR-trapped abort
+  now also writes `hal0-install-report-<ts>.txt` next to the log — redacted
+  environment (mirrors `hal0.api._redact`'s key-name pattern), port owners,
+  hal0 unit status, a hardware summary, and a log tail — via the new
+  `installer/lib/failure-report.sh`, and the trap prints its path alongside
+  the existing step-specific recovery advice. Every `installer/lib/*.sh` and
+  `install.sh`'s own top now carries the `Purpose / Expects / Provides /
+  Modder notes` header convention (documented in `installer/README.md`) so a
+  future decomposition of the 4,000-line script into standalone steps has a
+  contract to extract against. `ui_step` gained an optional per-step time
+  estimate (`EST. TIME: ~30s`) and now measures real per-step durations
+  (`UI_STEP_DURATIONS`), with total elapsed time printed at the end. A new
+  `--summary-json=PATH` flag writes a versioned (`hal0.install-summary.v1`),
+  atomically-written machine-readable install summary — versions, dev/no-start
+  mode, network bind info, hardware class, the brain model pulled, warning/
+  error counts, and per-step durations — documented in
+  `docs/getting-started/install.mdx`. Container-image pulls (the OpenWebUI
+  background warm-cache pull in `install.sh`, and the dashboard's
+  runner-image pull job in `hal0.registry.runner_pull`) now retry transient
+  failures with backoff (`installer/lib/pull-retry.sh` on the bash side,
+  `is_retryable_pull_error`/`pull_backoff_delay` in Python), classify
+  auth/404/manifest-unknown/disk-full failures as non-retryable so they fail
+  fast instead of spinning, and verify the image actually landed in local
+  storage after an apparent success before declaring victory.
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a

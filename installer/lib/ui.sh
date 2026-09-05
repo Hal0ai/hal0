@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# installer/lib/ui.sh — shared UI helpers for the hal0 installer family.
+# installer/lib/ui.sh
 #
-# Source from a sibling script with:
-#     source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
-#
-# Public API
-#   ui_banner                    — 5-line ASCII banner with version
-#   ui_step "Title"              — incremental "── (n/N) Title ──"
-#   ui_spinner_run desc cmd...   — run cmd in background, foreground spinner
-#   ui_box "Title" "line1" ...   — Unicode box around a multi-line block
-#   info / warn / err / die      — log helpers (signatures unchanged)
-#
-# Globals honoured
-#   HAL0_PLAIN=1                 — disable banner/colors/box/spinner glyphs
-#   NO_COLOR=1                   — disable colors only (https://no-color.org)
-#   UI_STEP_TOTAL                — total step count (caller sets before first ui_step)
-#   HAL0_VERSION                 — override the version string
-#
-# Globals exported (for back-compat with existing scripts)
-#   RED YEL GRN BLU AMBER BOLD DIM RST
-#   UI_STEP_NUM                  — count of ui_step calls so far
-#   CURRENT_STEP                 — most recent ui_step title (useful in traps)
-#   UI_PLAIN                     — 1 if degraded mode is active
+# Purpose: Shared terminal UI for the hal0 installer family — banner, the
+#          "(n/N) Title" step counter with per-step time estimates and
+#          measured durations, a spinner for long-running commands, a
+#          boxed summary, and the info/warn/err/die log helpers.
+# Expects: Source from a sibling script with
+#          `source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"`. Honors
+#          HAL0_PLAIN=1 (disable banner/colors/box/spinner glyphs),
+#          NO_COLOR=1 (colors only, https://no-color.org), UI_STEP_TOTAL
+#          (caller sets before the first ui_step call), HAL0_VERSION
+#          (override the detected version string).
+# Provides: ui_banner; ui_step TITLE [ESTIMATE]; ui_step_finalize (closes
+#          out the last step's measured duration); ui_spinner_run desc
+#          cmd...; ui_box "Title" "line1" ...; info/warn/err/die.
+#          Exported for back-compat with existing scripts: RED YEL GRN BLU
+#          AMBER BOLD DIM RST, UI_STEP_NUM (count of ui_step calls so far),
+#          UI_STEP_DURATIONS (assoc array, title -> elapsed seconds),
+#          CURRENT_STEP (most recent ui_step title, read by the ERR trap),
+#          UI_PLAIN (1 if degraded mode is active).
+# Modder notes:
+#   Change the CRT-free hal0 theme (banner, box glyphs, spinner style) here.
+#   ui_step's estimate is advisory text only — it is never used for timing
+#   logic; UI_STEP_DURATIONS is the actual measured source of truth and is
+#   what --summary-json reports.
 
 # shellcheck shell=bash
 
@@ -143,17 +145,45 @@ ui_banner() {
 # ── ui_step ─────────────────────────────────────────────────────────────────
 # Caller sets UI_STEP_TOTAL before the first ui_step call. If unset, we
 # print "?" so a missing-config bug is visible rather than silently absent.
+#
+# ui_step TITLE [ESTIMATE]
+#   ESTIMATE is an optional honest range ("~10-30s", "~1-5 min") printed
+#   next to the title so an operator watching a quiet step (a pip install,
+#   a multi-GB model pull) knows whether to expect seconds or minutes.
+#   Omit it for a step with no meaningful wait.
+#
+# Measures wall-clock time PER STEP (via bash's $SECONDS, zero subprocess
+# cost) into UI_STEP_DURATIONS, keyed by title — install.sh's
+# `ui_step_finalize` (call once, after the last step's work is done) closes
+# out the final step's duration so --summary-json can report real numbers
+# instead of only estimates. Durations are best-effort bookkeeping, never
+# consulted for control flow, so a caller that never touches
+# UI_STEP_DURATIONS pays nothing extra beyond the array writes.
 UI_STEP_NUM=${UI_STEP_NUM:-0}
 CURRENT_STEP=""
+declare -A UI_STEP_DURATIONS 2>/dev/null || true
+_UI_STEP_LAST_TITLE=""
+_UI_STEP_LAST_START=0
 
 ui_step() {
+    local title="$1" estimate="${2:-}"
+
+    if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
+        UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+    fi
+    _UI_STEP_LAST_TITLE="$title"
+    _UI_STEP_LAST_START="$SECONDS"
+
     UI_STEP_NUM=$((UI_STEP_NUM + 1))
-    CURRENT_STEP="$*"
+    CURRENT_STEP="$title"
     local total="${UI_STEP_TOTAL:-?}"
-    local title="$*"
+    local suffix=""
+    [[ -n "$estimate" ]] && suffix="  ${DIM}(EST. TIME: ${estimate})${RST}"
 
     if [[ "${UI_PLAIN}" == "1" ]]; then
-        printf '\n== (%s/%s) %s\n' "$UI_STEP_NUM" "$total" "$title"
+        local plain_suffix=""
+        [[ -n "$estimate" ]] && plain_suffix="  (EST. TIME: ${estimate})"
+        printf '\n== (%s/%s) %s%s\n' "$UI_STEP_NUM" "$total" "$title" "$plain_suffix"
         return 0
     fi
 
@@ -163,7 +193,19 @@ ui_step() {
     pad=$(( cols - ${#label} ))
     [[ $pad -lt 3 ]] && pad=3
     fill="$(_ui_repeat "${UI_GLYPH_BOX_H}" "$pad")"
-    printf '\n%s%s%s%s%s\n' "${BOLD}${AMBER}" "$label" "${RST}${AMBER}" "$fill" "${RST}"
+    printf '\n%s%s%s%s%s%s\n' "${BOLD}${AMBER}" "$label" "${RST}${AMBER}" "$fill" "${RST}" "$suffix"
+}
+
+# ui_step_finalize — close out the LAST step's duration. Call once, after
+# the final step's work completes and before reading UI_STEP_DURATIONS
+# (the success box, --summary-json) — otherwise the last entry is missing
+# since ui_step only closes out the *previous* step when the *next* one
+# starts.
+ui_step_finalize() {
+    if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
+        UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+        _UI_STEP_LAST_TITLE=""
+    fi
 }
 
 # ── ui_spinner_run ──────────────────────────────────────────────────────────

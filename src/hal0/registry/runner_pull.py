@@ -30,6 +30,7 @@ import re
 import secrets
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -352,6 +353,51 @@ def write_local_marker(image_id: str, image_ref: str) -> Path:
     return path
 
 
+# ── retry discipline ─────────────────────────────────────────────────────────
+#
+# Mirrors installer/lib/pull-retry.sh's bash classifier/backoff so a manual
+# `install.sh` image pull and a dashboard-triggered runner-image pull fail
+# for the same reasons and back off on the same schedule. Kept in sync by
+# hand (there is no shared source between a bash and a Python regex) —
+# tests/registry/test_runner_pull_retry.py pins both against the same
+# fixture strings.
+
+#: Non-retryable failure signatures: auth/permission, 404/manifest-unknown,
+#: and out-of-space/daemon-unreachable are never fixed by trying again.
+_NONRETRYABLE_PULL_RE = re.compile(
+    r"unauthorized|authentication required|denied|forbidden|not[\s-]?found"
+    r"|manifest unknown|\b404\b|no space left on device|cannot connect to the .*daemon",
+    re.IGNORECASE,
+)
+
+#: Seconds to wait before retry N (1-indexed); past the table's end the last
+#: value doubles per extra step (see :func:`pull_backoff_delay`).
+_DEFAULT_PULL_RETRY_DELAYS: tuple[int, ...] = (5, 15, 30, 60)
+
+
+def is_retryable_pull_error(message: str | None) -> bool:
+    """``True`` unless *message* matches a known non-retryable signature.
+
+    Everything else (DNS blip, connection reset, registry 5xx, timeout) is
+    treated as transient and gets the backoff table. An empty/``None``
+    message (an exception with no useful text) is treated as retryable —
+    the conservative default when there's nothing to classify against.
+    """
+    if not message:
+        return True
+    return not _NONRETRYABLE_PULL_RE.search(message)
+
+
+def pull_backoff_delay(attempt: int, delays: tuple[int, ...] = _DEFAULT_PULL_RETRY_DELAYS) -> int:
+    """Seconds to sleep before retry ``#attempt`` (1-indexed: the wait
+    before the 2nd overall attempt is ``pull_backoff_delay(1)``)."""
+    idx = attempt - 1
+    if idx < len(delays):
+        return delays[idx]
+    extra = idx - (len(delays) - 1)
+    return int(delays[-1] * (2**extra))
+
+
 # ── job execution ────────────────────────────────────────────────────────────
 
 
@@ -360,6 +406,8 @@ async def run_runner_pull(
     *,
     store: RunnerImageStore,
     provider: Any,
+    max_attempts: int = 1,
+    sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Drive one runner-image pull to completion, updating ``job`` as it goes.
 
@@ -370,28 +418,89 @@ async def run_runner_pull(
     generator yields (podman itself has no cancel signal short of killing
     the subprocess, which ``pull_image_stream`` already does on generator
     close/GC).
+
+    ``max_attempts`` (default 1 — no retry) bounds how many times a
+    *retryable* failure (see :func:`is_retryable_pull_error`) is retried,
+    with :func:`pull_backoff_delay` backoff between attempts. A
+    non-retryable failure (auth/permission, 404/manifest-unknown, disk-full)
+    ends the job on the first occurrence regardless of ``max_attempts`` —
+    :mod:`hal0.registry.runner_pull_jobs` is the caller that opts real
+    dashboard-triggered pulls into multi-attempt retry; direct callers (and
+    every existing test) that omit the argument keep the original
+    single-attempt behaviour byte-for-byte. ``sleep_fn`` is the backoff
+    sleep, injectable so tests never wait on a real clock.
+
+    On an apparent success, verifies the image actually landed in local
+    storage via ``provider.image_present(image_ref)`` (tri-state: True/False
+    verified, None means "couldn't check" — see
+    :meth:`hal0.providers.container.ContainerProvider.image_present`) when
+    the provider exposes that method; a provider without it (every test
+    fake) skips verification and trusts the ``completed`` event, unchanged
+    from before this was added. ``False`` is treated as a retryable failure
+    — a pull that exits 0 without the image present is not success.
     """
     job.state = "running"
     job._signal()
-    try:
-        agen = provider.pull_image_stream(job.image_ref)
-        async for event in agen:
-            if job.cancel_requested:
-                job.state = "cancelled"
-                job.finished_at = time.time()
-                with contextlib.suppress(Exception):
-                    await agen.aclose()
-                job._signal()
-                return
-            state = event.get("state")
-            if state == "pulling":
-                job.layers_done = int(event.get("layer") or 0)
-                job.layers_total = int(event.get("total_layers") or 0)
-                job.line = event.get("line")
-                job._signal()
-            elif state == "completed":
-                job.layers_done = int(event.get("layer") or job.layers_done)
-                job.layers_total = int(event.get("total_layers") or job.layers_total)
+
+    last_error: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        if job.cancel_requested:
+            job.state = "cancelled"
+            job.finished_at = time.time()
+            job._signal()
+            return
+
+        job.layers_done = 0
+        job.layers_total = 0
+        outcome: str | None = None  # "completed" | "failed" | None (cancelled, returned already)
+
+        try:
+            agen = provider.pull_image_stream(job.image_ref)
+            async for event in agen:
+                if job.cancel_requested:
+                    job.state = "cancelled"
+                    job.finished_at = time.time()
+                    with contextlib.suppress(Exception):
+                        await agen.aclose()
+                    job._signal()
+                    return
+                state = event.get("state")
+                if state == "pulling":
+                    job.layers_done = int(event.get("layer") or 0)
+                    job.layers_total = int(event.get("total_layers") or 0)
+                    job.line = event.get("line")
+                    job._signal()
+                elif state == "completed":
+                    job.layers_done = int(event.get("layer") or job.layers_done)
+                    job.layers_total = int(event.get("total_layers") or job.layers_total)
+                    outcome = "completed"
+                    break
+                elif state == "failed":
+                    last_error = str(event.get("error") or "pull failed")
+                    outcome = "failed"
+                    break
+        except asyncio.CancelledError:
+            job.state = "cancelled"
+            job.finished_at = time.time()
+            job._signal()
+            raise
+        except Exception as exc:  # defensive: never leave a job stuck "running"
+            log.exception("runner_image.pull_unhandled_error image_id=%s", job.image_id)
+            last_error = str(exc)
+            outcome = "failed"
+
+        if outcome == "completed":
+            verify = getattr(provider, "image_present", None)
+            present: bool | None = True
+            if verify is not None:
+                try:
+                    present = await asyncio.to_thread(verify, job.image_ref)
+                except Exception:
+                    present = None  # inconclusive — don't punish a flaky verifier
+            if present is False:
+                last_error = f"pull reported success but {job.image_ref} is not in local storage"
+                outcome = "failed"
+            else:
                 marker = write_local_marker(job.image_id, job.image_ref)
                 job.local_path = str(marker)
                 job.state = "completed"
@@ -404,25 +513,19 @@ async def run_runner_pull(
                     )
                 job._signal()
                 return
-            elif state == "failed":
-                job.state = "failed"
-                job.error = str(event.get("error") or "pull failed")
-                job.error_code = "runner_image.pull_failed"
-                job.finished_at = time.time()
-                job._signal()
-                return
-    except asyncio.CancelledError:
-        job.state = "cancelled"
-        job.finished_at = time.time()
+
+        # outcome == "failed" here (event, exception, or failed post-pull verify).
+        if attempt >= max_attempts or not is_retryable_pull_error(last_error):
+            job.state = "failed"
+            job.error = last_error or "pull failed"
+            job.error_code = "runner_image.pull_failed"
+            job.finished_at = time.time()
+            job._signal()
+            return
+
+        job.line = f"retry {attempt + 1}/{max_attempts} after: {last_error}"
         job._signal()
-        raise
-    except Exception as exc:  # defensive: never leave a job stuck "running"
-        log.exception("runner_image.pull_unhandled_error image_id=%s", job.image_id)
-        job.state = "failed"
-        job.error = str(exc)
-        job.error_code = "runner_image.pull_failed"
-        job.finished_at = time.time()
-        job._signal()
+        await sleep_fn(pull_backoff_delay(attempt))
 
 
 __all__ = [
@@ -434,11 +537,13 @@ __all__ = [
     "RunnerPullJob",
     "RunnerPullJobNotFound",
     "RunnerPullPathEscape",
+    "is_retryable_pull_error",
     "list_persisted_jobs",
     "local_marker_path",
     "make_job",
     "persist_pull_job",
     "persisted_job_files",
+    "pull_backoff_delay",
     "pull_job_file",
     "run_runner_pull",
     "sweep_pull_jobs",
