@@ -175,8 +175,18 @@ class ComfyUIProvider(Provider):
 
         Resolution order (§7.1b / ML-4 — now shared with every other
         provider via the runner registry):
-          1. ``slot_cfg["image"]`` — explicit override from slot TOML.
-          2. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
+          1. ``slot_cfg["image_pin"]`` (top-level or ``[slot]``-nested) —
+             the single canonical per-slot escape hatch
+             (spec-hw-slot-ownership §3, same contract as
+             :func:`hal0.providers.container._resolve_image_ref` and the
+             flm/kokoro/moonshine/qwen3tts providers). A non-empty string
+             is honored verbatim, never re-resolved (#2172 — this provider
+             previously ignored the pin, so a pinned img slot silently
+             launched the resolver default).
+          2. ``slot_cfg["image"]`` — the pre-pin explicit override from
+             slot TOML (still honored; the migration lane folds it into
+             ``image_pin``).
+          3. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
              runner: ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var →
              ``manifest.json`` digest pin → the fallback tag
              ``ghcr.io/hal0ai/hal0-comfyui:latest``.
@@ -187,6 +197,13 @@ class ComfyUIProvider(Provider):
         into :func:`~hal0.runners.resolve_runner_image` (best-effort — a
         missing/stale manifest never breaks the provider).
         """
+        pin: Any = slot_cfg.get("image_pin")
+        if not (isinstance(pin, str) and pin):
+            nested = slot_cfg.get("slot")
+            pin = nested.get("image_pin") if isinstance(nested, dict) else None
+        if isinstance(pin, str) and pin:
+            return pin
+
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
         # Only a STRING is an image-ref override. In raw slot dicts the
         # [image] TOML section (#599 image-gen settings) shares this key —

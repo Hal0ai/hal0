@@ -36,6 +36,16 @@ applying. Add those subsections to a version's section to surface them; see
   (an `error` dict carrying a string `code`), a shape no slot payload can
   own; genuine failures (unknown slot, REST 4xx/5xx, bad args) still raise
   `isError: true` with their typed code. (#2025)
+- `ComfyUIProvider.image_ref` now honors the slot-level `image_pin` escape
+  hatch (#2172). The provider resolved only the legacy `image` key and then
+  the runner-registry default, so a pinned img slot persisted (and displayed)
+  its pin but silently launched the resolver default at load/restart.
+  Resolution now matches every other provider's precedence contract
+  (spec-hw-slot-ownership §3): `image_pin` (top-level or `[slot]`-nested,
+  honored verbatim) → legacy `image` string (back-compat) →
+  `resolve_runner_image("comfyui")` (env var → manifest digest pin →
+  bundled tag). flm/kokoro/moonshine/qwen3tts already honored the pin and
+  are unchanged.
 
 - The capability catalog no longer advertises a `gpu-rocm` backend for
   registry models on hosts that cannot run it. The `rocm` tag branch in

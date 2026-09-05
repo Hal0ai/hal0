@@ -108,6 +108,35 @@ def test_image_ref_slot_cfg_override_wins(provider: ComfyUIProvider) -> None:
     assert provider.image_ref(cfg) == "hal0-toolbox-comfyui:dev"
 
 
+def test_image_ref_honors_image_pin(provider: ComfyUIProvider) -> None:
+    """#2172: image_pin is the canonical per-slot escape hatch — it must
+    launch verbatim, not the resolver default (live ct105: pinned img slot
+    silently launched the old kyuz0 default)."""
+    cfg = {"image_pin": "ghcr.io/hal0ai/hal0-comfyui@sha256:" + "f" * 64}
+    assert provider.image_ref(cfg) == "ghcr.io/hal0ai/hal0-comfyui@sha256:" + "f" * 64
+
+
+def test_image_ref_honors_nested_image_pin(provider: ComfyUIProvider) -> None:
+    """[slot]-nested image_pin works too (same shape as flm/kokoro/qwen3tts)."""
+    cfg = {"slot": {"image_pin": "ghcr.io/dev/comfyui-pin:test"}}
+    assert provider.image_ref(cfg) == "ghcr.io/dev/comfyui-pin:test"
+
+
+def test_image_ref_pin_beats_plain_image_key(provider: ComfyUIProvider) -> None:
+    """Precedence: image_pin → plain image key → resolver default."""
+    cfg = {"image_pin": "ghcr.io/dev/pin:a", "image": "hal0-toolbox-comfyui:dev"}
+    assert provider.image_ref(cfg) == "ghcr.io/dev/pin:a"
+
+
+def test_image_ref_empty_or_non_string_pin_falls_through(provider: ComfyUIProvider) -> None:
+    """An empty/non-string image_pin is 'no pin' — same contract as
+    container._resolve_image_ref (never str(dict), never empty ref)."""
+    assert provider.image_ref({"image_pin": "", "image": "x:dev"}) == "x:dev"
+    ref = provider.image_ref({"image_pin": {"oops": 1}})
+    assert isinstance(ref, str)
+    assert "hal0ai/hal0-comfyui" in ref  # manifest pin or fallback tag
+
+
 # ─── container_spec ──────────────────────────────────────────────────────────
 
 
