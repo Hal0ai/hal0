@@ -22,6 +22,7 @@
 // is flat-merged wholesale, so we start from the stored defaults and override
 // only the keys we surface (emptying an input deletes just that key).
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import {
 	useModelUpdate,
 	useModelSetDefault,
@@ -1321,15 +1322,14 @@ function SourcePathLine({ label, value, testId, empty, note }) {
 						type="button"
 						className="btn ghost sm"
 						data-testid={testId}
-						onClick={() => {
-							try {
-								navigator.clipboard.writeText(String(value));
+						onClick={async () => {
+							const ok = await copyTextToClipboard(String(value));
+							if (ok)
 								window.__hal0Toast &&
 									window.__hal0Toast(`${label} path copied to clipboard`, "ok");
-							} catch {
+							else
 								window.__hal0Toast &&
 									window.__hal0Toast("Copy failed — clipboard unavailable", "err");
-							}
 						}}
 					>
 						Copy

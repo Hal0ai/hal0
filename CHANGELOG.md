@@ -34,6 +34,13 @@ applying. Add those subsections to a version's section to surface them; see
   again — not an added pill plus a struck ghost — and no longer inflates the
   `◆ N diverged` count. Rendered spellings still come from the operator's
   own text; only the matching canonicalises. (#2211)
+- Copy-to-clipboard buttons across the dashboard (command palette, model
+  drawer source paths, model detail path, benchmark commands, slot logs,
+  connections) now report the real outcome: the success toast waits for the
+  async clipboard write to resolve, and a rejected write — permission denial,
+  non-secure origin — shows a failure toast instead of a false success. All
+  call sites share one helper (`@/lib/clipboard`) that keeps the legacy
+  `execCommand("copy")` fallback for plain-http LAN dashboards. (#2214)
 
 ## [1.2.0] — 2026-09-03
 

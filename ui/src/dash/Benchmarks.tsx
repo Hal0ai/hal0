@@ -16,6 +16,7 @@
  *       POST /control {action,exclusive} · DELETE /api/benchmarks/queue/{id}
  */
 
+import { copyTextToClipboard } from '@/lib/clipboard';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../api/client';
 import { useUpdateState } from '../api/hooks/useUpdates';
@@ -1407,8 +1408,12 @@ function CopyButton({ text }: { text: string }) {
     <button
       className="btn ghost sm"
       style={{ fontSize: 10, padding: '2px 8px' }}
-      onClick={() => {
-        navigator.clipboard?.writeText(text);
+      onClick={async () => {
+        const ok = await copyTextToClipboard(text);
+        if (!ok) {
+          toast('Copy failed — clipboard unavailable', 'err');
+          return;
+        }
         setCopied(true);
         setTimeout(() => setCopied(false), 1400);
       }}

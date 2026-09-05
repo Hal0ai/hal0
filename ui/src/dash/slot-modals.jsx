@@ -4,6 +4,7 @@
 // window globals. All persistence + lifecycle calls go through the typed
 // `useSlots` mutation hooks — no toast-only stubs survive in this file.
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import {
 	useSlotEdit,
 	useSlotDefaults,
@@ -3341,13 +3342,13 @@ function SlotLogsDrawer({ open, slot, onClose }) {
 
 	const copyAll = async () => {
 		if (!text) return;
-		try {
-			await navigator.clipboard.writeText(text);
-			setCopied(true);
-			setTimeout(() => setCopied(false), 1500);
-		} catch {
+		const ok = await copyTextToClipboard(text);
+		if (!ok) {
 			window.__hal0Toast && window.__hal0Toast("Clipboard unavailable", "warn");
+			return;
 		}
+		setCopied(true);
+		setTimeout(() => setCopied(false), 1500);
 	};
 
 	if (!slot) return null;

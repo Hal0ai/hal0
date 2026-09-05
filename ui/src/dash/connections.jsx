@@ -23,6 +23,7 @@
 // doesn't 401 (#1467). Tool detail comes from GET /api/mcp/servers
 // (`tool_details`).
 
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSlots } from '@/api/hooks/useSlots'
 import { slotIndicatorFromPhase } from './slot-status.js'
@@ -105,28 +106,9 @@ function CIcon({ name, size = 14 }) {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
-function copyText(t) {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(t)
-      return
-    }
-  } catch (e) {
-    /* fall through */
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = t
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-  } catch (e) {
-    /* no-op */
-  }
-}
+// Shared async-safe copy (@/lib/clipboard) — resolves the REAL outcome, with
+// the legacy execCommand fallback this file used to carry inline (#2214).
+const copyText = (t) => copyTextToClipboard(t)
 function toast(msg, kind) {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
 }
@@ -423,10 +405,15 @@ function CopyIcon({ text, title }) {
       title={title || 'Copy'}
       onClick={(e) => {
         e.stopPropagation()
-        copyText(text)
-        setDone(true)
-        toast((title || 'copied') + ' · clipboard')
-        setTimeout(() => setDone(false), 1200)
+        copyText(text).then((ok) => {
+          if (!ok) {
+            toast('Copy failed — clipboard unavailable', 'err')
+            return
+          }
+          setDone(true)
+          toast((title || 'copied') + ' · clipboard')
+          setTimeout(() => setDone(false), 1200)
+        })
       }}
     >
       <CIcon name={done ? 'check' : 'copy'} size={13} />
@@ -440,10 +427,15 @@ function CopyBtn({ text, label, icon, cls }) {
       className={(cls || 'cbtn') + (done ? ' ok-flash' : '')}
       onClick={(e) => {
         e.stopPropagation()
-        copyText(text)
-        setDone(true)
-        toast(label + ' copied · clipboard')
-        setTimeout(() => setDone(false), 1300)
+        copyText(text).then((ok) => {
+          if (!ok) {
+            toast('Copy failed — clipboard unavailable', 'err')
+            return
+          }
+          setDone(true)
+          toast(label + ' copied · clipboard')
+          setTimeout(() => setDone(false), 1300)
+        })
       }}
     >
       <CIcon name={done ? 'check' : icon || 'copy'} size={13} />
@@ -717,8 +709,10 @@ function AddTo({ client, servers }) {
       className="clientchip"
       onClick={(e) => {
         e.stopPropagation()
-        copyText(buildClientConfig(client, servers))
-        toast(meta.label + ' config copied · paste into ' + meta.file)
+        copyText(buildClientConfig(client, servers)).then((ok) => {
+          if (ok) toast(meta.label + ' config copied · paste into ' + meta.file)
+          else toast('Copy failed — clipboard unavailable', 'err')
+        })
       }}
     >
       <span className="ic">
