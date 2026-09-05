@@ -25,15 +25,22 @@
 #   3. patches manifest.json in place via python3 so JSON formatting stays
 #      stable.
 #
-# A ghcr.io image that fails resolution leaves its digest null and emits a
-# warning — matching the runtime contract (null digest => pull-by-tag +
-# warn); that image really is unpublished/unreachable. A NON-ghcr image that
-# fails resolution (no authoritative path here beyond the two above) instead
-# KEEPS whatever digest is already recorded and warns — a transient/offline
-# lookup must never regress a previously-valid pin to null, which used to
-# fail release.yml's null-digest gate on the very manifest this script
-# prepares (#1676). The script never hard-fails on a single unresolved
-# image; it exits non-zero only on a usage / environment error.
+# A digest is set to null ONLY when the registry answers a definitive
+# 404/NAME_UNKNOWN for the manifest — the image really is unpublished, and
+# null matches the runtime contract (null digest => pull-by-tag + warn).
+# Every other resolution failure — the token endpoint issues no anonymous
+# pull token, 401/403/DENIED, a curl/network error, docker buildx
+# unavailable — proves nothing about the published state, so the script
+# KEEPS whatever digest is already recorded and warns that the pin could
+# not be re-verified. The same rule covers non-ghcr images (which have no
+# authoritative lookup path beyond the digest-pinned-ref shortcut and the
+# buildx fallback): a transient/offline/auth lookup must never regress a
+# previously-valid pin to null, which used to fail release.yml's
+# null-digest gate on the very manifest this script prepares (#1676,
+# #2218 — ghcr.io/hal0ai/hal0-strix-vulkan serves no anonymous token, and
+# the old ghcr path read that DENIED as an unpublish). The script never
+# hard-fails on a single unresolved image; it exits non-zero only on a
+# usage / environment error.
 #
 # Usage:
 #   scripts/update-toolbox-digests.sh [path/to/manifest.json]
@@ -75,10 +82,19 @@ PY
 }
 
 # Resolve a ghcr.io content digest for "<registry>/<repo>:<reference>"
-# anonymously. Prints the sha256 digest on stdout, or nothing on failure.
+# anonymously. Prints the sha256 digest on stdout and returns 0 on success.
+# On failure the return code tells the caller which of two very different
+# situations it is in:
+#   2 — DEFINITIVE: the registry issued a pull token and then answered 404
+#       (NAME_UNKNOWN/MANIFEST_UNKNOWN) for the manifest — the image really
+#       is unpublished;
+#   1 — UNVERIFIED: an auth-shaped or transport failure (token endpoint
+#       returned no token, 401/403/DENIED, curl/network error, docker buildx
+#       unavailable) — nothing was proven about the published state.
 resolve_digest() {
     local image_ref="$1"
-    local registry repo_ref repo reference token digest
+    local registry repo_ref repo reference token digest headers status
+    local unpublished=0
 
     # A digest-pinned ref ("registry/repo@sha256:...") is authoritative by
     # construction — the digest IS the reference, no registry round-trip
@@ -115,18 +131,28 @@ resolve_digest() {
         2>/dev/null || true)"
 
     if [[ -n "${token}" ]]; then
-        # HEAD the manifest and read the Docker-Content-Digest response header.
-        digest="$(curl -fsSI -X GET \
+        # HEAD the manifest and read the Docker-Content-Digest response
+        # header. No -f: a 4xx status is signal, not noise — we need to see
+        # WHICH failure the registry chose.
+        headers="$(curl -sSI -X GET \
             -H "Authorization: Bearer ${token}" \
             -H "Accept: ${ACCEPT_HEADER}" \
             "https://${registry}/v2/${repo}/manifests/${reference}" \
-            2>/dev/null \
-            | tr -d '\r' \
+            2>/dev/null | tr -d '\r' || true)"
+        digest="$(printf '%s\n' "${headers}" \
             | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}' \
-            | tail -n1 || true)"
+            | tail -n1)"
         if [[ "${digest}" == sha256:* ]]; then
             printf '%s\n' "${digest}"
             return 0
+        fi
+        status="$(printf '%s\n' "${headers}" \
+            | awk 'toupper($1) ~ /^HTTP\//{code=$2} END{print code}')"
+        if [[ "${status}" == "404" ]]; then
+            # Token granted, manifest definitively absent. Still give the
+            # buildx fallback a chance below — operator docker credentials
+            # may see what anonymous auth cannot.
+            unpublished=1
         fi
     fi
 
@@ -141,6 +167,9 @@ resolve_digest() {
         fi
     fi
 
+    if [[ "${unpublished}" -eq 1 ]]; then
+        return 2
+    fi
     return 1
 }
 
@@ -214,25 +243,30 @@ while IFS=$'\t' read -r name tag; do
     fi
 
     echo "  ${name}: resolving ${tag}"
-    if digest="$(resolve_digest "${tag}")" && [[ -n "${digest}" ]]; then
+    digest=""
+    resolve_rc=0
+    digest="$(resolve_digest "${tag}")" || resolve_rc=$?
+    if [[ ${resolve_rc} -eq 0 && -n "${digest}" ]]; then
         patch_digest "${name}" "${digest}"
         echo "    -> ${digest}"
         updated=$((updated + 1))
     else
-        # Never regress a valid pin to null. A ghcr.io image that fails
-        # resolution really is unpublished/unreachable — null is correct,
-        # the runtime falls back to pull-by-tag. A non-ghcr registry (no
-        # authoritative resolution path here beyond the digest-pinned-ref
-        # shortcut and the docker buildx fallback above) that fails is far
-        # more likely a transient/offline lookup than an actual unpublish —
-        # keep whatever digest is already recorded and warn instead (#1676).
-        registry="${tag%%/*}"
+        # Never regress a valid pin to null (#1676, #2218). Only a
+        # DEFINITIVE 404 from the registry (resolve_digest rc 2) proves an
+        # image is unpublished — null is then correct, the runtime falls
+        # back to pull-by-tag. Every other failure — no anonymous pull
+        # token, 401/403/DENIED, network error, buildx missing — proves
+        # nothing about the published state, so keep whatever digest is
+        # already recorded and warn that the pin could not be re-verified.
         existing="$(current_digest "${name}")"
-        if [[ "${registry}" != "ghcr.io" && -n "${existing}" ]]; then
-            echo "warn: ${name}: ${tag} could not be resolved on ${registry} — keeping existing digest ${existing} (never regress a valid pin to null)" >&2
+        if [[ ${resolve_rc} -eq 2 ]]; then
+            echo "warn: ${name}: ${tag} is unpublished (registry answered 404 for the manifest) — leaving digest null (runtime pulls by tag)" >&2
+            patch_digest "${name}" ""
+        elif [[ -n "${existing}" ]]; then
+            echo "warn: ${name}: ${tag} could not be re-verified (auth/transport failure, not proof of an unpublish) — keeping existing digest ${existing} (never regress a valid pin to null)" >&2
             patch_digest "${name}" "${existing}"
         else
-            echo "warn: ${name}: ${tag} is unpublished or unreachable — leaving digest null (runtime pulls by tag)" >&2
+            echo "warn: ${name}: ${tag} could not be resolved and no digest is recorded — leaving digest null (runtime pulls by tag)" >&2
             patch_digest "${name}" ""
         fi
         warned=$((warned + 1))
