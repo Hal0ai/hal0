@@ -50,6 +50,11 @@ export function useSettingsUpdate() {
     onSuccess: (next) => {
       qc.setQueryData(SETTINGS_KEY, next)
       qc.invalidateQueries({ queryKey: ['models'] })
+      // `current` and `live_target` on every row are stale the instant this
+      // PUT lands — a save that fixes tool_model's live target must clear
+      // AgentsBrainPage's "no live target" banner immediately, not up to
+      // 15s later (see SETTINGS_FIELDS_KEY's staleTime below).
+      qc.invalidateQueries({ queryKey: SETTINGS_FIELDS_KEY })
     },
   })
 }
@@ -58,7 +63,10 @@ export function useSettingsReload() {
   const qc = useQueryClient()
   return useMutation<Hal0Settings, Hal0Error, void>({
     mutationFn: () => apiPost<Hal0Settings>(ENDPOINTS.settingsReload),
-    onSuccess: (next) => qc.setQueryData(SETTINGS_KEY, next),
+    onSuccess: (next) => {
+      qc.setQueryData(SETTINGS_KEY, next)
+      qc.invalidateQueries({ queryKey: SETTINGS_FIELDS_KEY })
+    },
   })
 }
 
@@ -194,6 +202,48 @@ export function useApplyPlan() {
     queryFn: () => apiGet<ApplyPlanRegistry>(ENDPOINTS.settingsApplyPlan),
     // Registry is static for the server's lifetime — never auto-refetch.
     staleTime: Infinity,
+  })
+}
+
+// ── Schema-driven settings fields (#2108) ───────────────────────────────────
+//
+// GET /api/settings/fields is the one payload a schema-driven settings page
+// renders from: one row per operator-editable Hal0Config leaf, joining three
+// single-owner facts — schema metadata (group/label/description/type/enum/
+// constraints/default) from Field(description=...) in hal0.config.schema,
+// reload classification from the same apply-plan registry useApplyPlan()
+// reads, and `current` from the live config. `live_target` is populated only
+// for a `hal0/<slot>`-shaped value (null otherwise) — true/false for whether
+// that alias currently resolves to a loaded slot, closing #2108's "the
+// shipped tool_model default has nowhere live to route on a fresh install"
+// gap server-side instead of the UI re-deriving slot-resolution logic.
+
+export interface SettingsFieldRow {
+  path: string
+  group: string
+  label: string
+  description: string
+  type: 'boolean' | 'number' | 'string' | 'string[]' | 'map' | 'enum'
+  enum: string[] | null
+  constraints: Record<string, number>
+  default: unknown
+  current: unknown
+  secret: boolean
+  apply_class: 'immediate' | 'service-restart' | 'manual-restart' | null
+  services: string[]
+  live_target: boolean | null
+}
+
+const SETTINGS_FIELDS_KEY = ['settings', 'fields'] as const
+
+export function useSettingsFields() {
+  return useQuery({
+    queryKey: SETTINGS_FIELDS_KEY,
+    queryFn: () => apiGet<{ fields: SettingsFieldRow[] }>(ENDPOINTS.settingsFields),
+    // live_target resolves against the current slot set, so this can't be
+    // Infinity like useSettingsSchema — but a settings page isn't a place
+    // operators watch for slot churn in real time either.
+    staleTime: 15_000,
   })
 }
 

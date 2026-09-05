@@ -353,6 +353,9 @@ export const ENDPOINTS = {
   settingsSchema: '/api/settings/schema',
   // Apply-plan registry — key→{apply_class, services} for all settings (#552).
   settingsApplyPlan: '/api/settings/apply-plan',
+  // One labelled row per operator-editable schema key — group/label/
+  // description/type/default/current/reload class/secret/live_target (#2108).
+  settingsFields: '/api/settings/fields',
   // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',
