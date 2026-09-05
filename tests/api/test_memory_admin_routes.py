@@ -359,6 +359,78 @@ def test_operation_retry_and_consolidate_forward(client: TestClient, recorder: _
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/consolidate"
 
 
+def test_operation_get_flags_zero_fact_retain(client: TestClient, recorder: _Recorder) -> None:
+    """#2030: the single-op poll target must say when a completed retain
+    learned nothing — a bare `completed`/`error_message: null` for a retain
+    that stored nothing retrievable is the regression."""
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/operations/op-1",
+        200,
+        {
+            "operation_id": "op-1",
+            "operation_type": "retain",
+            "status": "completed",
+            "retry_count": 0,
+            "error_message": None,
+            "result_metadata": {"document_id": "doc-1", "unit_ids_count": 0, "items_count": 1},
+        },
+    )
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/documents/doc-1",
+        200,
+        {"id": "doc-1", "memory_unit_count": 0},
+    )
+    r = client.get("/api/memory/banks/shared/operations/op-1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"  # visible, not reclassified as error
+    assert body["facts_extracted"] == 0
+    assert body["nothing_learned"] is True
+    assert "nothing was learned" in body["notice"]
+
+
+def test_operation_get_nonzero_yield_passes_through_with_count(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/operations/op-2",
+        200,
+        {
+            "operation_id": "op-2",
+            "operation_type": "retain",
+            "status": "completed",
+            "result_metadata": {"document_id": "doc-2", "unit_ids_count": 11},
+        },
+    )
+    r = client.get("/api/memory/banks/shared/operations/op-2")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["facts_extracted"] == 11
+    assert "nothing_learned" not in body
+    assert "notice" not in body
+    # A non-zero yield needs no document fetch — exactly one upstream call.
+    assert [q["path"] for q in recorder.requests] == ["/v1/default/banks/shared/operations/op-2"]
+
+
+def test_operation_get_non_retain_op_is_verbatim(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/operations/op-3",
+        200,
+        {"operation_id": "op-3", "operation_type": "consolidation", "status": "completed"},
+    )
+    r = client.get("/api/memory/banks/shared/operations/op-3")
+    assert r.status_code == 200
+    assert r.json() == {
+        "operation_id": "op-3",
+        "operation_type": "consolidation",
+        "status": "completed",
+    }
+
+
 def test_mental_model_refresh_forwards(client: TestClient, recorder: _Recorder) -> None:
     r = client.post("/api/memory/banks/shared/mental-models/mm-1/refresh")
     assert r.status_code == 200

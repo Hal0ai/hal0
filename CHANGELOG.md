@@ -36,6 +36,22 @@ applying. Add those subsections to a version's section to surface them; see
   (an `error` dict carrying a string `code`), a shape no slot payload can
   own; genuine failures (unknown slot, REST 4xx/5xx, bad args) still raise
   `isError: true` with their typed code. (#2025)
+- **A memory retain that extracts zero facts now says so** instead of
+  finishing as a bare `status=completed, error_message=null` while nothing it
+  stored is ever retrievable. The terminal operation record — served by
+  `GET /api/memory/banks/{bank}/operations/{id}` and the
+  `memory_operation_get` MCP tool — is annotated with `facts_extracted`
+  (from the engine's `result_metadata.unit_ids_count`, falling back to the
+  document's `memory_unit_count` on older engines) plus `nothing_learned:
+  true` and a human-readable `notice` when the retained document holds zero
+  memory units. A zero-yield retain of an *already-known* document (duplicate
+  `content_hash` dedup, adjudicated correct by rc-validate) is distinguished
+  via `document_fact_count` and gets a "content was already known" notice
+  rather than a false alarm. The dashboard's Add-fact flow now watches the
+  async extraction to its terminal state and raises a warn toast — "nothing
+  was learned" — instead of leaving "Fact added" as the last word. Empty
+  yield stays `completed`: it is a legitimate outcome made visible, not
+  reclassified as an error. (#2030)
 - `ComfyUIProvider.image_ref` now honors the slot-level `image_pin` escape
   hatch (#2172). The provider resolved only the legacy `image` key and then
   the runner-registry default, so a pinned img slot persisted (and displayed)

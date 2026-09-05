@@ -340,6 +340,91 @@ _AUTO_RETRY_MAX_SWEEPS = 5
 _AUTO_RETRY_MAX_OPS = 200
 
 
+# ── zero-fact retain visibility (#2030) ─────────────────────────────────────
+
+#: Operation types whose completion means "fact extraction ran over a
+#: document" — the ones a yield annotation is meaningful for.
+_RETAIN_OP_TYPES = {"retain", "batch_retain"}
+
+
+async def annotate_retain_yield(op: Any, fetch_document: Any) -> Any:
+    """Stamp extraction *yield* onto a terminal retain operation record.
+
+    A retain whose fact extraction produced zero units used to finish as a
+    bare ``status=completed, retry_count=0, error_message=None`` — the raw
+    document was stored, nothing was ever retrievable, and no surface said so
+    (#2030, rc-validate ``memory-retain-zero-yield-reports-completed``). This
+    annotates the engine's record (verified live against hindsight-api 0.9.2:
+    the single-op shape carries ``operation_type`` +
+    ``result_metadata.unit_ids_count``; list rows carry ``task_type`` +
+    ``document_id`` and no unit count) with:
+
+    * ``facts_extracted`` — memory units this operation created
+      (``result_metadata.unit_ids_count``), falling back to the document's
+      total ``memory_unit_count`` on engines whose op record has no
+      ``result_metadata``;
+    * ``document_fact_count`` — the document's total units, fetched only when
+      the operation's own yield is zero or unknown. This is what tells a
+      genuinely-unretrievable retain apart from a duplicate-``content_hash``
+      retain of an already-extracted document (correct dedup, per the rc.7
+      adversarial verification — not a defect);
+    * ``nothing_learned: true`` plus a human-readable ``notice`` — only when
+      the document itself holds zero units, i.e. the retain stored nothing
+      that search/recall can ever return. Empty yield stays ``completed`` —
+      it is a legitimate outcome that must be *visible*, not reclassified as
+      an error.
+
+    Fail-soft by construction: a document fetch that raises leaves
+    ``document_fact_count`` unset rather than failing the poll, and non-dict
+    payloads / non-retain / non-completed ops pass through untouched.
+    ``fetch_document`` is ``async (document_id) -> dict | None``.
+    """
+    if not isinstance(op, dict):
+        return op
+    op_type = op.get("task_type") or op.get("operation_type")
+    if op_type not in _RETAIN_OP_TYPES or op.get("status") != "completed":
+        return op
+    meta = op.get("result_metadata")
+    meta = meta if isinstance(meta, dict) else {}
+    created = meta.get("unit_ids_count")
+    created = created if isinstance(created, int) else None
+
+    doc_units: int | None = None
+    if created is None or created == 0:
+        doc_id = op.get("document_id") or meta.get("document_id")
+        if doc_id and fetch_document is not None:
+            try:
+                doc = await fetch_document(str(doc_id))
+            except Exception:
+                doc = None
+            if isinstance(doc, dict):
+                mu = doc.get("memory_unit_count")
+                doc_units = mu if isinstance(mu, int) else None
+
+    facts = created if created is not None else doc_units
+    if facts is None:
+        return op
+    op["facts_extracted"] = facts
+    if doc_units is not None:
+        op["document_fact_count"] = doc_units
+    if facts == 0:
+        if doc_units:
+            # This op added nothing NEW, but the document's facts exist and
+            # are retrievable — the duplicate-retain / re-ingest case.
+            op["notice"] = (
+                "completed with no new facts: this document's content was "
+                f"already known ({doc_units} fact(s) previously extracted from it)"
+            )
+        else:
+            op["nothing_learned"] = True
+            op["notice"] = (
+                "completed, but nothing was learned: fact extraction produced "
+                "0 memory units from this document — the raw text was stored, "
+                "but nothing from it is retrievable via search or recall"
+            )
+    return op
+
+
 class RecallResults(list):
     """``recall()``'s return value: a ``list[dict]`` of MemoryItem-shaped
     results, PLUS the response-level enrichment Hindsight's RecallResponse
@@ -1869,12 +1954,19 @@ class HindsightProvider(MemoryProvider):
         include_payload: bool | None = None,
     ) -> dict[str, Any]:
         bank = namespace_to_bank(self._write_namespace(dataset, client_id))
-        return await self._call(
+        op = await self._call(
             "get_operation",
             bank_id=bank,
             operation_id=operation_id,
             include_payload=include_payload,
         )
+
+        # #2030: a completed retain that extracted zero facts must say so on
+        # the record every poller reads (memory_operation_get, dashboard).
+        async def _doc(document_id: str) -> Any:
+            return await self._call("get_document", bank_id=bank, document_id=document_id)
+
+        return await annotate_retain_yield(op, _doc)
 
     async def cancel_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None

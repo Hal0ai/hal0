@@ -39,6 +39,7 @@ from hal0.api._audit import record_action
 from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
+from hal0.memory.hindsight_provider import annotate_retain_yield
 
 router = APIRouter()
 
@@ -977,6 +978,30 @@ _CURATE_AUDIT_ACTION = "memory.memory.curate"
 _CACHE_CLEARING_FORWARDS: set[tuple[str, str]] = {_CURATE_TEMPLATE}
 
 
+# ── #2030: zero-fact retain visibility on the single-operation poll ─────────
+#
+# The operation record hindsight returns for a completed retain says nothing
+# about extraction yield in its headline fields — `status=completed,
+# error_message=null` reads as success even when zero facts were extracted
+# and the retained text is unretrievable forever. The single-op GET (the
+# poll target `POST /api/memory/add` hands out via `operation_id`) is where
+# that has to become visible, so annotate it post-forward with
+# `facts_extracted` / `document_fact_count` / `nothing_learned` + `notice`
+# (see hal0.memory.hindsight_provider.annotate_retain_yield). Additive keys
+# only; the engine's own fields pass through verbatim, and the annotation is
+# fail-soft. The *list* passthrough is deliberately NOT annotated: list rows
+# carry no unit counts, so annotating them would cost one document fetch per
+# completed retain row on every dashboard poll tick.
+_OP_GET_TEMPLATE = ("GET", "/v1/default/banks/{bank_id}/operations/{operation_id}")
+
+
+async def _annotate_operation(client: Any, bank_id: str, result: Any) -> Any:
+    async def _doc(document_id: str) -> Any:
+        return await client.get_document(bank_id=bank_id, document_id=document_id)
+
+    return await annotate_retain_yield(result, _doc)
+
+
 def _make_handler(method: str, template: str):
     guard = _SHAPE_GUARDS.get((method, template))
     audit_action = _DELETE_ACTIONS.get(template) if method == "DELETE" else None
@@ -1005,6 +1030,8 @@ def _make_handler(method: str, template: str):
                 _GRAPH_CACHE.clear_bank(bank_id)
         if guard is not None:
             guard(result)
+        if (method, template) == _OP_GET_TEMPLATE:
+            result = await _annotate_operation(client, segments["bank_id"], result)
         return result
 
     return handler

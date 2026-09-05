@@ -247,7 +247,7 @@ same verdict, belt and braces).
 | `memory_directive_list` | none | a bank's directives (standing instructions injected into prompts) |
 | `memory_directive_get` | `id` | one directive |
 | `memory_operation_list` | none | async operations (retain, consolidation, refresh, ...) |
-| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate` |
+| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate`. A completed retain reports its extraction yield: `facts_extracted`, plus `nothing_learned` and a `notice` when zero facts made it into memory |
 | `memory_tags_list` | none | tags in use in a bank, with usage counts |
 | `memory_bank_stats` | none | node/link/observation/operation counts for a bank |
 
