@@ -8,8 +8,6 @@ would have written to the real filesystem here).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from hal0.config import paths as cfg_paths
 from hal0.config.schema import ToolPolicy
 from hal0.mcp import hermes_join, installed
@@ -42,7 +40,9 @@ def test_sync_exposure_applies_exposed_server(tmp_hal0_home: str) -> None:
     # hermes binary doesn't exist under the tmp sandbox -> apply degrades to
     # a recorded error rather than a crash, but the manifest still tracks
     # "github" as desired so a later real-hermes sync would apply it.
-    assert "github" in "".join(report["hermes"].get("errors", [])) or report["hermes"]["applied"] == 0
+    assert (
+        "github" in "".join(report["hermes"].get("errors", [])) or report["hermes"]["applied"] == 0
+    )
     manifest_path = cfg_paths.var_lib() / "mcp" / "hermes-managed.json"
     assert manifest_path.exists()
     import json
@@ -79,9 +79,9 @@ def test_sync_exposure_preserves_operator_seed_blocks(tmp_hal0_home: str) -> Non
     seed_path = cfg_paths.etc() / "agents" / "hermes.toml"
     seed_path.parent.mkdir(parents=True, exist_ok=True)
     seed_path.write_text(
-        '[mcp.servers.operator-added]\nbuiltin = false\nenabled = true\n'
+        "[mcp.servers.operator-added]\nbuiltin = false\nenabled = true\n"
         '[mcp.servers.operator-added.tools]\nallow = ["hand_tool"]\n'
-        'gated = []\nblocked = []\n'
+        "gated = []\nblocked = []\n"
     )
     _install("github", exposure=installed.ExposureConfig(hermes=True))
     hermes_join.sync_exposure()
@@ -98,8 +98,8 @@ def test_sync_exposure_removes_only_previously_owned_ids(tmp_hal0_home: str) -> 
     seed_path = cfg_paths.etc() / "agents" / "hermes.toml"
     seed_path.parent.mkdir(parents=True, exist_ok=True)
     seed_path.write_text(
-        '[mcp.servers.operator-added]\nbuiltin = false\nenabled = true\n'
-        '[mcp.servers.operator-added.tools]\nallow = []\ngated = []\nblocked = []\n'
+        "[mcp.servers.operator-added]\nbuiltin = false\nenabled = true\n"
+        "[mcp.servers.operator-added.tools]\nallow = []\ngated = []\nblocked = []\n"
     )
     _install("github", exposure=installed.ExposureConfig(hermes=True))
     hermes_join.sync_exposure()

@@ -80,6 +80,20 @@ class McpNotImplemented(Hal0Error):
     status = 501
 
 
+class McpExposureUnsupported(Hal0Error):
+    """``PATCH /{id}/exposure`` rejects ``openwebui``/``opencode`` — no join yet.
+
+    ADR-0015 §Decision 1/3/4: only ``hermes`` and ``brain`` have a join
+    mechanism. A distinct code (rather than reusing
+    ``mcp.supervisor_unavailable``, which names a different gap — the
+    stdio process supervisor) so a client can tell "this target has no
+    join at all" apart from "this server has no process yet".
+    """
+
+    code = "mcp.exposure_unsupported"
+    status = 501
+
+
 # ── Static catalog ──────────────────────────────────────────────────────────
 #
 # A small, hand-checked list of MCP servers an operator can install. It is
@@ -624,7 +638,7 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "source_url": record.source_url,
                 "env": record.env,
                 "secrets": sorted(record.secrets),
-                "tools_policy": record.tool_policy.model_dump(mode="python"),
+                "tool_policy": record.tool_policy.model_dump(mode="python"),
                 "exposure": record.exposure.model_dump(mode="python"),
                 "enabled": record.enabled,
                 "installed_at": record.installed_at,
@@ -1093,7 +1107,7 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
         raise BadRequest("patch body must be a JSON object", code="mcp.body_invalid")
     for target in _UNSUPPORTED_EXPOSURE_TARGETS:
         if body.get(target) is True:
-            raise McpNotImplemented(
+            raise McpExposureUnsupported(
                 f"{target} exposure has no join mechanism yet (pending ADR-0015)",
                 details={"server_id": server_id, "target": target},
             )

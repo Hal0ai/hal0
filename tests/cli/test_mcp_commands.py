@@ -86,7 +86,7 @@ def test_allow_moves_tool_and_patches_tools(api: dict[str, Any]) -> None:
         "servers": [
             {
                 "id": "github",
-                "tools_policy": {
+                "tool_policy": {
                     "allow": [],
                     "gated": ["create_pull_request"],
                     "blocked": ["delete_repository"],
@@ -105,7 +105,7 @@ def test_allow_moves_tool_and_patches_tools(api: dict[str, Any]) -> None:
 def test_gate_moves_tool(api: dict[str, Any]) -> None:
     api["get_response"] = {
         "servers": [
-            {"id": "github", "tools_policy": {"allow": ["search"], "gated": [], "blocked": []}}
+            {"id": "github", "tool_policy": {"allow": ["search"], "gated": [], "blocked": []}}
         ]
     }
     result = runner.invoke(mcp_commands.app, ["gate", "github", "search"])
@@ -117,7 +117,7 @@ def test_gate_moves_tool(api: dict[str, Any]) -> None:
 def test_block_moves_tool(api: dict[str, Any]) -> None:
     api["get_response"] = {
         "servers": [
-            {"id": "github", "tools_policy": {"allow": ["danger"], "gated": [], "blocked": []}}
+            {"id": "github", "tool_policy": {"allow": ["danger"], "gated": [], "blocked": []}}
         ]
     }
     result = runner.invoke(mcp_commands.app, ["block", "github", "danger"])

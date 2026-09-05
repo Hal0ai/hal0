@@ -234,7 +234,7 @@ def test_to_toml_dict_round_trips_tool_policy(tmp_hal0_home: str) -> None:
 
 def test_tool_policy_disjointness_enforced(tmp_hal0_home: str) -> None:
     """ToolPolicy's own validator rejects a tool on two tiers — reused, not re-implemented."""
-    with pytest.raises(Exception, match="disjoint|overlap"):
+    with pytest.raises(Exception, match="disjoint|overlap"):  # noqa: RUF043
         _record("github", tool_policy=ToolPolicy(allow=["x"], gated=["x"]))
 
 
@@ -249,7 +249,7 @@ def test_secrets_reference_valid_name_accepted(tmp_hal0_home: str) -> None:
 
 
 def test_exposure_round_trips(tmp_hal0_home: str) -> None:
-    saved = registry.install(_record("github", exposure=ExposureConfig(hermes=True)))
+    registry.install(_record("github", exposure=ExposureConfig(hermes=True)))
     reloaded = registry.get_installed("github")
     assert reloaded.exposure.hermes is True
     assert reloaded.exposure.brain is False

@@ -373,7 +373,7 @@ def _move_tool(server_id: str, tool: str, target: str) -> None:
         if server is None:
             die(f"no MCP server matching '{server_id}'")
             return
-        policy = dict(server.get("tools_policy") or {"allow": [], "gated": [], "blocked": []})
+        policy = dict(server.get("tool_policy") or {"allow": [], "gated": [], "blocked": []})
         for tier in ("allow", "gated", "blocked"):
             policy[tier] = [t for t in policy.get(tier, []) if t != tool]
         policy[target] = [*policy.get(target, []), tool]
