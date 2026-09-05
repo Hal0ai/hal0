@@ -1513,6 +1513,38 @@ class SlotManager:
         # facing message. Only a real ``str`` is evidence.
         return reason if isinstance(reason, str) else ""
 
+    async def _unit_stopped_cleanly(self, slot_name: str) -> bool:
+        """POSITIVE evidence the slot's unit was stopped on purpose (#2130).
+
+        Thin async wrapper over
+        :meth:`hal0.providers.container.ContainerProvider.unit_stopped_cleanly`
+        (a blocking ``systemctl show``, so it runs in the executor). The same
+        strictness rules as :meth:`unit_failure_reason`, inverted: callers use
+        ``True`` as proof a cached ERROR may be retired, so everything
+        inconclusive — no config, an NPU trio shadow, a provider double
+        without the probe, a probe that raises, a non-bool answer (a bare
+        ``MagicMock`` auto-creates the attribute) — must answer ``False``.
+        Absence of evidence never clears an ERROR.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None or is_npu_trio_shadow(cfg):
+            return False
+
+        from hal0.providers.container import container_provider
+
+        probe = getattr(container_provider(), "unit_stopped_cleanly", None)
+        if probe is None:
+            return False
+        try:
+            verdict = await asyncio.get_event_loop().run_in_executor(None, probe, _cfg_to_dict(cfg))
+        except Exception as exc:
+            log.warning(
+                "slot.unit_stopped_cleanly_probe_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return False
+        return verdict is True
+
     async def _read_last_crash_line(self, slot_name: str, cfg: Any) -> str | None:
         """Decisive crash line from the slot unit's journal, or ``None``.
 
@@ -2157,6 +2189,10 @@ class SlotManager:
             unit is active → adopt the running slot into READY. Covers
             the case where another process started the unit
             out-of-band.
+          - state.json says ERROR but the unit's own properties show it
+            was deliberately stopped (clean SIGTERM stop, ``systemctl
+            reset-failed``) → converge to OFFLINE (#2130). Positive
+            evidence only — a crashed/crash-looping unit keeps the ERROR.
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
@@ -2238,6 +2274,28 @@ class SlotManager:
             # message (#1791). Re-read the record so ``hal0 status`` and
             # ``/api/slots`` actually carry it.
             rec = self._states.get(self._key(slot_name)) or rec
+        elif observed == SlotState.ERROR and not active:
+            # #2130 second half: a cached ERROR must converge once the unit's
+            # own properties show a deliberate, non-crash end — a clean
+            # SIGTERM stop (`migrate-flags --stop-services`, a bare
+            # `systemctl stop`) or an operator's `systemctl reset-failed`.
+            # Without this the display stayed red until a full `slot load`,
+            # telling an operator mid-upgrade that the obvious systemd
+            # remediation had not worked. Gated on POSITIVE evidence only
+            # (see the provider probe): a crash-looping unit (`activating` /
+            # `failed`/start-limit-hit), a usage-exit (64), a removed unit
+            # (the output-sanity teardown), or an inconclusive probe all keep
+            # the ERROR — so genuine crash verdicts, the breaker bookkeeping,
+            # and `last_crash_line` evidence are never retired by drift.
+            if await self._unit_stopped_cleanly(slot_name):
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    message="container stopped (auto-reloads on next request)",
+                    force=True,
+                )
+                observed = SlotState.OFFLINE
+                rec = self._states.get(self._key(slot_name)) or rec
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
             # Inverse drift — state.json says we're not running, but
             # the unit is active. Adoption picks the slot up.

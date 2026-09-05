@@ -250,6 +250,16 @@ def test_restart_prevent_exit_status_list_is_accepted() -> None:
     _accepts(body, "chat")
 
 
+def test_success_exit_status_is_accepted() -> None:
+    """#2130: the renderer emits ``SuccessExitStatus=143`` so a requested
+    SIGTERM stop ends ``Result=success`` instead of parking the unit in
+    ``failed`` (which the state probe painted as a red ERROR). The root-side
+    allow-list must accept it, or every slot load on a provisioned box dies
+    at write-quadlet."""
+    body = f"{_HEAD}\n[Service]\nSuccessExitStatus=143\n"
+    _accepts(body, "chat")
+
+
 def test_live_container_provider_render_is_accepted() -> None:
     """End-to-end through the production path: ``ContainerProvider.container_spec``
     → ``_render_quadlet_from_plan``, not a hand-built plan."""
@@ -367,6 +377,11 @@ ESCALATIONS = {
     "service-restartpreventexitstatus-trailing-space": (
         f"{_HEAD}\n[Service]\nRestartPreventExitStatus=64 \n"
     ),
+    # #2130: SuccessExitStatus= is pinned exactly like RestartPreventExitStatus=
+    # (the renderer emits `143`); signal names and ranges are refused.
+    "service-successexitstatus-signal": f"{_HEAD}\n[Service]\nSuccessExitStatus=SIGTERM\n",
+    "service-successexitstatus-range": f"{_HEAD}\n[Service]\nSuccessExitStatus=0-255\n",
+    "service-successexitstatus-too-wide": f"{_HEAD}\n[Service]\nSuccessExitStatus=1430\n",
     "service-workingdirectory": f"{_HEAD}\n[Service]\nWorkingDirectory=/root\n",
     "service-environmentfile": f"{_HEAD}\n[Service]\nEnvironmentFile=/tmp/evil.env\n",
     "service-permissionsstartonly": f"{_HEAD}\n[Service]\nPermissionsStartOnly=true\n",

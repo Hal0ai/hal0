@@ -281,8 +281,8 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
 #               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
 #               HealthTimeout= Exec=
 #   [Service]   Restart= RestartSec= RestartSteps= RestartMaxDelaySec=
-#               RestartPreventExitStatus= SyslogIdentifier= StandardOutput=
-#               StandardError=
+#               RestartPreventExitStatus= SuccessExitStatus=
+#               SyslogIdentifier= StandardOutput= StandardError=
 #   [Install]   WantedBy=hal0.target        (omitted when autoload = false)
 #
 # Sections may appear at most once and only in that order; [Container] is
@@ -439,17 +439,19 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
 
     # ── [Service] ───────────────────────────────────────────────────────
     # Copied VERBATIM into the generated system unit by podman's quadlet
-    # generator — i.e. host-side root. Exactly the eight the renderer emits;
+    # generator — i.e. host-side root. Exactly the nine the renderer emits;
     # every Exec*=, User=, Group=, WorkingDirectory=, … lands in the default
     # arm below and dies. RestartPreventExitStatus= (#2037, widened by #2126)
-    # is pinned to a bounded space-separated list of bare exit statuses — the
-    # renderer emits `64 132`; the signal NAMES and ranges systemd would also
-    # accept are still refused here.
+    # and SuccessExitStatus= (#2130 — the renderer emits `143` so a requested
+    # SIGTERM stop is not recorded as a unit failure) are pinned to a bounded
+    # space-separated list of bare exit statuses; the signal NAMES and ranges
+    # systemd would also accept are still refused here.
     'Service|Restart')           [[ "$value" =~ $_QRE_RESTART ]] || _quadlet_die "bad Restart: $value" ;;
     'Service|RestartSec')        [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSec: $value" ;;
     'Service|RestartSteps')      [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSteps: $value" ;;
     'Service|RestartMaxDelaySec') [[ "$value" =~ $_QRE_UINT ]]   || _quadlet_die "bad RestartMaxDelaySec: $value" ;;
     'Service|RestartPreventExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]] || _quadlet_die "bad RestartPreventExitStatus: $value" ;;
+    'Service|SuccessExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]]        || _quadlet_die "bad SuccessExitStatus: $value" ;;
     'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;
     'Service|StandardOutput')    [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardOutput: $value" ;;
     'Service|StandardError')     [[ "$value" == "journal" ]]     || _quadlet_die "bad StandardError: $value" ;;
