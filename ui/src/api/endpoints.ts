@@ -89,6 +89,9 @@ export const ENDPOINTS = {
   // {models: [{model_id, ctx?}]} → {results: [...]}. A non-list body 400s;
   // this is the drawer's own pre-save probe, not the pull/inspect surface.
   modelsFeasibility: '/api/models/feasibility',
+  // #2212: read-only stat of a row's model file + mmproj sidecar → chips in
+  // the drawer's Source disclosure. On demand only — nothing polls it.
+  modelVerifyFiles: (id: string) => `/api/models/${encodeURIComponent(id)}/verify-files`,
   // Issue #311: free-text HF Hub model search backing the dashboard
   // "Search HF" button. Distinct from /api/models/inspect (which
   // resolves a known coord into variants) — this proxies HF's

@@ -27,7 +27,9 @@ import {
 	useModelUpdate,
 	useModelSetDefault,
 	useModelInspect,
+	useModelUpdateApply,
 } from "@/api/hooks/useModels";
+import { useModelVerifyFiles } from "@/api/hooks/useModelVerifyFiles";
 import { useModelSeedProfile } from "@/api/hooks/useModelSeedProfile";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useProfiles } from "@/api/hooks/useProfiles";
@@ -1293,6 +1295,27 @@ function mmprojRichOptions(dir, variants, extras) {
 	return opts;
 }
 
+// Turn one half of a POST /api/models/{id}/verify-files response into the chip
+// that sits beside its path line (#2212). Returns null unless the probe
+// actually measured THE PATH ON SCREEN: the projector line reads back the
+// draft pick, and a chip that says "on disk" about a file the operator has not
+// saved yet would be the exact untruth this endpoint exists to remove.
+//
+// Purely informational — warn-never-block. `size differs` is a warn, not an
+// error: a hand-rebuilt quant with a stale registry `size_bytes` is a routine,
+// harmless state, and the drawer has no business refusing a save over it.
+function verifyChipFor(verified, value) {
+	if (!verified) return null;
+	const shown = String(value || "").trim();
+	if (!shown || String(verified.path || "").trim() !== shown) return null;
+	if (!verified.exists) return { tone: "err", text: "missing" };
+	if (verified.size_matches === false) return { tone: "warn", text: "size differs" };
+	const gb = Number(verified.size_bytes) > 0
+		? ` · ${(Number(verified.size_bytes) / 1024 ** 3).toFixed(1)} GB`
+		: "";
+	return { tone: "ok", text: `on disk${gb}` };
+}
+
 // One read-only path line for the Source disclosure's paths block: mono text
 // that wraps mid-token (#2210's overflow-wrap:anywhere pattern — a projector
 // path is long, unbreakable, and must not push the drawer sideways) plus the
@@ -1303,8 +1326,14 @@ function mmprojRichOptions(dir, variants, extras) {
 //
 // `note` is for a line whose value is NOT on-disk truth — the projector line
 // shows the unsaved pick, and says so rather than implying the file is there.
-function SourcePathLine({ label, value, testId, empty, note }) {
+//
+// `verified` is one half of a POST /verify-files response (#2212), rendered as
+// a chip beside the path. It is only ever shown for the path it was MEASURED
+// for — see verifyChipFor — so an unsaved projector pick can never wear the
+// stored projector's "on disk" chip.
+function SourcePathLine({ label, value, testId, empty, note, verified, chipTestId }) {
 	const has = !!String(value || "").trim();
+	const chip = verifyChipFor(verified, value);
 	return (
 		<div style={{ marginTop: 4 }}>
 			<div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
@@ -1317,6 +1346,11 @@ function SourcePathLine({ label, value, testId, empty, note }) {
 				>
 					{has ? value : <span className="hint">{empty}</span>}
 				</span>
+				{chip && (
+					<span className={`chip ${chip.tone}`} data-testid={chipTestId}>
+						{chip.text}
+					</span>
+				)}
 				{has && (
 					<button
 						type="button"
@@ -1362,6 +1396,14 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// Repo listing behind the Source disclosure's mmproj picker (Task 9) —
 	// POST /api/models/inspect, server-cached, fired lazily (see srcOpen below).
 	const inspect = useModelInspect();
+	// #2212: on-disk truth for the row's two files. On demand ONLY — the
+	// disclosure opening does not fire it, a click on "Verify files" does.
+	const verifyFiles = useModelVerifyFiles();
+	// The existing re-pull machinery, reused as-is: POST /api/models/{id}/update
+	// (routes/models.py:555) re-pulls the row's OWN hf_repo + hf_filename over
+	// its existing `path`. No new pull surface was added for #2212 — see the
+	// button's own comment for the one thing it cannot repair.
+	const repull = useModelUpdateApply();
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
@@ -1403,6 +1445,14 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// lazy — one POST on the disclosure's first open, never on drawer mount —
 	// and this guards the re-open from re-firing it for the same coord.
 	const inspectedRepo = useRefMD(null);
+	// Closing the disclosure drops the verify chips (#2212). They are a
+	// point-in-time stat, and a chip restored on re-open would be asserting
+	// on-disk truth from an arbitrarily old probe — exactly the "the drawer
+	// asserting something it cannot know" the endpoint was added to end.
+	const toggleSrc = () => {
+		if (srcOpen) verifyFiles.reset();
+		setSrcOpen((o) => !o);
+	};
 	// Inline title editor (Task 3): the ✎ button swaps the name span for an
 	// input seeded from the CURRENT draft (`name`), never from the live model
 	// prop, so a prior uncommitted edit survives reopening the editor. Escape
@@ -1461,6 +1511,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setSrcOpen(false);
 		inspectedRepo.current = null;
 		inspect.reset();
+		// …and a different row's files are a different question entirely (#2212).
+		verifyFiles.reset();
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, model?.id]);
 
@@ -2037,6 +2089,23 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 			? (Number(model.size_bytes) / 1024 ** 3).toFixed(1)
 			: null;
 	const nativeContext = contextLengthLabel(modelContextLength);
+
+	// #2212's repair half. POST /api/models/{id}/update reads the STORED hf
+	// coords off the registry row (routes/models.py:576-578) and pulls over the
+	// row's existing `path` — never the drawer's drafts — so the offer is gated
+	// on what is saved, and the confirm quotes the saved values. It only appears
+	// once a verify has found something wrong with the model file: an
+	// unconditional re-download button beside a healthy path is a footgun, not
+	// an affordance.
+	const verifiedModel = verifyFiles.data?.model;
+	const storedHfRepo = String(model.hf_repo || "").trim();
+	const storedHfFile = String(model.hf_filename || "").trim();
+	const repullOffered =
+		!!verifiedModel &&
+		(verifiedModel.exists === false || verifiedModel.size_matches === false) &&
+		!!storedHfRepo &&
+		!!storedHfFile &&
+		!!String(model.path || "").trim();
 	// Ctx row intelligence (Task 7). ctxError already guarantees a clean,
 	// ≥128 integer for any non-empty value, so `ctxNumValue` is only ever
 	// non-null for a valid ctx — an errored or empty field never flips the
@@ -2547,11 +2616,11 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 					tabIndex={0}
 					aria-expanded={srcOpen}
 					style={{ marginTop: 16, cursor: "pointer", userSelect: "none" }}
-					onClick={() => setSrcOpen((o) => !o)}
+					onClick={toggleSrc}
 					onKeyDown={(e) => {
 						if (e.key === "Enter" || e.key === " ") {
 							e.preventDefault();
-							setSrcOpen((o) => !o);
+							toggleSrc();
 						}
 					}}
 				>
@@ -2643,6 +2712,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 									value={model.path}
 									testId="model-source-copy-path"
 									empty="not recorded on this row"
+									verified={verifyFiles.data?.model}
+									chipTestId="model-verify-chip-model"
 								/>
 								{/* The DRAFT projector, not the stored one: this line is
                     where a pick made above reads back as the resolved
@@ -2653,12 +2724,67 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 									value={mmproj}
 									testId="model-source-copy-mmproj"
 									empty="no projector paired"
+									verified={verifyFiles.data?.mmproj}
+									chipTestId="model-verify-chip-mmproj"
 									note={
 										baseline && mmproj.trim() !== baseline.mmproj
 											? "unsaved selection — this is the path Save will write, not what is stored today"
 											: null
 									}
 								/>
+								{/* #2212. Lazy by design: the probe is a host stat, cheap
+                    but not free, and a drawer that stats on every open would
+                    be doing filesystem work nobody asked for. One click, one
+                    answer, cleared when the disclosure closes. */}
+								<div
+									style={{
+										display: "flex",
+										gap: 8,
+										alignItems: "center",
+										marginTop: 8,
+									}}
+								>
+									<button
+										type="button"
+										className="btn ghost sm"
+										data-testid="model-verify-files"
+										disabled={verifyFiles.isPending}
+										onClick={() => verifyFiles.mutate(model.id)}
+									>
+										{verifyFiles.isPending ? "Verifying…" : "Verify files"}
+									</button>
+									{/* Re-pull reuses POST /api/models/{id}/update, which pulls
+                      the row's OWN hf coords over its existing path. It
+                      repairs the MODEL file only — the sidecar rides along
+                      only if the pull worker pairs one — so it is offered
+                      against a model-file finding, never as a projector fix. */}
+									{repullOffered && (
+										<button
+											type="button"
+											className="btn ghost sm"
+											data-testid="model-repull"
+											disabled={repull.isPending}
+											onClick={() =>
+												setConfirm({
+													title: "Re-pull this model file?",
+													message: `Re-download ${storedHfFile} from ${storedHfRepo} over ${model.path}. The existing bytes are replaced once the download verifies; progress shows in Downloads.`,
+													confirmLabel: "Re-pull",
+													onConfirm: () => {
+														setConfirm(null);
+														repull.mutate(model.id);
+													},
+												})
+											}
+										>
+											Re-pull
+										</button>
+									)}
+									{verifyFiles.isError && (
+										<span className="hint" data-testid="model-verify-error">
+											{verifyFiles.error?.message || "Verify failed"}
+										</span>
+									)}
+								</div>
 							</div>
 						</div>
 					</>

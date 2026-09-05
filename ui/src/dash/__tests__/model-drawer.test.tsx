@@ -58,6 +58,12 @@ const { inspectCalls, inspectHandler } = vi.hoisted(() => ({
   },
 }))
 
+// #2212: the Source disclosure's on-disk verify probe + the re-pull it offers
+// against a bad model-file finding. `useModelUpdateApply` is the EXISTING
+// re-pull mutation (POST /api/models/{id}/update) — nothing new was added
+// server-side for the repair half.
+const { repullCalls } = vi.hoisted(() => ({ repullCalls: [] as unknown[] }))
+
 vi.mock('@/api/hooks/useModels', () => ({
   useModelUpdate: () => ({
     mutateAsync: async (b: unknown) => {
@@ -90,6 +96,42 @@ vi.mock('@/api/hooks/useModels', () => ({
         else if (out) setState({ data: out, isError: false })
       },
       reset: () => setState({ isError: false }),
+    }
+  },
+  useModelUpdateApply: () => ({
+    mutate: (id: string) => {
+      repullCalls.push(id)
+    },
+    isPending: false,
+  }),
+}))
+
+// The verify probe is a react-query MUTATION fired by an explicit click, so
+// the stand-in is useState-backed like the inspect/feasibility ones above —
+// `mutate()` has to genuinely re-render for the chips to appear, and `reset()`
+// has to genuinely drop them for the "chips clear on close" contract to mean
+// anything. `verifyHandler.current` left unset models a probe in flight.
+const { verifyCalls, verifyHandler } = vi.hoisted(() => ({
+  verifyCalls: [] as unknown[],
+  verifyHandler: {
+    current: undefined as ((id: string) => Record<string, unknown> | undefined) | undefined,
+  },
+}))
+
+vi.mock('@/api/hooks/useModelVerifyFiles', () => ({
+  useModelVerifyFiles: () => {
+    const [data, setData] = React.useState<Record<string, unknown> | undefined>(undefined)
+    return {
+      data,
+      isPending: false,
+      isError: false,
+      error: undefined,
+      mutate: (id: string) => {
+        verifyCalls.push(id)
+        const resp = verifyHandler.current?.(id)
+        if (resp) setData(resp)
+      },
+      reset: () => setData(undefined),
     }
   },
 }))
@@ -240,6 +282,9 @@ beforeEach(() => {
   seedHandler.current = undefined
   inspectCalls.length = 0
   inspectHandler.current = undefined
+  verifyCalls.length = 0
+  verifyHandler.current = undefined
+  repullCalls.length = 0
 })
 
 afterEach(() => {
@@ -1425,6 +1470,181 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     await act(async () => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
     expect(toasts).toEqual([['Copy failed — clipboard unavailable', 'err']])
     delete (globalThis as unknown as { __hal0Toast?: unknown }).__hal0Toast
+    act(() => root.unmount())
+  })
+})
+
+// ─── #2212 — on-disk verify chips + the re-pull they offer ──────────────────
+// The Source disclosure shows where a row's files are SUPPOSED to be; #2212
+// added the read path that says whether they are actually there
+// (POST /api/models/{id}/verify-files). Warn-never-block: the chips are
+// informational, nothing gates on them, and nothing probes without a click.
+describe('ModelDrawer verify files (#2212)', () => {
+  const MODEL_DIR = '/var/lib/hal0/models/qwen'
+  const MODEL_PATH = `${MODEL_DIR}/qwen-q8.gguf`
+  const MMPROJ_PATH = `${MODEL_DIR}/mmproj-Q8_0.gguf`
+  const VERIFY_MODEL = {
+    ...MODEL,
+    path: MODEL_PATH,
+    hf_repo: 'org/qwen-gguf',
+    hf_filename: 'qwen-q8.gguf',
+    mmproj: MMPROJ_PATH,
+  }
+  const openSource = (host: HTMLElement) =>
+    act(() => q<HTMLElement>(host, 'model-source-disclosure').click())
+  const mountDrawer = (model: Record<string, unknown> = VERIFY_MODEL) =>
+    mount(React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }))
+
+  it('does not probe until the button is clicked, then POSTs the model id', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 9771050700, size_matches: true },
+      mmproj: null,
+    })
+    const { host, root } = mountDrawer()
+    // Closed disclosure: no button, no probe.
+    expect(q(host, 'model-verify-files')).toBeNull()
+    expect(verifyCalls).toEqual([])
+
+    openSource(host)
+    // Open but unclicked: still no probe, and no chip claiming anything.
+    expect(verifyCalls).toEqual([])
+    expect(q(host, 'model-verify-chip-model')).toBeNull()
+
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+    expect(verifyCalls).toEqual(['m1'])
+    act(() => root.unmount())
+  })
+
+  it('renders an ok chip with the on-disk size for each verified path', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 9771050700, size_matches: true },
+      mmproj: { path: MMPROJ_PATH, exists: true, size_bytes: 966367641, size_matches: null },
+    })
+    const { host, root } = mountDrawer()
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+
+    const modelChip = q<HTMLElement>(host, 'model-verify-chip-model')
+    expect(modelChip.className).toContain('ok')
+    expect(modelChip.textContent).toBe('on disk · 9.1 GB')
+    const mmChip = q<HTMLElement>(host, 'model-verify-chip-mmproj')
+    expect(mmChip.className).toContain('ok')
+    expect(mmChip.textContent).toBe('on disk · 0.9 GB')
+    act(() => root.unmount())
+  })
+
+  it('a missing file is an err chip; a size drift is a warn chip', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 12, size_matches: false },
+      mmproj: { path: MMPROJ_PATH, exists: false, size_bytes: null, size_matches: null },
+    })
+    const { host, root } = mountDrawer()
+    openSource(host)
+    // Stage one real edit so Save is live, and pin that a bad finding does not
+    // take it away — warn-never-block.
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-hffile-input'), 'qwen-q6.gguf'))
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(false)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+
+    const modelChip = q<HTMLElement>(host, 'model-verify-chip-model')
+    expect(modelChip.className).toContain('warn')
+    expect(modelChip.textContent).toBe('size differs')
+    const mmChip = q<HTMLElement>(host, 'model-verify-chip-mmproj')
+    expect(mmChip.className).toContain('err')
+    expect(mmChip.textContent).toBe('missing')
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(false)
+    act(() => root.unmount())
+  })
+
+  it('a row with no projector paired gets no mmproj chip', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 9771050700, size_matches: true },
+      mmproj: null,
+    })
+    const { host, root } = mountDrawer({ ...VERIFY_MODEL, mmproj: null })
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+    expect(q(host, 'model-verify-chip-model')).toBeTruthy()
+    expect(q(host, 'model-verify-chip-mmproj')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('chips clear when the disclosure closes', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 9771050700, size_matches: true },
+      mmproj: null,
+    })
+    const { host, root } = mountDrawer()
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+    expect(q(host, 'model-verify-chip-model')).toBeTruthy()
+
+    openSource(host) // close
+    expect(q(host, 'model-source-paths')).toBeNull()
+    openSource(host) // re-open — a stale stat must NOT come back
+    expect(q(host, 'model-verify-chip-model')).toBeNull()
+    expect(verifyCalls).toEqual(['m1'])
+    act(() => root.unmount())
+  })
+
+  it('an unsaved projector pick wears no chip from the stored path', () => {
+    // The mmproj line reads back the DRAFT. A chip measured for the stored
+    // projector must not follow the operator's new pick onto a file the probe
+    // never looked at.
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: true, size_bytes: 9771050700, size_matches: true },
+      mmproj: { path: MMPROJ_PATH, exists: true, size_bytes: 966367641, size_matches: null },
+    })
+    const { host, root } = mountDrawer()
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+    expect(q(host, 'model-verify-chip-mmproj')).toBeTruthy()
+
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-mmproj-input'), `${MODEL_DIR}/other.gguf`))
+    expect(q(host, 'model-verify-chip-mmproj')).toBeNull()
+    // The model line is untouched by an mmproj edit.
+    expect(q(host, 'model-verify-chip-model')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
+  it('a bad model-file finding offers re-pull, which confirms then POSTs', () => {
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: false, size_bytes: null, size_matches: null },
+      mmproj: null,
+    })
+    const { host, root } = mountDrawer()
+    openSource(host)
+    expect(q(host, 'model-repull')).toBeNull()
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+
+    const repullBtn = q<HTMLButtonElement>(host, 'model-repull')
+    expect(repullBtn).toBeTruthy()
+    act(() => repullBtn.click())
+    // Re-downloading many GB over the installed bytes goes through the house
+    // confirm, never straight off the click.
+    expect(repullCalls).toEqual([])
+    const confirmBtn = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Re-pull' && b !== repullBtn,
+    ) as HTMLButtonElement
+    expect(confirmBtn).toBeTruthy()
+    act(() => confirmBtn.click())
+    expect(repullCalls).toEqual(['m1'])
+    act(() => root.unmount())
+  })
+
+  it('no re-pull offer without stored HF coords to pull from', () => {
+    // POST /api/models/{id}/update reads the STORED coords off the registry
+    // row, so a coordless row has nothing to re-pull — and a draft typed into
+    // the inputs is not what the route would use.
+    verifyHandler.current = () => ({
+      model: { path: MODEL_PATH, exists: false, size_bytes: null, size_matches: null },
+      mmproj: null,
+    })
+    const { host, root } = mountDrawer({ ...VERIFY_MODEL, hf_repo: '', hf_filename: '' })
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-verify-files').click())
+    expect(q(host, 'model-verify-chip-model')).toBeTruthy()
+    expect(q(host, 'model-repull')).toBeNull()
     act(() => root.unmount())
   })
 })
