@@ -443,7 +443,50 @@ def _write_logs_section(out: Path, *, lines: int = 500) -> list[str]:
         dest = out / "logs" / f"{unit}.log"
         _run_one(argv, dest)
         captured.append(f"logs/{unit}.log")
+    captured += _write_install_log(out)
     return captured
+
+
+#: Where installer/lib/logging.sh's hal0_install_log_path() puts the tee'd
+#: install log — root gets /var/log/hal0, a --dev / non-root install falls
+#: back to /tmp. Both are globbed here so the bundle picks up whichever one
+#: this box actually has, newest first.
+_INSTALL_LOG_GLOBS: tuple[tuple[str, str], ...] = (
+    ("/var/log/hal0", "install-*.log"),
+    ("/tmp", "hal0-install-*.log"),
+)
+
+
+def _latest_install_log() -> Path | None:
+    candidates: list[Path] = []
+    for directory, pattern in _INSTALL_LOG_GLOBS:
+        d = Path(directory)
+        if d.is_dir():
+            candidates.extend(d.glob(pattern))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
+    """Copy the tail of the most recent installer log (installer/lib/logging.sh)
+    into the bundle, redacted like every other free-text capture (§3.1).
+
+    Best-effort: no install log on this box (a long-lived install predating
+    this feature, or a box whose /tmp was cleaned) writes nothing rather
+    than failing the bundle.
+    """
+    src = _latest_install_log()
+    if src is None:
+        return []
+    dest = out / "logs" / "install.log"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        tail = src.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+    except OSError:
+        return []
+    dest.write_text(_redact_text("\n".join(tail)) + "\n")
+    return ["logs/install.log"]
 
 
 # ── orchestration ────────────────────────────────────────────────────────────

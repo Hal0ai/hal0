@@ -182,6 +182,51 @@ def test_bundle_no_logs_flag_skips_logs_dir(tmp_hal0_home: str, tmp_path: Path) 
     assert "logs/" not in manifest["sections"]
 
 
+def test_bundle_includes_the_latest_install_log_redacted(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    older = log_dir / "install-20260101-000000.log"
+    older.write_text("stale run\nHF_TOKEN=hf_should_not_appear\n")
+    newer = log_dir / "install-20260102-000000.log"
+    newer.write_text("latest run\nAuthorization: Bearer super-secret-token\n")
+    # mtime, not filename order, decides "latest" — make it explicit.
+    import os
+    import time
+
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(newer, (now, now))
+
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    dest = out / "logs" / "install.log"
+    assert dest.is_file()
+    body = dest.read_text()
+    assert "latest run" in body
+    assert "stale run" not in body
+    assert "super-secret-token" not in body
+    assert "Bearer ***REDACTED***" in body
+
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert "logs/" in manifest["sections"]
+
+
+def test_bundle_with_no_install_log_present_writes_nothing_for_it(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(tmp_path / "nowhere"), "install-*.log"),)
+    )
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+    assert not (out / "logs" / "install.log").exists()
+
+
 def test_bundle_returns_nonzero_failed_count_when_probes_missing(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
