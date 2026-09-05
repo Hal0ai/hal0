@@ -31,6 +31,7 @@ import {
 } from './inference-pane.jsx'
 import { TelemetryHeader } from './telemetry-header.jsx'
 import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive, imageStatusChip } from './slot-status.js'
+import { statusCopyForSlotState } from './status-copy'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
 
@@ -69,7 +70,14 @@ function slotIndicator(slot, now = Date.now()) {
 
 function IndicatorDot({ slot }) {
   const ind = slotIndicator(slot);
-  return <span className={"dot " + ind.cls} title={ind.tooltip} />;
+  // The rendered tooltip appends the consequence-first sentence for the
+  // slot's raw lifecycle state (status-copy.ts) after the precise phase
+  // tooltip `slotIndicatorFromPhase` already computes — window.slotIndicator
+  // itself stays byte-for-byte pinned (tests/e2e/specs/slot-indicator.spec.ts
+  // reads its return value directly), only the DOM `title` gains the extra
+  // sentence.
+  const tooltip = `${ind.tooltip} — ${statusCopyForSlotState(slot?.state)}`;
+  return <span className={"dot " + ind.cls} title={tooltip} />;
 }
 
 // Expose for window-scope JSX (legacy pattern in this codebase) + tests.
