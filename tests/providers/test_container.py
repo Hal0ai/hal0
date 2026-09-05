@@ -694,7 +694,7 @@ class TestContainerSpec:
             ),
             # GPU device nodes are existence-filtered at the container_spec call
             # site; force present so the CI host (no /dev/kfd) still keeps them.
-            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container._dev_node_exists", return_value=True),
         ):
             spec = self._build_spec()
         assert spec.devices == ["/dev/kfd", "/dev/dri/renderD128"]
@@ -1146,7 +1146,7 @@ class TestGpuPassthroughGate:
             ),
             # Existence-filtered at the call site; force present so a CI host
             # with no /dev/kfd still exercises the gate rather than the filter.
-            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container._dev_node_exists", return_value=True),
             patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
         ):
             return provider.container_spec(cfg, _model_info())
@@ -2031,7 +2031,7 @@ class TestFPXQuantRunnerGuard:
                 "hal0.providers.container.resolve_gpu_device_paths",
                 return_value=list(self._GPU_NODES),
             ),
-            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container._dev_node_exists", return_value=True),
             patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
         ):
             return provider.container_spec(cfg, model_info)
