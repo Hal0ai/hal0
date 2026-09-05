@@ -123,7 +123,7 @@ memory is inert only once you (or the installer) have written
 
 Every memory operation is scoped to a namespace, and the grammar is a closed
 two-value set: `shared` or the caller's own `private:<client_id>`
-([ADR-0004](/docs/adr/0005-memory-namespace-shared-private)). `shared` is the
+([ADR-0005](/docs/adr/0005-memory-namespace-shared-private)). `shared` is the
 default for every write; `private:<agent>` is for memories an agent — or the
 operator — explicitly wants scoped to one identity. Scoping *within* `shared`
 is done with tags (the agent identity cards carry `agent-identity`; project
