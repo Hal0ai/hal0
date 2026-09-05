@@ -11,8 +11,10 @@ could not.
 
 Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
-ADR-level architecture decisions are kept internal (the `docs/internal/`
-tree is gitignored, #638) and referenced by number throughout the code.
+ADR-level architecture decisions referenced by number throughout the
+code live in one of two trees: `docs/adr/` (public, tracked) or
+`docs/internal/adr/` (gitignored, #638, for decisions that carry lab
+topology/IP data) — see `ARCHITECTURE.md` "Decision records".
 
 **Release automation.** On a tagged release the matching `## [<version>]`
 section below is bundled into the release tarball as `RELEASE_NOTES.md`, and its
