@@ -24,6 +24,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- The model drawer's flags divergence (`diffFlags` — the raw-mode diff, tune
+  pills, profile apply preview and seed consequence preview all consume it) now
+  matches pairs through the full llama-server alias table (`FLAG_ALIASES`)
+  instead of only the managed subset. A model tune carrying `-b 2048` diffed
+  against a profile carrying `--batch-size 1024` reads as one changed pair
+  again — not an added pill plus a struck ghost — and no longer inflates the
+  `◆ N diverged` count. Rendered spellings still come from the operator's
+  own text; only the matching canonicalises. (#2211)
+
 ## [1.2.0] — 2026-09-03
 
 ### Highlights

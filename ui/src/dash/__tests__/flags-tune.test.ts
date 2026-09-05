@@ -257,6 +257,23 @@ describe('diffFlags', () => {
     expect(d.diverged).toBe(false)
     expect(d.unchanged).toBe(1)
   })
+  it('folds the FULL alias table, not just the managed subset (#2211)', () => {
+    // -b is an unmanaged llama-server alias for --batch-size. Same value spelled
+    // two ways must be no-change, not added+removed.
+    const d = diffFlags('-b 2048', '--batch-size 2048')
+    expect(d.diverged).toBe(false)
+    expect(d.added).toEqual([])
+    expect(d.removed).toEqual([])
+    expect(d.unchanged).toBe(1)
+  })
+  it('cross-spelling value divergence is ONE changed pair, in the operator spelling (#2211)', () => {
+    const d = diffFlags('-b 2048', '--batch-size 1024')
+    expect(d.diverged).toBe(true)
+    expect(d.added).toEqual([])
+    expect(d.removed).toEqual([])
+    // `flag` carries the model side's own spelling; only the matching canonicalises.
+    expect(d.changed).toEqual([{ flag: '-b', from: '1024', to: '2048' }])
+  })
 })
 
 describe('flagsEquivalent', () => {
