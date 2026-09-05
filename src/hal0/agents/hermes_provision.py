@@ -47,7 +47,7 @@ import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -2126,6 +2126,163 @@ def _apply_config_set(
         except (subprocess.SubprocessError, OSError) as exc:
             errors.append(f"{key}: {exc}")
     return applied, errors
+
+
+def apply_mcp_server_entries(
+    entries: Mapping[str, dict[str, Any]],
+    *,
+    remove_ids: Iterable[str] = (),
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
+    venv: Path | str = "/var/lib/hal0/venvs/hermes",
+) -> dict[str, Any]:
+    """Additively write + surgically remove ``mcp_servers.<id>`` entries.
+
+    ADR-0015 §Decision 2 — the sole write path :mod:`hal0.mcp.hermes_join`
+    uses to join user-installed servers into Hermes's ``config.yaml``. This
+    is a public entrypoint (not a provisioning step) so it can run outside
+    the full :class:`BootstrapState` pipeline, on every MCP registry
+    mutation rather than only at ``hal0 agent reprovision`` time.
+
+    ``entries`` maps server id → ``{"type", "url", "timeout", "headers":
+    {...}}`` — the identical shape the two-builtin-server loop in
+    :func:`_build_config_overlay` already applies (``:2012-2021``); this
+    function reuses the same ``hermes config set`` mechanism
+    (:func:`_apply_config_set`) rather than a second one.
+
+    ``remove_ids`` are ids to delete from the ``mcp_servers`` table.
+    ``hermes config set`` cannot express deletion, so removal is a direct
+    load → pop → dump of ``config.yaml`` — the same full-parse-merge-dump
+    strategy :func:`_merge_config_yaml_layers` and
+    :func:`_phase_brain_profile_mcp_wire` already use on this exact file,
+    chosen over a line-based text patch (see ADR-0015 "Rejected") because
+    hal0 already accepts losing hand-formatting on this machine-migrated
+    file at those two call sites. Any id present in BOTH ``entries`` and
+    ``remove_ids`` is treated as a desired entry (removal loses) — callers
+    pass only ids that are no longer desired.
+
+    Best-effort: every failure lands in the returned ``errors`` list rather
+    than raising, so a caller can surface a warning without failing the
+    registry mutation that triggered the sync. Returns
+    ``{"applied": int, "removed": list[str], "errors": list[str]}``.
+    """
+    hermes_home = Path(hermes_home)
+    venv = Path(venv)
+    errors: list[str] = []
+    applied = 0
+
+    if entries:
+        pairs: list[tuple[str, Any]] = []
+        for sid, spec in entries.items():
+            pairs += [
+                (f"mcp_servers.{sid}.type", spec.get("type", "http")),
+                (f"mcp_servers.{sid}.url", spec["url"]),
+                (f"mcp_servers.{sid}.timeout", spec.get("timeout", 60)),
+            ]
+            for hk, hv in (spec.get("headers") or {}).items():
+                pairs.append((f"mcp_servers.{sid}.headers.{hk}", hv))
+        hermes_bin = _hermes_bin(venv)
+        if hermes_bin.exists():
+            applied, set_errors = _apply_config_set(
+                pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=subprocess.run
+            )
+            errors.extend(set_errors)
+        else:
+            errors.append(f"hermes binary not found at {hermes_bin}")
+
+    removed: list[str] = []
+    to_remove = [sid for sid in remove_ids if sid not in entries]
+    if to_remove:
+        try:
+            import yaml
+        except ImportError:
+            errors.append("PyYAML unavailable; cannot remove stale mcp_servers entries")
+        else:
+            config_path = hermes_home / "config.yaml"
+            try:
+                data: dict[str, Any] = {}
+                if config_path.exists():
+                    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                servers = data.get("mcp_servers")
+                if isinstance(servers, dict):
+                    changed = False
+                    for sid in to_remove:
+                        if servers.pop(sid, None) is not None:
+                            removed.append(sid)
+                            changed = True
+                    if changed:
+                        out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                        _atomic_write(config_path, out)
+            except (OSError, yaml.YAMLError) as exc:
+                errors.append(f"remove: {exc}")
+
+    return {"applied": applied, "removed": removed, "errors": errors}
+
+
+def apply_brain_profile_mcp_entries(
+    entries: Mapping[str, dict[str, Any]],
+    *,
+    remove_ids: Iterable[str] = (),
+    hermes_home: Path | str = HERMES_HOME_DEFAULT,
+) -> dict[str, Any]:
+    """Join user-installed servers into the hal0-brain profile's config.yaml.
+
+    ADR-0015 §Decision 3. The brain profile is a separate hermes-managed
+    ``config.yaml`` under ``profiles/hal0-brain/`` that ``hermes config
+    set`` cannot target (the CLI only edits the active ``$HERMES_HOME``
+    config) — :func:`_phase_brain_profile_mcp_wire` already handles this by
+    deep-merging directly, so this function does the same for user-installed
+    entries rather than inventing a second mechanism. Skips (returns
+    ``{"wired": False, ...}``) when the profile config doesn't exist yet or
+    PyYAML is unavailable, matching that function's own degrade-to-OK
+    posture — brain wiring is never load-bearing for the registry mutation
+    that triggered it.
+    """
+    path = Path(hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
+    if not path.exists():
+        return {"wired": False, "reason": "brain profile config absent", "path": str(path)}
+    try:
+        import yaml
+    except ImportError:
+        return {"wired": False, "reason": "PyYAML unavailable", "path": str(path)}
+
+    try:
+        current = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(current) or {}
+        servers = (
+            data.setdefault("mcp_servers", {})
+            if entries or remove_ids
+            else data.get("mcp_servers", {})
+        )
+        removed: list[str] = []
+        for sid in remove_ids:
+            if (
+                sid not in entries
+                and isinstance(servers, dict)
+                and servers.pop(sid, None) is not None
+            ):
+                removed.append(sid)
+        if isinstance(servers, dict):
+            for sid, spec in entries.items():
+                servers[sid] = {
+                    "type": spec.get("type", "http"),
+                    "url": spec["url"],
+                    "headers": dict(spec.get("headers") or {}),
+                    "timeout": spec.get("timeout", 60),
+                }
+        out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+        changed = out != current
+        if changed:
+            _atomic_write(path, out)
+    except (OSError, yaml.YAMLError) as exc:
+        return {"wired": False, "error": str(exc), "path": str(path)}
+
+    return {
+        "wired": True,
+        "changed": changed,
+        "removed": removed,
+        "path": str(path),
+        "servers": sorted(entries.keys()),
+    }
 
 
 def _merge_config_yaml_layers(

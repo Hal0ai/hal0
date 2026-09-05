@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import re
 import tomllib
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -36,10 +37,11 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from hal0.config import paths as cfg_paths
 from hal0.config.loader import write_toml_atomic
+from hal0.config.schema import ToolPolicy
 from hal0.errors import BadRequest, Conflict, NotFound
 
 log = structlog.get_logger(__name__)
@@ -52,6 +54,32 @@ BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 
 
 # ── Schema ──────────────────────────────────────────────────────────────────
+
+#: Grammar for a ``[secrets]`` reference — the name of a key in
+#: ``/etc/hal0/api.env``. Mirrors ``routes/secrets.py:65`` (the canonical
+#: enforcement point for names actually stored there); duplicated here
+#: rather than imported so this domain module doesn't reach up into the
+#: API route layer for a one-line regex.
+_SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+class ExposureConfig(BaseModel):
+    """``[exposure]`` — which consumers a user-installed server is joined to.
+
+    ADR-0015 §Decision 1/3/4: ``hermes`` and ``brain`` are honoured today
+    (:mod:`hal0.mcp.hermes_join`); ``openwebui``/``opencode`` have no join
+    mechanism in this codebase and setting either raises
+    ``501 mcp.exposure_unsupported`` at the route layer rather than being
+    silently ignored — the field still round-trips so a future join can
+    read an operator's already-expressed intent.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    hermes: bool = Field(default=False)
+    brain: bool = Field(default=False)
+    openwebui: bool = Field(default=False)
+    opencode: bool = Field(default=False)
 
 
 class InstalledServer(BaseModel):
@@ -70,13 +98,36 @@ class InstalledServer(BaseModel):
     a manifest URL. Stored verbatim so a future re-install / upgrade
     path can rerun the resolver."""
     transport: str = Field(default="stdio")
-    """``stdio`` or ``streamable-http``. ``stdio`` covers the most
-    common path (npx/uvx packages) — the supervisor follow-up will
-    actually honour this field."""
+    """``stdio``, ``streamable-http``, or ``sse`` (ADR-0015). ``stdio``
+    covers the most common path (npx/uvx packages) but has no
+    supervisor yet — see ADR-0015's "Deferred: stdio supervisor"."""
+    command: str = Field(default="")
+    """Stdio launch command (e.g. ``npx``, ``uvx``). Unused until the
+    stdio supervisor ships (ADR-0015); recorded now so a record doesn't
+    need a schema migration when it does."""
+    args: list[str] = Field(default_factory=list)
+    """Stdio launch args. Same deferred-use note as ``command``."""
+    url: str = Field(default="")
+    """Connect URL for ``streamable-http``/``sse`` transports. Empty for
+    ``stdio`` records."""
     tools: int = Field(default=0, ge=0, le=4096)
     resources: int = Field(default=0, ge=0)
     prompts: int = Field(default=0, ge=0)
     env: dict[str, str] = Field(default_factory=dict)
+    secrets: dict[str, str] = Field(default_factory=dict)
+    """``env var name`` → ``key in /etc/hal0/api.env``. A *reference*,
+    never a literal value (ADR-0015 §Decision 1) — resolved at call/probe
+    time via ``os.environ``, which hal0-api keeps in lockstep with
+    ``api.env`` on every secrets write (``routes/secrets.py``)."""
+    tool_policy: ToolPolicy = Field(default_factory=ToolPolicy)
+    """Reuses :class:`hal0.config.schema.ToolPolicy` verbatim — same
+    allow/gated/blocked disjointness, same empty-by-default posture.
+    Serialised under the TOML ``[tools]`` table (see
+    :meth:`to_toml_dict`); named ``tool_policy`` on the model, not
+    ``tools``, because the pre-existing ``tools`` field above is the
+    advertised tool *count* every existing on-disk record already
+    carries."""
+    exposure: ExposureConfig = Field(default_factory=ExposureConfig)
     enabled: bool = Field(default=True)
     installed_at: str = Field(default="")
     """ISO-8601 UTC timestamp set on first write."""
@@ -85,10 +136,57 @@ class InstalledServer(BaseModel):
     author: str = Field(default="user")
     verified: bool = Field(default=False)
 
+    @field_validator("secrets")
+    @classmethod
+    def _secrets_reference_valid_names(cls, v: dict[str, str]) -> dict[str, str]:
+        """Both sides of a ``[secrets]`` entry must be env-var-shaped.
+
+        The left side becomes a literal env var name in the eventual
+        process/header env; the right side must match the grammar
+        ``/api/secrets`` enforces for names it will actually store
+        (``routes/secrets.py:63``) — a mismatched reference here would
+        otherwise resolve to ``None`` silently at call time.
+        """
+        bad = {k: val for k, val in v.items() if not _SECRET_KEY_RE.match(val)}
+        if bad:
+            raise ValueError(
+                f"secrets values must reference a valid api.env key name "
+                f"(^[A-Z][A-Z0-9_]{{0,63}}$): {sorted(bad)}"
+            )
+        return v
+
     def to_toml_dict(self) -> dict[str, Any]:
-        """Serialise to a tomli_w-compatible dict (drops None values)."""
+        """Serialise to a tomli_w-compatible dict (drops None values).
+
+        ``tool_policy`` round-trips under the on-disk ``[tools]`` key —
+        the model attribute is named differently only to avoid colliding
+        with the pre-existing ``tools`` int-count field (see its
+        docstring); the TOML shape matches ADR-0015's schema example
+        exactly (``[tools]`` with ``allow``/``gated``/``blocked``).
+        """
         d = self.model_dump(mode="python")
+        tool_policy = d.pop("tool_policy")
+        d["tools_count"] = d.pop("tools")
+        d["tools"] = tool_policy
         return {k: v for k, v in d.items() if v is not None}
+
+    @classmethod
+    def from_toml_dict(cls, raw: dict[str, Any]) -> InstalledServer:
+        """Inverse of :meth:`to_toml_dict` — undoes the ``tools`` rename.
+
+        Tolerates the pre-#N on-disk shape (``tools`` as a bare int,
+        no ``[tools]`` table) so every existing record still validates:
+        that shape has no ``tools_count`` key, so ``tools`` is left as
+        the int count and ``tool_policy`` falls back to its empty default.
+        """
+        raw = dict(raw)
+        if isinstance(raw.get("tools"), dict):
+            raw["tool_policy"] = raw.pop("tools")
+            if "tools_count" in raw:
+                raw["tools"] = raw.pop("tools_count")
+            else:
+                raw["tools"] = 0
+        return cls.model_validate(raw)
 
 
 # ── Registry surface ────────────────────────────────────────────────────────
@@ -176,7 +274,7 @@ def list_installed() -> list[InstalledServer]:
         try:
             with p.open("rb") as f:
                 raw = tomllib.load(f)
-            rows.append(InstalledServer.model_validate(raw))
+            rows.append(InstalledServer.from_toml_dict(raw))
         except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
             log.warning(
                 "hal0.mcp.installed.bad_record",
@@ -199,7 +297,7 @@ def get_installed(server_id: str) -> InstalledServer:
     try:
         with path.open("rb") as f:
             raw = tomllib.load(f)
-        return InstalledServer.model_validate(raw)
+        return InstalledServer.from_toml_dict(raw)
     except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
         raise BadRequest(
             f"installed-server record at {path} is malformed",
@@ -282,14 +380,21 @@ def patch_config(
     server_id: str,
     *,
     env: dict[str, str] | None = None,
+    secrets: dict[str, str] | None = None,
+    tool_policy: ToolPolicy | None = None,
+    exposure: ExposureConfig | None = None,
     enabled: bool | None = None,
 ) -> InstalledServer:
-    """Merge env / enabled overrides into a registry record.
+    """Merge env / secrets / tools / exposure / enabled overrides into a record.
 
-    Replaces the record's ``env`` dict wholesale when supplied (a TOML
-    file holds a single per-server env block, so the route layer always
-    sends the full intended set, not a delta). ``enabled`` flips the
-    flag without touching anything else.
+    Every dict/model field replaces wholesale when supplied — a TOML
+    file holds a single per-server block for each, so the route layer
+    always sends the full intended set, not a delta (matches the
+    pre-existing ``env`` contract). ``enabled`` flips the flag without
+    touching anything else. Callers that also need the Hermes exposure
+    join re-run (``tool_policy``/``exposure``/``enabled`` changes) are
+    responsible for calling :mod:`hal0.mcp.hermes_join` themselves —
+    this function only owns the on-disk record.
     """
     with _registry_lock(server_id):
         record = get_installed(server_id)
@@ -298,6 +403,12 @@ def patch_config(
             # Coerce values to strings — pydantic validates the type but the
             # FastAPI body is permissive (numbers, bools, etc).
             updates["env"] = {k: str(v) for k, v in env.items()}
+        if secrets is not None:
+            updates["secrets"] = {k: str(v) for k, v in secrets.items()}
+        if tool_policy is not None:
+            updates["tool_policy"] = tool_policy
+        if exposure is not None:
+            updates["exposure"] = exposure
         if enabled is not None:
             updates["enabled"] = bool(enabled)
         if not updates:
@@ -314,11 +425,23 @@ def patch_config(
     return next_record
 
 
+def list_enabled_exposed(*, target: str) -> list[InstalledServer]:
+    """Installed, enabled records with ``exposure.<target>`` set.
+
+    ``target`` is ``"hermes"`` or ``"brain"`` — the two joins ADR-0015
+    wires. Used by :mod:`hal0.mcp.hermes_join` to compute its desired
+    set without duplicating the enabled+exposure filter at each call site.
+    """
+    return [r for r in list_installed() if r.enabled and bool(getattr(r.exposure, target, False))]
+
+
 __all__ = [
     "BUNDLED_SERVER_IDS",
+    "ExposureConfig",
     "InstalledServer",
     "get_installed",
     "install",
+    "list_enabled_exposed",
     "list_installed",
     "patch_config",
     "uninstall",
