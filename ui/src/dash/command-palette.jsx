@@ -13,6 +13,7 @@
 // clear-downloads, replay-tour) were removed — every item now does what
 // it says.
 
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { useSlots, useSlotRestart, useSlotLoad, useSlotUnload } from '@/api/hooks/useSlots'
 import { useModels, fmtBytes } from '@/api/hooks/useModels'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
@@ -33,12 +34,10 @@ if (typeof window !== "undefined") {
 }
 
 const cpCopy = (text, label) => {
-  try {
-    navigator.clipboard.writeText(text);
-    window.__hal0Toast && window.__hal0Toast(label, "ok");
-  } catch {
-    window.__hal0Toast && window.__hal0Toast("Copy failed — clipboard unavailable", "err");
-  }
+  copyTextToClipboard(text).then((ok) => {
+    if (ok) window.__hal0Toast && window.__hal0Toast(label, "ok");
+    else window.__hal0Toast && window.__hal0Toast("Copy failed — clipboard unavailable", "err");
+  });
 };
 
 const cpCurlFor = (slotName) =>

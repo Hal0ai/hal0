@@ -268,7 +268,12 @@ export function highlightSegments(text) {
 
 // Client-side divergence: diff the model's tune text against the profile text
 // that seeded it. Keyed by canonical flag so a reordered `-b 2048` isn't a
-// spurious change. Returns { added, removed, changed, unchanged, diverged }.
+// spurious change. Matching folds through canonFlag (the full FLAG_ALIASES
+// mirror, not just the managed subset) so a model `-b 2048` against a profile
+// `--batch-size 1024` reads as ONE changed pair, not added+removed (#2211) —
+// the same canonicalisation groupFlagPairs and the tune pills use. Reported
+// `flag` spellings stay the operator's own text; only the matching
+// canonicalises. Returns { added, removed, changed, unchanged, diverged }.
 //   added:     [{ flag, value }]  present in model, not in profile
 //   removed:   [{ flag, value }]  present in profile, not in model
 //   changed:   [{ flag, from, to }] same flag, different value
@@ -276,7 +281,7 @@ export function highlightSegments(text) {
 export function diffFlags(modelText, profileText) {
   const mp = flagPairs(tokenizeFlags(modelText).tokens);
   const pp = flagPairs(tokenizeFlags(profileText).tokens);
-  const key = (p) => p.canon;
+  const key = (p) => canonFlag(p.flag);
   const pByFlag = new Map();
   for (const p of pp) pByFlag.set(key(p), p);
   const mByFlag = new Map();

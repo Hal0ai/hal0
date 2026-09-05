@@ -14,6 +14,7 @@
 // affected_slots straight from the backend. The old HAL0_DATA fallbacks
 // live on only as cosmetic fixtures (host RAM, /var disk hint).
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
@@ -387,9 +388,10 @@ function OnDiskPanel({ model }) {
         <span className="v">{model.ns || "—"}</span>
       </div>
       <div style={{display: "flex", gap: 6, marginTop: 8}}>
-        <button className="btn ghost sm" onClick={() => {
-          navigator.clipboard?.writeText(path);
-          window.__hal0Toast && window.__hal0Toast("Path copied to clipboard", "ok");
+        <button className="btn ghost sm" onClick={async () => {
+          const ok = await copyTextToClipboard(path);
+          if (ok) window.__hal0Toast && window.__hal0Toast("Path copied to clipboard", "ok");
+          else window.__hal0Toast && window.__hal0Toast("Copy failed — clipboard unavailable", "err");
         }}>Copy path</button>
       </div>
     </div>

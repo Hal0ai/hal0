@@ -1355,7 +1355,7 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     act(() => root.unmount())
   })
 
-  it('a clipboard that throws reports the failure instead of a false success', () => {
+  it('a clipboard that throws reports the failure instead of a false success', async () => {
     const toasts: [string, string][] = []
     ;(globalThis as unknown as { __hal0Toast: unknown }).__hal0Toast = (m: string, k: string) =>
       toasts.push([m, k])
@@ -1367,11 +1367,38 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
       },
       configurable: true,
     })
+    // The legacy execCommand fallback is unavailable too — full copy failure.
+    Object.defineProperty(globalThis.document, 'execCommand', {
+      value: () => false,
+      configurable: true,
+    })
     const { host, root } = mount(
       React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
     )
     openSource(host)
-    act(() => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
+    await act(async () => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
+    expect(toasts).toEqual([['Copy failed — clipboard unavailable', 'err']])
+    delete (globalThis as unknown as { __hal0Toast?: unknown }).__hal0Toast
+    act(() => root.unmount())
+  })
+
+  it('an ASYNC clipboard rejection reports the failure too (#2214)', async () => {
+    const toasts: [string, string][] = []
+    ;(globalThis as unknown as { __hal0Toast: unknown }).__hal0Toast = (m: string, k: string) =>
+      toasts.push([m, k])
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText: () => Promise.reject(new Error('NotAllowedError')) },
+      configurable: true,
+    })
+    Object.defineProperty(globalThis.document, 'execCommand', {
+      value: () => false,
+      configurable: true,
+    })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
+    )
+    openSource(host)
+    await act(async () => q<HTMLButtonElement>(host, 'model-source-copy-path').click())
     expect(toasts).toEqual([['Copy failed — clipboard unavailable', 'err']])
     delete (globalThis as unknown as { __hal0Toast?: unknown }).__hal0Toast
     act(() => root.unmount())
