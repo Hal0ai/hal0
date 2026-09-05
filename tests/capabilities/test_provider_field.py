@@ -183,6 +183,66 @@ def test_runs_on_for_model_non_empty_for_empty_backends_llama_row(
     assert model_to_dict(m)["runs_on"] == ["gpu-vulkan", "cpu"]
 
 
+# ── rocm tag host gate (#2029) ────────────────────────────────────────────────
+#
+# The ``elif low in {"rocm", "gpu-rocm"}`` tag branch used to append gpu-rocm
+# unconditionally, with no ``available_backends()`` intersection. Every
+# ``hal0 model add`` GGUF gets ``backends=["vulkan","rocm","cuda","cpu"]``
+# (``registry.detect._GGUF_BACKENDS``), so on a kfd-less host each user-added
+# model advertised a gpu-rocm lane at fit_status: allowed that
+# require_kfd_for_gpu_slot then refused at load time. The rocm branch must go
+# through the same host intersection as its llamacpp / runtime-map siblings.
+
+
+def test_backend_variants_rocm_tag_gated_off_kfdless_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Host with no compute_capable GPU: available_backends() omits gpu-rocm.
+    # A registry GGUF's default tag list must not leak a gpu-rocm lane.
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("gpu-vulkan", "cpu"))
+    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: True)
+    m = Model(
+        id="added-a",
+        path=str(tmp_path / "added-a.gguf"),
+        backends=["vulkan", "rocm", "cuda", "cpu"],
+    )
+    variants = catalog._backend_variants(m)
+    assert "gpu-rocm" not in variants, f"kfd-less host must not advertise gpu-rocm: {variants!r}"
+    assert variants == ["gpu-vulkan", "cpu"]
+
+
+def test_backend_variants_bare_rocm_tag_gated_off_kfdless_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A rocm-only tag on a host without gpu-rocm yields no lanes at all —
+    # consistent with how a vulkan-only tag behaves on a GPU-less host.
+    monkeypatch.setattr(catalog, "available_backends", lambda: _hosts("cpu"))
+    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: False)
+    m = Model(id="rocm-only", path=str(tmp_path / "rocm-only.gguf"), backends=["rocm"])
+    assert catalog._backend_variants(m) == []
+
+
+def test_backend_variants_rocm_tag_kept_on_kfd_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # kfd-present AMD host: behaviour unchanged — gpu-rocm first (via the
+    # llamacpp fan-out's AMD ordering), vulkan and cpu beside it.
+    monkeypatch.setattr(
+        catalog, "available_backends", lambda: _hosts("gpu-rocm", "gpu-vulkan", "cpu")
+    )
+    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: True)
+    m = Model(
+        id="added-b",
+        path=str(tmp_path / "added-b.gguf"),
+        backends=["vulkan", "rocm", "cuda", "cpu"],
+    )
+    assert catalog._backend_variants(m) == ["gpu-rocm", "gpu-vulkan", "cpu"]
+
+    # And a bare rocm tag still advertises the lane when the host has it.
+    bare = Model(id="rocm-bare", path=str(tmp_path / "rocm-bare.gguf"), backends=["rocm"])
+    assert catalog._backend_variants(bare) == ["gpu-rocm"]
+
+
 def test_backend_variants_qwen3tts_yields_gpu_rocm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -26,6 +26,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- The capability catalog no longer advertises a `gpu-rocm` backend for
+  registry models on hosts that cannot run it. The `rocm` tag branch in
+  `_backend_variants` appended `gpu-rocm` unconditionally — no
+  `available_backends()` intersection, unlike its vulkan/llama-server and
+  provider-runtime siblings — so every `hal0 model add`-registered GGUF
+  (which carries `rocm` in its default backend tags) surfaced an unrunnable
+  `gpu-rocm` entry at `fit_status: allowed` on kfd-less hosts. The branch now
+  applies the same host intersection: no compute-capable AMD GPU, no
+  advertised ROCm lane. The deliberate `qwen3-tts` voice.tts engine row is
+  injected separately and is unaffected. (#2029)
 - The model drawer's flags divergence (`diffFlags` — the raw-mode diff, tune
   pills, profile apply preview and seed consequence preview all consume it) now
   matches pairs through the full llama-server alias table (`FLAG_ALIASES`)

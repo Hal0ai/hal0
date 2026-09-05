@@ -495,7 +495,17 @@ def _backend_variants(entry: Any) -> list[str]:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)
         elif low in {"rocm", "gpu-rocm"}:
-            if "gpu-rocm" not in out:
+            # Same host-presence intersection as the llamacpp fan-out and
+            # ``_RUNTIME_TO_HOST_BACKENDS`` branches (#2029): on a kfd-less
+            # host ``available_backends()`` omits gpu-rocm ("GPU/ROCm only
+            # when the GPU is compute_capable"), so a raw "rocm" tag —
+            # every ``hal0 model add`` GGUF carries one via
+            # ``_GGUF_BACKENDS`` — must not advertise a lane the host
+            # cannot run. (The voice.tts qwen3-tts row is unaffected: it
+            # is injected by ``_tts_rows_for_capability``, not this
+            # fan-out.)
+            host_backends = {b["id"] for b in available_backends()}
+            if "gpu-rocm" in host_backends and "gpu-rocm" not in out:
                 out.append("gpu-rocm")
         elif low in {"cpu"}:
             if "cpu" not in out:

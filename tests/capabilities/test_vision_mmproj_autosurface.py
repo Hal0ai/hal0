@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from hal0.capabilities import catalog
 from hal0.capabilities.catalog import _model_capabilities, models_for_capability
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
@@ -36,7 +39,14 @@ def test_mmproj_model_advertises_vision_keeping_chat(tmp_path: Path) -> None:
     assert "vision" in caps, f"vision must be auto-surfaced from the sidecar: {caps}"
 
 
-def test_mmproj_model_listed_under_vision_capability(tmp_path: Path) -> None:
+def test_mmproj_model_listed_under_vision_capability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Pin the host backends: this fixture's gpu-rocm tag only produces a
+    # row when the host advertises gpu-rocm (#2029 gated the rocm tag on
+    # available_backends()), and this test is about mmproj→vision
+    # surfacing, not host hardware.
+    monkeypatch.setattr(catalog, "available_backends", lambda: [{"id": "gpu-rocm"}, {"id": "cpu"}])
     reg = _reg(tmp_path)
     reg.add(
         Model(
