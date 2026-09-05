@@ -1571,6 +1571,74 @@ def screen_model_write(
             )
 
 
+# ── on-disk file verification (read path, #2212) ──────────────────────────────
+#
+# ``screen_vision_mmproj`` above does the ``Path(...).is_file()`` half of this at
+# WRITE time — it refuses to store a projector that is not there. What the model
+# drawer's Source disclosure needed was the READ half: a truthful "is the file
+# the row points at actually on this host" the UI can render instead of guessing
+# client-side. That is all this is — three ``os.stat`` fields, no hashing, no
+# HuggingFace round trip, no repair. Purely informational: it never blocks a
+# save, a launch, or a pull.
+
+
+def _stat_target(path: Any, *, expect_bytes: Any = None) -> dict[str, Any] | None:
+    """Stat one registry-declared file; ``None`` when no path is declared.
+
+    Degrades to nulls rather than raising: an unreadable parent, a dangling
+    symlink, a permission error and a plain missing file all land on
+    ``exists: False`` with null sizes. A DIRECTORY install (a sharded model
+    whose ``path`` is its folder) reports ``exists: True`` with a null
+    ``size_bytes`` — a directory's own stat size is not the model's size, and
+    inventing a recursive walk here would make a "never blocks" probe walk an
+    arbitrary tree.
+
+    ``size_matches`` is a three-state: ``True``/``False`` only when BOTH a
+    positive expected size and a real file size are in hand, ``None``
+    otherwise (nothing on disk to compare, or the row records no size).
+    """
+    raw = path.strip() if isinstance(path, str) else ""
+    if not raw:
+        return None
+    exists = False
+    size: int | None = None
+    try:
+        st = Path(raw).stat()
+    except OSError:
+        pass
+    else:
+        exists = True
+        from stat import S_ISDIR
+
+        if not S_ISDIR(st.st_mode):
+            size = int(st.st_size)
+    expected = expect_bytes if isinstance(expect_bytes, int) and expect_bytes > 0 else None
+    matches = None if (size is None or expected is None) else size == expected
+    return {"path": raw, "exists": exists, "size_bytes": size, "size_matches": matches}
+
+
+def verify_files(model: Any) -> dict[str, Any]:
+    """Report what is on disk for a registry row's model file and mmproj sidecar.
+
+    Shape::
+
+        {"model":  {"path", "exists", "size_bytes", "size_matches"},
+         "mmproj": {…same…} | None}
+
+    ``mmproj`` is ``None`` when the row pairs no projector. The model half keys
+    ``size_matches`` off the row's stored ``size_bytes``; the projector has no
+    stored size to compare against, so its ``size_matches`` is always ``None``.
+    """
+    return {
+        "model": _stat_target(
+            getattr(model, "path", None),
+            expect_bytes=getattr(model, "size_bytes", None),
+        )
+        or {"path": "", "exists": False, "size_bytes": None, "size_matches": None},
+        "mmproj": _stat_target(getattr(model, "mmproj", None)),
+    }
+
+
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was
 # removed 2026-08: duplicate registry rows for "same weights, different
 # settings" confused which row was the original. Per-slot runtime divergence

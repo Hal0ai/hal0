@@ -706,6 +706,40 @@ async def models_feasibility_method_not_allowed() -> None:
     raise HTTPException(status_code=405, detail="POST required")
 
 
+@router.post("/{model_id}/verify-files")
+async def verify_model_files(model_id: str, request: Request) -> dict[str, Any]:
+    """Stat a registry row's model file and mmproj sidecar (#2212).
+
+    Response::
+
+        {"model":  {"path", "exists", "size_bytes", "size_matches"},
+         "mmproj": {…same…} | None}
+
+    Registered above the ``/{model_id}`` catch-all with ``/feasibility`` and
+    friends. Order is not load-bearing the way it is for a LITERAL single
+    segment — this path is two segments, and the catch-all only ever matches
+    one — so the ``/feasibility`` GET-405 shim has no analogue here and, like
+    every other POST-only ``/{model_id}/…`` route, none is added: a stray GET
+    cannot resolve as ``model_id="verify-files"``. It falls through to the
+    SPA catch-all's bare ``api/`` 404 (api/__init__.py:2931-2934) rather than
+    a 405, since that route fully matches every GET.
+
+    Pure ``os.stat`` (see ``models_service.verify_files``): no hashing, no
+    HuggingFace round trip, so it never blocks. 404 is reserved for an unknown
+    ``model_id``; an absent or unreadable FILE is a 200 with nulls, because
+    "that file is not there" is the answer the caller asked for, not an error.
+    Advisory only — the drawer renders it as a chip and nothing gates on it.
+    """
+    registry = request.app.state.model_registry
+    if not registry.has(model_id):
+        raise NotFound(
+            f"model {model_id!r} not found in registry",
+            details={"model_id": model_id},
+            code="model.not_found",
+        )
+    return _svc.verify_files(registry.get(model_id))
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
