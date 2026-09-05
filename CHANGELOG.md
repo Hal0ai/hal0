@@ -26,6 +26,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
+  with the code** they describe. The Hermes provisioner section now
+  documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline
+  (not the retired 15-phase checkpointed one); `BUNDLED_AGENTS`'s value
+  and order now match `src/hal0/agents/manager.py`; the
+  `hal0-agent@.service` unit's `Documentation=` now points at a tracked
+  doc (`docs/guides/run-agents.mdx`) instead of a path that never
+  existed; the "hal0 keeps no ADR tree" claim is replaced with the real
+  rule (a public `docs/adr/` plus a gitignored `docs/internal/adr/`),
+  five ADRs are reconstructed from source + CHANGELOG history
+  (`docs/adr/0004`, `0012`, `0013`, `0020`, `0023`) to close the largest
+  "ghost citation" gaps, and a mislabeled ADR link in
+  `docs/concepts/memory.mdx` is fixed. The stale `voice/` entry (the
+  package was fully deleted in #620, not merely emptied) is removed from
+  `ARCHITECTURE.md`'s module tree. No behavior change. (#2244)
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a
