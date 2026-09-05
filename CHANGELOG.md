@@ -62,6 +62,19 @@ applying. Add those subsections to a version's section to surface them; see
   apply/commit by persisting the job before the restart. The rc.1 CHANGELOG
   entry that described this CLI behaviour as already shipped is corrected in
   place below.
+- Memory dashboard: bank deletion has a live UI path again. The pre-v2
+  components stranded in `memory.jsx` after the v2 rewrite (`MemHindsightCard`,
+  `MemBankCard`, `MemTimeseries`, `MemOperations`, `MemBankDetail`, plus their
+  private helpers and orphaned styles) were removed — `MemBankDetail` carried
+  the only bank-delete affordance, and it had been unreachable. Delete now
+  lives on the Bank workspace's bank bar as a trash action behind the shared
+  destructive confirm dialog (type the bank id to confirm, blast radius shown
+  from live stats — the same idiom as slot delete), backed by the existing
+  confirm-guarded `DELETE /api/memory/banks/{bank_id}` route. The Add modal's
+  mental-model refresh-schedule picker, which silently discarded whatever the
+  operator picked (`useMentalModelCreate` sends only `{name, source_query}`),
+  was removed rather than left inert. (#2107)
+
 - The model drawer's flags divergence (`diffFlags` — the raw-mode diff, tune
   pills, profile apply preview and seed consequence preview all consume it) now
   matches pairs through the full llama-server alias table (`FLAG_ALIASES`)

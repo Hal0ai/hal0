@@ -53,7 +53,6 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
   // mental model tab
   const [modelName, setModelName] = useStateBankBar('')
   const [modelQuestion, setModelQuestion] = useStateBankBar('')
-  const [refresh, setRefresh] = useStateBankBar('on consolidation')
   const useMentalModelCreate = window.__hal0UseMentalModelCreate
   const mentalModelCreate = useMentalModelCreate
     ? useMentalModelCreate()
@@ -311,25 +310,14 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
                   onChange={(e) => setModelQuestion(e.target.value)}
                 />
               </div>
-              <div>
-                <span className="mv-cell-k">refresh</span>
-                <div style={{ display: 'flex', gap: 5 }}>
-                  {['on consolidation', 'daily', 'manual'].map((r) => (
-                    <button
-                      key={r}
-                      className={'mv-tf ' + (refresh === r ? 'on' : '')}
-                      onClick={() => setRefresh(r)}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
-              </div>
               <p className="mhelp">
-                The model's answer is rebuilt from memory on this schedule; agents read the cached
+                The model's answer is rebuilt from memory on consolidation; agents read the cached
                 answer instead of re-recalling.
-                {/* refresh schedule is UI-only for now — useMentalModelCreate's body only
-                    accepts {name, source_query}; there's no backend field for it yet. */}
+                {/* #2107: the old refresh-schedule picker here was cosmetic —
+                    useMentalModelCreate's body only accepts {name, source_query},
+                    so whatever the operator picked was silently discarded.
+                    Removed rather than left inert; reintroduce it only once the
+                    backend grows a schedule field. */}
               </p>
             </div>
             <div className="mf">
@@ -413,12 +401,43 @@ function BankBar({ bank, setBank }) {
   // own confirmation flow, not a quick add-on here — so wire up the one
   // action that's real, safe, and already has a working hook:
   // consolidate-now. Title updated to match what it actually does.
+  // (#2107 then gave the bank delete exactly that confirmation flow — see
+  // runDelete below.)
   const consolidate = useConsolidate ? useConsolidate() : { mutate: () => {}, isPending: false }
   const runConsolidate = () => {
     consolidate.mutate(bank, {
       onSuccess: () => memToast('Consolidation queued', 'ok'),
       onError: (err) => memToast(`Consolidate failed: ${err.message}`, 'err'),
     })
+  }
+
+  // Bank delete (#2107). The only UI path used to live in the pre-v2
+  // MemBankDetail panel, which the v2 rewrite left unreachable — so the
+  // action moved here, onto the bank's own header bar. Same idiom as slot
+  // delete (slots/DeleteSlotDialog.jsx): shared ConfirmDialog, destructive,
+  // type-the-id-to-confirm. The backend (routes/memory_admin.py delete_bank)
+  // requires the bank id echoed back as ?confirm= — useBankDelete sends it —
+  // and then deletes immediately and irreversibly (no approval queue on this
+  // admin route, unlike bulk memory-id deletes on the MCP mounts).
+  const useBankDelete = window.__hal0UseBankDelete
+  const del = useBankDelete ? useBankDelete() : { mutateAsync: async () => {}, isPending: false }
+  const [confirmingDelete, setConfirmingDelete] = useStateBankBar(false)
+  const runDelete = async () => {
+    try {
+      await del.mutateAsync(bank)
+      memToast(`Bank ${bank} deleted`, 'ok')
+      setConfirmingDelete(false)
+      // The persisted last-viewed bank (memory.jsx MEM_BANK_LS_KEY) must not
+      // point at a bank that no longer exists, or the next session deep-links
+      // into a 404ing workspace.
+      try {
+        if (localStorage.getItem('hal0.mem.bank') === bank) localStorage.removeItem('hal0.mem.bank')
+      } catch { /* ignore */ }
+      const next = banks.find((x) => x.bank_id !== bank)
+      setBank(next ? next.bank_id : null)
+    } catch (err) {
+      memToast(`Delete failed: ${err?.message || 'see logs'}`, 'err')
+    }
   }
 
   const directivesQuery = useDirectives ? useDirectives(bank) : { data: null }
@@ -503,6 +522,15 @@ function BankBar({ bank, setBank }) {
             disabled={consolidate.isPending}
           >
             <Icon name="refresh" size={13} />
+          </button>
+          <button
+            className="mv-btn danger"
+            title={`Delete bank ${bank}…`}
+            data-testid="mv-bank-delete"
+            onClick={() => setConfirmingDelete(true)}
+            disabled={del.isPending}
+          >
+            <Icon name="trash" size={13} />
           </button>
         </div>
       </div>
@@ -716,6 +744,36 @@ function BankBar({ bank, setBank }) {
         </div>
       )}
       {modal && <AddModal bank={bank} tab0={modal} onClose={() => setModal(null)} />}
+      {confirmingDelete && window.ConfirmDialog && (
+        <window.ConfirmDialog
+          open
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={runDelete}
+          destructive
+          typeToConfirm={bank}
+          confirmLabel={del.isPending ? 'Deleting…' : 'Delete bank'}
+          confirmDisabled={del.isPending}
+          title={`Delete bank "${bank}"?`}
+          message={
+            <span data-testid="mv-bank-delete-blast">
+              Deleting <span className="mono" style={{ fontSize: 11 }}>{bank}</span> permanently
+              destroys everything it holds
+              {stats ? (
+                <>
+                  {' — '}
+                  <b className="num">{fmtN(facts)}</b> facts,{' '}
+                  <b className="num">{fmtN(stats.total_documents ?? 0)}</b> documents and{' '}
+                  <b className="num">{fmtN(links)}</b> links
+                </>
+              ) : (
+                ' — every fact, document and link'
+              )}
+              , plus its directives and mental models. The engine deletes immediately; there is no
+              approval step and no undo.
+            </span>
+          }
+        />
+      )}
     </div>
   )
 }

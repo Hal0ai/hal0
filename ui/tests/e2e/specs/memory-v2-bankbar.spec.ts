@@ -99,4 +99,36 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     await page.getByTestId('mv-add-submit').click()
     await expect(page.getByText('Fact added')).toBeVisible()
   })
+
+  test('bank delete: trash → type-to-confirm → DELETE with the echoed confirm (#2107)', async ({
+    page,
+  }) => {
+    // The only UI path to delete a bank (the pre-v2 MemBankDetail danger
+    // zone) was unreachable after the v2 rewrite; #2107 moved it onto the
+    // BankBar. Mutation — the GET-only forced-mock never substitutes this
+    // route, so intercept the DELETE and assert the backend's #1024
+    // echoed-id guard (?confirm=<bank_id>) is satisfied.
+    let confirmEcho: string | null = null
+    await page.route(
+      (url) => url.pathname.endsWith('/api/memory/banks/primary'),
+      async (route) => {
+        if (route.request().method() !== 'DELETE') return route.fallback()
+        confirmEcho = new URL(route.request().url()).searchParams.get('confirm')
+        await route.fulfill({ json: { status: 'deleted' } })
+      },
+    )
+    await page.goto('/#memory/bank?bank=primary')
+    await page.getByTestId('mv-bank-delete').click()
+    await expect(page.getByText('Delete bank "primary"?')).toBeVisible()
+    // Blast radius names what dies with the bank.
+    await expect(page.getByTestId('mv-bank-delete-blast')).toContainText('facts')
+    // Destructive gate: Delete bank stays disabled until the id is typed back.
+    const confirmBtn = page.getByRole('button', { name: 'Delete bank', exact: true })
+    await expect(confirmBtn).toBeDisabled()
+    await page.locator('.modal-backdrop input').fill('primary')
+    await expect(confirmBtn).toBeEnabled()
+    await confirmBtn.click()
+    await expect(page.getByText('Bank primary deleted')).toBeVisible()
+    expect(confirmEcho).toBe('primary')
+  })
 })
