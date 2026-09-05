@@ -19,8 +19,11 @@ Endpoints
     POST   /api/mcp/install            — install from a resolved spec/URL (#305)
     DELETE /api/mcp/{id}               — uninstall a user-installed server (#305)
     PATCH  /api/mcp/{id}/config        — write env / enabled overrides (#305)
+    POST   /api/mcp/{id}/test          — probe + classify advertised tools (ADR-0015)
+    PATCH  /api/mcp/{id}/tools         — write the [tools] allow/gated/blocked policy (ADR-0015)
+    PATCH  /api/mcp/{id}/exposure      — write the [exposure] hermes/brain flags (ADR-0015)
     POST   /api/mcp/{id}/{action}      — start/stop/restart — stubs 501
-                                          pending the supervisor follow-up.
+                                          pending the stdio supervisor (ADR-0015).
 
 Bundled servers (``hal0-admin``, ``hal0-memory``) are uninstall-protected;
 the route returns ``409 mcp.bundled`` rather than letting the registry
@@ -36,17 +39,25 @@ import shutil
 import time
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
 from hal0 import __version__
+from hal0.config.schema import ToolPolicy
 from hal0.errors import BadRequest, Conflict, Hal0Error
+from hal0.mcp import hermes_join
 from hal0.mcp import installed as installed_registry
 from hal0.mcp import manifest as manifest_resolver
+from hal0.mcp import probe as mcp_probe
+from hal0.mcp.installed import ExposureConfig, InstalledServer
 
 log = structlog.get_logger(__name__)
+
+#: ADR-0015 §Decision 3/4 — the only two exposure targets with a join.
+_UNSUPPORTED_EXPOSURE_TARGETS = ("openwebui", "opencode")
 
 router = APIRouter()
 
@@ -441,6 +452,33 @@ def _tool_detail(tool: Any, gated_names: frozenset[str]) -> dict[str, Any]:
     }
 
 
+async def _installed_state(record: InstalledServer) -> str:
+    """Real reachability for ``streamable-http``/``sse``; unchanged for stdio.
+
+    A cheap TCP-connect probe — deliberately NOT the full ``tools/list``
+    JSON-RPC handshake ``POST /{id}/test`` performs (:mod:`hal0.mcp.probe`)
+    — so listing every installed server stays fast regardless of count
+    (ADR-0015 §Decision 5). ``stdio`` still reports ``"stopped"``: there is
+    no process behind it until the supervisor ships (ADR-0015 "Deferred").
+    """
+    if record.transport not in ("streamable-http", "sse") or not record.url:
+        return "stopped"
+    parts = urlsplit(record.url)
+    host = parts.hostname
+    if not host:
+        return "stopped"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        async with asyncio.timeout(1.5):
+            _reader, writer = await asyncio.open_connection(host, port)
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return "reachable" if record.enabled else "disabled"
+    except (OSError, TimeoutError):
+        return "unreachable"
+
+
 def _connect_url(request: Request, mount: str) -> str:
     """Build the connect URL the dashboard renders next to each server.
 
@@ -559,10 +597,9 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "id": record.id,
                 "name": record.name,
                 "bundled": False,
-                # No supervisor yet → installed servers always start stopped;
-                # ``enabled`` is the operator's intent for when the supervisor
-                # arrives, not the current process state.
-                "state": "stopped",
+                # http/sse: real reachability (ADR-0015). stdio still has no
+                # supervisor, so it always reports "stopped".
+                "state": await _installed_state(record),
                 "transport": record.transport,
                 "connect_url": _connect_url(request, record.id),
                 "pid": None,
@@ -586,6 +623,9 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "spec": record.spec,
                 "source_url": record.source_url,
                 "env": record.env,
+                "secrets": sorted(record.secrets),
+                "tools_policy": record.tool_policy.model_dump(mode="python"),
+                "exposure": record.exposure.model_dump(mode="python"),
                 "enabled": record.enabled,
                 "installed_at": record.installed_at,
             }
@@ -815,6 +855,18 @@ async def resolve_manifest(
     return resolved.model_dump(mode="python")
 
 
+async def _sync_hermes_join(server_id: str | None) -> dict[str, Any]:
+    """Run :func:`hal0.mcp.hermes_join.sync_exposure` off the event loop.
+
+    Subprocess calls (``hermes config set``) and file I/O make this
+    blocking; every mutation route awaits it via ``asyncio.to_thread``
+    rather than importing it directly into the async handler body.
+    Never raises — :func:`sync_exposure` folds every failure into its own
+    ``errors`` list (ADR-0015 §Decision 2).
+    """
+    return await asyncio.to_thread(hermes_join.sync_exposure, only_server_id=server_id)
+
+
 # ── Install / uninstall / patch (#305) ──────────────────────────────────────
 
 
@@ -859,12 +911,20 @@ async def install_server(request: Request, body: dict[str, Any]) -> dict[str, An
         fetcher = getattr(request.app.state, "mcp_manifest_fetcher", None)
         resolved = await manifest_resolver.resolve(url, fetcher=fetcher)
 
+    # A streamable-http/sse manifest's connect endpoint is the resolved
+    # URL itself (the http(s) branch of manifest.resolve() only reaches
+    # here for a manifest whose declared transport isn't "stdio"); stdio
+    # records have no `url` (ADR-0015 §Decision 1 — `command`/`args`
+    # cover that transport, unused until the supervisor ships).
+    connect_url = resolved.source_url or "" if resolved.transport != "stdio" else ""
+
     record = installed_registry.InstalledServer(
         id=resolved.id,
         name=resolved.name,
         description=resolved.description,
         spec=resolved.spec,
         transport=resolved.transport,
+        url=connect_url,
         tools=resolved.tools,
         resources=resolved.resources,
         prompts=resolved.prompts,
@@ -875,7 +935,8 @@ async def install_server(request: Request, body: dict[str, Any]) -> dict[str, An
         verified=resolved.verified,
     )
     stored = installed_registry.install(record)
-    return {"installed": stored.model_dump(mode="python")}
+    hermes_sync = await _sync_hermes_join(stored.id)
+    return {"installed": stored.model_dump(mode="python"), "hermes_sync": hermes_sync}
 
 
 @router.delete("/{server_id}")
@@ -893,7 +954,8 @@ async def uninstall_server(server_id: str) -> dict[str, Any]:
             details={"server_id": server_id},
         )
     installed_registry.uninstall(server_id)
-    return {"uninstalled": server_id}
+    hermes_sync = await _sync_hermes_join(server_id)
+    return {"uninstalled": server_id, "hermes_sync": hermes_sync}
 
 
 @router.patch("/{server_id}/config")
@@ -925,7 +987,134 @@ async def patch_server_config(server_id: str, body: dict[str, Any]) -> dict[str,
     if enabled is not None and not isinstance(enabled, bool):
         raise BadRequest("'enabled' must be a boolean", code="mcp.enabled_invalid")
     updated = installed_registry.patch_config(server_id, env=env_block, enabled=enabled)
-    return {"server": updated.model_dump(mode="python")}
+    result: dict[str, Any] = {"server": updated.model_dump(mode="python")}
+    if enabled is not None:
+        # enabled gates membership in the Hermes/brain desired set
+        # (hal0.mcp.installed.list_enabled_exposed) — env alone never does.
+        result["hermes_sync"] = await _sync_hermes_join(server_id)
+    return result
+
+
+@router.post("/{server_id}/test")
+async def test_server(server_id: str) -> dict[str, Any]:
+    """Probe an installed server + classify its advertised tools.
+
+    ADR-0015 §Decision 4/5 — the single highest-value new verb: turns "I
+    added a server" into "here is exactly what it can do and what I have
+    permitted". ``stdio`` servers have no supervisor yet, so this always
+    returns the same ``mcp.supervisor_unavailable`` 501 the start/stop/
+    restart stub does. Bundled servers aren't installed-registry records
+    at all — this route 404s for them via :func:`installed_registry.get_installed`.
+    """
+    record = installed_registry.get_installed(server_id)
+    if record.transport == "stdio":
+        raise McpNotImplemented(
+            "stdio servers have no supervisor yet (pending ADR-0015)",
+            details={"server_id": server_id, "action": "test"},
+        )
+    result = await asyncio.to_thread(mcp_probe.probe_installed_server_sync, record)
+    verdicts: dict[str, str] = {}
+    if result.get("ok"):
+        verdicts = _classify_tools(server_id, result.get("tools") or [])
+    return {"server_id": server_id, "probe": result, "verdicts": verdicts}
+
+
+def _classify_tools(server_id: str, tool_names: list[str]) -> dict[str, str]:
+    """Classify each advertised tool against the seed-TOML mirror.
+
+    Reuses :meth:`hal0.agents.mcp_client.AgentMCPClient.classify` — the
+    exact function that governs a live agent's tool calls — against the
+    ``/etc/hal0/agents/hermes.toml`` mirror :mod:`hal0.mcp.hermes_join`
+    writes. Degrades to ``"unknown_server"`` for every tool when the seed
+    TOML doesn't exist yet (fresh install, no agent provisioned) or fails
+    to parse — never a 500 for what is fundamentally a read-only preview.
+    """
+    from hal0.agents.mcp_client import AgentMCPClient, classify_many
+
+    try:
+        client = AgentMCPClient.from_agent_name("hermes")
+    except Exception:
+        return dict.fromkeys(tool_names, "unknown_server")
+    verdicts = classify_many(client, [(server_id, name) for name in tool_names])
+    return {name: verdicts[(server_id, name)] for name in tool_names}
+
+
+@router.patch("/{server_id}/tools")
+async def patch_server_tools(server_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Write the ``[tools]`` allow/gated/blocked policy for a server.
+
+    ADR-0015 §Decision 1/4. Reuses :class:`hal0.config.schema.ToolPolicy`
+    verbatim — the same disjointness validator a bundled agent's policy
+    gets — so an overlapping edit 400s here instead of silently deciding
+    "which list wins" at dispatch time. Triggers the Hermes/brain seed-TOML
+    mirror re-sync (the policy axis, not membership, so config.yaml itself
+    is untouched — only the classify() source changes).
+    """
+    if server_id in installed_registry.BUNDLED_SERVER_IDS:
+        raise Conflict(
+            f"server {server_id!r} is bundled — tools are read-only here",
+            code="mcp.bundled",
+            details={"server_id": server_id},
+        )
+    if not isinstance(body, dict):
+        raise BadRequest("patch body must be a JSON object", code="mcp.body_invalid")
+    try:
+        policy = ToolPolicy.model_validate(body)
+    except Exception as exc:
+        raise BadRequest(
+            "invalid tool policy",
+            code="mcp.tools_invalid",
+            details={"reason": str(exc)},
+        ) from exc
+    updated = installed_registry.patch_config(server_id, tool_policy=policy)
+    hermes_sync = await _sync_hermes_join(server_id)
+    return {"server": updated.model_dump(mode="python"), "hermes_sync": hermes_sync}
+
+
+@router.patch("/{server_id}/exposure")
+async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Write the ``[exposure]`` hermes/brain/openwebui/opencode flags.
+
+    ADR-0015 §Decision 1/3/4. ``openwebui``/``opencode`` have no join
+    mechanism — setting either ``true`` is rejected with
+    ``501 mcp.exposure_unsupported`` (the field study's explicit
+    recommendation: fail loudly rather than silently ignore an operator's
+    intent). A ``stdio`` record has no supervisor to make it reachable, so
+    ``hermes``/``brain`` reject with ``409 mcp.exposure_needs_supervisor``
+    instead of accepting a flag that would never actually join anything.
+    """
+    if server_id in installed_registry.BUNDLED_SERVER_IDS:
+        raise Conflict(
+            f"server {server_id!r} is bundled — exposure is read-only here",
+            code="mcp.bundled",
+            details={"server_id": server_id},
+        )
+    if not isinstance(body, dict):
+        raise BadRequest("patch body must be a JSON object", code="mcp.body_invalid")
+    for target in _UNSUPPORTED_EXPOSURE_TARGETS:
+        if body.get(target) is True:
+            raise McpNotImplemented(
+                f"{target} exposure has no join mechanism yet (pending ADR-0015)",
+                details={"server_id": server_id, "target": target},
+            )
+    record = installed_registry.get_installed(server_id)
+    current = record.exposure.model_dump(mode="python")
+    current.update({k: v for k, v in body.items() if k in current})
+    try:
+        exposure = ExposureConfig.model_validate(current)
+    except Exception as exc:
+        raise BadRequest(
+            "invalid exposure flags", code="mcp.exposure_invalid", details={"reason": str(exc)}
+        ) from exc
+    if record.transport == "stdio" and (exposure.hermes or exposure.brain):
+        raise Conflict(
+            "stdio servers have no supervisor yet — cannot expose to hermes/brain",
+            code="mcp.exposure_needs_supervisor",
+            details={"server_id": server_id},
+        )
+    updated = installed_registry.patch_config(server_id, exposure=exposure)
+    hermes_sync = await _sync_hermes_join(server_id)
+    return {"server": updated.model_dump(mode="python"), "hermes_sync": hermes_sync}
 
 
 # ── Action stub (start/stop/restart — supervisor follow-up) ─────────────────

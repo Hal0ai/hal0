@@ -772,7 +772,10 @@ def test_uninstall_removes_installed_server(client: TestClient) -> None:
     client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
     response = client.delete("/api/mcp/filesystem")
     assert response.status_code == 200, response.text
-    assert response.json() == {"uninstalled": "filesystem"}
+    # ADR-0015: the response also carries a best-effort "hermes_sync"
+    # report from re-running the Hermes/brain exposure join.
+    assert response.json()["uninstalled"] == "filesystem"
+    assert "hermes_sync" in response.json()
     # Second uninstall is 404.
     again = client.delete("/api/mcp/filesystem")
     assert again.status_code == 404
