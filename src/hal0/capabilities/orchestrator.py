@@ -50,7 +50,7 @@ from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.config.locking import file_lock
 from hal0.dispatcher._npu_common import is_container_npu_cfg
-from hal0.errors import BadRequest, Hal0Error, NotFound
+from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
 from hal0.model_fit import evaluate_model_fit
 from hal0.model_meta import canonical_device
 from hal0.profiles import ProfileCatalog, ResolvedProfile
@@ -477,9 +477,19 @@ class CapabilityOrchestrator:
 
         # Validate the model against the catalog when one is set + the
         # caller didn't explicitly clear it. We don't fail when the model
-        # is empty — that's the "unset" state.
+        # is empty — that's the "unset" state. The downloaded gate only
+        # arms when the selection is (or stays) enabled: disabling a
+        # selection whose weights vanished must always succeed, and
+        # picking a model while the child is off is legal staging — the
+        # gate fires when the operator flips it on (#2026).
         if merged.model:
-            self._validate_model_in_catalog(slot, child, merged.model, merged.device)
+            self._validate_model_in_catalog(
+                slot,
+                child,
+                merged.model,
+                merged.device,
+                require_downloaded=merged.enabled,
+            )
 
         # ── reconcile + persist (issue #697) ──────────────────────────────
         # The SlotConfigStore computes the post-state of BOTH
@@ -605,6 +615,8 @@ class CapabilityOrchestrator:
         child: str,
         model_id: str,
         backend_id: str,
+        *,
+        require_downloaded: bool = False,
     ) -> None:
         # NOTE: ``backend_id`` is named for back-compat with v0.1.x call
         # sites; in v0.2 it carries a ``device`` value (gpu-rocm etc).
@@ -612,7 +624,7 @@ class CapabilityOrchestrator:
         # source-only.
         """Reject the merged selection if it's illegal against the catalog.
 
-        Two distinct failure modes:
+        Three distinct failure modes:
 
           1. ``model_id`` isn't advertised at all for this capability →
              :class:`NotFound` ``capability.unknown_model``. Likely a
@@ -628,6 +640,23 @@ class CapabilityOrchestrator:
              prevent (e.g. picking ``backend=npu`` with a llama.cpp GGUF
              which then crashes FLM at start-up with "Model not found").
 
+          3. ``require_downloaded`` is set (the merged selection is
+             enabled → the lifecycle below WILL load/swap the slot) and
+             the picked (model, backend) row advertises
+             ``downloaded: false`` → :class:`Conflict`
+             ``capability.model_not_downloaded``, raised BEFORE anything
+             is persisted or spawned. Without this gate the slot was
+             launched with the bare model id as ``--model``, llama-server
+             died with "failed to open GGUF file", and the apply blocked
+             for the full crash-loop dwell before answering 200
+             "warming" (#2026). The details name the ``POST
+             /api/models/{id}/pull`` remediation when the row is
+             pullable. ``backend_id == "npu"`` is exempt: NPU-trio
+             selections never spawn a standalone process (they toggle
+             the FLM anchor and return ``pending_reload``), and FLM
+             weights are pulled through ``flm pull``, not the registry
+             pull path.
+
         Empty ``backend_id`` skips the pair check — backend is allowed
         to be unset transiently while the user is still mid-selection;
         the slot lifecycle won't start until a backend lands anyway.
@@ -639,6 +668,8 @@ class CapabilityOrchestrator:
         match = next((row for row in rows if row["id"] == model_id), None)
         if match is None:
             if self._registry is not None and self._registry.has(model_id):
+                if require_downloaded and backend_id != "npu":
+                    self._require_registry_weights_present(slot, child, model_id, backend_id)
                 return
             raise NotFound(
                 f"model {model_id!r} not advertised for {slot}.{child}",
@@ -660,6 +691,19 @@ class CapabilityOrchestrator:
                     "legal_backends": legal_backends,
                 },
             )
+        if require_downloaded and backend_id != "npu":
+            backend_row = next(
+                (b for b in match.get("backends", []) if b.get("id") == backend_id),
+                None,
+            )
+            if backend_row is not None and backend_row.get("downloaded", True) is False:
+                self._raise_model_not_downloaded(
+                    slot,
+                    child,
+                    model_id,
+                    backend_id,
+                    pullable=bool(backend_row.get("pullable")),
+                )
         slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
         if slot_type is None:
             return
@@ -697,6 +741,79 @@ class CapabilityOrchestrator:
                 code="capability.illegal_model_fit",
                 details=details,
             )
+
+    def _require_registry_weights_present(
+        self,
+        slot: str,
+        child: str,
+        model_id: str,
+        backend_id: str,
+    ) -> None:
+        """Downloaded gate for the permissive registry-only fallback (#2026).
+
+        A model the curated catalog doesn't advertise is accepted when the
+        registry knows it — but an enabled selection must still not launch
+        a slot whose weights aren't on disk. Stays permissive on any
+        registry read error: this path exists precisely because the
+        catalog isn't authoritative for user-added models.
+        """
+        if self._registry is None:  # defensive; caller checked has()
+            return
+        try:
+            entry = self._registry.get(model_id)
+        except Exception:
+            return
+        path = getattr(entry, "path", None)
+        if isinstance(path, str) and path:
+            try:
+                if Path(path).exists():
+                    return
+            except OSError:
+                pass
+        pullable = bool(
+            (getattr(entry, "hf_repo", "") or "").strip()
+            and (getattr(entry, "hf_filename", "") or "").strip()
+        )
+        self._raise_model_not_downloaded(slot, child, model_id, backend_id, pullable=pullable)
+
+    def _raise_model_not_downloaded(
+        self,
+        slot: str,
+        child: str,
+        model_id: str,
+        backend_id: str,
+        *,
+        pullable: bool,
+    ) -> None:
+        """Raise the typed 409 for an enabled selection with absent weights.
+
+        Named after the rc-validate register key
+        ``capability-apply-skips-model-pull`` (#2026): apply must reject
+        before any container is spawned, naming the pull remediation,
+        instead of launching llama-server with the bare model id and
+        blocking through the crash-loop dwell.
+        """
+        remediation = (
+            f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"
+            if pullable
+            else "stage the weights on disk and register them, then re-apply"
+        )
+        details: dict[str, Any] = {
+            "slot": slot,
+            "child": child,
+            "model": model_id,
+            "backend": backend_id,
+            "downloaded": False,
+            "pullable": pullable,
+            "remediation": remediation,
+        }
+        if pullable:
+            details["pull_endpoint"] = f"/api/models/{model_id}/pull"
+        raise Conflict(
+            f"weights for model {model_id!r} are not downloaded — {remediation}",
+            code="capability.model_not_downloaded",
+            details=details,
+        )
 
     def _profile_for_fit(self, capability: str, device: str) -> ResolvedProfile | None:
         """Infer the runtime profile implied by a capability selection.

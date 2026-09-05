@@ -74,7 +74,19 @@ applying. Add those subsections to a version's section to surface them; see
   mental-model refresh-schedule picker, which silently discarded whatever the
   operator picked (`useMentalModelCreate` sends only `{name, source_query}`),
   was removed rather than left inert. (#2107)
-
+- A capability apply naming a model whose weights are not on disk
+  (`downloaded: false` in the picker catalog, e.g. a pullable-but-never-pulled
+  row, or a registry entry whose file vanished) is now rejected up front with a
+  typed 409 `capability.model_not_downloaded` naming the
+  `POST /api/models/{id}/pull` remediation — before anything is persisted and
+  before any container is spawned. Previously the orchestrator went straight to
+  `SlotManager.load`, launched llama-server with the bare model id as
+  `--model` (instant `failed to open GGUF file` crash loop), blocked the apply
+  for the full ~3 min health-wait, and then returned HTTP 200 `"warming"`.
+  Disabling a selection whose weights vanished still always succeeds, and
+  picking a model while the child is disabled remains legal staging — the gate
+  arms on enable. NPU-trio selections are exempt (they toggle the FLM anchor,
+  never spawn a bare-id process). (#2026)
 - The model drawer's flags divergence (`diffFlags` — the raw-mode diff, tune
   pills, profile apply preview and seed consequence preview all consume it) now
   matches pairs through the full llama-server alias table (`FLAG_ALIASES`)

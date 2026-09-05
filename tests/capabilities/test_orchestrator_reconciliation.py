@@ -164,7 +164,7 @@ def orchestrator(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     fake = FakeSlotManager()
     orch = CapabilityOrchestrator(slot_manager=fake)
@@ -216,7 +216,7 @@ async def test_apply_reconciles_before_load(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
 
     class DiskPeekSlotManager(FakeSlotManager):
@@ -370,7 +370,7 @@ async def test_disable_hides_slot_from_routing(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     home = Path(tmp_hal0_home)
     slots_dir = home / "etc" / "hal0" / "slots"
@@ -426,7 +426,7 @@ async def test_apply_lifecycle_failure_still_persists_intent(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
 
     class ExplodingSlotManager(FakeSlotManager):
@@ -561,7 +561,7 @@ def npu_orchestrator(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     fake = FakeSlotManager()
     fake.set_configs(
@@ -820,7 +820,7 @@ async def test_npu_embed_anchor_offline_still_pending(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     fake = FakeSlotManager()
     # No anchor record at all → "offline".
@@ -932,7 +932,7 @@ async def test_npu_embed_enable_container_anchor_without_external_runtime(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     fake = FakeSlotManager()
     fake.set_configs(

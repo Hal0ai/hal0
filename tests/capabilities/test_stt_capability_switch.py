@@ -305,7 +305,7 @@ async def test_apply_npu_stt_drives_flm_trio_without_slot_spawn(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     home = Path(tmp_hal0_home)
     slots_dir = home / "etc" / "hal0" / "slots"
