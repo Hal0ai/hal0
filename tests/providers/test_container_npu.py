@@ -231,7 +231,7 @@ class TestLoadSyncNpuBranch:
             ),
             # GPU device nodes are existence-filtered at the container_spec call
             # site; force present so the CI host (no /dev/kfd) still renders them.
-            patch("hal0.providers.container.os.path.exists", return_value=True),
+            patch("hal0.providers.container._dev_node_exists", return_value=True),
             patch.object(provider, "_run", side_effect=fake_run),
             patch.object(provider, "_unit_path", return_value=unit_file),
         ):

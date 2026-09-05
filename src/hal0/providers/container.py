@@ -103,6 +103,17 @@ from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
 # callers/tests still import the old name from this module.
 ContainerSpec = RuntimeLaunchPlan
 
+#: Existence probe for GPU device nodes (/dev/kfd, /dev/dri/renderD*), used by
+#: the AMD passthrough filter in :meth:`ContainerProvider.container_spec`.
+#: A dedicated seam so tests can force device nodes "present" on hosts without
+#: a GPU by patching ``hal0.providers.container._dev_node_exists`` — patching
+#: ``hal0.providers.container.os.path.exists`` instead mutates the ONE shared
+#: ``os`` module for the whole process, and on Python >= 3.14
+#: ``pathlib.Path.exists()`` delegates to ``os.path.exists``, so a
+#: ``return_value=True`` patch made every absent-file guard in the config
+#: loaders take the read path and raise ConfigNotFound (#2166).
+_dev_node_exists = os.path.exists
+
 
 class UnknownRuntimeFamilyError(Hal0Error):
     """A slot profile resolved to a runtime family with no dispatch branch.
@@ -2444,7 +2455,7 @@ class ContainerProvider(Provider):
                 devices = nvidia_cdi_devices(scalars["gpu_index"])
                 group_ids = []
             else:
-                devices = [p for p in resolve_gpu_device_paths() if os.path.exists(p)]
+                devices = [p for p in resolve_gpu_device_paths() if _dev_node_exists(p)]
                 group_ids = [str(g) for g in resolve_gpu_group_ids()]
         else:
             devices = []

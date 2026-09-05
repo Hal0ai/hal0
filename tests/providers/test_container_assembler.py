@@ -239,7 +239,7 @@ def test_cpu_profile_gets_no_gpu_plumbing() -> None:
             return_value=["/dev/kfd", "/dev/dri/renderD128"],
         ),
         patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993, 44]),
-        patch("hal0.providers.container.os.path.exists", return_value=True),
+        patch("hal0.providers.container._dev_node_exists", return_value=True),
     ):
         spec = ContainerProvider().container_spec(
             cfg, {"_model_key": "m", "path": "/mnt/ai-models/m.gguf"}
@@ -267,7 +267,7 @@ def test_gpu_profile_existence_filters_devices() -> None:
             return_value=["/dev/kfd", "/dev/dri/renderD128"],
         ),
         patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[993]),
-        patch("hal0.providers.container.os.path.exists", side_effect=_exists),
+        patch("hal0.providers.container._dev_node_exists", side_effect=_exists),
     ):
         spec = ContainerProvider().container_spec(
             cfg, {"_model_key": "m", "path": "/mnt/ai-models/m.gguf"}
