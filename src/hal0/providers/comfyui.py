@@ -183,8 +183,8 @@ class ComfyUIProvider(Provider):
              is honored verbatim, never re-resolved (#2172 — this provider
              previously ignored the pin, so a pinned img slot silently
              launched the resolver default).
-          2. ``slot_cfg["image"]`` — the legacy explicit override from
-             slot TOML (back-compat; the migration lane folds it into
+          2. ``slot_cfg["image"]`` — the pre-pin explicit override from
+             slot TOML (still honored; the migration lane folds it into
              ``image_pin``).
           3. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
              runner: ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var →

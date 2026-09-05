@@ -122,8 +122,8 @@ def test_image_ref_honors_nested_image_pin(provider: ComfyUIProvider) -> None:
     assert provider.image_ref(cfg) == "ghcr.io/dev/comfyui-pin:test"
 
 
-def test_image_ref_pin_beats_legacy_image_key(provider: ComfyUIProvider) -> None:
-    """Precedence: image_pin → legacy image → resolver default."""
+def test_image_ref_pin_beats_plain_image_key(provider: ComfyUIProvider) -> None:
+    """Precedence: image_pin → plain image key → resolver default."""
     cfg = {"image_pin": "ghcr.io/dev/pin:a", "image": "hal0-toolbox-comfyui:dev"}
     assert provider.image_ref(cfg) == "ghcr.io/dev/pin:a"
 
