@@ -10,7 +10,7 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -431,6 +431,72 @@ def test_rollback_without_previous_returns_envelope(
     body = r.json()
     assert "error" in body
     assert body["error"]["code"] == "system.update_rollback_unavailable"
+
+
+class _StubRollbackUpdater:
+    """Stands in for Updater on the success path — rollback() is filesystem-
+    heavy and privilege-gated, and what's under test here is the route's
+    payload contract (#2027/#2145), not the swap."""
+
+    result: ClassVar[dict] = {}
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    async def rollback(self) -> dict:
+        return dict(self.result)
+
+
+def test_rollback_success_payload_carries_all_fields_and_restart_contract(
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route passes through everything Updater.rollback() computed
+    (rolled_back_to / previous_now / schema_warning, #1541) and states the
+    restart contract explicitly (#2027/#2145): the answering process is by
+    definition the not-yet-restarted daemon, so running_version is its own
+    __version__ and restart_required is True when the reverted-to tree is a
+    different version.
+    """
+    from hal0 import __version__
+
+    _StubRollbackUpdater.result = {
+        "rolled_back_to": "/usr/lib/hal0/hal0-0.0.1",
+        "previous_now": "/usr/lib/hal0/hal0-0.0.2",
+        "schema_warning": "meta.schema_version on disk is 7; the previous install …",
+    }
+    monkeypatch.setattr("hal0.api.routes.updater.Updater", _StubRollbackUpdater)
+    r = isolated_client.post("/api/updates/rollback")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rolled_back"] is True
+    assert body["rolled_back_to"] == "/usr/lib/hal0/hal0-0.0.1"
+    assert body["previous_now"] == "/usr/lib/hal0/hal0-0.0.2"
+    assert body["schema_warning"].startswith("meta.schema_version on disk is 7")
+    assert body["running_version"] == __version__
+    # "hal0-0.0.1" != the running __version__, so a restart is required.
+    assert body["restart_required"] is True
+
+
+def test_rollback_restart_not_required_when_bounced_back_to_running_version(
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A double-rollback that returns to the very version the daemon is
+    running needs no restart — restart_required must not cry wolf."""
+    from hal0 import __version__
+
+    _StubRollbackUpdater.result = {
+        "rolled_back_to": f"/usr/lib/hal0/hal0-{__version__}",
+        "previous_now": "/usr/lib/hal0/hal0-0.0.2",
+        "schema_warning": None,
+    }
+    monkeypatch.setattr("hal0.api.routes.updater.Updater", _StubRollbackUpdater)
+    r = isolated_client.post("/api/updates/rollback")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["restart_required"] is False
+    assert body["running_version"] == __version__
 
 
 def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None:

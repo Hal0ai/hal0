@@ -357,7 +357,9 @@ Rollback reads `/var/lib/hal0/hal0.previous`, atomically swaps the
 `current` symlink back to it, then reinstalls that prior tree into the
 venv and re-renders every slot unit. Unlike an apply, a rollback does
 **not** try-restart `hal0-api` for you — the running process keeps
-serving the newer code until you restart it yourself. It warns (without
+serving the newer code until you restart it yourself; the CLI names the
+version it reverted to and, while the running version still disagrees,
+prints the `systemctl restart hal0-api` remedy. It warns (without
 erroring) if the previous tree is gone on disk, or if the current
 config's schema version is ahead of what the previous tree understands —
 migrations are forward-only, so the older tree just parses what it can.

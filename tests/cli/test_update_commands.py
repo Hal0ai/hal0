@@ -506,6 +506,20 @@ def test_up_to_date_no_reset_due_says_nothing_to_apply(
     assert "/api/updates/converge-profiles" not in cap["posts"]
 
 
+#: A realistic /api/updates/rollback response post-#2027/#2145: the route
+#: passes through everything Updater.rollback() computed plus the restart
+#: contract fields.
+_ROLLBACK_BODY = {
+    "rolled_back": True,
+    "channel": "stable",
+    "rolled_back_to": "/usr/lib/hal0/hal0-1.1.0",
+    "previous_now": "/usr/lib/hal0/hal0-1.2.0",
+    "schema_warning": None,
+    "running_version": "1.2.0",
+    "restart_required": True,
+}
+
+
 def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Headless/piped (non-TTY) rollback proceeds unattended, like apply."""
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
@@ -514,13 +528,126 @@ def test_rollback_headless_proceeds_without_prompt(monkeypatch: pytest.MonkeyPat
 
     def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
         posted.append(path)
-        return {"channel": "stable"}
+        return dict(_ROLLBACK_BODY)
 
     monkeypatch.setattr(uc, "api_post", fake_post)
     result = runner.invoke(app, ["update", "--rollback"])
     assert result.exit_code == 0, result.output
     assert "/api/updates/rollback" in posted
     assert "rolled back" in result.output
+
+
+def test_rollback_names_version_and_prints_restart_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2027/#2145: the banner names the reverted-to version, surfaces
+    previous_now, and — because the API still reports the rolled-away-from
+    version as running — says a restart is required and prints the command.
+    """
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: dict(_ROLLBACK_BODY))
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "1.1.0" in out  # names the version it reverted to
+    assert "/usr/lib/hal0/hal0-1.2.0" in out  # previous_now surfaced
+    assert "restart required" in out
+    assert "1.2.0" in out  # names what is still serving
+    assert "systemctl restart hal0-api" in out
+
+
+def test_rollback_renders_schema_warning_callout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-null schema_warning (forward-only migration data hazard) is
+    rendered as its own warning callout, never silently dropped (#2027)."""
+    warning = (
+        "meta.schema_version on disk is 7; the previous install may not "
+        "understand all fields. Forward-only migrations: skipping migration revert."
+    )
+    body = dict(_ROLLBACK_BODY, schema_warning=warning)
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "Schema warning" in result.output
+    assert "meta.schema_version on disk is 7" in result.output
+
+
+def test_rollback_no_restart_notice_when_running_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A double-rollback that bounced back to the running version needs no
+    restart — the banner must not cry wolf."""
+    body = dict(
+        _ROLLBACK_BODY,
+        rolled_back_to="/usr/lib/hal0/hal0-1.2.0",
+        previous_now="/usr/lib/hal0/hal0-1.1.0",
+        running_version="1.2.0",
+        restart_required=False,
+    )
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "restart required" not in result.output
+    assert "already serving 1.2.0" in result.output
+
+
+def test_rollback_falls_back_to_health_for_running_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Against an older daemon whose response lacks running_version, the CLI
+    reads the running version from /api/health — never from its own
+    in-process hal0.__version__, which post-swap resolves through the
+    rolled-back tree and would compare the old version against itself."""
+    body = {
+        "rolled_back": True,
+        "channel": "stable",
+        "rolled_back_to": "/usr/lib/hal0/hal0-1.1.0",
+        "previous_now": "/usr/lib/hal0/hal0-1.2.0",
+        "schema_warning": None,
+    }
+    fetched: list[str] = []
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    monkeypatch.setattr(
+        uc, "api_get", lambda path, **k: fetched.append(path) or {"version": "1.2.0"}
+    )
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "/api/health" in fetched
+    assert "restart required" in result.output
+    assert "systemctl restart hal0-api" in result.output
+
+
+def test_rollback_restart_notice_suppressed_when_api_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No running_version in the body and /api/health unreachable → nothing
+    stale is serving, so the restart warning is suppressed (#1541 contract)."""
+    body = {
+        "rolled_back": True,
+        "channel": "stable",
+        "rolled_back_to": "/usr/lib/hal0/hal0-1.1.0",
+        "previous_now": None,
+        "schema_warning": None,
+    }
+
+    def dead_get(path: str, **k: object) -> dict:
+        raise uc.CliApiError("connection refused")
+
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    monkeypatch.setattr(uc, "api_get", dead_get)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "rolled back" in result.output
+    assert "1.1.0" in result.output
+    assert "systemctl restart hal0-api" not in result.output
 
 
 def test_rollback_yes_flag_skips_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,7 +660,7 @@ def test_rollback_yes_flag_skips_confirm(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     posted: list[str] = []
     monkeypatch.setattr(
-        uc, "api_post", lambda path, **k: posted.append(path) or {"channel": "stable"}
+        uc, "api_post", lambda path, **k: posted.append(path) or dict(_ROLLBACK_BODY)
     )
     result = runner.invoke(app, ["update", "--rollback", "--yes"])
     assert result.exit_code == 0, result.output

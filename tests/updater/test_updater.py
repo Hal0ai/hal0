@@ -2030,8 +2030,14 @@ def test_rollback_swaps_symlink_back(
     res = asyncio.run(Updater().rollback())
     assert "hal0-0.0.1" in res["rolled_back_to"]
     assert Path(os.readlink(_current_symlink())).resolve() == v1_dir.resolve()
-    # The previous record now points at v0.0.2 (so a second rollback bounces).
+    # The previous record now points at v0.0.2 (so a second rollback bounces),
+    # and the result reports it — the CLI renders it (#2027/#2145).
     assert "hal0-0.0.2" in _previous_record().read_text(encoding="utf-8")
+    assert res["previous_now"] is not None
+    assert "hal0-0.0.2" in res["previous_now"]
+    # schema_warning is always present in the result (None when the on-disk
+    # schema is not ahead of the reverted tree).
+    assert "schema_warning" in res
 
 
 # ── rollback re-pip into venv (#980) ──────────────────────────────────────────
