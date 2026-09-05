@@ -235,6 +235,14 @@ const GLYPHS = {
       <path d="M10 2.5A2.5 2.5 0 0 1 12.5 5v.2A2.3 2.3 0 0 1 13 9.5a2.4 2.4 0 0 1-3 4V2.5z" />
     </g>
   ),
+  trash: (
+    <g>
+      <path d="M2.5 4.5h11" />
+      <path d="M6 4.5V3h4v1.5" />
+      <path d="M4 4.5l.8 9h6.4l.8-9" />
+      <path d="M6.7 7v4M9.3 7v4" />
+    </g>
+  ),
 }
 
 const Icon = ({ name, size = 16, sw = 1.5 }) => (
