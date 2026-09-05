@@ -212,9 +212,8 @@ def load_persisted(image_id: str, tag: str | None = None) -> dict[str, Any] | No
     """Read a persisted job snapshot from disk (reconciled), or None.
 
     Snapshots are per-(image, tag) files. With ``tag``, only that tag's
-    snapshot answers (pre-per-tag snapshots carry no ``tag`` key and never
-    match). Without, the most recent pull wins — highest ``started_at``
-    across the bare untagged file and every per-tag sibling.
+    snapshot answers. Without, the most recent pull wins — highest
+    ``started_at`` across every per-tag ``<id>@<tag>.json`` sibling.
     """
     if tag is not None:
         data = _read_snapshot(pull_job_file(image_id, tag=tag))
@@ -249,8 +248,7 @@ def status(
     With ``tag``, only a job for that exact tag answers — the in-memory
     slot may hold another tag's pull, in which case the read falls through
     to the requested tag's persisted snapshot (a newer pull must not
-    orphan the previous tag's terminal result). Pre-per-tag persisted
-    snapshots carry no ``tag`` key and never match a tag-filtered read.
+    orphan the previous tag's terminal result).
     """
     if tag is not None:
         validate_pull_tag(tag)  # typed 400 before any lookup or path build

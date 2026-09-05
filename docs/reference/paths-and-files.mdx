@@ -51,7 +51,6 @@ key layout.
 ├── activity.db(+wal/shm)    # audit trail SQLite
 ├── .first-run.lock          # 0600, single-use OTP for first-run claim
 ├── .first_run_done          # first-run completion sentinel
-├── .bundle-chosen           # unwired for v1.0 — see caution below
 ├── registry/
 │   └── registry.toml(+.lock) # model registry
 ├── models/                  # default model cache (unless overridden — see below)
@@ -64,12 +63,6 @@ key layout.
 ├── .hermes/runtime.json      # Hermes runtime info (embed token, etc)
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
-
-<Aside type="caution">
-`.bundle-chosen` is a bundle-picker completion marker (JSON: tier + NPU flag +
-timestamp). As of v1.0 the marker is written but the bundle-picker flow that would
-consume it is deferred/unwired — don't document it as an active decision point.
-</Aside>
 
 ### Model store resolution
 

@@ -243,19 +243,18 @@ def pull_job_file(image_id: str, *, tag: str | None = None) -> Path:
 
 
 def persisted_job_files(image_id: str) -> list[Path]:
-    """Every snapshot file for ``image_id``: the bare untagged name plus
-    any per-tag ``<id>@<tag>.json`` siblings (name order, no ranking —
-    callers pick by snapshot content, e.g. ``started_at``)."""
+    """Every per-tag ``<id>@<tag>.json`` snapshot file for ``image_id``
+    (name order, no ranking — callers pick by snapshot content, e.g.
+    ``started_at``).
+
+    Every writer has passed a tag since #2048, so per-tag files are the
+    only ones read; the bare pre-#2048 ``<id>.json`` fallback was sunset
+    in the v1.3.0 tranche (#2168).
+    """
     jobs_dir = _pull_jobs_dir()
     if not jobs_dir.is_dir():
         return []
-    stem = _sanitise_id(image_id)
-    # HAL0-SUNSET: v1.3.0 — the bare <id>.json lookup reads snapshots written
-    # before per-tag files (#2048); drop it once those have aged out of the
-    # 14-day sweep_pull_jobs window.
-    out = [p for p in (_contained_jobs_path(f"{stem}.json"),) if p.is_file()]
-    out.extend(sorted(jobs_dir.glob(f"{stem}@*.json")))
-    return out
+    return sorted(jobs_dir.glob(f"{_sanitise_id(image_id)}@*.json"))
 
 
 def persist_pull_job(job: RunnerPullJob) -> None:
