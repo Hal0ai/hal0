@@ -24,6 +24,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **The Doctor panel's next steps are now real, not empty.** `health_report.py`'s
+  seven `hal0 doctor verify` classifiers (API, mDNS, runners, capability
+  slots, memory engine, OpenWebUI, Hermes) used to hard-code
+  `next_steps=[]` on every row despite the typed `Diagnosis.next_steps` /
+  `NextStep(kind="command"|"manual"|"doc")` shape already existing — so
+  `GET /api/doctor` and `hal0 doctor verify --json` always answered with an
+  empty list, and the dashboard's `DiagnosisPanel` chips carried the
+  remediation command only as a `title=` tooltip. Every fail/warn branch now
+  emits at least one real `NextStep`: the exact command an operator would
+  run (`hal0 serve`, `hal0 slot restart <name>`, `systemctl restart
+  hal0-api`/`hindsight-api`/`hal0-openwebui`/`hal0-agent@hermes`), a doc
+  link, or a manual instruction where no single command exists. In the
+  dashboard, `command` chips now show the command text inline in mono (not
+  only in a tooltip) and offer **Copy**, plus **Run** through the existing
+  typed `useServiceRepair`/`useSlotRestart` hooks when the command maps onto
+  one of those actions; `doc` chips open the link; `manual` chips expand.
+  A new **StepsDrawer** (numbered steps, same copy/Run/open affordances)
+  appears on any diagnosis with two or more next steps, reusable as-is for
+  a future extension-enable-steps surface. A new `status-copy.ts` module
+  gives every slot lifecycle state (`offline`/`pulling`/`starting`/
+  `warming`/`ready`/`serving`/`idle`/`unloading`/`error`) and companion-service
+  health word (`up`/`stopped`/`down`) a one-sentence, consequence-first
+  "what this means for you" line, surfaced as a tooltip beside the existing
+  precise vocabulary in the slot drawer, the slot card's status dot, and the
+  Services card — the precise words themselves are unchanged.
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a
