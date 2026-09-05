@@ -555,8 +555,53 @@ describe('card profile picker + apply confirm (card-dropdowns Task 2)', () => {
     // + :1036 — the drawer's own two-call save, reachable as one gesture.
     expect(editCalls).toEqual([{ name: 'primary', body: { profile: 'brainy' } }])
     expect(restartCalls).toEqual(['primary'])
-    // the confirm closes on apply; the slots poll re-renders the pill.
+    // the confirm closes on apply; the pill reads the new name right away via
+    // `appliedOverride`, without waiting on the next slots poll.
     expect(q(host, 'infer-profile-preview')).toBeNull()
+    expect(profileTrigger(host, 'primary').textContent).toContain('brainy')
+  })
+
+  it('re-picking the just-applied profile before the poll catches up is a no-op', () => {
+    const { host } = mountCards([PROFILE_SLOT])
+    openProfileMenu(host, 'primary')
+    pickProfile(host, 'primary', 'brainy')
+    act(() => {
+      footButton('Apply profile')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(profileTrigger(host, 'primary').textContent).toContain('brainy')
+
+    // `s.profile` on the underlying slot is still the OLD value ('rocm') —
+    // the poll hasn't landed — but the override gates the re-pick guard the
+    // same way it gates the pill text, so re-picking the name just applied
+    // does not reopen the confirm or re-fire the write.
+    openProfileMenu(host, 'primary')
+    pickProfile(host, 'primary', 'brainy')
+    expect(q(host, 'infer-profile-preview')).toBeNull()
+    expect(editCalls).toEqual([{ name: 'primary', body: { profile: 'brainy' } }])
+  })
+
+  it('the override clears once the slots poll catches up, instead of lingering', () => {
+    const slot = { ...PROFILE_SLOT }
+    const { host, rerender } = mountCards([slot])
+    openProfileMenu(host, 'primary')
+    pickProfile(host, 'primary', 'brainy')
+    act(() => {
+      footButton('Apply profile')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(profileTrigger(host, 'primary').textContent).toContain('brainy')
+
+    // the slots poll lands, `s.profile` now matches the applied name.
+    slot.profile = 'brainy'
+    rerender()
+    expect(profileTrigger(host, 'primary').textContent).toContain('brainy')
+
+    // Prove the override actually cleared (rather than just coincidentally
+    // agreeing with `s.profile`) with a SECOND change that bypasses the
+    // apply flow entirely — e.g. an edit made from the slot drawer. A
+    // lingering override would keep shadowing it with the stale 'brainy'.
+    slot.profile = 'rocm-mtp'
+    rerender()
+    expect(profileTrigger(host, 'primary').textContent).toContain('rocm-mtp')
   })
 
   it('a slot with no profile keeps the "default" word as a listed row', () => {

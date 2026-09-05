@@ -365,6 +365,30 @@ describe('ModelDrawer header (Task 3)', () => {
     expect(usedBy.textContent).toContain('agent')
     act(() => root.unmount())
   })
+
+  it('used-by cell renders jump buttons when onOpenSlot is passed, and calls it with the slot name', () => {
+    slotsBox.current = [{ name: 'agent', model_default: 'm1' }]
+    const opened: string[] = []
+    const { host, root } = mount(
+      // `onOpenSlot`'s JS-inferred type narrows to `undefined` from its
+      // `= undefined` default (model-drawer.jsx has no JSDoc for it) — cast
+      // the component reference, not the props, so the rest of the call
+      // still gets real prop checking.
+      React.createElement(ModelDrawer as unknown as React.ComponentType<Record<string, unknown>>, {
+        open: true,
+        onClose: () => {},
+        model: MODEL,
+        onOpenSlot: (name: string) => opened.push(name),
+      }),
+    )
+    const usedBy = host.querySelector('[data-testid="model-facts-usedby"]') as HTMLElement
+    const btn = usedBy.querySelector('button') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.textContent).toBe('agent')
+    act(() => btn.click())
+    expect(opened).toEqual(['agent'])
+    act(() => root.unmount())
+  })
 })
 
 // ─── Task 4 — structured tune editor ────────────────────────────────────────

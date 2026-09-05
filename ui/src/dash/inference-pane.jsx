@@ -268,7 +268,13 @@ function profileCardOptions({ s, profiles, backends }) {
 // WRITES NOTHING: it hands the pick up to the pane (`onPickProfile`), which
 // owns the consequence confirm. This component holds no data hooks and no
 // mutations — the card is a leaf.
-function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
+// `effectiveProfile` — the just-applied profile name, when the apply confirm
+// wrote one but the polled `s.profile` hasn't caught up yet (see the
+// `appliedOverride` map on SlotCards). Undefined outside that window, in
+// which case the pill falls back to the slot's own persisted `profile`. It
+// gates BOTH the pill's displayed value and the re-pick guard below, so a
+// slot can't be "applied" a second time to the profile it was just given.
+function DevCell({ s, onProfile, profiles, backends, onPickProfile, effectiveProfile }) {
   const kind = devKind(s.device)
   const dchip =
     kind === 'npu' ? (
@@ -279,14 +285,15 @@ function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
         {kind}
       </span>
     )
-  const cur = s.profile || ''
+  const cur = effectiveProfile ?? (s.profile || '')
+  const sForOptions = cur === (s.profile || '') ? s : { ...s, profile: cur }
   return (
     <span className="prov">
       {dchip}
       <RichSelect
         className="profile-pill"
         value={cur}
-        options={profileCardOptions({ s, profiles, backends })}
+        options={profileCardOptions({ s: sForOptions, profiles, backends })}
         aria-label={`Runtime profile for ${s.name}`}
         data-testid={`infer-profile-${s.name}`}
         onChange={(id) => {
@@ -336,7 +343,7 @@ function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
 // preview's `lane` line instead of blocking (§4 warn-never-block).
 //
 // `pending` is `{ s, profile, modelFlags }` or null; null renders nothing.
-function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose }) {
+function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose, onApplied }) {
   const editMut = useSlotEdit()
   const restartMut = useSlotRestart()
   const s = pending?.s || null
@@ -384,6 +391,9 @@ function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose })
         onError: (err) =>
           toast(`${s.name}: profile apply failed — ${err?.message || 'see logs'}`, 'warn'),
         onSuccess: () => {
+          // Written — the pill must read the new name now, not after the next
+          // slots poll lands (see `appliedOverride` on SlotCards).
+          onApplied && onApplied(s.name, name)
           restartMut.mutate(s.name, {
             onError: (err) =>
               toast(
@@ -789,12 +799,15 @@ export function slotCtrlPhase(slot) {
 //   onPickProfile — called with the picked profile name. The card writes
 //               NOTHING itself: the caller owns the apply confirm, which has to
 //               live outside `.scard` (see ProfileApplyConfirm).
+//   effectiveProfile — overrides `s.profile` for the profile pill (see
+//               `appliedOverride` on SlotCards): the just-applied name until
+//               the slots poll confirms it. Omit and the pill reads `s.profile`.
 //   grip / dragging / dropProps — drag-to-reorder wiring (see slots/card-order).
 //               Omit `grip` and the card carries no handle at all, which is how
 //               every non-reorderable caller renders it.
 export function SlotScard({
   s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName,
-  profiles, backends, onPickProfile,
+  profiles, backends, onPickProfile, effectiveProfile,
   grip, dragging, dropProps,
 }) {
   const dot = dotCls(ind)
@@ -840,11 +853,12 @@ export function SlotScard({
       </div>
       <div className="scard-b">
         {/* Inline model edit sits OUTSIDE the model control, never nested in it:
-            the LLM model row is a <select> and the pencil must not compete with
-            that picker's own click/keyboard gesture. `stopPropagation` is
-            belt-and-braces on top of the separate hit area. Disabled when the
-            bound model isn't resolvable to a registry row — ModelDrawer needs
-            the row, not an id, and renders nothing for null. */}
+            the LLM model row is a RichSelect trigger and the pencil must not
+            compete with that picker's own click/keyboard gesture.
+            `stopPropagation` is belt-and-braces on top of the separate hit
+            area. Disabled when the bound model isn't resolvable to a
+            registry row — ModelDrawer needs the row, not an id, and renders
+            nothing for null. */}
         {onEditModel ? (
           <div className="smodel-row">
             {modelNode}
@@ -885,6 +899,7 @@ export function SlotScard({
             profiles={profiles}
             backends={backends}
             onPickProfile={onPickProfile}
+            effectiveProfile={effectiveProfile}
           />
         </div>
         {full && (
@@ -940,6 +955,29 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
   // rendered outside `.scard` (overflow-clipped, and a hover-transform
   // containing block) — see ProfileApplyConfirm.
   const [pendingProfile, setPendingProfile] = useStateI(null)
+  // The re-pick race (#leftovers-sweep 1d): a successful apply writes the new
+  // profile via PUT, but the card's own `s.profile` doesn't move until the
+  // NEXT /api/slots poll lands — in that window the pill would keep showing
+  // the old name, and the guard in DevCell (`id !== cur`) would let the
+  // operator "apply" the very profile that was just applied. `appliedOverride`
+  // closes the window: set per-slot the instant the write succeeds, read by
+  // DevCell as `effectiveProfile` for BOTH the pill text and the re-pick
+  // guard, and cleared below the moment the poll catches up.
+  const [appliedOverride, setAppliedOverride] = useStateI({})
+  React.useEffect(() => {
+    setAppliedOverride((prev) => {
+      if (Object.keys(prev).length === 0) return prev
+      let changed = false
+      const next = { ...prev }
+      for (const { s } of rows) {
+        if (Object.prototype.hasOwnProperty.call(next, s.name) && (s.profile || '') === next[s.name]) {
+          delete next[s.name]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [rows])
   if (!rows.length) {
     if (loading)
       return (
@@ -1005,6 +1043,7 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
             modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
             profiles={profiles}
             backends={backends}
+            effectiveProfile={appliedOverride[s.name]}
             onPickProfile={(profile) =>
               setPendingProfile({
                 s,
@@ -1030,6 +1069,9 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
       backends={backends}
       hardware={systemInfoQuery.data?.hardware}
       onClose={() => setPendingProfile(null)}
+      onApplied={(slotName, profileName) =>
+        setAppliedOverride((prev) => ({ ...prev, [slotName]: profileName }))
+      }
     />
     </React.Fragment>
   )

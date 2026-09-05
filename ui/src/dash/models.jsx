@@ -462,7 +462,15 @@ function ModelsView({ modelParam = null }) {
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
-      <ModelDrawer open={!!recipeModel} onClose={() => setRecipeModel(null)} model={recipeModel} />
+      <ModelDrawer
+        open={!!recipeModel}
+        onClose={() => setRecipeModel(null)}
+        model={recipeModel}
+        onOpenSlot={(name) => {
+          setRecipeModel(null);
+          window.location.hash = '#slots/' + name;
+        }}
+      />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
 
       {searchOpen && (

@@ -1348,9 +1348,9 @@ function SourcePathLine({ label, value, testId, empty, note }) {
 // ─── ModelDrawer ─────────────────────────────────────────────────────────────
 // `onOpenSlot` is optional (Task 3, facts-band used-by cell): when a host
 // passes it, each slot name in the used-by list is a jump button; absent, the
-// names render as plain text. jump wiring: models.jsx passes onOpenSlot — NOT
-// wired yet (the standalone Models page has no slot-drawer opener nearby to
-// reach trivially); tracked as a follow-up rather than faked here.
+// names render as plain text. models.jsx wires it: closes this drawer, then
+// sets `#slots/:name` (same gesture as model-modals.jsx's used-by row) to
+// land on the slot editor.
 export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const update = useModelUpdate();
 	const setDefault = useModelSetDefault();

@@ -33,6 +33,7 @@ import {
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
 } from './flags-tune.js'
+import { LANE_TITLE } from './profile-apply-preview.js'
 
 // Backend runtime hue map — built from meta.devices (GET /api/meta/enums via
 // useMetaEnums, static fallback when absent) instead of the old hardcoded
@@ -89,7 +90,6 @@ function bk(name, meta) { return meta[name] || meta.cpu; }
 // system-info's `backends` rows), so the profile drawer, the profile card and
 // the slot drawer name a runtime the same way.
 
-const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
 // One hue per backend lane (dashboard.css --dev-*), so a lane reads the same
 // colour in a chip here as it does on a slot card or a chart legend.
 const LANE_HUE = {
