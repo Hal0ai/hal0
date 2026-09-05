@@ -45,6 +45,27 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > brain steward model, and starts the API. When it finishes, open the
 > dashboard and assign models to slots.
 
+## At a glance
+
+| | |
+|---|---|
+| **What it is** | One control plane, `hal0-api` on `:8080`, turning a Linux box into an OpenAI-compatible inference appliance — chat, embeddings, rerank, transcription, speech and image generation, each capability in its own podman container. |
+| **Install** | One `curl \| sudo bash` line. The installer probes hardware, seeds every capability slot, and starts the API — there is no separate setup wizard to run afterward. |
+| **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan, CUDA and CPU fallbacks everywhere else. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
+| **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
+| **Auth** | Off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
+| **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. |
+| **Updates** | Cosign-signed tarball releases via `hal0 update`, with one-flag rollback. |
+
+### If you know Ollama / llama.cpp / Open WebUI / LocalAI, hal0 adds…
+
+| You already know | hal0 adds |
+|---|---|
+| **Ollama** — pull a model, run it, hit one local API. | A dedicated slot per capability (chat, embed, rerank, STT, TTS, image) — each its own podman container with its own hardware backend, typed lifecycle, and per-slot logs, instead of one shared runtime doing everything. |
+| **llama.cpp** / `llama-server` — the inference engine itself. | hal0 runs llama.cpp *inside* systemd-supervised slots, with a state machine (`starting → warming → ready → …`), a model registry, automatic hardware-backend selection (ROCm/Vulkan/CUDA/CPU/NPU), and a benchmarking pipeline (`hal0 bench`) on top of it. |
+| **Open WebUI** — the chat frontend. | hal0 prewires OpenWebUI as the chat surface *and* is the backend it talks to — hardware probing, slot/model management, and a separate operator dashboard sit underneath, not just the chat window. |
+| **LocalAI** — an OpenAI-compatible gateway over multiple backends. | hal0 adds a live operator dashboard, a hardware probe that drives backend selection automatically, systemd-managed container lifecycle per slot, and a signed self-update path with rollback. |
+
 ## Screenshots
 
 <div align="center">

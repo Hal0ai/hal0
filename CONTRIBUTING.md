@@ -215,6 +215,34 @@ tag. It walks the per-release gate:
 
 If any of these fail, fix and re-run before `git tag`.
 
+## Area → required validation
+
+The PR template's §14.1 high-risk checklist tells a reviewer *whether* a
+change is high-risk. This table tells a contributor *what to run* before
+opening the PR, by the surface touched — same risk vocabulary
+(low/med/high) the template already uses, so picking a risk grade and
+knowing what validation backs it up are the same lookup.
+
+**On β:** the rows below cite α + β together because that's what this section documents as
+required. As of this writing neither `make test-integration` nor `.github/workflows/integration.yml`
+exist in the tree — both were retired in the toolbox-retirement pass and never restored (filed as
+[#2239](https://github.com/Hal0ai/hal0/issues/2239)). Until that's resolved, treat "+ β" below as
+"+ β once it's restored" and lean harder on γ / `rc-validate` for the areas it names.
+
+| Area | Risk | Required validation |
+|---|---|---|
+| `src/hal0/api/` | med–high | α + β (every PR). A new route must be classified in `src/hal0/security/exposure.py` — the deny-by-default ratchet test (`tests/security/test_exposure.py`) fails an unclassified route rather than letting it default open. |
+| `src/hal0/auth/`, login routes, auth middleware | high | α + β, plus the auth-specific suite (`tests/security/test_kb1_hardening_tail.py`, `test_upstream_auth_contract.py`, `test_secrets_protected_keys.py`). §14.1 high-risk — run γ (`make release-test`) before merge. |
+| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α + β — β's integration suite is meant to exercise load → chat → swap → unload against a real slot (see the #2239 note above). A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
+| `src/hal0/capabilities/`, `model_meta`, `model_fit` | med | α + β. Changes to device/profile resolution should re-run the γ matrix row for the affected backend (ROCm/Vulkan/CPU/NPU) — see [Validation matrix](docs/reference/validation-matrix.mdx). |
+| `installer/`, systemd units | high | §14.1 high-risk trigger (installer / RCE-class: shell-out, downloads, signature verification, privilege changes). `shellcheck` on every `.sh` touched is a **manual convention, not a CI gate today** — run it yourself (`bash -n` at minimum if `shellcheck` isn't installed). Changes to `installer/bootstrap.sh` specifically must stay byte-identical to the logic `scripts/check-bootstrap-parity.sh` diffs against the live one-liner (`.github/workflows/bootstrap-parity.yml`). A `rc-validate` fresh-install lane pass is expected for anything beyond a comment/log-message change. |
+| `src/hal0/updater/`, the release manifest | high | §14.1 high-risk trigger. α + β, plus the γ script's `updater` row (check-only by design — see `scripts/release-test.sh`) and the `rc-validate` kit's `upgrade`/`post-upgrade` lanes, which are the only place an in-place convergence (schema-version-gated resets included) is exercised end to end. |
+| `src/hal0/api/routes/board_chat.py`, `src/hal0/mcp/admin.py` | high | §14.1 high-risk trigger by name — any addition to `AUTONOMOUS_WRITE_TOOLS` (`src/hal0/mcp/admin.py`) requires the reviewer to run the full γ release-gate before merge, per the PR template. |
+| `src/hal0/config/`, pydantic models | low–high | α always. A schema-version bump needs a migration test under `tests/` for the old→new shape; a new compatibility shim needs a `HAL0-SUNSET` marker and a clean `python3 scripts/check_sunset.py` (anti-scar rule 4). |
+| `ui/src/`, Playwright specs | med | `npm run lint && npm run typecheck && npm run test:unit && npm run build`; a new critical path needs a Playwright spec under `ui/tests/e2e/specs/*-v3.spec.ts` (see `ui/tests/e2e/README.md`). |
+| `docs/`, `CONTRIBUTING.md`, `ARCHITECTURE.md` | low | No code tests required, but a change to operator-visible behavior (CLI verb, flag, config key, endpoint, page) must land its matching doc update in the **same PR** — a docs-only PR that changes behavior description without a code change should fact-check every command/flag/path it cites against the current tree before opening. |
+| `.github/workflows/`, `release.yml` | low–high depending on target | CI-workflow changes can't verify themselves in the run they change — get a second pair of eyes and watch the run through to a real conclusion rather than trusting a self-referential green. Never skip hooks or bypass signing. Anything touching `release.yml`'s asset/signing/pointer steps is high-risk regardless of diff size; run `scripts/release-check.sh` before any tag-affecting change ships. |
+
 ## Release delivery
 
 Tagging is not delivering. The tag publishes immutable, signed assets;

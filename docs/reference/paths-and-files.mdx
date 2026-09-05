@@ -140,3 +140,6 @@ entries only hold the *name* of an environment variable (`auth_value_env`); the 
 secret value lives in `api.env` (mode `0600`), written atomically via
 `hal0.config.env.write_env_atomic`.
 </Aside>
+
+For *who* writes each of these files, *when* they get rewritten, and whether a hand
+edit survives the next write, see [Generated & rewritten files](/docs/reference/generated-files/).

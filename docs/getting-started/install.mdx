@@ -143,7 +143,10 @@ journalctl -fu hal0-api
 `hal0 status` reports system + slot + memory health; `hal0 slot list`
 shows configured slots; the `/api/health` curl is a lightweight liveness
 probe (200 the moment the API is serving); `journalctl -fu hal0-api`
-tails the control-plane log if something looks wrong.
+tails the control-plane log if something looks wrong. For the full
+six-step "did it work" checklist — health, model list, first chat,
+dashboard, logs, and `hal0 doctor verify` — see
+[Verify the install](/docs/getting-started/verify/).
 
 ## Uninstall
 
