@@ -973,10 +973,13 @@ def _dirs_identical(a: Path, b: Path) -> bool:
 def _phase_install(ctx: _StepCtx) -> PhaseResult:
     """Provision the managed Hermes venv + ``/usr/local/bin/hermes`` + plugins.
 
-    The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (the
-    canonical, shipped ``MemoryProvider`` source — see
-    ``tests/agents/test_hal0_memory_client.py`` for its contract tests) is
-    copied into ``$HERMES_HOME/plugins/hal0-memory/``. A concurrent lane ships
+    The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (a
+    byte-identical seed mirrored from the canonical ``MemoryProvider`` source
+    at ``src/hal0/agents/hermes/plugins/memory_hindsight/`` — the two are
+    locked together by ``tests/agents/hermes_plugins/test_seed_parity.py``;
+    see ``tests/agents/test_hal0_memory_client.py`` for the provider's own
+    contract tests) is copied into ``$HERMES_HOME/plugins/hal0-memory/``. A
+    concurrent lane ships
     the ``hal0-provider`` model-provider tree, dir-dropped alongside it into
     ``$HERMES_HOME/plugins/model-providers/hal0/`` — the copy tolerates a missing
     source dir (skipped-step report line) until that lane lands.
