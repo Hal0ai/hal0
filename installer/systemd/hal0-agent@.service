@@ -5,7 +5,7 @@
 # v0.4-ready: a future `hal0-agent@piccoder.service` is a drop-in with
 # a per-instance override under hal0-agent@piccoder.service.d/.
 Description=hal0 agent (%i)
-Documentation=https://github.com/Hal0ai/hal0/blob/main/docs/agents/hermes/SERVICE.md
+Documentation=https://github.com/Hal0ai/hal0/blob/main/docs/guides/run-agents.mdx
 
 # No hard dependency on the inference layer: the agent talks to
 # hal0-api over HTTP and tolerates it being down (per-slot podman
