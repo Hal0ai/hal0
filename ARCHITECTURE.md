@@ -8,10 +8,14 @@ Scope/roadmap live in the maintainer planning doc (`docs/.devdocs/PLAN.md`, loca
 live under `docs/` (Starlight `.mdx`).
 
 > **One authoritative doc.** This file replaces the former split across
-> `ARCHITECTURE.md`, `CONTEXT.md`, and `AGENTS.md`. Every standing decision
-> below is explained inline: hal0 keeps no separate ADR tree, so nothing
-> here cites a decision record by number — the rationale lives next to the
-> statement it justifies.
+> `ARCHITECTURE.md`, `CONTEXT.md`, and `AGENTS.md`. A handful of standing
+> decisions are recorded as numbered ADRs in `docs/adr/` (see "Decision
+> records" below); everything else is explained here inline, next to the
+> statement it justifies. Source comments citing `ADR-00NN` for a number
+> with no file in `docs/adr/` are usually pointing at `docs/internal/adr/`
+> — a second, gitignored ADR tree for decisions that carry lab
+> topology/IP data (`.gitignore`, closed by #627/#638) — not at a missing
+> or deleted document.
 
 ## hal0 in one paragraph
 
@@ -101,9 +105,6 @@ src/hal0/
 │                    #   (spec: update system)
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
-├── voice/           # emptied in #620 (in-process Moonshine/Kokoro
-│                    #   providers deleted); STT runs in the npu FLM
-│                    #   container, TTS in the tts container
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
@@ -270,8 +271,8 @@ model advertised and will 4xx on inference attempts (issue #31).
 A bundled agent in v0.3 is a third-party agent runtime running as a
 sibling systemd unit with hal0 wired in as its local AI provider. Two
 agents ship as first-class bundled agents —
-`BUNDLED_AGENTS = ("pi-coder", "hermes")` in
-`src/hal0/agents/manager.py`, single-pick at install; `hermes` is the
+`BUNDLED_AGENTS = ("hermes", "pi")` in
+`src/hal0/agents/manager.py:117`, single-pick at install; `hermes` is the
 default integration. The boundary is intentionally narrow: hal0 owns
 provisioning, identity, MCP wiring, and the chat-surface proxy. Runtime
 is whatever the bundled upstream does natively.
@@ -301,7 +302,7 @@ bundled agents are not a revival of it.)
 ### Install & lifecycle
 
 ```
-sudo hal0 agent provision hermes         # one-shot 15-phase bootstrap
+sudo hal0 agent install hermes           # one-shot 12-step converging install
 sudo systemctl status hal0-agent@hermes  # unit health
 hal0 agent personas                      # list personas (TOML store)
 hal0 agent personas activate coder       # swap active persona
@@ -314,13 +315,25 @@ and the composite `hal0` upstream config — all idempotently.
 
 ### Surfaces
 
-* **Provision** — `hal0 agent provision hermes` → the 15-phase
-  orchestrator in `src/hal0/agents/hermes_provision.py`
-  (preflight → install → env_probe → home_init → install_artifacts →
-  persona_seed → config_write → mcp_wire → context_link →
-  namespace_register → model_automap → voice_wire →
-  gateway_secrets_wire → smoke_tests → self_report). Idempotent +
-  checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`.
+* **Provision** — `hal0 agent install hermes` (root: installs the CLI
+  wrapper + hal0-owned skeleton, then re-execs `hal0 agent bootstrap
+  hermes` as the `hal0` user) → the 12-step, deliberately
+  **uncheckpointed** pipeline in `src/hal0/agents/hermes_provision.py`
+  (`_INSTALL_STEPS`, `hermes_provision.py:6582`): `preflight → install →
+  env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire →
+  config_write → context_link → voice_wire → gateway_secrets_wire →
+  smoke_tests`. Every step converges its slice of host state (a
+  re-run over an already-provisioned box mutates nothing —
+  `report.converged`); there is no resumable `provision.json` checkpoint
+  machinery — a last-run report is written to
+  `/var/lib/hal0/state/agents/hermes/provision.json` purely for `hal0
+  agent status`/`log` to render, not to resume from. The brain/persona/
+  memory-identity steps (`persona_seed`, `namespace_register`,
+  `brain_profile_seed`, `brain_profile_mcp_wire`, `self_report`) used to
+  run in this pipeline too; they now run in the `hal0-api` boot lifespan
+  instead (`src/hal0/api/__init__.py`, around the `lifespan()` function) —
+  the phase functions are unchanged and still directly callable, only
+  their membership in `_INSTALL_STEPS` moved.
 * **Service** — `hal0-agent@<id>.service` (template; v0.3 instances:
   `hermes` only). Sandboxed (`NoNewPrivileges`, `ProtectSystem=strict`,
   `ProtectHome=yes`). Type=notify + `WatchdogSec=60`. The agent reaches
@@ -373,10 +386,10 @@ and the composite `hal0` upstream config — all idempotently.
 | Module                                         | Owns                                         |
 |------------------------------------------------|----------------------------------------------|
 | `src/hal0/agents/manager.py`                   | single-pick install / uninstall              |
-| `src/hal0/agents/hermes_provision.py`          | 15-phase Hermes bootstrap orchestrator       |
+| `src/hal0/agents/hermes_provision.py`          | 12-step Hermes install pipeline + brain-lane bootstrap phases |
 | `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
-| `installer/agents/hermes/plugins/hal0-memory/`| hal0-hindsight MemoryProvider plugin (canonical source) |
+| `src/hal0/agents/hermes/plugins/memory_hindsight/` | hal0-memory `MemoryProvider` plugin (canonical source; mirrored byte-for-byte into `installer/agents/hermes/plugins/hal0-memory/` at install time, guarded by `tests/agents/hermes_plugins/test_seed_parity.py`) |
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
 | `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
@@ -389,8 +402,8 @@ and the composite `hal0` upstream config — all idempotently.
 
 ### Standing decisions
 
-These decisions are settled and explained here inline (hal0 keeps no ADR
-tree):
+These decisions are settled. Some are recorded as ADRs in `docs/adr/`
+(see "Decision records" below); the rest are explained here inline:
 
 * **Agent bundling** — hal0 bundles third-party runtimes
   (`pi-coder`, `hermes`) and runs them as sandboxed sibling units; it
@@ -1257,6 +1270,36 @@ then clean `[gone]` branches.
 **6. Record memory-worthy outcomes** (PR/merge, gotcha, decision) to the
 hal0 Hindsight engine via the `hal0-memory` skill — see the standing rules
 in `CLAUDE.md`.
+
+## Decision records
+
+`docs/adr/` is the public, tracked ADR tree — decisions safe to ship in
+the open-source repo, numbered independently of anything else. As of
+this writing: `0001` (Moonshine CPU STT reinstatement), `0002` (agent
+credential isolation), `0003` (ONNX text-generation via the NPU —
+deferred), `0004` (bundled agents), `0005` (memory namespace grammar),
+`0006` (every shipped runner image is a registry runner), `0012`
+(auth + Caddy removal), `0013` (per-agent MCP client allow-list),
+`0020` (localhost-callback-only OAuth PKCE for OpenRouter), `0023`
+(canonical LLM roles + Hindsight-native memory extraction). `0007`,
+`0008`–`0011`, and `0014`–`0022` (excluding `0020`) are gaps in this
+tree, not missing numbers to fill — see the next paragraph.
+
+A second ADR tree, `docs/internal/adr/`, is gitignored
+(`.gitignore`, closed by #627/#638): decisions whose write-up leans on
+lab topology, box names, or LAN addresses stay there, local to the
+machine that wrote them, the same way `docs/.devdocs/` and
+`docs/superpowers/` do (see this repo's `CLAUDE.md`). Its numbering is
+**independent** of `docs/adr/`'s — the two trees have collided on
+low numbers more than once (e.g. the current `docs/adr/0001` is
+unrelated to the `docs/internal/adr/0001` an early auth ADR once used).
+A source comment citing `ADR-00NN` with no matching file in `docs/adr/`
+is very likely citing the internal tree, not a ghost document; check
+there (if present on your box) before assuming the citation is stale.
+Some early internal ADRs (`0006` Lemonade adoption's era, `0008`–`0010`,
+`0022`) describe the pre-#687 Lemonade-fronted inference runtime, which
+the container-switchover epic replaced — those decisions are superseded
+by the current per-slot podman runtime and are not reconstructed here.
 
 ## See also
 
