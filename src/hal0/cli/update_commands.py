@@ -72,12 +72,30 @@ def _is_placeholder_manifest(latest: str, manifest: dict) -> bool:
     return isinstance(digest, str) and digest == _PLACEHOLDER_DIGEST
 
 
+def _print_override_note(override: str, channel: str) -> None:
+    """Disclose an active HAL0_RELEASES_URL override next to the channel (#2128).
+
+    The override bypasses channel resolution entirely, so any output that
+    names the configured channel without this note reads exactly like a
+    correctly-honoured channel setting — while the box may be pinned to one
+    immutable asset forever.
+    """
+    if not override:
+        return
+    console.print(
+        f"[yellow]manifest URL overridden by HAL0_RELEASES_URL={override} "
+        f"(configured channel '{channel}' ignored)[/yellow]"
+    )
+
+
 def _print_check(body: dict) -> None:
     """Render the /api/updates/check response as a rich panel + table."""
     current = body.get("current", "?")
     latest_raw = str(body.get("latest") or "")
     channel = body.get("channel", "stable")
     available = body.get("update_available", False)
+    override = str(body.get("releases_url_override") or "")
+    channel_label = f"{channel} — overridden" if override else str(channel)
     manifest = body.get("manifest") or {}
     if not isinstance(manifest, dict):
         manifest = {}
@@ -85,21 +103,31 @@ def _print_check(body: dict) -> None:
     if _is_placeholder_manifest(latest_raw, manifest):
         console.print(
             Panel(
-                f"[bold]hal0[/bold] {current}  ({channel})  "
+                f"[bold]hal0[/bold] {current}  ({channel_label})  "
                 "[yellow]no release published on this channel[/yellow]",
                 border_style="cyan",
             )
         )
+        _print_override_note(override, channel)
         return
 
     latest = latest_raw or "—"
-    status = "[green]update available[/green]" if available else "[dim]up to date[/dim]"
+    if available:
+        status = "[green]update available[/green]"
+    elif override:
+        # "up to date" cannot mean what it normally means against a pinned
+        # manifest: an immutable asset reports it forever, no matter what
+        # ships on the real channel (#2128).
+        status = "[yellow]pinned by HAL0_RELEASES_URL[/yellow]"
+    else:
+        status = "[dim]up to date[/dim]"
     console.print(
         Panel(
-            f"[bold]hal0[/bold] {current}  →  {latest}  ({channel})  {status}",
+            f"[bold]hal0[/bold] {current}  →  {latest}  ({channel_label})  {status}",
             border_style="cyan",
         )
     )
+    _print_override_note(override, channel)
     if manifest:
         table = Table(show_header=False, box=None, padding=(0, 2))
         for key in ("released_at", "notes_url", "digest_sha256", "signer_identity"):

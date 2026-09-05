@@ -799,6 +799,76 @@ def test_print_check_real_manifest_renders_normally(capsys: pytest.CaptureFixtur
     out = capsys.readouterr().out
     assert "no release published" not in out
     assert "1.0.0" in out
+    # #2128: no override → output stays exactly the pre-fix shape.
+    assert "HAL0_RELEASES_URL" not in out
+    assert "overridden" not in out
+
+
+# ── _print_check HAL0_RELEASES_URL override disclosure (#2128) ────────────────
+
+
+def test_print_check_discloses_releases_url_override(capsys: pytest.CaptureFixture) -> None:
+    """Override set + 'no update' → the pin is disclosed and 'up to date' is
+    suppressed: a box pinned to an immutable asset would claim up-to-date
+    forever, no matter what ships on the real channel."""
+    uc._print_check(
+        {
+            "current": "1.0.0rc12",
+            "latest": "1.0.0-rc.12",
+            "channel": "stable",
+            "update_available": False,
+            "releases_url_override": "https://x.test/p.json",
+            "manifest": {"digest_sha256": "a" * 64, "released_at": "2026-08-28"},
+        }
+    )
+    out = capsys.readouterr().out
+    assert "overridden" in out
+    assert "HAL0_RELEASES_URL" in out
+    assert "https://x.test/p.json" in out
+    assert "ignored" in out
+    assert "up to date" not in out
+    assert "pinned" in out
+
+
+def test_print_check_override_with_update_available_still_disclosed(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """An available update renders as usual, but the bypass note still prints."""
+    uc._print_check(
+        {
+            "current": "0.9.0",
+            "latest": "1.0.0",
+            "channel": "nightly",
+            "update_available": True,
+            "releases_url_override": "https://x.test/p.json",
+            "manifest": {"digest_sha256": "a" * 64, "released_at": "2026-08-28"},
+        }
+    )
+    out = capsys.readouterr().out
+    assert "update available" in out
+    assert "HAL0_RELEASES_URL" in out
+    assert "'nightly'" in out
+    assert "ignored" in out
+
+
+def test_print_check_placeholder_manifest_still_discloses_override(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The placeholder-manifest branch (#1796) discloses the override too."""
+    uc._print_check(
+        {
+            "current": "1.0.0rc4",
+            "latest": "0.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "releases_url_override": "https://x.test/p.json",
+            "manifest": {"digest_sha256": "0" * 64, "released_at": "2026-05-15"},
+        }
+    )
+    out = capsys.readouterr().out
+    assert "no release published on this channel" in out
+    assert "HAL0_RELEASES_URL" in out
+    assert "ignored" in out
 
 
 # ── `hal0 update status` / `hal0 update component` (spec 2026-08-30 §3) ────────

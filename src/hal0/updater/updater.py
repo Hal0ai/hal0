@@ -471,9 +471,27 @@ class ReleaseInfo:
     revoked: bool = False
     revoked_reason: str = ""
     raw_manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: The active ``HAL0_RELEASES_URL`` value when the manifest source was
+    #: overridden, else ``None``. When set, ``channel`` was NOT consulted to
+    #: build ``manifest_url`` — reporting surfaces must disclose that (#2128).
+    releases_url_override: str | None = None
 
 
 # ── URL helpers + raw fetch ────────────────────────────────────────────────────
+
+
+def releases_url_override() -> str | None:
+    """Return the active ``HAL0_RELEASES_URL`` override, or ``None``.
+
+    Structural companion to :func:`releases_url` (#2128): when this returns a
+    value, channel resolution is bypassed entirely — the configured channel
+    plays no part in which manifest is consulted. Every surface that reports
+    a channel next to a resolved target (CLI ``--check``, ``/api/updates/*``,
+    dashboard) uses this to disclose the override; it never changes which URL
+    is fetched.
+    """
+    override = os.environ.get("HAL0_RELEASES_URL", "").strip()
+    return override or None
 
 
 def releases_url(channel: str = "stable") -> str:
@@ -487,7 +505,7 @@ def releases_url(channel: str = "stable") -> str:
       - Otherwise ``https://releases.hal0.dev/{channel}.json`` — the
         canonical per-channel layout from PLAN §9.
     """
-    override = os.environ.get("HAL0_RELEASES_URL", "").strip()
+    override = releases_url_override()
     if override:
         # Preserve historical test behaviour: file:// or bare paths use the
         # override verbatim (a single static JSON file under the tmp dir).
@@ -4502,6 +4520,7 @@ class Updater:
             revoked=revoked,
             revoked_reason=revoked_reason,
             raw_manifest=raw,
+            releases_url_override=releases_url_override(),
         )
 
     # ── apply ──────────────────────────────────────────────────────────────────

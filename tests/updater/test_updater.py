@@ -38,6 +38,7 @@ from hal0.updater import (
     UpdateRollbackUnavailable,
     UpdateVerifyError,
     releases_url,
+    releases_url_override,
 )
 from hal0.updater.updater import (
     _atomic_symlink_swap,
@@ -331,6 +332,24 @@ def test_releases_url_appends_channel_for_http_override(
     monkeypatch.setenv("HAL0_RELEASES_URL", "https://example.test/releases.json")
     assert releases_url("stable") == "https://example.test/releases.json"
     assert releases_url("nightly") == "https://example.test/releases.json?channel=nightly"
+
+
+def test_releases_url_override_reports_the_active_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2128: the override is exposed structurally so surfaces can disclose it."""
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(tmp_path / "rel.json"))
+    assert releases_url_override() == str(tmp_path / "rel.json")
+
+
+def test_releases_url_override_is_none_when_unset_or_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No override (or a whitespace-only one) reports None — nothing to disclose."""
+    monkeypatch.delenv("HAL0_RELEASES_URL", raising=False)
+    assert releases_url_override() is None
+    monkeypatch.setenv("HAL0_RELEASES_URL", "   ")
+    assert releases_url_override() is None
 
 
 # ── manifest schema validation ─────────────────────────────────────────────────
@@ -679,6 +698,9 @@ def test_check_returns_typed_release_info(
     assert info.digest_sha256 == synthetic_release["payload"]["digest_sha256"]
     assert info.signer_identity == synthetic_release["payload"]["signer_identity"]
     assert info.update_available is True or info.update_available is False  # type sanity
+    # #2128: the fixture points HAL0_RELEASES_URL at the synthetic manifest, so
+    # check() must report the override structurally — `channel` was not consulted.
+    assert info.releases_url_override == str(synthetic_release["manifest_path"])
 
 
 def test_preview_check_and_prepare_exercise_cosign_subprocess_without_activation(

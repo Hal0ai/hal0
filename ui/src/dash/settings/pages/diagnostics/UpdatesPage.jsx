@@ -232,6 +232,17 @@ export function UpdatesPage() {
             </select>
           }
         />
+        {/* #2128: HAL0_RELEASES_URL bypasses channel resolution entirely —
+            without this row the picker above reads exactly like a honoured
+            channel setting while the box is pinned to one manifest URL. */}
+        {u.hal0?.releases_url_override && (
+          <div className="s-row" data-testid="updates-releases-url-override">
+            <div className="k"><span style={{color: "var(--warn)"}}>Manifest URL overridden</span></div>
+            <div className="v mono" style={{color: "var(--fg-3)"}}>
+              HAL0_RELEASES_URL={u.hal0.releases_url_override} — the channel above is ignored while this override is set.
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── About (absorbed from the former About page) ─────────────────── */}
