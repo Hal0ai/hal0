@@ -60,6 +60,7 @@ import {
 	slotButtonPhase,
 	imageLiveState,
 } from "./slot-status.js";
+import { statusCopyForSlotState } from "./status-copy";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { npuModalityOn } from "./npu-modality.js";
 import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
@@ -1767,6 +1768,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							<span
 								data-testid="slot-state-readonly"
 								className={stateChipClass(slot)}
+								title={statusCopyForSlotState(slot.state)}
 							>
 								{slot.state}
 							</span>
