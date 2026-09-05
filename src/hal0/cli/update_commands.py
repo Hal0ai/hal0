@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys
 import time
 from enum import StrEnum
+from pathlib import Path
 
 import httpx
 import typer
@@ -583,6 +584,91 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
+def _running_api_version() -> str | None:
+    """Version the live hal0-api process reports on ``/api/health``, or None.
+
+    Fallback for a daemon whose rollback response predates ``running_version``.
+    Deliberately NOT the CLI's own in-process ``hal0.__version__``: after the
+    swap the CLI binary already resolves through the rolled-back tree, so a
+    local read would compare the rolled-back version against itself and the
+    restart warning could never fire (#1541 / #2027). Fail-soft — an
+    unreachable API means nothing stale is serving, so the caller suppresses
+    the warning.
+    """
+    try:
+        body = api_get("/api/health")
+    except Exception:
+        return None
+    if isinstance(body, dict):
+        version = body.get("version")
+        if version:
+            return str(version)
+    return None
+
+
+def _render_rollback_result(body: dict) -> None:
+    """Render the /api/updates/rollback response — every field, loudly (#2027/#2145).
+
+    Rollback is the emergency path and it deliberately does not restart
+    hal0-api (by-design: ``update-rollback-defers-hal0-api-restart``), so the
+    one thing this banner must never do is imply the box is done. Names the
+    version reverted to, surfaces the forward-only-migration
+    ``schema_warning`` as its own callout, and — when the API's reported
+    running version still disagrees with the rolled-back tree — says so and
+    prints the exact remedy, mirroring the dashboard's own two-place notice
+    and the ``[memory].enabled`` restart line in memory_commands.
+    """
+    channel = body.get("channel", "stable")
+    rolled_back_to = str(body.get("rolled_back_to") or "")
+    reverted = Path(rolled_back_to).name.removeprefix("hal0-") if rolled_back_to else ""
+    headline = (
+        f"[green]rolled back[/green] to [bold]{reverted}[/bold] ({channel})"
+        if reverted
+        else f"[green]rolled back[/green] ({channel})"
+    )
+    lines = [headline]
+    previous_now = body.get("previous_now")
+    if previous_now:
+        lines.append(
+            f"[dim]previous-version slot now holds {previous_now} "
+            "(a second rollback returns to it)[/dim]"
+        )
+    console.print(Panel("\n".join(lines), border_style="green"))
+
+    schema_warning = body.get("schema_warning")
+    if schema_warning:
+        console.print(
+            Panel(
+                f"[yellow]{schema_warning}[/yellow]",
+                title="Schema warning",
+                border_style="yellow",
+            )
+        )
+
+    # The daemon that answered the rollback POST is by definition the
+    # not-yet-restarted process, so its self-reported version is what is
+    # still serving. Older daemons don't send it — fall back to /api/health.
+    running = body.get("running_version") or _running_api_version()
+    if running is None:
+        # Unreachable — nothing stale is serving, so no restart nag.
+        return
+    running = str(running)
+    if reverted and running == reverted:
+        console.print(f"[dim]hal0-api is already serving {running}; no restart needed.[/dim]")
+        return
+    still = f"hal0-api is still serving [bold]{running}[/bold]"
+    target = f" ([bold]{reverted}[/bold])" if reverted else ""
+    console.print(
+        Panel(
+            f"[bold yellow]restart required[/bold yellow] — {still}; "
+            f"the rolled-back tree{target} takes over only after:\n"
+            "[bold]systemctl restart hal0-api[/bold]",
+            title="hal0-api not restarted",
+            border_style="yellow",
+        )
+    )
+
+
 @update_app.callback(invoke_without_command=True)
 def update(
     ctx: typer.Context,
@@ -671,12 +757,7 @@ def update(
         except CliApiError as exc:
             die(str(exc))
             return
-        console.print(
-            Panel(
-                f"[green]rolled back[/green] ({body.get('channel', 'stable')})",
-                border_style="green",
-            )
-        )
+        _render_rollback_result(body if isinstance(body, dict) else {})
         return
 
     try:

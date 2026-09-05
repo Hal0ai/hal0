@@ -959,6 +959,16 @@ async def rollback_update(request: Request) -> dict[str, Any]:
     (e.g. ``UpdateRollbackUnavailable`` when there's no previous record),
     which the middleware renders as structured envelopes. Anything else is
     wrapped as a generic ``system.update_error``.
+
+    Deliberately does NOT restart ``hal0-api`` (#1549, adjudicated by-design
+    as ``update-rollback-defers-hal0-api-restart``): rollback is the only
+    mutating updater operation that is not a background job, and an in-route
+    ``try-restart`` would kill this very process mid-response — the exact
+    stale-terminal-state race #1540 fixed for apply/commit by persisting the
+    job BEFORE the restart. Until rollback grows that job machinery, the
+    contract is: the payload says loudly that a restart is still required
+    (``restart_required`` + ``running_version``), and every caller — CLI,
+    dashboard — surfaces it (#2027/#2145).
     """
     channel = _current_channel(request)
     updater = Updater(channel=channel)
@@ -981,7 +991,21 @@ async def rollback_update(request: Request) -> dict[str, Any]:
     #     tree may not understand. This was the worst of the three to drop:
     #     it is a data-hazard warning on an emergency path, and it was being
     #     discarded before any operator could see it.
-    return {"rolled_back": True, "channel": channel, **result}
+    # Plus the restart contract (#2027/#2145): this process IS the not-yet-
+    # restarted daemon, so its own ``__version__`` is authoritative for what
+    # is still serving. ``restart_required`` is False only when the tree we
+    # just swapped to is the very version already running (a double-rollback
+    # bounced back, or a dev tree without versioned dirs is indeterminate →
+    # True, the safe answer).
+    rolled_back_to = str(result.get("rolled_back_to") or "")
+    reverted_version = Path(rolled_back_to).name.removeprefix("hal0-") if rolled_back_to else ""
+    return {
+        "rolled_back": True,
+        "channel": channel,
+        "running_version": __version__,
+        "restart_required": reverted_version != __version__,
+        **result,
+    }
 
 
 # ── /channel ───────────────────────────────────────────────────────────────
