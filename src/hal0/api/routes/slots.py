@@ -815,9 +815,31 @@ def _normalize_create_body(
     return out
 
 
+#: Slot names whose creation/deletion can change what OpenWebUI's dynamic
+#: env blocks claim (RAG embeddings / image generation — see
+#: hal0.openwebui.wiring). These are the fixed system slot names the
+#: capability orchestrator targets for the "embed" and "img" capability
+#: lanes (hal0.capabilities.orchestrator's slot mapping), not
+#: operator-chosen names.
+_OWUI_WIRED_SLOT_NAMES = frozenset({"embed", "img"})
+
+
+def _reconcile_openwebui_env_background() -> None:
+    """Best-effort OpenWebUI env reconcile — never lets a broken resolver
+    or a dead unit surface as a failure on the slot create/delete response
+    it's piggybacking on (see reconcile_openwebui_env's own fail-soft
+    contract)."""
+    from hal0.components.openwebui_arm import reconcile_openwebui_env
+
+    try:
+        reconcile_openwebui_env()
+    except Exception as exc:  # pragma: no cover — defensive, arm is fail-soft
+        log.warning("slots.owui_reconcile_failed", exc_info=exc)
+
+
 @router.post("", status_code=201)
 @_invalidates_snapshot
-async def create_slot(request: Request) -> dict[str, object]:
+async def create_slot(request: Request, background_tasks: BackgroundTasks) -> dict[str, object]:
     """Create a new slot. Body: SlotConfig schema.
 
     Writes /etc/hal0/slots/<name>.toml, the systemd drop-in override, the
@@ -958,6 +980,8 @@ async def create_slot(request: Request) -> dict[str, object]:
                     "reason": str(exc),
                 }
 
+    if name in _OWUI_WIRED_SLOT_NAMES:
+        background_tasks.add_task(_reconcile_openwebui_env_background)
     return out
 
 
@@ -1305,7 +1329,9 @@ async def _refresh_composite_catalogue(
 
 @router.delete("/{name}")
 @_invalidates_snapshot
-async def delete_slot(name: str, request: Request, force: bool = False) -> dict[str, object]:
+async def delete_slot(
+    name: str, request: Request, background_tasks: BackgroundTasks, force: bool = False
+) -> dict[str, object]:
     """Delete a slot. If the slot is running, it is stopped first.
 
     #2112: only **pinned** slots are protected — the default-pinned anchors
@@ -1335,6 +1361,8 @@ async def delete_slot(name: str, request: Request, force: bool = False) -> dict[
     # advertised by /v1/models (hard-404ing on dispatch) until an
     # unrelated slot went ready or hal0-api restarted. Evict here.
     await _refresh_composite_catalogue(request, before)
+    if name in _OWUI_WIRED_SLOT_NAMES:
+        background_tasks.add_task(_reconcile_openwebui_env_background)
     return {"name": name, "deleted": True, "forced": force}
 
 

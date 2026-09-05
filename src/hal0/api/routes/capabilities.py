@@ -10,16 +10,38 @@ Mounted under ``/api/capabilities`` (see :mod:`hal0.api.__init__`):
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from hal0.api._audit import record_action
 from hal0.api.deps import CapabilityOrchestratorDep
 from hal0.capabilities.orchestrator import LEGAL_SLOTS, legal_children
 from hal0.errors import BadRequest
 
+log = logging.getLogger(__name__)
+
 router = APIRouter()
+
+#: Capability slots whose selection feeds OpenWebUI's dynamic env blocks
+#: (RAG embeddings / image generation — see hal0.openwebui.wiring). "voice"
+#: is excluded: STT/TTS are prewired unconditionally in env_writer's static
+#: defaults, so a voice apply never changes what OpenWebUI needs re-rendered.
+_OWUI_WIRED_SLOTS = frozenset({"embed", "img"})
+
+
+def _reconcile_openwebui_env_background() -> None:
+    """Best-effort OpenWebUI env reconcile — never lets a broken resolver
+    or a dead unit surface as a failure on the capability-apply response
+    it's piggybacking on (see reconcile_openwebui_env's own fail-soft
+    contract)."""
+    from hal0.components.openwebui_arm import reconcile_openwebui_env
+
+    try:
+        reconcile_openwebui_env()
+    except Exception as exc:  # pragma: no cover — defensive, arm is fail-soft
+        log.warning("capabilities.owui_reconcile_failed", exc_info=exc)
 
 
 @router.get("")
@@ -43,6 +65,7 @@ async def apply_capability(
     child: str,
     request: Request,
     orchestrator: CapabilityOrchestratorDep,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Apply a partial selection update to one (slot, child) pair.
 
@@ -99,6 +122,11 @@ async def apply_capability(
             "child": child,
             **{k: body[k] for k in ("backend", "provider", "model", "enabled") if k in body},
         }
+    if slot in _OWUI_WIRED_SLOTS:
+        # Runs after the response is sent — re-rendering OpenWebUI's env
+        # (and restarting it, only if that render actually changed
+        # something) is not this endpoint's own result.
+        background_tasks.add_task(_reconcile_openwebui_env_background)
     return {"ok": True, "selection": selection}
 
 
