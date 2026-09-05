@@ -178,15 +178,18 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
     """
     from hal0.agents import hermes_provision
 
-    manifest = _load_manifest()
+    old_manifest = _load_manifest()
+    new_manifest: dict[str, list[str]] = {}
     report: dict[str, Any] = {"hermes": {}, "brain": {}, "errors": []}
 
     all_records = {r.id: r for r in list_enabled_exposed(target="hermes")}
     all_records.update({r.id: r for r in list_enabled_exposed(target="brain")})
 
+    desired_by_target: dict[str, dict[str, dict[str, Any]]] = {}
     for target in JOIN_TARGETS:
         desired = _desired_entries(target)
-        previously_owned = set(manifest.get(target, []))
+        desired_by_target[target] = desired
+        previously_owned = set(old_manifest.get(target, []))
         remove_ids = sorted(previously_owned - set(desired))
         try:
             if target == "hermes":
@@ -205,18 +208,22 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
             result = {"errors": [str(exc)]}
             report["errors"].append(f"{target}: {exc}")
         report[target] = result
-        manifest[target] = sorted(desired.keys())
+        new_manifest[target] = sorted(desired.keys())
 
-    _write_manifest(manifest)
+    _write_manifest(new_manifest)
 
     # Seed TOML mirror (classify() source) always reflects hermes-exposed
     # records — brain has no separate policy axis, it shares the same
-    # per-server ToolPolicy.
+    # per-server ToolPolicy. Pruning uses the PRE-sync "hermes" ownership
+    # set (`old_manifest`, not `new_manifest`) — an id already written to
+    # `new_manifest` above is never a stale entry to prune.
     hermes_desired_records = {
-        sid: rec for sid, rec in all_records.items() if sid in _desired_entries("hermes")
+        sid: rec for sid, rec in all_records.items() if sid in desired_by_target["hermes"]
     }
     try:
-        _mirror_seed_toml(hermes_desired_records, previously_owned=set(manifest.get("hermes", [])))
+        _mirror_seed_toml(
+            hermes_desired_records, previously_owned=set(old_manifest.get("hermes", []))
+        )
     except Exception as exc:
         log.warning("hal0.mcp.hermes_join.seed_mirror_failed", error=str(exc))
         report["errors"].append(f"seed_toml: {exc}")

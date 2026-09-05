@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from hal0.config.schema import ToolPolicy
 from hal0.errors import BadRequest, Conflict, NotFound
 from hal0.mcp import installed as registry
+from hal0.mcp.installed import ExposureConfig
 
 
 def _record(server_id: str = "filesystem", **overrides: object) -> registry.InstalledServer:
@@ -178,3 +180,85 @@ def test_patch_config_locked_rmw_applies(tmp_hal0_home: str) -> None:
     reloaded = registry.get_installed("filesystem")
     assert reloaded.enabled is False
     assert reloaded.env == {"FOO": "bar"}
+
+
+# ── ADR-0015: schema extension (command/args/url/secrets/tools/exposure) ────
+
+
+def test_new_fields_default_empty(tmp_hal0_home: str) -> None:
+    """A fresh record has zero callable tools and zero exposure by default."""
+    saved = registry.install(_record())
+    assert saved.command == ""
+    assert saved.args == []
+    assert saved.url == ""
+    assert saved.secrets == {}
+    assert saved.tool_policy == ToolPolicy()
+    assert saved.exposure == ExposureConfig()
+
+
+def test_pre_adr0015_record_still_validates(tmp_hal0_home: str) -> None:
+    """A pre-#305-extension on-disk shape (``tools`` as a bare int) still loads.
+
+    Simulates an old record written before this PR: no [secrets]/[tools]/
+    [exposure] tables, ``tools`` is the bare advertised-count int.
+    """
+    old_shape = {
+        "id": "legacy",
+        "name": "legacy",
+        "spec": "npm:legacy-mcp",
+        "transport": "stdio",
+        "tools": 7,
+        "enabled": True,
+    }
+    record = registry.InstalledServer.from_toml_dict(old_shape)
+    assert record.tools == 7
+    assert record.tool_policy == ToolPolicy()
+    assert record.exposure == ExposureConfig()
+
+
+def test_to_toml_dict_round_trips_tool_policy(tmp_hal0_home: str) -> None:
+    saved = registry.install(
+        _record(
+            "github",
+            tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"], blocked=["delete_repo"]),
+        )
+    )
+    reloaded = registry.get_installed("github")
+    assert reloaded.tool_policy.allow == ["search"]
+    assert reloaded.tool_policy.gated == ["create_pr"]
+    assert reloaded.tool_policy.blocked == ["delete_repo"]
+    # The int tool *count* (a separate field, see InstalledServer docstring)
+    # survives the [tools]-table round-trip untouched.
+    assert reloaded.tools == saved.tools == 5
+
+
+def test_tool_policy_disjointness_enforced(tmp_hal0_home: str) -> None:
+    """ToolPolicy's own validator rejects a tool on two tiers — reused, not re-implemented."""
+    with pytest.raises(Exception, match="disjoint|overlap"):
+        _record("github", tool_policy=ToolPolicy(allow=["x"], gated=["x"]))
+
+
+def test_secrets_reference_must_be_env_shaped(tmp_hal0_home: str) -> None:
+    with pytest.raises(Exception, match="secrets"):
+        _record("github", secrets={"GITHUB_TOKEN": "not a valid key"})
+
+
+def test_secrets_reference_valid_name_accepted(tmp_hal0_home: str) -> None:
+    saved = registry.install(_record("github", secrets={"GITHUB_TOKEN": "GITHUB_MCP_TOKEN"}))
+    assert saved.secrets == {"GITHUB_TOKEN": "GITHUB_MCP_TOKEN"}
+
+
+def test_exposure_round_trips(tmp_hal0_home: str) -> None:
+    saved = registry.install(_record("github", exposure=ExposureConfig(hermes=True)))
+    reloaded = registry.get_installed("github")
+    assert reloaded.exposure.hermes is True
+    assert reloaded.exposure.brain is False
+
+
+def test_list_enabled_exposed_filters_correctly(tmp_hal0_home: str) -> None:
+    registry.install(_record("exposed", exposure=ExposureConfig(hermes=True), enabled=True))
+    registry.install(_record("disabled", exposure=ExposureConfig(hermes=True), enabled=False))
+    registry.install(_record("not-exposed", exposure=ExposureConfig(hermes=False), enabled=True))
+
+    hermes_ids = {r.id for r in registry.list_enabled_exposed(target="hermes")}
+    assert hermes_ids == {"exposed"}
