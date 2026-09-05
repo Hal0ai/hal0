@@ -93,7 +93,7 @@ async def test_npu_phase2_embed_enable_end_to_end(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
+        lambda self, slot, child, model_id, backend_id, **kw: None,
     )
     home = Path(tmp_hal0_home)
     slots_dir = home / "etc" / "hal0" / "slots"

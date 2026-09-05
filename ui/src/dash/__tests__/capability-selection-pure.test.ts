@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveProvider, rowId } from '../settings/pages/capabilities/selection-pure.js'
+import { resolveProvider, rowId, rowNeedsPull } from '../settings/pages/capabilities/selection-pure.js'
 
 describe('rowId', () => {
   it('prefers id, then model_id, then the bare value', () => {
@@ -22,5 +22,25 @@ describe('resolveProvider (#1470 semantics)', () => {
   })
   it('empty model resolves to empty provider', () => {
     expect(resolveProvider(catalog, '', selection)).toBe('')
+  })
+})
+
+describe('rowNeedsPull (#2026 semantics)', () => {
+  it('marks a row whose every backend is undownloaded', () => {
+    expect(rowNeedsPull({ id: 'm', backends: [
+      { id: 'gpu-vulkan', downloaded: false, pullable: true },
+      { id: 'cpu', downloaded: false, pullable: true },
+    ] })).toBe(true)
+  })
+  it('does not mark a row with at least one downloaded backend', () => {
+    expect(rowNeedsPull({ id: 'm', backends: [
+      { id: 'gpu-vulkan', downloaded: false },
+      { id: 'cpu', downloaded: true },
+    ] })).toBe(false)
+  })
+  it('never marks rows without a backends list (legacy fixtures, bare ids)', () => {
+    expect(rowNeedsPull({ id: 'm' })).toBe(false)
+    expect(rowNeedsPull({ id: 'm', backends: [] })).toBe(false)
+    expect(rowNeedsPull('bare')).toBe(false)
   })
 })

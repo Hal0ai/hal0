@@ -15,3 +15,15 @@ export function resolveProvider(catalogItems, model, selection) {
   return row?.provider
     || (model && model === (selection?.model || "") ? selection?.provider : "") || ""
 }
+
+// #2026: ⬇ marker for pullable-but-absent catalog rows. A grouped picker row
+// is "not downloaded" when every backend it advertises reports
+// downloaded:false — applying it enabled can only 409
+// (capability.model_not_downloaded) until the weights are pulled from the
+// Models view. Rows without a backends list (legacy fixtures, free-text ids)
+// are never marked.
+export function rowNeedsPull(m) {
+  const backends = m?.backends
+  if (!Array.isArray(backends) || backends.length === 0) return false
+  return backends.every(b => b?.downloaded === false)
+}
