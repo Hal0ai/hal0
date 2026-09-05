@@ -2707,7 +2707,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_operation_list": "List async operations (retain, consolidation, refresh, ...).",
     "memory_operation_get": (
         "Get one async operation's status — the poll target for memory_add's "
-        "operation_id, memory_mental_model_refresh, and memory_bank_consolidate."
+        "operation_id, memory_mental_model_refresh, and memory_bank_consolidate. "
+        "A completed retain reports its extraction yield: facts_extracted, and "
+        "nothing_learned + notice when zero facts made it into memory (#2030)."
     ),
     "memory_operation_cancel": "Cancel a pending/processing operation (aborts in-flight work only).",
     "memory_operation_retry": "Re-queue a failed operation.",

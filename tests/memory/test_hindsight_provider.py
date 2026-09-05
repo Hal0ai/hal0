@@ -1141,6 +1141,147 @@ async def test_operation_get_list_cancel_retry():
     assert retried["success"] is True
 
 
+# ── zero-fact retain visibility on the operation record (#2030) ───────────
+#
+# A retain whose fact extraction yields zero units used to finish as a bare
+# `status=completed, error_message=None` — stored raw, never retrievable, no
+# surface saying so. get_operation now annotates the terminal record.
+
+
+@pytest.mark.asyncio
+async def test_operation_get_flags_zero_fact_retain():
+    """Completed retain, 0 units created, document holds 0 units →
+    ``nothing_learned`` + a notice; still ``completed``, never an error."""
+    fake = FakeHindsightClient()
+    fake.operations["op-z"] = {
+        "operation_id": "op-z",
+        "bank_id": "shared",
+        "operation_type": "retain",
+        "status": "completed",
+        "retry_count": 0,
+        "error_message": None,
+        "result_metadata": {"document_id": "doc-z", "unit_ids_count": 0, "items_count": 1},
+    }
+    fake._documents_by_bank["shared"] = {"doc-z": {"id": "doc-z", "memory_unit_count": 0}}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-z", dataset="shared", client_id="hermes")
+    assert got["status"] == "completed"  # empty yield is visible, not failed
+    assert got["facts_extracted"] == 0
+    assert got["document_fact_count"] == 0
+    assert got["nothing_learned"] is True
+    assert "nothing was learned" in got["notice"]
+
+
+@pytest.mark.asyncio
+async def test_operation_get_reports_nonzero_yield_without_notice():
+    fake = FakeHindsightClient()
+    fake.operations["op-n"] = {
+        "operation_id": "op-n",
+        "bank_id": "shared",
+        "operation_type": "retain",
+        "status": "completed",
+        "result_metadata": {"document_id": "doc-n", "unit_ids_count": 7},
+    }
+    # No document seeded: a non-zero yield must not need (or attempt) a
+    # document fetch — the count is already on the record.
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-n", dataset="shared", client_id="hermes")
+    assert got["facts_extracted"] == 7
+    assert "nothing_learned" not in got
+    assert "notice" not in got
+
+
+@pytest.mark.asyncio
+async def test_operation_get_zero_yield_on_known_document_is_dedup_not_loss():
+    """0 units created but the document already holds facts — the rc.7
+    adversarial verification showed this is correct duplicate-content dedup;
+    it must not read as 'nothing was learned'."""
+    fake = FakeHindsightClient()
+    fake.operations["op-d"] = {
+        "operation_id": "op-d",
+        "bank_id": "shared",
+        "operation_type": "batch_retain",
+        "status": "completed",
+        "result_metadata": {"document_id": "doc-d", "unit_ids_count": 0},
+    }
+    fake._documents_by_bank["shared"] = {"doc-d": {"id": "doc-d", "memory_unit_count": 5}}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-d", dataset="shared", client_id="hermes")
+    assert got["facts_extracted"] == 0
+    assert got["document_fact_count"] == 5
+    assert "nothing_learned" not in got
+    assert "already known" in got["notice"]
+
+
+@pytest.mark.asyncio
+async def test_operation_get_falls_back_to_document_count_without_result_metadata():
+    """0.8.x-era record shape (``task_type``/``document_id``, no
+    ``result_metadata``): the document's own unit count is the yield."""
+    fake = FakeHindsightClient()
+    fake.operations["op-o"] = {
+        "id": "op-o",
+        "bank_id": "shared",
+        "task_type": "retain",
+        "status": "completed",
+        "document_id": "doc-o",
+    }
+    fake._documents_by_bank["shared"] = {"doc-o": {"id": "doc-o", "memory_unit_count": 0}}
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-o", dataset="shared", client_id="hermes")
+    assert got["facts_extracted"] == 0
+    assert got["nothing_learned"] is True
+
+
+@pytest.mark.asyncio
+async def test_operation_get_leaves_non_retain_and_failed_ops_untouched():
+    fake = FakeHindsightClient()
+    fake.operations["op-c"] = {
+        "operation_id": "op-c",
+        "bank_id": "shared",
+        "operation_type": "consolidation",
+        "status": "completed",
+    }
+    fake.operations["op-f"] = {
+        "operation_id": "op-f",
+        "bank_id": "shared",
+        "operation_type": "retain",
+        "status": "failed",
+        "error_message": "boom",
+    }
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    for op_id in ("op-c", "op-f"):
+        got = await p.get_operation(op_id, dataset="shared", client_id="hermes")
+        assert "facts_extracted" not in got
+        assert "nothing_learned" not in got
+        assert "notice" not in got
+
+
+@pytest.mark.asyncio
+async def test_operation_get_zero_yield_fail_soft_on_document_fetch_error():
+    """Document gone / engine hiccup: the op's own 0-unit count still flags,
+    with no document_fact_count claim — and the poll never errors."""
+    fake = FakeHindsightClient()
+    fake.operations["op-g"] = {
+        "operation_id": "op-g",
+        "bank_id": "shared",
+        "operation_type": "retain",
+        "status": "completed",
+        "result_metadata": {"document_id": "doc-gone", "unit_ids_count": 0},
+    }
+    # doc-gone unseeded → FakeHindsightClient.get_document raises 404.
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    got = await p.get_operation("op-g", dataset="shared", client_id="hermes")
+    assert got["facts_extracted"] == 0
+    assert got["nothing_learned"] is True
+    assert "document_fact_count" not in got
+
+
 # ── tags / bank stats / consolidation ────────────────────────────────────
 
 

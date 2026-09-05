@@ -39,18 +39,106 @@ export interface MemoryAddResponse {
   operation_id?: string
 }
 
+// ── #2030: zero-fact retain visibility ──────────────────────────────────────
+//
+// Retain is async: /api/memory/add answers before fact extraction runs, and a
+// retain whose extraction yields ZERO facts still finishes
+// `status=completed, error_message=null` — the raw document is stored but
+// nothing from it is ever retrievable, and the only toast the operator saw
+// was "Fact added". The server now annotates the terminal operation record
+// (`facts_extracted` / `nothing_learned` / `notice` on
+// GET /api/memory/banks/{bank}/operations/{id}); this bounded poll carries
+// that verdict to the surface the operator actually reads. Fail-soft: any
+// fetch error or timeout ends the watch silently — it must never turn an
+// engine hiccup into a scary toast for a write that landed fine.
+
+/** Single-op record slice the yield watch reads (server-annotated, #2030). */
+export interface RetainYieldOperation {
+  status?: string
+  facts_extracted?: number
+  nothing_learned?: boolean
+  notice?: string | null
+}
+
+const RETAIN_YIELD_POLL_MS = 3_000
+// Extraction is model-bound and can queue behind other ops; ~60s covers the
+// fleet-observed completion times without polling forever.
+const RETAIN_YIELD_MAX_POLLS = 20
+
+export const NOTHING_LEARNED_FALLBACK =
+  'Completed, but nothing was learned: extraction produced 0 facts from that text.'
+
+/**
+ * Poll one retain operation to its terminal state and surface a zero-fact
+ * completion as a warn toast. Returns a verdict for tests; production
+ * callers fire-and-forget. `deps` exist for injection in unit tests only.
+ */
+export async function watchRetainYield(
+  bank: string,
+  operationId: string,
+  deps?: {
+    fetchOp?: (bank: string, id: string) => Promise<RetainYieldOperation>
+    notify?: (msg: string, kind: 'warn') => void
+    sleep?: (ms: number) => Promise<void>
+    maxPolls?: number
+  },
+): Promise<'nothing_learned' | 'ok' | 'gone' | 'timeout'> {
+  const fetchOp =
+    deps?.fetchOp ??
+    ((b: string, id: string) =>
+      apiGet<RetainYieldOperation>(
+        `/api/memory/banks/${encodeURIComponent(b)}/operations/${encodeURIComponent(id)}`,
+      ))
+  const notify =
+    deps?.notify ??
+    ((msg: string, kind: 'warn') => {
+      const toast = (window as unknown as { __hal0Toast?: (m: string, k: string) => void })
+        .__hal0Toast
+      if (toast) toast(msg, kind)
+    })
+  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const maxPolls = deps?.maxPolls ?? RETAIN_YIELD_MAX_POLLS
+
+  for (let i = 0; i < maxPolls; i++) {
+    await sleep(RETAIN_YIELD_POLL_MS)
+    let op: RetainYieldOperation
+    try {
+      op = await fetchOp(bank, operationId)
+    } catch {
+      return 'gone' // op deleted / bank mismatch / engine unreachable
+    }
+    const status = op?.status
+    if (status === 'failed' || status === 'cancelled') return 'ok' // loud elsewhere
+    if (status === 'completed') {
+      if (op.nothing_learned) {
+        notify(op.notice || NOTHING_LEARNED_FALLBACK, 'warn')
+        return 'nothing_learned'
+      }
+      return 'ok'
+    }
+  }
+  return 'timeout'
+}
+
 export function useMemoryAdd() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: MemoryAddBody) =>
       apiPost<MemoryAddResponse>(ENDPOINTS.memoryAdd, body as unknown as Record<string, unknown>),
-    onSuccess: (_d, vars) => {
+    onSuccess: (data, vars) => {
       // Refresh the written bank's unit/stats/tag caches (falls back to a
       // broad memory invalidate if no dataset was given, matching the
       // server's own dataset-resolution fallback).
       void qc.invalidateQueries({
         queryKey: vars.dataset ? ['memory', 'banks', vars.dataset] : ['memory'],
       })
+      // #2030: watch the async extraction to its terminal state so a
+      // zero-fact completion is announced instead of leaving "Fact added"
+      // as the last word. Needs the concrete bank id — the Add modal always
+      // sends one; adds without a dataset skip the watch.
+      if (data.operation_id && vars.dataset) {
+        void watchRetainYield(vars.dataset, data.operation_id)
+      }
     },
   })
 }

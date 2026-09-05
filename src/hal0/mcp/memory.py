@@ -1961,7 +1961,9 @@ def build_server(
         name="memory_operation_get",
         description=(
             "Get one async operation's status — the poll target for memory_add's "
-            "operation_id, memory_mental_model_refresh, and memory_bank_consolidate."
+            "operation_id, memory_mental_model_refresh, and memory_bank_consolidate. "
+            "A completed retain reports its extraction yield: facts_extracted, and "
+            "nothing_learned + notice when zero facts made it into memory (#2030)."
         ),
         annotations=_ANNOTATIONS["memory_operation_get"],
     )
