@@ -111,6 +111,8 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_AGENT_MODEL` | _(unset)_ | Force a specific rung of the agent model ladder instead of the hardware-derived pick |
 | `HAL0_SKIP_SETUP` | _(unset)_ | Set to `1` to skip first-run seeding (`hal0 setup --auto --no-pull`) **and** both the brain and agent model steps |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
+| `HAL0_PULL_MAX_ATTEMPTS` | `4` | Max attempts for a retryable container-image pull failure (backoff between attempts — see [Installer forensics](#installer-forensics) below) |
+| `HAL0_PULL_RETRY_DELAYS` | `5 15 30 60` | Space-separated backoff seconds for pull retries; past the end of the list the last value doubles per extra attempt |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
 
@@ -119,6 +121,98 @@ Example:
 ```sh
 HAL0_PORT=9090 sudo bash installer/install.sh
 ```
+
+## Installer forensics
+
+### Module header convention
+
+Every file under `installer/lib/*.sh`, plus `install.sh`'s own top comment
+block, carries the same four-label header:
+
+```sh
+# installer/lib/<name>.sh
+#
+# Purpose: what this file is for, one or two sentences.
+# Expects: what has to be true before it's sourced/run (globals, prior
+#          sourcing order, privileges).
+# Provides: the public functions/globals other files may use.
+# Modder notes: anything a future editor needs to know before changing
+#          behaviour here (a footgun, a knob to prefer over an edit).
+```
+
+Keep new installer files (bash) on this convention — it is what lets
+`hal0 doctor` and future step-extraction tooling treat each file as a
+contract rather than re-reading its whole body.
+
+### Install log
+
+Every run tees its full output — narrator lines and every spawned command's
+stdout/stderr — to `/var/log/hal0/install-<ts>.log` (falling back to
+`/tmp/hal0-install-<ts>.log` when not root, e.g. `--dev`). The path is
+printed right after the banner and again at the end, and `hal0 doctor
+bundle` includes the most recent one (redacted) under `logs/install.log`.
+Implemented in `installer/lib/logging.sh`; degrades to no log (rather than
+aborting the install) if neither location is writable.
+
+### Failure report
+
+If `install.sh` aborts (its `ERR` trap fires), it writes
+`hal0-install-report-<ts>.txt` next to the install log and prints its path
+alongside the existing step-specific recovery advice. The report bundles a
+redacted environment dump (same key-name pattern as
+`hal0.api._redact` — `SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|
+ENCRYPTION_KEY|SALT|_KEY$|^KEY$`, case-insensitive), the owner of the
+hal0-api/OpenWebUI ports (`ss -ltnp`), `systemctl status` of the hal0
+units, `/etc/hal0/hardware.json`, and the last 200 lines of the install
+log — one file to attach to a bug report instead of a re-pasted
+scrollback. Implemented in `installer/lib/failure-report.sh`.
+
+### `--summary-json=PATH`
+
+Writes a versioned, machine-readable install summary once the install
+finishes, atomically (tempfile + fsync + `os.replace`, so a reader never
+sees a half-written file):
+
+```sh
+sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
+```
+
+```json
+{
+  "schema": "hal0.install-summary.v1",
+  "generated_at": "2026-09-05T12:00:00+00:00",
+  "hal0_version": "1.3.0",
+  "install": { "dev_mode": false, "no_start": false, "prefix": "/usr/lib/hal0/hal0-1.3.0", "models_dir": "/var/lib/hal0/models" },
+  "network": { "bind_host": "0.0.0.0", "port": 8080, "openwebui_port": 3001 },
+  "hardware_class": { "id": "gfx1151", "label": "AMD Strix Halo" },
+  "brain_model": "lfm2.5-2.6b",
+  "warnings": 1,
+  "errors": 0,
+  "elapsed_seconds": 612,
+  "step_durations_seconds": { "Pre-flight checks": 6, "Python environment": 54, "...": 0 }
+}
+```
+
+`hardware_class` reads `/etc/hal0/hardware.json` (absent → `"unknown"`/
+`"unknown"`); `brain_model` is `null` when the brain pull was skipped
+(`HAL0_SKIP_BRAIN_MODEL`/`HAL0_SKIP_SETUP`) or never completed. There is no
+`auth` field — see [Authentication & TLS](#authentication--tls): hal0-api
+binds open, so there is no posture to report here.
+
+### Pull retry discipline
+
+Container-image pulls back off and retry transient failures instead of
+either failing on the first blip or retrying forever: the OpenWebUI
+background warm-cache pull in `install.sh` (`installer/lib/pull-retry.sh`)
+and the dashboard's runner-image pull job (`hal0.registry.runner_pull`,
+Python) both classify auth/permission, 404/manifest-unknown, and
+out-of-space failures as **non-retryable** (fail immediately — retrying
+never fixes them) and back off `HAL0_PULL_RETRY_DELAYS` (default `5 15 30
+60`, doubling past the end) up to `HAL0_PULL_MAX_ATTEMPTS` (default `4`)
+attempts for everything else. An apparent success is verified — the image
+must actually be present in local storage — before it's trusted; a pull
+that exits 0 without landing the image is treated as a retryable failure,
+not a false success.
 
 ## Authentication & TLS
 
