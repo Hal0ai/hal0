@@ -1396,6 +1396,95 @@ async def test_registered_tool_raises_toolerror_on_missing_arg(queue: ApprovalQu
         await server.call_tool("model_show", {"args": {}})
 
 
+# ── #2025: the failure sentinel must not swallow error-STATE resources ───────
+#
+# The #1796 raise keyed on ``result.get("status") == "error"`` alone. A slot
+# whose lifecycle state is ERROR serialises with top-level ``status: "error"``
+# too (``serialize_slot`` mirrors ``state`` into ``status``), so a fully
+# successful ``slot_status`` / ``slot_by_name`` / ``slot_by_id`` read of a
+# crashed slot came back isError:true with the correct payload stringified
+# into the error message and structuredContent dropped — while REST returned
+# 200 for the identical resource. The sentinel must require the MCP layer's
+# full failure envelope (``error`` dict with a string ``code``), which no
+# slot payload can own.
+
+_ERROR_STATE_SLOT: dict[str, Any] = {
+    "name": "gpu-rocm",
+    "state": "error",
+    "status": "error",  # lifecycle mirror — NOT a failure envelope
+    "port": 8083,
+    "model_id": "qwen3:0.6b",
+    "backend": "llamacpp",
+    "metadata": {"backend": "llamacpp"},
+    "last_used_at": None,
+    "kind": "local",
+    "id": 7,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["slot_status", "slot_by_name", "slot_by_id"])
+async def test_error_state_slot_read_is_a_success_not_a_tool_failure(
+    queue: ApprovalQueue, error_transport: dict[str, Any], tool: str
+) -> None:
+    """A 200 read of a slot in lifecycle state ``error`` must NOT raise
+    ToolError — the full slot record flows through as a normal result."""
+    error_transport["status"] = 200
+    error_transport["payload"] = dict(_ERROR_STATE_SLOT)
+
+    args = {"slot_id": 7} if tool == "slot_by_id" else {"name": "gpu-rocm"}
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    result = await server.call_tool(tool, {"args": args})
+
+    # convert_result=True hands back ``(content, structured)`` for
+    # dict-returning tools — the structured payload must be the complete
+    # slot record, not a stringified error message.
+    _content, structured = result
+    assert isinstance(structured, dict)
+    assert structured["status"] == "error"  # the slot's own lifecycle field
+    assert structured["name"] == "gpu-rocm"
+    assert structured["state"] == "error"
+    assert structured["model_id"] == "qwen3:0.6b"
+
+
+@pytest.mark.asyncio
+async def test_unknown_slot_read_still_raises_toolerror(
+    queue: ApprovalQueue, error_transport: dict[str, Any]
+) -> None:
+    """A genuine lookup failure (REST 404, typed hal0 envelope) keeps the
+    #1796 behaviour: ToolError → isError:true, code preserved."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    error_transport["status"] = 404
+    error_transport["payload"] = {
+        "error": {"code": "slot.not_found", "message": "no such slot", "details": {"name": "nope"}}
+    }
+
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    with pytest.raises(ToolError) as excinfo:
+        await server.call_tool("slot_status", {"args": {"name": "nope"}})
+    assert "slot.not_found" in str(excinfo.value)
+
+
+def test_is_failure_envelope_discriminates_envelope_from_domain_data() -> None:
+    """Unit-pin the discriminator: only the MCP layer's own envelope shape
+    (``status=="error"`` + ``error`` dict with string ``code``) is a failure."""
+    # Every internal failure producer's shape → failure.
+    assert admin._is_failure_envelope(
+        {"status": "error", "error": {"code": "mcp.missing_arg", "detail": "name"}}
+    )
+    assert admin._is_failure_envelope(
+        {"status": "error", "http_status": 502, "error": {"code": "mcp.rest_error"}}
+    )
+    # Domain data that merely shares the ``status`` string → not a failure.
+    assert not admin._is_failure_envelope(dict(_ERROR_STATE_SLOT))
+    assert not admin._is_failure_envelope({"status": "error"})
+    assert not admin._is_failure_envelope({"status": "error", "error": "crashed at boot"})
+    assert not admin._is_failure_envelope({"status": "ok", "error": {"code": "x"}})
+    assert not admin._is_failure_envelope("error")
+    assert not admin._is_failure_envelope(None)
+
+
 @pytest.mark.asyncio
 async def test_slot_lifecycle_tools_forward_with_the_lifecycle_budget(
     queue: ApprovalQueue, mock_transport: dict[str, Any]

@@ -3119,6 +3119,31 @@ def _validate_catalog() -> None:
 _validate_overlay()
 
 
+def _is_failure_envelope(result: Any) -> bool:
+    """True only for the MCP layer's OWN failure envelope, never domain data.
+
+    Every failure path in this layer (``dispatch``'s policy/arg rejections,
+    ``_call_rest``'s 4xx/5xx wrapping via :func:`_rest_error_payload`, the
+    probe and memory dispatchers) returns ``{"status": "error", "error":
+    {"code": <str>, ...}}`` — ``error`` is always a dict and ``error.code``
+    is always a branchable string (see ``_REST_FALLBACK_ERROR_CODE``).
+
+    A bare ``status == "error"`` check is NOT sufficient: the slot object's
+    own lifecycle ``status`` field is the literal string ``"error"`` for a
+    crashed slot, so ``slot_status`` / ``slot_by_name`` / ``slot_by_id`` on
+    an error-state slot produced ``isError: true`` with the (correct,
+    complete) payload stringified and ``structuredContent`` dropped (#2025).
+    Slot payloads never carry a top-level ``error`` dict with a string
+    ``code`` (``Slot.as_dict`` + ``serialize_slot`` own the key set), so
+    requiring the full envelope shape discriminates transport failure from
+    domain data.
+    """
+    if not isinstance(result, dict) or result.get("status") != "error":
+        return False
+    error = result.get("error")
+    return isinstance(error, dict) and isinstance(error.get("code"), str)
+
+
 # ── FastMCP server builder ───────────────────────────────────────────────────
 
 
@@ -3183,9 +3208,13 @@ def build_server(
             # the content as if it were a successful payload (#1796). Raise
             # here so the lowlevel handler's ``except Exception`` path sets
             # ``isError: true`` the way every MCP client expects to detect
-            # a failed call without string-sniffing the content.
-            if isinstance(result, dict) and result.get("status") == "error":
-                raise ToolError(json.dumps(result.get("error", result)))
+            # a failed call without string-sniffing the content. The check
+            # requires the FULL envelope shape (error dict + string code),
+            # not the bare ``status`` string — a successfully read slot in
+            # lifecycle state ``error`` shares that string and must come
+            # back isError:false with its payload intact (#2025).
+            if _is_failure_envelope(result):
+                raise ToolError(json.dumps(result["error"]))
             return result
 
         _tool.__name__ = tool_name

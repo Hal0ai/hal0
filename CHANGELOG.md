@@ -26,6 +26,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- MCP admin tools no longer report a tool failure for a successful read of a
+  slot whose lifecycle state is `error`. The tool-result wrapper's failure
+  sentinel keyed on `status == "error"` alone, which collides with the slot
+  payload's own lifecycle `status` field — `slot_status`, `slot_by_name` and
+  `slot_by_id` returned `isError: true` with the correct record stringified
+  and `structuredContent` dropped, while REST answered 200 for the identical
+  resource. The sentinel now requires the MCP layer's full failure envelope
+  (an `error` dict carrying a string `code`), a shape no slot payload can
+  own; genuine failures (unknown slot, REST 4xx/5xx, bad args) still raise
+  `isError: true` with their typed code. (#2025)
+
 - The capability catalog no longer advertises a `gpu-rocm` backend for
   registry models on hosts that cannot run it. The `rocm` tag branch in
   `_backend_variants` appended `gpu-rocm` unconditionally — no
