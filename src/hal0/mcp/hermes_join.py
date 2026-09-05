@@ -49,6 +49,7 @@ from typing import Any
 
 import structlog
 
+from hal0.config import paths as cfg_paths
 from hal0.mcp.installed import InstalledServer, list_enabled_exposed
 from hal0.mcp.probe import build_headers
 
@@ -59,36 +60,65 @@ log = structlog.get_logger(__name__)
 #: layer with ``mcp.exposure_unsupported`` before this module ever runs.
 JOIN_TARGETS = ("hermes", "brain")
 
-#: Ownership manifest — the ids this module wrote into Hermes's
-#: ``config.yaml``/seed TOML on its own last run, per target. Only ids
-#: recorded here are ever candidates for removal (see module docstring).
-_MANIFEST_PATH = Path("/var/lib/hal0/mcp/hermes-managed.json")
-
 #: Agent identity tag applied to every user-installed server's headers —
 #: mirrors the tag `_build_config_overlay` applies to the two builtins
 #: (`hermes_provision.py:2017`) so audit rows attribute calls the same way.
 _AGENT_ID = "hermes"
 
 
+def _hermes_home() -> Path:
+    """``/var/lib/hal0/.hermes`` (or its HAL0_HOME sandbox equivalent).
+
+    Mirrors ``hermes_provision.HERMES_HOME_DEFAULT``'s FHS shape exactly,
+    but resolved through :func:`hal0.config.paths.var_lib` (HAL0_HOME-aware)
+    rather than that module's bare constant — this module is called from
+    the request path in tests (``tmp_hal0_home``) where a hardcoded
+    ``/var/lib/hal0`` write would escape the test sandbox.
+    """
+    return cfg_paths.var_lib() / ".hermes"
+
+
+def _hermes_venv() -> Path:
+    """``/var/lib/hal0/venvs/hermes`` (or its HAL0_HOME sandbox equivalent)."""
+    return cfg_paths.var_lib() / "venvs" / "hermes"
+
+
+def _seed_toml_path() -> Path:
+    """``/etc/hal0/agents/hermes.toml`` (or its HAL0_HOME sandbox equivalent).
+
+    Same physical file as ``hermes_provision.INSTALL_SEED_PATH``, resolved
+    through :func:`hal0.config.paths.etc` for the same test-isolation
+    reason as :func:`_hermes_home`.
+    """
+    return cfg_paths.etc() / "agents" / "hermes.toml"
+
+
+def _manifest_path() -> Path:
+    """Ownership manifest path — see module docstring's "Removal ownership"."""
+    return cfg_paths.var_lib() / "mcp" / "hermes-managed.json"
+
+
 def _load_manifest() -> dict[str, list[str]]:
-    if not _MANIFEST_PATH.exists():
+    path = _manifest_path()
+    if not path.exists():
         return {t: [] for t in JOIN_TARGETS}
     try:
-        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {t: [] for t in JOIN_TARGETS}
     return {t: sorted({str(x) for x in raw.get(t, [])}) for t in JOIN_TARGETS}
 
 
 def _write_manifest(manifest: dict[str, list[str]]) -> None:
+    path = _manifest_path()
     with contextlib.suppress(OSError):
-        _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(_MANIFEST_PATH.parent, 0o700)
-    tmp = _MANIFEST_PATH.with_suffix(".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+    tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(_MANIFEST_PATH)
+    tmp.replace(path)
     with contextlib.suppress(OSError):
-        os.chmod(_MANIFEST_PATH, 0o600)
+        os.chmod(path, 0o600)
 
 
 def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
@@ -160,10 +190,15 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
         remove_ids = sorted(previously_owned - set(desired))
         try:
             if target == "hermes":
-                result = hermes_provision.apply_mcp_server_entries(desired, remove_ids=remove_ids)
+                result = hermes_provision.apply_mcp_server_entries(
+                    desired,
+                    remove_ids=remove_ids,
+                    hermes_home=_hermes_home(),
+                    venv=_hermes_venv(),
+                )
             else:
                 result = hermes_provision.apply_brain_profile_mcp_entries(
-                    desired, remove_ids=remove_ids
+                    desired, remove_ids=remove_ids, hermes_home=_hermes_home()
                 )
         except Exception as exc:
             log.warning("hal0.mcp.hermes_join.apply_failed", target=target, error=str(exc))
@@ -214,11 +249,9 @@ def _mirror_seed_toml(
     """
     import tomllib
 
-    import tomli_w
+    from hal0.config.loader import write_toml_atomic
 
-    from hal0.agents.hermes_provision import INSTALL_SEED_PATH
-
-    path = INSTALL_SEED_PATH
+    path = _seed_toml_path()
     existing: dict[str, Any] = {}
     if path.exists():
         try:
@@ -240,11 +273,7 @@ def _mirror_seed_toml(
     merged = dict(existing)
     merged["mcp"] = mcp
 
-    from hal0.agents.hermes_provision import _atomic_write
-
-    _atomic_write(path, tomli_w.dumps(merged))
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    write_toml_atomic(path, merged, mode=0o600)
 
 
 __all__ = ["JOIN_TARGETS", "sync_exposure"]
