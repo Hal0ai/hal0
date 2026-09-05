@@ -1,0 +1,61 @@
+---
+title: Generated & rewritten files
+description: "Every file hal0 generates or rewrites at runtime — its writer (file:line), when it's rewritten, and whether operator edits survive. Companion to Paths & files, which owns what each path is for."
+sidebar:
+  order: 40
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+[Paths & files](/docs/reference/paths-and-files/) is the map of *what* lives
+where. This page answers the question that map doesn't: for each generated
+or rewritten file, *who* writes it, *when* it gets rewritten, and whether a
+hand edit survives the next write. Read it before touching install-time or
+runtime config code — a fix that only patches one writer of a fact with
+multiple writers reappears the next time the other one runs.
+
+## Config surfaces
+
+| File | Writer (`file:line`) | Rewritten when | Operator edits survive? |
+|---|---|---|---|
+| `/etc/hal0/hal0.toml` | `save_hal0_config()` — `src/hal0/config/loader.py:244`. Every read-modify-write path (installer, `PUT /api/settings`, `hal0 config edit`, `hal0 update` convergence) goes through the single locked RMW seam `hal0_config_txn`/`hal0_config_file_lock` (`loader.py:268` on) so two writers never erase each other's section. | Install-time seeding (only the `[models].store` key, idempotent — `installer/install.sh:896`), any `hal0 config edit`, `PUT /api/settings` (deep-merged, `src/hal0/api/routes/settings.py`), and one-shot `hal0 update` convergence writes. | **Yes.** Every writer is a merge into the existing file under the shared lock, never a blind overwrite — a field the write doesn't touch is untouched. |
+| `/etc/hal0/api.env` | `upsert_env_value()` / `delete_env_value()` — `src/hal0/api/_env_store.py:88` / `:132`, both over the atomic writer at `:58`. Mode `0600` (systemd `EnvironmentFile=` for `hal0-api`). | Per-key upsert on `hal0 auth rotate`, provider-token save (`upstreams/integrations.py`), and settings-route secret writes. The installer's network-derived block (bind host/port) is rewritten on **every** `install.sh` run, not just first install (`installer/install.sh:1272`). | **Partially.** Individual keys are upserted (a key the write doesn't name is untouched), but the installer's network block is unconditionally re-derived from the current run's flags on every re-run — a hand-edit to *those specific* keys does not survive a re-install. |
+| `/etc/hal0/openwebui.env` | `write_openwebui_env()` — `src/hal0/openwebui/env_writer.py:248`, called from `main()` at `:303` with `preserve_existing=True`, invoked by the installer only (`installer/install.sh:1566`; there is no settings route for this file). | Every `install.sh` run (fresh install, repair, upgrade). | **Yes, explicitly** — since #1514, `main()` merges the freshly computed defaults with whatever the file already contains (`env_writer.py:290`) rather than clobbering it, specifically so an operator's hand-edits survive repair and upgrade runs. |
+| `/etc/hal0/hardware.json` | `HardwareProbe.write()` — `src/hal0/hardware/probe.py:1002`, called from the hardware route's refresh path (`src/hal0/api/routes/hardware.py:262`). | Install time, `hal0 config hardware --refresh` (CLI), and the dashboard's re-probe action — all three reach the same route. See [Hardware matrix](/docs/reference/hardware-matrix/) for what triggers a probe. | **No.** This is a machine-owned snapshot serialized fresh from the live probe every time — there is no merge step, so a hand-edit is discarded on the next probe. |
+| `/etc/hal0/manifest.json` | **Nothing writes this by default.** hal0 resolves the release manifest from `/usr/lib/hal0/current/manifest.json` (inside the versioned release tree, atomically swapped by the `current` symlink on install/update) — `/etc/hal0/manifest.json` is checked *first* only as a deliberate operator override (`_find_manifest_path()`, `src/hal0/config/loader.py:1151`). | Never, by hal0. An operator who places a file here is opting out of the shipped pins. | **Always** — hal0 never writes to this path; if it exists, it's 100% operator content. |
+| `/etc/hal0/profiles.toml` | `save_profiles_config()` — `src/hal0/config/loader.py:929` — for operator (non-seed) profile edits. The one-shot v1.0 convergence reset is a separate path: `_backup_profiles_toml()` (`updater.py:2684`) copies the file to `/var/lib/hal0/backups/profiles-<UTC>.toml`, then the reset (`updater.py:2763`) replaces the catalog outright. | Operator edits via `hal0 config edit profiles`, install-time seed injection (absent-file case only), and the one-shot v1.0 schema-version-gated catalog reset. | **Mostly.** Ordinary edits round-trip through the RMW writer untouched. The **one-shot v1.0 reset is the deliberate exception** — it replaces the whole catalog after taking a timestamped backup, specifically because pre-v1.0 profiles carried shapes v1.0 no longer accepts (`config/loader.py:833`, `HAL0-SUNSET: v1.3.0`). |
+| `/etc/hal0/slots/<name>.toml` | `write_slot_toml()` — `src/hal0/slot_config/__init__.py:70`, wrapping the shared `write_toml_atomic`. | `slot create/edit/rename/delete`, and the `slot migrate-*` family (`slot migrate-hw`, `-caps`, `-flags`, `-id-keying`) — see the [CLI reference](/docs/reference/cli/). | **Mostly.** Field-level writes are merged (`merge_slot_config`) so untouched keys survive, but a hardware/profile migration can rewrite backend-tied fields (e.g. `profile`, `image_pin`) across every slot in one pass by design — that's what a migration command is for. |
+| `/var/lib/hal0/registry/registry.toml` | `RegistryStore._atomic_write()` — `src/hal0/registry/store.py:305`, under the sidecar `registry.toml.lock`. | `model add/rm/pull/scan`, `model store --migrate`, `model import-backup`. | **Yes** — writes are read-modify-write against the in-memory model map; an entry the current operation doesn't touch is re-serialized unchanged. `model add --overwrite` / `import-backup --force` are the explicit exceptions, by name. |
+| `/var/lib/hal0/stacks/state.json` | `write_stack_state_atomic()` — `src/hal0/stacks/state.py:82`. | Every stack apply/load. | **N/A** — this is a pointer (active stack id + content hash), not operator-editable content; it's always fully overwritten by design. |
+| `/var/lib/hal0/secrets/hal0-api.env` | Installer bash only, no Python writer — `installer/install.sh:1489`, root:root `0600`. Holds the validated `HF_TOKEN`. | Only when `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN` is set on that `install.sh` invocation — an explicit env var is treated as an explicit rotate signal. | **Yes when omitted.** Re-running the installer with no token set leaves an existing file here untouched; it's never deleted just because the variable was left out of a later run. |
+
+## Generated infrastructure (not operator-editable)
+
+| File | Writer (`file:line`) | Rewritten when | Operator edits survive? |
+|---|---|---|---|
+| `/etc/containers/systemd/hal0-slot@<token>.container` (Podman Quadlet unit) | `_render_quadlet_from_plan()` — `src/hal0/providers/container.py:803` — produces the unit text via `_render_quadlet_text()` (`:2737`); written by `_SYSTEMCTL_SEAM.write_quadlet()` (`:2695`). | Every slot spawn/load — the unit is fully regenerated from the slot's current TOML + resolved profile each time, including its `Environment=` lines (slot env vars are baked directly into the unit; there is no separate per-slot `.env` file in the current architecture). | **No.** Pure generated infrastructure — never hand-edit; a hand edit is silently discarded on the next spawn. |
+| `/etc/avahi/services/hal0-addon-<id>.service` | `advertise()` / `withdraw()` — `src/hal0/services/mdns.py:100` / `:138`. | Whenever an addon service's mDNS advertisement is enabled/disabled (settings apply, service toggle). | **No** — generated on every state change. The installer-owned main `hal0.service` announcement is a **different file** this module explicitly never touches (`mdns.py` module docstring). |
+
+<Aside type="caution">
+Every atomic writer above uses the same pattern: `tempfile.mkstemp` in the same directory,
+write, `fsync`, then `os.replace` — so a reader never observes a torn write and a crash mid-write
+leaves the previous version intact. See the Temp file prefixes table in
+[Paths & files](/docs/reference/paths-and-files/) for the recognizable `.hal0-*-*.tmp` names this
+produces.
+</Aside>
+
+## Reading this table
+
+"Survives?" is about **the next write from hal0 itself**, not about whether a file is safe to
+read by hand. A `No` doesn't mean "don't look at it" — `hardware.json` and the quadlet units are
+both useful to inspect while debugging — it means the next probe, spawn, or advertisement change
+will discard anything you changed there. A `Yes`/`Mostly` means hal0's own writers merge rather
+than clobber; it says nothing about whether the *installer* or an *upgrade* might still replace
+the file wholesale for reasons of its own (profiles.toml's one-shot v1.0 reset is exactly that
+case, called out above).
+
+## See also
+
+- [Paths & files](/docs/reference/paths-and-files/) — every path, its purpose, and the temp-file/lock conventions.
+- [Config schema](/docs/reference/config-schema/) — the typed shape of `hal0.toml` and `profiles.toml`.
+- [CLI reference](/docs/reference/cli/) — `slot migrate-*`, `hal0 config`, and `hal0 update` in full.
