@@ -11,12 +11,17 @@ the non-ghcr paths any more — the #1676 coverage lives entirely in the
 synthetic docker.io fixtures below.
 
 These tests drive the REAL script against throwaway fixture manifests,
-under a hermetic PATH where ``curl`` and ``docker`` are stubbed to always
-fail (simulating an offline / token-less run) so the tests are deterministic
-regardless of the sandbox's real network access. A digest-pinned ref must
-resolve without ever touching either stub; a non-ghcr tag-only ref that
-cannot be resolved must keep its previously-recorded digest instead of going
-null; a ghcr ref that cannot be resolved keeps the documented null contract.
+under a hermetic PATH where ``curl`` and ``docker`` are stubbed (offline /
+token-less by default, or scripted registry answers) so the tests are
+deterministic regardless of the sandbox's real network access. A
+digest-pinned ref must resolve without ever touching either stub; ANY
+tag-only ref that cannot be resolved — ghcr or not — must keep its
+previously-recorded digest instead of going null (#2218 extended the #1676
+rule to the ghcr path: ghcr.io/hal0ai/hal0-strix-vulkan serves no anonymous
+pull token, and the old ghcr path read that DENIED as an unpublish). Only a
+DEFINITIVE unpublish — a pull token granted and then a 404 for the
+manifest — nulls a digest, as does a failure with no recorded digest to
+keep.
 """
 
 from __future__ import annotations
@@ -114,12 +119,15 @@ def test_unresolvable_non_ghcr_tag_keeps_its_existing_digest(
     assert "keeping existing digest" in proc.stderr
 
 
-def test_unresolvable_ghcr_tag_still_nulls_per_the_documented_contract(
+def test_unverified_ghcr_failure_keeps_its_existing_digest(
     tmp_path: Path, offline_path: str
 ) -> None:
-    # Regression guard the other way: ghcr.io failures must still null out
-    # (the runtime's documented pull-by-tag + warn contract), not silently
-    # keep a possibly-stale digest.
+    # The #2218 fix: an auth-shaped/transport failure on the ghcr path (here
+    # the token endpoint itself is unreachable — same bucket as "no token
+    # issued" / DENIED / 401 / 403) proves nothing about the published
+    # state, so the recorded pin must survive, exactly like the non-ghcr
+    # branch. Nulling here regressed the valid strix pin during the v1.2.0
+    # cut, which release.yml's null-digest gate then rejects.
     existing = "sha256:" + "b" * 64
     manifest = _fixture_manifest(
         tmp_path, {"vulkan": {"tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1", "digest": existing}}
@@ -128,8 +136,86 @@ def test_unresolvable_ghcr_tag_still_nulls_per_the_documented_contract(
     proc = _run(manifest, offline_path)
 
     assert proc.returncode == 0, proc.stderr
+    assert _load(manifest)["toolbox_images"]["vulkan"]["digest"] == existing
+    assert "could not be re-verified" in proc.stderr
+    assert "keeping existing digest" in proc.stderr
+
+
+def test_unverified_ghcr_failure_with_no_recorded_digest_stays_null(
+    tmp_path: Path, offline_path: str
+) -> None:
+    # Nothing to keep: an unverifiable ghcr ref whose entry has no recorded
+    # digest stays null (the runtime's pull-by-tag contract).
+    manifest = _fixture_manifest(
+        tmp_path, {"vulkan": {"tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1", "digest": None}}
+    )
+
+    proc = _run(manifest, offline_path)
+
+    assert proc.returncode == 0, proc.stderr
     assert _load(manifest)["toolbox_images"]["vulkan"]["digest"] is None
-    assert "unpublished or unreachable" in proc.stderr
+    assert "no digest is recorded" in proc.stderr
+
+
+def _write_ghcr_stub(path: Path, manifest_status: str) -> None:
+    """A curl stub that grants a pull token, then answers ``manifest_status``
+    (e.g. "404 Not Found") for the manifest GET — the two-request shape of
+    the script's anonymous ghcr flow."""
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        'for arg in "$@"; do\n'
+        '  case "${arg}" in\n'
+        '    *"/token?"*) printf \'{"token":"stub-token"}\\n\'; exit 0 ;;\n'
+        '    *"/v2/"*"/manifests/"*)\n'
+        f"      printf 'HTTP/2 {manifest_status}\\r\\n'\n"
+        "      printf 'content-type: application/json\\r\\n'\n"
+        "      printf '\\r\\n'\n"
+        "      exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 22\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _ghcr_stub_path(tmp_path: Path, manifest_status: str) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_ghcr_stub(bin_dir / "curl", manifest_status)
+    _write_always_failing(bin_dir / "docker")
+    return f"{bin_dir}:{os.environ['PATH']}"
+
+
+def test_definitive_ghcr_404_nulls_even_a_recorded_digest(tmp_path: Path) -> None:
+    # The one case that legitimately nulls a pin: the registry granted a
+    # pull token and then answered 404 for the manifest — the image really
+    # is unpublished, and a stale pin must not survive that.
+    existing = "sha256:" + "d" * 64
+    manifest = _fixture_manifest(
+        tmp_path, {"vulkan": {"tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1", "digest": existing}}
+    )
+
+    proc = _run(manifest, _ghcr_stub_path(tmp_path, "404 Not Found"))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _load(manifest)["toolbox_images"]["vulkan"]["digest"] is None
+    assert "unpublished (registry answered 404" in proc.stderr
+
+
+def test_ghcr_403_after_token_grant_keeps_its_existing_digest(tmp_path: Path) -> None:
+    # A non-404 registry refusal AFTER a token was granted is still only an
+    # auth-shaped failure — keep the pin.
+    existing = "sha256:" + "e" * 64
+    manifest = _fixture_manifest(
+        tmp_path, {"vulkan": {"tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1", "digest": existing}}
+    )
+
+    proc = _run(manifest, _ghcr_stub_path(tmp_path, "403 Forbidden"))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _load(manifest)["toolbox_images"]["vulkan"]["digest"] == existing
+    assert "keeping existing digest" in proc.stderr
 
 
 def test_missing_tag_still_nulls(tmp_path: Path, offline_path: str) -> None:
