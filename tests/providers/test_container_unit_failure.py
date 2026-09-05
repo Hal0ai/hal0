@@ -406,3 +406,104 @@ def test_a_failed_restart_is_typed_even_when_the_probe_has_no_reason(
     assert "journalctl" in err.message
     assert "sudo" not in err.message
     assert "hal0-systemctl" not in err.message
+
+
+# ── #2130: a deliberate SIGTERM stop is not a failure ───────────────────────
+
+
+def test_sigterm_stop_on_a_presuccessexitstatus_unit_is_not_a_failure(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2130's exact shape: `systemctl stop` on a unit rendered before
+    ``SuccessExitStatus=143`` existed. podman propagates the container's
+    graceful SIGTERM shutdown as exit CODE 143 (128+15), so systemd records
+    ``status=143 … Failed with result 'exit-code'`` and parks the unit in
+    ``failed`` — but the service was ASKED to die and did so cleanly. The
+    probe must stay silent: a non-empty reason stamps a red ERROR on every
+    slot the documented ``migrate-flags --stop-services`` path stopped.
+    """
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nNRestarts=0\nExecMainStatus=143\n",
+    )
+
+    assert provider.unit_failure_reason("chat") == ""
+
+
+def test_a_crash_loop_of_sigterm_exits_is_still_a_failure(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Narrowness guard: 143 only reads "deliberate stop" on a plain
+    ``exit-code`` result. A unit that burned its whole restart ramp dying
+    143 lands in ``start-limit-hit``, which stays a crash-loop verdict —
+    only a requested stop parks a unit in ``failed`` with a bare 143 under
+    ``Restart=always`` (systemd would otherwise have restarted it)."""
+    _stub_run(
+        monkeypatch,
+        provider,
+        "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\n"
+        "NRestarts=5\nExecMainStatus=143\n",
+    )
+
+    reason = provider.unit_failure_reason("chat")
+
+    assert "crash-looping" in reason
+    assert "start-limit-hit" in reason
+
+
+# ── #2130: unit_stopped_cleanly — positive evidence a stop was deliberate ──
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        # Clean stop on a SuccessExitStatus=143 unit, or reset-failed, or
+        # not started since boot.
+        "LoadState=loaded\nActiveState=inactive\nSubState=dead\nResult=success\n",
+        # Result unreported (older systemd / property elided) but inactive.
+        "LoadState=loaded\nActiveState=inactive\nSubState=dead\n",
+        # SIGTERM stop on a unit predating SuccessExitStatus=143.
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=143\n",
+    ],
+)
+def test_unit_stopped_cleanly_recognises_deliberate_stops(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    _stub_run(monkeypatch, provider, stdout)
+
+    assert provider.unit_stopped_cleanly("chat") is True
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        # Crash loop: systemd gave up.
+        "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nNRestarts=5\n",
+        # Usage-exit death (#2221's shape) — a real failure.
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=64\n",
+        # SIGILL — terminal fault (#2126).
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=132\n",
+        # Plain non-zero exit.
+        "LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=1\n",
+        # Mid-restart between crashes: not evidence of a stop.
+        "LoadState=loaded\nActiveState=activating\nResult=success\n",
+        # Still running.
+        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+        # Removed unit (the output-sanity teardown shape) — the record's
+        # verdict must survive, so a gone unit is NOT a clean stop.
+        "LoadState=not-found\nActiveState=inactive\n",
+        # Inactive but the last run genuinely failed (Restart=no style).
+        "LoadState=loaded\nActiveState=inactive\nResult=exit-code\n",
+        # Unreadable probe output.
+        "",
+    ],
+)
+def test_unit_stopped_cleanly_never_manufactures_an_offline(
+    provider: ContainerProvider, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """Callers use ``True`` to retire a cached ERROR, so absence of evidence
+    (or evidence of an actual crash) must answer ``False``."""
+    _stub_run(monkeypatch, provider, stdout)
+
+    assert provider.unit_stopped_cleanly("chat") is False

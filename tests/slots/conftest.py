@@ -80,6 +80,11 @@ class FakeContainerProvider:
         # test keeps the old "nothing is wrong with the unit" behaviour.
         self.unit_failure_by_slot: dict[str, str] = {}
         self.reset_failed_calls: list[str] = []
+        # #2130 — slots whose unit reads "deliberately stopped" to systemd
+        # (clean SIGTERM stop / reset-failed). Empty by default: the probe
+        # answers True only on POSITIVE evidence, so existing tests keep the
+        # "no evidence, nothing converges" behaviour.
+        self.stopped_cleanly: set[str] = set()
         # #1922 — the fake slot server's completion output. "Paris" is the
         # right answer to the gate's prompt, so the default double models a
         # box whose model actually works, exactly as ``healthy = True`` models
@@ -118,6 +123,10 @@ class FakeContainerProvider:
     def reset_failed(self, slot: Any) -> None:
         """Mirror ``ContainerProvider.reset_failed`` (#1424/#1791)."""
         self.reset_failed_calls.append(probe_slot_name(slot))
+
+    def unit_stopped_cleanly(self, slot: Any) -> bool:
+        """Mirror ``ContainerProvider.unit_stopped_cleanly`` (#2130)."""
+        return probe_slot_name(slot) in self.stopped_cleanly
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         # Mirrors ContainerProvider.health's (port, slot_cfg) signature —

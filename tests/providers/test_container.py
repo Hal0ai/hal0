@@ -589,6 +589,20 @@ class TestRenderUnit:
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
         assert "RestartPreventExitStatus=64 132" in service_section
 
+    def test_sigterm_stop_is_a_success_exit_status(self) -> None:
+        """#2130: `systemctl stop` sends SIGTERM and podman propagates the
+        container's graceful shutdown as exit CODE 143 — without
+        ``SuccessExitStatus=143`` systemd records ``Failed with result
+        'exit-code'`` and every deliberately-stopped slot (the documented
+        ``migrate-flags --stop-services`` path included) parks in ``failed``,
+        which `hal0 slot list` painted as a red ERROR on a healthy box.
+        """
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
+        service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
+        assert "SuccessExitStatus=143" in service_section.splitlines()
+
     def test_sigill_is_terminal_host_side(self) -> None:
         """#2126: exit 64 only exists inside images that SHIP the runner
         entrypoint. The `cpu` runner resolves to a foreign GPU toolbox, which

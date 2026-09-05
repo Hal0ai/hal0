@@ -73,6 +73,19 @@ applying. Add those subsections to a version's section to surface them; see
   - `hal0.config.paths.bundle_chosen_marker()` (the `.bundle-chosen`
     bundle-picker marker path) is deleted — the picker stayed deferred and
     nothing ever wired the marker.
+- A deliberate stop of a slot no longer reads as a red `error` in
+  `hal0 slot list` (#2130). `systemctl stop` sends SIGTERM and podman
+  propagates the container's graceful shutdown as exit code 143, which the
+  generated unit — having no `SuccessExitStatus` — recorded as
+  `Failed with result 'exit-code'`; the state probe then painted every slot
+  the documented `migrate-flags --apply --stop-services` path stopped as an
+  error on a healthy mid-upgrade box. The rendered unit now declares
+  `SuccessExitStatus=143`, the systemd probe recognises the plain
+  SIGTERM-stop signature on units that predate the directive, and a cached
+  `error` converges back to `offline` once the unit's own properties show it
+  was stopped on purpose (a clean stop or `systemctl reset-failed`) — while a
+  genuinely crashed or crash-looping unit keeps its error verdict, breaker
+  bookkeeping, and `last_crash_line` evidence untouched.
 
 ## [1.2.0] — 2026-09-03
 

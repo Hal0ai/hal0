@@ -725,6 +725,28 @@ _SIGILL_HINT = (
 )
 
 
+def _is_sigterm_stop(props: Mapping[str, str]) -> bool:
+    """True when a ``failed`` unit's death is a plain SIGTERM exit (#2130).
+
+    podman propagates a container's graceful SIGTERM shutdown as its own exit
+    CODE 143 (128+15), so on a unit rendered before ``SuccessExitStatus=143``
+    a deliberate ``systemctl stop`` reads ``Result=exit-code`` /
+    ``ExecMainStatus=143`` — indistinguishable, to systemd, from a crash. It
+    is distinguishable here: a self-inflicted 143 under ``Restart=always``
+    would have been restarted rather than parked in ``failed``, so a unit
+    that IS parked with this signature was told to stop. This is the
+    version-skew-proof half of the fix — deployed units keep their old text
+    until the next load rerenders them.
+
+    Deliberately narrow: only ``exit-code`` + 143. ``start-limit-hit`` (the
+    crash-loop verdict), the terminal statuses (64/132), and every other exit
+    code stay failures.
+    """
+    if props.get("Result", "") != "exit-code":
+        return False
+    return str(props.get("ExecMainStatus", "")).strip() == "143"
+
+
 def _fault_diagnosis(props: Mapping[str, str]) -> str:
     """Name the deterministic fault behind a failed unit, or ``""`` (#2126).
 
@@ -998,6 +1020,19 @@ def _render_quadlet_from_plan(
             # "before /health ever answered" makes them deterministic, in
             # packaging/runner/rocmfpx/entrypoint.sh.
             "RestartPreventExitStatus=64 132",
+            # #2130: a requested stop is not a failure. `systemctl stop` sends
+            # SIGTERM; podman propagates the container's graceful SIGTERM exit
+            # as its own exit CODE 143 (128+15), not a signal death — so
+            # without this, systemd records `status=143 … Failed with result
+            # 'exit-code'` and parks every deliberately-stopped slot in
+            # `failed`, which the slot-state probe then paints as a red ERROR
+            # (the v1.0.0 migrate-flags --stop-services shape). Declaring 143 a
+            # success makes a stop end `inactive`/`Result=success`. Restart
+            # semantics are untouched: Restart=always restarts on success and
+            # failure alike (never during a requested stop job), and the
+            # terminal statuses above are exit codes systemd already treats as
+            # distinct.
+            "SuccessExitStatus=143",
             f"SyslogIdentifier={container_name}",
             "StandardOutput=journal",
             "StandardError=journal",
@@ -3003,6 +3038,14 @@ class ContainerProvider(Provider):
         restarts = props.get("NRestarts", "") or "0"
         fault = _fault_diagnosis(props)
         if active_state == "failed":
+            if _is_sigterm_stop(props):
+                # #2130: a deliberate `systemctl stop` on a unit that predates
+                # `SuccessExitStatus=143` parks it in `failed` with a plain
+                # SIGTERM exit. The service was ASKED to die and did so
+                # cleanly — reporting it as a failure painted every slot
+                # stopped by `migrate-flags --stop-services` (or a bare
+                # systemctl stop) as a red ERROR on a healthy box.
+                return ""
             if result == "start-limit-hit":
                 base = (
                     f"{unit} is crash-looping: systemd stopped retrying after "
@@ -3020,6 +3063,43 @@ class ContainerProvider(Provider):
                 f"was loading. `hal0 slot load {token}` recreates it"
             )
         return ""
+
+    def unit_stopped_cleanly(self, slot: Mapping[str, Any] | str) -> bool:
+        """POSITIVE evidence that the slot's unit was stopped on purpose (#2130).
+
+        The inverse question to :meth:`unit_failure_reason`, and deliberately
+        not its negation: that probe's ``""`` means "no terminal evidence",
+        which callers must never read as proof of health. This one answers
+        ``True`` only when the unit's own properties show a deliberate,
+        non-crash end:
+
+          * ``ActiveState=inactive`` with ``Result=success`` — a clean stop on
+            a unit carrying ``SuccessExitStatus=143``, a unit reset via
+            ``systemctl reset-failed``, or one not started since boot;
+          * ``ActiveState=failed`` with the plain-SIGTERM signature
+            (``Result=exit-code`` / ``ExecMainStatus=143``) — a deliberate
+            stop on a unit rendered before ``SuccessExitStatus=143`` existed.
+
+        Everything else — crash-loop (``start-limit-hit``), any other exit
+        code, a unit mid-restart (``activating``), a removed unit
+        (``LoadState=not-found``, the output-sanity teardown shape), or a
+        probe error — is ``False``. Callers use ``True`` to retire a cached
+        ERROR, so absence of evidence must never manufacture an OFFLINE.
+        """
+        try:
+            props = self.unit_status(slot)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "container.unit_status_failed",
+                extra={"slot": _artefact_token(slot), "error": str(exc)},
+            )
+            return False
+        if props.get("LoadState", "") != "loaded":
+            return False
+        active_state = props.get("ActiveState", "")
+        if active_state == "inactive":
+            return props.get("Result", "") in ("success", "")
+        return active_state == "failed" and _is_sigterm_stop(props)
 
     def reset_failed(self, slot: Mapping[str, Any] | str) -> None:
         """Clear a unit's ``failed`` sub-state and its start-limit counter.
