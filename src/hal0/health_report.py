@@ -23,10 +23,10 @@ their tests) are unaffected.
 from __future__ import annotations
 
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from hal0.diagnostics import Confidence, Diagnosis, Evidence, Severity
+from hal0.diagnostics import Confidence, Diagnosis, Evidence, NextStep, Severity
 
 # Status vocabulary. A "fail" row that is also ``critical`` renders red and
 # drives the overall verdict; a plain "fail"/"warn" is amber and never blocks.
@@ -49,6 +49,7 @@ class Check:
     status: str  # _PASS | _WARN | _FAIL
     detail: str
     critical: bool = False
+    next_steps: tuple[NextStep, ...] = field(default_factory=tuple)
 
 
 def _url_host(url: Any) -> str | None:
@@ -63,6 +64,41 @@ def _url_host(url: Any) -> str | None:
     return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
 
 
+# ── shared remediation commands ─────────────────────────────────────────────
+#
+# One owner per command string: these are the exact literals the UI's
+# NextStep-to-action mapping (ui/src/dash/diagnostics/next-step-actions.ts)
+# pattern-matches to offer a "Run" button through the matching typed hook
+# (useServiceRepair / useSlotRestart), instead of copy-only. Keep both sides
+# in sync — a wording change here must be mirrored there.
+
+_RESTART_HAL0_API = NextStep(
+    kind="command", label="systemctl restart hal0-api", target="systemctl restart hal0-api"
+)
+_RESTART_HINDSIGHT_API = NextStep(
+    kind="command",
+    label="systemctl restart hindsight-api",
+    target="systemctl restart hindsight-api",
+)
+
+# Cap the number of per-slot restart chips a single diagnosis offers -- a
+# roster with a dozen errored slots gets one row per slot in `hal0 slot
+# status`, not a diagnosis card wallpapered in chips.
+_MAX_SLOT_RESTART_STEPS = 3
+
+
+def _restart_slot_steps(errored: list[str]) -> tuple[NextStep, ...]:
+    """One ``hal0 slot restart <name>`` command per errored slot (capped)."""
+    return tuple(
+        NextStep(
+            kind="command",
+            label=f"hal0 slot restart {name}",
+            target=f"hal0 slot restart {name}",
+        )
+        for name in errored[:_MAX_SLOT_RESTART_STEPS]
+    )
+
+
 # ── per-check classifiers (pure -- take parsed JSON, return a Check) ───────────
 
 
@@ -75,6 +111,7 @@ def check_api(health: dict[str, Any] | None) -> Check:
             _FAIL,
             "unreachable — start it with `hal0 serve`",
             critical=True,
+            next_steps=(NextStep(kind="command", label="hal0 serve", target="hal0 serve"),),
         )
     version = health.get("version") if isinstance(health, dict) else None
     detail = f"serving (v{version})" if version else "serving"
@@ -102,6 +139,21 @@ def check_dns(urls: dict[str, Any] | None) -> Check:
             "mDNS (.local)",
             _WARN,
             f"{host} does not resolve here (multicast filtered? use the LAN IP)",
+            next_steps=(
+                NextStep(
+                    kind="manual",
+                    label="Use the LAN IP instead",
+                    target=(
+                        f"Browse to hal0 by its LAN IP instead of {host} — check your "
+                        "router's client list or run `hostname -I` on the hal0 host."
+                    ),
+                ),
+                NextStep(
+                    kind="doc",
+                    label="mDNS discovery",
+                    target="/docs/operate/services/#mdns-discovery-toggle",
+                ),
+            ),
         )
     return Check("dns", "mDNS (.local)", _PASS, f"{host} resolves")
 
@@ -114,22 +166,45 @@ def check_runners(system: dict[str, Any] | None) -> Check:
     errored slot names.
     """
     if system is None:
-        return Check("runners", "Runners", _FAIL, "health/system unreachable", critical=True)
+        return Check(
+            "runners",
+            "Runners",
+            _FAIL,
+            "health/system unreachable",
+            critical=True,
+            next_steps=(_RESTART_HAL0_API,),
+        )
     sm = (system.get("checks") or {}).get("slot_manager") if isinstance(system, dict) else None
     if not isinstance(sm, dict) or "slots" not in sm:
-        return Check("runners", "Runners", _FAIL, "slot manager not wired", critical=True)
+        return Check(
+            "runners",
+            "Runners",
+            _FAIL,
+            "slot manager not wired",
+            critical=True,
+            next_steps=(_RESTART_HAL0_API,),
+        )
     total = int(sm.get("slots") or 0)
     errored = list(sm.get("errored") or [])
     healthy = total - len(errored)
     if healthy <= 0:
-        detail = "no healthy runner slots" if total else "no runner slots configured yet"
-        return Check("runners", "Runners", _FAIL, detail, critical=True)
+        if total:
+            detail = "no healthy runner slots"
+            steps = _restart_slot_steps(errored)
+        else:
+            detail = "no runner slots configured yet"
+            steps = (
+                NextStep(kind="command", label="hal0 slot create", target="hal0 slot create"),
+                NextStep(kind="doc", label="Manage slots", target="/docs/guides/manage-slots"),
+            )
+        return Check("runners", "Runners", _FAIL, detail, critical=True, next_steps=steps)
     if errored:
         return Check(
             "runners",
             "Runners",
             _WARN,
             f"{healthy}/{total} healthy — errored: {', '.join(errored)}",
+            next_steps=_restart_slot_steps(errored),
         )
     return Check("runners", "Runners", _PASS, f"{healthy}/{total} slot(s) healthy")
 
@@ -137,13 +212,35 @@ def check_runners(system: dict[str, Any] | None) -> Check:
 def check_capabilities(capabilities: dict[str, Any] | None) -> Check:
     """Capability slots (embed/voice/img) configured -- advisory."""
     if capabilities is None:
-        return Check("capabilities", "Capability slots", _WARN, "unreachable")
+        return Check(
+            "capabilities",
+            "Capability slots",
+            _WARN,
+            "unreachable",
+            next_steps=(_RESTART_HAL0_API,),
+        )
     selections = capabilities.get("selections") if isinstance(capabilities, dict) else None
+    caps_steps = (
+        NextStep(
+            kind="manual",
+            label="Enable a capability",
+            target="Settings → AI Capabilities → pick an embed, voice, image, or vision child.",
+        ),
+        NextStep(
+            kind="doc",
+            label="Capabilities & profiles",
+            target="/docs/concepts/capabilities-and-profiles",
+        ),
+    )
     if not isinstance(selections, dict) or not selections:
-        return Check("capabilities", "Capability slots", _WARN, "none configured")
+        return Check(
+            "capabilities", "Capability slots", _WARN, "none configured", next_steps=caps_steps
+        )
     active = [k for k, v in selections.items() if v]
     if not active:
-        return Check("capabilities", "Capability slots", _WARN, "none active")
+        return Check(
+            "capabilities", "Capability slots", _WARN, "none active", next_steps=caps_steps
+        )
     return Check(
         "capabilities",
         "Capability slots",
@@ -155,7 +252,13 @@ def check_capabilities(capabilities: dict[str, Any] | None) -> Check:
 def check_memory(memory: dict[str, Any] | None) -> Check:
     """Hindsight memory engine + banks -- advisory (memory is optional)."""
     if memory is None:
-        return Check("memory", "Hindsight / banks", _WARN, "memory admin unreachable")
+        return Check(
+            "memory",
+            "Hindsight / banks",
+            _WARN,
+            "memory admin unreachable",
+            next_steps=(_RESTART_HAL0_API,),
+        )
     if not isinstance(memory, dict) or memory.get("engine") is None:
         # engine=None covers two very different states (#1543/#1613): memory
         # deliberately disabled (enabled=False → an honest PASS) vs. memory
@@ -170,19 +273,43 @@ def check_memory(memory: dict[str, Any] | None) -> Check:
                 _WARN,
                 "memory enabled but engine degraded (pgvector fallback) — "
                 "waits for the self-heal re-probe, or restart hal0-api",
+                next_steps=(_RESTART_HAL0_API,),
             )
         return Check("memory", "Hindsight / banks", _PASS, "disabled (no memory engine)")
     if not memory.get("reachable"):
-        return Check("memory", "Hindsight / banks", _WARN, "engine enabled but :9177 unreachable")
+        return Check(
+            "memory",
+            "Hindsight / banks",
+            _WARN,
+            "engine enabled but :9177 unreachable",
+            next_steps=(_RESTART_HINDSIGHT_API,),
+        )
     banks = memory.get("banks_total")
     detail = f"reachable — {banks} bank(s)" if banks is not None else "reachable"
     return Check("memory", "Hindsight / banks", _PASS, detail)
 
 
+#: check_key -> the systemd unit its companion-service restart command names,
+#: bare (no ``.service`` suffix — matches how an operator would type it).
+#: One owner: ui/src/dash/diagnostics/next-step-actions.ts maps the same
+#: bare name (plus ``.service``) to installer.py's _REPAIRABLE_UNITS entry.
+_SERVICE_UNITS: dict[str, str] = {
+    "openwebui": "hal0-openwebui",
+    "hermes": "hal0-agent@hermes",
+}
+
+
 def _service_check(services: dict[str, Any] | None, sid: str, label: str) -> Check:
     """Shared classifier for the two companion services (OWUI, Hermes)."""
+    restart_step = NextStep(
+        kind="command",
+        label=f"systemctl restart {_SERVICE_UNITS[sid]}",
+        target=f"systemctl restart {_SERVICE_UNITS[sid]}",
+    )
     if services is None:
-        return Check(sid, label, _WARN, "services health unreachable")
+        return Check(
+            sid, label, _WARN, "services health unreachable", next_steps=(_RESTART_HAL0_API,)
+        )
     entries = services.get("services") if isinstance(services, dict) else None
     entry = (
         next((s for s in entries if isinstance(s, dict) and s.get("id") == sid), None)
@@ -190,10 +317,10 @@ def _service_check(services: dict[str, Any] | None, sid: str, label: str) -> Che
         else None
     )
     if entry is None:
-        return Check(sid, label, _WARN, "not reported")
+        return Check(sid, label, _WARN, "not reported", next_steps=(restart_step,))
     if entry.get("up"):
         return Check(sid, label, _PASS, str(entry.get("detail") or "up"))
-    return Check(sid, label, _WARN, str(entry.get("detail") or "down"))
+    return Check(sid, label, _WARN, str(entry.get("detail") or "down"), next_steps=(restart_step,))
 
 
 def check_openwebui(services: dict[str, Any] | None) -> Check:
@@ -279,7 +406,7 @@ def to_diagnosis(c: Check) -> Diagnosis:
         summary=c.label,
         detail=c.detail,
         evidence=[Evidence(kind="endpoint", summary=c.detail)],
-        next_steps=[],
+        next_steps=list(c.next_steps),
     )
 
 
