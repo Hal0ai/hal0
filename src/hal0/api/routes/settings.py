@@ -11,9 +11,15 @@ Endpoints:
                                       existing config, validated against
                                       the pydantic schema, then atomically
                                       written. Response includes
-                                      ``_hal0.apply_plan`` so the UI can
-                                      render the right effect badge
-                                      without a second round-trip.
+                                      ``_hal0.apply_plan`` and
+                                      ``_hal0.changeset`` so the UI can
+                                      render the right effect badge and
+                                      toast from the real diff without a
+                                      second round-trip.
+    POST /api/settings/preview      — same body shape as the PUT, same
+                                      ChangeSet computation, writes
+                                      nothing — for a confirm-before-apply
+                                      drawer (#1967, #2195, #2203, #1511).
     POST /api/settings/reload       — re-read /etc/hal0/hal0.toml from
                                       disk into the running process.
     GET  /api/settings/schema       — pydantic JSON schema of Hal0Config
@@ -22,6 +28,12 @@ Endpoints:
     GET  /api/settings/apply-plan   — full key→apply-class registry the
                                       dashboard mounts once to render
                                       per-row effect badges (#552).
+    GET  /api/settings/fields       — one row per operator-editable schema
+                                      key (group/label/description/type/
+                                      enum/range/default/current/reload
+                                      class/secret) so the dashboard can
+                                      render a labelled row for every
+                                      config key automatically (#2108).
 
 Validation failures return the structured error envelope with
 ``code: "config.invalid"`` and ``details`` containing a per-field
@@ -39,7 +51,9 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
-from hal0.api._settings_apply import APPLY_CLASSES, apply_plan, get_registry
+from hal0.api._settings_apply import APPLY_CLASSES, get_registry
+from hal0.api._settings_changeset import changeset_payload, compute_settings_changeset
+from hal0.api._settings_fields import build_settings_fields
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
@@ -63,23 +77,6 @@ class ConfigInvalidError(Hal0Error):
 
     code = "config.invalid"
     status = 400
-
-
-def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """Recursive dict merge: patch wins, but nested dicts are merged not replaced.
-
-    Lists and scalars are replaced wholesale (no append/extend semantics)
-    because the schema doesn't define list identities — the caller's intent
-    when sending ``{"slots": {"port_range_end": 8090}}`` is to set that
-    one knob, not to clobber the rest of ``slots``.
-    """
-    out = dict(base)
-    for k, v in patch.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
 
 
 def _validation_error_details(exc: ValidationError) -> dict[str, str]:
@@ -144,11 +141,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # (#1717 review: a settings PUT waiting behind a ~60s graph PUT used to
     # resume on the stale cached snapshot, merge its own unrelated patch into
     # it, and overwrite the graph section the graph route had just written).
+    #
+    # ``compute_settings_changeset`` is the SAME function
+    # ``POST /api/settings/preview`` calls (#1967/#2195/#2203/#1511-shaped
+    # fixtures in tests/api/test_settings_changeset.py) — one diff, read
+    # here under the write lock so it can never see a value a concurrent
+    # writer is mid-changing.
     async with hal0_config_txn(request) as txn:
-        merged_raw = _deep_merge(txn.config.model_dump(mode="python"), body)
-
         try:
-            merged = Hal0Config.model_validate(merged_raw)
+            cs = compute_settings_changeset(txn.config, body)
         except ValidationError as exc:
             raise ConfigInvalidError(
                 "hal0 config failed schema validation",
@@ -158,7 +159,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
         # Atomic write via the txn — which also refreshes
         # ``app.state.hal0_config`` so no writer can leave that cache stale.
         try:
-            txn.save(merged)
+            txn.save(cs.merged)
         except OSError as exc:
             raise Hal0Error(
                 f"could not persist hal0 config: {exc}",
@@ -183,36 +184,57 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # manual operator action *before* it renders the success toast, so
     # the partition rides along in the response under ``_hal0.apply_plan``.
     # The top-level config dict stays the same shape — this is purely
-    # additive (#545).
+    # additive (#545). ``cs.plan`` is byte-identical to the old inline
+    # ``apply_plan(_dotted_leaf_keys(body))`` call — every touched leaf,
+    # whether or not its value actually changed, classified or landed in
+    # ``unknown`` (never silently dropped).
     #
-    # The touched-keys list flattens the nested PATCH body into dotted
-    # leaf paths ("slots.max_slots") — the form the registry keys on. A
-    # normal nested PUT ({"slots": {"max_slots": 4}}) previously produced
-    # an all-empty plan because only top-level body keys were matched
-    # against the registry, so the UI's restart hint never fired for
-    # generic-endpoint edits.
-    #
-    # Every touched leaf goes to apply_plan() unfiltered — a key the
-    # registry doesn't know about lands in ApplyPlanResult.unknown rather
-    # than being silently dropped here. Pre-filtering with `if k in
-    # REGISTRY` made `unknown` structurally always `[]` on this route,
-    # contradicting the documented contract on ApplyPlanResult (the UI is
-    # supposed to render an informational chip for a gap key instead of
-    # guessing at its class).
-    def _dotted_leaf_keys(node: dict[str, Any], prefix: str = "") -> list[str]:
-        out: list[str] = []
-        for k, v in node.items():
-            path = f"{prefix}{k}"
-            if isinstance(v, dict):
-                out.extend(_dotted_leaf_keys(v, f"{path}."))
-            else:
-                out.append(path)
-        return out
-
-    touched_keys = _dotted_leaf_keys(body)
-    config_view = _config_to_dict(merged)
-    config_view["_hal0"] = {"apply_plan": apply_plan(touched_keys)}
+    # ``_hal0.changeset`` is the newer, stricter view (#1967/#2195/#2203/
+    # #1511): only leaves whose value actually changed, each with its own
+    # before/after and reload class, so the UI can toast from truth
+    # instead of re-deriving "what changed" from the raw PATCH body.
+    config_view = _config_to_dict(cs.merged)
+    config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
     return config_view
+
+
+@router.post("/preview")
+async def preview_settings(request: Request) -> dict[str, Any]:
+    """Compute the ChangeSet a PUT with this body would apply, without writing.
+
+    Calls :func:`hal0.api._settings_changeset.compute_settings_changeset` —
+    the exact same function ``update_settings`` calls — so preview and
+    apply can never disagree about what a PATCH would do (the class of bug
+    behind #1967/#2195/#2203/#1511: two call sites independently deriving
+    "what changed"). Body shape is identical to ``PUT /api/settings``.
+
+    Reads against the live in-process config (``app.state.hal0_config``),
+    not a fresh disk re-read under the write lock — a preview never blocks
+    on, or competes with, a concurrent writer. The actual apply always
+    re-reads fresh under the lock in ``update_settings``, so a preview is a
+    best-effort snapshot, same caveat as any dry-run.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    if cfg is None:
+        cfg = load_hal0_config()
+        request.app.state.hal0_config = cfg
+
+    try:
+        cs = compute_settings_changeset(cfg, body)
+    except ValidationError as exc:
+        raise ConfigInvalidError(
+            "hal0 config failed schema validation",
+            details=_validation_error_details(exc),
+        ) from exc
+
+    return {"changeset": changeset_payload(cs), "apply_plan": cs.plan}
 
 
 @router.post("/reload")
@@ -272,6 +294,71 @@ async def get_apply_plan() -> dict[str, Any]:
         "apply_classes": list(APPLY_CLASSES),
         "registry": get_registry(),
     }
+
+
+async def _live_target_for(request: Request, value: Any) -> bool | None:
+    """Whether a ``hal0/<slot>``-style value currently resolves to a loaded slot.
+
+    Returns ``None`` when ``value`` isn't a virtual model reference (nothing
+    to say), ``True``/``False`` otherwise. Used to flag #2108's fresh-install
+    gap: ``[brain_chat].tool_model`` defaults to ``hal0/agent``, and that
+    slot ships unbound by design, so the default has nowhere live to route
+    tool turns until an operator pulls a model into it — this lets the
+    renderer say so plainly instead of the operator discovering it mid-chat.
+    """
+    if not isinstance(value, str) or not value.startswith("hal0/"):
+        return None
+    try:
+        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.normalize.resolver import LiveSlotResolver
+
+        views = await _normalize_slot_views(request)
+        resolver = LiveSlotResolver(
+            slot_views_provider=lambda: views,
+            loaded_models_provider=lambda: _normalize_loaded_models(request),
+        )
+        res = await resolver.resolve(value)
+    except Exception:
+        return None
+    if res is None:
+        return None
+    return not res.fallback
+
+
+@router.get("/fields")
+async def get_settings_fields(request: Request) -> dict[str, Any]:
+    """Schema-driven settings field metadata (#2108, #1967, #2195, #2203, #1511).
+
+    One row per operator-editable ``Hal0Config`` leaf — group, label,
+    description, type/enum/range, default, current value, reload class
+    (``apply_class``/``services``), and secret flag — so the dashboard
+    renders a labelled row for every schema key automatically instead of
+    requiring a hand-authored FormRow per field (the gap that left
+    ``[brain_chat].tool_model`` with no dashboard path).
+
+    :func:`hal0.api._settings_fields.build_settings_fields` supplies
+    everything a live config alone can answer (schema metadata + current
+    value + reload class, joined from the same
+    :data:`hal0.api._settings_apply.REGISTRY` ``/api/settings/apply-plan``
+    serves, so the two endpoints can never disagree on a key's reload
+    effect — see ``tests/api/test_settings_fields.py`` for the ratchet that
+    keeps every schema leaf classified in that registry). This route adds
+    the one thing that needs a live ``Request``: ``live_target``, populated
+    only for a ``hal0/<slot>``-shaped current value, ``true``/``false`` for
+    whether that alias currently resolves to a loaded slot — ``null`` for
+    every other field. That flags #2108's fresh-install gap directly:
+    ``tool_model`` defaults to ``hal0/agent``, and that slot ships unbound
+    by design, so a fresh box's row renders with ``live_target: false``
+    instead of the operator discovering the gap mid-chat.
+    """
+    cfg = getattr(request.app.state, "hal0_config", None)
+    if cfg is None:
+        cfg = load_hal0_config()
+        request.app.state.hal0_config = cfg
+    fields = build_settings_fields(cfg)
+    for row in fields:
+        row["live_target"] = await _live_target_for(request, row["current"])
+    return {"fields": fields}
 
 
 # ── Model storage (Settings → Models · FirstRun "Storage" step) ────────────
