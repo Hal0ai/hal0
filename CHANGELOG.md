@@ -233,6 +233,19 @@ applying. Add those subsections to a version's section to surface them; see
   silently drop a key, and a preview whose promise the apply doesn't keep)
   as regression fixtures against the general settings surface (#1967,
   #2195, #2203, #1511).
+### Added
+
+- Parity documentation pass: an "At a glance" block and an
+  if-you-know-Ollama/llama.cpp/Open WebUI/LocalAI comparison table in
+  `README.md`; `docs/getting-started/verify.mdx` (the six-step post-install
+  checklist); `docs/reference/support-matrix.mdx` (platform/GPU-lane support,
+  honestly separating installer-level detection from CI- and
+  fleet-exercised coverage); `docs/reference/validation-matrix.mdx` (the
+  α/β/γ test tiers and the `rc-validate` release-validation kit mapped onto
+  a hal0-specific "User Green" definition); `docs/reference/generated-files.mdx`
+  (every config file hal0 generates or rewrites, its writer, and whether
+  operator edits survive it); and an area→required-validation table in
+  `CONTRIBUTING.md` mirroring the PR template's §14.1 high-risk map.
 
 ### Fixed
 

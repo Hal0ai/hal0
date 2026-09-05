@@ -1,0 +1,105 @@
+---
+title: Verify the install
+description: The six-step "did it work" checklist after install.sh finishes — health, model list, first chat, dashboard, logs, and doctor — with the command and what a good answer looks like for each.
+sidebar:
+  order: 45
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+`install.sh` finishes by starting `hal0-api` and printing a summary. Before
+you trust the box, run these six checks in order — each one rules out a
+different layer (network, model registry, inference, UI, logs, and the
+aggregate self-check), so a failure tells you roughly where to look.
+
+<Steps>
+
+1. **Health** — is the API answering at all?
+
+   ```sh
+   curl http://localhost:8080/api/health
+   ```
+
+   A good answer is `200` with a small JSON body immediately — this is a
+   shallow liveness probe with no dependency on models or slots, the same
+   one systemd's watchdog and the installer poll before anything else is
+   assumed to work. If it doesn't answer, check `hal0-api.service` before
+   anything downstream: `systemctl status hal0-api`.
+
+2. **Model list** — did the installer actually register a model?
+
+   ```sh
+   hal0 model list
+   ```
+
+   A good answer lists at least one entry — the hal0-brain steward model the
+   installer downloads by default. An empty list means the pull step failed
+   or was skipped (`--no-pull`); pull one with `hal0 model pull <ref>` (see
+   [Load your first model](/docs/getting-started/first-model/)).
+
+3. **First chat** — does inference actually run end to end?
+
+   ```sh
+   curl http://localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model": "agent", "messages": [{"role": "user", "content": "Say hello in one sentence."}]}'
+   ```
+
+   A good answer is an OpenAI-shaped completion with real text in
+   `choices[0].message.content`, back within a few seconds on a warm slot
+   (longer on the first request, while the container image pulls and the
+   model loads). `model` here is the **slot name** (`agent`), not a raw
+   model id — hal0 rewrites the alias before dispatching. See
+   [Send your first chat](/docs/getting-started/first-chat/) for the
+   streaming variant and OpenWebUI equivalent.
+
+4. **Dashboard** — is the control plane's own UI serving?
+
+   Open `http://<host>:8080/` in a browser. A good answer is the dashboard
+   loading with the slot list populated (not stuck on a loading spinner or a
+   blank page) and at least one slot showing a `ready` status chip. The
+   dashboard is served by `hal0-api` itself — there is no separate dashboard
+   port or process to check.
+
+5. **Logs** — is the control plane logging cleanly?
+
+   ```sh
+   journalctl -fu hal0-api
+   ```
+
+   A good answer is steady request/response log lines with no repeating
+   tracebacks. `hal0 doctor logs` (default unit `hal0-api`) is the
+   equivalent read via the CLI, with `--level` and `--since` filters if you
+   need to narrow the window.
+
+6. **Doctor** — does the aggregate self-check agree?
+
+   ```sh
+   hal0 doctor verify
+   ```
+
+   A good answer is a pass/warn/fail report card with every row green
+   (`ok`) — API reachability, capability slots, memory, OpenWebUI, Hermes,
+   auth posture, and more, plus the box's live URLs. The command exits
+   non-zero only on a critical failure (no reachable URL, or zero healthy
+   runners); isolated warnings are worth reading but don't fail the check.
+   `hal0 doctor verify --json` gives the same report as structured JSON —
+   the same shape `GET /api/doctor` serves over HTTP.
+
+</Steps>
+
+<Aside type="tip">
+`hal0 doctor all --json` runs every read-only doctor audit in one pass
+(`perms`, `models`, `migrations`, `profiles`, plus the `doctor verify`
+checks) if you want one command that rolls up all six areas above into a
+single report — useful for scripting a post-install gate.
+</Aside>
+
+## If a step fails
+
+- **Health fails** — `systemctl status hal0-api`, then `journalctl -u hal0-api` for the crash reason.
+- **Model list is empty** — re-run the pull: `hal0 model pull <ref>`.
+- **First chat fails or times out** — check the slot: `hal0 slot status agent`, `hal0 slot logs agent`.
+- **Dashboard won't load** — same unit as health; a health failure explains a dashboard failure too.
+- **Logs show repeating tracebacks** — `hal0 doctor bundle` collects a redacted diagnostic archive to attach to a bug report.
+- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`, …); `hal0 doctor <row>`-shaped subcommands (`doctor perms`, `doctor models`, `doctor profiles`) can fix several of them directly with `--fix`.
