@@ -1,32 +1,35 @@
 #!/usr/bin/env bash
-# installer/lib/distro.sh — distro / package-manager detection.
+# installer/lib/distro.sh
 #
-# Sourced by install.sh, lib/preflight.sh, and `hal0 doctor` so the one
-# place that knows "what distro is this and how do I name an install
-# command" lives here instead of being string-matched in three files.
-#
-# All functions are pure: they read /etc/os-release and probe PATH, echo
-# a result, and return 0/1. None of them mutate the caller's environment
-# (os-release is sourced in a subshell so its ID/NAME/VERSION vars never
-# leak in and clobber installer state).
-#
-# Sourcing this file twice is a no-op (guard below), so install.sh can
-# source it explicitly and preflight.sh can source it again for its
-# standalone `hal0 doctor` path without double-defining anything.
-#
-# Public API:
-#   distro_id            — /etc/os-release ID            (fedora, ubuntu, arch…)
-#   distro_id_like       — /etc/os-release ID_LIKE       (e.g. "debian", "arch")
-#   distro_pretty        — human name (PRETTY_NAME → NAME → ID → "this host")
-#   pkg_mgr              — host package manager command   (apt-get|dnf|yum|
-#                          zypper|pacman|apk) or non-zero if none recognised
-#   distro_family        — ecosystem bucket              (debian|fedora|suse|
-#                          arch|alpine) used to pick package names
-#   pkg_install_cmd PKG… — the full one-liner an operator runs to install
-#                          PKG… with the detected manager (incl. sudo)
-#   python_venv_hint     — install one-liner for a `python3 -m venv`-capable
-#                          Python on this distro (Debian splits out
-#                          python3-venv; most others bundle it)
+# Purpose: Distro / package-manager detection — the one place that knows
+#          "what distro is this and how do I name an install command",
+#          instead of that being string-matched in three files.
+# Expects: Sourced by install.sh, lib/preflight.sh, and `hal0 doctor`.
+#          Reads /etc/os-release and probes PATH; sourcing it twice is a
+#          no-op (guard below). All functions are pure — they read state
+#          and return 0/1, never mutating the caller's environment
+#          (os-release is sourced in a subshell so its ID/NAME/VERSION
+#          vars never leak in and clobber installer state).
+# Provides: distro_id            — /etc/os-release ID (fedora, ubuntu, arch…)
+#          distro_id_like       — /etc/os-release ID_LIKE (e.g. "debian", "arch")
+#          distro_pretty        — human name (PRETTY_NAME → NAME → ID → "this host")
+#          pkg_mgr              — host package manager command (apt-get|dnf|
+#                                 yum|zypper|pacman|apk) or non-zero if none
+#                                 recognised
+#          distro_family        — ecosystem bucket (debian|fedora|suse|
+#                                 arch|alpine) used to pick package names
+#          pkg_install_cmd PKG… — the full one-liner an operator runs to
+#                                 install PKG… with the detected manager
+#                                 (incl. sudo)
+#          python_venv_hint     — install one-liner for a
+#                                 `python3 -m venv`-capable Python on this
+#                                 distro (Debian splits out python3-venv;
+#                                 most others bundle it)
+# Modder notes:
+#   Add a new distro by extending the ID/ID_LIKE matches in `pkg_mgr` and
+#   `distro_family` together — they must stay in lockstep, since every
+#   caller picks package names from `distro_family` but the install
+#   *command* from `pkg_mgr`.
 
 [[ -n "${_HAL0_DISTRO_SH_LOADED:-}" ]] && return 0
 _HAL0_DISTRO_SH_LOADED=1

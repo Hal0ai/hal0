@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# installer/lib/preflight.sh — re-runnable pre-flight checks.
+# installer/lib/preflight.sh
 #
-# Sourceable: install.sh dot-sources this to do its inline preflight.
-# Executable: `bash installer/lib/preflight.sh` runs preflight_all and
-#             exits with the aggregate status. `hal0 doctor` shells
-#             this in executable mode.
-#
-# Public API (all functions return 0 on success, non-zero on failure;
-# none of them exit the calling shell):
+# Purpose: Re-runnable pre-flight checks (systemd, Python floor, container
+#          runtime, GPU/NPU device visibility, disk, ports, privileged-seam
+#          verification, ...) shared between install.sh and `hal0 doctor`.
+# Expects: Sourceable — install.sh dot-sources this to do its inline
+#          preflight. Executable — `bash installer/lib/preflight.sh` runs
+#          preflight_all and exits with the aggregate status; `hal0 doctor`
+#          shells this in executable mode.
+# Provides (all functions return 0 on success, non-zero on failure; none
+# of them exit the calling shell):
 #   hal0_lxc_kind              — platform classification: none |
 #                                lxc-privileged | lxc-unprivileged. Decides
 #                                which remedies are possible from inside (a
@@ -110,6 +112,12 @@
 #                        (see HAL0_GPU_RC_*) instead of always 0, so install.sh
 #                        can smart-block a broken LXC passthrough. Default 0 →
 #                        soft/advisory mode for `hal0 doctor`.
+#
+# Modder notes:
+#   Each preflight_* function is soft-by-default (returns 0 with a warning)
+#   and only gates the install when its matching HAL0_*_REQUIRED/_GATE env
+#   is set — keep new checks on that same pattern so `hal0 doctor` (which
+#   never sets those flags) stays purely advisory.
 
 # shellcheck shell=bash
 
