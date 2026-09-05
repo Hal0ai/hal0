@@ -54,6 +54,7 @@ from hal0.updater import (
     fetch_release_manifest,
     profile_reset_status,
     releases_url,
+    releases_url_override,
     reset_profile_catalog,
     validate_release_version,
 )
@@ -629,6 +630,9 @@ async def update_state(request: Request) -> dict[str, Any]:
             "current": __version__,
             "available": hal0_available,
             "channel": channel,
+            # #2128: non-None when HAL0_RELEASES_URL bypasses channel
+            # resolution — the dashboard discloses it next to the channel.
+            "releases_url_override": releases_url_override(),
             "revoked": hal0_revoked,
             "revoked_reason": hal0_revoked_reason,
             "revoked_version": hal0_revoked_version,
@@ -656,16 +660,21 @@ async def check_updates(request: Request) -> dict[str, Any]:
             "channel": "stable",
             "update_available": true,
             "manifest_url": "https://releases.hal0.dev/latest.json",
+            "releases_url_override": null,
             "manifest": { ... raw JSON from the release service ... }
         }
 
     Honours ``HAL0_RELEASES_URL`` (env var) so tests + dev installs can
-    point at a local file. Transport failures and bad JSON surface as
-    typed envelopes (system.update_error) — the dashboard renders these
-    as "couldn't check for updates" without crashing.
+    point at a local file. When that override is active, ``channel`` is
+    reported but was NOT consulted — ``releases_url_override`` carries the
+    override URL so every consumer can disclose the bypass (#2128).
+    Transport failures and bad JSON surface as typed envelopes
+    (system.update_error) — the dashboard renders these as "couldn't
+    check for updates" without crashing.
     """
     channel = _current_channel(request)
     url = releases_url(channel)
+    url_override = releases_url_override()
     try:
         manifest = await fetch_release_manifest(channel)
     except OSError as exc:
@@ -712,6 +721,9 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "revoked": revoked,
         "revoked_reason": revoked_reason,
         "manifest_url": url,
+        # #2128: when HAL0_RELEASES_URL is set, `channel` above was NOT
+        # consulted — this field lets every surface disclose the bypass.
+        "releases_url_override": url_override,
         "manifest": manifest if isinstance(manifest, dict) else {},
         "profile_reset": await asyncio.to_thread(profile_reset_status),
         "components_pending": await asyncio.to_thread(_components_pending),

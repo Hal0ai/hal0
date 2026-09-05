@@ -95,6 +95,23 @@ def test_check_includes_profile_reset_snapshot(isolated_client: TestClient) -> N
     assert "due" in pr and "needs_consent" in pr
 
 
+def test_check_reports_releases_url_override(isolated_client: TestClient) -> None:
+    """#2128: with HAL0_RELEASES_URL active, /check names the override URL so
+    every consumer can see the configured channel was bypassed."""
+    r = isolated_client.get("/api/updates/check")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["releases_url_override"] == str(isolated_client.__dict__["_manifest_path"])
+
+
+def test_state_reports_releases_url_override(isolated_client: TestClient) -> None:
+    """#2128: the dashboard state payload carries the override next to the channel."""
+    r = isolated_client.get("/api/updates/state")
+    assert r.status_code == 200, r.text
+    hal0 = r.json()["hal0"]
+    assert hal0["releases_url_override"] == str(isolated_client.__dict__["_manifest_path"])
+
+
 def _seed_pre_v1(hal0_home: str, *, custom: str | None = None) -> None:
     """Write a pre-v1.0 hal0.toml (schema_version 1) and an optional custom profile."""
     from hal0.config.paths import hal0_toml, profiles_toml

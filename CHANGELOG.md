@@ -41,6 +41,15 @@ applying. Add those subsections to a version's section to surface them; see
   non-secure origin — shows a failure toast instead of a false success. All
   call sites share one helper (`@/lib/clipboard`) that keeps the legacy
   `execCommand("copy")` fallback for plain-http LAN dashboards. (#2214)
+- An active `HAL0_RELEASES_URL` override is now disclosed on every surface
+  that names the update channel, instead of silently reporting a channel it
+  never consulted (#2128). `hal0 update --check` marks the channel as
+  overridden, prints the override URL with a note that the configured channel
+  is ignored, and no longer claims `up to date` against a pinned manifest;
+  `/api/updates/check` and `/api/updates/state` carry a new
+  `releases_url_override` field (null when no override is set) so API
+  consumers and the dashboard's Settings → Updates page see it too. Which
+  URL is consulted is unchanged — the override still wins.
 
 ## [1.2.0] — 2026-09-03
 

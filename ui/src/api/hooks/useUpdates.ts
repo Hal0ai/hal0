@@ -13,6 +13,9 @@ export interface UpdateChannel {
   current: string
   available?: string | null
   channel?: string
+  // #2128: set when HAL0_RELEASES_URL overrides the manifest source — the
+  // `channel` field is reported but NOT consulted while this is present.
+  releases_url_override?: string | null
   pinned?: boolean
   source?: string
   // Set when the latest release on this channel was yanked/withdrawn. When
