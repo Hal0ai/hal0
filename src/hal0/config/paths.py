@@ -438,25 +438,6 @@ def first_run_lock() -> Path:
     return var_lib() / ".first-run.lock"
 
 
-# HAL0-SUNSET: v1.3.0 — picker deferred; marker unwired.
-def bundle_chosen_marker() -> Path:
-    """Return the bundle-picker completion marker path.
-
-    Dropped by ``POST /api/bundles/{name}`` (or
-    ``GET /api/bundles/skip``) once the operator has engaged the first-
-    run bundle picker. The dashboard reads this to decide
-    whether to render the picker or the regular dashboard on load.
-
-    Location: ``$HAL0_HOME/var-lib/hal0/.bundle-chosen`` (or
-    ``/var/lib/hal0/.bundle-chosen`` in production). Lives alongside
-    ``.first_run_done`` so a single ``rm -rf /var/lib/hal0`` resets
-    both. Contains a JSON blob with the picked tier name + npu opt-in
-    flag + ISO timestamp; treat as advisory not authoritative — the
-    canonical record of selections is ``capabilities.toml``.
-    """
-    return var_lib() / ".bundle-chosen"
-
-
 def profiles_toml() -> Path:
     """Return the profile catalog path (/etc/hal0/profiles.toml).
 

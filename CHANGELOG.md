@@ -50,6 +50,19 @@ applying. Add those subsections to a version's section to surface them; see
   `releases_url_override` field (null when no override is set) so API
   consumers and the dashboard's Settings → Updates page see it too. Which
   URL is consulted is unchanged — the override still wins.
+### Removed
+
+- **The v1.3.0 sunset tranche (#2168) is executed** — three internal compat
+  shims re-stamped to v1.3.0 at the 1.2.0 cut are deleted ahead of the bump:
+  - `PUT /api/user/dashboard-layout` no longer accepts the pre-#1061 v2 body
+    (`order/enabled/spans/pinned`, kept for cached UI bundles) — v3 is the only
+    accepted write. A v2 layout file already on disk still round-trips on GET.
+  - The runner-image pull-status disk read no longer consults the bare
+    `<id>.json` snapshot name — every snapshot written since per-tag pulls
+    (#2048) is a per-tag `<id>@<tag>.json` file.
+  - `hal0.config.paths.bundle_chosen_marker()` (the `.bundle-chosen`
+    bundle-picker marker path) is deleted — the picker stayed deferred and
+    nothing ever wired the marker.
 
 ## [1.2.0] — 2026-09-03
 

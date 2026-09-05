@@ -5,10 +5,11 @@ The dashboard moved to the fixed-band v3 schema in #1061
 backend still required v2 (``order/enabled/spans/pinned``), so every save
 422'd with ``layout.invalid`` and every customization was lost on reload.
 
-v3 is now the canonical schema; v2 is TOLERATED (a stale cached bundle must
-not start 422-ing, and a pre-#1061 file on disk is preserved, not erased).
-GET dispatches its reconcile by the STORED payload's version so a v3 file is
-never mangled by the v2 pin/span rules.
+v3 is now the ONLY accepted PUT body — the v2 acceptance window (kept for
+cached pre-#1061 bundles) closed with the v1.3.0 sunset tranche (#2168).
+A pre-#1061 v2 file on disk is still preserved, not erased: GET dispatches
+its reconcile by the STORED payload's version so a v3 file is never mangled
+by the v2 pin/span rules and a v2 file still round-trips.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.api.routes import dashboard_layout as dashboard_layout_routes
+from hal0.dashboard import layout_store
 
 
 @pytest.fixture
@@ -112,9 +114,17 @@ def test_put_unknown_version_is_422(layout_client: TestClient) -> None:
     assert r.json()["error"]["code"] == "layout.invalid"
 
 
-def test_v2_body_is_still_tolerated(layout_client: TestClient) -> None:
-    """A stale cached bundle emitting v2 must not start 422-ing."""
-    assert layout_client.put("/api/user/dashboard-layout", json=_V2_LAYOUT).status_code == 204
+def test_v2_body_is_rejected(layout_client: TestClient) -> None:
+    """The pre-#1061 v2 acceptance window closed with the v1.3.0 sunset (#2168)."""
+    r = layout_client.put("/api/user/dashboard-layout", json=_V2_LAYOUT)
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "layout.invalid"
+
+
+def test_v2_file_on_disk_still_round_trips(layout_client: TestClient) -> None:
+    """Only the WRITE path is v3-only: a pre-#1061 v2 file already on disk
+    still comes back reconciled under the v2 rules, not erased or 500'd."""
+    layout_store.save(_V2_LAYOUT)
 
     body = layout_client.get("/api/user/dashboard-layout").json()
     assert body["v"] == 2
