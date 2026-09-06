@@ -83,6 +83,35 @@
 
 .svcp-unmanaged { color: var(--fg-4); font-style: italic; }
 
+/* Wired chips — mirrors .svc-pill's mono/uppercase/pill vocabulary,
+   one chip per OpenWebUI feature this card renders live from svc.wired. */
+.svcp-wired {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.svcp-wired-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--jbm);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: var(--rad-pill, 999px);
+  border: 1px solid var(--line);
+  color: var(--fg-4);
+  background: transparent;
+}
+
+.svcp-wired-chip.on {
+  color: var(--ok, #6fcf97);
+  border-color: rgba(111, 207, 151, 0.3);
+  background: rgba(111, 207, 151, 0.06);
+}
+
 .svcp-hints {
   font-size: 11px;
   color: var(--fg-4);
