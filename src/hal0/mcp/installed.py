@@ -210,19 +210,21 @@ def _registry_path(server_id: str) -> Path:
     reaches this before ``patch_config``'s own :func:`get_installed` has
     validated anything, and it opens the returned path's sibling ``.lock`` with
     mode ``"w"`` — a truncating create. :func:`_validate_id`'s charset already
-    makes traversal unrepresentable; the resolved-containment assert states
-    that as a property of the path rather than of the id spelling.
+    makes traversal unrepresentable; the containment check states that as a
+    property of the resolved path rather than of the id spelling, and is
+    written as realpath-then-prefix-compare so the taint analysers reading this
+    file can see the barrier too.
     """
     _validate_id(server_id)
-    root = _registry_dir().resolve()
-    path = (root / f"{server_id}.toml").resolve()
-    if path.parent != root:
+    root = os.path.realpath(_registry_dir())
+    candidate = os.path.realpath(os.path.join(root, f"{server_id}.toml"))
+    if not candidate.startswith(root + os.sep) or os.path.dirname(candidate) != root:
         raise BadRequest(
             "server id does not resolve inside the MCP registry",
             code="mcp.id_invalid",
             details={"id": server_id},
         )
-    return path
+    return Path(candidate)
 
 
 # Restrictive perms: TOML files contain the per-server ``env`` block, which
