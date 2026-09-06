@@ -26,6 +26,30 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Hardware truth stays fresh, and the ROCm lane no longer depends on
+  `rocm-smi`.** A missing or stale `/etc/hal0/hardware.json` used to make a
+  real GPU box book resident slot memory as `ram_mb` instead of `vram_mb`
+  (`hal0.slots.capacity._host_has_capable_gpu` trusted the cache blindly);
+  it now falls back to a live re-probe when the cache is missing, predates
+  the running kernel, or was written in a previous boot cycle
+  (`hal0.hardware.freshness`), surfaced as `hal0 doctor`'s new
+  `hardware_freshness` row (#1862). `derive_device`'s ROCm-lane check
+  required `rocm-smi`'s optional CLI to exit 0 in addition to
+  `kfd_present()`'s device-node truth, so a fresh LXC with `/dev/kfd`
+  correctly forwarded — hal0's own reference deploy shape — seeded every
+  llama.cpp slot onto the slower Vulkan lane; `kfd_present()` alone now
+  decides it, matching the capability picker's GPU/ROCm badge and the
+  ComfyUI/Qwen3-TTS rows, which had the same gap (#2216, #1966). A new
+  `apply_cpu_fallback()` records *why* a slot's lane fell back to CPU at
+  seed time (#1936, #1966); the pre-existing load-time refusal for a GPU
+  slot with zero devices mapped (`require_kfd_for_gpu_slot`) is now locked
+  with a regression test naming the exact #1936 shape. Freshly seeded
+  `agent`/`brain`/`coder`/`embed`/`rerank`/`utility` slots now clamp
+  `context_size` to a new single-owner memory-envelope function
+  (`hal0.hardware.memory_envelope`, mirroring ODS's `usable_memory_gb`)
+  instead of shipping the reference platform's flat `65536` verbatim, with
+  a `hal0 doctor` finding (`seed_context_envelope`) for a ceiling an
+  existing box can no longer afford (#1868).
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot

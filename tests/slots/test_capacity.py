@@ -63,24 +63,28 @@ def _hw_info(vulkan_capable=False, compute_capable=False, no_gpus=False):
 
 
 class TestHostHasCapableGpu:
+    """Patches at the freshness-resolver seam (#1862): ``_host_has_capable_gpu``
+    now reads through :func:`hal0.hardware.freshness.resolve_fresh_hardware_info`
+    rather than the raw cache, so that is the boundary these tests fake."""
+
     def test_true_when_vulkan_capable_gpu_present(self):
         with patch(
-            "hal0.config.loader.load_hardware_info",
-            return_value=_hw_info(vulkan_capable=True),
+            "hal0.hardware.freshness.resolve_fresh_hardware_info",
+            return_value=(_hw_info(vulkan_capable=True), None),
         ):
             assert _host_has_capable_gpu() is True
 
     def test_true_when_compute_capable_gpu_present(self):
         with patch(
-            "hal0.config.loader.load_hardware_info",
-            return_value=_hw_info(compute_capable=True),
+            "hal0.hardware.freshness.resolve_fresh_hardware_info",
+            return_value=(_hw_info(compute_capable=True), None),
         ):
             assert _host_has_capable_gpu() is True
 
     def test_false_when_no_gpus(self):
         with patch(
-            "hal0.config.loader.load_hardware_info",
-            return_value=_hw_info(no_gpus=True),
+            "hal0.hardware.freshness.resolve_fresh_hardware_info",
+            return_value=(_hw_info(no_gpus=True), None),
         ):
             assert _host_has_capable_gpu() is False
 
@@ -88,8 +92,8 @@ class TestHostHasCapableGpu:
         """A GPU sysfs node with no capable render node (#1839's box) — the
         exact CPU-only-LXC repro. Not vulkan- or compute-capable."""
         with patch(
-            "hal0.config.loader.load_hardware_info",
-            return_value=_hw_info(vulkan_capable=False, compute_capable=False),
+            "hal0.hardware.freshness.resolve_fresh_hardware_info",
+            return_value=(_hw_info(vulkan_capable=False, compute_capable=False), None),
         ):
             assert _host_has_capable_gpu() is False
 
@@ -97,7 +101,7 @@ class TestHostHasCapableGpu:
         """Never raises — a broken/missing hardware.json degrades to False,
         the conservative choice (books memory as RAM, not phantom VRAM)."""
         with patch(
-            "hal0.config.loader.load_hardware_info",
+            "hal0.hardware.freshness.resolve_fresh_hardware_info",
             side_effect=RuntimeError("boom"),
         ):
             assert _host_has_capable_gpu() is False

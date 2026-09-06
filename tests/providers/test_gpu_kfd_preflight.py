@@ -243,6 +243,30 @@ class TestRequireKfdForGpuSlot:
                 amd_host=True,
             )
 
+    def test_zero_devices_mapped_refuses_before_launch_not_a_segfault(self, tmp_path) -> None:
+        """#1936: a container/LXC with NEITHER /dev/kfd NOR a render node
+        visible, explicitly pinned to device='gpu-rocm', used to reach
+        ``llama-server`` and SIGSEGV at model load before the HTTP port ever
+        bound. ``ContainerProvider.load_sync`` calls this guard BEFORE
+        ``_write_and_start_unit`` (src/hal0/providers/container.py), so the
+        refusal below happens instead of a launch — this pins that the
+        zero-devices shape specifically (not just a present-but-unopenable
+        node) still raises with a clear, actionable message."""
+        with pytest.raises(GpuPreflightError) as exc:
+            require_kfd_for_gpu_slot(
+                "brain",
+                device="gpu-rocm",
+                runtime_lane="llama",
+                kfd_path=str(tmp_path / "no-such-kfd"),
+                dri_dir=str(tmp_path / "no-such-dri"),
+                env={},
+                amd_host=True,
+            )
+        msg = str(exc.value)
+        assert "brain" in msg
+        assert "not visible here" in msg
+        assert "Forward the device" in msg
+
 
 class TestLoadSyncGuard:
     """The guard must fire on the LOAD path, not on unit rendering — a

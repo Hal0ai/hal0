@@ -126,6 +126,110 @@ def check_secret_file_modes() -> Check:
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
+def check_hardware_freshness() -> Check:
+    """The cached hardware.json must be fresh enough to trust (#1862/H9).
+
+    Runs the SAME staleness check ``_host_has_capable_gpu`` (VRAM/RAM
+    attribution) and the ROCm/Vulkan lane derivation now fall back through
+    (:func:`hal0.hardware.freshness.staleness_reason`), so this row explains
+    OUT LOUD, on every ``hal0 doctor`` run, why a box might be getting a
+    live re-probe on every capacity read instead of the cheap cached one —
+    a missing probe (fresh install, ``hal0 probe`` never run), a cache that
+    predates a kernel upgrade/reboot, or one written before the #1799
+    capability fields existed.
+
+    Warn-only: a live-probe fallback keeps the box CORRECT even while stale
+    (never silently wrong), just not as cheap — so this is an actionable
+    heads-up, not a failure.
+    """
+    from hal0.config.loader import load_hardware_info
+    from hal0.hardware.freshness import staleness_reason
+
+    name, title = "hardware_freshness", "Hardware probe freshness"
+    path = paths.hardware_json()
+    has_file = path.exists()
+    if not has_file:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"{path} does not exist — run `hal0 config hardware --refresh` (until then, VRAM/RAM "
+            "attribution and the ROCm/Vulkan lane derivation fall back to a live "
+            "re-probe on every read)",
+        )
+    try:
+        info = load_hardware_info()
+    except Exception as exc:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"{path} is unreadable ({exc}) — run `hal0 config hardware --refresh`",
+        )
+    reason = staleness_reason(info, has_file=True)
+    if reason is None:
+        return Check(
+            name, title, _PASS, f"hardware.json is fresh (probed {info.probed_at or 'unknown'})"
+        )
+    return Check(
+        name,
+        title,
+        _WARN,
+        f"hardware.json is stale ({reason}) — falling back to a live re-probe on every "
+        f"VRAM/RAM and ROCm/Vulkan-lane read; run `hal0 config hardware --refresh` to refresh the cache",
+    )
+
+
+def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
+    """A slot's on-disk ``[model].context_size`` must fit this box's memory
+    envelope (#1868).
+
+    ``static_seeds``/``hal0 setup --auto`` clamp freshly-seeded slots at
+    install time, but an operator-edited ceiling, or a box downgraded in RAM
+    since install (a VM resize, a moved LXC), is never revisited. Flags any
+    slot whose configured ceiling exceeds what :func:`hal0.hardware.
+    memory_envelope.max_affordable_context_tokens` says this box can spend on
+    a model + KV cache — advisory (the slot may still run fine if the model
+    itself is small), never a fail.
+    """
+    from hal0.agents.anchor_window import SLOTS_DIR, read_slot_ceiling
+    from hal0.hardware.freshness import resolve_fresh_hardware_info
+    from hal0.hardware.memory_envelope import max_affordable_context_tokens
+
+    name, title = "seed_context_envelope", "Seed context_size vs. memory envelope"
+    directory = slots_dir if slots_dir is not None else SLOTS_DIR
+    try:
+        names = sorted(p.stem for p in directory.glob("*.toml"))
+    except OSError as exc:
+        return Check(name, title, _WARN, f"could not list {directory}: {exc}")
+    if not names:
+        return Check(name, title, _PASS, f"no slot TOMLs found in {directory}")
+
+    try:
+        hw, _stale = resolve_fresh_hardware_info()
+    except Exception as exc:
+        return Check(name, title, _WARN, f"hardware envelope unreadable: {exc}")
+    affordable = max_affordable_context_tokens(hw)
+
+    offenders: list[str] = []
+    for slot_name in names:
+        ceiling = read_slot_ceiling(slot_name, slots_dir=directory)
+        if ceiling is not None and ceiling > affordable:
+            offenders.append(f"{slot_name} ({ceiling:,} > {affordable:,})")
+    if offenders:
+        return Check(
+            name,
+            title,
+            _WARN,
+            "context_size above this box's memory envelope: "
+            + ", ".join(offenders)
+            + " — `hal0 slot edit <name> --ctx-size <n>` to lower it, or add memory",
+        )
+    return Check(
+        name, title, _PASS, f"every seeded context_size fits the {affordable:,}-token envelope"
+    )
+
+
 #: The API unit, and the agent template whose instances carry the bundled agent.
 _API_UNIT = "hal0-api.service"
 _AGENT_UNIT_GLOB = "hal0-agent@*.service"
@@ -1177,6 +1281,8 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_netns_durability(),
         check_hal0_target(),
         check_secret_file_modes(),
+        check_hardware_freshness(),
+        check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_voice_stt_weights(),
         check_seams(),

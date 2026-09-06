@@ -13,8 +13,14 @@ The (device, profile) pairs this produces are backend-coherent per #807:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+import structlog
+
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES, HardwareInfo
 from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
+
+log = structlog.get_logger(__name__)
 
 #: NPU-trio capabilities (NPU chat agent + npu stt/embed passengers). Kept as a
 #: symbol because the trio code is left **dormant** (out of scope to remove,
@@ -69,6 +75,36 @@ def npu_takes_utility(hw: HardwareInfo, *, npu_opt_in: bool) -> bool:
     return bool(hw.npu.present and npu_opt_in)
 
 
+@dataclass(frozen=True, slots=True)
+class CpuFallback:
+    """The CPU lane a slot fell back to, and why."""
+
+    device: str
+    reason: str
+
+
+def apply_cpu_fallback(reason: str) -> CpuFallback:
+    """The one function that turns a slot's lane to CPU, with a recorded reason.
+
+    Single owner for every "this box doesn't have the GPU device class a
+    slot needs, so it runs on CPU instead" decision (#1936, #1966): seed-time
+    derivation (:func:`derive_device`, below) and the capability picker's
+    host-backend fan-out (:mod:`hal0.capabilities.catalog`) both route
+    through this instead of returning a bare ``"cpu"`` literal, so every
+    fallback in hal0 logs the SAME structured reason a caller can hand to an
+    operator (the slot state message, a dashboard device-picker hint, or a
+    `hal0 doctor` finding) instead of a silent, unexplained "why did this
+    land on CPU".
+
+    Mirrors ODS's ``apply_cpu_gpu_fallback`` (``ods/installers/lib/
+    detection.sh:235-257``) in spirit — warn loudly, then hand back the safe
+    lane — but returns a value rather than mutating globals, since hal0's
+    device derivation is a pure function over one capability at a time.
+    """
+    log.info("hal0.hardware.cpu_fallback_applied", reason=reason)
+    return CpuFallback(device="cpu", reason=reason)
+
+
 def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str | None:
     """Return a ``DeviceLiteral`` for the capability, or None to skip it.
 
@@ -99,16 +135,33 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
         # the §8 "needs upstream routing" case — rather than create an
         # incoherent cpu/gpu-profile slot that #807 would reject.
         return "npu" if (hw.npu.present and npu_opt_in) else None
-    # chat / coder / embed → GPU lane. platform=="strix-halo" is the canonical
-    # FP4 signal; compute_capable means a ROCm/CUDA runtime was detected.
-    # #1888: the ROCm lane is the ONLY valid GPU LLM lane on AMD, and it needs
-    # the /dev/kfd compute node. The strix-halo / compute_capable signals are
-    # necessary but NOT sufficient — a Strix Halo box whose amdkfd node was
-    # never forwarded is exactly the fresh-LXC shape the blocker was found on,
-    # and deriving gpu-rocm there would hand every seeded slot a load-time
-    # refusal right after a deliberately CPU-only install.
-    rocm_ok = any(g.compute_capable for g in hw.gpus) or kfd_present()
-    if rocm_ok and (hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus)):
+    # chat / coder / embed → GPU lane. #1888: the ROCm lane is the ONLY valid
+    # GPU LLM lane on AMD, and it needs the /dev/kfd compute node — so
+    # kfd_present() (device-node truth) is what decides this lane, never
+    # ``compute_capable`` alone (#2216).
+    #
+    # ``compute_capable`` means only "rocm-smi --showproductname exited 0" —
+    # a ROCm *userspace CLI* probe, not a GPU-can-run-ROCm probe. install.sh
+    # never installs rocm-smi, so on hal0's own reference deploy shape (a
+    # Proxmox LXC with /dev/kfd correctly forwarded) a fresh container has no
+    # rocm-smi and ``compute_capable`` reads False on every GPU row even
+    # though ROCm works perfectly — #2216, found building a privileged
+    # Ubuntu 26.04 CT on a Strix Halo host with dev0/renderD128, dev2/kfd,
+    # dev3/accel0 all forwarded: every slot seeded gpu-vulkan, and only
+    # installing rocm-smi by hand (so ``compute_capable`` finally read True)
+    # unlocked the ROCm lane it already had.
+    #
+    # ``hw.platform == "strix-halo"`` has the SAME gap from the other side:
+    # :func:`hal0.hardware.probe._detect_platform` classifies containers
+    # (LXC/WSL) before it ever reaches the bare-metal GPU/NPU classification
+    # that produces ``"strix-halo"``, so the platform signal is unreachable
+    # inside the container hal0 is actually deployed in.
+    #
+    # ``kfd_present()`` needs neither: /dev/kfd is AMD's own ROCm compute
+    # node (see its docstring), so its mere presence AND openability by the
+    # slot-runner identity already answers "can this box run ROCm" more
+    # directly than either proxy.
+    if any(g.compute_capable for g in hw.gpus) or kfd_present():
         return "gpu-rocm"
     # Vulkan-capable GPU, any vendor — AND a runner image that can serve the
     # lane. #1923 restricted this to non-AMD because the pinned runner's Vulkan
@@ -129,8 +182,12 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     # so a box that can run ROCm still derives ROCm.
     if any(g.vulkan_capable for g in hw.gpus) and default_image_serves_vulkan_lane():
         return "gpu-vulkan"
-    # No GPU lane this host can validly use for inference.
-    return "cpu"
+    # No GPU lane this host can validly use for inference (#1936, #1966):
+    # neither a ROCm compute node nor a runner-image-validated Vulkan GPU.
+    return apply_cpu_fallback(
+        f"no usable GPU lane for {capability!r} on this host (no /dev/kfd, and either "
+        "no Vulkan-capable GPU or no runner image validated for the Vulkan lane)"
+    ).device
 
 
 def derive_profile(capability: str, device: str) -> str:
