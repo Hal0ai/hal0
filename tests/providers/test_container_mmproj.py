@@ -154,7 +154,7 @@ class TestLoadSyncMmproj:
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m

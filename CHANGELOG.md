@@ -26,6 +26,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Every `systemctl`/podman seam call a slot load/unload/restart makes is
+  now bounded.** `ContainerProvider._run`'s callers (the Quadlet write,
+  `daemon-reload`, `reset-failed`, and — the one that actually wedged in the
+  field — `systemctl restart`, which spawns the container) used to pass no
+  timeout at all, so a stuck `sudo hal0-systemctl` or a wedged podman/netavark
+  call blocked the executor thread forever with nothing bounding it
+  server-side (#1869). A new `hal0.system.seam.bounded_call()` wraps every
+  such call and turns a `subprocess.TimeoutExpired` into a typed
+  `SeamTimeout` (`slot.seam_timeout`, HTTP 504) carrying the command, its
+  budget, and whatever the child had already printed before being killed;
+  the error propagates to the slot state machine as `error` with that
+  message, same as any other load failure. `hal0 slot load|unload|restart|
+  swap` and `hal0 update --restart-slots` now show an elapsed counter and the
+  slot's live state while they wait (refreshed every ~2s on a TTY; one
+  summary line otherwise), print the seam-timeout remedy (`hal0 slot logs
+  <name>`, `journalctl -u hal0-slot@<name>`) instead of a bare read-timeout
+  error, and gained a `--json` flag — instead of blocking silently for up to
+  ~40 minutes with no output (#1870). (#1869, #1870)
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot

@@ -87,7 +87,11 @@ from hal0.providers._gpu import (
 )
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.podman_mutate import PullLineParser
-from hal0.slot_lifecycle_budget import HEALTH_TIMEOUT_S
+from hal0.slot_lifecycle_budget import (
+    HEALTH_TIMEOUT_S,
+    UNIT_ADMIN_CALLS_ALLOWANCE_S,
+    UNIT_START_TIMEOUT_S,
+)
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, resolve_argv
 from hal0.slots.naming import (
@@ -97,7 +101,7 @@ from hal0.slots.naming import (
     slot_unit_name,
 )
 from hal0.slots.state import SlotSpawnFailed
-from hal0.system.seam import SystemCtlSeam, is_hal0_service_user
+from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -682,7 +686,25 @@ _HEALTH_REQUEST_TIMEOUT_S = 3.0
 #: generated ``.service`` stays on disk in ``failed`` and the "subsequent load
 #: still converges" promise does not hold. Deliberately under the caller's
 #: budget so the worker unwinds first.
-_UNIT_STOP_TIMEOUT_S = 20.0
+#:
+#: Reused (#1869) for every OTHER fast, should-be-sub-second systemd/seam
+#: admin call this provider makes outside the teardown path — the Quadlet
+#: write and ``daemon-reload`` in :meth:`_write_and_start_unit`,
+#: :meth:`daemon_reload`, :meth:`reset_failed`, :meth:`is_active`, and
+#: :meth:`unit_status` — none of which does real work beyond a sudo
+#: round-trip and a filesystem/systemd-daemon touch. Derived from
+#: ``hal0.slot_lifecycle_budget.UNIT_ADMIN_CALLS_ALLOWANCE_S`` (that budget is
+#: this bound charged three times — the load path's write + daemon-reload +
+#: reset-failed) so the two stay numerically locked together.
+_UNIT_STOP_TIMEOUT_S = UNIT_ADMIN_CALLS_ALLOWANCE_S / 3
+
+#: Wall-clock bound on the ``systemctl restart`` that actually (re)spawns a
+#: slot's container (#1869/#1870) — the one seam call in the load path that
+#: can legitimately take a while (device attach, a cold netavark setup)
+#: rather than being sub-second like the admin calls above. Imported from
+#: ``hal0.slot_lifecycle_budget`` (not a fresh literal) so the CLI's own wait,
+#: derived from the same module, stays in sync with the server's actual bound.
+_UNIT_START_TIMEOUT_S = UNIT_START_TIMEOUT_S
 
 #: Unit properties :meth:`ContainerProvider.unit_status` reads (#1791). All
 #: read-only — ``systemctl show`` needs no privilege and is never routed
@@ -2676,6 +2698,16 @@ class ContainerProvider(Provider):
         ``systemctl enable``. ``restart`` (not bare ``start``) keeps
         this idempotent: it starts a stopped slot and restarts a running one,
         exactly as before. All writes route through the hal0-systemctl seam.
+
+        Every seam call below is bounded (#1869): the write, the reloads and
+        ``reset_failed`` at :data:`_UNIT_STOP_TIMEOUT_S` (fast admin ops), the
+        ``restart`` itself at :data:`_UNIT_START_TIMEOUT_S` (the one call that
+        can legitimately take a while). A timeout raises
+        :class:`hal0.system.seam.SeamTimeout` — deliberately NOT caught here,
+        unlike ``CalledProcessError`` below: it is a distinct failure mode
+        (the seam call never confirmed one way or the other) and propagates
+        with its own ``slot.seam_timeout`` code through ``SlotManager.load``'s
+        generic ``except Exception -> ERROR`` handling.
         """
         unit_path = self._unit_path(slot_name)
         dropin_dir = unit_path.with_name(unit_path.name + ".d")
@@ -2692,9 +2724,9 @@ class ContainerProvider(Provider):
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
         )
-        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
+        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text, timeout=_UNIT_STOP_TIMEOUT_S)
         # daemon-reload runs the Quadlet generator, materialising the .service.
-        self._run("systemctl", "daemon-reload")
+        self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
         # #1424/#1791: a unit parked in ``failed`` after StartLimitBurst
         # refuses every ``restart`` for the whole StartLimitIntervalSec window
         # ("Start request repeated too quickly"), so a slot that crash-looped
@@ -2705,7 +2737,7 @@ class ContainerProvider(Provider):
         self.reset_failed(slot_name)
         unit = self._unit_name(slot_name)
         try:
-            self._run("systemctl", "restart", unit)
+            self._run("systemctl", "restart", unit, timeout=_UNIT_START_TIMEOUT_S)
         except subprocess.CalledProcessError as exc:
             # #1424 facet 2: raw, this is not a Hal0Error — it falls through
             # SlotManager.load()'s re-raise into the API's generic Exception
@@ -2888,7 +2920,7 @@ class ContainerProvider(Provider):
         unit_text = self._render_quadlet_text(slot_cfg, model_info)
         if unit_path.read_text() == unit_text:
             return False
-        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text)
+        _SYSTEMCTL_SEAM.write_quadlet(unit_path, unit_text, timeout=_UNIT_STOP_TIMEOUT_S)
         log.info(
             "container.unit_rerendered",
             extra={"slot": token, "unit_path": str(unit_path)},
@@ -2897,7 +2929,7 @@ class ContainerProvider(Provider):
 
     def daemon_reload(self) -> None:
         """``systemctl daemon-reload`` — public for the unit-rerender sweep."""
-        self._run("systemctl", "daemon-reload")
+        self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
 
     def expected_argv(
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
@@ -2941,7 +2973,12 @@ class ContainerProvider(Provider):
         log.info("container.unit_stop", extra={"slot": token, "unit": unit})
         try:
             self._run("systemctl", "stop", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, SeamTimeout):
+            # The real (unmocked) seam route raises SeamTimeout (#1869: every
+            # ``_run`` call now goes through ``SystemCtlSeam.systemctl`` ->
+            # ``bounded_call``); ``subprocess.TimeoutExpired`` stays caught too
+            # for callers/tests that stub ``_run`` directly and raise the bare
+            # stdlib error. Either way the stop is best-effort — see below.
             log.warning(
                 "container.unit_stop_timeout",
                 extra={"slot": token, "unit": unit, "timeout_s": _UNIT_STOP_TIMEOUT_S},
@@ -2949,7 +2986,7 @@ class ContainerProvider(Provider):
         # Remove the Quadlet source so daemon-reload regenerates without it.
         unit_path = self._unit_path(token)
         if unit_path.exists():
-            _SYSTEMCTL_SEAM.remove_quadlet(unit_path)
+            _SYSTEMCTL_SEAM.remove_quadlet(unit_path, timeout=_UNIT_STOP_TIMEOUT_S)
             self._run("systemctl", "daemon-reload", timeout=_UNIT_STOP_TIMEOUT_S)
         # A DELIBERATE stop must not leave the unit parked in `failed`.
         # The bounded stop above escalates to SIGKILL (exit 137) — and a
@@ -2977,7 +3014,11 @@ class ContainerProvider(Provider):
         still accepted as an already-resolved token.
         """
         result = self._run(
-            "systemctl", "is-active", self._unit_name(_artefact_token(slot)), check=False
+            "systemctl",
+            "is-active",
+            self._unit_name(_artefact_token(slot)),
+            check=False,
+            timeout=_UNIT_STOP_TIMEOUT_S,
         )
         return result.returncode == 0
 
@@ -2997,7 +3038,9 @@ class ContainerProvider(Provider):
         """
         unit = self._unit_name(_artefact_token(slot))
         args = [f"--property={prop}" for prop in _UNIT_SHOW_PROPS]
-        result = self._run("systemctl", "show", unit, *args, check=False)
+        result = self._run(
+            "systemctl", "show", unit, *args, check=False, timeout=_UNIT_STOP_TIMEOUT_S
+        )
         props: dict[str, str] = {}
         for line in (result.stdout or "").splitlines():
             key, sep, value = line.partition("=")
@@ -3109,7 +3152,13 @@ class ContainerProvider(Provider):
         start it precedes. Routed through the seam's ``reset-failed`` verb on
         a hal0-service-user box (#1424).
         """
-        self._run("systemctl", "reset-failed", self._unit_name(_artefact_token(slot)), check=False)
+        self._run(
+            "systemctl",
+            "reset-failed",
+            self._unit_name(_artefact_token(slot)),
+            check=False,
+            timeout=_UNIT_STOP_TIMEOUT_S,
+        )
 
     def image_present(self, image: str) -> bool | None:
         """Is ``image`` in the container image store slots use? Tri-state.
@@ -3179,10 +3228,15 @@ class ContainerProvider(Provider):
             )
             return None
         try:
+            # #1869: bounded like the sibling ``inspect`` probes below —
+            # ``TimeoutExpired`` is a ``SubprocessError`` subclass, so the
+            # except clause here already degrades it to image_status=unknown;
+            # it just never fired without a bound to expire.
             result = subprocess.run(
                 [runtime, "image", "exists", image],
                 capture_output=True,
                 check=False,
+                timeout=5,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning(

@@ -34,6 +34,30 @@ HEALTH_TIMEOUT_S = 180.0
 #: ``hal0.slots.manager.SlotManager._terminate_timeout_s``.
 TERMINATE_TIMEOUT_S = 30.0
 
+#: Wall-clock bound on the ``systemctl restart`` that actually (re)spawns a
+#: slot's Quadlet-generated unit (#1869/#1870) — the client-observable job
+#: window BEFORE the post-spawn ``/health`` poll even begins. Mirrored by
+#: ``hal0.providers.container._UNIT_START_TIMEOUT_S``.
+#:
+#: Before #1869 this call had NO bound at all: a ``systemctl restart`` that
+#: never returns (crossed with a wedged podman/netavark call) blocked the
+#: calling thread — and every client budget derived from this module —
+#: forever, with nothing printed (#1870). Set equal to
+#: :data:`HEALTH_TIMEOUT_S`: a wedged restart gets no more patience than the
+#: phase that follows it.
+UNIT_START_TIMEOUT_S = HEALTH_TIMEOUT_S
+
+#: Wall-clock bound on the three fast, should-be-sub-second seam calls that
+#: precede ``systemctl restart`` in the unit-start sequence: the Quadlet
+#: write, ``daemon-reload``, and ``reset-failed`` (#1869). Mirrors
+#: ``hal0.providers.container._UNIT_STOP_TIMEOUT_S`` x 3 — like
+#: :data:`EVICTION_UNLOAD_ALLOWANCE`, this is a policy allowance rather than a
+#: value container.py imports FROM here: none of the three legitimately needs
+#: more than an instant (a local file write, a systemd unit-cache reload, a
+#: state-clear), so the bound exists purely to turn "wedged forever" into
+#: "wedged for at most 20s each", not to give real work room.
+UNIT_ADMIN_CALLS_ALLOWANCE_S = 60.0
+
 #: Wall-clock bound on the RAW ``/completion`` output-sanity probe — the one a
 #: ``type=llm`` load runs after ``/health`` converges (#1922 — the gate that
 #: turns "the port answers" into "the model produces language"). Consumed by
@@ -119,6 +143,11 @@ EVICTION_UNLOAD_ALLOWANCE = 3
 #:          before re-spawning
 #:     90   3 x 30, ``preload_evict.admit`` unloading eviction candidates in
 #:          series (EVICTION_UNLOAD_ALLOWANCE)
+#:     60   the Quadlet write + daemon-reload + reset-failed that precede the
+#:          spawn (UNIT_ADMIN_CALLS_ALLOWANCE_S, #1869) — bounded seam calls
+#:          now that (before #1869) had no bound at all
+#:    180   the ``systemctl restart`` that spawns the unit (UNIT_START_TIMEOUT_S,
+#:          #1869/#1870) — likewise unbounded before this fix
 #:    180   the post-spawn ``/health`` poll (HEALTH_TIMEOUT_S)
 #:    360   the output-sanity gate (#1922), at its CPU-lane budget: 180 raw
 #:          probe + 180 chat fallback (OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 x
@@ -127,10 +156,12 @@ EVICTION_UNLOAD_ALLOWANCE = 3
 #:     30   the failed gate's teardown, which runs before the ERROR stamp and
 #:          therefore still inside the lock
 #:    ---
-#:    690
+#:    930
 LOAD_LOCK_HOLD_S = (
     TERMINATE_TIMEOUT_S
     + EVICTION_UNLOAD_ALLOWANCE * TERMINATE_TIMEOUT_S
+    + UNIT_ADMIN_CALLS_ALLOWANCE_S
+    + UNIT_START_TIMEOUT_S
     + HEALTH_TIMEOUT_S
     + OUTPUT_SANITY_LOAD_ALLOWANCE_S
     + TERMINATE_TIMEOUT_S

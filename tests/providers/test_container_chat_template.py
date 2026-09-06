@@ -217,7 +217,7 @@ class TestLoadSyncChatTemplate:
 
         from unittest.mock import MagicMock
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m
@@ -271,7 +271,7 @@ class TestLoadSyncChatTemplate:
 
         from unittest.mock import MagicMock
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m
