@@ -62,7 +62,10 @@ def test_list_json_outputs_raw_providers(api: dict[str, Any]) -> None:
 
 
 def test_connect_prints_authorize_url(api: dict[str, Any]) -> None:
-    api["post_response"] = {"authorize_url": "https://accounts.google.com/auth?state=abc", "state": "abc"}
+    api["post_response"] = {
+        "authorize_url": "https://accounts.google.com/auth?state=abc",
+        "state": "abc",
+    }
     result = runner.invoke(oauth_commands.app, ["connect", "google"])
     assert result.exit_code == 0, result.output
     assert api["posts"] == [("/api/oauth/google/start", None)]

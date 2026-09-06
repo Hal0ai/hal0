@@ -121,7 +121,9 @@ def _redirect_uri(request: Request, provider_id: str) -> str:
 def _require_provider(provider_id: str) -> provider_registry.OAuthProvider:
     provider = provider_registry.get_provider(provider_id)
     if provider is None:
-        raise OAuthProviderNotFound(f"oauth provider {provider_id!r} not registered", {"provider_id": provider_id})
+        raise OAuthProviderNotFound(
+            f"oauth provider {provider_id!r} not registered", {"provider_id": provider_id}
+        )
     return provider
 
 
@@ -293,7 +295,8 @@ async def _exchange_code(
         payload = resp.json()
     except ValueError as exc:
         raise OAuthExchangeFailed(
-            f"provider {provider.id!r} returned a non-JSON token response", {"provider_id": provider.id}
+            f"provider {provider.id!r} returned a non-JSON token response",
+            {"provider_id": provider.id},
         ) from exc
 
     access_token = payload.get("access_token")
@@ -359,9 +362,14 @@ async def oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
         # The nonce is authoritative; a path/nonce mismatch means the
         # redirect_uri was reused across providers or tampered with.
         _log.warning(
-            "oauth.callback_provider_mismatch", path_provider=provider_id, nonce_provider=nonce.provider_id
+            "oauth.callback_provider_mismatch",
+            path_provider=provider_id,
+            nonce_provider=nonce.provider_id,
         )
-        return _error_page("This authorization link does not match the provider it was issued for.", status_code=400)
+        return _error_page(
+            "This authorization link does not match the provider it was issued for.",
+            status_code=400,
+        )
     if not code:
         return _error_page(
             "No authorization code was returned. You may have denied the request.",

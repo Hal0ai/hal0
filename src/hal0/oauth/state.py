@@ -41,7 +41,9 @@ class OAuthStateStore:
         self._lock = threading.Lock()
 
     def _prune(self, now: float) -> None:
-        expired = [state for state, nonce in self._nonces.items() if now - nonce.created_at > self._ttl]
+        expired = [
+            state for state, nonce in self._nonces.items() if now - nonce.created_at > self._ttl
+        ]
         for state in expired:
             self._nonces.pop(state, None)
 

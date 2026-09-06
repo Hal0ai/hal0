@@ -29,7 +29,10 @@ def test_seeded_file_is_never_overwritten_after_hand_edit(tmp_path: Path) -> Non
     target = tmp_path / "oauth-providers.toml"
     load_providers(path=target)  # seeds it
     original = target.read_text(encoding="utf-8")
-    edited = original + '\n[[providers]]\nid = "custom"\nname = "Custom"\nskill_id = "custom"\nauthorize_url = "https://example.com/auth"\ntoken_url = "https://example.com/token"\n'
+    edited = (
+        original
+        + '\n[[providers]]\nid = "custom"\nname = "Custom"\nskill_id = "custom"\nauthorize_url = "https://example.com/auth"\ntoken_url = "https://example.com/token"\n'
+    )
     target.write_text(edited, encoding="utf-8")
 
     providers = load_providers(path=target)

@@ -60,7 +60,9 @@ class OAuthProvider:
                 raise ProviderRegistryError(f"provider entry missing required field {required!r}")
         scopes = data.get("scopes") or []
         if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-            raise ProviderRegistryError(f"provider {data.get('id')!r}: scopes must be a list of strings")
+            raise ProviderRegistryError(
+                f"provider {data.get('id')!r}: scopes must be a list of strings"
+            )
         return cls(
             id=data["id"].strip(),
             name=data["name"].strip(),

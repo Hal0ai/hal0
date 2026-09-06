@@ -22,7 +22,9 @@ from rich.table import Table
 
 from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_delete, api_get, api_post
 
-app = typer.Typer(help="Connect/disconnect OAuth for Hermes skills (Google Calendar, Spotify, ...).")
+app = typer.Typer(
+    help="Connect/disconnect OAuth for Hermes skills (Google Calendar, Spotify, ...)."
+)
 console = Console()
 
 
@@ -110,7 +112,9 @@ def disconnect(
 ) -> None:
     """Disconnect a provider (best-effort revoke at the provider, then forget the token)."""
     if not force:
-        confirm = typer.confirm(f"Disconnect {provider!r}? The skill will lose access until reconnected.")
+        confirm = typer.confirm(
+            f"Disconnect {provider!r}? The skill will lose access until reconnected."
+        )
         if not confirm:
             console.print("Aborted.")
             raise typer.Exit(0)

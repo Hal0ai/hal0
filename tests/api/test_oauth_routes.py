@@ -39,7 +39,9 @@ def _set_client_id(home: str, provider_id: str, client_id: str) -> None:
     # per-block string replace scoped to right after this provider's id.
     marker = f'id = "{provider_id}"'
     idx = text.index(marker)
-    block_end = text.index("[[providers]]", idx + 1) if "[[providers]]" in text[idx + 1 :] else len(text)
+    block_end = (
+        text.index("[[providers]]", idx + 1) if "[[providers]]" in text[idx + 1 :] else len(text)
+    )
     block = text[idx:block_end]
     patched_block = block.replace('client_id = ""', f'client_id = "{client_id}"')
     path.write_text(text[:idx] + patched_block + text[block_end:], encoding="utf-8")
@@ -65,7 +67,13 @@ class _FakeAsyncClient:
 
     calls: ClassVar[list[tuple[str, dict]]] = []
     response: ClassVar[_FakeResponse] = _FakeResponse(
-        200, {"access_token": "at-123", "refresh_token": "rt-456", "expires_in": 3600, "scope": "calendar"}
+        200,
+        {
+            "access_token": "at-123",
+            "refresh_token": "rt-456",
+            "expires_in": 3600,
+            "scope": "calendar",
+        },
     )
 
     def __init__(self, *args, **kwargs) -> None:
@@ -77,7 +85,9 @@ class _FakeAsyncClient:
     async def __aexit__(self, *args) -> bool:
         return False
 
-    async def post(self, url: str, data: dict | None = None, headers: dict | None = None) -> _FakeResponse:
+    async def post(
+        self, url: str, data: dict | None = None, headers: dict | None = None
+    ) -> _FakeResponse:
         type(self).calls.append((url, data or {}))
         return type(self).response
 
@@ -86,7 +96,13 @@ class _FakeAsyncClient:
 def _fake_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeAsyncClient.calls = []
     _FakeAsyncClient.response = _FakeResponse(
-        200, {"access_token": "at-123", "refresh_token": "rt-456", "expires_in": 3600, "scope": "calendar"}
+        200,
+        {
+            "access_token": "at-123",
+            "refresh_token": "rt-456",
+            "expires_in": 3600,
+            "scope": "calendar",
+        },
     )
     monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
     # The driver-env refresh after connect/disconnect shells out to the
@@ -116,7 +132,9 @@ def test_start_unknown_provider_404(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "oauth.provider_not_found"
 
 
-def test_start_returns_authorize_url_with_state_and_pkce(client: TestClient, tmp_hal0_home: str) -> None:
+def test_start_returns_authorize_url_with_state_and_pkce(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
     _set_client_id(tmp_hal0_home, "spotify", "client-abc")  # spotify: pkce=true, no secret required
 
     r = client.post("/api/oauth/spotify/start")
@@ -132,7 +150,9 @@ def test_start_returns_authorize_url_with_state_and_pkce(client: TestClient, tmp
     assert qs["code_challenge_method"] == ["S256"]
 
 
-def test_start_requires_client_secret_when_provider_needs_one(client: TestClient, tmp_hal0_home: str) -> None:
+def test_start_requires_client_secret_when_provider_needs_one(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
     _set_client_id(tmp_hal0_home, "github", "gh-client")  # github requires_client_secret=true
 
     r = client.post("/api/oauth/github/start")
@@ -148,7 +168,9 @@ def test_callback_with_unknown_state_is_rejected(client: TestClient, tmp_hal0_ho
 
 
 def test_callback_provider_error_param_is_reported(client: TestClient) -> None:
-    r = client.get("/api/oauth/google/callback", params={"error": "access_denied", "state": "whatever"})
+    r = client.get(
+        "/api/oauth/google/callback", params={"error": "access_denied", "state": "whatever"}
+    )
     assert r.status_code == 400
     assert "access_denied" in r.text
 
@@ -159,7 +181,9 @@ def test_full_start_to_callback_flow_stores_token(client: TestClient, tmp_hal0_h
     start = client.post("/api/oauth/google/start")
     state = start.json()["state"]
 
-    callback = client.get("/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state})
+    callback = client.get(
+        "/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state}
+    )
 
     assert callback.status_code == 200, callback.text
     assert "Connected" in callback.text
@@ -171,19 +195,27 @@ def test_full_start_to_callback_flow_stores_token(client: TestClient, tmp_hal0_h
     assert "auth-code-xyz" not in api_env.read_text(encoding="utf-8")
 
 
-def test_callback_state_is_single_use_replay_rejected(client: TestClient, tmp_hal0_home: str) -> None:
+def test_callback_state_is_single_use_replay_rejected(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
     _configure_google(tmp_hal0_home)
     start = client.post("/api/oauth/google/start")
     state = start.json()["state"]
 
-    first = client.get("/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state})
-    second = client.get("/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state})
+    first = client.get(
+        "/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state}
+    )
+    second = client.get(
+        "/api/oauth/google/callback", params={"code": "auth-code-xyz", "state": state}
+    )
 
     assert first.status_code == 200
     assert second.status_code == 400
 
 
-def test_callback_provider_path_must_match_nonces_provider(client: TestClient, tmp_hal0_home: str) -> None:
+def test_callback_provider_path_must_match_nonces_provider(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
     _configure_google(tmp_hal0_home)
     _set_client_id(tmp_hal0_home, "spotify", "s-client")
     start = client.post("/api/oauth/google/start")
