@@ -69,9 +69,12 @@ test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
     await expect(page.locator('.approval-modal')).toBeVisible()
 
     // Approve → 401 → the sign-in drawer appears instead of a silent failure.
-    // (Drawer, per primitives.jsx, always keeps its <aside> mounted and
-    // toggles a `.open` class + `aria-hidden` for its slide transition —
-    // it never unmounts — so "closed" is asserted via those, not absence.)
+    // AuthChallengeDrawer renders NOTHING until a challenge is raised: the
+    // Drawer primitive keeps its <aside class="drawer" role="dialog"> mounted
+    // whether open or not, so an always-mounted instance at the app root would
+    // put a second drawer on every page and every spec that addresses "the
+    // drawer" by class or role would hit a strict-mode violation. "Closed" is
+    // therefore asserted as absence, not as a missing `.open` class.
     await page.locator('.approval-card').getByRole('button', { name: 'Approve' }).click()
     const drawer = page.locator('aside.drawer', { hasText: 'Sign-in required' })
     await expect(drawer).toHaveClass(/\bopen\b/)
@@ -82,8 +85,7 @@ test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
     await page.getByTestId('auth-challenge-key-input').fill('the-admin-key')
     await page.getByTestId('auth-challenge-submit').click()
 
-    await expect(drawer).not.toHaveClass(/\bopen\b/)
-    await expect(drawer).toHaveAttribute('aria-hidden', 'true')
+    await expect(drawer).toHaveCount(0)
     expect(loginAttempts).toBe(1)
     expect(approveAttempts).toBe(2)
 
@@ -126,7 +128,7 @@ test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
     const drawer = page.locator('aside.drawer', { hasText: 'Sign-in required' })
     await expect(drawer).toHaveClass(/\bopen\b/)
     await page.keyboard.press('Escape')
-    await expect(drawer).not.toHaveClass(/\bopen\b/)
+    await expect(drawer).toHaveCount(0)
 
     // Only the one refused attempt happened — dismissing never retries.
     expect(approveAttempts).toBe(1)

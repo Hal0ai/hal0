@@ -57,6 +57,14 @@ export function AuthChallengeDrawer() {
     login.mutate(key)
   }
 
+  // Mount NOTHING until a challenge is actually raised. `Drawer` renders its
+  // <aside class="drawer" role="dialog"> whether or not it is open — `open`
+  // only adds a class — so an always-mounted instance at the app root would
+  // put a SECOND .drawer / [role="dialog"] on every page, and every spec that
+  // addresses the page's one drawer by class or role becomes a strict-mode
+  // violation. After the hooks above, so hook order stays unconditional.
+  if (!open) return null
+
   return (
     <Drawer
       open={open}
