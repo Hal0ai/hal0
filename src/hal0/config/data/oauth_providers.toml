@@ -1,0 +1,54 @@
+# hal0 — shipped default OAuth provider registry.
+#
+# Copied to /etc/hal0/oauth-providers.toml the first time
+# hal0.oauth.providers.load_providers() runs, then never overwritten again
+# — hand-edit the /etc copy to add a provider or point client_id at your
+# own OAuth app. client_secret (when a provider requires one) is never
+# stored in this file; see hal0.oauth.store / `hal0 oauth set-client-secret`.
+#
+# Shape ported from ODS's `extensions/services/hermes/oauth-providers.json`
+# (Osmantic/ODS, Apache-2.0; permission to copy granted by its author) and
+# translated to hal0's TOML-for-config convention and CLI-driven skill flow.
+schema_version = "hal0.oauth-providers.v1"
+
+[[providers]]
+id = "google"
+name = "Google Workspace"
+skill_id = "google-workspace"
+authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+revoke_url = "https://oauth2.googleapis.com/revoke"
+scopes = [
+  "https://www.googleapis.com/auth/calendar",
+  "https://www.googleapis.com/auth/gmail.readonly",
+]
+pkce = true
+client_id = ""
+requires_client_secret = true
+notes = "Calendar/Gmail scopes may show an unverified-app warning until your OAuth consent screen passes Google verification."
+
+[[providers]]
+id = "spotify"
+name = "Spotify"
+skill_id = "spotify"
+authorize_url = "https://accounts.spotify.com/authorize"
+token_url = "https://accounts.spotify.com/api/token"
+revoke_url = ""
+scopes = ["user-read-playback-state", "user-modify-playback-state"]
+pkce = true
+client_id = ""
+requires_client_secret = false
+notes = "PKCE-only; no client secret needed."
+
+[[providers]]
+id = "github"
+name = "GitHub"
+skill_id = "github"
+authorize_url = "https://github.com/login/oauth/authorize"
+token_url = "https://github.com/login/oauth/access_token"
+revoke_url = ""
+scopes = ["repo", "read:user"]
+pkce = false
+client_id = ""
+requires_client_secret = true
+notes = "GitHub's OAuth app flow does not support PKCE; the client secret is required."

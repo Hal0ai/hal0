@@ -3287,6 +3287,17 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
             "backend_url": primary_raw["base_url"],
         }
 
+    try:
+        from hal0.oauth.providers import load_providers as _load_oauth_providers
+
+        oauth_providers = [
+            {"id": p.id, "name": p.name, "skill_id": p.skill_id} for p in _load_oauth_providers()
+        ]
+    except Exception:
+        # Best-effort like the slot/context fetches above — a malformed or
+        # unwritable registry should never block persona rendering.
+        oauth_providers = []
+
     vars_ = {
         "env": env_report,
         "hal0_version": _hal0_version_string(),
@@ -3298,6 +3309,7 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
             "HAL0_DASHBOARD_URL",
             os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
         ),
+        "oauth_providers": oauth_providers,
     }
 
     rendered: dict[str, str] = {}
@@ -6224,7 +6236,7 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     return path, True
 
 
-def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
+def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
     Mirrors ``HermesDriver._write_env_file``: the systemd unit's
@@ -6238,6 +6250,19 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
     content and is picked up on the next bootstrap/``--repair`` run, same
     posture as the config.yaml bearer (:func:`_build_config_overlay`).
 
+    Also appends one ``HAL0_OAUTH_<PROVIDER>_TOKEN`` line per skill the
+    operator has connected via ``hal0 oauth`` / the dashboard's Connections
+    page (study 3.3) — :func:`hal0.oauth.store.driver_env_lines` is the one
+    owner of that env-var shape; this function only appends what it
+    returns. Same restart caveat as the MCP token: a running agent picks up
+    a newly connected/rotated OAuth token on its next restart, not live.
+
+    ``state`` is accepted for call-site symmetry with the other bootstrap
+    phase functions but unused — every value below comes from module
+    constants, ``service_identity``, or the secrets store. Optional so
+    :func:`refresh_driver_env` can call this outside the bootstrap
+    pipeline (e.g. right after an OAuth token is stored).
+
     Once this file can carry a live secret, its mode always lands ``0600``
     (root:root — read by pid1 as the unit's EnvironmentFile, never by the
     unprivileged hal0 user directly; see :func:`_build_hermes_env` in
@@ -6246,6 +6271,7 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
     — just without the token line — so a keyless/dev box never fails here.
     Returns ``(path, wrote)``.
     """
+    from hal0.oauth.store import driver_env_lines
     from hal0.service_identity import service_key
 
     api_base = HAL0_API_URL.rstrip("/")
@@ -6258,6 +6284,7 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
     token = service_key(prefer="admin")
     if token:
         lines.append(f"HAL0_MCP_TOKEN={token}")
+    lines.extend(driver_env_lines())
     body = "\n".join(lines) + "\n"
     path = DRIVER_ENV_PATH
     if path.exists():
@@ -6318,6 +6345,19 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
         # pins 0600 — see installer/wrappers/hal0-agentenv `write-driver-env`).
         _privileged_env_write("write-driver-env", body)
     return path, True
+
+
+def refresh_driver_env() -> tuple[Path, bool]:
+    """Public entry point: re-render :data:`DRIVER_ENV_PATH` on its own.
+
+    For callers outside the bootstrap phase pipeline that need the driver
+    env to reflect a change right now — today, ``hal0.api.routes.oauth``
+    after a skill's OAuth token is connected/disconnected — without paying
+    for (or risking a side effect from) the full provision run. Idempotent
+    and side-effect-scoped like :func:`_write_driver_env` itself, which does
+    all the actual work; this just supplies the unused ``state`` argument.
+    """
+    return _write_driver_env()
 
 
 def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:

@@ -42,6 +42,7 @@ from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
+from hal0.cli.oauth_commands import app as oauth_app
 from hal0.cli.ports_command import ports_cmd
 from hal0.cli.profile_commands import app as profile_app
 from hal0.cli.registry_commands import app as registry_app
@@ -75,6 +76,7 @@ app.add_typer(memory_app, name="memory")
 app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(upstream_app, name="upstream")
+app.add_typer(oauth_app, name="oauth")
 app.add_typer(capabilities_app, name="capabilities")
 # Issue #1199 — ``hal0 comfyui orchestrate-models`` pulls the curated ComfyUI
 # model set in one logged sequence.
