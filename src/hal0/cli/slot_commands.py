@@ -928,7 +928,7 @@ def slot_capacity(
 # process.
 
 
-def _active_hal0_units(
+def active_hal0_units(
     *, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
 ) -> list[str]:
     """Every hal0-owned systemd unit currently active: ``hal0-api.service``
@@ -1120,7 +1120,7 @@ def slot_migrate_id_keying(
         console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
         return
 
-    active = _active_hal0_units()
+    active = active_hal0_units()
     if active:
         console.print(
             "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
@@ -1129,7 +1129,7 @@ def slot_migrate_id_keying(
             console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
             for unit in active:
                 subprocess.run(["systemctl", "stop", unit], check=False)
-            active = _active_hal0_units()
+            active = active_hal0_units()
         if active:
             console.print(
                 "[red]✗[/red]  refusing to migrate while hal0 is live — flipping artefact "
@@ -1237,7 +1237,7 @@ def slot_migrate_hw(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites slot TOMLs the running process still resolves.
-    active = _active_hal0_units()
+    active = active_hal0_units()
     if active:
         console.print(
             "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
@@ -1246,7 +1246,7 @@ def slot_migrate_hw(
             console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
             for unit in active:
                 subprocess.run(["systemctl", "stop", unit], check=False)
-            active = _active_hal0_units()
+            active = active_hal0_units()
         if active:
             console.print(
                 "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
@@ -1340,7 +1340,7 @@ def slot_migrate_caps(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites slot TOMLs the running process still resolves.
-    active = _active_hal0_units()
+    active = active_hal0_units()
     if active:
         console.print(
             "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
@@ -1349,7 +1349,7 @@ def slot_migrate_caps(
             console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
             for unit in active:
                 subprocess.run(["systemctl", "stop", unit], check=False)
-            active = _active_hal0_units()
+            active = active_hal0_units()
         if active:
             console.print(
                 "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
@@ -1467,7 +1467,7 @@ def slot_migrate_flags(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites registry rows the running process still resolves.
-    active = _active_hal0_units()
+    active = active_hal0_units()
     if active:
         console.print(
             "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
@@ -1476,7 +1476,7 @@ def slot_migrate_flags(
             console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
             for unit in active:
                 subprocess.run(["systemctl", "stop", unit], check=False)
-            active = _active_hal0_units()
+            active = active_hal0_units()
         if active:
             console.print(
                 "[red]✗[/red]  refusing to fold while hal0 is live — rewriting model "
