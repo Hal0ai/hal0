@@ -24,6 +24,31 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **User-installed MCP servers can now actually reach an agent.** ADR-0015
+  extends `InstalledServer` with `secrets` (a reference into hal0's own
+  `/etc/hal0/api.env` store, never a literal), `tool_policy` (the same
+  `ToolPolicy` allow/gated/blocked scheme bundled agents use, disjoint and
+  empty-by-default), and `exposure` (`hermes`/`brain` honoured; `openwebui`/
+  `opencode` reserved, rejected with `501 mcp.exposure_unsupported`).
+  Flipping `exposure.hermes` on an enabled `streamable-http`/`sse` server
+  joins it into Hermes's `config.yaml` and mirrors its tool policy into the
+  `/etc/hal0/agents/hermes.toml` seed so `classify()` governs it exactly
+  like the two bundled servers — the join recomputes and prunes on every
+  registry mutation, never touching an operator's own hand-added
+  `mcp_servers` block. New CLI: `hal0 mcp test <id>` (probe + per-tool
+  allow/gated/blocked/unknown verdicts), `hal0 mcp allow|gate|block <id>
+  <tool>`, `hal0 mcp expose <id> --hermes/--brain`, and `add`/`remove` as
+  aliases of `install`/`uninstall`. New REST: `POST /api/mcp/{id}/test`,
+  `PATCH /api/mcp/{id}/tools`, `PATCH /api/mcp/{id}/exposure`; `GET
+  /api/mcp/servers` now reports real reachability for installed
+  `streamable-http`/`sse` servers instead of a hard-coded `"stopped"`. A
+  `stdio`-transport server's process supervisor is deferred (see
+  `docs/adr/0015-mcp-supervisor-and-exposure.md`) — install/configure work,
+  `exposure.hermes`/`.brain` reject with `409 mcp.exposure_needs_supervisor`
+  until it ships. (#305)
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a

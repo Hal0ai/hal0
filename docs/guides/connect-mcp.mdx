@@ -19,19 +19,22 @@ hal0 mcp install oci://ghcr.io/example/some-mcp-server:latest
 hal0 mcp install npm:@example/some-mcp-server
 hal0 mcp install uvx:some-mcp-server
 hal0 mcp install git+https://github.com/example/some-mcp-server
+hal0 mcp install https://some-mcp-server.example.com/mcp
 ```
 
-`hal0 mcp install` accepts an OCI image ref, an npm/uvx package
-specifier, a git URL, or a manifest URL. Each installed server persists
-as its own file, `/etc/hal0/mcp-servers/<id>.toml`, mode `0600` — secrets
-live in that server's own `env` block, never in a shared file.
+`hal0 mcp install` (alias: `hal0 mcp add`) accepts an OCI image ref, an
+npm/uvx package specifier, a git URL, or a streamable-http/sse manifest
+URL. Each installed server persists as its own file,
+`/etc/hal0/mcp-servers/<id>.toml`, mode `0600`. A **freshly installed
+server has zero callable tools and zero exposure** — see the next two
+sections to actually let an agent use it.
 
 ```sh
 hal0 mcp list                # bundled + installed
 hal0 mcp list --json
 hal0 mcp status <id>         # tools, env, connected clients
 hal0 mcp restart <id>
-hal0 mcp uninstall <id>
+hal0 mcp uninstall <id>      # alias: hal0 mcp remove <id>
 hal0 mcp uninstall <id> --force
 ```
 
@@ -43,6 +46,84 @@ hal0 mcp catalog refresh
 <Aside type="note">
 `hal0-admin` and `hal0-memory` (below) are bundled and cannot be
 uninstalled — `hal0 mcp uninstall hal0-admin` is rejected with a 409.
+</Aside>
+
+### Credentials
+
+Non-secret settings (a base URL, a workspace path) go in a server's
+plain `env` block. Anything credential-shaped is a *reference*, not a
+literal — point it at a name already in hal0's own secrets store
+(`hal0 config secrets set` / the dashboard's Settings → Secrets panel),
+never at a value typed straight into the server's TOML file:
+
+```toml
+# /etc/hal0/mcp-servers/github.toml
+[env]
+GITHUB_HOST = "github.com"
+
+[secrets]
+GITHUB_TOKEN = "GITHUB_MCP_TOKEN"   # name of a key already in /etc/hal0/api.env
+```
+
+This edits through `PATCH /api/mcp/{id}/config` (`env`) — the `secrets`
+block is written the same way a future release exposes on the CLI; today
+edit the record's `[secrets]` table directly, then `hal0 mcp restart <id>`
+(or reinstall) to pick it up.
+
+### Probe an installed server
+
+```sh
+hal0 mcp test github
+```
+
+Connects to the server directly (its own `url` + resolved `env`/`secrets`
+headers — never hal0's own credentials), lists its advertised tools, and
+shows each one's current `allow` / `gated` / `blocked` / `unknown_tool`
+verdict. Run this right after install: a fresh server's tools all show
+`unknown_tool` until you promote some (next section).
+
+### Set the tool policy
+
+A newly installed server can connect, but every one of its tools is
+unreachable until you say otherwise — the same default-deny posture
+hal0's bundled agents use:
+
+```sh
+hal0 mcp allow github search_repositories    # autonomous calls
+hal0 mcp gate github create_pull_request     # each call enqueues an approval
+hal0 mcp block github delete_repository      # hard-rejected at the client
+```
+
+A tool moves between tiers, never sits on two at once — `hal0 mcp allow`
+on a currently-gated tool promotes it and drops the gated entry
+automatically. Re-run `hal0 mcp test <id>` to confirm a verdict changed.
+
+### Expose to an agent
+
+Installing and setting a tool policy is not enough on its own — a server
+only reaches an agent once it is **exposed**:
+
+```sh
+hal0 mcp expose github --hermes           # join into Hermes's own config
+hal0 mcp expose github --no-hermes        # withdraw it
+hal0 mcp expose github --hermes --brain   # also join the hal0-brain profile
+```
+
+Exposing re-runs the join immediately (an idempotent recompute, not a
+one-shot patch) and re-probes the server, so a bad URL surfaces at expose
+time rather than at the agent's first turn. `openwebui`/`opencode` are
+reserved flags with no join yet — setting either returns
+`501 mcp.exposure_unsupported`. A `stdio`-transport server (most
+npm/uvx packages) has no supervisor yet either — `--hermes`/`--brain` on
+one of those returns `409 mcp.exposure_needs_supervisor` until that
+follow-up ships; `streamable-http`/`sse` servers work today.
+
+<Aside type="note">
+Uninstalling, disabling (`PATCH /api/mcp/{id}/config` `enabled: false`),
+or withdrawing exposure all re-run the same join and remove hal0's own
+entry from Hermes's config — an operator's own hand-added
+`mcp_servers.*` block in `config.yaml` is never touched, only entries
+hal0 itself previously wrote.
 </Aside>
 
 ## hal0's own bundled servers
