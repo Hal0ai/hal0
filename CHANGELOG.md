@@ -26,6 +26,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- `scripts/deploy.sh` now verifies the *served* build before printing
+  success, instead of trusting `git rev-parse HEAD` against the checkout's
+  files alone. `/api/status` gained a `build_sha` field — the short git SHA
+  of the tree the running process actually imports `hal0` from
+  (`hal0.build_info.build_sha`, cached once at process start so it reflects
+  what was true when the worker booted, not a live re-read) — and the
+  deploy script's health-check step now polls it after the service restart,
+  failing loudly with a `journalctl` hint on a mismatch rather than
+  reporting a deploy complete that a stuck-on-old-code worker never picked
+  up. (#1550)
+- `hal0 update`'s "Convergence incomplete" panel (and the new Settings ▸
+  Updates dashboard panel) no longer print a `migrate-flags`/`migrate-caps`/
+  `migrate-hw --apply` command that fails outright when `hal0-api` or a
+  `hal0-slot@*` unit is still active — `detect_pending_ownership_migrations`
+  now decides server-side whether `--stop-services` is required (reusing the
+  same live-unit check `hal0 slot migrate-*` itself refuses against,
+  `hal0.cli.slot_commands.active_hal0_units`) and both surfaces render that
+  exact string, never reassembling it client-side. (#1845)
+- `hal0 update` (and `scripts/deploy.sh`'s dev-deploy) now re-assert the
+  `/usr/local/bin/hal0` and `/usr/local/bin/hal0-agent` PATH symlinks on
+  every activation, the same way `refresh_privileged_wrappers` already
+  re-asserts the root-owned sudo wrappers — `install.sh` was previously the
+  only writer of these links, so a box upgraded exclusively through
+  `hal0 update` (or an editable checkout kept current via `deploy.sh`, which
+  never runs an FHS activation at all) could end up with a `hal0` on PATH
+  pointing at a stale or rebuilt venv shim. A new `hal0 doctor wrappers
+  --fix` command exposes the same refresh (wrappers + PATH links) for the
+  editable-install case deploy.sh runs under. (#1844, #2019)
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot

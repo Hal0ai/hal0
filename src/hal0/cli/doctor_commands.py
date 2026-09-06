@@ -989,6 +989,89 @@ def perms(
     raise typer.Exit(0)
 
 
+# ── hal0 doctor wrappers — privileged wrapper + PATH-link refresh ────────────
+#
+# install.sh writes /usr/lib/hal0/bin/hal0-* (root-owned sudo wrappers), the
+# matching /etc/sudoers.d drop-ins, and the /usr/local/bin/hal0(-agent) PATH
+# links. `hal0 update commit` re-asserts all three from the just-activated
+# release (Updater.activate_release -> refresh_privileged_wrappers /
+# refresh_path_links), but that path is refused outright on an editable/dev
+# install (_raise_if_editable_install) — exactly the shape
+# `scripts/deploy.sh` runs under on an editable /opt/hal0 checkout. Without
+# this command a dev-deploy had no way to pick up a wrapper or PATH-link
+# change at all (#1844/#2019) — this is the same refresh path, callable
+# outside an activation.
+
+
+@app.command("wrappers")
+def wrappers(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help=(
+            "Re-install the wrappers, sudoers drop-ins and PATH links from the "
+            "active tree (needs root)."
+        ),
+    ),
+) -> None:
+    """Refresh the root-owned sudo wrappers + `/usr/local/bin/hal0` PATH links.
+
+    Audit-only by default: reports which tree it would refresh from.
+    ``--fix`` re-installs ``/usr/lib/hal0/bin/hal0-*``, the matching
+    ``/etc/sudoers.d`` drop-ins, and the ``/usr/local/bin/hal0`` +
+    ``hal0-agent`` PATH links from that tree — the exact
+    :func:`hal0.updater.updater.refresh_privileged_wrappers` /
+    :func:`hal0.updater.updater.refresh_path_links` calls
+    ``hal0 update commit`` makes automatically on every FHS activation.
+    Use this on an editable checkout (``scripts/deploy.sh``'s dev-deploy
+    target), which never goes through activation at all.
+    """
+    from hal0.updater.updater import (
+        _editable_install_path,
+        _usr_lib_root,
+        refresh_path_links,
+        refresh_privileged_wrappers,
+    )
+
+    editable = _editable_install_path()
+    target = Path(editable) if editable else (_usr_lib_root() / "current").resolve()
+    console.print(f"[dim]refreshing from {target}[/dim]")
+
+    if not fix:
+        console.print("[dim]audit-only — pass --fix to actually re-install.[/dim]")
+        raise typer.Exit(0)
+    if os.geteuid() != 0:
+        console.print("[red]✗[/red]  --fix needs root — re-run `sudo hal0 doctor wrappers --fix`.")
+        raise typer.Exit(1)
+
+    wrappers_result = refresh_privileged_wrappers(target)
+    links_result = refresh_path_links(target)
+
+    if wrappers_result["refreshed"]:
+        console.print(
+            f"[green]✓[/green]  wrappers refreshed: {', '.join(wrappers_result['refreshed'])}"
+        )
+    else:
+        console.print("[dim]no wrappers changed.[/dim]")
+    if wrappers_result["sudoers_refreshed"]:
+        console.print(
+            f"[green]✓[/green]  sudoers refreshed: {', '.join(wrappers_result['sudoers_refreshed'])}"
+        )
+    for seam, err in wrappers_result["errors"].items():
+        console.print(f"[red]✗[/red]  {seam}: {err}")
+
+    for name, status in links_result.items():
+        if status == "linked":
+            console.print(f"[green]✓[/green]  {name} PATH link refreshed")
+        elif status == "missing":
+            console.print(f"[yellow]![/yellow]  {name}: no shim found in this venv — skipped")
+        else:
+            console.print(f"[red]✗[/red]  {name} PATH link refresh failed")
+
+    if wrappers_result["errors"] or "failed" in links_result.values():
+        raise typer.Exit(1)
+
+
 # ── hal0 doctor models — FLM (NPU) store pure helpers ─────────────────────────
 #
 # The FLM store is the single most reboot-fragile surface on the box: the NPU

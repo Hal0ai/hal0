@@ -16,6 +16,10 @@ def test_status_endpoint(client: TestClient) -> None:
     body = response.json()
     assert body["name"] == "hal0", f"Expected name='hal0', got {body.get('name')!r}"
     assert body["version"], f"Expected non-empty version, got {body.get('version')!r}"
+    # #1550/H7: build_sha is present (None or a str) even without a .git dir —
+    # the field must never be missing, only possibly null.
+    assert "build_sha" in body
+    assert body["build_sha"] is None or isinstance(body["build_sha"], str)
 
 
 def test_openapi_loads(client: TestClient) -> None:
