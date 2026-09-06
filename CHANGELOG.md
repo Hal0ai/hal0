@@ -24,6 +24,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Agent-driven OAuth passthrough** for Hermes skills that need OAuth
+  (Google Calendar, Spotify, GitHub). A skill is connected by sending the
+  operator a consent link — the provider's redirect lands directly on
+  `GET /api/oauth/{provider}/callback` and hal0 exchanges the code for a
+  token itself (PKCE where the provider supports it), so the operator
+  never copy-pastes an authorization code and the agent never handles a
+  raw code or client secret. New `hal0 oauth {list,connect,disconnect,
+  status,set-client-secret}` CLI, a dashboard Connections page
+  ("Connected accounts"), and a Hermes persona addendum that walks the
+  agent through the connect → poll → confirm flow. The provider registry
+  (`/etc/hal0/oauth-providers.toml`) is seeded from a shipped default
+  covering the common skill providers; tokens are stored through the
+  secrets store, never in TOML, never logged. Ported from ODS's OAuth
+  passthrough (Osmantic/ODS, Apache-2.0; permission to copy granted by its
+  author).
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a

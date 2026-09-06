@@ -408,6 +408,20 @@ dashboard/API-only (`/api/profiles`).
 | `auth rotate [tier]` | optional `tier` (default `admin`) | `--force`/`-f` |
 | `auth require <toggle>` | `toggle` (required) | — |
 
+## `hal0 oauth` — connect OAuth providers for Hermes skills
+
+Consent is a link, not a pasted code: the provider redirects straight back to
+`GET /api/oauth/{provider}/callback` and hal0 exchanges the code itself. Poll
+`oauth status <provider>` until `connected` flips true.
+
+| Command | Args | Flags |
+|---|---|---|
+| `oauth list` | — | `--json` |
+| `oauth connect <provider>` | `provider` | — |
+| `oauth disconnect <provider>` | `provider` | `--force`/`-f` |
+| `oauth status <provider>` | `provider` | `--json` |
+| `oauth set-client-secret <provider>` | `provider` | `--value` (required; prompted securely if omitted) |
+
 ## `hal0 board` — operator task board
 
 | Command | Args | Flags |

@@ -73,6 +73,11 @@ _FETCH_TIMEOUT = httpx.Timeout(connect=4.0, read=6.0, write=2.0, pool=6.0)
 # caller can use hal0 as a blind probe against the LAN, IMDS, and loopback.
 # We enforce a deny-list at the URL/IP layer and refuse to follow redirects
 # (a 30x to a private host would otherwise bypass the pre-flight check).
+#
+# ``is_safe_url`` / ``enforce_safe_url`` are public (not module-private) so
+# ``hal0.api.routes.oauth`` can reuse the same deny-list against a
+# provider's ``authorize_url``/``token_url`` (one owner of the SSRF guard,
+# per COMMON.md rule 2) rather than re-implementing it.
 
 
 class SsrfBlockedError(BadRequest):
@@ -102,7 +107,7 @@ def _ip_is_safe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def _is_safe_url(url: str) -> bool:
+def is_safe_url(url: str) -> bool:
     """Return True only when ``url`` resolves entirely to public addresses.
 
     Steps:
@@ -155,9 +160,9 @@ def _is_safe_url(url: str) -> bool:
     return True
 
 
-def _enforce_safe_url(url: str) -> None:
+def enforce_safe_url(url: str) -> None:
     """Raise :class:`SsrfBlockedError` when the URL fails the SSRF guard."""
-    if not _is_safe_url(url):
+    if not is_safe_url(url):
         raise SsrfBlockedError(
             "refusing to fetch a non-public URL",
             code="mcp.ssrf_blocked",
@@ -376,11 +381,11 @@ async def _default_fetcher(url: str) -> Any:
     """Production fetcher — SSRF-guarded, bounded body, JSON decoded.
 
     Redirects are intentionally NOT followed: a 30x to a private host
-    would bypass the pre-flight :func:`_enforce_safe_url` check. If a
+    would bypass the pre-flight :func:`enforce_safe_url` check. If a
     legitimate manifest sits behind a redirect, the caller can paste the
     final URL directly.
     """
-    _enforce_safe_url(url)
+    enforce_safe_url(url)
     # Stream the body and abort the moment we cross the cap (#381) — a
     # misbehaving server must not be able to make us buffer an unbounded
     # response into memory before we reject it.
@@ -441,7 +446,7 @@ async def resolve(url: str, *, fetcher: HttpFetcher | None = None) -> ResolvedMa
         # pre-flight check. Skipped when the caller injects a fetcher — the
         # test surface relies on synthesised hosts like example.com.
         if fetcher is None:
-            _enforce_safe_url(url)
+            enforce_safe_url(url)
         return await _resolve_http(url, fetcher)
 
     raise BadRequest(

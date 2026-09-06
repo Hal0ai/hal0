@@ -279,6 +279,21 @@ RULES: tuple[_Rule, ...] = (
     _Rule("brain (hal0-brain steward chat)", _prefix("/api/brain"), AuthClass.ADMIN, None),
     _Rule("providers", _prefix("/api/providers"), AuthClass.ADMIN, None),
     _Rule("upstreams", _prefix("/api/upstreams"), AuthClass.ADMIN, None),
+    # OAuth passthrough (agent-driven skill connect, study 3.3). The provider
+    # redirect target MUST be reachable with no session/bearer — a provider's
+    # 302 back to hal0 carries no auth of ours, only its own `state` nonce
+    # (validated inside the route, single-use — see hal0.oauth.state). Pinned
+    # BEFORE the ADMIN catch-all below so it isn't swallowed by the prefix
+    # rule. Every other /api/oauth/* route (start/status/disconnect/registry
+    # edits) is ADMIN — same posture as /api/providers and /api/secrets,
+    # which this feature composes.
+    _Rule(
+        "oauth callback (public redirect target)",
+        _exact("/api/oauth/{provider_id}/callback"),
+        AuthClass.OPEN,
+        _GET,
+    ),
+    _Rule("oauth (start/status/disconnect/registry)", _prefix("/api/oauth"), AuthClass.ADMIN, None),
     _Rule("updates", _prefix("/api/updates"), AuthClass.ADMIN, None),
     _Rule("capabilities", _prefix("/api/capabilities"), AuthClass.ADMIN, None),
     _Rule("stacks", _prefix("/api/stacks"), AuthClass.ADMIN, None),
@@ -371,6 +386,9 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/auth/login"),
         ("GET", "/api/auth/status"),
         ("POST", "/api/auth/logout"),
+        # OAuth passthrough callback — the provider's redirect target, has
+        # no auth of ours to check (see the RULES entry above).
+        ("GET", "/api/oauth/{provider_id}/callback"),
         # Hermes dashboard-plugin static asset proxy (kanban plugin JS/CSS
         # bundles) -- not under /api or /v1, so it hits the same
         # not-api/v1/mcp catch-all the SPA shell itself uses. No secrets:

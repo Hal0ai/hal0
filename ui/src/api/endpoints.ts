@@ -390,6 +390,17 @@ export const ENDPOINTS = {
   providersCatalog: '/api/providers/catalog',
   providerCredentials: (name: string) =>
     `/api/providers/${encodeURIComponent(name)}/credentials`,
+
+  // ── OAuth passthrough (agent-driven skill connect, study 3.3) ─────
+  // GET providers lists the registry + connection status (never a token
+  // value). start mints a consent URL (opens in a new tab); the provider
+  // redirects straight back to GET /api/oauth/{id}/callback (server-side,
+  // never hit from the dashboard). DELETE disconnects.
+  oauthProviders: '/api/oauth/providers',
+  oauthStart: (id: string) => `/api/oauth/${encodeURIComponent(id)}/start`,
+  oauthStatus: (id: string) => `/api/oauth/${encodeURIComponent(id)}/status`,
+  oauthDisconnect: (id: string) => `/api/oauth/${encodeURIComponent(id)}`,
+  oauthClientSecret: (id: string) => `/api/oauth/${encodeURIComponent(id)}/client-secret`,
   // Service URL discovery — the dashboard reads this to resolve the
   // reachable hostnames for sibling services (OpenWebUI, Hermes) from the
   // request host, so links work on any install (localhost / LAN IP /

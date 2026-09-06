@@ -215,7 +215,7 @@ async def test_default_fetcher_aborts_oversized_body(monkeypatch: pytest.MonkeyP
     bytes exceed _MAX_MANIFEST_BYTES, rather than buffering it all first."""
     import httpx
 
-    monkeypatch.setattr(manifest, "_enforce_safe_url", lambda url: None)
+    monkeypatch.setattr(manifest, "enforce_safe_url", lambda url: None)
     monkeypatch.setattr(manifest, "_MAX_MANIFEST_BYTES", 32)
 
     class _FakeResp:
