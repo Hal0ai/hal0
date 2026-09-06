@@ -2,8 +2,11 @@
 
 write_openwebui_env() produces /etc/hal0/openwebui.env with the variables
 required to prewire OpenWebUI to the hal0 API.  Called by the installer
-(`python -m hal0.openwebui.env_writer`, via :func:`main`); there is no
-settings route for it today.
+(`python -m hal0.openwebui.env_writer`, via :func:`main`) with no
+overrides, and by hal0.components.openwebui_arm's converge/reconcile
+functions with the RAG/image-gen/web-search overrides from
+hal0.openwebui.wiring (see the "Dynamic wiring" section below). There is
+still no settings route that calls this directly.
 
 Uses hal0.config.env.write_env_atomic() — the same atomic write primitive
 used for slot env files (PLAN.md §5 Tier 1).
@@ -52,6 +55,35 @@ Both also survive a re-run: since #1514 the installer path merges rather
 than replaces, so editing /etc/hal0/openwebui.env by hand is a supported
 way to set them. The previous instruction here — "pass them via the
 `overrides` parameter" — named a parameter no shipped caller ever passed.
+
+Dynamic wiring (RAG / image-gen / web-search). Beyond the fixed defaults
+above, three more blocks are rendered — but only when there is a real
+backend to point at, never a claim OpenWebUI can't cash:
+
+    RAG_EMBEDDING_ENGINE=openai              — an embed-capable slot is bound
+    RAG_OPENAI_API_BASE_URL / _MODEL / _KEY
+    ENABLE_IMAGE_GENERATION=True             — a ComfyUI (img) slot is bound
+    IMAGE_GENERATION_ENGINE=comfyui
+    COMFYUI_BASE_URL / _MODEL / COMFYUI_WORKFLOW / _WORKFLOW_NODES
+    ENABLE_WEB_SEARCH=True                   — a search provider is installed
+    WEB_SEARCH_ENGINE / SEARXNG_QUERY_URL / …
+
+:func:`dynamic_env_overrides` renders these as a pure function of already-
+resolved values (model ids, a baked ComfyUI workflow) — it never reads slot
+state itself, so it stays as import-light as the rest of this module. The
+live-truth resolver that gathers those values from ``capabilities.toml`` and
+the registry is :mod:`hal0.openwebui.wiring` (a separate module precisely so
+*that* import weight — ``hal0.capabilities``, ``hal0.registry``,
+``hal0.providers.comfyui_workflows`` — never lands on this module's cold
+``python -m`` path). Every dynamic key is explicitly nulled when its gate is
+false, not merely omitted: ``preserve_existing`` keeps whatever a prior write
+left in the file for any key an override doesn't mention, so a capability
+that WAS wired and got unwired (slot deleted, capability disabled) needs an
+explicit ``None`` to actually disappear on the next render — an omitted key
+would survive as a stale claim (ODS's own Apple footgun — a VRAM fallback
+that "assumes zero current usage" and can over-report what fits,
+``ods/extensions/services/dashboard-api/routers/features.py:27-32`` in the
+ODS reference tree — never claim a capability that isn't there).
 """
 
 from __future__ import annotations
@@ -218,6 +250,120 @@ def default_openwebui_env() -> dict[str, str]:
     return env
 
 
+#: Every env key any dynamic block can emit. Used to explicitly null out a
+#: block's keys when its gate is false — see the module docstring's
+#: "Dynamic wiring" section for why an explicit None (not omission) is
+#: required for a capability to actually stop being claimed.
+_DYNAMIC_ENV_KEYS: tuple[str, ...] = (
+    "RAG_EMBEDDING_ENGINE",
+    "RAG_OPENAI_API_BASE_URL",
+    "RAG_OPENAI_API_KEY",
+    "RAG_EMBEDDING_MODEL",
+    "ENABLE_IMAGE_GENERATION",
+    "IMAGE_GENERATION_ENGINE",
+    "COMFYUI_BASE_URL",
+    "IMAGE_SIZE",
+    "IMAGE_GENERATION_MODEL",
+    "COMFYUI_WORKFLOW",
+    "COMFYUI_WORKFLOW_NODES",
+    "ENABLE_WEB_SEARCH",
+    "ENABLE_SEARCH_QUERY_GENERATION",
+    "WEB_SEARCH_ENGINE",
+    "SEARXNG_QUERY_URL",
+    "WEB_SEARCH_RESULT_COUNT",
+)
+
+
+def _rag_env_block(embed_model_id: str) -> dict[str, str]:
+    """RAG embeddings routed through hal0's own ``/v1`` (not OWUI's default
+    sentence-transformers download, which can block a fresh install's first
+    boot before port 8080 even binds — same rationale as ODS's own
+    ``RAG_EMBEDDING_ENGINE`` comment)."""
+    return {
+        "RAG_EMBEDDING_ENGINE": "openai",
+        "RAG_OPENAI_API_BASE_URL": "http://host.docker.internal:8080/v1",
+        "RAG_OPENAI_API_KEY": "sk-hal0-local",
+        "RAG_EMBEDDING_MODEL": embed_model_id,
+    }
+
+
+def _image_gen_env_block(
+    model_id: str, workflow_json: str, workflow_nodes_json: str
+) -> dict[str, str]:
+    """Image generation routed through the ComfyUI slot on the host.
+
+    ComfyUI runs ``network_mode="host"`` (see
+    ``hal0.providers.comfyui.ComfyUIProvider.container_spec``), so from
+    inside the OpenWebUI container it is reached the same way hal0's own
+    ``/v1`` is: via the host gateway, not a compose-network service name.
+    ``workflow_json`` / ``workflow_nodes_json`` are pre-rendered by the
+    caller (see :mod:`hal0.openwebui.wiring`) from the SAME translator
+    hal0's own ``/v1/images/generations`` route uses, so the baked default
+    never drifts from what the slot actually runs.
+    """
+    return {
+        "ENABLE_IMAGE_GENERATION": "True",
+        "IMAGE_GENERATION_ENGINE": "comfyui",
+        "COMFYUI_BASE_URL": "http://host.docker.internal:8188",
+        "IMAGE_SIZE": "1024x1024",
+        "IMAGE_GENERATION_MODEL": model_id,
+        "COMFYUI_WORKFLOW": workflow_json,
+        "COMFYUI_WORKFLOW_NODES": workflow_nodes_json,
+    }
+
+
+def _web_search_env_block(provider: dict[str, str]) -> dict[str, str]:
+    """Web search routed through an installed provider.
+
+    ``provider`` carries ``{"engine": ..., "query_url": ...}`` — resolved by
+    the caller's registry lookup, never a literal here (no search provider
+    ships with hal0 today; this block only ever fires once an extension
+    registers one — see :mod:`hal0.openwebui.wiring`'s seam).
+    """
+    return {
+        "ENABLE_WEB_SEARCH": "True",
+        "ENABLE_SEARCH_QUERY_GENERATION": "True",
+        "WEB_SEARCH_ENGINE": provider["engine"],
+        "SEARXNG_QUERY_URL": provider["query_url"],
+        "WEB_SEARCH_RESULT_COUNT": "5",
+    }
+
+
+def dynamic_env_overrides(
+    *,
+    embed_model_id: str | None,
+    image_model_id: str | None,
+    image_workflow_json: str | None,
+    image_workflow_nodes_json: str | None,
+    search_provider: dict[str, str] | None,
+) -> dict[str, str | None]:
+    """Render the RAG / image-gen / web-search blocks as a
+    :func:`write_openwebui_env` ``overrides`` dict.
+
+    Pure function of already-resolved values — no I/O, no slot/registry
+    reads (that's :func:`hal0.openwebui.wiring.resolve_dynamic_env_overrides`).
+    Every key in :data:`_DYNAMIC_ENV_KEYS` is present in the result: ``None``
+    for any block whose gate is false, so a converge re-render always
+    deletes a capability's keys the moment it stops being true, rather than
+    leaving them to survive as a stale claim under ``preserve_existing``.
+
+    ``image_model_id`` requires both workflow strings — a caller that
+    resolved a model id but failed to build its workflow (see the
+    ``WorkflowTemplateError`` catch in :mod:`hal0.openwebui.wiring`) must
+    pass ``None`` for all three rather than a half-built block.
+    """
+    merged: dict[str, str | None] = dict.fromkeys(_DYNAMIC_ENV_KEYS, None)
+    if embed_model_id:
+        merged.update(_rag_env_block(embed_model_id))
+    if image_model_id and image_workflow_json and image_workflow_nodes_json:
+        merged.update(
+            _image_gen_env_block(image_model_id, image_workflow_json, image_workflow_nodes_json)
+        )
+    if search_provider:
+        merged.update(_web_search_env_block(search_provider))
+    return merged
+
+
 def _read_existing_env(target: Path) -> dict[str, str]:
     """Parse an existing env file into ``{key: value}``; ``{}`` if absent.
 
@@ -247,7 +393,7 @@ def _read_existing_env(target: Path) -> dict[str, str]:
 
 def write_openwebui_env(
     path: Path | str | None = None,
-    overrides: dict[str, str] | None = None,
+    overrides: dict[str, str | None] | None = None,
     preserve_existing: bool = False,
 ) -> Path:
     """Write the OpenWebUI environment file atomically.

@@ -24,6 +24,26 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Open WebUI is now fully pre-wired**, not just chat + voice: document
+  uploads route through RAG the moment an embed-capable slot is bound
+  (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
+  point at hal0's own `/v1`), and the image button generates through
+  ComfyUI the moment the `img` slot is bound (`ENABLE_IMAGE_GENERATION`,
+  `COMFYUI_BASE_URL`, and a `COMFYUI_WORKFLOW`/`COMFYUI_WORKFLOW_NODES`
+  pair baked from the SAME translator `/v1/images/generations` uses, keyed
+  to whichever checkpoint the slot is actually bound to). Both blocks are
+  gated on live capability state and explicitly cleared the moment that
+  state stops being true — never a stale claim of a capability that isn't
+  really there. A seam is left for a future search-provider extension
+  (`ENABLE_WEB_SEARCH` stays off; no search service ships today). The env
+  file re-renders — and the companion restarts only when the render
+  actually changed — on capability apply, `embed`/`img` slot create or
+  delete, and every regular component-convergence pass. The Services
+  page's Open WebUI card now shows a wired chip per feature (Chat, Voice,
+  Documents, Images, Web search), exposed via `GET /api/services`.
+
 ### Fixed
 
 - MCP admin tools no longer report a tool failure for a successful read of a

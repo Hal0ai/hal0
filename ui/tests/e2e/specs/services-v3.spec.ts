@@ -34,6 +34,15 @@ const SERVICES_PAYLOAD = {
       actions: ['start', 'stop', 'restart', 'enable', 'disable'],
       mdns_capable: true,
       hints: [],
+      wired: {
+        chat: true,
+        voice: true,
+        documents: true,
+        images: false,
+        web_search: false,
+        embed_model: 'nomic-embed-text-v1.5',
+        image_model: null,
+      },
     },
     {
       id: 'comfyui',
@@ -125,6 +134,24 @@ test.describe('Services v3 (/services)', () => {
     // Up service shows an "up" pill; unmanaged shows the external note.
     await expect(page.getByTestId('svcp-card-openwebui')).toContainText('up')
     await expect(page.getByTestId('svcp-card-n8n')).toContainText('external — not managed by hal0')
+  })
+
+  test('OpenWebUI card renders wired chips from the services payload', async ({ page }) => {
+    await page.route('**/api/services', (route) => json(route, SERVICES_PAYLOAD))
+    await page.goto('/#services')
+
+    const chips = page.getByTestId('svcp-wired-openwebui')
+    await expect(chips).toBeVisible()
+    // On chips (chat/voice/documents) show the "serving" dot tone.
+    for (const key of ['chat', 'voice', 'documents']) {
+      await expect(page.getByTestId(`svcp-wired-${key}`)).toHaveClass(/\bon\b/)
+    }
+    // Off chips (images/web_search — no ComfyUI slot, no search provider bound).
+    for (const key of ['images', 'web_search']) {
+      await expect(page.getByTestId(`svcp-wired-${key}`)).not.toHaveClass(/\bon\b/)
+    }
+    // Comfyui's card has no `wired` payload — no chips render for it.
+    await expect(page.getByTestId('svcp-card-comfyui').getByTestId(/svcp-wired-/)).toHaveCount(0)
   })
 
   test('action buttons follow the backend allow-list', async ({ page }) => {
