@@ -203,7 +203,26 @@ def _registry_dir() -> Path:
 
 
 def _registry_path(server_id: str) -> Path:
-    return _registry_dir() / f"{server_id}.toml"
+    """Resolve one server's record path, refusing anything outside the registry.
+
+    THE single place a caller-supplied id becomes a filesystem path, so the
+    barrier belongs here rather than at each entry point: :func:`_registry_lock`
+    reaches this before ``patch_config``'s own :func:`get_installed` has
+    validated anything, and it opens the returned path's sibling ``.lock`` with
+    mode ``"w"`` — a truncating create. :func:`_validate_id`'s charset already
+    makes traversal unrepresentable; the resolved-containment assert states
+    that as a property of the path rather than of the id spelling.
+    """
+    _validate_id(server_id)
+    root = _registry_dir().resolve()
+    path = (root / f"{server_id}.toml").resolve()
+    if path.parent != root:
+        raise BadRequest(
+            "server id does not resolve inside the MCP registry",
+            code="mcp.id_invalid",
+            details={"id": server_id},
+        )
+    return path
 
 
 # Restrictive perms: TOML files contain the per-server ``env`` block, which

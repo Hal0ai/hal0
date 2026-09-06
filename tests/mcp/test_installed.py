@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hal0.config.schema import ToolPolicy
@@ -262,3 +264,31 @@ def test_list_enabled_exposed_filters_correctly(tmp_hal0_home: str) -> None:
 
     hermes_ids = {r.id for r in registry.list_enabled_exposed(target="hermes")}
     assert hermes_ids == {"exposed"}
+
+
+def test_patch_config_traversal_id_creates_no_file_outside_the_registry(
+    tmp_hal0_home: str, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`patch_config` takes the record lock BEFORE `get_installed` validates.
+
+    The lock file is opened `"w"` — a truncating create — so an id that walked
+    out of the registry directory would let an API caller create (and, for a
+    `<name>.toml` target, truncate) a file anywhere the daemon can write.
+    `_registry_path` is the barrier; assert it holds from the entry point that
+    reaches it first, using a traversal spelled relative to the REAL registry
+    directory rather than a guessed number of `../`.
+    """
+    outside_dir = tmp_path_factory.mktemp("outside")
+    victim = outside_dir / "victim.toml"
+    victim.write_text("do not truncate me\n", encoding="utf-8")
+
+    # ".../outside0/victim" — strip the .toml the registry appends itself.
+    traversal = os.path.relpath(victim.with_suffix(""), registry._registry_dir())
+    assert traversal.startswith(".."), traversal
+
+    with pytest.raises(BadRequest) as exc:
+        registry.patch_config(traversal, enabled=False)
+    assert exc.value.code == "mcp.id_invalid"
+
+    assert victim.read_text(encoding="utf-8") == "do not truncate me\n"
+    assert not (outside_dir / "victim.toml.lock").exists()
