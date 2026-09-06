@@ -48,6 +48,22 @@ def bind_host() -> str:
     return raw or _DEFAULT_BIND_HOST
 
 
+def is_loopback_bind(host: str | None = None) -> bool:
+    """True iff *host* (default: :func:`bind_host`) is a loopback-only bind.
+
+    Wildcard binds (``0.0.0.0``/``::``) are NOT loopback — they are exactly
+    the LAN-reachable case this predicate exists to flag. Two consumers
+    (#1822): the posture-coupled ADMIN gate
+    (:mod:`hal0.api.auth`'s ``AuthEnforcementMiddleware``), which keeps
+    loopback-bound boxes frictionless even with ``require_auth`` off but
+    still requires an admin session for ADMIN-class requests on a
+    LAN-reachable box, and ``hal0 doctor all``'s auth-posture check, which
+    previously reported "open (dev/loopback)" without ever looking at the
+    bind host.
+    """
+    return (host if host is not None else bind_host()) in _LOOPBACK_BIND_HOSTS
+
+
 def hostname() -> str:
     """The canonical operator-facing hostname (bare, no ``.local`` suffix).
 
@@ -134,4 +150,5 @@ __all__ = [
     "derive_allowed_origins",
     "detect_lan_ips",
     "hostname",
+    "is_loopback_bind",
 ]

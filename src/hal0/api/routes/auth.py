@@ -25,6 +25,7 @@ from hal0.api.auth import (
     verify_admin_key,
 )
 from hal0.config.loader import hal0_config_txn
+from hal0.config.network import is_loopback_bind
 from hal0.errors import BadRequest, TooManyRequests, Unauthorized
 from hal0.security.exposure import OPEN_ALLOWLIST, RULES, AuthClass
 from hal0.service_identity import rotate_api_env_key
@@ -275,12 +276,17 @@ async def status(request: Request) -> dict[str, object]:
     distinguish "not configured yet" (first-run bootstrap window) from
     "configured, please log in"; ``tier`` is this caller's own resolved
     identity (useful for the dashboard to know if it's already logged in
-    via an existing cookie).
+    via an existing cookie). ``lan_exposed`` (#1822) is true when the box is
+    bound beyond loopback — independent of ``auth_required`` — so the
+    dashboard and ``hal0 doctor all`` can both explain that ADMIN mutations
+    already require a sign-in from off-box callers even while enforcement
+    itself reads as "off" (see :mod:`hal0.api.auth`'s posture-coupled gate).
     """
     principal = resolve_principal_from_scope(request)
     return {
         "auth_required": require_auth_enabled(),
         "has_admin_key": has_admin_key(),
+        "lan_exposed": not is_loopback_bind(),
         "tier": principal.tier,
     }
 

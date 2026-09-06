@@ -60,18 +60,44 @@ console = Console()
 
 
 def check_auth_posture(auth: dict[str, Any] | None) -> Check:
-    """Auth exposure posture from ``GET /api/auth/status`` (advisory).
+    """Auth exposure posture from ``GET /api/auth/status`` (advisory, #1822).
 
     ``auth_required`` + ``has_admin_key`` describe whether the box gates
-    access. The only misconfiguration we flag is "auth required but no admin
-    key configured" (nobody can log in); an intentionally open dev install
-    passes with a note.
+    access; ``lan_exposed`` (added for #1822) says whether the bind reaches
+    beyond loopback. The old version of this check printed PASS "dev/loopback"
+    for ANY box with ``auth_required`` off, never looking at the bind — a
+    LAN-bound, auth-off box (hal0-api's shipped default) got a clean bill of
+    health while reachable from every device on the network. Missing
+    ``lan_exposed`` from an older API build degrades to ``False`` (unknown ->
+    assume loopback) rather than raising, so this stays advisory-safe.
     """
     if auth is None:
         return Check("auth", "Auth posture", _WARN, "auth status unreachable")
     required = bool(auth.get("auth_required"))
     has_key = bool(auth.get("has_admin_key"))
+    lan_exposed = bool(auth.get("lan_exposed"))
     if not required:
+        if lan_exposed:
+            if not has_key:
+                return Check(
+                    "auth",
+                    "Auth posture",
+                    _WARN,
+                    "reachable from your network with auth off and no admin key set — every "
+                    "route, including model pulls, slot deletes and config writes, is "
+                    "unauthenticated from any LAN device. Set an admin key "
+                    "(`hal0 auth rotate admin`) or bind loopback (HAL0_BIND_HOST=127.0.0.1) "
+                    "to close this.",
+                )
+            return Check(
+                "auth",
+                "Auth posture",
+                _WARN,
+                "reachable from your network with auth off — mutating routes already require "
+                "an admin sign-in automatically for off-box callers, but reads and inference "
+                "stay open. `hal0 auth require on` or binding loopback "
+                "(HAL0_BIND_HOST=127.0.0.1) protects everything, including reads.",
+            )
         return Check("auth", "Auth posture", _PASS, "open (auth not required — dev/loopback)")
     if not has_key:
         return Check(
