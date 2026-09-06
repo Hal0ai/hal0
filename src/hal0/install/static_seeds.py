@@ -86,29 +86,54 @@ LLAMA_SEED_CAPABILITIES: dict[str, str] = {
 #: slot-level field.
 _DEVICE_LINE = re.compile(r'(?m)^(device[ \t]*=[ \t]*)"[^"]*"')
 
+#: The ``[model].context_size`` assignment. Every llama.cpp seed carries
+#: exactly one such line (verified against every file under
+#: ``installer/etc-hal0/slots/``), so a plain top-of-line match is enough —
+#: same posture as :data:`_DEVICE_LINE`.
+_CONTEXT_SIZE_LINE = re.compile(r"(?m)^context_size[ \t]*=[ \t]*(\d+)")
+
+#: Seed names whose capability can serve as Hermes' anchor (``hal0/agent``
+#: resolves through the routing fallback chain to one of these —
+#: ``LLAMA_SEED_CAPABILITIES`` maps both to ``"chat"``). #1868's "a box that
+#: cannot afford 64K should say so loudly rather than silently seeding less"
+#: floor applies only to these two; embed/rerank/coder/utility have no such
+#: hard minimum, so they clamp down freely.
+_HERMES_ANCHOR_SEEDS = frozenset({"agent", "brain"})
+
+#: The brain seed's documented default model footprint (``lfm2.5-2.6b``
+#: Q8_0, "2.87 GB" per ``installer/etc-hal0/slots/brain.toml``'s own doc
+#: comment). Used ONLY for ``brain`` in :func:`apply_context_size_envelope`'s
+#: envelope math: ``install.sh`` pulls this weight during install (the
+#: "Brain model" step) but that pull runs AFTER the seed-copy loop this
+#: module's ``_main`` serves, so the file is not yet on disk to measure at
+#: seed time — this is the one llama.cpp seed with a KNOWN default model, so
+#: it is the one seed this can be more than a floor-only clamp for.
+#: ``agent`` ships deliberately model-less (spec-p3-brain.final.md §5b/5c —
+#: no surprise multi-GB download) and the other seeds pin no default either,
+#: so they get ``model_mib=0.0``: an honest "unknown", not a guess.
+_BRAIN_DEFAULT_MODEL_MIB = 2.87 * 1024
+
 
 def _resolve_hardware_info() -> HardwareInfo | None:
-    """Best-effort hardware fact for seed-device derivation, or ``None``.
+    """Best-effort hardware fact for seed-device/context-size derivation, or
+    ``None``.
 
-    Prefers the stored probe fact (``/etc/hal0/hardware.json``, written by
-    ``hal0 setup``) when it exists; otherwise runs a live light probe — the
-    fresh-install case, where install.sh's seed loop lands BEFORE ``hal0
-    setup --auto`` writes the fact. ``None`` (nothing resolvable) means the
-    caller keeps the verbatim seed devices: fail-soft, a wrong ROCm label
-    refuses loudly at load time with its remedy, and seeding must never
-    abort over a probe.
+    Routes through :func:`hal0.hardware.freshness.resolve_fresh_hardware_info`
+    (#1862) rather than trusting a cached ``/etc/hal0/hardware.json`` blindly:
+    on the fresh-install path this loop runs BEFORE ``hal0 setup --auto``
+    ever writes the fact, so the freshness resolver's live-probe fallback is
+    what makes this call return real hardware at all rather than an
+    all-defaults ``HardwareInfo()`` that would derive every GPU-needing seed
+    to ``cpu``. ``None`` (nothing resolvable even live) means the caller
+    keeps the verbatim seed devices/context sizes: fail-soft, a wrong ROCm
+    label refuses loudly at load time with its remedy, and seeding must
+    never abort over a probe.
     """
     try:
-        if paths.hardware_json().exists():
-            from hal0.config.loader import load_hardware_info
+        from hal0.hardware.freshness import resolve_fresh_hardware_info
 
-            return load_hardware_info()
-    except Exception as exc:
-        log.warning("install.seed_device_hw_fact_unreadable", error=str(exc))
-    try:
-        from hal0.hardware.probe import HardwareProbe
-
-        return HardwareProbe().probe()
+        info, _stale_reason = resolve_fresh_hardware_info()
+        return info
     except Exception as exc:
         log.warning("install.seed_device_probe_failed", error=str(exc))
         return None
@@ -185,6 +210,90 @@ def apply_derived_seed_devices(
     return rewritten
 
 
+def apply_context_size_envelope(
+    names: Collection[str],
+    *,
+    slots_dir: Path | None = None,
+    hw: HardwareInfo | None = None,
+) -> dict[str, int]:
+    """Clamp freshly-seeded llama.cpp slots' ``context_size`` to this box's
+    memory envelope (#1868).
+
+    Every curated seed ships ``context_size = 65536`` (or a smaller
+    workload-appropriate value) verbatim, sized for the reference platform —
+    a copy-if-absent install onto a small CPU-only box warms the brain slot
+    at 65536 with nothing budgeting for the KV cache that costs. This is the
+    same single pass ``apply_derived_seed_devices`` runs for the device
+    field: :func:`seed_static_slots` calls it after its copy loop, and
+    ``install.sh``'s bash seed loop calls it via ``python -m
+    hal0.install.static_seeds`` over the names it just copied.
+
+    Uses :func:`hal0.hardware.memory_envelope.clamp_context_size` — the
+    single-owner memory-budget function also read by the capacity ruler and
+    ``hal0 doctor``'s ``seed_context_envelope`` check — with
+    :data:`hal0.agents.anchor_window.HERMES_MINIMUM_CONTEXT_LENGTH` as the
+    floor for :data:`_HERMES_ANCHOR_SEEDS` (agent/brain): a box that cannot
+    afford 64K keeps the floor and gets a loud warning rather than a
+    silently-shrunk value that would make it un-chattable again (#1827).
+
+    Only names in :data:`LLAMA_SEED_CAPABILITIES` with an existing
+    ``<name>.toml`` are considered, mirroring
+    :func:`apply_derived_seed_devices`'s contract exactly (only names
+    copied THIS call — an operator's existing file must never reach this
+    function). Returns ``{name: new_context_size}`` for the files actually
+    rewritten.
+    """
+    from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
+    from hal0.hardware.memory_envelope import clamp_context_size
+
+    dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
+    resolved = hw
+    rewritten: dict[str, int] = {}
+    for name in names:
+        if name not in LLAMA_SEED_CAPABILITIES:
+            continue
+        dest = dest_dir / f"{name}.toml"
+        try:
+            text = dest.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = _CONTEXT_SIZE_LINE.search(text)
+        if match is None:
+            continue
+        try:
+            current = int(match.group(1))
+        except ValueError:
+            continue
+        if resolved is None:
+            resolved = _resolve_hardware_info()
+            if resolved is None:
+                log.warning(
+                    "install.seed_context_envelope_skipped",
+                    detail="hardware unresolvable — seeded slots keep their shipped context_size",
+                )
+                return rewritten
+        floor = HERMES_MINIMUM_CONTEXT_LENGTH if name in _HERMES_ANCHOR_SEEDS else 0
+        model_mib = _BRAIN_DEFAULT_MODEL_MIB if name == "brain" else 0.0
+        new_value, warning = clamp_context_size(
+            current, resolved, floor_tokens=floor, model_mib=model_mib
+        )
+        if new_value == current:
+            continue
+        new_text, n = _CONTEXT_SIZE_LINE.subn(f"context_size = {new_value}", text, count=1)
+        if n == 0 or new_text == text:
+            continue
+        dest.write_text(new_text, encoding="utf-8")
+        rewritten[name] = new_value
+        log.warning(
+            "install.seed_context_size_clamped",
+            slot=name,
+            requested=current,
+            clamped=new_value,
+            detail=warning,
+        )
+    return rewritten
+
+
 def seed_static_slots(
     *,
     installer_root: Path | None = None,
@@ -258,6 +367,10 @@ def seed_static_slots(
         # names copied THIS call are touched; existing/operator files above
         # were skipped and stay untouched.
         apply_derived_seed_devices(seeded, slots_dir=dest_dir, hw=hw)
+        # #1868: the same seeds carry a flat context_size sized for the
+        # reference platform — clamp it to what THIS box's memory envelope
+        # can afford.
+        apply_context_size_envelope(seeded, slots_dir=dest_dir, hw=hw)
     return seeded
 
 
@@ -364,6 +477,10 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"seeded {name} slot: device derived -> {device}")
     if not rewritten:
         print("seeded slot devices already match this host — nothing rewritten")
+
+    clamped = apply_context_size_envelope(args.names, slots_dir=args.slots_dir, hw=hw)
+    for name, context_size in sorted(clamped.items()):
+        print(f"seeded {name} slot: context_size clamped -> {context_size}")
     return 0
 
 
@@ -377,6 +494,7 @@ __all__ = [
     "LLAMA_SEED_CAPABILITIES",
     "STATIC_SEED_SLOTS",
     "add_seed_tombstone",
+    "apply_context_size_envelope",
     "apply_derived_seed_devices",
     "clear_seed_tombstone",
     "derive_seed_device",

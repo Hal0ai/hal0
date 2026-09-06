@@ -276,6 +276,94 @@ def test_hal0_target_enabled_probe_no_systemctl(monkeypatch: pytest.MonkeyPatch)
     assert da._hal0_target_enabled_probe() is None
 
 
+# ── check_hardware_freshness (#1862/H9) ───────────────────────────────────────
+
+
+def test_hardware_freshness_missing_file_warns(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    missing = tmp_path / "hardware.json"
+    monkeypatch.setattr("hal0.config.paths.hardware_json", lambda: missing)
+    c = da.check_hardware_freshness()
+    assert c.status == "warn"
+    assert c.key == "hardware_freshness"
+    assert "hal0 config hardware --refresh" in c.detail
+
+
+def test_hardware_freshness_fresh_cache_passes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import HardwareInfo
+    from hal0.hardware.freshness import current_kernel_string
+
+    path = tmp_path / "hardware.json"
+    path.write_text("{}")
+    kernel = current_kernel_string() or "Linux version test"
+    info = HardwareInfo(kernel=kernel, probed_at="2026-09-05T12:00:00+00:00")
+    monkeypatch.setattr("hal0.config.paths.hardware_json", lambda: path)
+    monkeypatch.setattr("hal0.config.loader.load_hardware_info", lambda: info)
+    monkeypatch.setattr("hal0.hardware.freshness.current_kernel_string", lambda: kernel)
+    monkeypatch.setattr(
+        "hal0.hardware.freshness._boot_time_epoch_s",
+        lambda: 0.0,
+    )
+    c = da.check_hardware_freshness()
+    assert c.status == "pass"
+
+
+def test_hardware_freshness_stale_cache_warns(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import HardwareInfo
+
+    path = tmp_path / "hardware.json"
+    path.write_text("{}")
+    stale = HardwareInfo(kernel="Linux version 1.0.0-old", probed_at="2020-01-01T00:00:00+00:00")
+    monkeypatch.setattr("hal0.config.paths.hardware_json", lambda: path)
+    monkeypatch.setattr("hal0.config.loader.load_hardware_info", lambda: stale)
+    monkeypatch.setattr(
+        "hal0.hardware.freshness.current_kernel_string", lambda: "Linux version 9.9.9-new"
+    )
+    c = da.check_hardware_freshness()
+    assert c.status == "warn"
+    assert "stale" in c.detail
+
+
+# ── check_seed_context_envelope (#1868) ───────────────────────────────────────
+
+
+def test_seed_context_envelope_no_slots_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    c = da.check_seed_context_envelope(slots_dir=tmp_path)
+    assert c.status == "pass"
+
+
+def test_seed_context_envelope_flags_an_oversized_ceiling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import HardwareInfo
+
+    (tmp_path / "brain.toml").write_text("[model]\ncontext_size = 999999999\n", encoding="utf-8")
+    cpu_only = HardwareInfo(platform="bare-metal-cpu-only", ram_mb=4096, gpus=[])
+    monkeypatch.setattr(
+        "hal0.hardware.freshness.resolve_fresh_hardware_info", lambda: (cpu_only, None)
+    )
+    c = da.check_seed_context_envelope(slots_dir=tmp_path)
+    assert c.status == "warn"
+    assert "brain" in c.detail
+
+
+def test_seed_context_envelope_passes_when_within_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import GPUInfo, HardwareInfo
+
+    (tmp_path / "brain.toml").write_text("[model]\ncontext_size = 8192\n", encoding="utf-8")
+    big_box = HardwareInfo(
+        platform="strix-halo",
+        ram_mb=131072,
+        gpus=[GPUInfo(vendor="amd", vram_mb=131072, compute_capable=True, vulkan_capable=True)],
+    )
+    monkeypatch.setattr(
+        "hal0.hardware.freshness.resolve_fresh_hardware_info", lambda: (big_box, None)
+    )
+    c = da.check_seed_context_envelope(slots_dir=tmp_path)
+    assert c.status == "pass"
+
+
 # ── check_agent_uid_isolation (ADR-0002) ──────────────────────────────────────
 
 
@@ -929,8 +1017,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 17 extras.
-    assert keys[-17:] == [
+    # 7 verify rows + 19 extras.
+    assert keys[-19:] == [
         "auth",
         "models",
         "migrations",
@@ -940,6 +1028,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "netns",
         "hal0_target",
         "secret-modes",
+        "hardware_freshness",
+        "seed_context_envelope",
         "agent-uid",
         "stt-weights",
         "seams",

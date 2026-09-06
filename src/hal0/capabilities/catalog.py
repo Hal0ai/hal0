@@ -28,7 +28,7 @@ from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
-from hal0.providers._gpu import host_is_amd_gpu
+from hal0.providers._gpu import host_is_amd_gpu, kfd_present
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
 from hal0.runners import RUNNER_IMAGES
@@ -79,6 +79,13 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "comfyui": ("gpu-vulkan",),
     "qwen3tts": ("gpu-rocm",),  # Qwen3-TTS runner is ROCm-only (needs /dev/kfd)
 }
+
+#: Runtimes whose image is ROCm-only (needs /dev/kfd) despite the
+#: HOST_BACKENDS id it fans out to being the picker's generic Vulkan GPU row
+#: (#1941's "gpu-vulkan is the row label, not an image claim"). qwen3tts is
+#: exempt from the extra check below — its own HOST_BACKENDS entry IS
+#: ``"gpu-rocm"``, already kfd-gated by :func:`available_backends`.
+_ROCM_ONLY_RUNTIMES = frozenset({"comfyui"})
 
 _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
     "chat": "llm",
@@ -290,8 +297,15 @@ def available_backends() -> list[dict[str, Any]]:
                     "multiplex": False,
                 }
             )
-        # ROCm path — only AMD GPUs with compute support light this up.
-        if primary_gpu.vendor == "amd" and primary_gpu.compute_capable:
+        # ROCm path — an AMD GPU this box can actually run ROCm on.
+        # ``compute_capable`` alone under-reports (#2216): it is only
+        # "rocm-smi --showproductname exited 0", a ROCm *userspace CLI*
+        # probe that install.sh never installs, so a fresh container with a
+        # perfectly usable /dev/kfd read False here and the badge (and every
+        # ROCm-only runtime's picker row, e.g. Qwen3-TTS below) went missing.
+        # kfd_present() (device-node truth) is sufficient on its own — same
+        # ruling as hal0.install.profile_derive.derive_device's ROCm lane.
+        if primary_gpu.vendor == "amd" and (primary_gpu.compute_capable or kfd_present()):
             out.append(
                 {
                     "id": "gpu-rocm",
@@ -402,6 +416,9 @@ def _backend_variants(entry: Any) -> list[str]:
         # CPU-only ONNX wheel, ComfyUI's Vulkan-only image, …) — an
         # explicit provider still can't advertise a lane the host can't
         # actually serve.
+        if explicit in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not kfd_present():
+            # #1966 — see the identical guard on the tag-driven branch below.
+            return []
         host_backends = {b["id"] for b in available_backends()}
         return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(explicit, ()) if c in host_backends]
     # explicit llama-server (or unset) falls through to the existing
@@ -519,6 +536,19 @@ def _backend_variants(entry: Any) -> list[str]:
             # the slot TOML would say backend=vulkan but the container
             # would still pin every op to CPU.
             host_backends = {b["id"] for b in available_backends()}
+            if low in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not kfd_present():
+                # #1966: comfyui's HOST_BACKENDS entry is labelled
+                # "gpu-vulkan" — the picker's GENERIC GPU row (#1941) — but
+                # the image behind it is ROCm-only (ComfyUIProvider.
+                # gpu_runtime_needs_rocm). available_backends() rightly
+                # advertises gpu-vulkan whenever ANY Vulkan-capable render
+                # node exists, which on a kfd-less AMD box is exactly the
+                # "reachable lane" this runtime does NOT have: the load-time
+                # guard (require_kfd_for_gpu_slot) refuses it by name. Drop
+                # the row rather than offer one guaranteed to fail — qwen3tts
+                # needs no separate check here, its HOST_BACKENDS entry is
+                # the correctly-gated "gpu-rocm" id itself.
+                continue
             for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)

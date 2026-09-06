@@ -497,26 +497,32 @@ def _artefact_token(slot: Any) -> str:
 
 
 def _host_has_capable_gpu() -> bool:
-    """True if the hardware probe found at least one usable GPU on this box.
+    """True if this box has at least one usable GPU right now.
 
     "Usable" means Vulkan- or compute- (ROCm/CUDA) capable — the same
     ``vulkan_capable`` / ``compute_capable`` signal #1799 added to
     :class:`~hal0.config.schema.GPUInfo` and that :mod:`hal0.hardware.recommend`
-    already gates device recommendations on. Reads the cached
-    ``/etc/hal0/hardware.json`` written by ``hal0 probe`` via
-    :func:`hal0.config.loader.load_hardware_info` — cheap (one small JSON
-    file, no re-probe) and honest: an absent file / no probed GPU degrades
-    to ``HardwareInfo(gpus=[])``, which correctly reads as "no capable GPU"
-    rather than raising.
+    already gates device recommendations on.
+
+    Reads through :func:`hal0.hardware.freshness.resolve_fresh_hardware_info`
+    rather than the cached ``/etc/hal0/hardware.json`` directly (#1862): a
+    missing cache used to degrade straight to ``HardwareInfo(gpus=[])`` —
+    "no capable GPU" — on any install where ``hal0 probe`` had not run yet,
+    and a cache that predated a kernel upgrade/reboot or the #1799 capability
+    fields was trusted forever. Both booked a real GPU box's resident memory
+    as RAM instead of VRAM. The freshness resolver falls back to a live probe
+    exactly in those cases; a missing probe binary or a probe that itself
+    fails still degrades to the (possibly stale) cached answer, so this
+    keeps the original conservative contract: an unprovable case reads as
+    "no capable GPU" rather than inventing one.
 
     Never raises: any error probing/loading hardware state degrades to
-    ``False`` (the conservative choice — books memory as RAM rather than
-    risking phantom VRAM on a box we couldn't positively confirm has one).
+    ``False``.
     """
     try:
-        from hal0.config.loader import load_hardware_info
+        from hal0.hardware.freshness import resolve_fresh_hardware_info
 
-        info = load_hardware_info()
+        info, _stale_reason = resolve_fresh_hardware_info()
     except Exception:
         return False
     return any(g.vulkan_capable or g.compute_capable for g in info.gpus)

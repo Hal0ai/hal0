@@ -51,7 +51,12 @@ an explicit device pin, never "whatever llama.cpp picks":
 
 - **ROCm** (`gpu-rocm`) — AMD's compute stack, and the lane hal0 seeds where
   the box can run it. It needs the `/dev/kfd` compute node visible to hal0 and
-  to the slot containers; a `gpu-rocm` slot without it refuses to load.
+  to the slot containers; a `gpu-rocm` slot without it refuses to load. hal0
+  decides this lane from the device node itself — `/dev/kfd` present and
+  openable by the slot-runner identity — never from whether a `rocm-smi`
+  binary happens to be installed in the guest. A fresh container or LXC has
+  no `rocm-smi` by default; that must never be why a box that already has
+  `/dev/kfd` forwarded gets seeded onto Vulkan instead.
 - **Vulkan** (`gpu-vulkan`) — the Mesa/RADV path. It needs only a DRM render
   node (`/dev/dri/renderD*`), which makes it the lane for boxes where `/dev/kfd`
   was never forwarded — an unprivileged LXC, for instance. It is also the lane
@@ -149,6 +154,17 @@ section of [Slots](/docs/concepts/slots)): it gives the GPU's memory to
 either the LLM slots or the image slot, one group at a time, rather than
 letting them fight over the pool.
 
+hal0 also never budgets a model against the *entire* unified pool: the OS,
+the container runtime, and every other slot need headroom too. Anywhere hal0
+decides how much memory a model + its context window may spend — sizing a
+freshly seeded slot's `context_size` at install time, `hal0 doctor` flagging
+an oversized one, or the capacity API's fit estimate — it works from a
+bounded **memory envelope**, not the raw pool: on unified-memory hardware
+that is 55% of total RAM, floored so a small-RAM APU still gets a usable
+minimum; on a discrete GPU it's the card's own VRAM; on a CPU-only box it's a
+smaller, capped share of RAM. A single shared function computes this so
+every one of those call sites agrees on the same number.
+
 ![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
 *The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*
 
@@ -166,6 +182,16 @@ its own value, alongside generic ones such as `bare-metal-amd-gpu`,
 `bare-metal-nvidia-gpu`, `lxc`, `kvm`, `proxmox-kvm`, and `wsl2` — and the
 dashboard uses that to label memory as "unified" only on the platforms where
 that's true.
+
+The probe result is cached at `/etc/hal0/hardware.json`; the lane derivation
+above, and the dashboard's VRAM/RAM split, read that cache rather than
+re-probing on every request. hal0 detects when the cache should not be
+trusted — missing, predating the running kernel, or written in a previous
+boot cycle — and falls back to a live re-probe automatically rather than
+risking a stale answer; `hal0 doctor`'s `hardware_freshness` row surfaces
+this so you know when it's happening. See
+[GPU drivers and memory](/docs/getting-started/drivers) for when to
+re-run the probe yourself.
 
 <Aside type="caution">
 CUDA has nothing to do with Strix Halo — there's no NVIDIA silicon on this
