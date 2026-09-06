@@ -169,9 +169,13 @@ test.describe('Settings → Agent Chat (schema-driven, #2108)', () => {
     await mockSettingsSurface(page, { toolModel: 'hal0/agent', liveTarget: false })
     await openAgentChat(page)
 
+    // The static "Disabled" option is always the last entry `toolModelOptions`
+    // pushes regardless of which slots are configured — picking it (rather
+    // than a slot-derived id) keeps this assertion independent of the exact
+    // slot list a shared fixture happens to seed elsewhere in the suite.
     const trigger = page.getByTestId('brain-chat-tool-model-select')
-    await pickRichOption(trigger, 'hal0/utility')
-    await expect(trigger).toContainText('hal0/utility')
+    await pickRichOption(trigger, 'off')
+    await expect(trigger).toContainText('Disabled')
 
     let previewBody: unknown = null
     await page.route('**/api/settings/preview', (route) => {
@@ -185,7 +189,7 @@ test.describe('Settings → Agent Chat (schema-driven, #2108)', () => {
               {
                 path: 'brain_chat.tool_model',
                 before: 'hal0/agent',
-                after: 'hal0/utility',
+                after: 'off',
                 kind: 'changed',
                 apply_class: 'immediate',
                 services: [],
@@ -203,8 +207,8 @@ test.describe('Settings → Agent Chat (schema-driven, #2108)', () => {
     // The preview drawer shows the real diff before anything is written.
     await expect(page.locator('.drawer.open')).toContainText('brain_chat.tool_model')
     await expect(page.locator('.drawer.open')).toContainText('hal0/agent')
-    await expect(page.locator('.drawer.open')).toContainText('hal0/utility')
-    expect(previewBody).toEqual({ brain_chat: { tool_model: 'hal0/utility' } })
+    await expect(page.locator('.drawer.open')).toContainText('off')
+    expect(previewBody).toEqual({ brain_chat: { tool_model: 'off' } })
 
     let putBody: unknown = null
     await page.route('**/api/settings', (route) => {
@@ -214,11 +218,11 @@ test.describe('Settings → Agent Chat (schema-driven, #2108)', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          brain_chat: brainChatConfig({ tool_model: 'hal0/utility' }),
+          brain_chat: brainChatConfig({ tool_model: 'off' }),
           _hal0: {
             apply_plan: { immediate: ['brain_chat.tool_model'], service_restart: {}, manual_restart: [], unknown: [] },
             changeset: {
-              changes: [{ path: 'brain_chat.tool_model', before: 'hal0/agent', after: 'hal0/utility', kind: 'changed', apply_class: 'immediate', services: [] }],
+              changes: [{ path: 'brain_chat.tool_model', before: 'hal0/agent', after: 'off', kind: 'changed', apply_class: 'immediate', services: [] }],
               unknown: [],
             },
           },
@@ -230,7 +234,7 @@ test.describe('Settings → Agent Chat (schema-driven, #2108)', () => {
 
     // The exact patch previewed is the exact patch applied — same body,
     // preview and apply agree because they're the same ChangeSet.
-    expect(putBody).toEqual({ brain_chat: { tool_model: 'hal0/utility' } })
+    expect(putBody).toEqual({ brain_chat: { tool_model: 'off' } })
     await expect(page.locator('.drawer.open')).toHaveCount(0)
     await expect(page.locator('.hal0-toast')).toContainText(/saved/i)
   })
