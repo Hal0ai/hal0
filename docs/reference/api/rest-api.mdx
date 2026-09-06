@@ -117,7 +117,7 @@ silently paper over.
 | `/api/config` | Mixed | `GET /api/config/urls` (dashboard bootstrap hostnames) is OPEN; the rest of this prefix is ADMIN (may hold config-derived secrets). |
 | `/api/meta` | CLIENT (GET) / ADMIN (else) | `GET /api/meta/enums` — the canonical device/backend/capability vocabulary from `hal0.model_meta`. |
 | `/api/hf` | CLIENT (GET) / ADMIN (else) | HuggingFace Hub search proxy backing the dashboard's "Search HF" button. |
-| `/api/services` | ADMIN | `services_health.router` (`GET /api/services/health`, 3-service overview) and `services_routes.router` (full per-service detail + lifecycle actions + mDNS) share this prefix. |
+| `/api/services` | ADMIN | `services_health.router` (`GET /api/services/health`, stable overview iterating `hal0.services.registry.SERVICES` — comfyui, hermes, hindsight, openwebui) and `services_routes.router` (full per-service detail + lifecycle actions + mDNS) share this prefix. |
 | `/api/dashboard/plugins` | ADMIN | Hermes dashboard-plugin manifest (kanban plugin discovery for `<AgentView>`). |
 | `/api/openrouter` | ADMIN | OpenRouter OAuth callback scaffold — only mounted when `HAL0_OPENROUTER_OAUTH_ENABLED` is truthy; 501 placeholder otherwise absent from the route table entirely. |
 

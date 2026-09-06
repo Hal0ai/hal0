@@ -1113,7 +1113,15 @@ class SlotViewAggregator:
             # a model-less slot with neither has nothing to resolve).
             raw_ctx_max = payload.get("ctx_max")
             model_id = str(payload.get("model_default") or "")
-            if model_id or isinstance(raw_ctx_max, int):
+            # #1859: only an "llm" slot runs llama-server with a resolvable
+            # context window. Every other kind (embedding/reranking/
+            # transcription/tts/image — FLM, Kokoro, Moonshine, Qwen3-TTS,
+            # ComfyUI) has no such concept; calling the llama-only resolver
+            # for them fabricated an 8192 "window" (resolve_effective_
+            # context_size's safe fallback for an unrecognised model) that
+            # slot never runs with. Non-llm slots keep whatever raw ctx_max
+            # config_enrichment lifted (usually absent — key stays omitted).
+            if payload.get("type") == "llm" and (model_id or isinstance(raw_ctx_max, int)):
                 # NO ``slot_cfg`` on this path, deliberately (#1946/I2). This
                 # is the ~2s dashboard poll: handing the cfg down would make
                 # every specialty-model slot resolve a preview bundle — and
