@@ -18,16 +18,17 @@
 // server-computed `live_target` drives a plain-language banner when the
 // SAVED value has nowhere live to route a tool call (the fresh-install gap
 // #2108 documents: the `agent` slot ships with no bound model).
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { useSettingsForm } from '../../data/useSettingsForm.js'
-import { useSettingsFields } from '@/api/hooks/useSettings'
+import { useSettingsFields, useSettingsPreview } from '@/api/hooks/useSettings'
 import { useSlots } from '@/api/hooks/useSlots'
-import { ConfirmDialog, Banner } from '../../../primitives.jsx'
+import { Banner } from '../../../primitives.jsx'
 import { RichSelect } from '@/dash/rich-select.jsx'
 import { AdvRow, _getIn } from '../../shared/SchemaRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
+import { SettingsPreviewDrawer } from '../../shared/SettingsPreviewDrawer.jsx'
 
 // Mirrors the canonical chains in hal0.normalize.resolver.DEFAULT_CHAINS —
 // advisory only, for the picker's per-option "loaded" chip before a save.
@@ -136,7 +137,10 @@ export function AgentsBrainPage() {
     'brain_chat.tool_model', 'brain_chat.max_rounds', 'brain_chat.completion_timeout_s',
   ];
   const form = useSettingsForm(client, KEYS);
-  const { buf, set, fields, dirtyKeys, invalidKeys, canSave, confirmKeys } = form;
+  const { buf, set, fields, dirtyKeys, canSave } = form;
+  const preview = useSettingsPreview();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
 
   const modelValue = buf['brain_chat.model'] !== undefined ? buf['brain_chat.model'] : (live.model || '');
   const toolModelValue = buf['brain_chat.tool_model'] !== undefined
@@ -154,9 +158,25 @@ export function AgentsBrainPage() {
   const savedToolModelHasNoLiveTarget = fieldsByPath['brain_chat.tool_model']?.live_target === false
     && !dirtyKeys.includes('brain_chat.tool_model');
 
-  const doSave = async () => {
+  // Preview before apply (#1967, #2195, #2203, #1511): the drawer renders
+  // the exact ChangeSet POST /api/settings/preview computes for the pending
+  // patch; Apply below re-sends that same patch through PUT /api/settings,
+  // which computes the identical ChangeSet server-side — preview can't show
+  // something apply wouldn't do, because it's the same function.
+  const onSaveClick = async () => {
+    try {
+      const resp = await preview.mutateAsync(form.buildPatch());
+      setPreviewData(resp.changeset);
+      setPreviewOpen(true);
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Preview failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const confirmApply = async () => {
     try {
       const { needsRestart } = await form.commit();
+      setPreviewOpen(false);
       window.__hal0Toast && window.__hal0Toast(
         needsRestart ? "Saved — restart to apply the marked changes" : "Brain chat settings saved",
         needsRestart ? "warn" : "ok",
@@ -164,12 +184,6 @@ export function AgentsBrainPage() {
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
     }
-  };
-
-  const onSaveClick = async () => {
-    const manual = dirtyKeys.filter(k => client.reloadClass(k)?.apply_class === "manual-restart");
-    if (manual.length > 0) { form.submit(); return; }
-    doSave();
   };
 
   const loading = settings.isPending || client.schema.isPending;
@@ -242,27 +256,20 @@ export function AgentsBrainPage() {
 
           <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
             {dirtyKeys.length > 0 && <button className="btn ghost sm" onClick={form.reset}>Reset</button>}
-            <button className="btn sm" disabled={!canSave} onClick={onSaveClick}>
-              {update.isPending ? "Saving…" : "Save"}
+            <button className="btn sm" disabled={!canSave || preview.isPending} onClick={onSaveClick}>
+              {preview.isPending ? "Checking…" : "Review & save"}
             </button>
           </div>
         </div>
       )}
 
-      <ConfirmDialog
-        open={!!confirmKeys}
-        onCancel={form.clearConfirm}
-        onConfirm={() => { form.clearConfirm(); doSave(); }}
-        title="Manual restart required"
-        message={
-          <span>
-            {confirmKeys && confirmKeys.length === 1
-              ? <>The setting <b className="mono">{confirmKeys[0]}</b> requires</>
-              : <>These settings ({confirmKeys && confirmKeys.map(k => <b className="mono" key={k}>{k} </b>)}) require</>}{" "}
-            a <b>manual operator restart</b> to take effect. Values are persisted now.
-          </span>
-        }
-        confirmLabel="Save anyway"
+      <SettingsPreviewDrawer
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        changes={previewData?.changes}
+        unknown={previewData?.unknown}
+        onConfirm={confirmApply}
+        confirming={update.isPending}
       />
     </div>
   );

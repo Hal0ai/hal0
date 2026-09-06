@@ -8,11 +8,12 @@
 // renderer closes: every row here comes from GET /api/settings/schema (via
 // AdvRow / useSettingsForm, the same machinery AdvancedPage uses), grouped
 // by the operator's own questions rather than the TOML's flat key order.
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { useSettingsForm } from '../../data/useSettingsForm.js'
-import { ConfirmDialog } from '../../../primitives.jsx'
+import { useSettingsPreview } from '@/api/hooks/useSettings'
 import { AdvRow, _getIn } from '../../shared/SchemaRow.jsx'
+import { SettingsPreviewDrawer } from '../../shared/SettingsPreviewDrawer.jsx'
 
 const REALTIME_GROUPS = [
   { title: "Core", sub: "Kill switch, sample rate, and which slots serve STT/TTS", keys: [
@@ -35,12 +36,29 @@ export function RealtimePage() {
 
   const allKeys = REALTIME_GROUPS.flatMap(g => g.keys);
   const form = useSettingsForm(client, allKeys);
-  const { buf, fields, dirtyKeys, invalidKeys, canSave, confirmKeys } = form;
+  const { buf, fields, dirtyKeys, invalidKeys, canSave } = form;
   const onChange = form.set;
+  const preview = useSettingsPreview();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
 
-  const doSave = async () => {
+  // Preview before apply (#1967, #2195, #2203, #1511) — see AgentsBrainPage
+  // for the full rationale; same drawer, same one server ChangeSet function
+  // behind both the preview and the eventual PUT.
+  const onSaveClick = async () => {
+    try {
+      const resp = await preview.mutateAsync(form.buildPatch());
+      setPreviewData(resp.changeset);
+      setPreviewOpen(true);
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Preview failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const confirmApply = async () => {
     try {
       const { needsRestart } = await form.commit();
+      setPreviewOpen(false);
       window.__hal0Toast && window.__hal0Toast(
         needsRestart ? "Saved — restart to apply the marked changes" : "Realtime settings saved",
         needsRestart ? "warn" : "ok",
@@ -48,12 +66,6 @@ export function RealtimePage() {
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
     }
-  };
-
-  const onSaveClick = async () => {
-    const manual = dirtyKeys.filter(k => client.reloadClass(k)?.apply_class === "manual-restart");
-    if (manual.length > 0) { form.submit(); return; }
-    doSave();
   };
 
   const loading = settings.isPending || schemaQuery.isPending;
@@ -106,24 +118,19 @@ export function RealtimePage() {
             </span>
             <div style={{display: "inline-flex", gap: 8}}>
               <button className="btn ghost sm" disabled={dirtyKeys.length === 0 || update.isPending} onClick={form.reset}>Reset</button>
-              <button className="btn" disabled={!canSave} onClick={onSaveClick}>{update.isPending ? "Saving…" : "Save changes"}</button>
+              <button className="btn" disabled={!canSave || preview.isPending} onClick={onSaveClick}>
+                {preview.isPending ? "Checking…" : "Review & save"}
+              </button>
             </div>
           </div>
 
-          <ConfirmDialog
-            open={!!confirmKeys}
-            onCancel={form.clearConfirm}
-            onConfirm={() => { form.clearConfirm(); doSave(); }}
-            title="Manual restart required"
-            message={
-              <span>
-                {confirmKeys && confirmKeys.length === 1
-                  ? <>The setting <b className="mono">{confirmKeys[0]}</b> requires</>
-                  : <>These settings ({confirmKeys && confirmKeys.map(k => <b className="mono" key={k}>{k} </b>)}) require</>}{" "}
-                a <b>manual operator restart</b> to take effect. Values are persisted now.
-              </span>
-            }
-            confirmLabel="Save anyway"
+          <SettingsPreviewDrawer
+            open={previewOpen}
+            onClose={() => setPreviewOpen(false)}
+            changes={previewData?.changes}
+            unknown={previewData?.unknown}
+            onConfirm={confirmApply}
+            confirming={update.isPending}
           />
         </>
       )}

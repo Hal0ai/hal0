@@ -247,6 +247,42 @@ export function useSettingsFields() {
   })
 }
 
+// ── One ChangeSet, shared by preview and apply (#1967, #2195, #2203, #1511) ──
+//
+// POST /api/settings/preview and the `_hal0.changeset` on PUT /api/settings
+// both render this same shape — `hal0.api._settings_changeset.compute_
+// settings_changeset` is the one function behind both, so a preview drawer
+// built from this type shows exactly what the apply will write.
+
+export interface SettingsChange {
+  path: string
+  before: unknown
+  after: unknown
+  kind: 'added' | 'removed' | 'changed'
+  apply_class: 'immediate' | 'service-restart' | 'manual-restart' | null
+  services: string[]
+}
+
+export interface SettingsChangesetPayload {
+  changes: SettingsChange[]
+  unknown: string[]
+}
+
+export interface SettingsPreviewResponse {
+  changeset: SettingsChangesetPayload
+  apply_plan: unknown
+}
+
+// Dry-run mutation — deliberately not cached (queryClient has no notion of
+// "preview for this exact patch"), and never writes to SETTINGS_KEY: a
+// preview must never be mistaken for a save by anything reading react-query
+// state.
+export function useSettingsPreview() {
+  return useMutation<SettingsPreviewResponse, Hal0Error, Partial<Hal0Settings>>({
+    mutationFn: (patch) => apiPost<SettingsPreviewResponse>(ENDPOINTS.settingsPreview, patch),
+  })
+}
+
 export function useModelStoreMigrate() {
   const qc = useQueryClient()
   return useMutation<SetStoreResponse, Hal0Error, { path: string }>({
