@@ -24,8 +24,44 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Schema-driven settings**: `GET /api/settings/fields` returns one labelled
+  row per operator-editable `Hal0Config` key — group, label, a
+  consequence-first description, type/enum/range, default, current value,
+  reload class, secret flag, and (for a `hal0/<slot>`-shaped value) whether
+  it currently resolves to a loaded slot. Every leaf's description is a
+  hard requirement, enforced by a completeness ratchet
+  (`tests/api/test_settings_fields.py`) the same shape as the exposure
+  ratchet: a new config field ships with no dashboard row until it's
+  documented. Settings → Integrations gains a new **Realtime** page for the
+  previously entirely unexposed `[realtime]` WS voice-endpoint config
+  (#2108).
+- **One ChangeSet for settings preview and apply**: `POST
+  /api/settings/preview` computes the exact diff a `PUT /api/settings` with
+  the same body would apply — before/after per key, added/changed/removed,
+  reload class, and services affected — without writing anything. `PUT
+  /api/settings` now returns the same payload under `_hal0.changeset`
+  (additive alongside the existing `_hal0.apply_plan`), since both routes
+  call the one `compute_settings_changeset` function. Closes the shape of
+  four related bugs (a hardcoded changed-fields list that lies on a no-op,
+  a preview that bills additions but not removals, a round-trip that can
+  silently drop a key, and a preview whose promise the apply doesn't keep)
+  as regression fixtures against the general settings surface (#1967,
+  #2195, #2203, #1511).
+
 ### Fixed
 
+- `[brain_chat].tool_model` — the one `[brain_chat]` key with real routing
+  consequences (where a tool-calling round reroutes when the chat model
+  can't emit tool calls this runtime parses) — had no dashboard path at
+  all; the Agent Chat settings page saved every other key but silently
+  dropped this one. It now renders as a `RichSelect` over every configured
+  chat-capable slot, an explicit "same as chat model" preset, and a
+  "Disabled" choice, with a plain-language banner when the saved value has
+  no live target — the shipped `hal0/agent` default ships unbound on a
+  fresh install, so the gap is now visible in the dashboard instead of
+  discovered mid-chat (#2108).
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot

@@ -103,8 +103,11 @@ key fails validation rather than being silently ignored.
 | `completion_timeout_s` | float | `300.0` | `> 0`. Transport timeout for each LLM round. |
 
 The dashboard's Agent Chat settings page (Settings → Integrations) edits
-`enabled`, `read_only`, `model`, `max_rounds`, and `completion_timeout_s`
-live — `tool_model` is not exposed there; it's a `hal0.toml`-only knob today.
+every key above live, including `tool_model` — a picker over every
+configured chat-capable slot, an explicit "same as chat model" preset, and
+a "Disabled" choice. When the saved value has no live target (the
+fresh-install gap below), the page says so with a plain-language banner
+instead of the operator discovering it mid-chat.
 
 ### How tool routing resolves
 

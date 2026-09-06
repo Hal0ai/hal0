@@ -154,8 +154,17 @@ one line and a link here rather than a repeat.
   restart) so a gated or large pull can authenticate right away. See
   "Secrets" on [REST API index](/docs/reference/api/rest-api/) for the
   write path.
-- **Agent Chat** — the `[brain_chat]` policy surface (kill switch, target
-  slot override, loop knobs). See [Brain](/docs/concepts/brain).
+- **Agent Chat** — the `[brain_chat]` policy surface: kill switch,
+  read-only guardrail, chat model override, tool-routing model, and loop
+  knobs. `tool_model` (where a tool-calling round reroutes when the chat
+  model can't emit tool calls this runtime parses) has its own picker
+  here, with a warning banner when the saved value has no loaded slot to
+  route to — the shipped `hal0/agent` default on a fresh install, before
+  a model is pulled into that slot. See [Brain](/docs/concepts/brain).
+- **Realtime** — the `[realtime]` WS voice-endpoint surface: kill switch,
+  sample rate, which slots serve speech-to-text/text-to-speech, the
+  energy-VAD turn-detection thresholds, and output framing. Every key
+  applies on the next connection — no restart.
 
 ## Settings ▸ Storage, in detail
 
