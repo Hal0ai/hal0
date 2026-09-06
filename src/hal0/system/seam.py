@@ -36,8 +36,10 @@ import os
 import pwd
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+
+from hal0.errors import Hal0Error
 
 #: The wrapper's installed path (``installer/wrappers/hal0-systemctl`` ->
 #: ``${LIB_DIR}/bin/hal0-systemctl`` at install time).
@@ -112,6 +114,72 @@ class Hal0SeamMissing(RuntimeError):
     caller (``hal0 doctor``) can give a precise remediation instead of a raw
     traceback.
     """
+
+
+class SeamTimeout(Hal0Error):
+    """A bounded systemctl/podman seam call did not return within its budget
+    (#1869/#1870).
+
+    Raised by :func:`bounded_call` in place of the bare
+    :class:`subprocess.TimeoutExpired` every direct ``_run`` caller used to
+    let escape (or, worse, never bounded at all): a ``Hal0Error`` subclass
+    carries a stable ``code`` the API error-envelope middleware renders
+    uniformly, and a message an operator (or the CLI's own timeout handler)
+    can act on without reading a Python traceback.
+
+    ``details`` carries the three facts #1869 asked for: the ``command`` that
+    wedged, the ``budget_s`` it was given, and ``last_state`` — whatever the
+    child had already written to stdout/stderr at the moment it was killed
+    (``subprocess.TimeoutExpired.stdout``/``.stderr`` when the call captured
+    output, which every :class:`SystemCtlSeam` route does). ``None`` when the
+    child produced no output before the kill — a wedge that never got as far
+    as writing anything, which is itself informative (it did not even reach
+    the point of talking to systemd/podman).
+    """
+
+    code = "slot.seam_timeout"
+    status = 504
+
+    def __init__(self, command: Sequence[str], budget_s: float, last_state: str | None) -> None:
+        cmd = " ".join(command)
+        message = f"`{cmd}` did not return within {budget_s:g}s"
+        if last_state:
+            message += f" — last observed: {last_state}"
+        super().__init__(
+            message,
+            details={"command": list(command), "budget_s": budget_s, "last_state": last_state},
+        )
+
+
+def bounded_call(
+    argv: Sequence[str],
+    *,
+    timeout: float | None,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+    **kwargs: object,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``argv`` through ``run``, turning a timeout into :class:`SeamTimeout`.
+
+    THE one place a ``systemctl``/``podman`` child's ``subprocess.TimeoutExpired``
+    becomes the typed error the rest of hal0 (the slot state machine, the API
+    error envelope, the CLI) knows how to handle — every :class:`SystemCtlSeam`
+    route calls this instead of ``run`` directly (#1869).
+
+    ``timeout=None`` is a deliberate passthrough (no bound applied, matching
+    ``subprocess.run``'s own default) rather than a special case: callers that
+    have not been given a budget yet keep today's unbounded wait instead of
+    silently gaining a bogus one.
+    """
+    try:
+        return run(list(argv), timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raw_state = exc.stdout or exc.stderr or None
+        last_state: str | None
+        if isinstance(raw_state, bytes):
+            last_state = raw_state.decode("utf-8", errors="replace").strip() or None
+        else:
+            last_state = raw_state.strip() or None if raw_state else None
+        raise SeamTimeout(list(argv), float(timeout or 0.0), last_state) from exc
 
 
 def is_hal0_service_user() -> bool:
@@ -268,8 +336,14 @@ class SystemCtlSeam:
     # written via :meth:`write_quadlet`. ``remove_unit`` stays for legacy
     # pre-quadlet ``.service`` cleanup.
 
-    def remove_unit(self, unit_path: Path) -> None:
-        """Delete a ``hal0-slot@<id>.service`` unit file (no-op if absent)."""
+    def remove_unit(self, unit_path: Path, *, timeout: float | None = None) -> None:
+        """Delete a ``hal0-slot@<id>.service`` unit file (no-op if absent).
+
+        ``timeout`` (seconds, ``None`` = unbounded) bounds the seam child on
+        the hal0-service-user route, like :meth:`systemctl`'s (#1869) — a
+        wedged sudo/root-side ``rm`` on this path is otherwise indistinguishable
+        from a slow one.
+        """
         if not self._is_hal0_user():
             unit_path.unlink(missing_ok=True)
             return
@@ -278,9 +352,16 @@ class SystemCtlSeam:
             raise ValueError(f"not a hal0-slot@ unit: {unit_path.name!r}")
         # Mirrors the direct path's tolerance of "already gone" (missing_ok):
         # the wrapper's remove-unit is idempotent (rm -f semantics).
-        self._run(self._seam_argv("remove-unit", slot_id), check=False)
+        bounded_call(
+            self._seam_argv("remove-unit", slot_id),
+            timeout=timeout,
+            run=self._run,
+            check=False,
+        )
 
-    def write_quadlet(self, quadlet_path: Path, unit_text: str) -> None:
+    def write_quadlet(
+        self, quadlet_path: Path, unit_text: str, *, timeout: float | None = None
+    ) -> None:
         """Write a ``hal0-slot@<token>.container`` Quadlet source file (P3-quadlet).
 
         The declarative Quadlet replacement for the removed ``write_unit``:
@@ -296,6 +377,11 @@ class SystemCtlSeam:
         can no longer carry a host-side ``[Service] ExecStartPre=``. Rendering
         here is a convenience, never the control — see the wrapper's HONEST
         BOUNDARY note for what the allow-list does and does not claim.
+
+        ``timeout`` (seconds, ``None`` = unbounded) bounds the seam child
+        (#1869): this write is the first of three seam calls every slot load
+        makes before the container ever spawns, so a wedge here is just as
+        capable of hanging the CLI/API as the ``systemctl restart`` after it.
         """
         if not self._is_hal0_user():
             quadlet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,22 +390,32 @@ class SystemCtlSeam:
         token = _slot_id_from_quadlet(quadlet_path.name)
         if token is None:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
-        self._run(
+        bounded_call(
             self._seam_argv("write-quadlet", token),
+            timeout=timeout,
+            run=self._run,
             input=unit_text,
             text=True,
             check=True,
         )
 
-    def remove_quadlet(self, quadlet_path: Path) -> None:
-        """Delete a ``hal0-slot@<token>.container`` Quadlet file (no-op if absent)."""
+    def remove_quadlet(self, quadlet_path: Path, *, timeout: float | None = None) -> None:
+        """Delete a ``hal0-slot@<token>.container`` Quadlet file (no-op if absent).
+
+        ``timeout`` bounds the seam child, like :meth:`write_quadlet`'s (#1869).
+        """
         if not self._is_hal0_user():
             quadlet_path.unlink(missing_ok=True)
             return
         token = _slot_id_from_quadlet(quadlet_path.name)
         if token is None:
             raise ValueError(f"not a hal0-slot@ quadlet file: {quadlet_path.name!r}")
-        self._run(self._seam_argv("remove-quadlet", token), check=False)
+        bounded_call(
+            self._seam_argv("remove-quadlet", token),
+            timeout=timeout,
+            run=self._run,
+            check=False,
+        )
 
     def write_hindsight_dropin(
         self,
@@ -433,60 +529,42 @@ class SystemCtlSeam:
         behaviour) bounds the child process. Callers that must not be able to
         wedge — notably the slot ``systemctl stop`` on a unit systemd has
         already parked in ``failed`` (#1224) — pass an explicit bound and
-        handle :class:`subprocess.TimeoutExpired`.
+        handle :class:`SeamTimeout` (#1869: raised by :func:`bounded_call` in
+        place of the bare ``subprocess.TimeoutExpired`` this used to let
+        escape uncaught).
         """
-        if not self._is_hal0_user() or not args or args[0] != "systemctl":
-            return self._run(
-                list(args), capture_output=True, text=True, check=check, timeout=timeout
+
+        def _exec(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            return bounded_call(
+                argv, timeout=timeout, run=self._run, capture_output=True, text=True, check=check
             )
+
+        if not self._is_hal0_user() or not args or args[0] != "systemctl":
+            return _exec(list(args))
 
         verb = args[1] if len(args) > 1 else ""
         if verb == "daemon-reload":
-            return self._run(
-                self._seam_argv("daemon-reload"),
-                capture_output=True,
-                text=True,
-                check=check,
-                timeout=timeout,
-            )
+            return _exec(self._seam_argv("daemon-reload"))
         if verb in _UNIT_VERBS and len(args) > 2:
             slot_id = _slot_id_from_unit(args[2])
             if slot_id is not None:
-                return self._run(
-                    self._seam_argv(verb, slot_id),
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                    timeout=timeout,
-                )
+                return _exec(self._seam_argv(verb, slot_id))
             # Bundled-agent unit (hal0-agent@<id>.service) — route through the
             # wrapper's <verb>-agent arms (#1590). Same shape as the slot
             # family: the seam takes the bare id and rebuilds the unit name
             # root-side.
             agent_id = _agent_id_from_unit(args[2])
             if agent_id is not None and verb in AGENT_UNIT_VERBS:
-                return self._run(
-                    self._seam_argv(AGENT_UNIT_VERBS[verb], agent_id),
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                    timeout=timeout,
-                )
+                return _exec(self._seam_argv(AGENT_UNIT_VERBS[verb], agent_id))
             # Companion-service unit (openwebui / hindsight) — the wrapper's
             # svc-<verb> family takes a service KEY from a closed map, never a
             # unit string (#1590).
             svc_key = COMPANION_SERVICE_UNITS.get(args[2])
             if svc_key is not None and verb != "reset-failed":
-                return self._run(
-                    self._seam_argv(f"svc-{verb}", svc_key),
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                    timeout=timeout,
-                )
+                return _exec(self._seam_argv(f"svc-{verb}", svc_key))
         # Not a routable hal0-managed op (e.g. is-active, or a foreign unit) —
         # pass through unprivileged; systemctl read-only queries never need root.
-        return self._run(list(args), capture_output=True, text=True, check=check, timeout=timeout)
+        return _exec(list(args))
 
     def restart_self(self) -> subprocess.CompletedProcess[str]:
         """``systemctl restart hal0-api.service`` — the self-update path."""
@@ -510,9 +588,11 @@ __all__ = [
     "HINDSIGHT_DROPIN_PATH",
     "SEAM_BIN",
     "Hal0SeamMissing",
+    "SeamTimeout",
     "SystemCtlSeam",
     "agent_unit_argv",
     "agent_unit_name",
+    "bounded_call",
     "is_hal0_service_user",
     "privileged_systemctl",
 ]

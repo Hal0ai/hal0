@@ -138,7 +138,7 @@ class TestLoadSyncNpuBranch:
 
         calls_made: list[list[str]] = []
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             calls_made.append(list(args))
             m = MagicMock()
             m.returncode = 0
@@ -172,7 +172,7 @@ class TestLoadSyncNpuBranch:
         unit_file = tmp_path / "hal0-slot@npu.service"
         calls_made: list[list[str]] = []
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             calls_made.append(list(args))
             m = MagicMock()
             m.returncode = 0
@@ -215,7 +215,7 @@ class TestLoadSyncNpuBranch:
         )
         unit_file = tmp_path / "hal0-slot@chat.service"
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m

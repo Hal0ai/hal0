@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -273,15 +275,33 @@ def _api_request(
     try:
         with httpx.Client(timeout=_client_timeout(timeout)) as client:
             resp = client.request(method, url, **kwargs)
+    except httpx.TimeoutException as exc:
+        # The client's OWN read budget expired with no response at all — the
+        # server may still be converging (#1832/#1870). Distinct from
+        # CliApiError so a lifecycle command can print the timeout remedy
+        # (``hal0 slot logs``/``journalctl``) instead of a generic error.
+        raise CliApiTimeout(f"{method} {url} did not respond within {timeout:g}s") from exc
     except httpx.HTTPError as exc:
         raise CliApiError(f"{method} {url} failed: {type(exc).__name__}: {exc}") from exc
     if resp.status_code >= 400:
+        code: str | None = None
         try:
             body = resp.json()
-            msg = body.get("error", {}).get("message") or body
+            error = body.get("error") if isinstance(body, dict) else None
+            if isinstance(error, dict):
+                msg = error.get("message") or body
+                code = error.get("code")
+            else:
+                msg = body
         except ValueError:
             msg = resp.text[:300]
-        raise CliApiError(f"{method} {url} → HTTP {resp.status_code}: {msg}")
+        # The server bounded its own seam call and answered with the typed
+        # ``slot.seam_timeout`` envelope (#1869) rather than hanging until
+        # OUR read timeout fired — still "the operation timed out" from the
+        # operator's point of view, so it gets the same remedy treatment.
+        if code == "slot.seam_timeout":
+            raise CliApiTimeout(f"{method} {url} → HTTP {resp.status_code}: {msg}")
+        raise CliApiError(f"{method} {url} → HTTP {resp.status_code}: {msg}", code=code)
     if not resp.content:
         return None
     try:
@@ -291,7 +311,94 @@ def _api_request(
 
 
 class CliApiError(RuntimeError):
-    """Raised by the api_* helpers when the API returns an error."""
+    """Raised by the api_* helpers when the API returns an error.
+
+    ``code`` (when the server answered with the hal0 error envelope) carries
+    the typed ``error.code`` string — ``None`` for a transport-level failure
+    or a non-enveloped response.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class CliApiTimeout(CliApiError):
+    """The lifecycle call did not complete within its budget (#1869/#1870).
+
+    Raised either when the CLI's own read timeout expires with no response
+    (the server may still be converging), or when the server answered
+    promptly with its own typed ``slot.seam_timeout`` (#1869) — a wedged
+    ``systemctl``/podman seam call bounded server-side rather than left to
+    hang. Callers print the same remedy either way: check the unit's logs.
+    """
+
+
+#: How often the progress line refreshes while a lifecycle call is in flight.
+PROGRESS_POLL_INTERVAL_S = 2.0
+
+
+def run_with_progress(
+    call: Callable[[], Any],
+    *,
+    console: Console,
+    label: str,
+    timeout_s: float,
+    poll_state: Callable[[], str | None] | None = None,
+    json_out: bool = False,
+    poll_interval_s: float = PROGRESS_POLL_INTERVAL_S,
+) -> Any:
+    """Run a blocking lifecycle ``call()``, printing progress while it waits (#1870).
+
+    Before this, every mutating lifecycle verb (``hal0 slot load|unload|
+    restart|swap``, ``hal0 update --restart-slots``) made ONE blocking
+    ``api_post`` with a multi-minute read timeout (:mod:`hal0.slot_lifecycle_budget`)
+    and printed nothing until it returned — on a slow load an operator staring
+    at a silent terminal for up to ~2400s had no way to tell "still working"
+    from "hung".
+
+    On an interactive TTY (and not ``--json``, which must emit only the final
+    JSON payload): runs ``call()`` on a background thread and refreshes a
+    single status line — elapsed time plus, when ``poll_state`` is given, the
+    slot's current state (``GET /api/slots/{name}``, best-effort: a failed
+    poll just omits the state, never aborts the wait) — every
+    ``poll_interval_s``. Non-TTY or ``--json``: prints one summary line up
+    front (scripts/pipes get a stable, single-line transcript) and blocks.
+
+    Re-raises whatever ``call()`` raises, after the progress line stops.
+    """
+    interactive = console.is_terminal and not json_out
+    if not interactive:
+        if not json_out:
+            console.print(f"[dim]{label} (up to {timeout_s:.0f}s)…[/dim]")
+        return call()
+
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    start = time.monotonic()
+    worker.start()
+    with console.status(f"{label}…") as status:
+        while worker.is_alive():
+            worker.join(poll_interval_s)
+            elapsed = time.monotonic() - start
+            state = None
+            if poll_state is not None:
+                try:
+                    state = poll_state()
+                except Exception:
+                    state = None
+            state_part = f" — state={state}" if state else ""
+            status.update(f"{label}… {elapsed:.0f}s elapsed{state_part}")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
 
 
 def die(msg: str, code: int = 1) -> None:

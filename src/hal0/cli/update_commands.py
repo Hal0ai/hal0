@@ -30,12 +30,14 @@ from rich.table import Table
 
 from hal0.cli._shared import (
     CliApiError,
+    CliApiTimeout,
     _api_base,
     _api_unreachable,
     api_get,
     api_post,
     api_put,
     die,
+    run_with_progress,
 )
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
@@ -507,6 +509,22 @@ def _fetch_slot_drift() -> dict:
     return body if isinstance(body, dict) else {"count": 0, "slots": []}
 
 
+def _remaining_drift_state(names: list[str]) -> str | None:
+    """Progress-line state for ``--restart-slots`` (#1870): how many of the
+    slots this sweep targeted are still reported drifted.
+
+    Best-effort like :func:`_fetch_slot_drift`: a probe failure renders as no
+    state suffix (elapsed-only line), never as an error — the sweep itself is
+    still running regardless of whether this side probe succeeds.
+    """
+    drift = _fetch_slot_drift()
+    still_drifted = {s.get("slot") for s in (drift.get("slots") or []) if isinstance(s, dict)}
+    remaining = [n for n in names if n in still_drifted]
+    if not remaining:
+        return "converging"
+    return f"{len(remaining)}/{len(names)} still drifted"
+
+
 def _print_drift_banner(drift: dict) -> None:
     """Post-update ``N slots need restart`` banner (or a clean all-good line).
 
@@ -561,12 +579,21 @@ def _restart_drifted_slots() -> None:
         if isinstance(s, dict) and s.get("slot")
     ]
     payload = {"slots": names} if names else None
+    timeout_s = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count))
     try:
-        body = api_post(
-            "/api/updates/restart-slots",
-            json=payload,
-            timeout=slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count)),
+        body = run_with_progress(
+            lambda: api_post("/api/updates/restart-slots", json=payload, timeout=timeout_s),
+            console=console,
+            label=f"Restarting {len(names)} drifted slot(s)",
+            timeout_s=timeout_s,
+            poll_state=lambda: _remaining_drift_state(names),
         )
+    except CliApiTimeout as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        console.print(
+            "[dim]still converging? check `hal0 slot list` or `journalctl -u 'hal0-slot@*'`.[/dim]"
+        )
+        raise typer.Exit(1) from exc
     except CliApiError as exc:
         die(str(exc))
         return

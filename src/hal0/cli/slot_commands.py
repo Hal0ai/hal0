@@ -26,6 +26,7 @@ from rich.table import Table
 
 from hal0.cli._shared import (
     CliApiError,
+    CliApiTimeout,
     _api_base,
     _api_unreachable,
     api_delete,
@@ -34,6 +35,7 @@ from hal0.cli._shared import (
     api_put,
     die,
     follow_sse_logs,
+    run_with_progress,
 )
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
@@ -193,6 +195,63 @@ def _fmt_state(state: str | None) -> str:
     return f"[{style}]{state}[/{style}]"
 
 
+#: GET /api/slots/{name} while a lifecycle call is in flight, for the progress
+#: line's "state=..." suffix — a short, independent timeout: a slow/failed
+#: poll must never itself contribute to the wait (#1870).
+_STATE_POLL_TIMEOUT_S = 5.0
+
+
+def _poll_slot_state(name: str) -> str | None:
+    """Best-effort current state for the progress line. ``None`` on any failure
+    (API momentarily unreachable, slot renamed mid-op, ...) — the caller
+    renders that as an elapsed-only line, never as an error."""
+    try:
+        snap = api_get(f"/api/slots/{name}", timeout=_STATE_POLL_TIMEOUT_S)
+    except CliApiError:
+        return None
+    if not isinstance(snap, dict):
+        return None
+    return _fmt_state(snap.get("status") or snap.get("state"))
+
+
+def _print_timeout_remedy(name: str) -> None:
+    """Remedy line printed alongside a :class:`CliApiTimeout` (#1869/#1870):
+    the operation may still be converging server-side — these are where to
+    watch it, not a signal that it definitely failed."""
+    console.print(
+        f"[dim]still converging? check `hal0 slot logs {name}` or "
+        f"`journalctl -u hal0-slot@{name}`.[/dim]"
+    )
+
+
+def _run_lifecycle_call(
+    *,
+    name: str,
+    label: str,
+    timeout_s: float,
+    json_out: bool,
+    call: Callable[[], Any],
+) -> Any:
+    """Run one mutating lifecycle POST with the shared progress/timeout UX
+    (#1870): elapsed + polled state on a TTY, one summary line otherwise, and
+    the timeout remedy on :class:`CliApiTimeout` before exiting non-zero."""
+    try:
+        return run_with_progress(
+            call,
+            console=console,
+            label=label,
+            timeout_s=timeout_s,
+            poll_state=lambda: _poll_slot_state(name),
+            json_out=json_out,
+        )
+    except CliApiTimeout as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        _print_timeout_remedy(name)
+        raise typer.Exit(1) from exc
+    except CliApiError as exc:
+        die(str(exc))
+
+
 @app.command("list")
 def slot_list(
     json_out: bool = typer.Option(
@@ -314,16 +373,24 @@ def slot_load(
     model: str | None = typer.Option(
         None, "--model", "-m", help="Model ref to assign before loading"
     ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the final /api/slots/{name}/load JSON only (no progress)."
+    ),
 ) -> None:
     """Load a slot (optionally assign a model first)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    try:
-        body = {"model_id": model} if model else {}
-        snap = api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LOAD_TIMEOUT_S)
-    except CliApiError as exc:
-        die(str(exc))
+    body = {"model_id": model} if model else {}
+    snap = _run_lifecycle_call(
+        name=name,
+        label=f"Loading {name}",
+        timeout_s=SLOT_LOAD_TIMEOUT_S,
+        json_out=json_out,
+        call=lambda: api_post(f"/api/slots/{name}/load", json=body, timeout=SLOT_LOAD_TIMEOUT_S),
+    )
+    if json_out:
+        typer.echo(jsonlib.dumps(snap, indent=2))
         return
     console.print(
         f"Loaded [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))} model={snap.get('model_id', '—')}"
@@ -333,15 +400,23 @@ def slot_load(
 @app.command("unload")
 def slot_unload(
     name: str = typer.Argument(..., help="Slot name to unload"),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the final /api/slots/{name}/unload JSON only (no progress)."
+    ),
 ) -> None:
     """Unload a running slot gracefully."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    try:
-        snap = api_post(f"/api/slots/{name}/unload", timeout=SLOT_UNLOAD_TIMEOUT_S)
-    except CliApiError as exc:
-        die(str(exc))
+    snap = _run_lifecycle_call(
+        name=name,
+        label=f"Unloading {name}",
+        timeout_s=SLOT_UNLOAD_TIMEOUT_S,
+        json_out=json_out,
+        call=lambda: api_post(f"/api/slots/{name}/unload", timeout=SLOT_UNLOAD_TIMEOUT_S),
+    )
+    if json_out:
+        typer.echo(jsonlib.dumps(snap, indent=2))
         return
     console.print(f"Unloaded [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))}")
 
@@ -349,15 +424,23 @@ def slot_unload(
 @app.command("restart")
 def slot_restart(
     name: str = typer.Argument(..., help="Slot name to restart"),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the final /api/slots/{name}/restart JSON only (no progress)."
+    ),
 ) -> None:
     """Restart a slot (unload then load)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    try:
-        snap = api_post(f"/api/slots/{name}/restart", timeout=SLOT_LIFECYCLE_TIMEOUT_S)
-    except CliApiError as exc:
-        die(str(exc))
+    snap = _run_lifecycle_call(
+        name=name,
+        label=f"Restarting {name}",
+        timeout_s=SLOT_LIFECYCLE_TIMEOUT_S,
+        json_out=json_out,
+        call=lambda: api_post(f"/api/slots/{name}/restart", timeout=SLOT_LIFECYCLE_TIMEOUT_S),
+    )
+    if json_out:
+        typer.echo(jsonlib.dumps(snap, indent=2))
         return
     console.print(f"Restarted [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))}")
 
@@ -393,6 +476,9 @@ def slot_swap(
         "--no-persist",
         help="Hot-swap only — don't update /etc/hal0/slots/<slot>.toml.",
     ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the final /api/slots/{name}/swap JSON only (no progress)."
+    ),
 ) -> None:
     """Swap a slot's model, and (by default) make the change survive a restart.
 
@@ -408,12 +494,18 @@ def slot_swap(
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    try:
-        snap = api_post(
+    snap = _run_lifecycle_call(
+        name=name,
+        label=f"Swapping {name} → {model}",
+        timeout_s=SLOT_LIFECYCLE_TIMEOUT_S,
+        json_out=json_out,
+        call=lambda: api_post(
             f"/api/slots/{name}/swap", json={"model_id": model}, timeout=SLOT_LIFECYCLE_TIMEOUT_S
-        )
-    except CliApiError as exc:
-        die(str(exc))
+        ),
+    )
+
+    if json_out and no_persist:
+        typer.echo(jsonlib.dumps(snap, indent=2))
         return
 
     swapped_id = snap.get("model_id", model)
@@ -429,11 +521,17 @@ def slot_swap(
     try:
         api_put(f"/api/install/slots/{name}/model", json={"model_id": model})
     except CliApiError as exc:
-        console.print(f"Swapped [bold]{name}[/bold] → {swapped_id} state={state}")
+        if json_out:
+            typer.echo(jsonlib.dumps(snap, indent=2))
+        else:
+            console.print(f"Swapped [bold]{name}[/bold] → {swapped_id} state={state}")
         console.print(f"[yellow]Warning:[/yellow] runtime swap succeeded but persist failed: {exc}")
         console.print(f"[dim]Change will revert on next restart of hal0-slot@{name}.service.[/dim]")
         raise typer.Exit(1) from None
 
+    if json_out:
+        typer.echo(jsonlib.dumps(snap, indent=2))
+        return
     console.print(
         f"Swapped [bold]{name}[/bold] → {swapped_id} state={state} [dim](persisted)[/dim]"
     )
