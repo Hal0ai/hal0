@@ -307,7 +307,7 @@ export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confi
 
 // ─── Banner ───────────────────────────────────────────────────────────────
 // Reusable shell: icon + heading + body + actions + dismiss × · amber/red tones.
-function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebrow }) {
+export function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebrow }) {
   return (
     <div className={"banner banner-" + kind} role={kind === "err" ? "alert" : "status"}>
       <div className="banner-ic">

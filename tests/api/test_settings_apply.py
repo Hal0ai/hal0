@@ -110,6 +110,7 @@ def test_registry_declares_three_apply_classes() -> None:
         # like publish_host; preload_evict_* are SlotManager constructor
         # args fixed at create_app time.
         ("slots.network_mode", "service-restart", [SERVICE_SLOTS]),
+        ("slots.default_images", "service-restart", [SERVICE_SLOTS]),
         ("slots.preload_evict_enabled", "service-restart", [SERVICE_HAL0_API]),
         ("slots.preload_evict_headroom_mb", "service-restart", [SERVICE_HAL0_API]),
         # [dispatcher] — same create_app-time wiring as the other two knobs.

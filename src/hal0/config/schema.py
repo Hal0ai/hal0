@@ -3224,8 +3224,22 @@ class ActivityConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    enabled: bool = True
-    retention_days: int = Field(default=30, ge=1)
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether config-mutating actions and system state changes are "
+            "recorded to the durable activity store. Consumed once at "
+            "create_app(), so a change needs a hal0-api restart."
+        ),
+    )
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "How long an activity row survives before pruning. Overridden "
+            "at the env layer by HAL0_ACTIVITY_RETENTION_DAYS."
+        ),
+    )
     # None disables the row cap (retention_days still applies).
     #
     # PERSISTENCE (#1665): ``save_hal0_config``/``_maybe_run_config_migrations``
@@ -3240,7 +3254,15 @@ class ActivityConfig(BaseModel):
     # ``BrainChatConfig.tool_model`` / ``BRAIN_TOOL_MODEL_DISABLED`` (#1644):
     # give the unrepresentable sentinel a real word/value on disk instead of
     # relying on ``exclude_none`` to round-trip it.
-    max_rows: int | None = Field(default=50_000, ge=100)
+    max_rows: int | None = Field(
+        default=50_000,
+        ge=100,
+        description=(
+            "Row cap for the activity table; oldest rows are pruned past "
+            "this count regardless of retention_days. Set to 0 to disable "
+            "the cap (retention_days still applies)."
+        ),
+    )
 
     @field_validator("max_rows", mode="before")
     @classmethod
@@ -3320,12 +3342,26 @@ class BrainChatConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    enabled: bool = True
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Hard kill switch for the dashboard's agent-chat steward. When "
+            "false, every chat turn is refused and the slide-out chat is off."
+        ),
+    )
     # Ships TRUE (KB-2/3): the steward answers and reads state out of the box,
     # but every mutating / admin-write tool is refused server-side until an
     # operator explicitly opts in with [brain_chat] read_only=false. Safe
     # default over convenient default — the widening path is one config line.
-    read_only: bool = True
+    read_only: bool = Field(
+        default=True,
+        description=(
+            "When true (the shipped default), the steward answers and reads "
+            "state but every mutating or admin-write tool is refused "
+            "server-side — independently of the persona's own tool policy. "
+            "Set false to let the steward act on the instance through tools."
+        ),
+    )
     # Empty → persona preferred_model (hal0/brain). Set to a virtual slot model
     # like "hal0/npu" / "hal0/utility" to drive the steward on that slot; an
     # explicit per-request ``model`` in the chat body still wins over this.
@@ -3333,7 +3369,16 @@ class BrainChatConfig(BaseModel):
     # via the hal0/brain -> agent resolver fallback) needs >= 8k context —
     # the steward system prompt alone is ~7.3k tokens — and must actually be
     # LOADED, or the chat 404s (see BrainChatConfig docstring above).
-    model: str = ""
+    model: str = Field(
+        default="",
+        description=(
+            "Which model/slot drives the steward chat. Empty keeps the "
+            "persona's preferred_model (hal0/brain, itself falling back to "
+            "the agent slot); set to a virtual slot like 'hal0/npu' to pin "
+            "the steward there. Whatever this resolves to must be loaded "
+            "with >= 8k context, or the chat fails outright."
+        ),
+    )
     # Route tool-calling ROUNDS to a capable, tool-format-compatible model —
     # the escape hatch for boxes whose ``model`` (the shipped ~1.1B brain slot)
     # can't emit tool calls the local runtime parses natively (it leaks/500s).
@@ -3357,9 +3402,37 @@ class BrainChatConfig(BaseModel):
     # box was found with `[brain_chat] tool_model = ""`, which silently
     # overrode this default; it is now coerced back to the default with a loud
     # warning. Opting OUT is spelled explicitly: "off" / "none" / "disabled".
-    tool_model: str = BRAIN_TOOL_MODEL_DEFAULT
-    max_rounds: int = Field(default=8, ge=1, le=100)
-    completion_timeout_s: float = Field(default=300.0, gt=0)
+    tool_model: str = Field(
+        default=BRAIN_TOOL_MODEL_DEFAULT,
+        description=(
+            "Where a tool-calling ROUND reroutes when the chat model can't "
+            "emit tool calls this runtime parses. Default 'hal0/agent' — the "
+            "always-on fallback anchor — but that slot ships unbound on a "
+            "fresh install, so the first tool turn has nowhere to go until "
+            "an operator pulls a model into it. Per-round, not per-"
+            "conversation: plain chat stays on 'model'. An empty string is "
+            "coerced back to the default with a warning — to genuinely "
+            "disable tool routing, set 'off', 'none', or 'disabled'."
+        ),
+    )
+    max_rounds: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        description=(
+            "Runaway backstop: max tool-calling rounds in one chat turn "
+            "before the steward stops and returns whatever it has."
+        ),
+    )
+    completion_timeout_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Transport timeout (seconds) for each LLM round against the "
+            "target slot. A round that exceeds this fails the turn with a "
+            "timeout error instead of hanging indefinitely."
+        ),
+    )
 
     @field_validator("tool_model", mode="before")
     @classmethod
@@ -3508,19 +3581,91 @@ class RealtimeConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    enabled: bool = True
-    sample_rate: int = Field(default=24000, ge=8000, le=48000)
-    default_model: str = ""
-    stt_model: str = ""
-    tts_model: str = "kokoro"
-    tts_voice: str = ""
-    vad_energy_threshold: float = Field(default=0.02, ge=0.0, le=1.0)
-    vad_silence_ms: int = Field(default=500, ge=50, le=10000)
-    vad_min_speech_ms: int = Field(default=200, ge=0, le=10000)
-    vad_window_ms: int = Field(default=20, ge=5, le=100)
-    frame_ms: int = Field(default=20, ge=5, le=200)
-    approval_wait_s: float = Field(default=20.0, gt=0, le=300.0)
-    max_buffer_seconds: float = Field(default=30.0, gt=0, le=600.0)
+    enabled: bool = Field(
+        default=True,
+        description="Hard kill switch for the WS /v1/realtime voice endpoint.",
+    )
+    sample_rate: int = Field(
+        default=24000,
+        ge=8000,
+        le=48000,
+        description=(
+            "Fixed pcm16 sample rate (Hz). 24 kHz matches the demo client and "
+            "kokoro's native output — changing this does not resample either "
+            "direction, so a mismatched client will hear distorted audio."
+        ),
+    )
+    default_model: str = Field(
+        default="",
+        description="Fallback chat model for a realtime session when neither stt_model nor tts_model names one.",
+    )
+    stt_model: str = Field(
+        default="",
+        description=(
+            "Loaded slot the gateway calls over loopback for speech-to-text. "
+            "Empty falls back to the session's chat model."
+        ),
+    )
+    tts_model: str = Field(
+        default="kokoro",
+        description=("Loaded slot the gateway calls over loopback for text-to-speech."),
+    )
+    tts_voice: str = Field(
+        default="",
+        description="Voice name passed to the tts slot. Empty lets the slot's own default apply.",
+    )
+    vad_energy_threshold: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Normalized RMS (0-1) above which incoming audio counts as "
+            "speech for the zero-dependency energy-VAD turn detector."
+        ),
+    )
+    vad_silence_ms: int = Field(
+        default=500,
+        ge=50,
+        le=10000,
+        description="Trailing silence (ms) that ends a voice turn.",
+    )
+    vad_min_speech_ms: int = Field(
+        default=200,
+        ge=0,
+        le=10000,
+        description=(
+            "Minimum voiced-audio duration (ms) to count as speech rather "
+            "than noise; shorter segments never fire a turn."
+        ),
+    )
+    vad_window_ms: int = Field(
+        default=20,
+        ge=5,
+        le=100,
+        description="Analysis window size (ms) the energy-VAD detector evaluates at a time.",
+    )
+    frame_ms: int = Field(
+        default=20,
+        ge=5,
+        le=200,
+        description="Output audio frame size (ms) — the response.output_audio.delta granularity.",
+    )
+    approval_wait_s: float = Field(
+        default=20.0,
+        gt=0,
+        le=300.0,
+        description=(
+            "How long a gated steward tool may leave the voice session "
+            "silent before the assistant speaks a 'still waiting' notice "
+            "and ends the turn, instead of blocking up to 300s."
+        ),
+    )
+    max_buffer_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=600.0,
+        description="Cap on buffered audio (seconds) held for a single realtime turn.",
+    )
 
 
 class Hal0Config(BaseModel):

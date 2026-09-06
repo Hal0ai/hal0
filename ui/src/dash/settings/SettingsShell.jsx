@@ -31,6 +31,7 @@ import { MemoryPage } from './pages/data/MemoryPage.jsx'
 import { UpdatesPage } from './pages/diagnostics/UpdatesPage.jsx'
 import { AdvancedPage } from './pages/diagnostics/AdvancedPage.jsx'
 import { SecretsPage } from './pages/integrations/SecretsPage.jsx'
+import { RealtimePage } from './pages/integrations/RealtimePage.jsx'
 import { AgentsBrainPage } from './pages/routing/AgentsBrainPage.jsx'
 
 export function SettingsShell({ param }) {
@@ -56,6 +57,7 @@ export function SettingsShell({ param }) {
       case "advanced": return <AdvancedPage />;
       case "secrets": return <SecretsPage />;
       case "agents": return <AgentsBrainPage />;
+      case "realtime": return <RealtimePage />;
       default: return <OverviewPage />;
     }
   };

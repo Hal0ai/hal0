@@ -235,6 +235,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # unit the same way publish_host is; preload_evict_* are SlotManager
     # constructor args fixed at create_app time.
     "slots.network_mode": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
+    # Per-runner-family default-image overrides are read by
+    # _resolve_image_ref when a slot's container spec is rendered; a change
+    # only affects the next slot (re)start, same as network_mode/publish_host.
+    "slots.default_images": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     "slots.preload_evict_enabled": {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
