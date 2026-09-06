@@ -1,11 +1,19 @@
 """GET /api/services/health — dashboard services health aggregator.
 
-Returns a stable list of three well-known services (comfyui, hermes,
-openwebui) with honest up/down state.  Every source degrades
-gracefully — a probe failure yields up=false, never a 500.
+Returns one entry per row of ``hal0.services.registry.SERVICES`` — the ONE
+service catalog (#2028) also consumed by the richer ``GET /api/services``
+management page — with honest up/down state. Every source degrades
+gracefully — a probe failure yields up=false, never a 500, and a row is
+never dropped because ONE probe misbehaved: the whole pass runs through
+``asyncio.gather(return_exceptions=True)``.
 
-Real probes: comfyui (in-process /system_stats+/queue), hermes
-(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4).
+Real probes: comfyui (in-process /system_stats+/queue), hermes + hindsight
+(systemd unit state), openwebui (loopback GET /health — SpikeB §5.4). A
+service the table carries but this module has no bespoke probe for reports
+up=false, detail="unmonitored" — the same honest-unwired posture the richer
+page's generic ``_probe()`` dispatcher already uses, so a future extension
+row (w2b) that lands in the table before this module learns to probe it
+degrades safely instead of silently vanishing or reporting a fake "up".
 
 HARD RULE: up=true requires a real signal.  Services with no wired probe
 report up=false, detail="unmonitored" — never a fabricated "up".
@@ -16,6 +24,7 @@ src/hal0/api/__init__.py — do NOT edit that file here.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -31,6 +40,7 @@ from hal0.api.routes.comfyui import (
     _queue_counts,
     _systemd_active,
 )
+from hal0.services.registry import SERVICES, ServiceDef
 
 log = structlog.get_logger(__name__)
 
@@ -106,6 +116,7 @@ def _down_state(unit_state: str, fallback_detail: str) -> tuple[str, str]:
 
 _IMG_SLOT_UNIT = "hal0-slot@img.service"
 _OPENWEBUI_UNIT = "hal0-openwebui.service"
+_HINDSIGHT_UNIT = "hindsight-api.service"
 
 
 async def _img_unit_state(request: Request) -> str:
@@ -174,6 +185,19 @@ async def _probe_hermes() -> tuple[bool, str]:
     return False, "systemd unit inactive or absent"
 
 
+async def _probe_hindsight() -> tuple[bool, str]:
+    """Probe Hindsight via systemd unit state — #2028.
+
+    Same shape as :func:`_probe_hermes`: hindsight is loopback-only with no
+    HTTP health surface this module can reach without a self-call, so the
+    unit's own active/inactive/failed state IS the real signal.
+    """
+    active = await _systemd_active(_HINDSIGHT_UNIT)
+    if active:
+        return True, "systemd unit active"
+    return False, "systemd unit inactive or absent"
+
+
 async def _probe_openwebui() -> tuple[bool, str]:
     """Real reachability probe — GET <loopback>/health on OpenWebUI.
 
@@ -194,36 +218,7 @@ async def _probe_openwebui() -> tuple[bool, str]:
 # ── route ─────────────────────────────────────────────────────────────────────
 
 
-@router.get("/health")
-async def services_health(request: Request) -> dict[str, Any]:
-    """Aggregate health of the known hal0 companion services.
-
-    Response shape::
-
-        {
-          "services": [
-            {
-              "id":     "comfyui"|"hermes"|"openwebui",
-              "name":   str,
-              "up":     bool,
-              "state":  "up"|"stopped"|"down",
-              "detail": str,
-              "url":    str | null,
-              "stat":   {"label": str, "value": str} | null
-            },
-            ...
-          ]
-        }
-
-    ``state`` splits not-up into ``stopped`` (deliberate — unit inactive,
-    comes back on demand, renders grey) and ``down`` (unit failed /
-    unknown — renders red). ``up`` stays for older consumers.
-
-    Never returns 500 — every probe failure degrades to up=false.
-    """
-    services: list[dict[str, Any]] = []
-
-    # ── comfyui ──────────────────────────────────────────────────────────────
+async def _health_comfyui(request: Request) -> dict[str, Any]:
     try:
         cu_up, cu_detail, cu_stat, cu_url = await _probe_comfyui()
     except Exception as exc:
@@ -241,19 +236,18 @@ async def services_health(request: Request) -> dict[str, Any]:
         else:
             cu_state = "down"
 
-    services.append(
-        {
-            "id": "comfyui",
-            "name": "ComfyUI",
-            "up": cu_up,
-            "state": cu_state,
-            "detail": cu_detail,
-            "url": cu_url,
-            "stat": cu_stat,
-        }
-    )
+    return {
+        "id": "comfyui",
+        "name": "ComfyUI",
+        "up": cu_up,
+        "state": cu_state,
+        "detail": cu_detail,
+        "url": cu_url,
+        "stat": cu_stat,
+    }
 
-    # ── hermes ───────────────────────────────────────────────────────────────
+
+async def _health_hermes() -> dict[str, Any]:
     try:
         h_up, h_detail = await _probe_hermes()
     except Exception as exc:
@@ -264,19 +258,43 @@ async def services_health(request: Request) -> dict[str, Any]:
     if not h_up:
         h_state, h_detail = _down_state(await _unit_active_state(_HERMES_UNIT), h_detail)
 
-    services.append(
-        {
-            "id": "hermes",
-            "name": "Hermes",
-            "up": h_up,
-            "state": h_state,
-            "detail": h_detail,
-            "url": None,  # loopback-only, no browser-reachable URL
-            "stat": None,
-        }
-    )
+    return {
+        "id": "hermes",
+        "name": "Hermes",
+        "up": h_up,
+        "state": h_state,
+        "detail": h_detail,
+        "url": None,  # loopback-only, no browser-reachable URL
+        "stat": None,
+    }
 
-    # ── openwebui ─────────────────────────────────────────────────────────────
+
+async def _health_hindsight() -> dict[str, Any]:
+    try:
+        hs_up, hs_detail = await _probe_hindsight()
+    except Exception as exc:
+        log.warning("services_health.hindsight_probe_error", exc=repr(exc))
+        hs_up, hs_detail = False, type(exc).__name__
+
+    hs_state = "up"
+    if not hs_up:
+        # Same posture as hermes: hindsight has no HTTP surface this module
+        # calls, so systemd IS the probe — "inactive" (not-yet-started /
+        # deliberately stopped) is not the same as "failed" (crashed).
+        hs_state, hs_detail = _down_state(await _unit_active_state(_HINDSIGHT_UNIT), hs_detail)
+
+    return {
+        "id": "hindsight",
+        "name": "Hindsight",
+        "up": hs_up,
+        "state": hs_state,
+        "detail": hs_detail,
+        "url": None,  # loopback-only, no browser-reachable URL
+        "stat": None,
+    }
+
+
+async def _health_openwebui() -> dict[str, Any]:
     try:
         ow_up, ow_detail = await _probe_openwebui()
     except Exception as exc:
@@ -292,17 +310,106 @@ async def services_health(request: Request) -> dict[str, Any]:
         else:
             ow_state = "down"
 
-    services.append(
+    return {
+        "id": "openwebui",
+        "name": "OpenWebUI",
+        "up": ow_up,
+        "state": ow_state,
+        "detail": ow_detail,
+        "url": _openwebui_url(),
+        "stat": None,
+    }
+
+
+async def _health_unmonitored(sdef: ServiceDef) -> dict[str, Any]:
+    """Honest default for a table row this module has no bespoke probe for.
+
+    #2028: a service reaching ``SERVICES`` (a builtin added above, or —
+    eventually — an extension manifest row, w2b) with no wiring here MUST
+    NOT be silently dropped or reported up — it shows as down/unmonitored
+    until a probe is written for it, matching the richer ``/api/services``
+    page's own ``_probe()`` fallback.
+    """
+    return {
+        "id": sdef.id,
+        "name": sdef.name,
+        "up": False,
+        "state": "down",
+        "detail": "unmonitored",
+        "url": None,
+        "stat": None,
+    }
+
+
+#: Bespoke per-id health coroutine factories. Anything in ``SERVICES`` not
+#: listed here (a future builtin, or an extension-manifest row) degrades to
+#: :func:`_health_unmonitored` — the table drives WHICH ids appear; this map
+#: only decides HOW WELL each one is currently probed.
+_HEALTH_FACTORIES: dict[str, Any] = {
+    "comfyui": lambda request: _health_comfyui(request),
+    "hermes": lambda request: _health_hermes(),
+    "hindsight": lambda request: _health_hindsight(),
+    "openwebui": lambda request: _health_openwebui(),
+}
+
+
+@router.get("/health")
+async def services_health(request: Request) -> dict[str, Any]:
+    """Aggregate health of every service in ``hal0.services.registry.SERVICES``.
+
+    Response shape::
+
         {
-            "id": "openwebui",
-            "name": "OpenWebUI",
-            "up": ow_up,
-            "state": ow_state,
-            "detail": ow_detail,
-            "url": _openwebui_url(),
-            "stat": None,
+          "services": [
+            {
+              "id":     str,
+              "name":   str,
+              "up":     bool,
+              "state":  "up"|"stopped"|"down",
+              "detail": str,
+              "url":    str | null,
+              "stat":   {"label": str, "value": str} | null
+            },
+            ...
+          ]
         }
-    )
+
+    ``state`` splits not-up into ``stopped`` (deliberate — unit inactive,
+    comes back on demand, renders grey) and ``down`` (unit failed / unknown /
+    unmonitored — renders red). ``up`` stays for older consumers.
+
+    Iterates the registry table (not a hardcoded id list, #2028) so a new
+    row — hindsight included — appears automatically, and runs every
+    service's probe concurrently via ``asyncio.gather(return_exceptions=True)``
+    so one hung/raising probe can't block or drop the rest. Never returns
+    500 — every probe failure (caught here, or already caught inside the
+    per-service coroutine) degrades to up=false.
+    """
+    coros = [
+        _HEALTH_FACTORIES.get(sdef.id, lambda request, sdef=sdef: _health_unmonitored(sdef))(
+            request
+        )
+        for sdef in SERVICES
+    ]
+    results = await asyncio.gather(*coros, return_exceptions=True)
+
+    services: list[dict[str, Any]] = []
+    for sdef, result in zip(SERVICES, results, strict=True):
+        if isinstance(result, BaseException):
+            log.warning("services_health.entry_error", service=sdef.id, exc=repr(result))
+            services.append(
+                {
+                    "id": sdef.id,
+                    "name": sdef.name,
+                    "up": False,
+                    "state": "down",
+                    "detail": type(result).__name__,
+                    "url": None,
+                    "stat": None,
+                }
+            )
+        else:
+            services.append(result)
 
     return {"services": services}
 

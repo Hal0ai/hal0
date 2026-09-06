@@ -1230,6 +1230,8 @@ def _register_pulled(
     ctx_len: int | None = None
     detected_quant: str | None = None
     detected_arch: str | None = None
+    detected_backends: list[str] = []
+    detected_pooling_type: int | None = None
     try:
         detection = detect(Path(path))
         ctx_len = detection.context_length
@@ -1239,6 +1241,21 @@ def _register_pulled(
         # authoritative; the curated catalogue backfills an unreadable one
         # (same tiering as context_length above).
         detected_arch = detected_architecture(detection)
+        # #2192: detect() already classifies the runtime family
+        # (suggested_backends: ["moonshine"]/["kokoro"]/["flm"]/…) and, for
+        # GGUF embedding/reranking models, the header's pooling_type
+        # (raw_hints["pooling_type"]) — but neither ever reached the
+        # registry row below, which is the ONLY registration a pulled
+        # model's bytes ever get. Without a populated ``backends``/
+        # ``metadata.pooling_type``, hal0.model_meta.modality.
+        # derive_modalities_from_model_info() can't recognise the model, so
+        # a bound tts/transcription/embedding slot's LoadedSlot.modalities
+        # stayed empty and OmniRouter's tool eligibility (resolve_for_request)
+        # never saw those slots on a real deployment — despite the routing
+        # logic itself being correct and unit-tested against a hand-built
+        # model_info that happened to already carry the right shape.
+        detected_backends = list(detection.suggested_backends)
+        detected_pooling_type = detection.raw_hints.get("pooling_type")
     except Exception:  # header parse must never fail a completed pull
         ctx_len = None
     # #1890: capability-grouped installs (``_final_path_for_entry``) rename the
@@ -1262,6 +1279,10 @@ def _register_pulled(
         # backfill) so a LATER re-pull can tell it apart from an operator's
         # explicit metadata edit — see the merge below.
         fresh_meta["context_length_detected"] = True
+    if detected_pooling_type is not None:
+        # Header-derived fact, same standing as context_length/quant above —
+        # re-stamped fresh on every pull, never operator-editable.
+        fresh_meta["pooling_type"] = detected_pooling_type
     # #1890: stamp the detected quant on the row itself — the pull path is the
     # ONLY registration a pull-installed model ever gets, and a null ``quant``
     # left the #1790 FPX-on-wrong-runner guard inert (it reads the raw
@@ -1293,7 +1314,10 @@ def _register_pulled(
         is_comfyui = bool(comfyui_subdir)
         cap = (capability or "").strip()
         caps = [cap] if cap else (["image"] if is_comfyui else ["chat"])
-        backends = ["comfyui"] if is_comfyui else []
+        # #2192: comfyui already special-cased its own backend; every other
+        # kind detect() classified (moonshine/kokoro/flm/llama's vulkan-rocm-
+        # cuda-cpu quartet/…) was dropped on the floor before this fix.
+        backends = ["comfyui"] if is_comfyui else detected_backends
         # #1773: default defaults.tokenizer_repo from hf_repo when the pull
         # path already knows the source HF repo (the ONLY linkage a chat
         # cell's GuideLLM tokenizer resolution can trust without new pull
@@ -1350,6 +1374,12 @@ def _register_pulled(
         merged_meta["context_length"] = existing.metadata["context_length"]
         merged_meta.pop("context_length_detected", None)
     updates["metadata"] = merged_meta
+    # #2192: same "fill only if unset" rule as tokenizer_repo below — backfill
+    # an empty backends list (the pre-fix state every non-comfyui pulled row
+    # has) with this pull's detection, but never clobber an operator's own
+    # edit (registry PATCH surface) or an already-tagged row.
+    if detected_backends and not existing.backends:
+        updates["backends"] = detected_backends
     # #1773: same "fill only if unset" rule as chat_template — a re-pull
     # backfills defaults.tokenizer_repo from hf_repo for a row that never
     # got one (pre-#1773 registration, or a hand-added row), but never
@@ -2133,10 +2163,18 @@ def _register_flm_pulled(
                 path=path,
                 size_bytes=size_bytes,
                 capabilities=caps,
-                backends=["npu"],
+                # #2192: "npu" is a hardware-lane label, not a runtime family —
+                # hal0.model_meta.modality.derive_modalities_from_model_info's
+                # ``_family_runners`` set only recognises "flm" (matching
+                # metadata.runtime above), so an FLM-routed stt/embed shadow
+                # slot's model never resolved a modality and OmniRouter could
+                # never route to it. derive_model_provider("npu") already
+                # mapped to "flm" either way (_PROVIDER_TAGS), so this only
+                # fixes the modality side, not provider derivation.
+                backends=["flm"],
                 # Task 3: stamp provider alongside the tag-era backends tag on
                 # a NEW row — see the matching comment in ``_register_pulled``.
-                provider=derive_model_provider(["npu"]),
+                provider=derive_model_provider(["flm"]),
                 metadata={"runtime": "flm"},
             )
         )
@@ -2144,6 +2182,11 @@ def _register_flm_pulled(
     merged_meta = dict(existing.metadata)
     merged_meta["runtime"] = "flm"
     updates["metadata"] = merged_meta
+    # #2192: backfill a pre-fix row's wrong ["npu"] (or a never-set empty
+    # list) the same "fill only if unset/wrong" way ``_register_pulled``
+    # backfills backends — never clobbers an operator's own edit.
+    if existing.backends in ([], ["npu"]):
+        updates["backends"] = ["flm"]
     registry.update(tag, updates)
 
 

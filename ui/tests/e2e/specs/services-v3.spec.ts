@@ -80,9 +80,34 @@ const SERVICES_PAYLOAD = {
       hints: [],
     },
     {
-      id: 'n8n',
-      name: 'n8n',
-      description: 'Workflow automation (external — not deployed by hal0).',
+      // #2028: hindsight used to be entirely absent from this table.
+      id: 'hindsight',
+      name: 'Hindsight',
+      description: 'Memory engine (native daemon, loopback :9177).',
+      managed: true,
+      unit: 'hindsight-api.service',
+      unit_state: {
+        active_state: 'active',
+        sub_state: 'running',
+        unit_file_state: 'enabled',
+        since: 'Fri 2026-07-03 09:12:01 UTC',
+      },
+      up: true,
+      detail: 'systemd unit active',
+      stat: null,
+      url: null,
+      mdns_url: null,
+      loopback_port: 9177,
+      actions: ['start', 'stop', 'restart', 'enable', 'disable'],
+      mdns_capable: false,
+      hints: [],
+    },
+    {
+      // Stand-in for a future extension-manifest row (w2b) the backend
+      // carries but has no bespoke probe for yet — #2028's honest default.
+      id: 'future-extension',
+      name: 'Future Extension',
+      description: 'Example companion service (external — not deployed by hal0).',
       managed: false,
       unit: null,
       unit_state: null,
@@ -119,12 +144,18 @@ test.describe('Services v3 (/services)', () => {
 
     await expect(page.locator('.view .vh h1')).toHaveText('Services')
     await expect(page.getByTestId('svcp-mdns-toggle')).toBeVisible()
-    for (const id of ['openwebui', 'comfyui', 'hermes', 'n8n']) {
+    for (const id of ['openwebui', 'comfyui', 'hermes', 'hindsight', 'future-extension']) {
       await expect(page.getByTestId(`svcp-card-${id}`)).toBeVisible()
     }
-    // Up service shows an "up" pill; unmanaged shows the external note.
+    // Up service shows an "up" pill; a real, previously-invisible service
+    // (#2028) renders too; an unwired/unmanaged one shows the honest
+    // "unmonitored" detail + external note, never a fabricated up.
     await expect(page.getByTestId('svcp-card-openwebui')).toContainText('up')
-    await expect(page.getByTestId('svcp-card-n8n')).toContainText('external — not managed by hal0')
+    await expect(page.getByTestId('svcp-card-hindsight')).toContainText('up')
+    await expect(page.getByTestId('svcp-card-future-extension')).toContainText('unmonitored')
+    await expect(page.getByTestId('svcp-card-future-extension')).toContainText(
+      'external — not managed by hal0',
+    )
   })
 
   test('action buttons follow the backend allow-list', async ({ page }) => {
@@ -139,8 +170,8 @@ test.describe('Services v3 (/services)', () => {
     await expect(page.getByTestId('svcp-restart-comfyui')).toBeVisible()
     await expect(page.getByTestId('svcp-start-comfyui')).toHaveCount(0)
     await expect(page.getByTestId('svcp-stop-comfyui')).toHaveCount(0)
-    // n8n: no lifecycle buttons at all.
-    await expect(page.getByTestId('svcp-restart-n8n')).toHaveCount(0)
+    // future-extension: no lifecycle buttons at all.
+    await expect(page.getByTestId('svcp-restart-future-extension')).toHaveCount(0)
   })
 
   test('restart posts to /api/services/{id}/action and surfaces the result', async ({ page }) => {

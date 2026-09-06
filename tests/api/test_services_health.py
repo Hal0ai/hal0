@@ -6,11 +6,17 @@ minimal FastAPI app with the router mounted under the canonical prefix
 so the endpoint is reachable without touching the real app factory.
 
 Covers:
-  1. Endpoint returns 200 with all 3 service ids present.
+  1. Endpoint returns 200 with all 4 registry service ids present
+     (comfyui, hermes, hindsight, openwebui — #2028).
   2. With comfyui probe mocked reachable -> up=true, stat populated.
   3. comfyui probe raising -> comfyui up=false, endpoint still 200.
   4. openwebui /health 2xx -> up=true (SpikeB §5.4 real probe).
   5. openwebui unreachable / non-2xx -> up=false, honest detail.
+  6. hindsight up/down via systemd unit state (#2028 — it used to be
+     entirely absent from this endpoint).
+  7. A registry row with no bespoke probe (a stand-in for a future
+     extension-manifest service) reports up=false, detail="unmonitored" —
+     never dropped, never a fabricated up.
 """
 
 from __future__ import annotations
@@ -24,9 +30,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api.routes.services_health import router as services_router
+from hal0.services.registry import ServiceDef
 
 _BASE = "hal0.api.routes.services_health"
-_EXPECTED_IDS = {"comfyui", "hermes", "openwebui"}
+_EXPECTED_IDS = {"comfyui", "hermes", "hindsight", "openwebui"}
 
 
 @pytest.fixture
@@ -42,10 +49,10 @@ def _services_by_id(body: dict) -> dict:
 
 
 def _stub_other_probes() -> list:
-    """Patch comfyui/hermes/openwebui to neutral down states so a test can
-    isolate ONE service without real network/systemd calls. Returns a list
-    of started patchers the caller closes via an ExitStack, OR use as a
-    context-manager group. Default: everything down/unmonitored.
+    """Patch comfyui/hermes/hindsight/openwebui to neutral down states so a
+    test can isolate ONE service without real network/systemd calls. Returns
+    a list of started patchers the caller closes via an ExitStack, OR use as
+    a context-manager group. Default: everything down/unmonitored.
     """
     return [
         patch(
@@ -55,6 +62,11 @@ def _stub_other_probes() -> list:
         ),
         patch(
             f"{_BASE}._probe_hermes",
+            new_callable=AsyncMock,
+            return_value=(False, "systemd unit inactive or absent"),
+        ),
+        patch(
+            f"{_BASE}._probe_hindsight",
             new_callable=AsyncMock,
             return_value=(False, "systemd unit inactive or absent"),
         ),
@@ -78,7 +90,7 @@ def test_services_health_200_all_ids(svc_client: TestClient) -> None:
     assert r.status_code == 200, r.text
     body = r.json()
     assert "services" in body
-    assert len(body["services"]) == 3
+    assert len(body["services"]) == 4
     ids = {s["id"] for s in body["services"]}
     assert ids == _EXPECTED_IDS
 
@@ -306,6 +318,11 @@ def test_up_services_report_state_up(svc_client: TestClient) -> None:
             return_value=(True, "systemd unit active"),
         ),
         patch(
+            f"{_BASE}._probe_hindsight",
+            new_callable=AsyncMock,
+            return_value=(True, "systemd unit active"),
+        ),
+        patch(
             f"{_BASE}._probe_openwebui",
             new_callable=AsyncMock,
             return_value=(True, "reachable — /health ok"),
@@ -316,3 +333,105 @@ def test_up_services_report_state_up(svc_client: TestClient) -> None:
     assert r.status_code == 200
     for svc in r.json()["services"]:
         assert svc["state"] == "up"
+
+
+# ── 6. hindsight (#2028 — used to be entirely absent from this endpoint) ─────
+
+
+def test_hindsight_up_via_systemd(svc_client: TestClient) -> None:
+    with contextlib.ExitStack() as stack:
+        for p in _stub_other_probes():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                f"{_BASE}._probe_hindsight",
+                new_callable=AsyncMock,
+                return_value=(True, "systemd unit active"),
+            )
+        )
+        r = svc_client.get("/api/services/health")
+
+    assert r.status_code == 200
+    hs = _services_by_id(r.json())["hindsight"]
+    assert hs["up"] is True
+    assert hs["state"] == "up"
+    assert hs["url"] is None  # loopback-only
+
+
+def test_hindsight_down_reports_honest_detail() -> None:
+    """A hindsight outage must be visible — never masked as absent or up.
+
+    Direct coroutine call (no TestClient) so this asserts the exact
+    down-state mapping without also depending on every other probe.
+    """
+    import asyncio
+
+    from hal0.api.routes import services_health as mod
+
+    with (
+        patch(f"{_BASE}._probe_hindsight", new_callable=AsyncMock, return_value=(False, "x")),
+        patch(f"{_BASE}._unit_active_state", new_callable=AsyncMock, return_value="failed"),
+    ):
+        result = asyncio.run(mod._health_hindsight())
+
+    assert result["id"] == "hindsight"
+    assert result["up"] is False
+    assert result["state"] == "down"
+    assert result["detail"] == "crashed — systemd unit failed"
+
+
+# ── 7. registry row with no bespoke probe -> unmonitored, never dropped ──────
+
+
+def test_unmonitored_row_reports_honest_default() -> None:
+    """A service the table carries but this module hasn't wired a probe for.
+
+    Stands in for a future extension-manifest row (w2b): #2028's hard rule
+    is that such a row is NEVER dropped and NEVER reports a fabricated up.
+    """
+    import asyncio
+
+    from hal0.api.routes.services_health import _health_unmonitored
+
+    sdef = ServiceDef(
+        id="future-extension",
+        name="Future Extension",
+        description="stand-in for an unwired extension-manifest row",
+        source="extension",
+    )
+    result = asyncio.run(_health_unmonitored(sdef))
+    assert result == {
+        "id": "future-extension",
+        "name": "Future Extension",
+        "up": False,
+        "state": "down",
+        "detail": "unmonitored",
+        "url": None,
+        "stat": None,
+    }
+
+
+def test_unwired_registry_row_surfaces_through_the_route(svc_client: TestClient) -> None:
+    """The route iterates the table, not a hardcoded id list (#2028) — a row
+    with no entry in ``_HEALTH_FACTORIES`` must still appear, unmonitored,
+    alongside every service this module DOES know how to probe."""
+    from hal0.api.routes import services_health as mod
+
+    extra = ServiceDef(
+        id="future-extension",
+        name="Future Extension",
+        description="stand-in for an unwired extension-manifest row",
+        source="extension",
+    )
+    with contextlib.ExitStack() as stack:
+        for p in _stub_other_probes():
+            stack.enter_context(p)
+        stack.enter_context(patch.object(mod, "SERVICES", (*mod.SERVICES, extra)))
+        r = svc_client.get("/api/services/health")
+
+    assert r.status_code == 200
+    svcs = _services_by_id(r.json())
+    assert set(svcs) == _EXPECTED_IDS | {"future-extension"}
+    fx = svcs["future-extension"]
+    assert fx["up"] is False
+    assert fx["detail"] == "unmonitored"

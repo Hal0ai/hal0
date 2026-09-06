@@ -1234,7 +1234,11 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         # ``resolved_command``. Mirror the list route's re-resolution here.
         raw_ctx_max = out.get("ctx_max")
         model_id = str(out.get("model_default") or "")
-        if model_id or isinstance(raw_ctx_max, int):
+        # #1859: mirror the list route's llm-only gate (slot_view.snapshot) —
+        # a non-llm slot (embedding/reranking/transcription/tts/image) has no
+        # context window to resolve; see the comment there for the full
+        # rationale.
+        if out.get("type") == "llm" and (model_id or isinstance(raw_ctx_max, int)):
             # #1946/I2: hand this slot's own TOML down so a DEGRADED specialty
             # slot advertises the plain-model window it actually launches with,
             # instead of the card's 262144 — and so this body agrees with the

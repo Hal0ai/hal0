@@ -26,6 +26,36 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **`GET /api/services/health` (the Overview card's stable feed) now includes
+  Hindsight and iterates the same typed service catalog the full Services
+  page already used**, instead of a hardcoded three-branch construction that
+  could never surface a fourth service or a Hindsight outage. A service with
+  no wired probe reports `up:false, detail:"unmonitored"` — never a
+  fabricated up — via `asyncio.gather(return_exceptions=True)` so one hung
+  probe can't drop the rest. (#2028)
+- **The installer now writes the base `/etc/avahi/services/hal0.service`
+  mDNS announcement it always documented** — the Services page's Discovery
+  card and `services/mdns.py`'s own docstring both promised "the installer
+  writes it when avahi is present," but nothing ever did, so
+  `base_advertised` was permanently false. (H13)
+- **A pulled model's runtime family and pooling type now reach the model
+  registry**, not just `detect()`'s in-memory result — a fresh Kokoro/
+  Moonshine/Qwen3-TTS pull registered with an empty `backends` list, and a
+  GGUF embedding/reranking pull registered with no `metadata.pooling_type`,
+  so `hal0.model_meta.modality.derive_modalities_from_model_info` could
+  never recognise the model. A bound tts/transcription/embedding slot's
+  `LoadedSlot.modalities` stayed empty, so OmniRouter's tool eligibility
+  (`resolve_for_request`) silently never routed to those slots on a real
+  deployment, even though the routing logic itself was correct. An
+  FLM-pulled model's `backends=["npu"]` (a hardware-lane label, not a
+  runtime family) is now `["flm"]`, the string the modality derivation
+  actually recognises. (#2192)
+- **The llama-only effective-context resolver no longer runs against
+  embedding/reranking/transcription/tts/image slots** (FLM, Kokoro,
+  Moonshine, Qwen3-TTS, ComfyUI) on `GET /api/slots` and
+  `GET /api/slots/{name}`. Those slot kinds have no context window; calling
+  the resolver anyway fabricated an 8192-token "window" (its safe fallback
+  for an unrecognised model) that the slot never runs with. (#1859)
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot
@@ -148,6 +178,16 @@ applying. Add those subsections to a version's section to surface them; see
   `releases_url_override` field (null when no override is set) so API
   consumers and the dashboard's Settings → Updates page see it too. Which
   URL is consulted is unchanged — the override still wins.
+
+### Changed
+
+- `hal0.services.registry.ServiceDef` gains `category`, `source`
+  (`builtin`/`extension`), `modalities`, and a `probe_tcp` field for a future
+  `"tcp"` probe kind — additive, no builtin service's behavior changes. This
+  is the one shape a future extension-manifest-provided service row is meant
+  to reuse, so the registry never grows a second, parallel service shape.
+  (#2028)
+
 ### Removed
 
 - **The v1.3.0 sunset tranche (#2168) is executed** — three internal compat
