@@ -66,53 +66,55 @@ export function AuthChallengeDrawer() {
   if (!open) return null
 
   return (
-    <Drawer
-      open={open}
-      onClose={dismiss}
-      eyebrow="Sign-in required"
-      title="This box is reachable from your network"
-      width={420}
-      foot={
-        <button
-          type="submit"
-          form="auth-challenge-form"
-          className="btn"
-          data-testid="auth-challenge-submit"
-          disabled={!key || login.isPending}
-        >
-          {login.isPending ? 'Signing in…' : 'Sign in & retry'}
-        </button>
-      }
-    >
-      <form id="auth-challenge-form" data-testid="auth-challenge-drawer" onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-3, #aaa)' }}>
-          Other devices on your network can reach this box, so changes need the admin key — sign
-          in once and the action you just tried will retry automatically.
-        </p>
+    <div className="auth-challenge-layer">
+      <Drawer
+        open={open}
+        onClose={dismiss}
+        eyebrow="Sign-in required"
+        title="This box is reachable from your network"
+        width={420}
+        foot={
+          <button
+            type="submit"
+            form="auth-challenge-form"
+            className="btn"
+            data-testid="auth-challenge-submit"
+            disabled={!key || login.isPending}
+          >
+            {login.isPending ? 'Signing in…' : 'Sign in & retry'}
+          </button>
+        }
+      >
+        <form id="auth-challenge-form" data-testid="auth-challenge-drawer" onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-3, #aaa)' }}>
+            Other devices on your network can reach this box, so changes need the admin key — sign
+            in once and the action you just tried will retry automatically.
+          </p>
 
-        <label className="mono" htmlFor="auth-challenge-key" style={{ fontSize: 11, color: 'var(--fg-4, #888)' }}>
-          Admin key
-        </label>
-        <input
-          id="auth-challenge-key"
-          data-testid="auth-challenge-key-input"
-          type="password"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          autoComplete="current-password"
-          autoFocus
-          spellCheck={false}
-          disabled={login.isPending}
-          placeholder="admin key"
-          className="input mono"
-        />
+          <label className="mono" htmlFor="auth-challenge-key" style={{ fontSize: 11, color: 'var(--fg-4, #888)' }}>
+            Admin key
+          </label>
+          <input
+            id="auth-challenge-key"
+            data-testid="auth-challenge-key-input"
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            autoComplete="current-password"
+            autoFocus
+            spellCheck={false}
+            disabled={login.isPending}
+            placeholder="admin key"
+            className="input mono"
+          />
 
-        {error && (
-          <div data-testid="auth-challenge-error" role="alert" className="mono" style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--err, #e66)' }}>
-            {error.text}
-          </div>
-        )}
-      </form>
-    </Drawer>
+          {error && (
+            <div data-testid="auth-challenge-error" role="alert" className="mono" style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--err, #e66)' }}>
+              {error.text}
+            </div>
+          )}
+        </form>
+      </Drawer>
+    </div>
   )
 }
