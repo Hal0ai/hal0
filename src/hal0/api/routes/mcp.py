@@ -48,7 +48,6 @@ from fastapi.responses import StreamingResponse
 from hal0 import __version__
 from hal0.config.schema import ToolPolicy
 from hal0.errors import BadRequest, Conflict, Hal0Error
-from hal0.mcp import hermes_join
 from hal0.mcp import installed as installed_registry
 from hal0.mcp import manifest as manifest_resolver
 from hal0.mcp import probe as mcp_probe
@@ -877,7 +876,16 @@ async def _sync_hermes_join(server_id: str | None) -> dict[str, Any]:
     rather than importing it directly into the async handler body.
     Never raises — :func:`sync_exposure` folds every failure into its own
     ``errors`` list (ADR-0015 §Decision 2).
+
+    Imported HERE, not at module scope: ``hal0.api`` imports every route
+    module eagerly, so a top-level ``from hal0.mcp import hermes_join`` puts
+    a hermes-named module in the core import graph and breaks GP-15
+    ("importing the public core does not drag in a hermes dependency",
+    ``tests/golden_paths/test_gp15_no_hermes.py``). The join is only ever
+    reached from a mutation handler, which is well past import time.
     """
+    from hal0.mcp import hermes_join
+
     return await asyncio.to_thread(hermes_join.sync_exposure, only_server_id=server_id)
 
 
