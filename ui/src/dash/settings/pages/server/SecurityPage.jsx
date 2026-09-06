@@ -151,7 +151,9 @@ export function SecurityPage() {
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 3, lineHeight: 1.55, maxWidth: 460 }}>
               {authArmed
                 ? 'Every route requires the admin key (or a logged-in session). Applies live — no restart.'
-                : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.'}
+                : s?.lan_exposed
+                  ? 'Auth is off, but this box is reachable from your network — changes (model pulls, slot edits, config writes) already ask for the admin key automatically from other devices; reads and inference stay open. Enable to require a login for everything, including reads.'
+                  : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.'}
             </div>
           </div>
           {authArmed ? (

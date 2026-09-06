@@ -3052,6 +3052,15 @@ select.npu-sel {
   max-width: 100vw;
 }
 .drawer.open { transform: translateX(0); }
+
+/* The #1822 sign-in challenge is raised BY a refused mutation, and that
+   mutation is often fired from inside a modal (approvals, delete confirms).
+   `.modal-backdrop` is z-index 100 and `.drawer` is 95, so the challenge
+   would render behind the very modal that triggered it and its Sign in
+   button would be unclickable. This layer is the last-resort surface, so it
+   outranks both. */
+.auth-challenge-layer .drawer-backdrop { z-index: 120; }
+.auth-challenge-layer .drawer { z-index: 125; }
 .drawer-h {
   padding: 18px 22px 14px;
   border-bottom: 1px solid var(--line);

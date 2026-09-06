@@ -1199,3 +1199,8 @@ function ImportDialog({
 }
 
 Object.assign(window, { Modal, Drawer, DrawerDock, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, MtpControl, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+
+// Real ESM export for the newer `dash/auth/*` modules (AuthChallengeDrawer),
+// which import Drawer directly rather than reading the window-globals shim
+// the legacy dash/*.jsx prototype files above rely on.
+export { Drawer };

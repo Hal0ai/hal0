@@ -42,6 +42,31 @@ def test_auth_required_with_key_passes() -> None:
     assert c.status == "pass"
 
 
+def test_auth_open_loopback_passes_even_missing_lan_exposed_field() -> None:
+    """An older API build with no ``lan_exposed`` field degrades to False
+    (assume loopback) rather than warning on missing data."""
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": False})
+    assert c.status == "pass"
+
+
+def test_auth_open_lan_exposed_no_key_warns() -> None:
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": False, "lan_exposed": True})
+    assert c.status == "warn"
+    assert "no admin key" in c.detail
+
+
+def test_auth_open_lan_exposed_with_key_warns() -> None:
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": True, "lan_exposed": True})
+    assert c.status == "warn"
+    assert "reachable from your network" in c.detail
+
+
+def test_auth_open_loopback_bind_passes_regardless_of_key() -> None:
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": True, "lan_exposed": False})
+    assert c.status == "pass"
+    assert "open" in c.detail
+
+
 # ── check_model_store ─────────────────────────────────────────────────────────
 
 
