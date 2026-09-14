@@ -34,6 +34,7 @@ from hal0.cli._shared import (
     _api_unreachable,
     api_delete,
     api_get,
+    api_patch,
     api_post,
     die,
 )
@@ -233,6 +234,18 @@ def install_cmd(
     )
 
 
+# ── `hal0 mcp add` (ADR-0015 §Decision 4 — alias of install) ────────────────
+
+
+@app.command("add")
+def add_cmd(
+    url_spec: str = typer.Argument(..., help="MCP server URL or spec (oci://…, npm:…, etc.)."),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the panel."),
+) -> None:
+    """Alias of ``hal0 mcp install``."""
+    install_cmd(url_spec, json_out)
+
+
 # ── `hal0 mcp uninstall` ─────────────────────────────────────────────────────
 
 
@@ -265,6 +278,18 @@ def uninstall_cmd(
     )
 
 
+# ── `hal0 mcp remove` (ADR-0015 §Decision 4 — alias of uninstall) ───────────
+
+
+@app.command("remove")
+def remove_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id to remove."),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
+) -> None:
+    """Alias of ``hal0 mcp uninstall``."""
+    uninstall_cmd(server_id, force)
+
+
 # ── `hal0 mcp restart` ───────────────────────────────────────────────────────
 
 
@@ -284,6 +309,152 @@ def restart_cmd(
 
     # Expecting a 501 for now (supervisor not implemented), but handle gracefully
     console.print(f"[bold yellow]restart {server_id}:[/bold yellow] {result}")
+
+
+# ── `hal0 mcp test` (ADR-0015) ───────────────────────────────────────────────
+
+
+@app.command("test")
+def test_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id to probe."),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the table."),
+) -> None:
+    """Probe an installed server and show each tool's allow/gated/blocked verdict."""
+    api_url = _api_base()
+    if _api_unreachable(api_url):
+        raise typer.Exit(1)
+    try:
+        result = api_post(f"/api/mcp/{server_id}/test")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+
+    if json_out:
+        typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
+        return
+
+    probe = result.get("probe", {})
+    if not probe.get("ok"):
+        console.print(
+            Panel(
+                f"[bold red]✗ unreachable[/bold red]  {probe.get('error', 'unknown error')}",
+                border_style="red",
+            )
+        )
+        return
+
+    verdicts: dict[str, str] = result.get("verdicts", {})
+    verdict_style = {
+        "allow": "[green]allow[/green]",
+        "gated": "[yellow]gated[/yellow]",
+        "blocked": "[red]blocked[/red]",
+        "unknown_tool": "[dim]unknown_tool[/dim]",
+        "unknown_server": "[dim]unknown_server[/dim]",
+    }
+    table = Table(title=f"mcp test · {server_id}")
+    table.add_column("Tool", style="bold")
+    table.add_column("Verdict")
+    for tool in probe.get("tools", []):
+        table.add_row(tool, verdict_style.get(verdicts.get(tool, ""), verdicts.get(tool, "—")))
+    console.print(table)
+
+
+# ── `hal0 mcp allow|gate|block` (ADR-0015) ───────────────────────────────────
+
+
+def _move_tool(server_id: str, tool: str, target: str) -> None:
+    """Fetch the current [tools] policy, move ``tool`` into ``target``, PATCH."""
+    api_url = _api_base()
+    if _api_unreachable(api_url):
+        raise typer.Exit(1)
+    try:
+        servers = api_get("/api/mcp/servers").get("servers", [])
+        server = _find_server(servers, server_id)
+        if server is None:
+            die(f"no MCP server matching '{server_id}'")
+            return
+        policy = dict(server.get("tool_policy") or {"allow": [], "gated": [], "blocked": []})
+        for tier in ("allow", "gated", "blocked"):
+            policy[tier] = [t for t in policy.get(tier, []) if t != tool]
+        policy[target] = [*policy.get(target, []), tool]
+        result = api_patch(f"/api/mcp/{server_id}/tools", json=policy)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(
+        Panel(
+            f"[bold]{tool}[/bold] → [bold]{target}[/bold] on {server_id}",
+            border_style="green",
+        )
+    )
+    if not result.get("hermes_sync", {}).get("errors"):
+        return
+    console.print(f"[yellow]![/yellow] [dim]hermes sync: {result['hermes_sync']['errors']}[/dim]")
+
+
+@app.command("allow")
+def allow_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id."),
+    tool: str = typer.Argument(..., help="Tool name to allow autonomously."),
+) -> None:
+    """Move a tool onto the allow list (autonomous calls)."""
+    _move_tool(server_id, tool, "allow")
+
+
+@app.command("gate")
+def gate_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id."),
+    tool: str = typer.Argument(..., help="Tool name to gate behind approval."),
+) -> None:
+    """Move a tool onto the gated list (each call enqueues an approval)."""
+    _move_tool(server_id, tool, "gated")
+
+
+@app.command("block")
+def block_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id."),
+    tool: str = typer.Argument(..., help="Tool name to hard-block."),
+) -> None:
+    """Move a tool onto the blocked list (hard-rejected at the client)."""
+    _move_tool(server_id, tool, "blocked")
+
+
+# ── `hal0 mcp expose` (ADR-0015) ─────────────────────────────────────────────
+
+
+@app.command("expose")
+def expose_cmd(
+    server_id: str = typer.Argument(..., help="MCP server id."),
+    hermes: bool = typer.Option(None, "--hermes/--no-hermes", help="Join into Hermes's config."),
+    brain: bool = typer.Option(
+        None, "--brain/--no-brain", help="Join into the hal0-brain profile."
+    ),
+) -> None:
+    """Flip which consumers can see an installed server."""
+    if hermes is None and brain is None:
+        die("pass at least one of --hermes/--no-hermes or --brain/--no-brain")
+        return
+    api_url = _api_base()
+    if _api_unreachable(api_url):
+        raise typer.Exit(1)
+    body: dict[str, Any] = {}
+    if hermes is not None:
+        body["hermes"] = hermes
+    if brain is not None:
+        body["brain"] = brain
+    try:
+        result = api_patch(f"/api/mcp/{server_id}/exposure", json=body)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    exposure = result.get("server", {}).get("exposure", {})
+    console.print(
+        Panel(
+            f"[bold]{server_id}[/bold] exposure: "
+            f"hermes={exposure.get('hermes')} brain={exposure.get('brain')}",
+            border_style="green",
+        )
+    )
 
 
 # ── `hal0 mcp catalog list` ──────────────────────────────────────────────────

@@ -388,13 +388,23 @@ dashboard/API-only (`/api/profiles`).
 
 ## `hal0 mcp` — manage MCP servers
 
+`add`/`remove` are aliases of `install`/`uninstall` (ADR-0015) — same
+route, same behaviour, different vocabulary.
+
 | Command | Args | Flags |
 |---|---|---|
 | `mcp list` | — | `--json` |
 | `mcp status <server_id>` | `server_id` | `--json` |
 | `mcp install <url_spec>` | `url_spec` | `--json` |
+| `mcp add <url_spec>` | `url_spec` | `--json` |
 | `mcp uninstall <server_id>` | `server_id` | `--force`/`-f` |
+| `mcp remove <server_id>` | `server_id` | `--force`/`-f` |
 | `mcp restart <server_id>` | `server_id` | — |
+| `mcp test <server_id>` | `server_id` | `--json` |
+| `mcp allow <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp gate <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp block <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp expose <server_id>` | `server_id` | `--hermes`/`--no-hermes`, `--brain`/`--no-brain` |
 | `mcp catalog list` | — | `--json` |
 | `mcp catalog refresh` | — | `--json` |
 

@@ -772,7 +772,10 @@ def test_uninstall_removes_installed_server(client: TestClient) -> None:
     client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
     response = client.delete("/api/mcp/filesystem")
     assert response.status_code == 200, response.text
-    assert response.json() == {"uninstalled": "filesystem"}
+    # ADR-0015: the response also carries a best-effort "hermes_sync"
+    # report from re-running the Hermes/brain exposure join.
+    assert response.json()["uninstalled"] == "filesystem"
+    assert "hermes_sync" in response.json()
     # Second uninstall is 404.
     again = client.delete("/api/mcp/filesystem")
     assert again.status_code == 404
@@ -910,3 +913,134 @@ def test_validate_id_rejects_path_traversal(client: TestClient) -> None:
     assert code in {"mcp.id_invalid", "mcp.manifest_invalid"}, (
         f"path traversal must be rejected at validation, got {code}"
     )
+
+
+# ── ADR-0015: POST /{id}/test, PATCH /{id}/tools, PATCH /{id}/exposure ──────
+
+
+def _github_http_manifest_dict() -> dict[str, Any]:
+    """A streamable-http manifest — the shape a real hosted MCP server takes."""
+    return {
+        "id": "github",
+        "name": "github",
+        "description": "GitHub MCP server.",
+        "spec": "https://github.example.com/manifest.json",
+        "transport": "streamable-http",
+        "tools": 3,
+        "resources": 0,
+        "prompts": 0,
+        "env_required": [],
+        "source_kind": "manifest",
+        "source_url": "https://github.example.com/mcp",
+        "author": "user",
+    }
+
+
+def _install_github(client: TestClient) -> dict[str, Any]:
+    response = client.post("/api/mcp/install", json={"manifest": _github_http_manifest_dict()})
+    assert response.status_code == 201, response.text
+    return response.json()["installed"]
+
+
+def test_install_sets_url_for_http_transport(client: TestClient) -> None:
+    installed = _install_github(client)
+    assert installed["url"] == "https://github.example.com/mcp"
+    assert installed["transport"] == "streamable-http"
+
+
+def test_test_endpoint_returns_probe_and_verdicts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_github(client)
+
+    def fake_probe(record: Any) -> dict[str, Any]:
+        return {"ok": True, "tools": ["search_repositories"], "error": None}
+
+    monkeypatch.setattr(mcp_routes.mcp_probe, "probe_installed_server_sync", fake_probe)
+    response = client.post("/api/mcp/github/test")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["probe"]["ok"] is True
+    # No hermes agent config present under this tmp sandbox -> classify()
+    # degrades to unknown_server rather than 500ing the preview.
+    assert body["verdicts"] == {"search_repositories": "unknown_server"}
+
+
+def test_test_endpoint_stdio_returns_501(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    response = client.post("/api/mcp/filesystem/test")
+    assert response.status_code == 501
+    assert response.json()["error"]["code"] == "mcp.supervisor_unavailable"
+
+
+def test_test_endpoint_missing_server_404(client: TestClient) -> None:
+    response = client.post("/api/mcp/nope/test")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "mcp.not_found"
+
+
+def test_patch_tools_writes_policy(client: TestClient) -> None:
+    _install_github(client)
+    response = client.patch(
+        "/api/mcp/github/tools",
+        json={"allow": ["search_repositories"], "gated": ["create_pull_request"], "blocked": []},
+    )
+    assert response.status_code == 200, response.text
+    tools = response.json()["server"]["tool_policy"]
+    assert tools["allow"] == ["search_repositories"]
+    assert tools["gated"] == ["create_pull_request"]
+    assert "hermes_sync" in response.json()
+
+
+def test_patch_tools_rejects_overlap(client: TestClient) -> None:
+    _install_github(client)
+    response = client.patch(
+        "/api/mcp/github/tools",
+        json={"allow": ["x"], "gated": ["x"], "blocked": []},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.tools_invalid"
+
+
+def test_patch_tools_bundled_rejected(client: TestClient) -> None:
+    response = client.patch(
+        "/api/mcp/hal0-admin/tools", json={"allow": [], "gated": [], "blocked": []}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.bundled"
+
+
+def test_patch_exposure_hermes(client: TestClient) -> None:
+    _install_github(client)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True})
+    assert response.status_code == 200, response.text
+    exposure = response.json()["server"]["exposure"]
+    assert exposure["hermes"] is True
+    assert exposure["brain"] is False
+    assert "hermes_sync" in response.json()
+
+
+def test_patch_exposure_openwebui_rejected(client: TestClient) -> None:
+    _install_github(client)
+    response = client.patch("/api/mcp/github/exposure", json={"openwebui": True})
+    assert response.status_code == 501
+    assert response.json()["error"]["code"] == "mcp.exposure_unsupported"
+
+
+def test_patch_exposure_stdio_needs_supervisor(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    response = client.patch("/api/mcp/filesystem/exposure", json={"hermes": True})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.exposure_needs_supervisor"
+
+
+def test_patch_exposure_bundled_rejected(client: TestClient) -> None:
+    response = client.patch("/api/mcp/hal0-admin/exposure", json={"hermes": True})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.bundled"
+
+
+def test_install_returns_hermes_sync_report(client: TestClient) -> None:
+    response = client.post("/api/mcp/install", json={"manifest": _github_http_manifest_dict()})
+    assert response.status_code == 201, response.text
+    assert "hermes_sync" in response.json()
