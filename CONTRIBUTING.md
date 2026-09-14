@@ -76,11 +76,13 @@ enforces the ones marked **(gated)**.
    grow. Never widen exposure as a side effect of another change.
 
 9. **No ghost-doc citations.** A decision is either recorded in a real,
-   tracked document or explained inline where it takes effect. Do not cite
-   a doc, ADR, or design note that does not exist in the tree. hal0 keeps
-   no separate ADR tree: rationale lives next to the code or in
-   [`ARCHITECTURE.md`](./ARCHITECTURE.md). Touched documentation must match
-   the code it describes.
+   tracked document (an ADR in `docs/adr/`, or the gitignored
+   `docs/internal/adr/` for a decision that carries lab topology/IP data)
+   or explained inline where it takes effect. Do not cite a doc, ADR, or
+   design note that does not exist in either tree. Most standing decisions
+   are explained inline in [`ARCHITECTURE.md`](./ARCHITECTURE.md); only cite
+   an ADR number when the file actually exists. Touched documentation must
+   match the code it describes.
 
 10. **Test behavior, not framework internals.** Probe routes and effects
     through the public surface; never assert on `app.routes` shape or other
