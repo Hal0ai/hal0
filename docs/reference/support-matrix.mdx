@@ -1,0 +1,72 @@
+---
+title: Support matrix
+description: "What hal0 supports today, honestly: platform, GPU lanes, CI/fleet coverage, and an explicit not-supported row for macOS and Windows — derived from the CI workflows, installer/lib/distro.sh, and the release-validation fleet."
+sidebar:
+  order: 55
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This page separates three things that are easy to conflate: what the
+installer's package-manager detection can *technically* run on, what CI
+actually *exercises* on every PR, and what the release-validation fleet
+*proves* on real hardware before a release ships. A row can be "installer
+supports it" without being "CI-tested" or "fleet-validated" — say which is
+true, not just whether the code path exists.
+
+## Platform
+
+| Platform | Status | What that means today |
+|---|---|---|
+| **Linux + systemd + podman** | **Supported** | The only supported runtime shape. Every inference workload is a podman container under a `hal0-slot@<name>.service` systemd unit — hal0 has no non-systemd, non-podman code path. |
+| **Proxmox LXC (privileged, Ubuntu)** | **Supported** | First-class, not a workaround: `scripts/proxmox-ve/hal0.sh` provisions a privileged Ubuntu 26.04 LXC with iGPU + XDNA NPU device-node passthrough already wired (`docs/getting-started/proxmox.mdx`). This is also the literal shape of the release-validation fleet's primary box (`tests/release-validation/boxes.toml`) — the Proxmox path isn't a lesser-tested variant of bare metal, it's what the fleet itself runs on. |
+| **WSL2** | **Experimental, CPU-only** | hal0 detects WSL2 but does not work around its limits: no `/dev/kfd` (no ROCm), and the iGPU only appears through Microsoft's `/dev/dxg`, not the native render/kfd nodes hal0's slots expect — untested, don't rely on it. systemd must be enabled manually or preflight fails. `docs/getting-started/wsl.mdx` is explicit: **"Windows is out of scope for hal0 v1."** |
+| **macOS** | **Not supported** | No Darwin handling anywhere in `installer/install.sh` — there is no macOS install path, tested or otherwise. hal0's runtime model (systemd units + podman containers) has no macOS equivalent shipped. |
+| **Windows (native)** | **Not supported** | Same installer has no Windows-native path either; the only way to reach hal0 from Windows today is WSL2 (see above), CPU-only and experimental. See `docs/getting-started/wsl.mdx` for why this is a v1 scope decision, not an oversight. |
+
+<Aside type="note">
+"Supported" here means an install actually happens and is exercised somewhere in CI or the release
+fleet (below) — not "the installer has a `case` branch for this distro's package manager and
+nothing has actively broken it yet." The Package-manager breadth section below draws that
+distinction explicitly.
+</Aside>
+
+## GPU / accelerator lanes
+
+| Lane | Status | Evidence |
+|---|---|---|
+| **ROCm** (`gpu-rocm`) | **Supported, default** | `DEFAULT_DEVICE = "gpu-rocm"` in `hal0.model_meta`. Selected whenever `/dev/kfd` is present and rocm-smi is reachable (`hardware.recommend._backend_for()`). Exercised in the γ release-gate matrix (`make release-test` → `llamacpp-rocm` row) and by the release-validation fleet's update/prod boxes, both of which carry `/dev/kfd`. |
+| **Vulkan** (`gpu-vulkan`) | **Supported** | The lane for iGPU-only boxes with no `/dev/kfd` (render node only) — also the non-llama.cpp GPU runtime for Kokoro TTS, whisper.cpp, and ComfyUI. LLM slots on this device are gated to an explicit image allowlist (`VULKAN_CAPABLE_IMAGE_REFS`, `src/hal0/config/schema.py`), not a version comparison. Exercised in the γ matrix (`llamacpp-vulkan` row) and is the primary lane on the release-validation fleet's fresh-install box, which has no `/dev/kfd`. |
+| **CPU** | **Supported, universal fallback** | Always available; `hardware.recommend._backend_for()` falls back here when no GPU class matches. Exercised on every fresh-install box in the fleet regardless of GPU class. |
+| **NPU (FLM trio)** | **Supported on Strix Halo, opt-in** | AMD XDNA NPU via FastFlowLM — chat + transcription + embedding coresident in one `hal0-toolbox-flm` container (see `docs/concepts/strix-halo.mdx`). Exercised in the γ matrix's `flm` row (chat + trio ASR/embed); `skip`s cleanly on a manifest without a pinned FLM `.deb` rather than failing the release. |
+| **CUDA** (`gpu-cuda`) | **Experimental** | NVIDIA GPUs via llama.cpp CUDA — present in the device taxonomy (`docs/reference/hardware-matrix.mdx`) but not seeded by default and not part of the γ release-gate matrix or the release-validation fleet today. Treat as unvalidated until it appears in a fleet report. |
+
+## CI and fleet coverage — what actually runs where
+
+| Layer | Where it runs | What it covers | What it does NOT cover |
+|---|---|---|---|
+| **CI** (`.github/workflows/ci.yml`) | GitHub-hosted `ubuntu-latest` runners | Unit tests (α tier), lint, mypy, sunset/scar ratchet, UI build + unit tests. Push-to-main also runs the full supported Python range; PRs run 3.12 only. | No other Linux distro, no GPU, no real systemd/podman install. |
+| **Bootstrap parity** (`.github/workflows/bootstrap-parity.yml`) | `ubuntu-latest`, daily | Diffs the in-tree `installer/bootstrap.sh` against the live `hal0.dev/install.sh` one-liner — catches drift between the audited installer and what a `curl \| bash` user actually runs. | Does not install hal0 anywhere; it's a text diff, not a runtime check. |
+| **β integration tier** | Not currently wired into CI | `CONTRIBUTING.md`'s Test tiers section describes a `make test-integration` target and a `.github/workflows/integration.yml` job exercising a real `hal0-lemonade.service` — **neither exists in the tree today.** Both were retired in the toolbox-retirement pass (commit `4c01f0c1`, "PR-9") alongside `tests/slots/test_integration.py`, and no later commit restored them, despite that commit's own message naming a follow-up that would. Filed as [#2239](https://github.com/Hal0ai/hal0/issues/2239). | The α unit tier and the γ release-gate are the only test tiers that actually run today; there is currently no automated tier between them. |
+| **γ release-gate script** (`make release-test`) | An operator-designated `hal0-test` box over SSH (`HAL0_TEST_HOST`) | The 7-row matrix — `llamacpp-vulkan`, `llamacpp-rocm`, `flm` (chat+trio), `whispercpp`, `tts`, `sd-cpp`, `openwebui`, plus an updater round-trip. Structured pass/fail/skip/deferred rows in `tests/release-gate-report.json`. | Distro breadth — it's one box, whichever the operator points it at. |
+| **Release-validation fleet** (`tests/release-validation/`, the `rc-validate` kit) | A private Proxmox-hosted lab fleet: one fresh-install box (privileged Ubuntu, iGPU+NPU passthrough, no `/dev/kfd`), one in-place-upgrade box (Ubuntu, `/dev/kfd` present), one read-only production box (Ubuntu, `/dev/kfd` present) | Agent-driven exploratory lanes over the real product: CLI, API, MCP, Hermes, UI (read-only), then serialized stateful lanes (slots, routing, brain, memory, capabilities, Hermes e2e), then the in-place upgrade lane. See [Validation matrix](/docs/reference/validation-matrix/). | Every box in the fleet runs Ubuntu — no Fedora/Arch/openSUSE/Debian coverage exists anywhere in CI or the fleet today, despite the installer's package-manager detection supporting all of them (below). A second, CPU-only fresh-install box exists in the fleet's roster but isn't part of the default lane matrix and carries its own unresolved AppArmor/podman caveat (`tests/release-validation/boxes.toml`) — so CPU-only fresh-install coverage isn't exercised by default; the CPU lane inside `make release-test` is the reliable CPU-only check today. |
+
+## Package-manager breadth (installer-level, not fleet-tested)
+
+`installer/lib/distro.sh` detects the host package manager by command
+presence — `apt-get`, `dnf`/`yum`, `zypper`, `pacman`, `apk` — and buckets it
+into a `distro_family` (`debian`, `fedora`, `suse`, `arch`, `alpine`) used
+only to pick package *names*, not to gate behavior. This means `install.sh`
+will attempt an install on any of those five package-manager families. **This
+is installer-level generality, not a support claim** — none of Fedora, Arch,
+openSUSE, or Alpine appears in CI or the release-validation fleet (both
+Ubuntu-only, per the table above), so a non-Debian install is exercising a
+code path with detection logic but no end-to-end evidence behind it. Report
+issues on those distros; don't assume they're fleet-proven because the
+`case` statement recognizes them.
+
+## See also
+
+- [Hardware matrix](/docs/reference/hardware-matrix/) — the hardware probe, device taxonomy, and backend-selection decision tree in full.
+- [Validation matrix](/docs/reference/validation-matrix/) — how the α/β/γ test tiers and the release-validation fleet map onto release-readiness gates.
+- [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers) — the α/β/γ test tiers in full, including local commands.

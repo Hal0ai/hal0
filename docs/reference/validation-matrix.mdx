@@ -1,0 +1,84 @@
+---
+title: Validation matrix
+description: "hal0's α/β/γ test tiers and the rc-validate release-validation kit mapped onto release-readiness gates, plus a 'User Green' definition for hal0 — a fresh box reaching first chat unattended."
+sidebar:
+  order: 56
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 validates a change at three widening tiers before it reaches a
+release, plus one exploratory layer that runs only against a release
+candidate. This page names what each layer proves, where it runs, and what
+blocks a release — see [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers)
+for the day-to-day commands.
+
+## The four layers
+
+| Tier | What it proves | Where it runs | Blocks what |
+|---|---|---|---|
+| **α — Unit** | Pure logic, mocked systemd/HTTP/Lemonade client. | Any host, no daemons — `make test` | Every commit / PR. |
+| **β — Integration** *(documented, not currently wired)* | Real `hal0-lemonade.service` + a tiny GGUF: load → chat → swap → unload, slot state visible via `/v1/health` — per `CONTRIBUTING.md`'s description. | Neither `make test-integration` nor `.github/workflows/integration.yml` exist in the tree today — both were retired alongside the old per-modality toolboxes (`4c01f0c1`) and never restored, despite that commit's own message naming a follow-up that would. Filed as [#2239](https://github.com/Hal0ai/hal0/issues/2239). | Nothing today — there is no automated tier between α and γ right now. |
+| **γ — Release-gate script** | The 7-row hardware/backend matrix (ROCm, Vulkan, CPU, NPU/FLM, whisper.cpp, Kokoro TTS, sd-cpp, OpenWebUI proxy, updater round-trip) on one designated box. | `hal0-test` LXC over SSH — `make release-test` | Per release candidate, not per commit. Row status `pass\|fail\|skip\|deferred`; only `fail` blocks. |
+| **γ+ — Release-validation fleet (`rc-validate` kit)** | The product as an operator would actually use it — CLI, API, MCP, Hermes, UI, then serialized stateful lanes (slots, routing, brain, memory, capabilities, Hermes e2e), then an in-place upgrade — on real hardware, per `tests/release-validation/`. | A private real-hardware fleet (Proxmox-hosted; see [Support matrix](/docs/reference/support-matrix/)) | Release-candidate confidence. Agent-driven and exploratory, not a fixed pytest suite — findings that prove mechanical get folded back into pytest/`release-test.sh` so they stop needing an agent (`tests/release-validation/README.md`). |
+
+<Aside type="note">
+The γ script and the `rc-validate` kit are complementary, not redundant. `make release-test`
+answers "does each backend row still work" with a fixed, scriptable matrix. The `rc-validate` kit
+answers "does the product still work the way an operator experiences it" — model registry, the
+memory engine, the agent board, upgrade behavior — surfaces a fixed matrix can't reach because
+they depend on multi-step, stateful operator workflows.
+</Aside>
+
+## The release-validation kit, in more detail
+
+`tests/release-validation/` (orchestrated by the `rc-validate` Claude Code workflow) runs seven
+phases in order: **Preflight** (per-box readiness — a version/reachability mismatch aborts the
+run) → **Read-only sweep** (`api`, `cli`, `mcp`, `hermes`, `ui` lanes, parallel, no mutations) →
+**Stateful lane** (`slots` → `routing` → `brain` → `memory` → `capabilities` → `hermes-e2e`,
+strictly serialized on one box — two agents mutating the same install would produce
+unreproducible findings) → **Update lane** (upgrade + post-upgrade checks on a separate box,
+concurrent with the stateful lane) → **Regression probes** (every previously filed finding in
+`regressions.yaml`, re-checked every release) → **Triage + adversarial verify** (dedup, drop
+known issues, one skeptic agent per candidate finding — four of the rc.4 wave's candidates were
+refuted or reclassified as by-design here) → **Synthesis + report**, committed under
+`tests/release-validation/reports/<version>.md`. **Kit curation** is the eighth, standing phase
+that folds newly discovered checks back into the lane briefs and promotes confirmed findings into
+`regressions.yaml`, so the kit gets sharper release over release instead of starting from zero.
+
+## "User Green" for hal0
+
+ODS's release gate names a combined `User Green` result: every enabled release surface either
+passed or was explicitly accounted for. hal0 doesn't yet have a single named gate that plays that
+role end to end, but the equivalent, stated in hal0's own vocabulary, is:
+
+> **User Green, for hal0** — a fresh box reaches first chat **unattended**: `install.sh` completes
+> non-interactively, `hal0-api` comes up healthy (`/api/health` — [Verify the install](/docs/getting-started/verify/)
+> step 1), at least one model is registered (step 2), a `/v1/chat/completions` request against the
+> seeded `agent` slot returns real text (step 3), the dashboard serves (step 4), and
+> `hal0 doctor verify` reports no critical failure (step 6) — with nothing but the one-line
+> installer command and, optionally, a HuggingFace token.
+
+Composed from the same layers as the table above:
+
+| Component | What must be true | Proven by |
+|---|---|---|
+| **Install Green** | The public install path completes on a real fresh box without operator intervention. | `rc-validate`'s Preflight + fresh-install evidence; the fresh-install box in the fleet. |
+| **Product Green** | Core API, dashboard, and OpenWebUI serve; doctor's aggregate check has no critical row. | `hal0 doctor verify` (or `GET /api/doctor`); the read-only lane sweep (`api`, `ui` lanes). |
+| **Capability Green** | A chat completion against the seeded slot returns real generated text, not an error or a timeout. | The first-chat step of [Verify the install](/docs/getting-started/verify/); the `brain`/`slots` stateful lanes. |
+| **Lifecycle Green** | An in-place `hal0 update` converges cleanly and the box remains healthy after. | The update lane (`upgrade`, `post-upgrade`) on the fleet's update box. |
+| **User Green** | All four of the above, for the candidate under test, with any skip or deferral named and justified rather than silently dropped. | The synthesized `rc-validate` report for that release. |
+
+<Aside type="caution">
+This is a documentation mapping, not a new CI gate — hal0 has no automated job today that
+computes a single "User Green" boolean and fails a release on it. Release readiness is currently
+a human judgment call informed by the α/β/γ results plus the `rc-validate` report; this table
+exists so that judgment has a name and a checklist, not a formula.
+</Aside>
+
+## See also
+
+- [Support matrix](/docs/reference/support-matrix/) — the hardware/platform coverage these tiers actually exercise.
+- [Verify the install](/docs/getting-started/verify/) — the six-step checklist an operator runs by hand; steps 1, 2, 3, 4, and 6 are exactly the checks "Product Green" and "Capability Green" above cite.
+- [`tests/release-validation/README.md`](https://github.com/Hal0ai/hal0/blob/main/tests/release-validation/README.md) — the kit's own layout, phase table, and process lessons.
+- [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers) — α/β/γ commands and CI wiring.
