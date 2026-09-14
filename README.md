@@ -135,6 +135,7 @@ Full step list and the complete env-var table:
 | `HAL0_PY_AUTOINSTALL=1` | Let the installer install a compatible `python3.12` |
 | `HAL0_SKIP_HINDSIGHT=1`, `HAL0_SKIP_OPENWEBUI=1`, `HAL0_SKIP_HERMES=1`, `HAL0_SKIP_COMFYUI=1` | Skip individual companion services |
 | `--no-start` | Provision everything, leave services stopped |
+| `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
 
 ### Proxmox VE, one line
 

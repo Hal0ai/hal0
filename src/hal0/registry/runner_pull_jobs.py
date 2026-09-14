@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Coroutine
 from typing import Any
 
@@ -85,6 +86,14 @@ def _default_provider_factory() -> Any:
 #: point this at a fake ``pull_image_stream``-shaped object instead of the
 #: real podman-backed singleton.
 provider_factory: Any = _default_provider_factory
+
+#: Retry attempts for a dashboard-triggered runner-image pull (backoff +
+#: non-retryable classification: see ``runner_pull.is_retryable_pull_error``
+#: / ``pull_backoff_delay``). ``run_runner_pull``'s own default (1, no
+#: retry) is for direct/test callers; this is where the real multi-attempt
+#: policy is opted into for the actual user-facing pull path. Override with
+#: HAL0_RUNNER_PULL_MAX_ATTEMPTS for a slower/flakier network.
+_PULL_MAX_ATTEMPTS = int(os.environ.get("HAL0_RUNNER_PULL_MAX_ATTEMPTS", "4"))
 
 
 async def enqueue(request: Request, *, image_id: str, tag: str | None = None) -> dict[str, object]:
@@ -153,7 +162,9 @@ async def enqueue(request: Request, *, image_id: str, tag: str | None = None) ->
 
     async def _run() -> None:
         try:
-            await run_runner_pull(job, store=store, provider=provider)
+            await run_runner_pull(
+                job, store=store, provider=provider, max_attempts=_PULL_MAX_ATTEMPTS
+            )
         finally:
             persist_pull_job(job)
             if event_bus is not None:

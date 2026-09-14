@@ -1,5 +1,32 @@
 #!/usr/bin/env bash
-# hal0 installer — idempotent, non-interactive.
+# installer/install.sh
+#
+# Purpose: hal0's single user-facing install entry point — idempotent,
+#          non-interactive by default. Provisions the system user,
+#          filesystem layout, Python venv, dashboard UI, config, systemd
+#          units, container slot seeds, hardware probe, curated models,
+#          and starts the service.
+# Expects: A systemd Linux on x86_64 (or `--dev` for a non-systemd,
+#          non-FHS local checkout under $PWD/.hal0ai). Root for a real
+#          install; any user for `--dev`. See `--help` (below) for flags
+#          and the "Env overrides" table for every env var this script
+#          reads.
+# Provides: The installed hal0 system (see installer/README.md "What the
+#          installer does" for the full 16-step breakdown) plus, for
+#          other tooling in this tree: a tee'd install log at
+#          $HAL0_INSTALL_LOG (installer/lib/logging.sh), a failure report
+#          on any ERR-trapped abort (installer/lib/failure-report.sh), and
+#          an optional --summary-json=<path> machine-readable install
+#          summary (schema hal0.install-summary.v1).
+# Modder notes:
+#   4,000+ lines by design — one script an operator can read top to bottom
+#   while an install runs, no framework indirection. ui_step's 16-step
+#   count is asserted against UI_STEP_TOTAL by
+#   tests/installer/test_install_single_entry_point.py; keep them in
+#   lockstep when adding/removing a step. Function/step names in this file
+#   are read by teammates decomposing install.sh into standalone step
+#   scripts — keep new blocks named after their `ui_step` title so that
+#   extraction stays mechanical.
 #
 # Usage:
 #   sudo bash install.sh             # standard install at /usr/lib/hal0
@@ -34,6 +61,28 @@ umask 022
 # trap below. Honors HAL0_PLAIN=1 and NO_COLOR=1 for non-fancy terms.
 # shellcheck source=lib/ui.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
+
+# Tee'd install log (installer/lib/logging.sh) — every line this script and
+# every command it runs prints from here on also lands in HAL0_INSTALL_LOG,
+# so a failed or partial install leaves forensic evidence on disk. Sourced
+# and initialised immediately after ui.sh so even the banner below is
+# captured. hal0_install_log_init degrades to HAL0_INSTALL_LOG="" (no log)
+# on an unwritable /var/log AND /tmp rather than aborting the install.
+# shellcheck source=lib/logging.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/logging.sh"
+hal0_install_log_init || warn "could not open an install log — continuing without one"
+
+# Failure report (installer/lib/failure-report.sh) — the ERR trap below
+# calls hal0_write_failure_report to leave a redacted, shareable
+# hal0-install-report-<ts>.txt next to the install log on any abort.
+# shellcheck source=lib/failure-report.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/failure-report.sh"
+
+# Backoff + non-retryable classification for container-image pulls
+# (installer/lib/pull-retry.sh) — used by the OpenWebUI background pull
+# below instead of a single bare `podman pull`.
+# shellcheck source=lib/pull-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/pull-retry.sh"
 
 # Distro / package-manager detection (distro_id / pkg_mgr / pkg_install_cmd /
 # python_venv_hint). One place knows "what distro is this and how do I name an
@@ -98,14 +147,19 @@ MODELS_DIR="${HAL0_MODELS_DIR:-}"
 # choice is never re-asked at the TTY prompt below.
 MODELS_DIR_EXPLICIT=0
 [[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
+# --summary-json=PATH: write a machine-readable install summary (schema
+# hal0.install-summary.v1) at PATH once the install finishes (or fails —
+# see the ERR trap). Empty means "don't write one" (the default).
+SUMMARY_JSON_PATH=""
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
+        --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
+Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
   --no-start          set up everything but don't enable/start the API
   --models-dir=PATH   absolute path where HuggingFace pulls land
@@ -113,6 +167,10 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
                       Omit it and the installer asks on an interactive terminal;
                       a piped (\`curl … | bash\`) or headless run takes the default.
+  --summary-json=PATH write a machine-readable install summary (versions,
+                      ports, bind host, model pulled, per-step durations,
+                      warning count) to PATH as JSON, atomically. See
+                      docs/getting-started/install.mdx.
 
 Interactive prompts (models dir, HuggingFace token, Hermes terminal tool) only
 run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env
@@ -131,6 +189,7 @@ done
 # Banner first — before any info/warn so the brand greets the user
 # rather than hiding behind a "Dev mode …" line.
 ui_banner
+[[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
 
 HAL0_PORT="${HAL0_PORT:-8080}"
 PY="${HAL0_PYTHON:-python3}"
@@ -245,6 +304,10 @@ fi
 # now asserts the two agree).
 UI_STEP_TOTAL=16
 
+# _hal0_report_path IS assigned below, inside this same single-quoted trap
+# body — shellcheck's SC2154 is a known false positive for vars set-and-used
+# inside a `trap '...'` string.
+# shellcheck disable=SC2154
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
         "Pre-flight checks")
@@ -266,9 +329,11 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
     esac
+    _hal0_report_path="$(hal0_write_failure_report "${CURRENT_STEP:-pre-init}" 2>/dev/null || true)"
+    [[ -n "${_hal0_report_path}" ]] && warn "Failure report saved: ${_hal0_report_path} — attach it to a bug report."
     exit 1' ERR
 
-ui_step "Pre-flight checks"
+ui_step "Pre-flight checks" "~5-10s"
 
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null; then
@@ -717,7 +782,7 @@ fi
 # Q1), so the render/video group membership below is settled before any
 # later step that depends on group membership or on the user existing
 # (the FLM cache / HF cache / STATE.md ownership work further down).
-ui_step "System user"
+ui_step "System user" "~1-2s"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs never create system users or touch systemd.
@@ -802,7 +867,7 @@ else
     fi
 fi
 
-ui_step "Filesystem layout"
+ui_step "Filesystem layout" "~2-5s"
 
 mkdir -p \
     "${PREFIX}" \
@@ -1030,7 +1095,7 @@ PYEOF
     fi
 fi
 
-ui_step "Python environment"
+ui_step "Python environment" "~30-90s"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
     "${PY}" -m venv "${VENV_DIR}"
@@ -1098,7 +1163,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
-ui_step "Node.js toolchain"
+ui_step "Node.js toolchain" "~5-60s (skipped if Node is already present)"
 
 UI_DIR="${REPO_ROOT}/ui"
 UI_DIST="${UI_DIR}/dist"
@@ -1124,7 +1189,7 @@ else
     warn "  install manually: https://nodejs.org/en/download (or your distro's nodejs/NodeSource package), then re-run install.sh"
 fi
 
-ui_step "Dashboard UI"
+ui_step "Dashboard UI" "~60-180s (skipped when a prebuilt ui/dist ships)"
 
 # Staleness gate for source trees (same class as the venv same-version trap):
 # "dist exists" is NOT "dist is current". Stamp a local build with the ui/
@@ -1194,7 +1259,7 @@ else
     warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
 fi
 
-ui_step "Configuration"
+ui_step "Configuration" "~1-2s"
 
 HAL0_TOML="${ETC_DIR}/hal0.toml"
 if [[ ! -f "${HAL0_TOML}" ]]; then
@@ -1569,7 +1634,7 @@ else
     warn "failed to write openwebui.env — OpenWebUI may not start"
 fi
 
-ui_step "Systemd units"
+ui_step "Systemd units" "~2-5s"
 
 # WorkingDirectory follows `current` in prod so a `hal0 update` symlink swap
 # moves it to the new tree without rewriting the unit; dev uses the checkout.
@@ -2170,16 +2235,18 @@ fi
 # The unit also has ExecStartPre=podman pull (idempotent), so a missed
 # background pull never breaks correctness — only first-boot latency.
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1; then
-    # Background the actual pull, but spin briefly so the user sees we
-    # kicked it off. The hal0-openwebui unit also has ExecStartPre=podman
-    # pull (idempotent), so missing this background pull only costs first
-    # -boot latency, not correctness.
-    (podman pull "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
+    # Background the actual pull (with retry/backoff — lib/pull-retry.sh —
+    # so a single transient registry blip doesn't waste the warm-cache
+    # attempt entirely), but spin briefly so the user sees we kicked it
+    # off. The hal0-openwebui unit also has ExecStartPre=podman pull
+    # (idempotent), so missing this background pull only costs first-boot
+    # latency, not correctness.
+    (hal0_pull_with_retry podman "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
     disown
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
 
-ui_step "Container slot seeds"
+ui_step "Container slot seeds" "~1-2s"
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
 # Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain,…}.toml
@@ -2325,7 +2392,7 @@ if (( SEEDED_EXISTING_SLOTS > 0 )) && (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
     info "      not a stray slot — each stays inert until you bind a model to it."
 fi
 
-ui_step "Hardware probe"
+ui_step "Hardware probe" "~10-30s"
 
 if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
     info "Skipping first-run seeding (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
@@ -2451,7 +2518,7 @@ fi
 # UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
 # brain pull makes the steward work out of the box (chat AND native tool
 # calls); the agent pull adds the bigger fallback tool-caller.
-ui_step "Steward + agent models"
+ui_step "Steward + agent models" "~1-5 min (model download; size varies)"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping the brain model pull (no system writes)"
@@ -2578,7 +2645,7 @@ fi
 #      (NPU-less hal0 still ships — FLM trio gates on `flm validate`).
 #
 # Refs: ADR-0009 (FLM trio NPU packing).
-ui_step "NPU prerequisites (FastFlowLM)"
+ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
 # Pinned FLM .deb — bump in lockstep with ADR-0009 and the toolbox image
 # tag in manifest.json (both 0.9.44 as of v0.9.6). NOTE (since 0.9.43):
@@ -3040,7 +3107,7 @@ fi
 # (#984, also resolves #874).  We still create the model-share subdirectories
 # and seed the optional helper assets (custom nodes, extra_model_paths.yaml)
 # because the img slot bind-mounts the same paths.
-ui_step "ComfyUI model share"
+ui_step "ComfyUI model share" "~2-10s"
 
 COMFYUI_CUSTOM_NODES_SRC="${REPO_ROOT}/installer/comfyui/custom_nodes"
 COMFYUI_MODELS_ROOT="/mnt/ai-models/comfyui"
@@ -3178,7 +3245,7 @@ fi
 # Idempotent: re-running install.sh overwrites each manifest. Manifests
 # are tiny (a few KB) and the copy is fast, so we don't bother with
 # content hashing.
-ui_step "Bundle picker manifests"
+ui_step "Bundle picker manifests" "~1s"
 
 BUNDLES_SRC="${REPO_ROOT}/installer/manifests/omni"
 BUNDLES_DST="${VAR_DIR}/models/collections/omni"
@@ -3208,7 +3275,7 @@ fi
 # (also on external_dirs): new skills install just by dropping a folder in, and
 # editing is a plain file edit. This must run BEFORE the hermes provision in
 # "Service start" so the mirror finds the shipped source. Idempotent.
-ui_step "Bundled agent skills"
+ui_step "Bundled agent skills" "~2-5s"
 
 SKILLS_SRC="${REPO_ROOT}/installer/agent-skills"
 SKILLS_SHIP="/usr/share/hal0/skills"
@@ -3231,7 +3298,7 @@ else
     info "dev mode — skipping system skill install (/usr/share/hal0/skills)"
 fi
 
-ui_step "Service start"
+ui_step "Service start" "~30-90s"
 
 # P4-model-layout backstop: the v0.1→v0.2 model-layout migration
 # (src/hal0/cli/migrate_commands.py) reads registry.toml + the on-disk
@@ -3977,6 +4044,126 @@ SUMMARY_LINES+=(
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
+
+# Close out the last step's measured duration (ui_step only closes the
+# PREVIOUS step when the next one starts, so "Service start" needs this
+# explicit finalize) and report the total wall-clock time.
+ui_step_finalize
+info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
+
+# ── --summary-json ───────────────────────────────────────────────────────────
+# Versioned, machine-readable install summary (docs/getting-started/install.mdx).
+# Written atomically (tempfile + fsync + os.replace) so a reader never sees a
+# half-written file. Best-effort: a write failure here never fails the install
+# that already succeeded.
+if [[ -n "${SUMMARY_JSON_PATH}" ]]; then
+    _summary_hw_class_id="unknown"
+    _summary_hw_class_label="unknown"
+    if [[ -f /etc/hal0/hardware.json ]]; then
+        read -r _summary_hw_class_id _summary_hw_class_label < <(
+            "${PY}" - <<'PYEOF' 2>/dev/null || printf 'unknown unknown\n'
+import json
+try:
+    data = json.load(open("/etc/hal0/hardware.json"))
+except Exception:
+    print("unknown unknown")
+else:
+    hc = data.get("hardware_class") or {}
+    cid = str(hc.get("id", "unknown")).replace(" ", "_") or "unknown"
+    label = str(hc.get("label", "unknown")).replace(" ", "_") or "unknown"
+    print(f"{cid} {label}")
+PYEOF
+        )
+    fi
+    _summary_brain_model="$(grep -m1 '^  brain model: ' "${HAL0_INSTALL_LOG:-/dev/null}" 2>/dev/null \
+        | sed -E 's/^  brain model: ([^ ]+).*/\1/')"
+
+    _summary_steps_blob=""
+    for _summary_step_title in "${!UI_STEP_DURATIONS[@]}"; do
+        _summary_steps_blob+="${_summary_step_title}=${UI_STEP_DURATIONS[$_summary_step_title]}"$'\x1e'
+    done
+    export HAL0_STEP_DURATIONS_BLOB="${_summary_steps_blob}"
+
+    "${PY}" - \
+        "${SUMMARY_JSON_PATH}" \
+        "$(_ui_read_version)" \
+        "${DEV_MODE}" "${NO_START}" \
+        "${LIB_DIR:-}" "${MODELS_DIR:-}" \
+        "0.0.0.0" "${HAL0_PORT}" "3001" \
+        "${_summary_hw_class_id}" "${_summary_hw_class_label}" \
+        "${_summary_brain_model:-none}" \
+        "${UI_WARN_COUNT:-0}" "${UI_ERR_COUNT:-0}" \
+        "${SECONDS}" \
+        <<'PYEOF' || warn "could not write --summary-json to ${SUMMARY_JSON_PATH}"
+import json
+import os
+import pathlib
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+(
+    out_file, version, dev_mode, no_start, prefix, models_dir,
+    bind_host, port, openwebui_port, hw_class_id, hw_class_label,
+    brain_model, warn_count, err_count, elapsed_seconds,
+) = sys.argv[1:]
+
+# UI_STEP_DURATIONS (bash assoc array "Title=seconds") is exported as one
+# NUL-joined blob via HAL0_STEP_DURATIONS_BLOB below rather than argv, since
+# step titles contain spaces/parens that don't survive positional argv cleanly.
+steps = {}
+blob = os.environ.get("HAL0_STEP_DURATIONS_BLOB", "")
+for entry in blob.split("\x1e"):
+    if "=" not in entry:
+        continue
+    title, _, secs = entry.rpartition("=")
+    if title:
+        try:
+            steps[title] = int(secs)
+        except ValueError:
+            pass
+
+payload = {
+    "schema": "hal0.install-summary.v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "hal0_version": version,
+    "install": {
+        "dev_mode": dev_mode == "1",
+        "no_start": no_start == "1",
+        "prefix": prefix or None,
+        "models_dir": models_dir or None,
+    },
+    "network": {
+        "bind_host": bind_host,
+        "port": int(port),
+        "openwebui_port": int(openwebui_port),
+    },
+    "hardware_class": {"id": hw_class_id, "label": hw_class_label},
+    "brain_model": None if brain_model == "none" else brain_model,
+    "warnings": int(warn_count),
+    "errors": int(err_count),
+    "elapsed_seconds": int(elapsed_seconds),
+    "step_durations_seconds": steps,
+}
+
+path = pathlib.Path(out_file)
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, indent=2) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, str(path))
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+print(f"[INFO] Wrote install summary JSON: {out_file}")
+PYEOF
+fi
 
 # ── No Stage-2 handoff (v1.0) ───────────────────────────────────────────────
 # There used to be a "Launch the guided hal0 setup now? [Y/n]" prompt here

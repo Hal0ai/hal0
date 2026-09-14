@@ -108,6 +108,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--dev` | Local-only editable install under `$PWD/.hal0ai` — no systemd, no host package changes |
 | `--no-start` | Set everything up but do not enable/start the units |
 | `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
+| `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -119,6 +120,29 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe / first-run seeding |
 | `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing the Hindsight memory service |
 | `HAL0_PY_AUTOINSTALL` | _(unset)_ | Set to `1` to let the installer auto-install a Python 3.12 interpreter when the default is too old |
+
+### Install log and failure reports
+
+Every run tees its full output to `/var/log/hal0/install-<ts>.log`
+(`/tmp/hal0-install-<ts>.log` when not root) — the path is printed at the
+start and end, and `hal0 doctor bundle` includes the latest one. If the
+installer aborts, it also writes a redacted `hal0-install-report-<ts>.txt`
+next to the log (environment, port owners, unit status, hardware summary,
+log tail) and prints its path. See `installer/README.md` for the full
+breakdown of what each report contains.
+
+### `--summary-json`
+
+```sh
+sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
+```
+
+Writes a `schema: "hal0.install-summary.v1"` JSON document — hal0 version,
+`--dev`/`--no-start` flags, models dir, network bind info, the detected
+hardware class, which brain model was pulled, a warning/error count, and
+measured per-step durations — atomically, so a script polling for the file
+never reads a half-written one. Full field reference and an example payload
+are in `installer/README.md`.
 
 ## Production filesystem layout
 

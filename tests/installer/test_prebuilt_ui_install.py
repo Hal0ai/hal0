@@ -19,7 +19,7 @@ _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 def _node_and_ui_block() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
     match = re.search(
-        r'ui_step "Node\.js toolchain"\n(.*?)\nui_step "Configuration"',
+        r'ui_step "Node\.js toolchain"[^\n]*\n(.*?)\nui_step "Configuration"',
         text,
         re.DOTALL,
     )
