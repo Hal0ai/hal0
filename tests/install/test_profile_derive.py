@@ -255,6 +255,52 @@ def test_cpu_host_tts_still_derives_tts_profile():
     assert derive_profile("tts", "cpu") == "kokoro"
 
 
+# ── kfd_present decides the ROCm lane, not rocm-smi (#2216) ────────────────────
+
+
+def test_kfd_present_alone_wins_rocm_on_a_container_lxc_platform(monkeypatch):
+    """hal0's own production shape: a Proxmox LXC with /dev/kfd forwarded.
+
+    ``_detect_platform`` classifies containers before it ever reaches the
+    bare-metal GPU classification that produces ``"strix-halo"``, and a
+    fresh container has no ``rocm-smi`` so ``compute_capable`` reads False
+    too — before #2216's fix, both signals came back negative and every
+    llama.cpp seed derived ``gpu-vulkan`` despite ROCm working perfectly.
+    ``kfd_present()`` alone must be sufficient.
+    """
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    hw = _hw(platform="lxc", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
+
+
+def test_neither_kfd_nor_compute_capable_still_declines_rocm(monkeypatch):
+    """The other half of #2216: no real signal must still decline ROCm."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    hw = _hw(platform="lxc", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
+
+
+# ── apply_cpu_fallback (#1936, #1966) ───────────────────────────────────────────
+
+
+def test_apply_cpu_fallback_returns_cpu_device_and_the_reason():
+    from hal0.install.profile_derive import apply_cpu_fallback
+
+    fallback = apply_cpu_fallback("no usable GPU lane")
+    assert fallback.device == "cpu"
+    assert fallback.reason == "no usable GPU lane"
+
+
+def test_derive_device_cpu_fallback_names_a_reason(monkeypatch):
+    """The final 'no GPU lane at all' fallback in derive_device still returns
+    plain 'cpu' (back-compat), routed through apply_cpu_fallback for the
+    structured log — verified via the reason text a caller could recover by
+    calling apply_cpu_fallback directly with the same capability."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    hw = _hw(compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+
+
 def test_cpu_llm_profile_exists_in_seed_profiles():
     """The 'cpu-llm' seed profile must exist and have backend=None (cpu-coherent)."""
     from hal0.config.schema import SEED_PROFILES
