@@ -315,7 +315,7 @@ def test_the_start_path_clears_a_start_limited_unit_before_restarting(
     monkeypatch.setattr(ContainerProvider, "_run", _run)
     monkeypatch.setattr(
         "hal0.providers.container._SYSTEMCTL_SEAM.write_quadlet",
-        lambda path, text: None,
+        lambda path, text, timeout=None: None,
     )
 
     provider._write_and_start_unit("chat", "[Container]\n")
@@ -355,7 +355,7 @@ def test_a_failed_restart_raises_slot_spawn_failed_with_the_systemd_reason(
     monkeypatch.setattr(ContainerProvider, "_run", _run)
     monkeypatch.setattr(
         "hal0.providers.container._SYSTEMCTL_SEAM.write_quadlet",
-        lambda path, text: None,
+        lambda path, text, timeout=None: None,
     )
 
     with pytest.raises(SlotSpawnFailed) as excinfo:
@@ -393,7 +393,7 @@ def test_a_failed_restart_is_typed_even_when_the_probe_has_no_reason(
     monkeypatch.setattr(ContainerProvider, "_run", _run)
     monkeypatch.setattr(
         "hal0.providers.container._SYSTEMCTL_SEAM.write_quadlet",
-        lambda path, text: None,
+        lambda path, text, timeout=None: None,
     )
 
     with pytest.raises(SlotSpawnFailed) as excinfo:

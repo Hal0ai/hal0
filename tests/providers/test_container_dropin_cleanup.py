@@ -24,7 +24,7 @@ def _make_provider_with_tmp_unit(
     unit_path = tmp_path / f"hal0-slot@{slot_name}.service"
     calls_made: list[list[str]] = []
 
-    def fake_run(*args: str, check: bool = True) -> MagicMock:
+    def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
         calls_made.append(list(args))
         m = MagicMock()
         m.returncode = 0
@@ -48,7 +48,7 @@ def test_stale_dropin_dir_removed_before_start(tmp_path: Path) -> None:
 
     calls_made: list[list[str]] = []
 
-    def fake_run(*args: str, check: bool = True) -> MagicMock:
+    def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
         calls_made.append(list(args))
         m = MagicMock()
         m.returncode = 0
@@ -82,7 +82,7 @@ def test_no_dropin_clean_start(tmp_path: Path) -> None:
 
     calls_made: list[list[str]] = []
 
-    def fake_run(*args: str, check: bool = True) -> MagicMock:
+    def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
         calls_made.append(list(args))
         m = MagicMock()
         m.returncode = 0
@@ -113,7 +113,7 @@ def test_dropin_removal_logged(tmp_path: Path, caplog) -> None:
     dropin_dir.mkdir()
     (dropin_dir / "override.conf").write_text("[Service]\nEnvironmentFile=/dead/path\n")
 
-    def fake_run(*args: str, check: bool = True) -> MagicMock:
+    def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
         m = MagicMock()
         m.returncode = 0
         return m

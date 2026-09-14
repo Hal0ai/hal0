@@ -16,13 +16,14 @@ real ``hal0`` user, or a privileged filesystem.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from hal0.system import seam as seam_mod
-from hal0.system.seam import SEAM_BIN, SystemCtlSeam
+from hal0.system.seam import SEAM_BIN, SeamTimeout, SystemCtlSeam, bounded_call
 
 
 def _completed(returncode: int = 0) -> MagicMock:
@@ -391,3 +392,92 @@ def test_is_hal0_service_user_false_when_euid_differs(monkeypatch: pytest.Monkey
     monkeypatch.setattr(seam_mod.pwd, "getpwnam", lambda _name: _Ent())
     monkeypatch.setattr(seam_mod.os, "geteuid", lambda: 1000)
     assert seam_mod.is_hal0_service_user() is False
+
+
+# ── bounded_call / SeamTimeout (#1869/#1870) ─────────────────────────────────
+
+
+def _timing_out_run(argv: list[str], **kw: object) -> MagicMock:
+    raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout") or 0)
+
+
+def test_bounded_call_converts_timeout_expired_to_seam_timeout() -> None:
+    with pytest.raises(SeamTimeout) as excinfo:
+        bounded_call(
+            ["systemctl", "restart", "hal0-slot@chat.service"], timeout=5.0, run=_timing_out_run
+        )
+
+    assert excinfo.value.code == "slot.seam_timeout"
+    assert excinfo.value.status == 504
+    assert isinstance(excinfo.value.__cause__, subprocess.TimeoutExpired)
+
+
+def test_seam_timeout_details_carry_command_budget_and_last_state() -> None:
+    def _run(argv: list[str], **kw: object) -> MagicMock:
+        raise subprocess.TimeoutExpired(
+            cmd=argv, timeout=kw.get("timeout") or 0, output="Starting hal0-slot@chat.service...\n"
+        )
+
+    with pytest.raises(SeamTimeout) as excinfo:
+        bounded_call(["systemctl", "restart", "hal0-slot@chat.service"], timeout=42.0, run=_run)
+
+    exc = excinfo.value
+    assert exc.details["command"] == ["systemctl", "restart", "hal0-slot@chat.service"]
+    assert exc.details["budget_s"] == 42.0
+    assert exc.details["last_state"] == "Starting hal0-slot@chat.service..."
+    assert "42s" in str(exc)
+    assert "Starting hal0-slot@chat.service" in str(exc)
+
+
+def test_seam_timeout_last_state_is_none_when_child_produced_no_output() -> None:
+    with pytest.raises(SeamTimeout) as excinfo:
+        bounded_call(["systemctl", "daemon-reload"], timeout=5.0, run=_timing_out_run)
+
+    assert excinfo.value.details["last_state"] is None
+
+
+def test_bounded_call_passthrough_on_success() -> None:
+    calls, run = _recorder()
+    result = bounded_call(["systemctl", "is-active", "chat"], timeout=5.0, run=run)
+
+    assert calls == [["systemctl", "is-active", "chat"]]
+    assert result.returncode == 0
+
+
+def test_bounded_call_none_timeout_never_raises_seam_timeout() -> None:
+    """``timeout=None`` is a deliberate passthrough — subprocess.run itself
+    never raises TimeoutExpired without a bound, so bounded_call has nothing
+    to convert."""
+    calls, run = _recorder()
+
+    bounded_call(["systemctl", "daemon-reload"], timeout=None, run=run)
+
+    assert calls == [["systemctl", "daemon-reload"]]
+
+
+def test_systemctl_wedged_seam_call_raises_seam_timeout_not_bare_timeout_expired() -> None:
+    """#1869: every ``systemctl()`` route (direct AND seamed) now bounds
+    through :func:`bounded_call` — a wedged child raises the typed error the
+    slot state machine and the CLI know how to handle, not the bare stdlib
+    exception every prior caller would have had to catch individually."""
+    seam = SystemCtlSeam(run=_timing_out_run, is_hal0_user=lambda: True)
+
+    with pytest.raises(SeamTimeout) as excinfo:
+        seam.systemctl("systemctl", "stop", "hal0-slot@chat.service", timeout=7.5)
+
+    assert excinfo.value.details["command"] == [
+        "sudo",
+        "-n",
+        SEAM_BIN,
+        "stop",
+        "chat",
+    ]
+    assert excinfo.value.details["budget_s"] == 7.5
+
+
+def test_write_quadlet_wedged_seam_call_raises_seam_timeout(tmp_path: Path) -> None:
+    seam = SystemCtlSeam(run=_timing_out_run, is_hal0_user=lambda: True)
+    quadlet = tmp_path / "hal0-slot@chat.container"
+
+    with pytest.raises(SeamTimeout):
+        seam.write_quadlet(quadlet, "[Container]\n", timeout=15.0)

@@ -39,6 +39,7 @@ from hal0.providers.container import (
     _CTX_DENSE_CAP,
     _CTX_SAFE_FALLBACK,
     _MODEL_STORE_MOUNT,
+    _UNIT_START_TIMEOUT_S,
     _UNIT_STOP_TIMEOUT_S,
     ContainerProvider,
     _best_effort_model_info,
@@ -55,6 +56,7 @@ from hal0.providers.container import (
 )
 from hal0.registry.model import Model
 from hal0.slots.argv import resolve_argv
+from hal0.system.seam import SeamTimeout
 
 # Podman is the only supported runtime under Quadlet; the shims below ignore
 # ``runtime_bin`` (Quadlet doesn't put the runtime binary in the unit), but the
@@ -798,7 +800,7 @@ class TestLoadSync:
 
         calls_made: list[list[str]] = []
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             calls_made.append(list(args))
             m = MagicMock()
             m.returncode = 0
@@ -819,6 +821,74 @@ class TestLoadSync:
         assert any("restart" in c for c in cmds), f"restart not in {cmds}"
         assert (tmp_path / "test.service").exists()
 
+    def test_load_sync_bounds_every_systemctl_call(self, tmp_path: Path) -> None:
+        """#1869: no ``_run`` call in the load path may go through with
+        ``timeout=None`` — a wedged ``daemon-reload``/``restart`` used to block
+        the load path forever. ``restart`` gets the wider spawn budget
+        (``_UNIT_START_TIMEOUT_S``); the fast admin calls around it get
+        ``_UNIT_STOP_TIMEOUT_S``."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+
+        calls: list[tuple[list[str], float | None]] = []
+
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
+            calls.append((list(args), timeout))
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=tmp_path / "test.service"),
+        ):
+            provider.load_sync(
+                {"name": "test-container", "port": 8095, "profile": "rocm"},
+                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+            )
+
+        assert calls, "load_sync made no _run calls"
+        assert all(timeout is not None for _args, timeout in calls), calls
+        for args, timeout in calls:
+            if "restart" in args:
+                assert timeout == _UNIT_START_TIMEOUT_S, (args, timeout)
+            else:
+                assert timeout == _UNIT_STOP_TIMEOUT_S, (args, timeout)
+
+    def test_load_sync_lets_a_seam_timeout_on_restart_propagate_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """A wedged ``systemctl restart`` raises :class:`SeamTimeout` (#1869) —
+        a distinct failure mode from ``CalledProcessError`` (#1424's
+        ``SlotSpawnFailed`` wrap), so ``_write_and_start_unit`` must NOT catch
+        it: it propagates with its own ``slot.seam_timeout`` code straight
+        through to ``SlotManager.load``'s generic ``except Exception -> ERROR``
+        handling."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
+            if "restart" in args:
+                raise SeamTimeout(list(args), timeout or 0.0, "activating")
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=tmp_path / "test.service"),
+            pytest.raises(SeamTimeout) as excinfo,
+        ):
+            provider.load_sync(
+                {"name": "test-container", "port": 8095, "profile": "rocm"},
+                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+            )
+
+        assert excinfo.value.code == "slot.seam_timeout"
+        assert "activating" in str(excinfo.value)
+
     def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
         """load_sync bakes the resolved context window (base --ctx-size) AND the
         MODEL's materialized ``defaults.extra_args`` into the rendered unit.
@@ -833,7 +903,7 @@ class TestLoadSync:
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m
@@ -877,7 +947,7 @@ class TestLoadSync:
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m
@@ -929,7 +999,7 @@ class TestLoadSync:
         # paths must honour it identically.
         monkeypatch.setattr("hal0.providers.container._slot_publish_host", lambda: "0.0.0.0")
 
-        def fake_run(*args: str, check: bool = True) -> MagicMock:
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
             m = MagicMock()
             m.returncode = 0
             return m
@@ -1056,6 +1126,34 @@ class TestLoadSync:
             calls_made.append(list(args))
             if "stop" in args:
                 raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout or 0)
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=unit_file),
+        ):
+            provider.unload_sync({"name": "test-container"})
+
+        assert not unit_file.exists(), "quadlet source must still be removed"
+        assert any("daemon-reload" in c for c in calls_made), calls_made
+
+    def test_unload_sync_survives_a_stop_that_raises_seam_timeout(self, tmp_path: Path) -> None:
+        """Same best-effort teardown as above, but for the REAL (unmocked seam)
+        failure mode (#1869): ``SystemCtlSeam.systemctl`` now raises
+        :class:`SeamTimeout`, not the bare ``subprocess.TimeoutExpired`` the
+        sibling test above stubs directly at ``provider._run``."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@test-container.container"
+        unit_file.write_text("[Container]\n")
+
+        calls_made: list[list[str]] = []
+
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
+            calls_made.append(list(args))
+            if "stop" in args:
+                raise SeamTimeout(list(args), timeout or 0.0, "deactivating")
             m = MagicMock()
             m.returncode = 0
             return m

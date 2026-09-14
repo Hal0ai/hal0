@@ -204,6 +204,42 @@ field is disabled with this same reason while the slot is up.
 </TabItem>
 </Tabs>
 
+### While a lifecycle command is waiting
+
+`load`, `unload`, `restart`, and `swap` all block until the slot converges —
+a cold load can legitimately take minutes (health poll, then the
+output-sanity check). On a terminal, the CLI now shows an elapsed counter and
+the slot's live state, refreshed every couple of seconds:
+
+```sh
+$ hal0 slot load agent
+⠋ Loading agent… 42s elapsed — state=starting
+```
+
+Piped or scripted (`--json`, or stdout redirected) prints one line up front
+instead and stays quiet until the result:
+
+```sh
+$ hal0 slot load agent --json > result.json
+Loading agent (up to 2139s)…
+```
+
+If the wait itself times out — every `systemctl`/podman call the server
+makes on your behalf is now bounded, so this means a specific wedged
+command, not an indefinite hang — the CLI prints the seam's own error and
+where to look next:
+
+```
+Error: `systemctl restart hal0-slot@agent.service` did not return within 180s
+still converging? check `hal0 slot logs agent` or `journalctl -u hal0-slot@agent`.
+```
+
+The slot itself lands in `error` with that same message (`hal0 slot status
+agent`, or `/api/slots/agent`), carrying the typed code `slot.seam_timeout` —
+a load in this state is safe to retry once the stuck command clears (a
+wedged `systemctl`/podman invocation on the host, or a genuinely oversized
+model that needs a wider `[server]` timeout upstream).
+
 ## Swap the model
 
 ```sh
