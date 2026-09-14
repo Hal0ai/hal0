@@ -18,6 +18,30 @@ Three-tier, deny-by-default auth built around one classification table
   scopes; a denied WebSocket is rejected pre-accept with close code 4403
   (matching :mod:`hal0.api.agents.chat_proxy`'s existing convention).
 
+Posture-coupled ADMIN gate (#1822, H1/H3)
+------------------------------------------
+``require_auth_enabled()`` OFF does not mean "every request is anon-open"
+any more. hal0-api binds ``0.0.0.0:8080`` by default (``install.sh``), so
+the shipped combination — auth off, bind wide open — let any device on the
+LAN drive every ADMIN-class route (model pulls, slot deletes, config
+writes, approval execution) with zero credential. :func:`_lan_admin_gate`
+closes that gap without touching the ``require_auth`` toggle itself: an
+ADMIN-classified request is treated exactly as if enforcement were on
+(needs an admin session/key) whenever ALL of these hold —
+
+1. an admin key has been configured (:func:`has_admin_key`) — otherwise
+   there would be no way to satisfy the requirement at all, the same
+   first-run chicken-egg :class:`~hal0.security.exposure.AuthClass`
+   ``BOOTSTRAP`` already carves out;
+2. the box is bound beyond loopback (:func:`hal0.config.network.is_loopback_bind`
+   is false); and
+3. *this request's* own peer did not arrive over loopback.
+
+A loopback-bound box, or a loopback-originating request against a
+LAN-bound box (the operator at the console), stays fully frictionless —
+"auth off" still means "open on loopback". Reads (``OPEN``/``CLIENT``)
+are unaffected either way.
+
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (the existing
 HMAC-SHA256 cookie already protecting the agent chat-proxy WS routes), so
@@ -36,6 +60,7 @@ Deliberately NOT covered here (deferred, see the KB-1 delivery report):
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 from dataclasses import dataclass
@@ -45,6 +70,7 @@ from urllib.parse import parse_qs, urlsplit
 import structlog
 
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
+from hal0.config.network import is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
 log = structlog.get_logger(__name__)
@@ -383,6 +409,43 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Posture-coupled ADMIN gate (#1822) — see the module docstring.
+
+
+def _is_loopback_peer(scope: dict[str, Any]) -> bool:
+    """True iff the ASGI ``scope["client"]`` peer address is loopback.
+
+    Missing client info (``None`` — some non-TCP test transports) is
+    treated as NOT loopback: deny-by-default, same philosophy as
+    :mod:`hal0.security.exposure`'s unclassified-path fallback. An
+    unparseable address (shouldn't happen for a real ASGI server) is the
+    same.
+    """
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        return ipaddress.ip_address(client[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _lan_admin_gate(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
+    """True iff this request must be treated as if enforcement were ON.
+
+    Only ever true for :data:`AuthClass.ADMIN`. See the module docstring
+    ("Posture-coupled ADMIN gate") for the full three-condition rule.
+    """
+    if auth_class is not AuthClass.ADMIN:
+        return False
+    if not has_admin_key():
+        return False
+    if is_loopback_bind():
+        return False
+    return not _is_loopback_peer(scope)
+
+
+# ---------------------------------------------------------------------------
 # Enforcement decision
 
 
@@ -439,7 +502,11 @@ class AuthEnforcementMiddleware:
     Dev-open bypass: when :func:`require_auth_enabled` is false (the
     default on loopback with no keys configured), every request passes
     through untouched -- this is what keeps the pre-existing TestClient
-    suite green without modification.
+    suite green without modification. The one exception is the
+    posture-coupled ADMIN gate (:func:`_lan_admin_gate`, #1822): an
+    ADMIN-classified request from a non-loopback peer against a
+    non-loopback bind with an admin key already configured is enforced
+    even while the dev-open bypass is otherwise in effect.
     """
 
     def __init__(self, app: Any) -> None:
@@ -451,15 +518,16 @@ class AuthEnforcementMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if not require_auth_enabled():
-            await self.app(scope, receive, send)
-            return
-
         path = scope.get("path", "/")
         # A WebSocket upgrade is an HTTP GET at the transport level; there
         # is no scope["method"] for a websocket scope, so classify() gets
         # the same pseudo-method the exposure-CI test uses.
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
+        auth_class = classify(method, path)
+
+        if not require_auth_enabled() and not _lan_admin_gate(auth_class, scope):
+            await self.app(scope, receive, send)
+            return
 
         # Origin defence-in-depth: reject browser cross-site WebSocket
         # upgrades and state-changing requests BEFORE tier auth. Requests
@@ -489,7 +557,6 @@ class AuthEnforcementMiddleware:
             await send({"type": "http.response.body", "body": payload})
             return
 
-        auth_class = classify(method, path)
         principal = resolve_principal(scope)
         allowed, status, code = _decide(auth_class, principal)
 

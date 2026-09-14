@@ -41,6 +41,7 @@ def test_all_exports_are_callable() -> None:
         "derive_allowed_origins",
         "detect_lan_ips",
         "hostname",
+        "is_loopback_bind",
     }
     for name in network.__all__:
         assert callable(getattr(network, name)), f"network.{name} is not callable"
@@ -68,6 +69,30 @@ class TestBindHost:
     def test_whitespace_only_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HAL0_BIND_HOST", "   ")
         assert network.bind_host() == "127.0.0.1"
+
+
+# ── is_loopback_bind() (#1822) ──────────────────────────────────────────────
+
+
+class TestIsLoopbackBind:
+    def test_default_unset_is_loopback(self) -> None:
+        assert network.is_loopback_bind() is True
+
+    def test_explicit_loopback_values(self) -> None:
+        assert network.is_loopback_bind("127.0.0.1") is True
+        assert network.is_loopback_bind("localhost") is True
+        assert network.is_loopback_bind("::1") is True
+
+    def test_wildcard_binds_are_not_loopback(self) -> None:
+        assert network.is_loopback_bind("0.0.0.0") is False
+        assert network.is_loopback_bind("::") is False
+
+    def test_concrete_lan_address_is_not_loopback(self) -> None:
+        assert network.is_loopback_bind("10.0.0.5") is False
+
+    def test_reads_bind_host_when_no_argument(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+        assert network.is_loopback_bind() is False
 
 
 # ── hostname() ────────────────────────────────────────────────────────────────
