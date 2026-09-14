@@ -124,6 +124,21 @@ def _load_template(stem: str) -> dict[str, Any]:
     return data
 
 
+def template_params_for_model_class(model_class: str | None) -> dict[str, Any]:
+    """Return the resolved template's ``_meta.params`` pointer map.
+
+    Lets a caller outside this translator (OpenWebUI's static
+    ``COMFYUI_WORKFLOW_NODES`` export — see
+    :mod:`hal0.openwebui.wiring`) discover which graph node backs each
+    parameter without reaching into :func:`build_workflow`'s private
+    template loader. Empty dict when the template has no ``params`` table.
+    """
+    stem = template_for_model_class(model_class)
+    template = _load_template(stem)
+    params = (template.get("_meta") or {}).get("params")
+    return params if isinstance(params, dict) else {}
+
+
 def template_for_model_class(model_class: str | None) -> str:
     """Resolve a model_class string to a template stem.
 
@@ -312,4 +327,5 @@ __all__ = [
     "WorkflowTemplateNotFound",
     "build_workflow",
     "template_for_model_class",
+    "template_params_for_model_class",
 ]

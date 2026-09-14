@@ -1,0 +1,133 @@
+---
+title: Open WebUI — chat companion wiring
+description: What hal0 pre-wires into the Open WebUI companion — chat, voice, retrieval-augmented document uploads, image generation, web search — and how to check what's actually connected before you click a button that has nothing behind it.
+sidebar:
+  order: 75
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 ships **Open WebUI** as a companion container (`hal0-openwebui.service`,
+LAN `:3001`) and writes its environment file
+(`/etc/hal0/openwebui.env`) for you — there is nothing to configure inside
+Open WebUI's own settings for any of this to work. What gets wired depends
+on what you have actually enabled through hal0's own capability slots:
+
+| Open WebUI feature | Wired when | Always on? |
+| --- | --- | --- |
+| Chat | — | Yes — points at hal0's own `/v1` |
+| Voice (Call mode) | — | Yes — STT/TTS point at hal0's `/v1/audio/*` |
+| Document uploads (RAG) | An **embed**-capable slot is enabled | No |
+| Image generation | The **img** (ComfyUI) slot is enabled | No |
+| Web search | A search provider is installed | No — none ships today |
+
+<Aside type="note">
+Chat and voice are unconditional because hal0 always exposes a `/v1`
+gateway and voice endpoints — there is no "off" state for those to be
+gated on. Documents and images are real capability slots you turn on
+yourself; hal0 never tells Open WebUI a feature exists unless there is a
+real backend behind it, so an unwired button fails honestly instead of
+silently doing nothing.
+</Aside>
+
+## Chat and voice (always wired)
+
+`OPENAI_API_BASE_URLS` points Open WebUI's chat at hal0's own `/v1`
+gateway, and `AUDIO_STT_*` / `AUDIO_TTS_*` point Call mode's transcription
+and synthesis at hal0's own `/v1/audio/transcriptions` and
+`/v1/audio/speech`. See [Speech to text and text to
+speech](/docs/guides/voice-stt-tts) for the underlying `stt`/`tts` slots
+Call mode actually dispatches to.
+
+## Document uploads (RAG)
+
+Open WebUI's upload button embeds every document you attach through
+whichever model backs its `RAG_EMBEDDING_MODEL` setting. hal0 points that
+at its own `/v1` and the model id bound to the **embed** capability's
+`embed` child — enable it the same way you'd enable any other capability:
+
+```sh
+hal0 capabilities set embed embed --model <your-embed-model>
+```
+
+Until an embed-capable slot is enabled, `RAG_EMBEDDING_ENGINE` and its
+siblings are left unset — Open WebUI falls back to its own bundled
+sentence-transformers model rather than a broken hal0 route. See [Enable
+memory](/docs/guides/enable-memory) and [Choose
+models](/docs/guides/choose-models) for picking an embed model.
+
+## Image generation
+
+The image button in the chat composer generates through hal0's ComfyUI
+slot once it's enabled:
+
+```sh
+hal0 capabilities set img img --model <your-image-model>
+```
+
+hal0 bakes a static `COMFYUI_WORKFLOW` (and its matching
+`COMFYUI_WORKFLOW_NODES` substitution map) from the **same** translator
+`/v1/images/generations` itself uses, keyed to whichever checkpoint your
+`img` slot is actually bound to — never a generic pasted-in workflow for a
+checkpoint hal0 doesn't ship. Rebinding the `img` slot to a different model
+re-bakes the workflow on the next convergence pass (see [Generate
+images](/docs/guides/generate-images) for the underlying capability).
+
+## Web search
+
+No search provider ships with hal0 today, so `ENABLE_WEB_SEARCH` stays
+off — the toggle in Open WebUI has nothing to query. This is a seam for a
+future extension (e.g. a SearXNG addon), not a missing feature you can
+turn on by hand-editing the env file; a hand-added `SEARXNG_QUERY_URL`
+would be silently overwritten the next time anything re-renders the env
+(see below).
+
+## Checking what's actually wired
+
+The Services page's Open WebUI card shows a chip per feature — Chat,
+Voice, Documents, Images, Web search — each lit only when hal0 actually
+has a backend behind it. Hover a chip for the specific slot or model it's
+routed to (or why it isn't wired yet). The same information is available
+over the API:
+
+```sh
+curl http://localhost:8080/api/services | jq '.services[] | select(.id == "openwebui") | .wired'
+```
+
+```json
+{
+  "chat": true,
+  "voice": true,
+  "documents": true,
+  "images": false,
+  "web_search": false,
+  "embed_model": "nomic-embed-text-v1.5",
+  "image_model": null
+}
+```
+
+## When the env file re-renders
+
+`/etc/hal0/openwebui.env` re-renders automatically — you never edit it by
+hand for any of this. It re-renders (and the Open WebUI container restarts
+**only if the rendered file actually changed**) whenever:
+
+- You apply a capability change to `embed` or `img`
+  (`hal0 capabilities set …` or the dashboard's Capabilities page).
+- You create or delete the `embed` or `img` slot directly.
+- hal0 runs its regular component convergence pass: `hal0 update`, the
+  Services page's Retry button on Open WebUI's version row, or the
+  boot-time convergence check.
+
+Hand edits to keys hal0 doesn't manage (or the exposure knobs documented
+in the installer — `HAL0_BIND_HOST`, `HAL0_OWUI_TRUSTED_EMAIL_HEADER`) are
+preserved across every re-render; only the RAG/image-gen/web-search keys
+listed above are hal0-owned and rewritten on every pass.
+
+## See also
+
+- [Generate images](/docs/guides/generate-images) — the `img` capability
+  and ComfyUI engine in depth.
+- [Enable memory](/docs/guides/enable-memory) — the `embed` capability.
+- [Speech to text and text to speech](/docs/guides/voice-stt-tts) — the
+  `stt`/`tts` slots Call mode dispatches to.

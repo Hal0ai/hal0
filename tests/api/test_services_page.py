@@ -134,6 +134,59 @@ def test_list_services_200_all_ids(svc_client: TestClient) -> None:
     assert by_id["openwebui"]["url"] == "http://testserver:3001"
     # loopback-only services expose no URL without a public-URL env.
     assert by_id["hindsight"]["url"] is None
+    # Every entry carries "wired" — non-openwebui rows are honestly null
+    # rather than a re-derived guess (one classifier on the server).
+    assert "wired" in by_id["openwebui"]
+    assert by_id["comfyui"]["wired"] is None
+    assert by_id["hermes"]["wired"] is None
+
+
+# ── 1b. OpenWebUI wired chips ───────────────────────────────────────────────
+
+
+def test_openwebui_wired_reflects_the_shared_classifier(svc_client: TestClient) -> None:
+    """The services route's "wired" block IS
+    hal0.openwebui.wiring.openwebui_wiring_status()'s output — never a
+    client-side re-derivation. Patching the resolver changes the route's
+    answer directly."""
+    status = {
+        "chat": True,
+        "voice": True,
+        "documents": True,
+        "images": False,
+        "web_search": False,
+        "embed_model": "nomic-embed-text-v1.5",
+        "image_model": None,
+    }
+    with contextlib.ExitStack() as stack:
+        for p in _stub_all_down():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch("hal0.openwebui.wiring.openwebui_wiring_status", return_value=status)
+        )
+        r = svc_client.get("/api/services")
+
+    assert r.status_code == 200, r.text
+    by_id = _services_by_id(r.json())
+    assert by_id["openwebui"]["wired"] == status
+
+
+def test_openwebui_wired_degrades_to_none_on_resolver_failure(svc_client: TestClient) -> None:
+    """A broken wiring resolver must not 500 the whole Services page."""
+    with contextlib.ExitStack() as stack:
+        for p in _stub_all_down():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                "hal0.openwebui.wiring.openwebui_wiring_status",
+                side_effect=RuntimeError("boom"),
+            )
+        )
+        r = svc_client.get("/api/services")
+
+    assert r.status_code == 200, r.text
+    by_id = _services_by_id(r.json())
+    assert by_id["openwebui"]["wired"] is None
 
 
 # ── 2. registry invariants ────────────────────────────────────────────────────
