@@ -39,6 +39,7 @@ export const NAV_GROUPS = [
     items: [
       { id: "secrets", label: "Secrets" },
       { id: "agents", label: "Agent Chat" },
+      { id: "realtime", label: "Realtime" },
     ],
   },
 ];

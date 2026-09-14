@@ -161,6 +161,48 @@ def test_settings_schema_returns_json_schema(isolated_client: TestClient) -> Non
     assert "telemetry" in body["properties"]
 
 
+def test_settings_fields_returns_every_schema_leaf_as_one_row(
+    isolated_client: TestClient,
+) -> None:
+    """GET /api/settings/fields is the one payload a schema-driven settings
+    page renders from — group/label/description/type/default/current/
+    apply_class/services/secret/live_target per operator-editable key
+    (#2108)."""
+    r = isolated_client.get("/api/settings/fields")
+    assert r.status_code == 200, r.text
+    fields = r.json()["fields"]
+    by_path = {f["path"]: f for f in fields}
+    assert "brain_chat.tool_model" in by_path
+    row = by_path["brain_chat.tool_model"]
+    assert row["label"] == "Tool model"
+    assert row["group"] == "brain_chat"
+    assert row["default"] == "hal0/agent"
+    assert row["current"] == "hal0/agent"
+    assert row["apply_class"] == "immediate"
+    assert row["services"] == []
+    assert row["secret"] is False
+    # #2108: the shipped default has no live target on a fresh install — the
+    # `agent` slot ships unbound, so nothing in the resolver chain is loaded.
+    assert row["live_target"] is False
+    # Every row must carry a real apply class — a schema field with no
+    # registry entry would render with no effect badge (issue-#552 gap).
+    assert all(f["apply_class"] is not None for f in fields)
+    # live_target is only meaningful for a hal0/<slot>-shaped value.
+    assert by_path["telemetry.enabled"]["live_target"] is None
+
+
+def test_settings_fields_reflects_current_value_after_a_save(
+    isolated_client: TestClient,
+) -> None:
+    """``current`` is read off the live config, not the schema default —
+    a save must be visible on the next fetch without a process restart."""
+    isolated_client.put("/api/settings", json={"brain_chat": {"max_rounds": 42}})
+    r = isolated_client.get("/api/settings/fields")
+    by_path = {f["path"]: f for f in r.json()["fields"]}
+    assert by_path["brain_chat.max_rounds"]["current"] == 42
+    assert by_path["brain_chat.max_rounds"]["default"] == 8
+
+
 def test_reload_after_bad_toml_returns_parse_error_envelope(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:

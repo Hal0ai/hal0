@@ -101,6 +101,10 @@ export function useSettingsForm(client, keys) {
     clearConfirm,
     submit,
     commit,
+    // Exposed so a page can preview the pending patch (POST
+    // /api/settings/preview) before committing — same shape `commit()`
+    // sends, so the preview can't drift from what a save would do.
+    buildPatch,
     registry,
   }
 }

@@ -353,6 +353,13 @@ export const ENDPOINTS = {
   settingsSchema: '/api/settings/schema',
   // Apply-plan registry — key→{apply_class, services} for all settings (#552).
   settingsApplyPlan: '/api/settings/apply-plan',
+  // One labelled row per operator-editable schema key — group/label/
+  // description/type/default/current/reload class/secret/live_target (#2108).
+  settingsFields: '/api/settings/fields',
+  // Dry-run a PATCH: same body shape and ChangeSet computation as the PUT,
+  // writes nothing (#1967, #2195, #2203, #1511) — backs a confirm-before-
+  // apply preview drawer.
+  settingsPreview: '/api/settings/preview',
   // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',

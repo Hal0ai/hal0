@@ -73,7 +73,7 @@ silently paper over.
 |---|---|---|
 | `/api/auth` | Mixed | `login`/`status`/`logout` are OPEN (you can't require a cookie to obtain one); `require` (toggle enforcement) and `rotate` (mint a new admin/client key) are ADMIN; `exposure` (serialize this whole rule table) is ADMIN. |
 | `/api/secrets` | ADMIN | Operator-managed secrets store. See "Secrets" below — dedicated section, not just a table row. |
-| `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan preview. |
+| `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan registry, schema-driven field metadata (`fields`), and a dry-run ChangeSet preview (`preview`) sharing the same diff the write path applies. |
 | `/api/settings/models/store` | ADMIN | Model store path get/set/migrate (part of the `/api/settings` prefix). |
 | `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See "Proxmox integration" below — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
 | `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance, metrics, capacity. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
