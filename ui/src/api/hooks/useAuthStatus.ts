@@ -5,6 +5,7 @@
 //
 //   { auth_required: bool,   // is the enforcement gate armed at all?
 //     has_admin_key: bool,   // is HAL0_ADMIN_KEY configured? (set/unset)
+//     lan_exposed: bool,     // is the bind reachable beyond loopback? (#1822)
 //     tier: "open"|"client"|"admin" }  // THIS caller's resolved identity
 //
 // It NEVER returns a key value, and it does NOT report: the admin-key
@@ -14,6 +15,12 @@
 // inventing data the backend doesn't send. Key rotation is a SEPARATE route
 // (POST /api/auth/rotate, both tiers — see useAuthActions.ts) and is live;
 // it just isn't reflected back through this status probe.
+//
+// `lan_exposed` is independent of `auth_required` (#1822): a LAN-bound box
+// with enforcement OFF already gates ADMIN mutations for off-box callers
+// (hal0.api.auth's posture-coupled gate) — this field lets the Security page
+// and AuthChallengeDrawer explain why a 401 shows up even though "Require
+// authentication" reads as off.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
@@ -24,6 +31,7 @@ export type AuthTier = 'open' | 'client' | 'admin'
 export interface AuthStatus {
   auth_required: boolean
   has_admin_key: boolean
+  lan_exposed: boolean
   tier: AuthTier
 }
 

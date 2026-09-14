@@ -26,6 +26,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **ADMIN-class routes are gated whenever the box is bound past loopback,
+  even with `require_auth` off.** hal0-api binds `0.0.0.0:8080` by default
+  (`installer/install.sh`), so the shipped combination — auth off, bind wide
+  open — let any device on the LAN drive every ADMIN route (model pulls, slot
+  deletes, config writes, approval execution) with no credential at all. An
+  ADMIN request now needs an admin session/key exactly as if enforcement were
+  on, but only when all three hold: an admin key is configured (otherwise the
+  requirement would be unsatisfiable, the same first-run carve-out
+  `AuthClass.BOOTSTRAP` already makes), the listener is not loopback-bound,
+  and this request's own peer did not arrive over loopback. A loopback-bound
+  box — and the operator at the console of a LAN-bound one — stays exactly as
+  frictionless as before; `OPEN`/`CLIENT` reads are untouched. The dashboard
+  answers a resulting 401 with an admin-key challenge drawer rather than a
+  dead-end error, and `hal0 doctor` reports the posture. (#1822)
 - MCP admin tools no longer report a tool failure for a successful read of a
   slot whose lifecycle state is `error`. The tool-result wrapper's failure
   sentinel keyed on `status == "error"` alone, which collides with the slot
