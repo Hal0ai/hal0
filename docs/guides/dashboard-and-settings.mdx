@@ -115,7 +115,14 @@ one line and a link here rather than a repeat.
   or client key; shows the live route-exposure table. See
   [Auth](/docs/operate/auth).
 - **Doctor** — runs and renders `hal0 doctor`'s typed diagnoses (id,
-  severity, evidence, next steps) over HTTP.
+  severity, evidence, next steps) over HTTP. Every fail/warn row carries at
+  least one real next step, not just a description of the problem: a
+  `command` step shows the exact command in mono and offers **Copy**, plus
+  **Run** when it maps onto an existing repair action (restarting the
+  affected systemd service, or restarting a named runner slot); a `doc` step
+  opens the relevant guide; a `manual` step expands inline. A diagnosis with
+  two or more steps also gets a **Steps** button that opens a numbered
+  drawer with the same actions.
 
 ### MODELS & INFERENCE
 
