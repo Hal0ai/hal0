@@ -270,8 +270,22 @@ def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     runs after this fixture and wins), and the posture-derivation tests in
     ``tests/api/test_auth_core.py`` ``delenv`` it first to exercise the
     bind/key-derived default.
+
+    #1822 added a SECOND consumer of the same leaked ``HAL0_BIND_HOST``: the
+    posture-coupled ADMIN gate (``hal0.api.auth._lan_admin_gate``) fires
+    whenever the bind reads non-loopback, an admin key is configured, AND the
+    request's own peer isn't loopback — and it does that regardless of
+    ``HAL0_REQUIRE_AUTH``. ``TestClient``'s default peer is
+    ``("testclient", 50000)``, not loopback, so a leaked
+    ``HAL0_BIND_HOST=0.0.0.0`` plus any test that also sets
+    ``HAL0_ADMIN_KEY`` would 401 unrelated ADMIN-route tests the same way the
+    old bind-derived ``require_auth_enabled()`` default used to. Pinning
+    ``HAL0_BIND_HOST=127.0.0.1`` here closes that the same way: tests that
+    need the LAN-bound gate set their own ``HAL0_BIND_HOST`` after this
+    fixture runs and win.
     """
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("HAL0_BIND_HOST", "127.0.0.1")
 
 
 @pytest.fixture(autouse=True)
