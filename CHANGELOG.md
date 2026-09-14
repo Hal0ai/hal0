@@ -26,6 +26,60 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **User-installed MCP servers can now actually reach an agent.** ADR-0015
+  extends `InstalledServer` with `secrets` (a reference into hal0's own
+  `/etc/hal0/api.env` store, never a literal), `tool_policy` (the same
+  `ToolPolicy` allow/gated/blocked scheme bundled agents use, disjoint and
+  empty-by-default), and `exposure` (`hermes`/`brain` honoured; `openwebui`/
+  `opencode` reserved, rejected with `501 mcp.exposure_unsupported`).
+  Flipping `exposure.hermes` on an enabled `streamable-http`/`sse` server
+  joins it into Hermes's `config.yaml` and mirrors its tool policy into the
+  `/etc/hal0/agents/hermes.toml` seed so `classify()` governs it exactly
+  like the two bundled servers — the join recomputes and prunes on every
+  registry mutation, never touching an operator's own hand-added
+  `mcp_servers` block. New CLI: `hal0 mcp test <id>` (probe + per-tool
+  allow/gated/blocked/unknown verdicts), `hal0 mcp allow|gate|block <id>
+  <tool>`, `hal0 mcp expose <id> --hermes/--brain`, and `add`/`remove` as
+  aliases of `install`/`uninstall`. New REST: `POST /api/mcp/{id}/test`,
+  `PATCH /api/mcp/{id}/tools`, `PATCH /api/mcp/{id}/exposure`; `GET
+  /api/mcp/servers` now reports real reachability for installed
+  `streamable-http`/`sse` servers instead of a hard-coded `"stopped"`. A
+  `stdio`-transport server's process supervisor is deferred (see
+  `docs/adr/0015-mcp-supervisor-and-exposure.md`) — install/configure work,
+  `exposure.hermes`/`.brain` reject with `409 mcp.exposure_needs_supervisor`
+  until it ships. (#305)
+- **Agent-driven OAuth passthrough** for Hermes skills that need OAuth
+  (Google Calendar, Spotify, GitHub). A skill is connected by sending the
+  operator a consent link — the provider's redirect lands directly on
+  `GET /api/oauth/{provider}/callback` and hal0 exchanges the code for a
+  token itself (PKCE where the provider supports it), so the operator
+  never copy-pastes an authorization code and the agent never handles a
+  raw code or client secret. New `hal0 oauth {list,connect,disconnect,
+  status,set-client-secret}` CLI, a dashboard Connections page
+  ("Connected accounts"), and a Hermes persona addendum that walks the
+  agent through the connect → poll → confirm flow. The provider registry
+  (`/etc/hal0/oauth-providers.toml`) is seeded from a shipped default
+  covering the common skill providers; tokens are stored through the
+  secrets store, never in TOML, never logged. Ported from ODS's OAuth
+  passthrough (Osmantic/ODS, Apache-2.0; permission to copy granted by its
+  author).
+- **Open WebUI is now fully pre-wired**, not just chat + voice: document
+  uploads route through RAG the moment an embed-capable slot is bound
+  (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
+  point at hal0's own `/v1`), and the image button generates through
+  ComfyUI the moment the `img` slot is bound (`ENABLE_IMAGE_GENERATION`,
+  `COMFYUI_BASE_URL`, and a `COMFYUI_WORKFLOW`/`COMFYUI_WORKFLOW_NODES`
+  pair baked from the SAME translator `/v1/images/generations` uses, keyed
+  to whichever checkpoint the slot is actually bound to). Both blocks are
+  gated on live capability state and explicitly cleared the moment that
+  state stops being true — never a stale claim of a capability that isn't
+  really there. A seam is left for a future search-provider extension
+  (`ENABLE_WEB_SEARCH` stays off; no search service ships today). The env
+  file re-renders — and the companion restarts only when the render
+  actually changed — on capability apply, `embed`/`img` slot create or
+  delete, and every regular component-convergence pass. The Services
+  page's Open WebUI card now shows a wired chip per feature (Chat, Voice,
+  Documents, Images, Web search), exposed via `GET /api/services`.
 - **Schema-driven settings**: `GET /api/settings/fields` returns one labelled
   row per operator-editable `Hal0Config` key — group, label, a
   consequence-first description, type/enum/range, default, current value,
@@ -52,6 +106,120 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **ADMIN-class routes are gated whenever the box is bound past loopback,
+  even with `require_auth` off.** hal0-api binds `0.0.0.0:8080` by default
+  (`installer/install.sh`), so the shipped combination — auth off, bind wide
+  open — let any device on the LAN drive every ADMIN route (model pulls, slot
+  deletes, config writes, approval execution) with no credential at all. An
+  ADMIN request now needs an admin session/key exactly as if enforcement were
+  on, but only when all three hold: an admin key is configured (otherwise the
+  requirement would be unsatisfiable, the same first-run carve-out
+  `AuthClass.BOOTSTRAP` already makes), the listener is not loopback-bound,
+  and this request's own peer did not arrive over loopback. A loopback-bound
+  box — and the operator at the console of a LAN-bound one — stays exactly as
+  frictionless as before; `OPEN`/`CLIENT` reads are untouched. The dashboard
+  answers a resulting 401 with an admin-key challenge drawer rather than a
+  dead-end error, and `hal0 doctor` reports the posture. (#1822)
+- **Every `systemctl`/podman seam call a slot load/unload/restart makes is
+  now bounded.** `ContainerProvider._run`'s callers (the Quadlet write,
+  `daemon-reload`, `reset-failed`, and — the one that actually wedged in the
+  field — `systemctl restart`, which spawns the container) used to pass no
+  timeout at all, so a stuck `sudo hal0-systemctl` or a wedged podman/netavark
+  call blocked the executor thread forever with nothing bounding it
+  server-side (#1869). A new `hal0.system.seam.bounded_call()` wraps every
+  such call and turns a `subprocess.TimeoutExpired` into a typed
+  `SeamTimeout` (`slot.seam_timeout`, HTTP 504) carrying the command, its
+  budget, and whatever the child had already printed before being killed;
+  the error propagates to the slot state machine as `error` with that
+  message, same as any other load failure. `hal0 slot load|unload|restart|
+  swap` and `hal0 update --restart-slots` now show an elapsed counter and the
+  slot's live state while they wait (refreshed every ~2s on a TTY; one
+  summary line otherwise), print the seam-timeout remedy (`hal0 slot logs
+  <name>`, `journalctl -u hal0-slot@<name>`) instead of a bare read-timeout
+  error, and gained a `--json` flag — instead of blocking silently for up to
+  ~40 minutes with no output (#1870). (#1869, #1870)
+- `scripts/deploy.sh` now verifies the *served* build before printing
+  success, instead of trusting `git rev-parse HEAD` against the checkout's
+  files alone. `/api/status` gained a `build_sha` field — the short git SHA
+  of the tree the running process actually imports `hal0` from
+  (`hal0.build_info.build_sha`, cached once at process start so it reflects
+  what was true when the worker booted, not a live re-read) — and the
+  deploy script's health-check step now polls it after the service restart,
+  failing loudly with a `journalctl` hint on a mismatch rather than
+  reporting a deploy complete that a stuck-on-old-code worker never picked
+  up. (#1550)
+- `hal0 update`'s "Convergence incomplete" panel (and the new Settings ▸
+  Updates dashboard panel) no longer print a `migrate-flags`/`migrate-caps`/
+  `migrate-hw --apply` command that fails outright when `hal0-api` or a
+  `hal0-slot@*` unit is still active — `detect_pending_ownership_migrations`
+  now decides server-side whether `--stop-services` is required (reusing the
+  same live-unit check `hal0 slot migrate-*` itself refuses against,
+  `hal0.cli.slot_commands.active_hal0_units`) and both surfaces render that
+  exact string, never reassembling it client-side. (#1845)
+- `hal0 update` (and `scripts/deploy.sh`'s dev-deploy) now re-assert the
+  `/usr/local/bin/hal0` and `/usr/local/bin/hal0-agent` PATH symlinks on
+  every activation, the same way `refresh_privileged_wrappers` already
+  re-asserts the root-owned sudo wrappers — `install.sh` was previously the
+  only writer of these links, so a box upgraded exclusively through
+  `hal0 update` (or an editable checkout kept current via `deploy.sh`, which
+  never runs an FHS activation at all) could end up with a `hal0` on PATH
+  pointing at a stale or rebuilt venv shim. A new `hal0 doctor wrappers
+  --fix` command exposes the same refresh (wrappers + PATH links) for the
+  editable-install case deploy.sh runs under. (#1844, #2019)
+- **Hardware truth stays fresh, and the ROCm lane no longer depends on
+  `rocm-smi`.** A missing or stale `/etc/hal0/hardware.json` used to make a
+  real GPU box book resident slot memory as `ram_mb` instead of `vram_mb`
+  (`hal0.slots.capacity._host_has_capable_gpu` trusted the cache blindly);
+  it now falls back to a live re-probe when the cache is missing, predates
+  the running kernel, or was written in a previous boot cycle
+  (`hal0.hardware.freshness`), surfaced as `hal0 doctor`'s new
+  `hardware_freshness` row (#1862). `derive_device`'s ROCm-lane check
+  required `rocm-smi`'s optional CLI to exit 0 in addition to
+  `kfd_present()`'s device-node truth, so a fresh LXC with `/dev/kfd`
+  correctly forwarded — hal0's own reference deploy shape — seeded every
+  llama.cpp slot onto the slower Vulkan lane; `kfd_present()` alone now
+  decides it, matching the capability picker's GPU/ROCm badge and the
+  ComfyUI/Qwen3-TTS rows, which had the same gap (#2216, #1966). A new
+  `apply_cpu_fallback()` records *why* a slot's lane fell back to CPU at
+  seed time (#1936, #1966); the pre-existing load-time refusal for a GPU
+  slot with zero devices mapped (`require_kfd_for_gpu_slot`) is now locked
+  with a regression test naming the exact #1936 shape. Freshly seeded
+  `agent`/`brain`/`coder`/`embed`/`rerank`/`utility` slots now clamp
+  `context_size` to a new single-owner memory-envelope function
+  (`hal0.hardware.memory_envelope`, mirroring ODS's `usable_memory_gb`)
+  instead of shipping the reference platform's flat `65536` verbatim, with
+  a `hal0 doctor` finding (`seed_context_envelope`) for a ceiling an
+  existing box can no longer afford (#1868).
+- **`GET /api/services/health` (the Overview card's stable feed) now includes
+  Hindsight and iterates the same typed service catalog the full Services
+  page already used**, instead of a hardcoded three-branch construction that
+  could never surface a fourth service or a Hindsight outage. A service with
+  no wired probe reports `up:false, detail:"unmonitored"` — never a
+  fabricated up — via `asyncio.gather(return_exceptions=True)` so one hung
+  probe can't drop the rest. (#2028)
+- **The installer now writes the base `/etc/avahi/services/hal0.service`
+  mDNS announcement it always documented** — the Services page's Discovery
+  card and `services/mdns.py`'s own docstring both promised "the installer
+  writes it when avahi is present," but nothing ever did, so
+  `base_advertised` was permanently false. (H13)
+- **A pulled model's runtime family and pooling type now reach the model
+  registry**, not just `detect()`'s in-memory result — a fresh Kokoro/
+  Moonshine/Qwen3-TTS pull registered with an empty `backends` list, and a
+  GGUF embedding/reranking pull registered with no `metadata.pooling_type`,
+  so `hal0.model_meta.modality.derive_modalities_from_model_info` could
+  never recognise the model. A bound tts/transcription/embedding slot's
+  `LoadedSlot.modalities` stayed empty, so OmniRouter's tool eligibility
+  (`resolve_for_request`) silently never routed to those slots on a real
+  deployment, even though the routing logic itself was correct. An
+  FLM-pulled model's `backends=["npu"]` (a hardware-lane label, not a
+  runtime family) is now `["flm"]`, the string the modality derivation
+  actually recognises. (#2192)
+- **The llama-only effective-context resolver no longer runs against
+  embedding/reranking/transcription/tts/image slots** (FLM, Kokoro,
+  Moonshine, Qwen3-TTS, ComfyUI) on `GET /api/slots` and
+  `GET /api/slots/{name}`. Those slot kinds have no context window; calling
+  the resolver anyway fabricated an 8192-token "window" (its safe fallback
+  for an unrecognised model) that the slot never runs with. (#1859)
 - `[brain_chat].tool_model` — the one `[brain_chat]` key with real routing
   consequences (where a tool-calling round reroutes when the chat model
   can't emit tool calls this runtime parses) — had no dashboard path at
@@ -184,6 +352,16 @@ applying. Add those subsections to a version's section to surface them; see
   `releases_url_override` field (null when no override is set) so API
   consumers and the dashboard's Settings → Updates page see it too. Which
   URL is consulted is unchanged — the override still wins.
+
+### Changed
+
+- `hal0.services.registry.ServiceDef` gains `category`, `source`
+  (`builtin`/`extension`), `modalities`, and a `probe_tcp` field for a future
+  `"tcp"` probe kind — additive, no builtin service's behavior changes. This
+  is the one shape a future extension-manifest-provided service row is meant
+  to reuse, so the registry never grows a second, parallel service shape.
+  (#2028)
+
 ### Removed
 
 - **The v1.3.0 sunset tranche (#2168) is executed** — three internal compat

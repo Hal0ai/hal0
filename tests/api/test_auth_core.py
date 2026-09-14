@@ -320,6 +320,73 @@ def test_decide_admin_requires_admin_tier() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Posture-coupled ADMIN gate (#1822): _is_loopback_peer + _lan_admin_gate
+
+
+def _scope_with_client(client: tuple[str, int] | None) -> dict[str, object]:
+    scope = _scope()
+    scope["client"] = client
+    return scope
+
+
+def test_is_loopback_peer_true_for_v4_and_v6() -> None:
+    assert auth_mod._is_loopback_peer(_scope_with_client(("127.0.0.1", 5000))) is True
+    assert auth_mod._is_loopback_peer(_scope_with_client(("127.5.5.5", 5000))) is True
+    assert auth_mod._is_loopback_peer(_scope_with_client(("::1", 5000))) is True
+
+
+def test_is_loopback_peer_false_for_lan_or_missing() -> None:
+    assert auth_mod._is_loopback_peer(_scope_with_client(("192.168.1.20", 5000))) is False
+    # No client tuple at all (some non-TCP test transports) -- deny-by-default.
+    assert auth_mod._is_loopback_peer(_scope_with_client(None)) is False
+    assert auth_mod._is_loopback_peer(_scope()) is False
+    # TestClient's default fake peer -- not an IP address at all.
+    assert auth_mod._is_loopback_peer(_scope_with_client(("testclient", 50000))) is False
+
+
+def test_lan_admin_gate_only_applies_to_admin_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "k")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    scope = _scope_with_client(("192.168.1.20", 5000))
+    assert auth_mod._lan_admin_gate(AuthClass.OPEN, scope) is False
+    assert auth_mod._lan_admin_gate(AuthClass.CLIENT, scope) is False
+    assert auth_mod._lan_admin_gate(AuthClass.BOOTSTRAP, scope) is False
+    assert auth_mod._lan_admin_gate(AuthClass.ADMIN, scope) is True
+
+
+def test_lan_admin_gate_false_without_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No admin key -> nothing to log in with yet; mirrors BOOTSTRAP's own carve-out."""
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    scope = _scope_with_client(("192.168.1.20", 5000))
+    assert auth_mod._lan_admin_gate(AuthClass.ADMIN, scope) is False
+
+
+def test_lan_admin_gate_false_on_loopback_bind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "k")
+    monkeypatch.delenv("HAL0_BIND_HOST", raising=False)  # defaults to 127.0.0.1
+    scope = _scope_with_client(("192.168.1.20", 5000))
+    assert auth_mod._lan_admin_gate(AuthClass.ADMIN, scope) is False
+
+
+def test_lan_admin_gate_false_for_loopback_peer_even_on_lan_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator at the console stays frictionless even on a LAN-bound box."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "k")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    scope = _scope_with_client(("127.0.0.1", 5000))
+    assert auth_mod._lan_admin_gate(AuthClass.ADMIN, scope) is False
+
+
+def test_lan_admin_gate_true_when_all_conditions_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "k")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    scope = _scope_with_client(("192.168.1.20", 5000))
+    assert auth_mod._lan_admin_gate(AuthClass.ADMIN, scope) is True
+
+
+# ---------------------------------------------------------------------------
 # Route-level: POST /api/auth/login + GET /api/auth/status, and the
 # dev-open bypass end-to-end through a real TestClient app.
 
@@ -346,11 +413,44 @@ def auth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         yield c
 
 
+@pytest.fixture
+def auth_app_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Factory variant of ``auth_client``: returns a callable that builds a
+    fresh isolated app on demand, so a test can set ``HAL0_ADMIN_KEY`` /
+    ``HAL0_BIND_HOST`` first and then wrap the app in its OWN
+    ``TestClient(app, client=(...))`` with a custom peer tuple -- the fixed
+    ``auth_client`` fixture below always uses ``TestClient``'s default
+    ``("testclient", 50000)`` peer, which is exactly what the loopback-vs-LAN
+    posture gate needs to vary per test (#1822).
+    """
+    import os
+
+    from hal0.api import create_app
+
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "hal0_home"))
+    os.makedirs(tmp_path / "hal0_home" / "etc" / "hal0", exist_ok=True)
+
+    return create_app
+
+
 def test_status_route_reports_posture(auth_client) -> None:
     resp = auth_client.get("/api/auth/status")
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"auth_required": False, "has_admin_key": False, "tier": "anon"}
+    assert body == {
+        "auth_required": False,
+        "has_admin_key": False,
+        "lan_exposed": False,
+        "tier": "anon",
+    }
+
+
+def test_status_route_reports_lan_exposed(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    resp = auth_client.get("/api/auth/status")
+    assert resp.status_code == 200
+    assert resp.json()["lan_exposed"] is True
 
 
 def test_status_route_never_leaks_the_key(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -430,3 +530,111 @@ def test_dev_open_bypass_reaches_admin_route_with_no_creds(auth_client) -> None:
     """
     resp = auth_client.get("/api/settings")
     assert resp.status_code not in (401, 403), resp.text
+
+
+# ---------------------------------------------------------------------------
+# Posture-coupled ADMIN gate, end-to-end (#1822): loopback-vs-LAN request
+# classification through a real app + TestClient with a custom peer.
+
+
+def test_posture_gate_blocks_admin_route_from_lan_peer_on_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HAL0_REQUIRE_AUTH is OFF, but a LAN-bound box with a key set still
+    401s an ADMIN route hit from an off-box peer."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        resp = c.get("/api/settings")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "auth.required"
+
+
+def test_posture_gate_allows_loopback_peer_on_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator at the console (loopback peer) stays frictionless even
+    though the box itself is bound to every interface."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        resp = c.get("/api/settings")
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_posture_gate_open_on_loopback_bind_regardless_of_peer(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loopback-bound box never gates on peer -- an unreachable-in-practice
+    scenario (the kernel wouldn't route a real LAN peer to a loopback bind),
+    but the gate must not rely on that; it checks the bind explicitly."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.delenv("HAL0_BIND_HOST", raising=False)  # defaults to 127.0.0.1
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        resp = c.get("/api/settings")
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_posture_gate_open_without_admin_key_even_on_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No admin key yet -> bootstrap window, mirrors AuthClass.BOOTSTRAP:
+    nothing to log in with, so the gate must not lock the operator out."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        resp = c.get("/api/settings")
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_posture_gate_admin_session_reaches_admin_route_from_lan_peer(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A logged-in admin session clears the gate from any peer -- login
+    itself is OPEN-classified, so the gate never blocks reaching it."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        login = c.post("/api/auth/login", json={"key": "the-real-key"})
+        assert login.status_code == 200
+        resp = c.get("/api/settings")
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_posture_gate_covers_approvals_route(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The named #1822 scenario: approve executes gated tools (model_pull,
+    slot_delete, config_write); the approvals list route must be gated the
+    same as every other ADMIN route -- refused from an off-box peer, allowed
+    with an admin session."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        denied = c.get("/api/agent/approvals")
+        assert denied.status_code == 401
+        assert denied.json()["error"]["code"] == "auth.required"
+
+        login = c.post("/api/auth/login", json={"key": "the-real-key"})
+        assert login.status_code == 200
+
+        allowed = c.get("/api/agent/approvals")
+        assert allowed.status_code not in (401, 403), allowed.text
