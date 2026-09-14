@@ -266,6 +266,7 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | `doctor migrations` | `--json` |
 | `doctor profiles` | `--json` |
 | `doctor ports` | `--fix` (delete stale netavark DNAT rules found by the audit; privileged) |
+| `doctor wrappers` | `--fix` (re-install `${LIB_DIR}/bin/hal0-*`, the matching `/etc/sudoers.d` drop-ins, and the `/usr/local/bin/hal0`(`-agent`) PATH links from the active tree; privileged) |
 | `doctor all` | `--json` |
 | `doctor bundle` | `--out`, `--no-rocm-smi`, `--include-logs` (default `auto`; `auto\|yes\|no`) |
 

@@ -34,6 +34,29 @@ export interface UpdateState {
 
 export type UpdateJobState = 'queued' | 'running' | 'applied' | 'failed'
 
+// One of the three deploy-window ownership folds (spec-flags-ownership /
+// spec-hw-slot-ownership) hal0.updater.updater.detect_pending_ownership_migrations
+// reports on. `command` is the EXACT runnable line — it already carries
+// `--stop-services` when the server determined hal0 units are live
+// (#1845/H8) — render it verbatim; never re-derive or append flags here.
+export interface OwnershipMigrationEntry {
+  command: string
+  lines: string[]
+  error: string | null
+}
+
+export interface OwnershipMigrations {
+  pending: string[]
+  detail: Record<string, OwnershipMigrationEntry>
+  commands: string[]
+}
+
+export interface ConvergenceReport {
+  profile_reset?: { due: boolean; outcome?: string; backup?: string | null }
+  ownership_migrations: OwnershipMigrations
+  converged: boolean
+}
+
 export interface UpdateJob {
   id: string
   state: UpdateJobState
@@ -43,6 +66,9 @@ export interface UpdateJob {
   updated_at: number
   error: string | null
   error_code?: string | null
+  // Attached by /api/updates/status/{id} after a commit — null until the
+  // job reaches a terminal state, or on a daemon too old to send it.
+  convergence?: ConvergenceReport | null
 }
 
 export function useUpdateState() {

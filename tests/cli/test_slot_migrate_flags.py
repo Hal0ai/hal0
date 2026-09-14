@@ -82,7 +82,7 @@ def test_apply_folds_slot_tune_onto_the_model_and_backs_up(
     registry = ModelRegistry()
     registry.add(Model(id="m", path="/models/m.gguf"))
 
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     slot_migrate_flags(apply=True, yes=True, stop_services=False)
 
     folded = registry.get("m").defaults
@@ -120,7 +120,7 @@ def test_apply_folds_chat_template_onto_the_model(
     registry = ModelRegistry()
     registry.add(Model(id="m", path="/models/m.gguf"))
 
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     slot_migrate_flags(apply=True, yes=True, stop_services=False)
 
     # resolve_chat_template reads ONLY the model now, so the slot's template
@@ -139,7 +139,7 @@ def test_apply_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     )
     registry = ModelRegistry()
     registry.add(Model(id="m", path="/models/m.gguf"))
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
 
     slot_migrate_flags(apply=True, yes=True, stop_services=False)
     first = registry.get("m").defaults
@@ -170,7 +170,7 @@ def test_divergent_share_refuses_and_writes_nothing(
     )
     registry = ModelRegistry()
     registry.add(Model(id="shared", path="/models/shared.gguf"))
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
 
     with pytest.raises(typer.Exit) as exc:
         slot_migrate_flags(apply=True, yes=True, stop_services=False)
@@ -225,7 +225,7 @@ def test_apply_refuses_while_hal0_units_are_live(
     )
     registry = ModelRegistry()
     registry.add(Model(id="m", path="/models/m.gguf"))
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: ["hal0-api.service"])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: ["hal0-api.service"])
 
     with pytest.raises(typer.Exit) as exc:
         slot_migrate_flags(apply=True, yes=True, stop_services=False)

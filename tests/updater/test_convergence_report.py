@@ -113,6 +113,43 @@ def test_real_fold_work_is_reported_with_its_command(
     assert report["detail"]["hw"]["lines"][0].startswith("would fold slot 'chat'")
 
 
+def test_pending_command_gains_stop_services_when_units_are_up(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1845/H8: a bare `--apply` printed while hal0 units are live fails —
+    the migrate-* commands all refuse without `--stop-services` in that state
+    (cli/slot_commands.py). The server is the one place that knows whether
+    units are up, so it must be the one to decide the flag, not the CLI panel
+    or the dashboard reprinting a stale static string.
+    """
+    import hal0.cli.slot_commands as slot_commands
+    import hal0.config.migrations.hw_slot_ownership as m
+
+    monkeypatch.setattr(
+        m, "run_migration", lambda **kw: ["would fold slot 'chat': ngl=99 binary='rocmfpx'"]
+    )
+    monkeypatch.setattr(slot_commands, "active_hal0_units", lambda: ["hal0-api.service"])
+    report = U.detect_pending_ownership_migrations()
+    assert report["commands"] == ["hal0 slot migrate-hw --apply --stop-services"]
+    assert report["detail"]["hw"]["command"] == "hal0 slot migrate-hw --apply --stop-services"
+
+
+def test_pending_command_omits_stop_services_when_units_are_down(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case: no live units, so the plain `--apply` command is correct
+    and must not carry a flag the operator doesn't need."""
+    import hal0.cli.slot_commands as slot_commands
+    import hal0.config.migrations.hw_slot_ownership as m
+
+    monkeypatch.setattr(
+        m, "run_migration", lambda **kw: ["would fold slot 'chat': ngl=99 binary='rocmfpx'"]
+    )
+    monkeypatch.setattr(slot_commands, "active_hal0_units", lambda: [])
+    report = U.detect_pending_ownership_migrations()
+    assert report["commands"] == ["hal0 slot migrate-hw --apply"]
+
+
 def test_divergent_share_refusal_is_surfaced_not_swallowed(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -16,15 +16,20 @@ default for the duration of that test.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from hal0.agents import hermes_provision as hp
 
 
 @pytest.fixture(autouse=True)
-def _euid_root_by_default():
-    """Run hermes-provision tests as if euid == 0 (the direct-write path)."""
-    with patch.object(hp.os, "geteuid", return_value=0):
-        yield
+def _euid_root_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run hermes-provision tests as if euid == 0 (the direct-write path).
+
+    Takes the test's OWN ``monkeypatch`` rather than an independent
+    ``patch.object`` context: ``hp.os`` IS the global :mod:`os` module, and a
+    per-test override set through ``monkeypatch`` would otherwise be undone
+    AFTER this fixture had already restored the real ``geteuid`` — re-installing
+    the euid-0 stub process-wide for every test that followed in the same xdist
+    worker. One monkeypatch instance makes the undo order LIFO and correct.
+    """
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)

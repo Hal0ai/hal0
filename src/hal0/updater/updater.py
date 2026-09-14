@@ -2925,14 +2925,27 @@ def detect_pending_ownership_migrations(*, job_id: str | None = None) -> dict[st
 
     What is NOT acceptable is leaving the box silently half-converged, so this
     runs each fold's *planner* (``dry_run=True``, filesystem- and DB-write-free)
-    and reports precisely what is outstanding, with the command that fixes it.
+    and reports precisely what is outstanding, with the EXACT runnable command
+    that fixes it — including ``--stop-services`` when it is actually required
+    (#1845/H8): every ``migrate-*`` command in :data:`_OWNERSHIP_MIGRATIONS`
+    refuses ``--apply`` while ``hal0-api`` or any ``hal0-slot@*`` unit is
+    active (:func:`hal0.cli.slot_commands.active_hal0_units` is that same
+    live-unit check), and a bare ``... --apply`` printed while units are up
+    fails with no indication the flag exists. Callers (the CLI panel and the
+    dashboard) print this string verbatim — the flag is decided HERE, once,
+    not re-derived client-side.
 
     Returns ``{"pending": [keys], "detail": {key: {...}}, "commands": [...]}``.
     """
     import importlib
 
+    from hal0.cli.slot_commands import active_hal0_units
+
+    stop_services_suffix = " --stop-services" if active_hal0_units() else ""
+
     detail: dict[str, Any] = {}
-    for key, module_name, command in _OWNERSHIP_MIGRATIONS:
+    for key, module_name, base_command in _OWNERSHIP_MIGRATIONS:
+        command = base_command + stop_services_suffix
         entry: dict[str, Any] = {"command": command, "lines": [], "error": None}
         try:
             module = importlib.import_module(module_name)
@@ -4102,6 +4115,73 @@ def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> d
     return {"refreshed": refreshed, "sudoers_refreshed": sudoers_refreshed, "errors": errors}
 
 
+#: Where ``install.sh`` symlinks the CLI onto PATH (installer/install.sh:1078,
+#: env-overridable there via ``HAL0_PATH_LINK``). A module constant for the
+#: same testability reason as :data:`GPU_PERMS_UNIT_DST` — tests redirect it
+#: rather than touching the real ``/usr/local/bin``.
+HAL0_PATH_LINK_DST = Path(os.environ.get("HAL0_PATH_LINK", "/usr/local/bin/hal0"))
+
+
+def refresh_path_links(target: Path, *, job_id: str | None = None) -> dict[str, str]:
+    """Re-assert the ``/usr/local/bin/hal0`` (+ ``hal0-agent``) PATH links (#1844/#2019).
+
+    Same #1689 shape as :func:`refresh_privileged_wrappers`: ``install.sh`` was
+    the ONLY writer of these symlinks (installer/install.sh:1077-1099) —
+    ``hal0 update`` never refreshed them, so a box upgraded exclusively
+    through the updater kept ``/usr/local/bin/hal0`` pointed at whatever venv
+    shim existed at the LAST ``install.sh`` run. A rebuilt or relocated venv
+    (or a `scripts/deploy.sh` dev-deploy that reprovisions one, #2019) then
+    left the PATH entry stale or dangling with nothing to re-assert it.
+
+    Privileged-side ONLY, same guard as its siblings: a no-op unless
+    ``os.geteuid() == 0`` — the unprivileged daemon must never write
+    ``/usr/local/bin``.
+
+    ``target`` names the release tree only for log context; the link SOURCE
+    is always THIS process's actual venv (``sys.prefix`` — the same signal
+    :func:`refresh_gpu_perms_unit` trusts), because the CLI shim lives in the
+    venv's ``bin/``, not the release tree, and by the time this runs
+    :func:`activate_release` has already re-pip'd ``target`` into that venv
+    (a no-op re-pip for an editable install).
+
+    Best-effort per link, using the same atomic swap :func:`activate_release`
+    uses for the release symlink itself (:func:`_atomic_symlink_swap`) so a
+    concurrent ``hal0`` invocation never observes a half-written link. A
+    missing ``hal0-agent`` shim (older release, or a venv still provisioning)
+    is skipped, not fatal — the same "never wedge an otherwise-successful
+    activate" policy as :func:`refresh_privileged_wrappers`.
+
+    Returns ``{"hal0": "linked"|"missing"|"failed", "hal0-agent": ...}``
+    (empty dict when not root).
+    """
+    if os.geteuid() != 0:
+        return {}
+
+    venv_bin = Path(sys.prefix) / "bin"
+    results: dict[str, str] = {}
+    for src_name, dst in (
+        ("hal0", HAL0_PATH_LINK_DST),
+        ("hal0-agent", HAL0_PATH_LINK_DST.with_name("hal0-agent")),
+    ):
+        src = venv_bin / src_name
+        if not src.is_file():
+            results[src_name] = "missing"
+            log.warning(
+                "updater.path_link_source_missing", job_id=job_id, name=src_name, src=str(src)
+            )
+            continue
+        try:
+            _atomic_symlink_swap(src, dst)
+            results[src_name] = "linked"
+        except OSError as exc:
+            results[src_name] = "failed"
+            log.warning(
+                "updater.path_link_refresh_failed", job_id=job_id, name=src_name, error=str(exc)
+            )
+    log.info("updater.path_links_refreshed", job_id=job_id, target=str(target), results=results)
+    return results
+
+
 def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, Any]:
     """§9 step 8 + 8b: swap ``current`` to ``<usr_lib>/<dir_name>`` and re-pip it.
 
@@ -4161,6 +4241,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     # activate (a wrapper that fails to refresh keeps the OLD one in place,
     # same class of degradation as before this fix, not a new failure mode).
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
+    path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
 
     log.info(
@@ -4173,6 +4254,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "previous": str(prior) if prior else None,
         "target": str(target),
         "wrappers_refreshed": wrappers["refreshed"],
+        "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
     }
 
@@ -4994,6 +5076,7 @@ __all__ = [
     "fetch_release_manifest",
     "profile_reset_status",
     "refresh_gpu_perms_unit",
+    "refresh_path_links",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",

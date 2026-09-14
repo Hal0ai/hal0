@@ -552,11 +552,13 @@ older on-disk slot config forward through the v1.0 field-ownership
 changes: `migrate-id-keying`, `migrate-hw`, `migrate-caps`,
 `migrate-flags`, `migrate-enabled-removal`. These are **manual, operator-run**
 migrations — `hal0 update` only *detects* which ones a box still needs and
-prints the command to run; it never applies one for you. `hal0 slot
+prints the exact command to run; it never applies one for you. `hal0 slot
 migrate-hw --apply` (and its siblings) also refuse to run while `hal0-api`
 or any `hal0-slot@*` unit is active, since rewriting slot TOML under a live
-runtime risks a split-brain config — stop hal0's services first, then run
-the reported command with `--apply`.
+runtime risks a split-brain config. `hal0 update` already knows whether any
+such unit is up, so the command it prints carries `--stop-services` for you
+when that's the case (stopping those units before proceeding) — copy the
+line verbatim rather than adding the flag yourself.
 
 ## Related
 

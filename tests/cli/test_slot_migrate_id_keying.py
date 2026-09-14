@@ -7,7 +7,7 @@ API.
 Covers the three seams the command wires together:
 
   * ``_backup_slot_state``   — pre-flight tar backup (the only rollback path).
-  * ``_active_hal0_units``   — the live-runtime safety gate (halo143 split-brain
+  * ``active_hal0_units``   — the live-runtime safety gate (halo143 split-brain
                                 lesson: never flip under a running API/slot).
   * ``_migrate_id_keying_dry_run_plan`` — the plan a ``--dry-run`` prints
                                 without invoking the real (file-moving) migrator.
@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 
 from hal0.cli.slot_commands import (
-    _active_hal0_units,
     _backup_slot_state,
     _migrate_id_keying_dry_run_plan,
+    active_hal0_units,
     slot_migrate_id_keying,
 )
 from hal0.slots.identity import SlotIdentityStore
@@ -79,7 +79,7 @@ def test_backup_tolerates_missing_data_dir(tmp_path: Path) -> None:
     assert any("chat.toml" in n for n in names)
 
 
-# ── _active_hal0_units ───────────────────────────────────────────────────────
+# ── active_hal0_units ───────────────────────────────────────────────────────
 
 
 def _fake_run(active_units: set[str]):
@@ -105,11 +105,11 @@ def _fake_run(active_units: set[str]):
 
 
 def test_active_units_empty_when_nothing_running() -> None:
-    assert _active_hal0_units(run=_fake_run(set())) == []
+    assert active_hal0_units(run=_fake_run(set())) == []
 
 
 def test_active_units_reports_api_and_slots() -> None:
-    active = _active_hal0_units(run=_fake_run({"hal0-api.service", "hal0-slot@143.service"}))
+    active = active_hal0_units(run=_fake_run({"hal0-api.service", "hal0-slot@143.service"}))
     assert "hal0-api.service" in active
     assert "hal0-slot@143.service" in active
 
@@ -118,7 +118,7 @@ def test_active_units_tolerates_missing_systemctl() -> None:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError("systemctl not found")
 
-    assert _active_hal0_units(run=run) == []
+    assert active_hal0_units(run=run) == []
 
 
 # ── _migrate_id_keying_dry_run_plan ──────────────────────────────────────────
@@ -180,7 +180,7 @@ def test_command_migrates_tree_and_writes_backup(
 
     # Exercise the filesystem migration independently of host systemd state.
     # The safety gate keeps its dedicated coverage above.
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     slot_migrate_id_keying(apply=True, yes=True, stop_services=False, dry_run=False)
 
     remaining = sorted(p.name for p in config_dir.glob("*.toml"))
@@ -207,7 +207,7 @@ def test_apply_false_previews_and_writes_nothing(
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "chat.toml").write_text('[slot]\nname = "chat"\nport = 8081\n')
 
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     # apply defaults to False on the real CLI → dry-run: prints the plan,
     # writes nothing. yes=True so the (skipped, on this path) confirm can't
     # block the assertion under pytest's captured stdin.
@@ -238,7 +238,7 @@ def test_dry_run_flag_is_a_no_op_alias_that_apply_overrides(
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "chat.toml").write_text('[slot]\nname = "chat"\nport = 8081\n')
 
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     slot_migrate_id_keying(apply=True, yes=True, stop_services=False, dry_run=True)
 
     remaining = sorted(p.name for p in config_dir.glob("*.toml"))

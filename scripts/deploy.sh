@@ -197,6 +197,23 @@ fi
 step "3. Re-assert group-shared ownership (keeps the tree writable by '${HAL0_GROUP:-hal0}')"
 reassert_group_share "$REPO_ROOT"
 
+# ── 3b. Re-assert privileged wrappers + PATH links ────────────────────────────
+# `hal0 update commit` refreshes /usr/lib/hal0/bin/hal0-*, the /etc/sudoers.d
+# drop-ins and the /usr/local/bin/hal0(-agent) PATH links from the tree it just
+# activated (Updater.activate_release) — but that path only runs for an FHS
+# install; it's refused outright on this editable checkout. Without this step
+# a wrapper or PATH-link change pulled in by the reset above never reaches the
+# running box (#1844/#2019). Best-effort: never fails an otherwise-successful
+# deploy — same policy the updater itself uses for these refreshes.
+step "3b. Refresh privileged wrappers + PATH links"
+if [[ "$(id -u)" -ne 0 ]]; then
+    warn "not running as root — skipping wrapper/PATH-link refresh (sudo hal0 doctor wrappers --fix)"
+elif ! command -v hal0 >/dev/null 2>&1; then
+    warn "hal0 not on PATH — skipping wrapper/PATH-link refresh"
+else
+    hal0 doctor wrappers --fix || warn "wrapper/PATH-link refresh reported a problem — see above"
+fi
+
 # ── 4. Restart service ────────────────────────────────────────────────────────
 if [[ "$DO_RESTART" -eq 1 ]]; then
     step "4. Restart ${SERVICE} (editable install picks up new source on restart)"
@@ -215,15 +232,41 @@ step "5. Health check"
 port="${HAL0_PORT:-8080}"
 url="http://127.0.0.1:${port}"
 ok=0
+status_body=""
 for _ in $(seq 1 15); do
+    status_body="$(curl -s "${url}/api/status" 2>/dev/null || true)"
     code="$(curl -s -o /dev/null -w '%{http_code}' "${url}/api/status" 2>/dev/null || echo 000)"
     if [[ "$code" == "200" ]]; then ok=1; break; fi
     sleep 1
 done
-if [[ "$ok" -eq 1 ]]; then
-    served="$(curl -s "${url}/" 2>/dev/null | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
-    info "gateway healthy at ${url} (serving ${served:-?})"
-    info "deploy complete @ $(git rev-parse --short HEAD)"
+[[ "$ok" -eq 1 ]] || die "gateway did not return 200 at ${url}/api/status after restart"
+
+served="$(curl -s "${url}/" 2>/dev/null | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
+info "gateway healthy at ${url} (serving ${served:-?})"
+
+# ── 5b. Verify the SERVED build identity, not just that git moved ────────────
+# A 200 above only proves hal0-api's event loop answers — an editable install
+# only picks up new source on restart, and step 4's restart fails SOFT when no
+# systemd unit is found (a warn, not a die). `/api/status.build_sha` is the
+# git SHA the RUNNING process actually loaded (hal0.build_info.build_sha,
+# cached at process start — see src/hal0/build_info.py), so comparing it
+# against what we just checked out catches a stuck-on-old-code worker that a
+# bare `git rev-parse HEAD` (this script's old success message) could never
+# see (#1550/H7).
+if [[ "$DO_RESTART" -ne 1 ]]; then
+    warn "build-identity check skipped (--no-restart) — served code may predate this deploy"
+elif ! command -v jq >/dev/null 2>&1; then
+    warn "jq not found — skipping build-identity check"
 else
-    die "gateway did not return 200 at ${url}/api/status after restart"
+    served_sha="$(printf '%s' "$status_body" | jq -r '.build_sha // empty' 2>/dev/null || true)"
+    expected_sha="$(git rev-parse --short=12 HEAD)"
+    if [[ -z "$served_sha" ]]; then
+        warn "served build reports no build_sha (non-git install?) — cannot verify identity"
+    elif [[ "$served_sha" == "$expected_sha" ]]; then
+        info "served build matches deployed commit (${served_sha})"
+    else
+        die "served build_sha (${served_sha}) != deployed commit (${expected_sha}) — ${SERVICE} did not pick up the new code; check: journalctl -u ${SERVICE} -n 50"
+    fi
 fi
+
+info "deploy complete @ $(git rev-parse --short HEAD)"

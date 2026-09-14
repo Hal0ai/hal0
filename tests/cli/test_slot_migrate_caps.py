@@ -63,7 +63,7 @@ def test_apply_folds_slot_mtp_to_model_and_backs_up(
 
     # Exercise the filesystem fold independently of host systemd state. The
     # safety gate itself retains dedicated coverage in the id-keying tests.
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
     slot_migrate_caps(apply=True, yes=True, stop_services=False)
 
     raw = tomllib.loads(slot.read_text(encoding="utf-8"))
@@ -91,7 +91,7 @@ def test_apply_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     )
     registry = ModelRegistry()
     registry.add(Model(id="m", path="/models/m.gguf"))
-    monkeypatch.setattr("hal0.cli.slot_commands._active_hal0_units", lambda: [])
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
 
     slot_migrate_caps(apply=True, yes=True, stop_services=False)
     first_defaults = registry.get("m").defaults

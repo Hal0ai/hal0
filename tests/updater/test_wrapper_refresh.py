@@ -246,3 +246,4 @@ def test_activate_release_includes_wrappers_refreshed_key(
     result = activate_release("hal0-1.0.0")
 
     assert result["wrappers_refreshed"] == []
+    assert result["path_links_refreshed"] == {}

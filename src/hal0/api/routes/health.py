@@ -26,6 +26,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from hal0 import __version__
+from hal0.build_info import build_sha
 from hal0.config import paths
 from hal0.slots.state import SlotState
 
@@ -228,6 +229,14 @@ async def get_status(request: Request) -> dict[str, Any]:
     return {
         "name": "hal0",
         "version": __version__,
+        # Short git SHA of the tree THIS PROCESS started from, or None on a
+        # non-git FHS install (#1550/H7). `scripts/deploy.sh` polls this after
+        # restarting hal0-api and fails loudly on a mismatch — a served
+        # version string alone can't catch a worker still running the old
+        # code (an editable install's `__version__` doesn't change between
+        # commits at all). Cached at process start, never re-read live — see
+        # hal0.build_info.build_sha.
+        "build_sha": build_sha(),
         "status": "ok",
         "hardware": None,  # populated by /api/hardware on demand
         "slots": slot_list,
