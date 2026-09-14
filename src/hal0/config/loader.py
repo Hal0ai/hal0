@@ -830,7 +830,7 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     return cfg
 
 
-# HAL0-SUNSET: v1.3.0 — one-shot upgrade path for installs whose profiles.toml
+# HAL0-SUNSET: v2.0.0 — one-shot upgrade path for installs whose profiles.toml
 # predates the catalog cut. Delete the bulk pass (and the ``legacy_seeds_migrated``
 # marker that gates it) once no supported upgrade can start from such a file; the
 # per-name adoption ledger and ``ProfileCatalog._materialize_legacy`` stay — those

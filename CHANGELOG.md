@@ -24,6 +24,124 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-14
+
+### Highlights
+
+- **User-installed MCP servers can now actually reach an agent.** An installed
+  `streamable-http`/`sse` server gains secrets, a `ToolPolicy`, and an
+  `exposure` flag; flipping `exposure.hermes` joins it into Hermes's
+  `config.yaml` and mirrors its tool policy into the agent seed, driven by
+  `hal0 mcp test|allow|gate|block|expose` and matching REST. `stdio` servers
+  install and configure, but wait on a process supervisor
+  (`409 mcp.exposure_needs_supervisor`). (#305)
+- **Hermes skills that need OAuth are connected with a consent link.** The
+  provider's redirect lands on `GET /api/oauth/{provider}/callback` and hal0
+  exchanges the code itself (PKCE where supported), so the operator never
+  copy-pastes an authorization code and the agent never handles a raw code or
+  client secret. New `hal0 oauth` CLI and a dashboard Connections page manage
+  the accounts; tokens go through the secrets store, never into TOML.
+- **Settings are schema-driven, and every save previews first.**
+  `GET /api/settings/fields` returns one documented row per operator-editable
+  config key — including the previously unreachable `[brain_chat].tool_model`
+  and a new Realtime page for `[realtime]` — and `POST /api/settings/preview`
+  computes the exact diff `PUT /api/settings` would apply from the same
+  function, so a preview cannot promise something the apply does not keep.
+  (#2108, #1967, #2195, #2203, #1511)
+- **Hardware truth stays fresh, and the ROCm lane no longer depends on
+  `rocm-smi`.** A missing or stale `/etc/hal0/hardware.json` now triggers a
+  live re-probe instead of booking a real GPU box's resident slot memory as
+  `ram_mb`; `/dev/kfd` alone decides the ROCm lane, so a fresh LXC with the
+  device forwarded no longer seeds every llama.cpp slot onto the slower Vulkan
+  lane; and freshly seeded slots clamp `context_size` to a host memory
+  envelope instead of the reference platform's flat `65536`.
+  (#1862, #2216, #1966, #1868)
+- **A slot load, unload or restart can no longer hang forever.** Every
+  `systemctl`/podman seam call is now bounded, and a timeout surfaces as a
+  typed `slot.seam_timeout` (HTTP 504) naming the command, its budget and
+  whatever the child printed before being killed. `hal0 slot
+  load|unload|restart|swap` shows an elapsed counter and the slot's live state
+  while it waits, instead of blocking silently for up to ~40 minutes.
+  (#1869, #1870)
+- **`hal0 update` re-asserts the `/usr/local/bin/hal0` and
+  `/usr/local/bin/hal0-agent` PATH symlinks on every activation**, so a box
+  upgraded exclusively through the updater can no longer end up with a `hal0`
+  on PATH pointing at a stale venv shim. `/api/status` also gained a
+  `build_sha` field naming the tree the running process actually imports from,
+  which `scripts/deploy.sh` now polls before reporting success.
+  (#1550, #1844, #2019)
+
+### Breaking
+
+- **ADMIN-class routes now need an admin credential from off-box callers
+  whenever the box is bound past loopback — even with `require_auth` off.**
+  Until this release `require_auth = false` meant the enforcement middleware
+  waved every request through untouched. It now classifies the request first
+  and enforces ADMIN-class routes anyway whenever all three hold: an admin key
+  is configured (`HAL0_ADMIN_KEY`), the listener is not loopback-bound
+  (`install.sh` seeds `HAL0_BIND_HOST=0.0.0.0`, so that is the shipped
+  default), and this request's own peer did not arrive over loopback. Such a
+  request carrying no admin session cookie, `Authorization: Bearer` or
+  `?api_key=` is answered `401 auth.required`; one carrying a client-tier key
+  is answered `403 auth.forbidden`, and a WebSocket upgrade closes with code
+  `4403`. ADMIN covers every mutating route plus `GET /api/docs`,
+  `/api/openapi.json` and `/api/auth/exposure`. `OPEN` and `CLIENT` reads —
+  `/v1` inference, `GET /api/slots`, `GET /api/models`, the health endpoints —
+  are untouched, as is anything arriving over loopback, so the CLI, the
+  operator at the console and every on-box service stay exactly as
+  frictionless as before. A box with **no** admin key configured is not
+  affected at all: the gate cannot arm where the requirement would be
+  unsatisfiable, the same carve-out `AuthClass.BOOTSTRAP` already makes for
+  first run — `hal0 doctor` warns about that posture rather than passing it.
+  To restore off-box access, sign in from the dashboard (a refused mutation
+  raises an admin-key challenge drawer instead of a dead-end error) or send
+  the admin key on the request; `hal0 auth require on` makes the posture
+  explicit, and `HAL0_BIND_HOST=127.0.0.1` in `/etc/hal0/api.env` returns the
+  box to loopback-only. One further consequence on the same boxes: the
+  cross-site `Origin` check that previously ran only under `require_auth` now
+  also runs on these requests, so a browser-driven state-changing call from an
+  origin outside `HAL0_ALLOWED_ORIGINS` is answered `403
+  auth.origin_forbidden`. (#1822)
+- **A ComfyUI slot's `image_pin` is now honoured, so a pinned `img` slot can
+  start a different container image after the upgrade.**
+  `ComfyUIProvider.image_ref` resolved only the legacy `image` key and then
+  the runner-registry default, so a slot that persisted and displayed an
+  `image_pin` silently launched the resolver default anyway. Resolution now
+  matches every other provider: `image_pin` (top-level or `[slot]`-nested,
+  honoured verbatim) → the legacy `image` string → the resolved runner image.
+  Because `hal0 slot migrate-flags` folds an old `image` value into
+  `image_pin`, a box may be carrying a pin that has never actually taken
+  effect. Check `/etc/hal0/slots/img.toml` before upgrading and clear
+  `image_pin` if you want the resolver default. (#2172, #2233)
+- **A capability apply naming weights that are not on disk is refused instead
+  of accepted.** `POST /api/capabilities/{slot}/{child}` with `enabled: true`
+  and a model whose weights are absent now returns `409`
+  `capability.model_not_downloaded`, naming the `POST /api/models/{id}/pull`
+  remediation, before anything is persisted and before any container is
+  spawned. It previously returned `200 "warming"` after blocking for the full
+  health wait while llama-server crash-looped on the bare model id. Automation
+  that applied a selection and then started the pull must pull first and apply
+  afterwards, or stage the selection with `enabled: false` — which remains
+  legal. NPU-trio selections are exempt. (#2026, #2232)
+- **`ctx_max` is no longer reported for slots that have no context window.**
+  `GET /api/slots` and `GET /api/slots/{name}` ran the llama-only
+  effective-context resolver against every slot with a bound model, so an
+  embedding, reranking, transcription, TTS or image slot was handed the
+  resolver's 8192-token safe fallback — a window it never runs with. The
+  resolver is now gated on `type == "llm"`. A bound `img`, `tts` or
+  transcription slot omits the `ctx_max` key entirely, and `embed` and
+  `rerank` slots report the raw ceiling from their own TOML. Clients that read
+  `ctx_max` unconditionally must tolerate its absence. (#1859)
+- **`PUT /api/user/dashboard-layout` accepts only the v3 body.** The pre-#1061
+  v2 schema (`order`/`enabled`/`spans`/`pinned`), kept accepted since
+  1.0.0-rc.1 so a cached older dashboard bundle would not start failing its
+  saves, is removed with the v1.3.0 sunset tranche: `v` must equal `3`, and
+  any other body is rejected `422` with `code: "layout.invalid"`. Only a
+  browser still running a pre-#1061 bundle is affected — hard-refresh the
+  dashboard and its saves work again. Reads are unchanged: a v2 layout file
+  already on disk still round-trips on `GET`, reconciled under the v2 rules.
+  (#2168, #2225)
+
 ### Added
 
 - **User-installed MCP servers can now actually reach an agent.** ADR-0015
@@ -63,23 +181,6 @@ applying. Add those subsections to a version's section to surface them; see
   secrets store, never in TOML, never logged. Ported from ODS's OAuth
   passthrough (Osmantic/ODS, Apache-2.0; permission to copy granted by its
   author).
-- **Open WebUI is now fully pre-wired**, not just chat + voice: document
-  uploads route through RAG the moment an embed-capable slot is bound
-  (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
-  point at hal0's own `/v1`), and the image button generates through
-  ComfyUI the moment the `img` slot is bound (`ENABLE_IMAGE_GENERATION`,
-  `COMFYUI_BASE_URL`, and a `COMFYUI_WORKFLOW`/`COMFYUI_WORKFLOW_NODES`
-  pair baked from the SAME translator `/v1/images/generations` uses, keyed
-  to whichever checkpoint the slot is actually bound to). Both blocks are
-  gated on live capability state and explicitly cleared the moment that
-  state stops being true — never a stale claim of a capability that isn't
-  really there. A seam is left for a future search-provider extension
-  (`ENABLE_WEB_SEARCH` stays off; no search service ships today). The env
-  file re-renders — and the companion restarts only when the render
-  actually changed — on capability apply, `embed`/`img` slot create or
-  delete, and every regular component-convergence pass. The Services
-  page's Open WebUI card now shows a wired chip per feature (Chat, Voice,
-  Documents, Images, Web search), exposed via `GET /api/services`.
 - **Schema-driven settings**: `GET /api/settings/fields` returns one labelled
   row per operator-editable `Hal0Config` key — group, label, a
   consequence-first description, type/enum/range, default, current value,
@@ -106,20 +207,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
-- **ADMIN-class routes are gated whenever the box is bound past loopback,
-  even with `require_auth` off.** hal0-api binds `0.0.0.0:8080` by default
-  (`installer/install.sh`), so the shipped combination — auth off, bind wide
-  open — let any device on the LAN drive every ADMIN route (model pulls, slot
-  deletes, config writes, approval execution) with no credential at all. An
-  ADMIN request now needs an admin session/key exactly as if enforcement were
-  on, but only when all three hold: an admin key is configured (otherwise the
-  requirement would be unsatisfiable, the same first-run carve-out
-  `AuthClass.BOOTSTRAP` already makes), the listener is not loopback-bound,
-  and this request's own peer did not arrive over loopback. A loopback-bound
-  box — and the operator at the console of a LAN-bound one — stays exactly as
-  frictionless as before; `OPEN`/`CLIENT` reads are untouched. The dashboard
-  answers a resulting 401 with an admin-key challenge drawer rather than a
-  dead-end error, and `hal0 doctor` reports the posture. (#1822)
+- **ADMIN-class routes are gated on a box that has an admin key configured
+  and binds past loopback, even with `require_auth` off.** Previously
+  `require_auth = false` meant the middleware waved every request through
+  untouched, so on such a box any device on the LAN could drive every ADMIN
+  route — model pulls, slot deletes, config writes, approval execution — with
+  no credential. An ADMIN request now needs an admin session or key exactly as
+  if enforcement were on, but only when all three hold: an admin key is
+  configured, the listener is not loopback-bound, and this request's own peer
+  did not arrive over loopback. **A box with no admin key configured is not
+  covered by this** — the gate deliberately cannot arm where the requirement
+  would be unsatisfiable, the same first-run carve-out `AuthClass.BOOTSTRAP`
+  already makes, and the installer mints no key — so the shipped keyless
+  default remains open to the LAN and `hal0 doctor` now warns about that
+  posture rather than passing it. A loopback-bound box, and the operator at
+  the console of a LAN-bound one, stay exactly as frictionless as before;
+  `OPEN`/`CLIENT` reads are untouched. The dashboard answers a resulting 401
+  with an admin-key challenge drawer rather than a dead-end error. (#1822)
+
 - **Every `systemctl`/podman seam call a slot load/unload/restart makes is
   now bounded.** `ContainerProvider._run`'s callers (the Quadlet write,
   `daemon-reload`, `reset-failed`, and — the one that actually wedged in the
@@ -362,6 +467,24 @@ applying. Add those subsections to a version's section to surface them; see
   to reuse, so the registry never grows a second, parallel service shape.
   (#2028)
 
+- **The Inference pane's slot cards get the drawer's rich dropdowns.** The card
+  model picker is no longer a bare `<select>` of model names: each row carries
+  the model's quantisation and modality tags, its size, which other slots are
+  bound to it, and a GTT fit chip (`fits` / `tight` / `won't fit`) from one
+  batched `POST /api/models/feasibility` fired the first time the menu opens —
+  advisory only, so an unprobed or over-budget model stays selectable. Picking
+  a model still swaps it immediately, as before. The `[ device | PROFILE ]`
+  pill, which previously did nothing but open the slot editor, is now a real
+  profile picker filtered to the slot's type: a pick writes nothing by itself,
+  it opens a confirm that states the consequences first — the runtime, a lane
+  move, how many launch flags the profile's tune replaces, and whether applying
+  restarts the slot or, when it is stopped, starts it and loads its model — and
+  only Apply performs the same two writes the drawer's Save does, `PUT
+  /api/slots/{name}/config {profile}` followed by a background `POST
+  /api/slots/{name}/restart`. The pill's old gesture lives on as the picker's
+  last row ("✎ Edit slot…"), which also remains the only way to clear a slot's
+  profile. (#2219)
+
 ### Removed
 
 - **The v1.3.0 sunset tranche (#2168) is executed** — three internal compat
@@ -388,6 +511,42 @@ applying. Add those subsections to a version's section to surface them; see
   was stopped on purpose (a clean stop or `systemctl reset-failed`) — while a
   genuinely crashed or crash-looping unit keeps its error verdict, breaker
   bookkeeping, and `last_crash_line` evidence untouched.
+
+### Migrations
+
+- **Nothing to run by hand.** The config schema version is unchanged
+  (`[meta] schema_version` stays 1), no database migration is added, and
+  neither `capabilities.toml` nor `profiles.toml` changes shape. The one thing
+  this upgrade rewrites on disk is each slot's generated systemd unit:
+  `hal0 update` re-installs the `hal0-systemctl` seam wrapper and then
+  re-renders every unit through the new code in the same activation, so the
+  `SuccessExitStatus=143` fix lands with no `migrate-flags`-style pass. Slots
+  stopped *before* the upgrade need no rewrite either — the state probe
+  recognises a clean SIGTERM stop on a unit that predates the directive, so a
+  deliberately stopped slot reads as `offline` immediately rather than after
+  its next load.
+- **Upgrading from 1.1.0 and skipping 1.2.0 still takes 1.2.0's
+  `profiles.toml` migration.** The file gains `legacy_seeds_migrated` and
+  `legacy_seeds_adopted` on the first load after the upgrade — automatic,
+  nothing to run — and `ProfilesConfig` rejects unknown keys on 1.1.0, so the
+  migrated file will not parse there. Back up `/etc/hal0/profiles.toml` before
+  upgrading if you may downgrade to 1.1.0.
+- **A rolled-back box does not read MCP server records that 1.3.0 rewrote.**
+  An installed server's record gains `secrets`, `tool_policy` and `exposure`,
+  and serialises its policy under a `[tools]` table while the old integer
+  count moves to `tools_count`. 1.3.0 still reads a 1.2.0 record, but the
+  reverse does not hold: a record rewritten by 1.3.0 fails validation on
+  1.2.0, where the server disappears from `hal0 mcp list` and a direct read
+  answers `400 mcp.record_malformed`. Records are only rewritten when one of
+  the new `hal0 mcp` verbs is used, never automatically on load, so a box that
+  upgrades and rolls back without touching MCP is unaffected.
+- **Hermes needs reprovisioning before it can drive the new OAuth flow.** The
+  agent-facing half of the feature lives in the persona file, which only the
+  provisioning pipeline writes — `hal0 update` never invokes it. On an
+  already-provisioned box, run `hal0 agent reprovision hermes` so the agent
+  knows the connect-poll-confirm sequence. Every shipped provider also ships
+  an empty `client_id`, so each provider needs its own app credentials
+  configured before a connection can be made at all.
 
 ## [1.2.0] — 2026-09-03
 
