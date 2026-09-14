@@ -167,6 +167,41 @@ async def test_resolve_for_request_label_overlay_falls_back_to_derived_embed_mod
 
 
 @pytest.mark.asyncio
+async def test_resolve_for_request_label_overlay_falls_back_to_derived_tts_modality(
+    slot_root: Path, tmp_hal0_home: str
+) -> None:
+    """#2192: text_to_speech's required label is "tts", derived from a
+    Kokoro-backed model's ``backends=["kokoro"]`` — the exact fact
+    ``_register_pulled`` now propagates from ``detect()`` at pull time."""
+    ModelRegistry().add(Model(id="kokoro-v1", path="/tmp/kokoro-v1.bin", backends=["kokoro"]))
+    _write_slot(slot_root, "voice", slot_type="tts", model="kokoro-v1")
+
+    slot = await SlotManager().resolve_for_request("tts", required_labels=("tts",))
+
+    assert slot is not None
+    assert slot.name == "voice"
+
+
+@pytest.mark.asyncio
+async def test_resolve_for_request_label_overlay_falls_back_to_derived_transcription_modality(
+    slot_root: Path, tmp_hal0_home: str
+) -> None:
+    """#2192: transcribe_audio's required label is "transcription", derived
+    from a Moonshine-backed model's ``backends=["moonshine"]``."""
+    ModelRegistry().add(
+        Model(id="moonshine-small", path="/tmp/moonshine-small.bin", backends=["moonshine"])
+    )
+    _write_slot(slot_root, "asr", slot_type="transcription", model="moonshine-small")
+
+    slot = await SlotManager().resolve_for_request(
+        "transcription", required_labels=("transcription",)
+    )
+
+    assert slot is not None
+    assert slot.name == "asr"
+
+
+@pytest.mark.asyncio
 async def test_resolve_for_request_label_overlay_has_no_fallback_for_edit(
     slot_root: Path, tmp_hal0_home: str
 ) -> None:

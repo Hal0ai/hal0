@@ -1088,6 +1088,26 @@ class TestCtxMaxEffectiveResolution:
         views = await agg.snapshot()
         assert views[0].to_dict()["ctx_max"] == 65536
 
+    async def test_ctx_max_resolution_skipped_for_non_llm_slot_kind(self, no_mem: None) -> None:
+        """#1859: only an "llm" slot runs llama-server with a resolvable
+        context window. A tts/transcription/embedding/image slot's raw
+        ``[model].context_size`` (a legacy/misconfigured value — these kinds
+        have no real notion of one) must pass through UNTOUCHED, never
+        re-resolved through the llama-only resolver. Same numbers as
+        ``test_ctx_max_downgraded_to_model_window`` above — where the "llm"
+        case DOES resolve down to 8000 — so an unchanged 65536 here proves
+        this is a skip, not a coincidental match."""
+        cfg = _llm_cfg(
+            name="voice", type="tts", model={"default": "kokoro-v1", "context_size": 65536}
+        )
+        registry = _FakeCtxRegistry({"kokoro-v1": _FakeCtxModel(8000)})
+        agg = _agg(
+            FakeSlotManager(slots=[_slot(name="voice", model_id="kokoro-v1")], configs=[cfg]),
+            registry=registry,
+        )
+        views = await agg.snapshot()
+        assert views[0].to_dict()["ctx_max"] == 65536
+
 
 # ── concern 5: metric injection ─────────────────────────────────────────────
 

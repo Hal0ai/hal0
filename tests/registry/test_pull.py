@@ -23,6 +23,7 @@ from hal0.registry.pull import (
     _CHUNK_BYTES,
     _pull_root,
     _register_flm_pulled,
+    _register_pulled,
     _sanitise_id,
     _tmp_dir,
     hf_download_url,
@@ -1794,6 +1795,121 @@ async def test_run_pull_expected_hash_captured_from_redirect_hop(
     assert job.files[0].expected_sha256 == wrong
 
 
+# ── _register_pulled: backends + pooling_type propagation (#2192) ───────────
+#
+# hal0.model_meta.modality.derive_modalities_from_model_info() needs
+# model_info["backends"] (a runtime-family string: moonshine/kokoro/flm/…)
+# or model_info["metadata"]["pooling_type"] to recognise a non-chat model.
+# _register_pulled already calls detect() for context_length/quant/arch —
+# before this fix, detect()'s own suggested_backends/pooling_type were
+# computed and then dropped on the floor, so a real Kokoro/Moonshine/
+# embedding pull registered with backends=[] and no pooling_type. Every
+# tts/transcription/embedding slot bound to such a model then had an empty
+# LoadedSlot.modalities, and OmniRouter's resolve_for_request() could never
+# route those tools to it — despite the routing logic itself being correct.
+
+
+def test_register_pulled_new_row_gets_detected_backends(tmp_hal0_home: str) -> None:
+    """A brand-new row for a moonshine-named pull gets backends=["moonshine"]
+    from detect()'s filename classification — not the pre-fix backends=[]."""
+    registry = ModelRegistry()
+    root = Path(tmp_hal0_home) / "models"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "moonshine-small-streaming-en.bin"
+    path.write_bytes(b"not-a-gguf-asr-blob")
+
+    _register_pulled(
+        registry,
+        model_id="moonshine-small-streaming-en",
+        path=str(path),
+        size_bytes=path.stat().st_size,
+        sha256="deadbeef",
+        hf_repo="org/moonshine",
+        hf_filename=path.name,
+    )
+    entry = registry.get("moonshine-small-streaming-en")
+    assert entry.backends == ["moonshine"]
+
+
+def test_register_pulled_new_row_gets_pooling_type_metadata(tmp_hal0_home: str) -> None:
+    """A GGUF embedding pull's header-derived pooling_type reaches
+    ``metadata.pooling_type`` — the fact derive_modalities_from_model_info
+    reads for the embed/rerank branch of the closed modality taxonomy."""
+    registry = ModelRegistry()
+    root = Path(tmp_hal0_home) / "models"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "some-embedder.gguf"
+    path.write_bytes(_payload(2048))
+
+    import sys
+
+    from hal0.registry.detect import DetectionResult
+
+    detect_mod = sys.modules["hal0.registry.detect"]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            detect_mod,
+            "detect",
+            lambda p: DetectionResult(
+                suggested_backends=[],
+                suggested_capabilities=["embed"],
+                kind="llama",
+                raw_hints={"pooling_type": 2},
+            ),
+        )
+        _register_pulled(
+            registry,
+            model_id="some-embedder",
+            path=str(path),
+            size_bytes=path.stat().st_size,
+            sha256="deadbeef",
+            hf_repo="org/some-embedder",
+            hf_filename=path.name,
+        )
+    entry = registry.get("some-embedder")
+    assert entry.metadata.get("pooling_type") == 2
+
+
+def test_register_pulled_backfills_backends_on_repull_only_when_unset(
+    tmp_hal0_home: str,
+) -> None:
+    """A re-pull backfills an EMPTY backends list from this pull's detection
+    (healing a pre-fix row) but never clobbers an operator-set/prior value —
+    same "fill only if unset" rule the tokenizer_repo backfill uses."""
+    from hal0.registry.model import Model
+
+    registry = ModelRegistry()
+    root = Path(tmp_hal0_home) / "models"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "kokoro-v1.bin"
+    path.write_bytes(b"not-a-gguf-tts-blob")
+
+    def _register(model_id: str) -> None:
+        _register_pulled(
+            registry,
+            model_id=model_id,
+            path=str(path),
+            size_bytes=path.stat().st_size,
+            sha256="deadbeef",
+            hf_repo="org/kokoro",
+            hf_filename=path.name,
+        )
+
+    # Pre-fix row: registered with no backends at all.
+    registry.add(
+        Model(id="kokoro-empty", name="kokoro-empty", path=str(path), backends=[]),
+    )
+    _register("kokoro-empty")
+    assert registry.get("kokoro-empty").backends == ["kokoro"]
+
+    # Operator/previously-tagged row: a re-pull must not override it.
+    registry.add(
+        Model(id="kokoro-custom", name="kokoro-custom", path=str(path), backends=["custom"]),
+    )
+    _register("kokoro-custom")
+    assert registry.get("kokoro-custom").backends == ["custom"]
+
+
 # ── _register_flm_pulled: capability classification (#1647) ──────────────────
 
 
@@ -1861,7 +1977,16 @@ def test_register_flm_pulled_re_pull_corrects_stale_capabilities(
 
 def test_register_flm_pulled_stamps_provider_on_new_row(tmp_hal0_home: str) -> None:
     """A brand-new FLM-pulled row gets ``provider="flm"`` stamped alongside
-    the legacy ``backends=["npu"]`` tag — not left for lazy derivation."""
+    the ``backends=["flm"]`` tag — not left for lazy derivation.
+
+    #2192: this used to write the hardware-lane label ``"npu"`` here, which
+    ``derive_modalities_from_model_info``'s runtime-family set doesn't
+    recognise (only "flm" does) — an FLM-routed stt/embed shadow slot's
+    model info never resolved a modality, so OmniRouter's tool eligibility
+    could never route to it. ``derive_model_provider`` already mapped both
+    strings to "flm" (that half was never broken); only the modality side
+    needed the literal fixed.
+    """
     registry = ModelRegistry()
     _register_flm_pulled(
         registry,
@@ -1872,7 +1997,7 @@ def test_register_flm_pulled_stamps_provider_on_new_row(tmp_hal0_home: str) -> N
     )
     entry = registry.get("qwen3-embed:4b")
     assert entry.provider == "flm"
-    assert entry.backends == ["npu"]  # tag still written — vestigial lane hint
+    assert entry.backends == ["flm"]
 
 
 @pytest.mark.asyncio

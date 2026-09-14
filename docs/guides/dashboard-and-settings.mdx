@@ -82,6 +82,42 @@ zone pinned to the bottom of the sidebar with quick external launchers:
 **OpenWebUI**, and **Hermes Dash** — the latter two only appear when the
 backend reports them reachable.
 
+### Services
+
+The **Services** page is the management surface for hal0's companion
+processes — OpenWebUI, ComfyUI, Hermes, and Hindsight — all four sourced
+from one server-side catalog (`hal0.services.registry.SERVICES`), so the
+page and the footer's services pip group can never disagree about which
+services exist. Each card shows:
+
+- a real up/down state (never a placeholder) — ComfyUI via its own
+  `/system_stats` + `/queue` probe, OpenWebUI via a loopback `GET /health`,
+  and Hermes/Hindsight via their systemd unit state, distinguishing a
+  deliberate stop (grey, "stopped — starts on demand") from a crash (red,
+  "crashed — systemd unit failed");
+- the systemd unit, browser URL (when one exists — Hermes and Hindsight are
+  loopback-only), and mDNS `.local` URL when advertised;
+- lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
+  actually permits — ComfyUI exposes Start/Restart only, since a raw
+  `systemctl start` would bypass the GPU-arbiter switchover that hands the
+  iGPU back from inference mode;
+- a journald logs drawer, and, for ComfyUI, an inline live job queue.
+
+A service the backend has no real probe for (nothing in the current
+catalog, but a future extension-provided service could arrive this way)
+reports honestly as unmonitored rather than a fabricated "up" — the same
+rule the Overview card's services pip group and the footer's ready count
+follow.
+
+The **Discovery (mDNS)** card at the top shows whether `avahi-daemon` is
+active, the dashboard's own `<hostname>.local` announcement, and lets you
+advertise or withdraw the addon services (ComfyUI, OpenWebUI) as their own
+`<name>.local` entries. The installer writes the base `hal0.service` avahi
+file itself when avahi is present, alongside the same permission fix-up
+that lets the daemon (running as the unprivileged `hal0` user) write the
+addon files — so both announcements come up out of the box, not just the
+addons.
+
 ### Footer
 
 The footer is always visible as a thin strip and expands into a pane when

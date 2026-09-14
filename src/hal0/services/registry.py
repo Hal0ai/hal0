@@ -32,7 +32,17 @@ _FULL = LIFECYCLE_ACTIONS
 
 @dataclass(frozen=True)
 class ServiceDef:
-    """One companion service as the management layer sees it."""
+    """One companion service as the management layer sees it.
+
+    #2028: this table is the ONE place a service is declared — both
+    ``GET /api/services`` (services.py) and ``GET /api/services/health``
+    (services_health.py, the Overview card's stable feed) iterate it, so a
+    service added here (hindsight included) appears on both without either
+    route hand-listing ids. ``category``/``source``/``modalities`` are
+    additive fields with no builtin consumer yet: they exist so a future
+    extension-manifest-driven row (w2b's extension loader) can describe
+    itself the same way a builtin does, without a second, parallel shape.
+    """
 
     id: str
     name: str
@@ -44,11 +54,17 @@ class ServiceDef:
     port: int | None = None
     #: Env var carrying an operator-declared public URL (reverse proxy).
     public_url_env: str | None = None
-    #: Probe strategy: "http" | "systemd" | "comfyui" | "none".
+    #: Probe strategy: "http" | "systemd" | "comfyui" | "tcp" | "none".
+    #: "none" is honest-by-construction: services_health/_probe never
+    #: fabricates an "up" for it — it reports up=False, detail="unmonitored".
     probe: str = "none"
     #: Default URL for http probes (loopback), overridable via probe_url_env.
     probe_url: str | None = None
     probe_url_env: str | None = None
+    #: "tcp" probe target when probe="tcp"; ("host", port). Unused by any
+    #: builtin today (all four have an http/systemd/comfyui probe already) —
+    #: present for a future extension whose only signal is "port open".
+    probe_tcp: tuple[str, int] | None = None
     #: Lifecycle verbs the API may run for this service (subset of
     #: LIFECYCLE_ACTIONS). Empty = read-only.
     actions: tuple[str, ...] = ()
@@ -60,6 +76,18 @@ class ServiceDef:
     loopback_port: int | None = None
     #: Extra UI hints (e.g. where deeper controls live).
     hints: tuple[str, ...] = field(default=())
+    #: Grouping for a future Services page section header / filter chip.
+    category: str = "companion"
+    #: Where this row came from — a hand-declared builtin (below) or a
+    #: parsed extension manifest (w2b). Every builtin is "builtin"; nothing
+    #: in this repo produces "extension" rows yet.
+    source: str = "builtin"
+    #: Modality facts this service serves (closed taxonomy in
+    #: :mod:`hal0.model_meta.modality` — "image"/"tts"/"transcription"/
+    #: "embeddings"/"reranking"/"vision"), for a future surface that groups
+    #: services by what they can do rather than by identity. Empty for a
+    #: service with no single modality (hermes/hindsight are general-purpose).
+    modalities: tuple[str, ...] = field(default=())
 
 
 SERVICES: tuple[ServiceDef, ...] = (
@@ -75,6 +103,7 @@ SERVICES: tuple[ServiceDef, ...] = (
         probe_url_env="HAL0_OPENWEBUI_PROBE_URL",
         actions=_FULL,
         mdns=True,
+        category="chat",
     ),
     ServiceDef(
         id="comfyui",
@@ -91,6 +120,8 @@ SERVICES: tuple[ServiceDef, ...] = (
         actions=("start", "restart"),
         mdns=True,
         hints=("stop is GPU-arbiter managed — switch back to inference in the Image-Gen pane",),
+        category="image",
+        modalities=("image",),
     ),
     ServiceDef(
         id="hermes",
@@ -101,6 +132,7 @@ SERVICES: tuple[ServiceDef, ...] = (
         probe="systemd",
         actions=_FULL,
         loopback_port=9119,
+        category="agent",
     ),
     ServiceDef(
         id="hindsight",
@@ -109,6 +141,7 @@ SERVICES: tuple[ServiceDef, ...] = (
         unit="hindsight-api.service",
         probe="systemd",
         actions=_FULL,
+        category="memory",
         loopback_port=9177,
     ),
 )

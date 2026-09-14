@@ -851,6 +851,45 @@ if [[ "${DEV_MODE}" -eq 0 && -d /etc/avahi/services ]] \
     chgrp hal0 /etc/avahi/services/hal0-addon-*.service 2>/dev/null || true
 fi
 
+# H13: the base dashboard announcement (services/mdns.py's docstring and the
+# Services page caption both promised "the installer writes
+# /etc/avahi/services/hal0.service when avahi is present" — nothing ever did,
+# so ``base_advertised`` (GET /api/services/mdns) was permanently false and
+# the caption was always the fallback "no base file" wording. Written here,
+# root-owned, alongside the addon-dir permission grant above; avahi fills the
+# %h host wildcard itself so this needs no hostname derivation. tmp+rename
+# for atomicity; avahi-daemon inotify-watches the dir, no reload needed.
+# A factored function (not inlined) so it can be extracted and driven in
+# isolation the same way tests/installer/test_avahi_hostname.py already
+# does for sync_avahi_hostname.
+write_avahi_base_service() {
+    local services_dir="${1:?services_dir required}" port="${2:?port required}"
+    local tmp
+    tmp="$(mktemp "${services_dir}/hal0.service.XXXXXX" 2>/dev/null)" || return 0
+    cat > "${tmp}" <<EOF
+<?xml version="1.0" standalone='no'?>
+<!-- Written by the hal0 installer (base dashboard mDNS announcement) — do
+     not edit by hand. Addon services are managed separately via the
+     dashboard Services page / POST /api/services/mdns. -->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">hal0 on %h</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>${port}</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>name=hal0</txt-record>
+  </service>
+</service-group>
+EOF
+    chmod 0644 "${tmp}" 2>/dev/null || true
+    mv -f "${tmp}" "${services_dir}/hal0.service" 2>/dev/null || rm -f "${tmp}"
+}
+
+if [[ "${DEV_MODE}" -eq 0 && -d /etc/avahi/services ]]; then
+    write_avahi_base_service /etc/avahi/services "${HAL0_PORT}"
+fi
+
 # Production (FHS, #495) ships the source tree into the versioned dir
 # ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
 # `hal0 update` can atomically swap `current` to a new versioned tree.

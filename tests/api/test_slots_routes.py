@@ -2251,6 +2251,43 @@ def test_get_slot_resolves_ctx_max_to_effective_window(
     )
 
 
+def test_get_slot_skips_ctx_max_resolution_for_non_llm_slot(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1859: mirror of the effective-window test above, but for a "tts"
+    slot — a kind with no real context-window concept. The raw TOML
+    ceiling (65536) must pass through untouched, not get re-resolved down
+    to the registry model's declared window (8000) the way an "llm" slot's
+    would — proving the llama-only resolver is skipped, not coincidentally
+    matching."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "voice",
+        [
+            'name = "voice"',
+            "port = 8083",
+            'device = "cpu"',
+            'provider = "kokoro"',
+            'runtime = "container"',
+            'type = "tts"',
+            "[model]",
+            'default = "kokoro-v1"',
+            "context_size = 65536",
+        ],
+    )
+    isolated_app.state.model_registry = _FakeCtxRegistry({"kokoro-v1": _FakeCtxModel(8000)})
+
+    r = isolated_client.get("/api/slots/voice")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ctx_max"] == 65536, (
+        f"a non-llm slot's raw ctx ceiling must not be re-resolved; got {body['ctx_max']!r}"
+    )
+
+
 def test_get_slot_includes_config_drift_when_requested(
     slot_root: Path,
     container_stub: dict[str, Any],
