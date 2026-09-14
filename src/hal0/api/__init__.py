@@ -109,6 +109,9 @@ from hal0.api.routes import (
     meta as meta_routes,
 )
 from hal0.api.routes import (
+    oauth as oauth_routes,
+)
+from hal0.api.routes import (
     ports as ports_routes,
 )
 from hal0.api.routes import (
@@ -2439,6 +2442,13 @@ def create_app() -> FastAPI:
 
     app.state.login_limiter = login_limiter_from_env()
 
+    # OAuth passthrough (study 3.3): single-use state-nonce store for the
+    # start->callback CSRF/replay defense. Process-local like login_limiter
+    # above — one hal0-api instance, no shared store to coordinate.
+    from hal0.oauth.state import OAuthStateStore
+
+    app.state.oauth_state = OAuthStateStore()
+
     # /api/auth: login (mints the admin-equivalent session cookie via the
     # SAME HMAC cookie agents/_auth.py already ships) + status (posture
     # report for the dashboard's own auth gate). Both routes are OPEN in
@@ -2519,6 +2529,17 @@ def create_app() -> FastAPI:
         secrets_routes.router,
         prefix="/api/secrets",
         tags=["secrets"],
+    )
+    # Agent-driven OAuth passthrough (study 3.3): provider registry +
+    # start/callback/status/disconnect for skills that need OAuth (Google
+    # Calendar, Spotify, GitHub, ...). Routes are declared as /oauth/... on
+    # the router (see routes/oauth.py) so the "/api" prefix here composes
+    # to exactly /api/oauth/{provider_id}/callback — the literal path
+    # security/exposure.py's OPEN rule is pinned against.
+    app.include_router(
+        oauth_routes.router,
+        prefix="/api",
+        tags=["oauth"],
     )
     # Proxmox integration sub-router (config file at /etc/hal0/proxmox.json).
     # Mounted as a sibling under /api/settings/proxmox so the dashboard's

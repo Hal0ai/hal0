@@ -39,6 +39,12 @@ import {
   useUpstreamTest,
   useUpstreamUpdate,
 } from '@/api/hooks/useUpstreams'
+import {
+  useOAuthDisconnect,
+  useOAuthProviders,
+  useOAuthSetClientSecret,
+  useOAuthStart,
+} from '@/api/hooks/useOAuth'
 
 const { useState: useCS } = React
 
@@ -1402,6 +1408,217 @@ function AddUpstreamForm({ onClose }) {
   )
 }
 
+// ─── Connected accounts (agent-driven OAuth passthrough, study 3.3) ────────
+//
+// A Hermes skill that needs OAuth (Google Calendar, Spotify, GitHub) is
+// connected here: Connect opens the provider's consent page in a new tab,
+// the provider redirects straight back to hal0-api's own callback route
+// (never through the dashboard), and this panel's poll picks up the new
+// `connected: true` a few seconds later. A token VALUE never reaches the
+// browser — only connection status.
+
+function OAuthStatusChip({ p }) {
+  if (!p.configured) return <span className="chip outlined">not configured</span>
+  if (p.connected && p.expired) return <span className="chip warn">token expired</span>
+  if (p.connected) return <span className="chip ok">connected</span>
+  return <span className="chip outlined">not connected</span>
+}
+
+function SetClientSecretDrawer({ provider, onClose }) {
+  const [value, setValue] = useCS('')
+  const setSecret = useOAuthSetClientSecret()
+
+  function submit() {
+    if (!value) return
+    setSecret.mutate(
+      { id: provider.id, value },
+      {
+        onSuccess: () => {
+          toast(`Client secret stored for ${provider.name}`, 'ok')
+          onClose()
+        },
+        onError: (e) => toast(`Could not store client secret — ${e?.message || 'see logs'}`, 'err'),
+      },
+    )
+  }
+
+  return (
+    <FormDrawer
+      eyebrow="connected accounts"
+      title={`Configure ${provider.name}`}
+      ariaLabel={`Configure ${provider.name} OAuth client secret`}
+      submitting={setSecret.isPending}
+      onClose={onClose}
+      foot={
+        <>
+          <button className="btn sm" onClick={onClose} disabled={setSecret.isPending}>
+            Cancel
+          </button>
+          <button
+            className="btn sm primary"
+            onClick={submit}
+            disabled={!value || setSecret.isPending}
+          >
+            {setSecret.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <FormRow
+        label="Client secret"
+        sub={`from ${provider.name}'s OAuth app console`}
+      >
+        <input
+          type="password"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="paste the client secret"
+        />
+      </FormRow>
+      <p className="oa-drawer-hint">
+        Stored through hal0's secrets store — never written to
+        oauth-providers.toml, never shown again once saved.
+      </p>
+    </FormDrawer>
+  )
+}
+
+function OAuthAccountRow({ p }) {
+  const [confirmOpen, setConfirmOpen] = useCS(false)
+  const [secretDrawerOpen, setSecretDrawerOpen] = useCS(false)
+  const start = useOAuthStart()
+  const disconnect = useOAuthDisconnect()
+
+  function connect() {
+    start.mutate(p.id, {
+      onSuccess: (result) => {
+        window.open(result.authorize_url, '_blank', 'noopener,noreferrer')
+        toast(`Authorize ${p.name} in the new tab — hal0 picks it up automatically`, 'ok')
+      },
+      onError: (e) => toast(`Could not start ${p.name} connect — ${e?.message || 'see logs'}`, 'err'),
+    })
+  }
+
+  function confirmDisconnect() {
+    disconnect.mutate(p.id, {
+      onSuccess: () => {
+        setConfirmOpen(false)
+        toast(`Disconnected ${p.name}`, 'ok')
+      },
+      onError: (e) => {
+        setConfirmOpen(false)
+        toast(`Could not disconnect ${p.name} — ${e?.message || 'see logs'}`, 'err')
+      },
+    })
+  }
+
+  const needsSecret = p.requires_client_secret && !p.has_client_secret
+  const canConnect = p.configured && !p.connected
+
+  return (
+    <div className="eprow oarow">
+      <div className="eprow-main oa-main">
+        <span className={'ep-dot ' + (p.connected && !p.expired ? 'serving' : 'offline')} />
+        <span className="ep-name">{p.name}</span>
+        <span className="oa-skill mono">{p.skill_id}</span>
+        <span className="oa-chip">
+          <OAuthStatusChip p={p} />
+        </span>
+        <span className="oa-actions">
+          {needsSecret && (
+            <button className="btn sm" onClick={() => setSecretDrawerOpen(true)}>
+              Set client secret
+            </button>
+          )}
+          {!needsSecret && canConnect && (
+            <button className="btn sm primary" onClick={connect} disabled={start.isPending}>
+              {start.isPending ? 'Starting…' : 'Connect'}
+            </button>
+          )}
+          {p.connected && (
+            <button className="btn sm danger" onClick={() => setConfirmOpen(true)}>
+              Disconnect
+            </button>
+          )}
+        </span>
+      </div>
+      {secretDrawerOpen && (
+        <SetClientSecretDrawer provider={p} onClose={() => setSecretDrawerOpen(false)} />
+      )}
+      <ConfirmDialog
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={confirmDisconnect}
+        title={`Disconnect ${p.name}?`}
+        message={`hal0's Hermes agent can use your ${p.name} account until you disconnect. This can't be undone from here — you'll need to reconnect to use ${p.skill_id} again.`}
+        confirmLabel={disconnect.isPending ? 'Disconnecting…' : 'Disconnect'}
+        destructive
+        confirmDisabled={disconnect.isPending}
+      />
+    </div>
+  )
+}
+
+function ConnectedAccountsPanel() {
+  const providersQuery = useOAuthProviders()
+  const providers = providersQuery.data ?? []
+  const connectedCount = providers.filter((p) => p.connected).length
+
+  return (
+    <EnginePane
+      glyph="connections"
+      eyebrow={
+        <>
+          <b>oauth</b>
+          <span className="dim">·</span>
+          <span className="meta">agent skills</span>
+          <span className="dim">·</span>
+          <span className="mono" style={{ color: 'var(--fg-3)' }}>
+            {providers.length} registered
+          </span>
+          <span className="grow" />
+          <span className="meta">oauth-providers.toml · agent-driven</span>
+        </>
+      }
+      title="Connected accounts"
+      sub="OAuth for Hermes skills · /api/oauth"
+      pill={{
+        tone: connectedCount ? 'live' : 'off',
+        text: `${connectedCount} connected`,
+      }}
+      foot={
+        <>
+          <span className="k">registry</span>
+          <span className="v">/etc/hal0/oauth-providers.toml</span>
+          <span className="sep">·</span>
+          <span className="k">tokens</span>
+          <span className="v">secrets store · never echoed</span>
+        </>
+      }
+    >
+      <div className="eplist oarowlist">
+        <div className="ep-head oa-head">
+          <span />
+          <span>account</span>
+          <span>skill</span>
+          <span>status</span>
+          <span />
+        </div>
+        {providersQuery.isPending && <div className="cn-empty mono">Loading OAuth providers…</div>}
+        {!providersQuery.isPending && providers.length === 0 && (
+          <div className="cn-empty mono">
+            No OAuth providers registered — hal0 seeds a default registry on first read.
+          </div>
+        )}
+        {providers.map((p) => (
+          <OAuthAccountRow key={p.id} p={p} />
+        ))}
+      </div>
+    </EnginePane>
+  )
+}
+
 function UpstreamProvidersPanel() {
   const upstreamsQuery = useUpstreams()
   const [adding, setAdding] = useCS(false)
@@ -1504,6 +1721,7 @@ function ConnectionsView() {
       </div>
       <div className="conn">
         <LocalEndpointsPanel />
+        <ConnectedAccountsPanel />
         <UpstreamProvidersPanel />
         <McpServersPanel />
       </div>

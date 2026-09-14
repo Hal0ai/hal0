@@ -221,9 +221,26 @@ def test_representative_admin_routes_are_admin() -> None:
         ("POST", "/api/secrets/{name}"),
         ("GET", "/api/secrets"),
         ("POST", "/api/auth/rotate"),
+        ("GET", "/api/oauth/providers"),
+        ("POST", "/api/oauth/{provider_id}/start"),
+        ("GET", "/api/oauth/{provider_id}/status"),
+        ("DELETE", "/api/oauth/{provider_id}"),
+        ("POST", "/api/oauth/{provider_id}/client-secret"),
     ]
     for method, path in admin_examples:
         assert classify(method, path) is AuthClass.ADMIN, f"{method} {path} should be ADMIN"
+
+
+def test_oauth_callback_is_open_but_nothing_else_under_oauth_is() -> None:
+    """The provider redirect target is the one OAuth route with no auth.
+
+    A provider's 302 back to hal0 carries none of hal0's own bearer/cookie
+    — the security boundary there is the single-use state nonce
+    (hal0.oauth.state), not the exposure tier. Everything else under
+    /api/oauth stays ADMIN, same posture as /api/secrets.
+    """
+    assert classify("GET", "/api/oauth/{provider_id}/callback") is AuthClass.OPEN
+    assert classify("POST", "/api/oauth/{provider_id}/callback") is AuthClass.ADMIN
 
 
 def test_representative_client_routes_are_client() -> None:
