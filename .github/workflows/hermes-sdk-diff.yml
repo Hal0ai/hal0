@@ -164,6 +164,21 @@ jobs:
               report = '_(diff report missing from artifact — see run log.)_';
             }
 
+            // GitHub rejects an issue body or comment over 65536 characters
+            // ("Body is too long"), which is how this job stayed red weekly
+            // once the drift grew: the whole report was inlined verbatim. Clamp
+            // it and point at the artifact, which always carries the full diff.
+            const BODY_LIMIT = 65536;
+            const RESERVE = 2048;          // preamble + truncation notice
+            const clamp = (text) => {
+              if (text.length <= BODY_LIMIT - RESERVE) return text;
+              const keep = BODY_LIMIT - RESERVE;
+              return text.slice(0, keep) +
+                `\n\n_... report truncated at ${keep} of ${text.length} characters. ` +
+                `Download the \`hermes-sdk-diff\` artifact from ${runUrl} for the full diff._`;
+            };
+            report = clamp(report);
+
             // One open tracking issue per drift state. We attach to the
             // first match and never open duplicates.
             const open = await github.paginate(github.rest.issues.listForRepo, {
