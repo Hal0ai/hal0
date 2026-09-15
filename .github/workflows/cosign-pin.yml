@@ -206,18 +206,44 @@ jobs:
             echo "that vouch for every hal0 install."
           } > pr-body.md
 
-          gh pr create \
-            --title "chore(installer): bump pinned cosign to ${VERSION}" \
-            --body-file pr-body.md \
-            --base "${GITHUB_REF_NAME}" \
-            --head "${BRANCH}" \
-            --label "installer" \
-            --label "security" || \
-          gh pr create \
-            --title "chore(installer): bump pinned cosign to ${VERSION}" \
-            --body-file pr-body.md \
-            --base "${GITHUB_REF_NAME}" \
-            --head "${BRANCH}"
+          # The branch and the verification report are the durable artifacts
+          # here; the PR is a convenience wrapper around them. A repository with
+          # "Allow GitHub Actions to create and approve pull requests" disabled
+          # refuses createPullRequest outright, and failing the job over that
+          # turns a drift NOTICE into a permanently red check on main — which is
+          # how this job blocked a release tag despite having done all of its
+          # real work. Report the drift loudly and exit clean instead.
+          if gh pr create \
+               --title "chore(installer): bump pinned cosign to ${VERSION}" \
+               --body-file pr-body.md \
+               --base "${GITHUB_REF_NAME}" \
+               --head "${BRANCH}" \
+               --label "installer" \
+               --label "security" 2>pr-err.txt \
+             || gh pr create \
+               --title "chore(installer): bump pinned cosign to ${VERSION}" \
+               --body-file pr-body.md \
+               --base "${GITHUB_REF_NAME}" \
+               --head "${BRANCH}" 2>>pr-err.txt
+          then
+            echo "opened the review PR for ${BRANCH}"
+          else
+            cat pr-err.txt >&2 || true
+            COMPARE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}?expand=1"
+            echo "::warning title=cosign pin drift — open the PR by hand::cosign ${VERSION} is staged on ${BRANCH}; GitHub refused to open the PR automatically. Open it at ${COMPARE}"
+            {
+              echo "### cosign pin drift — PR not opened automatically"
+              echo ""
+              echo "Branch \`${BRANCH}\` carries the verified bump to \`${VERSION}\`."
+              echo "GitHub refused \`createPullRequest\` (see the step log; most"
+              echo "often \"GitHub Actions is not permitted to create or approve"
+              echo "pull requests\")."
+              echo ""
+              echo "Open it by hand: ${COMPARE}"
+              echo ""
+              echo "The reviewer checklist is in the \`cosign-pin-report\` artifact."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Upload the verification report
         if: always()
