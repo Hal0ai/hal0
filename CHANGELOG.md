@@ -24,7 +24,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-## [1.3.0] — 2026-09-14
+## [1.3.0] — 2026-09-15
 
 ### Highlights
 
@@ -513,6 +513,19 @@ applying. Add those subsections to a version's section to surface them; see
   bookkeeping, and `last_crash_line` evidence untouched.
 
 ### Migrations
+
+- **Upgrading from 1.2.0 or earlier leaves the `/usr/local/bin/hal0` PATH
+  entry stale — run `sudo hal0 doctor wrappers --fix` once afterwards.** This
+  release makes `hal0 update` re-assert that symlink on every activation, but
+  the re-assert lives in the updater itself, and the activation that installs
+  1.3.0 is still executed by the *outgoing* version's code. On a box coming
+  from a release that predates the fix there is nothing to run it, so a `hal0`
+  on PATH left pointing at an old venv shim by an earlier `install.sh` stays
+  pointed there — `hal0 --version` keeps reporting the stale version while the
+  API and the dashboard correctly report 1.3.0. `sudo hal0 doctor wrappers
+  --fix` re-installs the link from the active release immediately; a later
+  `hal0 update` also fixes it, because by then the re-assert is live. Boxes
+  already on 1.3.0 or newer never hit this. (#1844, #2019)
 
 - **Nothing to run by hand.** The config schema version is unchanged
   (`[meta] schema_version` stays 1), no database migration is added, and
