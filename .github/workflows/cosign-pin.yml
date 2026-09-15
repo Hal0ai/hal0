@@ -180,7 +180,14 @@ jobs:
           git checkout -b "${BRANCH}"
           git add installer/bootstrap.sh
           git commit -m "chore(installer): bump pinned cosign to ${VERSION}"
-          git push --set-upstream origin "${BRANCH}"
+          # --force: the guard above already returned when an open PR exists, so
+          # nothing under review is ever clobbered. What remains is a bot branch
+          # from an earlier run that pushed but then died before opening its PR —
+          # it is regenerated from scratch here every run, and a plain push
+          # against it fails "fetch first" forever, which is how this job stayed
+          # red weekly. The branch is single-purpose and bot-owned; the freshly
+          # built commit is always the one we want.
+          git push --force --set-upstream origin "${BRANCH}"
 
           {
             cat cosign-pin.md
