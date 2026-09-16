@@ -24,28 +24,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Fixed
-
-- **`make release-test` tears down the slots it creates again.**
-  `remote_slot_create` recorded each slot in `CREATED_SLOTS`, but every row
-  captured its result with `SLOT="$(remote_slot_create …)"`; command
-  substitution ran the append in a subshell, so the EXIT-trap cleanup saw an
-  empty list and every tier-gamma sweep left the slots it created behind,
-  still loaded, on the test box. The function now returns the name in a
-  global and is called directly, and a contract test drives the real script
-  against a stubbed `ssh` to pin that cleanup unloads and deletes each created
-  slot on both passing and failing runs. (#2262)
-
-- **`make release-test` resolves the installed hal0 CLI, not a stale
-  `/opt/hal0` path.** The remote binary fell back to
-  `/opt/hal0/.venv/bin/hal0`, which no current install has; it now prefers the
-  installer's FHS venv binary `/usr/lib/hal0/venv/bin/hal0` (the one
-  `hal0-api.service` runs), then `hal0` on the remote `PATH`, and a new
-  `HAL0_TEST_BIN` variable (also a `make release-test` knob) overrides both.
-  Pre-flight logs the resolved binary's `--version` and stops with exit 2 when
-  it cannot run, instead of failing every row at its first CLI call. (#2263)
-
-## [1.3.0] — 2026-09-15
+## [1.3.0] — 2026-09-16
 
 ### Highlights
 
@@ -227,6 +206,25 @@ applying. Add those subsections to a version's section to surface them; see
   #2195, #2203, #1511).
 
 ### Fixed
+
+- **`make release-test` tears down the slots it creates again.**
+  `remote_slot_create` recorded each slot in `CREATED_SLOTS`, but every row
+  captured its result with `SLOT="$(remote_slot_create …)"`; command
+  substitution ran the append in a subshell, so the EXIT-trap cleanup saw an
+  empty list and every tier-gamma sweep left the slots it created behind,
+  still loaded, on the test box. The function now returns the name in a
+  global and is called directly, and a contract test drives the real script
+  against a stubbed `ssh` to pin that cleanup unloads and deletes each created
+  slot on both passing and failing runs. (#2262)
+
+- **`make release-test` resolves the installed hal0 CLI, not a stale
+  `/opt/hal0` path.** The remote binary fell back to
+  `/opt/hal0/.venv/bin/hal0`, which no current install has; it now prefers the
+  installer's FHS venv binary `/usr/lib/hal0/venv/bin/hal0` (the one
+  `hal0-api.service` runs), then `hal0` on the remote `PATH`, and a new
+  `HAL0_TEST_BIN` variable (also a `make release-test` knob) overrides both.
+  Pre-flight logs the resolved binary's `--version` and stops with exit 2 when
+  it cannot run, instead of failing every row at its first CLI call. (#2263)
 
 - **ADMIN-class routes are gated on a box that has an admin key configured
   and binds past loopback, even with `require_auth` off.** Previously
