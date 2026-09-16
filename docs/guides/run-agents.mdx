@@ -273,13 +273,6 @@ an authorization code, and the agent never sees a client secret.
 
 </Steps>
 
-<Aside type="caution">
-With `require_auth` on — or on a LAN-bound box with an admin key configured —
-the callback currently answers `401 auth.required` unless the browser already
-holds a dashboard session. Sign in to the dashboard in the same browser before
-opening the consent link (tracked in #2266).
-</Aside>
-
 Tokens and client secrets are stored in `/etc/hal0/api.env` as
 `HAL0_OAUTH_<PROVIDER>_TOKEN` and `HAL0_OAUTH_<PROVIDER>_CLIENT_SECRET` — never
 in the TOML registry, never returned by an endpoint. hal0 does not refresh
