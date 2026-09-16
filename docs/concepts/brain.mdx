@@ -86,7 +86,8 @@ context** — sized for the built-in fallback prompt, which alone is roughly
 floor has to cover the fallback case too) — and it must actually be loaded,
 or `/api/brain/chat` 404s with an actionable error naming the model it
 tried. The seeded `brain` slot ships with a 65536-token context window, well
-above the floor.
+above the floor. On a box whose memory envelope can't afford that, seeding
+lowers it, but never below 64,000 tokens.
 
 ## `[brain_chat]`
 

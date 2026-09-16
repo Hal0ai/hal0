@@ -90,6 +90,16 @@ the CLI/API — see
 ![Settings page showing live reload status](/screenshots/settings-page.png)
 *Settings page with live daemon status and reload controls.*
 
+## Preview a change over the API
+
+`POST /api/settings/preview` takes the same body as `PUT /api/settings` and
+returns the diff that write would apply, without writing: `changeset.changes[]`
+(`path`, `before`, `after`, `kind`, `apply_class`, `services`),
+`changeset.unknown`, and `apply_plan`. `PUT /api/settings` returns the same
+changeset under `_hal0.changeset`, computed by the same function. `GET
+/api/settings/fields` lists one row per operator-editable key with its
+description, type, default, current value and apply class (`apply_class`).
+
 ## Refresh the hardware probe
 
 ```sh

@@ -141,11 +141,11 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 |---|---|---|
 | `slot list` | — | `--json` |
 | `slot status <name>` | `name` | `--json` |
-| `slot load <name>` | `name` | `--model`/`-m` |
-| `slot unload <name>` | `name` | — |
-| `slot restart <name>` | `name` | — |
+| `slot load <name>` | `name` | `--model`/`-m`, `--json` |
+| `slot unload <name>` | `name` | `--json` |
+| `slot restart <name>` | `name` | `--json` |
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
-| `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist` |
+| `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f`, `--lines`/`-n` (default 200, 1-5000) |
 | `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--backend`/`-b` (hidden, deprecated alias for `--provider`), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`), `--profile` (default: inferred from `--type`/`--hardware`) |
 | `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--profile`, `--backend`/`-b` (hidden, deprecated) |
@@ -274,8 +274,9 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 (`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
 `migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
-`agent-uid`, `stt-weights`, `seams`, `mcp_mounts`, `hermes_mcp_auth`,
-`hermes_anchor_window`, `hindsight_llm_auth`. There is no standalone `hal0 doctor seams`
+`hardware_freshness`, `seed_context_envelope`, `agent-uid`, `stt-weights`, `seams`,
+`mcp_mounts`, `hermes_mcp_auth`, `hermes_anchor_window`, `hindsight_llm_auth`,
+`memory_engine_version`. There is no standalone `hal0 doctor seams`
 command — `seams` is one of these roll-up rows, surfaced by `hal0 doctor all`.
 
 ## `hal0 upstream` — manage upstream LLM providers
@@ -454,14 +455,18 @@ in-flight op on the same slot, plus a podman/systemd overhead factor).
 
 | Verb shape | Budget |
 |---|---|
-| load (`slot load`, `model run`, NPU backend load) | 621s |
-| unload (`slot unload`, `slot delete`, NPU backend unload) | 345s |
-| restart / swap (`slot restart`, `slot swap`, `capabilities set`) | 966s |
-| `update --restart-slots`, per drifted slot | 966s (3 slots = 2898s) |
+| load (`slot load`, `model run`, NPU backend load) | 2139s |
+| unload (`slot unload`, `slot delete`, NPU backend unload) | 1104s |
+| restart / swap (`slot restart`, `slot swap`, `capabilities set`) | 3243s |
+| `update --restart-slots`, per drifted slot | 3243s (3 slots = 9729s) |
 
 These are ceilings on a *wedged* daemon, not expected durations — a healthy
-load returns in seconds. But the commands print nothing while they wait, so a
-genuinely stuck slot can hold the terminal for the full budget. If you are
+load returns in seconds. While they wait, `slot load`/`unload`/`restart`/`swap`
+and `update --restart-slots` show an elapsed counter and the slot's live state on
+a terminal (one summary line when not a TTY; only the final JSON with `--json`),
+and every `systemctl`/podman call the server makes is bounded — a wedged one
+answers `504 slot.seam_timeout` — but a genuinely stuck slot can still hold the
+terminal for the full budget. If you are
 scripting against them (CI, smoke tests), wrap the call in your own
 `timeout(1)` rather than relying on the CLI to give up first.
 

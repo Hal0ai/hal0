@@ -36,6 +36,8 @@ With `HAL0_HOME=$X` set (dev installs, tests): `usr_lib = $X/usr-lib/hal0/curren
 ├── stacks.toml               # optional
 ├── slots/                   # one <name>.toml per slot
 ├── agents/<name>.toml       # per-agent MCP allowlist/config
+├── mcp-servers/<id>.toml    # 0600, one record per user-installed MCP server
+├── oauth-providers.toml     # OAuth provider registry, seeded once from shipped defaults
 └── *.lock                   # advisory RMW lock siblings
 ```
 
@@ -59,6 +61,7 @@ key layout.
 │   ├── secret.bin            # 0600 HMAC secret for the agent chat proxy
 │   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
 ├── stacks/state.json         # active-stack pointer + content hash
+├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
 ├── openwebui/                 # OpenWebUI state
 ├── .hermes/runtime.json      # Hermes runtime info (embed token, etc)
 └── .config/flm/models/       # default FLM (NPU) model cache

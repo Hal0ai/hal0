@@ -51,12 +51,11 @@ an explicit device pin, never "whatever llama.cpp picks":
 
 - **ROCm** (`gpu-rocm`) — AMD's compute stack, and the lane hal0 seeds where
   the box can run it. It needs the `/dev/kfd` compute node visible to hal0 and
-  to the slot containers; a `gpu-rocm` slot without it refuses to load. hal0
-  decides this lane from the device node itself — `/dev/kfd` present and
-  openable by the slot-runner identity — never from whether a `rocm-smi`
-  binary happens to be installed in the guest. A fresh container or LXC has
-  no `rocm-smi` by default; that must never be why a box that already has
-  `/dev/kfd` forwarded gets seeded onto Vulkan instead.
+  to the slot containers; a `gpu-rocm` slot without it refuses to load. A
+  `/dev/kfd` present and openable by the slot-runner identity is enough on
+  its own for hal0 to seed this lane; a `rocm-smi` binary is not required. A
+  fresh container or LXC has no `rocm-smi` by default, and that no longer
+  pushes a box with `/dev/kfd` forwarded onto Vulkan.
 - **Vulkan** (`gpu-vulkan`) — the Mesa/RADV path. It needs only a DRM render
   node (`/dev/dri/renderD*`), which makes it the lane for boxes where `/dev/kfd`
   was never forwarded — an unprivileged LXC, for instance. It is also the lane
@@ -155,15 +154,15 @@ either the LLM slots or the image slot, one group at a time, rather than
 letting them fight over the pool.
 
 hal0 also never budgets a model against the *entire* unified pool: the OS,
-the container runtime, and every other slot need headroom too. Anywhere hal0
-decides how much memory a model + its context window may spend — sizing a
-freshly seeded slot's `context_size` at install time, `hal0 doctor` flagging
-an oversized one, or the capacity API's fit estimate — it works from a
-bounded **memory envelope**, not the raw pool: on unified-memory hardware
-that is 55% of total RAM, floored so a small-RAM APU still gets a usable
-minimum; on a discrete GPU it's the card's own VRAM; on a CPU-only box it's a
-smaller, capped share of RAM. A single shared function computes this so
-every one of those call sites agrees on the same number.
+the container runtime, and every other slot need headroom too. When hal0
+seeds its llama.cpp slots (`agent`, `brain`, `coder`, `embed`, `rerank`,
+`utility`) onto a box, it clamps each seed's `context_size` against a bounded
+**memory envelope**, not the raw pool, and `hal0 doctor all` checks existing
+slots against the same envelope (its `seed_context_envelope` row): on
+unified-memory hardware that is 55% of total RAM, floored at 2 GiB; on a
+discrete GPU it's the card's own VRAM; on a CPU-only box it's 35% of RAM,
+clamped to 3–8 GiB. It never exceeds the box's actual RAM, and the `agent`
+and `brain` seeds are never clamped below the 64,000-token Hermes floor.
 
 ![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
 *The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*
@@ -186,9 +185,9 @@ that's true.
 The probe result is cached at `/etc/hal0/hardware.json`; the lane derivation
 above, and the dashboard's VRAM/RAM split, read that cache rather than
 re-probing on every request. hal0 detects when the cache should not be
-trusted — missing, predating the running kernel, or written in a previous
-boot cycle — and falls back to a live re-probe automatically rather than
-risking a stale answer; `hal0 doctor`'s `hardware_freshness` row surfaces
+trusted — missing, carrying none of the kernel/probe-time/GPU fields, recording a
+different kernel than the running one, or written in a previous boot cycle — and falls back to a live re-probe automatically rather than
+risking a stale answer; `hal0 doctor all`'s `hardware_freshness` row surfaces
 this so you know when it's happening. See
 [GPU drivers and memory](/docs/getting-started/drivers) for when to
 re-run the probe yourself.

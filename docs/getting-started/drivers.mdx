@@ -58,23 +58,23 @@ install.
 <Aside type="note" title="Host ROCm is not required">
 The host only needs `amdgpu` bound and the nodes above present — it does
 **not** need a host ROCm install. Every hal0 slot container carries its
-own ROCm userspace. In particular, hal0 does **not** need `rocm-smi` on the
-host to decide the ROCm lane: it checks whether `/dev/kfd` is present and
-openable by the identity that runs your slot containers, not whether a
-ROCm CLI happens to be installed. `rocm-smi`, when present, is read only
-as telemetry (GPU name, free VRAM) — never as the gate for whether ROCm
-runs.
+own ROCm userspace. In particular, hal0 does **not** need `rocm-smi` to pick
+the ROCm lane: `/dev/kfd` present and openable by the identity that runs
+your slot containers is enough on its own. A `rocm-smi --showproductname`
+that succeeds is still a second, independent signal for ROCm, so having
+`rocm-smi` installed can add the lane, but its absence never removes it.
 </Aside>
 
 ## Re-probing after a driver or kernel change
 
 hal0 caches what it found in `/etc/hal0/hardware.json`, written by `hal0
-probe`. A kernel upgrade, a newly forwarded device, or a driver change
+config hardware --refresh`. A kernel upgrade, a newly forwarded device, or a driver change
 can make that cache stale — the ROCm/Vulkan lane derivation and the
 dashboard's VRAM/RAM split both read it. hal0 detects the common staleness
-shapes itself (the file is missing, it predates the running kernel, or it
-was written in a previous boot cycle) and falls back to a live re-probe
-automatically rather than trusting a stale answer — `hal0 doctor` surfaces
+shapes itself (the file is missing, carries none of the kernel/probe-time/GPU
+fields, records a different kernel than the running one, or was written in
+a previous boot cycle) and falls back to a live re-probe
+automatically rather than trusting a stale answer — `hal0 doctor all` surfaces
 this as the `hardware_freshness` row so you know when that is happening.
 Still, re-run `hal0 config hardware --refresh` yourself after any
 host-level hardware or driver change so the cache catches up and every

@@ -44,7 +44,9 @@ The dashboard's per-slot cards (Inference pane) carry a metric row —
 **tok/s**, **ttft**, and **mem** (resident memory in GB, from the slot's
 `mem_mb`) — plus a footer strip of chips: a **context** chip (`Nk ctx`,
 shown on a full-size card whenever `ctx_max` is a positive number — MiniCards
-never show it), an **image status** chip when
+never show it; only `llm` slots get an effective context resolved, other slot
+types report their TOML's own `context_size` if set and otherwise omit
+`ctx_max`), an **image status** chip when
 hal0 could not read the container image store (label "image ?" — not a claim
 the image is missing, see [Slot lifecycle reference](/docs/reference/slot-lifecycle)),
 and a **crash-loop breaker** chip whenever a slot is backing off or parked
@@ -52,6 +54,16 @@ after repeated load failures (see the same reference page). Drag a card's grip
 handle (or use the arrow keys on it) to reorder the grid — that ordering is a
 per-browser preference stored locally, not slot config, so it needs no Save
 step.
+
+On an `llm` slot's full card, the model name is a picker: each row shows the
+model's quantisation and modality tags, its size, other slots bound to it, and a
+GTT fit chip (`fits` / `tight` / `won't fit`, from one
+`POST /api/models/feasibility` fired the first time the menu opens — advisory
+only). Picking a model swaps it immediately. The `[ device | PROFILE ]` pill is a
+profile picker filtered to the slot's type: a pick writes nothing until you
+confirm, then applies `PUT /api/slots/{name}/config` followed by a background
+`POST /api/slots/{name}/restart`. Its last row, "✎ Edit slot…", opens the full
+editor and is the only way to clear a profile.
 
 <Aside type="note">
 `primary` and `chat` are retired slot/role names — neither is accepted as
@@ -216,11 +228,11 @@ $ hal0 slot load agent
 ⠋ Loading agent… 42s elapsed — state=starting
 ```
 
-Piped or scripted (`--json`, or stdout redirected) prints one line up front
-instead and stays quiet until the result:
+With stdout redirected, it prints one line up front instead and stays quiet
+until the result. With `--json` it prints nothing but the final JSON:
 
 ```sh
-$ hal0 slot load agent --json > result.json
+$ hal0 slot load agent > load.log
 Loading agent (up to 2139s)…
 ```
 
@@ -230,7 +242,7 @@ command, not an indefinite hang — the CLI prints the seam's own error and
 where to look next:
 
 ```
-Error: `systemctl restart hal0-slot@agent.service` did not return within 180s
+Error: POST http://127.0.0.1:8080/api/slots/agent/load → HTTP 504: `<seam command>` did not return within 180s
 still converging? check `hal0 slot logs agent` or `journalctl -u hal0-slot@agent`.
 ```
 

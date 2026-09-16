@@ -31,6 +31,13 @@ what every operator already runs better elsewhere (a real reverse proxy).
 **The shipped default is still OFF** — turning on the layer below is an
 explicit operator decision, not something that silently activates.
 
+One exception since v1.3.0: once an admin key is configured, a box bound past
+loopback gates its **ADMIN**-class routes (every mutation, plus a few
+config-revealing reads) for callers that are not on loopback, even with
+enforcement off. Reads, inference, and anything arriving over loopback stay
+open; a box with no admin key stays fully open. See
+[Authentication](/docs/operate/auth/) for the exact rule.
+
 ## The v1.0 auth layer: three tiers, deny-by-default
 
 When you do turn it on, hal0 resolves every request to one of three
@@ -89,7 +96,9 @@ bind or whenever a key was configured — and that locked operators out of a
 dashboard that shipped no login UI, so the fix was to make enforcement
 **explicit-enable only**. If you're troubleshooting an unexpected 401/403,
 check whether something set `HAL0_REQUIRE_AUTH` or the config toggle before
-assuming a bug.
+assuming a bug — and, on a LAN-bound box with an admin key configured, whether
+the request is an ADMIN-class call from off the box, which is gated regardless
+of the toggle.
 </Aside>
 
 Once enabled: configure `HAL0_ADMIN_KEY` (and optionally `HAL0_CLIENT_KEY`

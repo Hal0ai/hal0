@@ -55,7 +55,9 @@ total links, a 30-day activity spark, and an activity chip — `⟳ N working`,
 `N queued`, or `idle` (the Overview table's equivalent chip reads `N
 pending` for the same state, not `N queued`). `+ Add` opens the add-content
 modal (below); the small refresh icon next to it triggers **consolidate
-now** for this bank.
+now** for this bank, and the trash icon deletes the bank. Delete opens a
+destructive confirm that asks you to type the bank id before calling
+`DELETE /api/memory/banks/{bank_id}`; there is no undo.
 
 Below that, two sub-tabs:
 
@@ -87,17 +89,16 @@ The `+ Add` modal has four tabs:
 
 - **Fact** — free text, a type picker (`world` or `experience` only —
   `observation` is derived, never operator-authored), and comma-separated
-  tags.
+  tags. Retain is async: after "Fact added", the dashboard follows the
+  extraction and raises a warning toast if nothing was learned.
 - **Document** — lists existing documents in the bank with a **Reprocess**
   button per document (re-runs extraction over it). There is currently no
   document upload/ingest endpoint, so the drop-file/paste-URL area and the
   **Ingest** button are inert placeholders — this tab is view-and-reprocess
   only for now.
 - **Directive** — a rule text box and an active-immediately toggle.
-- **Mental model** — a name, a standing question, and a refresh-schedule
-  picker (on consolidation / daily / manual). Only the manual trigger
-  (`memory_mental_model_refresh`) is actually wired up server-side today —
-  the schedule choice isn't persisted or acted on.
+- **Mental model** — a name and a standing question. There is no
+  refresh-schedule picker.
 
 ### Filters
 

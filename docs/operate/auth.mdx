@@ -14,10 +14,14 @@ hal0 ships built-in login, sessions, and a deny-by-default route classifier
 tier is rejected before the handler runs.
 
 <Aside type="caution">
-**Auth ships off by default.** A fresh v1.0 install is trusted-LAN-open —
-every route responds to any caller that can reach the port — until an
-operator explicitly enables enforcement (see the Enabling auth section
-below). This is a deliberate v1.0 decision: an earlier
+**Auth ships off by default.** A fresh install has no admin key and
+enforcement off, so it is trusted-LAN-open — every route responds to any
+caller that can reach the port — until an operator configures an admin key
+or explicitly enables enforcement (see the Enabling auth section below).
+Since v1.3.0, configuring an admin key on a LAN-bound box is enough to gate
+the mutating (ADMIN-class) routes for off-box callers even with enforcement
+off — see the ADMIN routes on a LAN-bound box section below. Leaving
+enforcement off by default is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
 directory — for that, put a reverse proxy in front (see the TLS still
@@ -75,7 +79,43 @@ A fresh install has no admin key and enforcement off. To lock it down:
 
 </Steps>
 
-To go back to open access: `hal0 auth require off`.
+To go back to open access: `hal0 auth require off`. On a box bound past
+loopback that still has an admin key, this does not re-open ADMIN-class
+routes to off-box callers — see the next section.
+
+## ADMIN routes on a LAN-bound box
+
+Since v1.3.0, `require_auth = false` no longer waves every request through.
+An **ADMIN**-class request is enforced exactly as if auth were on whenever all
+three of these hold:
+
+1. an admin key is configured (`HAL0_ADMIN_KEY`);
+2. the API listener is not loopback-bound — `HAL0_BIND_HOST` is anything
+   other than `127.0.0.1`, `localhost` or `::1` (the installer seeds
+   `0.0.0.0`); and
+3. this request's own peer did not arrive over loopback.
+
+Such a request with no admin session cookie, Bearer key or `?api_key=` gets
+`401 auth.required`; one carrying the client key gets `403 auth.forbidden`; a
+WebSocket upgrade is closed with code `4403`. The `Origin` check described in
+Origin protection below also runs on these requests. **OPEN** and **CLIENT**
+routes — `/v1` inference and the read-only status/list routes — stay open, and
+anything arriving over loopback (the CLI, on-box services, the operator at the
+console) is unaffected.
+
+A box with **no** admin key is not covered: the requirement would be
+unsatisfiable, the same first-run carve-out the **bootstrap** class makes, so
+the keyless default stays open to the LAN. `hal0 doctor all` reports both
+LAN-reachable, auth-off postures as a warning on its `auth` row rather than a
+pass.
+
+In the dashboard, a mutation refused this way opens a sign-in drawer ("This
+box is reachable from your network") that takes the admin key and retries the
+action. From other clients, send the admin key on the request. To make the
+posture explicit, run `hal0 auth require on`; to take the box off the LAN
+instead, set `HAL0_BIND_HOST=127.0.0.1` in `/etc/hal0/api.env` and restart
+`hal0-api` (the value sits in the installer-managed `hal0-network` block, which
+a later `install.sh` run rewrites).
 
 ## Endpoints
 
@@ -126,8 +166,11 @@ caller on the old key stops working immediately.
 ### `GET /api/auth/status`
 
 ```json
-{ "auth_required": true, "has_admin_key": true, "tier": "client" }
+{ "auth_required": true, "has_admin_key": true, "lan_exposed": true, "tier": "client" }
 ```
+
+`lan_exposed` is true when the API is bound beyond loopback, independent of
+`auth_required`.
 
 Never returns secrets — safe for the dashboard to poll unauthenticated.
 

@@ -135,6 +135,14 @@ wins over the default; when the override is an `http`/`https` URL and the
 channel is not `stable`, the channel is appended as a `?channel=`
 parameter instead of as a filename.
 
+An active override is disclosed wherever the channel is named.
+`hal0 update --check` labels the channel `— overridden`, prints the override
+URL with a note that the configured channel is ignored, and reports
+`pinned by HAL0_RELEASES_URL` instead of `up to date` when nothing newer is
+found. `GET /api/updates/check` and `GET /api/updates/state` carry a
+`releases_url_override` field (`null` when no override is set), which the
+Settings → Updates page shows next to the channel.
+
 ## How the atomic update works
 
 <Steps>
@@ -155,7 +163,9 @@ parameter instead of as a filename.
 
 5. **Swap** the `/usr/lib/hal0/current` symlink atomically, then reinstall
    the code into the venv. A failed re-install rolls the symlink back so
-   `current` and the venv never diverge.
+   `current` and the venv never diverge. The activation then re-installs the
+   root-owned `hal0-*` sudo wrappers and re-asserts the `/usr/local/bin/hal0`
+   and `/usr/local/bin/hal0-agent` PATH links from the new tree.
 
 6. **Re-render every slot's systemd unit** through the newly installed
    code. This step never bounces a running slot — the CLI shows a
@@ -166,6 +176,61 @@ parameter instead of as a filename.
    for rollback.
 
 </Steps>
+
+## Upgrading to 1.3.0
+
+The config schema version is unchanged and nothing needs a manual migration
+pass, but a few things are worth doing or checking. The full list is in the
+`1.3.0` Migrations and Breaking sections of `CHANGELOG.md`.
+
+- **Refresh the PATH link once, when coming from 1.2.0 or earlier.** 1.3.0's
+  updater re-asserts `/usr/local/bin/hal0` on every activation, but the
+  activation that installs 1.3.0 still runs the outgoing version's code. If
+  `hal0 --version` keeps reporting the old version while the dashboard and API
+  report 1.3.0, run:
+
+  ```sh
+  sudo hal0 doctor wrappers --fix
+  ```
+
+  It re-installs the sudo wrappers, their sudoers drop-ins and the
+  `/usr/local/bin/hal0` (+ `hal0-agent`) links from the active tree. Without
+  `--fix` it only reports which tree it would refresh from. A later
+  `hal0 update` also fixes the link.
+- **Reprovision Hermes before using OAuth-connected skills.** The agent's
+  half of the OAuth connect flow lives in its persona file, which `hal0 update`
+  does not rewrite. On an already-provisioned box run
+  `hal0 agent reprovision hermes`. Each shipped OAuth provider also has an
+  empty `client_id`, so configure the provider's own app credentials before
+  connecting an account.
+- **Off-box admin calls may now need a credential.** On a box with an admin key
+  configured and `hal0-api` bound past loopback, mutating (ADMIN-class) routes
+  answer `401 auth.required` to off-box callers even with `require_auth` off.
+  See [Authentication](/docs/operate/auth/).
+- **Check a pinned `img` slot.** A ComfyUI slot's `image_pin` is now honoured,
+  so an `img` slot carrying a pin that never took effect can start a different
+  container image. Check `/etc/hal0/slots/img.toml` before upgrading and clear
+  `image_pin` if you want the resolver default.
+- **Pull before enabling a capability.** `POST /api/capabilities/{slot}/{child}`
+  with `enabled: true` for a model whose weights are not on disk now returns
+  `409 capability.model_not_downloaded`. Pull first
+  (`POST /api/models/{id}/pull`), or stage the selection with
+  `enabled: false`.
+- **Hard-refresh an open dashboard tab** if layout saves start failing:
+  `PUT /api/user/dashboard-layout` now accepts only the v3 body and answers an
+  older cached bundle with `422 layout.invalid`.
+- **Rolling back to 1.2.0 after writing an MCP server record.** 1.3.0 writes
+  installed-server records in a new shape (a `[tools]` policy table, with the
+  old tool count moved to `tools_count`), and 1.2.0 cannot validate it: the
+  server disappears from `hal0 mcp list` and a direct read answers
+  `400 mcp.record_malformed`. A record is rewritten whenever 1.3.0 saves it —
+  installing a server, or changing its config, enabled flag, tool policy
+  (`hal0 mcp allow`/`gate`/`block`) or exposure (`hal0 mcp expose`) — never on
+  load, so a box that upgrades and rolls back without touching MCP servers is
+  unaffected.
+- **Skipping 1.2.0 from 1.1.0** still applies 1.2.0's automatic
+  `profiles.toml` migration, and the migrated file does not parse on 1.1.0.
+  Back up `/etc/hal0/profiles.toml` first if you may downgrade.
 
 ## Upgrading from 0.9.8
 
@@ -358,8 +423,12 @@ Rollback reads `/var/lib/hal0/hal0.previous`, atomically swaps the
 venv and re-renders every slot unit. Unlike an apply, a rollback does
 **not** try-restart `hal0-api` for you — the running process keeps
 serving the newer code until you restart it yourself; the CLI names the
-version it reverted to and, while the running version still disagrees,
-prints the `systemctl restart hal0-api` remedy. It warns (without
+version it reverted to, shows what the previous-version slot now holds,
+prints any schema warning as its own callout and, while the running version
+still disagrees, prints the `systemctl restart hal0-api` remedy.
+`POST /api/updates/rollback` returns the same facts as `rolled_back_to`,
+`previous_now`, `schema_warning`, `running_version` and a
+`restart_required` flag. It warns (without
 erroring) if the previous tree is gone on disk, or if the current
 config's schema version is ahead of what the previous tree understands —
 migrations are forward-only, so the older tree just parses what it can.

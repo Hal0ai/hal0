@@ -104,7 +104,7 @@ Shared by `hal0 doctor` and the install-time preflight checks in
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_PORT` | `8080` | API port. Also read by `hal0 serve --port`. |
-| `HAL0_BIND_HOST` | `0.0.0.0` | API bind host. Also read by `hal0 serve --host`. |
+| `HAL0_BIND_HOST` | `127.0.0.1` when unset; the installer seeds `0.0.0.0` | API bind host. Also read by `hal0 serve --host`. Any value other than `127.0.0.1`/`localhost`/`::1` counts as LAN-bound: with an admin key configured, ADMIN-class routes then require an admin credential from non-loopback callers even while `require_auth` is off (#1822). |
 | `HAL0_HOSTNAME` | `socket.gethostname()` | Canonical hostname override — feeds the dashboard URLs, the WS-origin allowlist, and the mDNS announcement. At install time (`HAL0_HOSTNAME=jarvis sudo -E bash install.sh` — the env path only; `network.hostname` in the answer file is consumed by the separate `hal0 setup --answers` process and does **not** reach the installer's avahi sync yet, a known follow-up) the installer also pins avahi's announced name via `host-name=` under `[server]` in `/etc/avahi/avahi-daemon.conf`, so `http://jarvis.local:8080` resolves on the LAN without renaming the box (no `hostnamectl`). Re-running with a different name updates the announcement; running without one withdraws only the installer-managed line and reverts to the machine hostname. Caveat: if an operator had hand-written their own `host-name=` before pinning, the pin replaces it (with a warning) and a later no-override run does not restore it. Wrinkle: a renamed box stops answering to the `hal0.local` alias (avahi cannot cleanly publish CNAMEs) — the alias stays in the origin allowlist, which is harmless. |
 | `HAL0_PUBLIC_URL` | unset | Public URL announced by the installer/mDNS. |
 | `HAL0_LAN_IPS` | `""` | Comma/space-separated list of the box's LAN IPv4 addresses, short-circuiting auto-detection. The installer feeds it `hostname -I` output — Python's own resolver is unreliable inside some containers. |
@@ -125,6 +125,7 @@ Shared by `hal0 doctor` and the install-time preflight checks in
 | `HAL0_OPENWEBUI_PROBE_URL` | `""` → `http://127.0.0.1:3001/health` | Loopback health-check URL for OpenWebUI, independent of the browser-facing public URL. Override for tests or a non-default deployment. |
 | `HAL0_HERMES_PUBLIC_URL` | `""` | Public URL the dashboard advertises for the Hermes agent dashboard. Hermes binds loopback-only (`127.0.0.1:9119`), so — unlike OpenWebUI — there is no host:port fallback; on a stock install the dashboard shows the health row without a link until this is set. |
 | `HAL0_API_URL` | `http://127.0.0.1:8080` (CLI client default) | Base URL the CLI uses to reach `hal0-api`. |
+| `HAL0_DASHBOARD_URL` | unset → `HAL0_API_URL` → `http://hal0.local:8080` | Base of the OAuth `redirect_uri` hal0-api sends a provider (`<base>/api/oauth/<provider>/callback`) and the dashboard link rendered into Hermes' persona. Must match the redirect URI registered with the provider. |
 
 <Aside type="caution">
 `HAL0_API_URL`'s embedded default differs by call site: the CLI shared HTTP helper

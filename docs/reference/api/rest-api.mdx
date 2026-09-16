@@ -42,8 +42,11 @@ rule table:
 - **ADMIN** — everything else, including every mutating route and every route that can
   return secrets or config. **Unclassified paths fall back to ADMIN** (deny-by-default).
 
-These classes only matter once `[security].require_auth` is actually on — while it's
-off the whole surface is trusted-LAN-open regardless of class. The table below states
+These classes are fully enforced once `[security].require_auth` is on. While it's off,
+the surface is trusted-LAN-open with one exception (since v1.3.0): with an admin key
+configured and the API bound past loopback, ADMIN-class requests from a non-loopback
+peer still need an admin credential (`_lan_admin_gate` in `src/hal0/api/auth.py`; see
+[Authentication](/docs/operate/auth/)). The table below states
 each group's class as enforced by `exposure.py`, not as a claim about the current
 default posture.
 
@@ -73,6 +76,7 @@ silently paper over.
 |---|---|---|
 | `/api/auth` | Mixed | `login`/`status`/`logout` are OPEN (you can't require a cookie to obtain one); `require` (toggle enforcement) and `rotate` (mint a new admin/client key) are ADMIN; `exposure` (serialize this whole rule table) is ADMIN. |
 | `/api/secrets` | ADMIN | Operator-managed secrets store. See "Secrets" below — dedicated section, not just a table row. |
+| `/api/oauth` | Mixed | OAuth passthrough for Hermes skills (see [Run agents](/docs/guides/run-agents/)): `GET /api/oauth/providers`, `POST /api/oauth/{provider_id}/start` (returns `authorize_url`), `GET /api/oauth/{provider_id}/status`, `DELETE /api/oauth/{provider_id}` (best-effort revoke, then delete the token), `POST /api/oauth/{provider_id}/client-secret`, and `GET /api/oauth/{provider_id}/callback`, the provider's redirect target. The callback is meant to be OPEN, guarded by a single-use `state` nonce, but the exposure rule currently matches only the literal template path, so a real callback classifies ADMIN (#2266). Every other route is ADMIN. Tokens and client secrets persist to `/etc/hal0/api.env` and are never returned. |
 | `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan registry, schema-driven field metadata (`fields`), and a dry-run ChangeSet preview (`preview`) sharing the same diff the write path applies. |
 | `/api/settings/models/store` | ADMIN | Model store path get/set/migrate (part of the `/api/settings` prefix). |
 | `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See "Proxmox integration" below — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
@@ -83,7 +87,7 @@ silently paper over.
 | `/api/hardware` | CLIENT (GET) / ADMIN (`/probe`) | Hardware probe read + on-demand re-probe. |
 | `/api/stats/hardware` | CLIENT | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |
 | `/api/stats` (`/slots`, `/requests`, `/throughput/history`, `/power`) | CLIENT (GET) / ADMIN (else) | Dispatcher rollups, throughput history, power stats. |
-| `/api/status` | CLIENT | Version/build summary. |
+| `/api/status` | CLIENT | Version/build summary. Includes `build_sha`, the short git SHA of the tree the running process started from — `null` on a release (non-git) install. |
 | `/api/health`, `/api/health/system` | OPEN | Shallow + deep liveness probes hit by the installer/systemd watchdog before any credential exists. |
 | `/api/doctor` | ADMIN | `GET /api/doctor` — the same report card `hal0 doctor verify --json` prints, aggregated in-process from health/urls/system/memory/services, over HTTP. Classified ADMIN (not CLIENT) because it re-surfaces detail from ADMIN-only subsystems. |
 | `/api/metrics` | CLIENT | JSON metrics snapshot. |

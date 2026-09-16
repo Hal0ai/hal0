@@ -33,7 +33,6 @@ sections to actually let an agent use it.
 hal0 mcp list                # bundled + installed
 hal0 mcp list --json
 hal0 mcp status <id>         # tools, env, connected clients
-hal0 mcp restart <id>
 hal0 mcp uninstall <id>      # alias: hal0 mcp remove <id>
 hal0 mcp uninstall <id> --force
 ```
@@ -53,7 +52,7 @@ uninstalled — `hal0 mcp uninstall hal0-admin` is rejected with a 409.
 Non-secret settings (a base URL, a workspace path) go in a server's
 plain `env` block. Anything credential-shaped is a *reference*, not a
 literal — point it at a name already in hal0's own secrets store
-(`hal0 config secrets set` / the dashboard's Settings → Secrets panel),
+(the dashboard's Settings → Secrets panel, or `PUT /api/secrets/{name}`),
 never at a value typed straight into the server's TOML file:
 
 ```toml
@@ -65,10 +64,15 @@ GITHUB_HOST = "github.com"
 GITHUB_TOKEN = "GITHUB_MCP_TOKEN"   # name of a key already in /etc/hal0/api.env
 ```
 
-This edits through `PATCH /api/mcp/{id}/config` (`env`) — the `secrets`
-block is written the same way a future release exposes on the CLI; today
-edit the record's `[secrets]` table directly, then `hal0 mcp restart <id>`
-(or reinstall) to pick it up.
+`env` edits go through `PATCH /api/mcp/{id}/config`. Nothing writes the
+`[secrets]` table yet — edit it in the record file directly. Each `[env]` and
+`[secrets]` entry is sent to the server as a request header of that name, with
+a secret resolved from hal0-api's live environment, so set the secret through
+Settings → Secrets (which updates the running process) rather than by editing
+`api.env` by hand. A hand edit is picked up by the next registry mutation —
+re-run `hal0 mcp expose <id> --hermes` to push it into Hermes's config now.
+`hal0 mcp restart <id>` does not help: start/stop/restart answer
+`501 mcp.supervisor_unavailable` until the process supervisor ships.
 
 ### Probe an installed server
 
@@ -78,9 +82,12 @@ hal0 mcp test github
 
 Connects to the server directly (its own `url` + resolved `env`/`secrets`
 headers — never hal0's own credentials), lists its advertised tools, and
-shows each one's current `allow` / `gated` / `blocked` / `unknown_tool`
-verdict. Run this right after install: a fresh server's tools all show
-`unknown_tool` until you promote some (next section).
+shows each one's verdict: `allow`, `gated`, `blocked`, `unknown_tool`, or
+`unknown_server`. Verdicts are read from the Hermes seed at
+`/etc/hal0/agents/hermes.toml`, which only carries servers that are enabled
+and exposed to Hermes — so until you run `hal0 mcp expose <id> --hermes`,
+every tool reports `unknown_server`, whatever its policy. A `stdio` server
+answers `501 mcp.supervisor_unavailable`.
 
 ### Set the tool policy
 
@@ -96,7 +103,8 @@ hal0 mcp block github delete_repository      # hard-rejected at the client
 
 A tool moves between tiers, never sits on two at once — `hal0 mcp allow`
 on a currently-gated tool promotes it and drops the gated entry
-automatically. Re-run `hal0 mcp test <id>` to confirm a verdict changed.
+automatically. Once the server is exposed to Hermes, re-run
+`hal0 mcp test <id>` to confirm a verdict changed.
 
 ### Expose to an agent
 
@@ -110,8 +118,10 @@ hal0 mcp expose github --hermes --brain   # also join the hal0-brain profile
 ```
 
 Exposing re-runs the join immediately (an idempotent recompute, not a
-one-shot patch) and re-probes the server, so a bad URL surfaces at expose
-time rather than at the agent's first turn. `openwebui`/`opencode` are
+one-shot patch) and re-probes the server; the probe result is in the REST
+response's `hermes_sync.probe` (the CLI prints only the new flags), so run
+`hal0 mcp test <id>` to see a bad URL at expose time rather than at the
+agent's first turn. `openwebui`/`opencode` are
 reserved flags with no join yet — setting either returns
 `501 mcp.exposure_unsupported`. A `stdio`-transport server (most
 npm/uvx packages) has no supervisor yet either — `--hermes`/`--brain` on
