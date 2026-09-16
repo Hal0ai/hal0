@@ -39,7 +39,7 @@ applying. Add those subsections to a version's section to surface them; see
   provider's redirect lands on `GET /api/oauth/{provider}/callback` and hal0
   exchanges the code itself (PKCE where supported), so the operator never
   copy-pastes an authorization code and the agent never handles a raw code or
-  client secret. New `hal0 oauth` CLI and a dashboard Connections page manage
+  client secret. The new `hal0 oauth` CLI manages
   the accounts; tokens go through the secrets store, never into TOML.
 - **Settings are schema-driven, and every save previews first.**
   `GET /api/settings/fields` returns one documented row per operator-editable
@@ -51,10 +51,10 @@ applying. Add those subsections to a version's section to surface them; see
 - **Hardware truth stays fresh, and the ROCm lane no longer depends on
   `rocm-smi`.** A missing or stale `/etc/hal0/hardware.json` now triggers a
   live re-probe instead of booking a real GPU box's resident slot memory as
-  `ram_mb`; `/dev/kfd` alone decides the ROCm lane, so a fresh LXC with the
+  `ram_mb`; `/dev/kfd` is enough on its own to put a box on the ROCm lane, so a fresh LXC with the
   device forwarded no longer seeds every llama.cpp slot onto the slower Vulkan
   lane; and freshly seeded slots clamp `context_size` to a host memory
-  envelope instead of the reference platform's flat `65536`.
+  envelope instead of shipping the seed files' fixed values (up to `65536`).
   (#1862, #2216, #1966, #1868)
 - **A slot load, unload or restart can no longer hang forever.** Every
   `systemctl`/podman seam call is now bounded, and a timeout surfaces as a
@@ -67,7 +67,8 @@ applying. Add those subsections to a version's section to surface them; see
   `/usr/local/bin/hal0-agent` PATH symlinks on every activation**, so a box
   upgraded exclusively through the updater can no longer end up with a `hal0`
   on PATH pointing at a stale venv shim. `/api/status` also gained a
-  `build_sha` field naming the tree the running process actually imports from,
+  `build_sha` field naming the git tree the running process imports from
+  (`null` on a normal release install, which has no git checkout),
   which `scripts/deploy.sh` now polls before reporting success.
   (#1550, #1844, #2019)
 
@@ -129,8 +130,9 @@ applying. Add those subsections to a version's section to surface them; see
   embedding, reranking, transcription, TTS or image slot was handed the
   resolver's 8192-token safe fallback — a window it never runs with. The
   resolver is now gated on `type == "llm"`. A bound `img`, `tts` or
-  transcription slot omits the `ctx_max` key entirely, and `embed` and
-  `rerank` slots report the raw ceiling from their own TOML. Clients that read
+  transcription slot omits the `ctx_max` key unless its own TOML sets a
+  `context_size`, and `embed` and `rerank` slots report the raw ceiling from
+  their own TOML. Clients that read
   `ctx_max` unconditionally must tolerate its absence. (#1859)
 - **`PUT /api/user/dashboard-layout` accepts only the v3 body.** The pre-#1061
   v2 schema (`order`/`enabled`/`spans`/`pinned`), kept accepted since
@@ -173,9 +175,11 @@ applying. Add those subsections to a version's section to surface them; see
   token itself (PKCE where the provider supports it), so the operator
   never copy-pastes an authorization code and the agent never handles a
   raw code or client secret. New `hal0 oauth {list,connect,disconnect,
-  status,set-client-secret}` CLI, a dashboard Connections page
-  ("Connected accounts"), and a Hermes persona addendum that walks the
-  agent through the connect → poll → confirm flow. The provider registry
+  status,set-client-secret}` CLI and a Hermes persona addendum that walks the
+  agent through the connect → poll → confirm flow (the addendum drives
+  `hal0 oauth` through the agent's terminal tool, which is off by default).
+  A "Connected accounts" dashboard panel exists but is not reachable from
+  the dashboard navigation in this release (#2267); use the CLI. The provider registry
   (`/etc/hal0/oauth-providers.toml`) is seeded from a shipped default
   covering the common skill providers; tokens are stored through the
   secrets store, never in TOML, never logged. Ported from ODS's OAuth
@@ -206,6 +210,20 @@ applying. Add those subsections to a version's section to surface them; see
   #2195, #2203, #1511).
 
 ### Fixed
+
+- A deliberate stop of a slot no longer reads as a red `error` in
+  `hal0 slot list` (#2130). `systemctl stop` sends SIGTERM and podman
+  propagates the container's graceful shutdown as exit code 143, which the
+  generated unit — having no `SuccessExitStatus` — recorded as
+  `Failed with result 'exit-code'`; the state probe then painted every slot
+  the documented `migrate-flags --apply --stop-services` path stopped as an
+  error on a healthy mid-upgrade box. The rendered unit now declares
+  `SuccessExitStatus=143`, the systemd probe recognises the plain
+  SIGTERM-stop signature on units that predate the directive, and a cached
+  `error` converges back to `offline` once the unit's own properties show it
+  was stopped on purpose (a clean stop or `systemctl reset-failed`) — while a
+  genuinely crashed or crash-looping unit keeps its error verdict, breaker
+  bookkeeping, and `last_crash_line` evidence untouched.
 
 - **`make release-test` tears down the slots it creates again.**
   `remote_slot_create` recorded each slot in `CREATED_SLOTS`, but every row
@@ -258,14 +276,17 @@ applying. Add those subsections to a version's section to surface them; see
   message, same as any other load failure. `hal0 slot load|unload|restart|
   swap` and `hal0 update --restart-slots` now show an elapsed counter and the
   slot's live state while they wait (refreshed every ~2s on a TTY; one
-  summary line otherwise), print the seam-timeout remedy (`hal0 slot logs
-  <name>`, `journalctl -u hal0-slot@<name>`) instead of a bare read-timeout
-  error, and gained a `--json` flag — instead of blocking silently for up to
+  summary line otherwise) and print a timeout remedy instead of a bare
+  read-timeout error (`hal0 slot logs <name>` / `journalctl -u
+  hal0-slot@<name>` for the slot verbs; `hal0 slot list` / `journalctl -u
+  'hal0-slot@*'` for `--restart-slots`); the slot verbs also gained a
+  `--json` flag — instead of blocking silently for up to
   ~40 minutes with no output (#1870). (#1869, #1870)
 - `scripts/deploy.sh` now verifies the *served* build before printing
   success, instead of trusting `git rev-parse HEAD` against the checkout's
   files alone. `/api/status` gained a `build_sha` field — the short git SHA
-  of the tree the running process actually imports `hal0` from
+  of the tree the running process actually imports `hal0` from, or `null` on
+  a normal release install with no `.git`
   (`hal0.build_info.build_sha`, cached once at process start so it reflects
   what was true when the worker booted, not a live re-read) — and the
   deploy script's health-check step now polls it after the service restart,
@@ -294,25 +315,26 @@ applying. Add those subsections to a version's section to surface them; see
   `rocm-smi`.** A missing or stale `/etc/hal0/hardware.json` used to make a
   real GPU box book resident slot memory as `ram_mb` instead of `vram_mb`
   (`hal0.slots.capacity._host_has_capable_gpu` trusted the cache blindly);
-  it now falls back to a live re-probe when the cache is missing, predates
-  the running kernel, or was written in a previous boot cycle
-  (`hal0.hardware.freshness`), surfaced as `hal0 doctor`'s new
-  `hardware_freshness` row (#1862). `derive_device`'s ROCm-lane check
+  it now falls back to a live re-probe when the cache is missing, carries no
+  probe data, was probed under a different kernel than the running one, or
+  was written in a previous boot cycle (`hal0.hardware.freshness`), surfaced
+  as `hal0 doctor all`'s new `hardware_freshness` row (#1862). `derive_device`'s ROCm-lane check
   required `rocm-smi`'s optional CLI to exit 0 in addition to
   `kfd_present()`'s device-node truth, so a fresh LXC with `/dev/kfd`
   correctly forwarded — hal0's own reference deploy shape — seeded every
-  llama.cpp slot onto the slower Vulkan lane; `kfd_present()` alone now
-  decides it, matching the capability picker's GPU/ROCm badge and the
+  llama.cpp slot onto the slower Vulkan lane; `kfd_present()` is now
+  sufficient on its own, matching the capability picker's GPU/ROCm badge and the
   ComfyUI/Qwen3-TTS rows, which had the same gap (#2216, #1966). A new
-  `apply_cpu_fallback()` records *why* a slot's lane fell back to CPU at
+  `apply_cpu_fallback()` logs *why* a slot's lane fell back to CPU at
   seed time (#1936, #1966); the pre-existing load-time refusal for a GPU
   slot with zero devices mapped (`require_kfd_for_gpu_slot`) is now locked
   with a regression test naming the exact #1936 shape. Freshly seeded
   `agent`/`brain`/`coder`/`embed`/`rerank`/`utility` slots now clamp
-  `context_size` to a new single-owner memory-envelope function
+  `context_size` to a new memory-envelope function
   (`hal0.hardware.memory_envelope`, mirroring ODS's `usable_memory_gb`)
-  instead of shipping the reference platform's flat `65536` verbatim, with
-  a `hal0 doctor` finding (`seed_context_envelope`) for a ceiling an
+  instead of shipping the seed files' fixed values verbatim (`65536` for
+  `agent`/`brain`/`utility`, `32768` for `coder`, `4096` for `embed`/`rerank`),
+  with a `hal0 doctor all` finding (`seed_context_envelope`) for a ceiling an
   existing box can no longer afford (#1868).
 - **`GET /api/services/health` (the Overview card's stable feed) now includes
   Hindsight and iterates the same typed service catalog the full Services
@@ -517,19 +539,6 @@ applying. Add those subsections to a version's section to surface them; see
   - `hal0.config.paths.bundle_chosen_marker()` (the `.bundle-chosen`
     bundle-picker marker path) is deleted — the picker stayed deferred and
     nothing ever wired the marker.
-- A deliberate stop of a slot no longer reads as a red `error` in
-  `hal0 slot list` (#2130). `systemctl stop` sends SIGTERM and podman
-  propagates the container's graceful shutdown as exit code 143, which the
-  generated unit — having no `SuccessExitStatus` — recorded as
-  `Failed with result 'exit-code'`; the state probe then painted every slot
-  the documented `migrate-flags --apply --stop-services` path stopped as an
-  error on a healthy mid-upgrade box. The rendered unit now declares
-  `SuccessExitStatus=143`, the systemd probe recognises the plain
-  SIGTERM-stop signature on units that predate the directive, and a cached
-  `error` converges back to `offline` once the unit's own properties show it
-  was stopped on purpose (a clean stop or `systemctl reset-failed`) — while a
-  genuinely crashed or crash-looping unit keeps its error verdict, breaker
-  bookkeeping, and `last_crash_line` evidence untouched.
 
 ### Migrations
 
@@ -569,14 +578,17 @@ applying. Add those subsections to a version's section to surface them; see
   count moves to `tools_count`. 1.3.0 still reads a 1.2.0 record, but the
   reverse does not hold: a record rewritten by 1.3.0 fails validation on
   1.2.0, where the server disappears from `hal0 mcp list` and a direct read
-  answers `400 mcp.record_malformed`. Records are only rewritten when one of
-  the new `hal0 mcp` verbs is used, never automatically on load, so a box that
-  upgrades and rolls back without touching MCP is unaffected.
+  answers `400 mcp.record_malformed`. Any MCP write under 1.3.0 rewrites the
+  record — installing a server, changing its config or enabled state, its
+  tool policy or its exposure (`hal0 mcp test` only reads) — but nothing is
+  rewritten automatically on load, so a box that upgrades and rolls back
+  without changing its MCP servers is unaffected.
 - **Hermes needs reprovisioning before it can drive the new OAuth flow.** The
   agent-facing half of the feature lives in the persona file, which only the
   provisioning pipeline writes — `hal0 update` never invokes it. On an
   already-provisioned box, run `hal0 agent reprovision hermes` so the agent
-  knows the connect-poll-confirm sequence. Every shipped provider also ships
+  knows the connect-poll-confirm sequence; the persona drives `hal0 oauth`
+  through the agent's terminal tool, so that tool must be enabled. Every shipped provider also ships
   an empty `client_id`, so each provider needs its own app credentials
   configured before a connection can be made at all.
 
