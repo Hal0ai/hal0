@@ -196,7 +196,8 @@ routing, and TTS slot into one live session — the same three pieces the dashbo
 model backs STT/TTS is controlled by `[realtime].stt_model` / `[realtime].tts_model`
 (default `tts_model` is `"kokoro"`; an empty `stt_model` falls back to the session's
 chat model) — configuration reference for the full `[realtime]` table lives on
-[Config schema](/docs/reference/config-schema/).
+[Config schema](/docs/reference/config-schema/). The same keys are editable from
+Settings → Integrations → Realtime.
 
 <Aside type="note">
 Everything on this page was verified directly against `src/hal0/realtime/session.py`,

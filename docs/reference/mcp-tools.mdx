@@ -29,7 +29,10 @@ Return shape for every admin tool is `dict[str, Any]`:
   response as `{"<key>": [...], "count": N}` (`_LIST_TOOL_WRAP_KEY` in source is the
   authoritative list).
 - **pending approval (gated)**: `{"status": "pending_approval", "approval_id": "...", "detail": "..."}`.
-- **error**: `{"status": "error", "error": {"code": ..., ...}}`.
+- **error**: `{"status": "error", "error": {"code": ..., ...}}` — only this full envelope
+  (an `error` dict with a string `code`) is reported as `isError: true`. A successful
+  read of a slot whose own lifecycle `status` is `"error"` returns normally with its
+  payload.
 
 Tools fall into three gating tiers. Treat the frozensets in source
 (`AUTONOMOUS_READ_TOOLS`, `AUTONOMOUS_WRITE_TOOLS`, `GATED_TOOLS`) as ground truth if
@@ -247,7 +250,7 @@ same verdict, belt and braces).
 | `memory_directive_list` | none | a bank's directives (standing instructions injected into prompts) |
 | `memory_directive_get` | `id` | one directive |
 | `memory_operation_list` | none | async operations (retain, consolidation, refresh, ...) |
-| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate`. A completed retain reports its extraction yield: `facts_extracted`, plus `nothing_learned` and a `notice` when zero facts made it into memory |
+| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate`. A completed retain reports its extraction yield: `facts_extracted`, plus `nothing_learned` and a `notice` when zero facts made it into memory. A zero-yield retain of an already-extracted document instead carries `document_fact_count` and a "content was already known" `notice` |
 | `memory_tags_list` | none | tags in use in a bank, with usage counts |
 | `memory_bank_stats` | none | node/link/observation/operation counts for a bank |
 
@@ -297,20 +300,28 @@ protocol surface above. Tool invocation only happens over the actual MCP protoco
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| GET | `/api/mcp/servers` | — | `{servers: [...], count}` — bundled servers introspected live via `list_tools()`/`list_resources()`/`list_prompts()`; installed non-bundled servers come from the registry with `state="stopped"` (no supervisor yet). |
+| GET | `/api/mcp/servers` | — | `{servers: [...], count}` — bundled servers introspected live via `list_tools()`/`list_resources()`/`list_prompts()`; installed servers come from the registry; `state` is a 1.5 s TCP connect to the record's `url` for `streamable-http`/`sse` (`reachable`, `unreachable`, or `disabled` when reachable but `enabled = false`) and always `stopped` for `stdio`. |
 | GET | `/api/mcp/clients` | — | `{clients: [{id, name, role, host, since, connected_to}], count}` — derived from the audit log. |
 | GET | `/api/mcp/catalog` | — | `{items: [...], categories}` — static installable-MCP catalog (puppeteer, sqlite, gdrive, slack, ...). |
 | GET | `/api/mcp/stream` | — | SSE stream of `mcp.tool.*` events (audit-log tail, polled every 2s). |
 | GET | `/api/mcp/{server_id}/logs` | query `limit` (1-500, default 100) | `{server, events: [...], count}`. |
 | GET | `/api/mcp/resolve` | query `url` (1-2048 chars) | A `ResolvedManifest`: `{id, name, description, spec, transport, tools, resources, prompts, env_required, source_kind, source_url?, author, verified}`. Supports `oci://`, `npm:`/`npx:`, `uvx:`/`uv:`, `git+https://`, and generic `https://.../manifest.json` specs, with an SSRF guard blocking loopback/private/link-local/CGNAT targets. |
-| POST | `/api/mcp/install` | `{"url": "..."}` or `{"manifest": {...}}` | 201 `{installed: <InstalledServer>}`; 409 on a bundled-id collision or already-installed. |
-| DELETE | `/api/mcp/{server_id}` | — | `{uninstalled: server_id}`; 409 `mcp.bundled` if `server_id` is a bundled server. |
-| PATCH | `/api/mcp/{server_id}/config` | `{"env"?: {str: str}, "enabled"?: bool}` | `{server: <InstalledServer>}`; 409 if bundled. |
+| POST | `/api/mcp/install` | `{"url": "..."}` or `{"manifest": {...}}` | 201 `{installed: <InstalledServer>, hermes_sync}`; 409 on a bundled-id collision or already-installed. |
+| DELETE | `/api/mcp/{server_id}` | — | `{uninstalled: server_id, hermes_sync}`; 409 `mcp.bundled` if `server_id` is a bundled server. |
+| PATCH | `/api/mcp/{server_id}/config` | `{"env"?: {str: str}, "enabled"?: bool}` | `{server: <InstalledServer>}`, plus `hermes_sync` when the body set `enabled`; 409 if bundled. |
+| POST | `/api/mcp/{server_id}/test` | — | `{server_id, probe, verdicts}` — MCP `tools/list` handshake against the record's own `url`, each tool classified against the Hermes seed (`unknown_server` when the server isn't exposed or no seed exists). 404 `mcp.not_found`; 501 `mcp.supervisor_unavailable` for `stdio`. |
+| PATCH | `/api/mcp/{server_id}/tools` | `{"allow": [...], "gated": [...], "blocked": [...]}` (replaces the whole policy) | `{server, hermes_sync}`; 400 `mcp.tools_invalid` (e.g. a tool on two lists); 409 `mcp.bundled`. |
+| PATCH | `/api/mcp/{server_id}/exposure` | any of `{"hermes", "brain", "openwebui", "opencode"}: bool` (merged into the current flags) | `{server, hermes_sync}`; 501 `mcp.exposure_unsupported` for `openwebui`/`opencode` set `true`; 409 `mcp.exposure_needs_supervisor` for `hermes`/`brain` on a `stdio` record; 400 `mcp.exposure_invalid`; 409 `mcp.bundled`. |
 | POST | `/api/mcp/{server_id}/{action}` | — | **501 stub** (`McpNotImplemented`, code `mcp.supervisor_unavailable`) — start/stop/restart are not implemented yet. |
 
-`InstalledServer` fields (as used, not fully enumerated in this pass): `id, name,
-description, spec, transport, tools, resources, prompts, env, enabled, source_url,
-author, verified, installed_at`.
+`hermes_sync` is the join report `{hermes, brain, errors, probe}`; the join never fails
+the request — failures land in `errors`.
+
+`InstalledServer` fields: `id, name, description, spec, transport, command, args, url,
+tools, resources, prompts, env, secrets, tool_policy, exposure, enabled, source_url,
+author, verified, installed_at`. On disk (`/etc/hal0/mcp-servers/<id>.toml`),
+`tool_policy` is serialised as the `[tools]` table and the integer `tools` count as
+`tools_count`.
 
 ## hal0 as an MCP client
 

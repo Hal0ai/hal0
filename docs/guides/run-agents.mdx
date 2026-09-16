@@ -222,6 +222,78 @@ running Hermes to hot-reload; if Hermes isn't running, the next restart
 picks up the new active persona. To author your own, copy `personas show`
 output, change the persona id, and save it under the persona store.
 
+## Connect accounts for OAuth skills
+
+Skills that act on a third-party account — Google Workspace, Spotify, GitHub —
+need an OAuth grant. hal0 runs the consent flow itself: you open a consent
+link, the provider redirects back to hal0-api, and hal0 exchanges the code for
+a token server-side, using PKCE where the provider supports it. Nobody copies
+an authorization code, and the agent never sees a client secret.
+
+<Steps>
+
+1. Register an OAuth app in the provider's developer console with this
+   redirect URI:
+
+   ```
+   <base>/api/oauth/<provider>/callback
+   ```
+
+   `<base>` is `HAL0_DASHBOARD_URL`, else `HAL0_API_URL`, else
+   `http://hal0.local:8080`, read from hal0-api's environment — never from the
+   request's `Host` header. It must be reachable from your browser and match
+   the console entry exactly.
+
+2. Put the app's client ID in `/etc/hal0/oauth-providers.toml`. hal0 seeds this
+   file from its shipped defaults (`google`, `spotify`, `github`) the first
+   time the registry is read and never overwrites it afterwards. Every shipped
+   entry has an empty `client_id`. Add your own `[[providers]]` entry the same
+   way.
+
+3. If the provider needs a client secret (`google` and `github` do; `spotify`
+   is PKCE-only), store it — you are prompted for the value:
+
+   ```sh
+   hal0 oauth set-client-secret google
+   ```
+
+4. Connect, then poll until the account reports connected:
+
+   ```sh
+   hal0 oauth list               # configured, connected, expiry per provider
+   hal0 oauth connect google     # prints the consent URL
+   hal0 oauth status google
+   ```
+
+   A consent link is single-use, expires after 10 minutes, and does not
+   survive a `hal0-api` restart — run `connect` again if it goes stale.
+
+5. Restart the agent so it loads the token:
+   `sudo systemctl restart hal0-agent@hermes`.
+
+</Steps>
+
+<Aside type="caution">
+With `require_auth` on — or on a LAN-bound box with an admin key configured —
+the callback currently answers `401 auth.required` unless the browser already
+holds a dashboard session. Sign in to the dashboard in the same browser before
+opening the consent link (tracked in #2266).
+</Aside>
+
+Tokens and client secrets are stored in `/etc/hal0/api.env` as
+`HAL0_OAUTH_<PROVIDER>_TOKEN` and `HAL0_OAUTH_<PROVIDER>_CLIENT_SECRET` — never
+in the TOML registry, never returned by an endpoint. hal0 does not refresh
+tokens: when `hal0 oauth status` reports the token expired, connect again.
+`hal0 oauth disconnect <provider>` asks the provider to revoke the token where
+the registry names a `revoke_url`, and deletes hal0's copy even if that call
+fails.
+
+A Hermes provisioned on 1.3.0 or later has a persona section describing this
+flow — send the consent link, poll `status`, confirm — which it runs through
+`hal0 oauth` shell commands, so it needs the terminal tool (see above); with
+the tool off, run the steps yourself. On a box provisioned before 1.3.0, run
+`hal0 agent reprovision hermes` first.
+
 ## The approvals queue
 
 Destructive or gated tool calls don't execute immediately — they land in

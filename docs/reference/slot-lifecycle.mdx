@@ -22,7 +22,7 @@ the dashboard SSE stream, and the `state.json` persistence layer.
 | `SERVING` | An inference request is actively in-flight on this slot. |
 | `IDLE` | Reached two ways, both render identically on the wire: `warming → idle` (process up but `/v1/models` is empty — launched with `--model ""` or a missing file; routers must not treat this as ready), or `ready → idle` (no request for longer than the idle timeout — eviction candidate). |
 | `UNLOADING` | Graceful shutdown in progress. systemd stop issued; waiting for the container to exit. |
-| `ERROR` | Failed. Details in `state.json` and journald. |
+| `ERROR` | Failed. Details in `state.json` and journald. A deliberate stop is not a failure: rendered units declare `SuccessExitStatus=143`, a plain SIGTERM stop on an older unit is recognised, and a cached `ERROR` converges to `OFFLINE` once the unit shows a clean stop or `systemctl reset-failed`. A crashed or crash-looping unit keeps its `ERROR`. |
 
 ```
 offline → pulling → starting → warming → ready ←──┐
@@ -83,6 +83,7 @@ Each is an HTTP-status-bearing error under the `slot.*` namespace:
 | `SlotOutputSanityFailed` | 500 | The server is healthy but its output is not language — see Output-sanity gate below. |
 | `SlotCrashLooping` | 503 | Reload blocked during exponential backoff, or after too many consecutive failures — see Crash-loop breaker below. Carries `retry_after_s`. |
 | `SlotTerminateTimeout` | 504 | Stop didn't return in time — the request unblocks anyway. |
+| `SeamTimeout` (`slot.seam_timeout`) | 504 | A bounded `systemctl`/podman seam call (Quadlet write, `daemon-reload`, `reset-failed`, the spawning `systemctl restart`) did not return within its budget. `details` carries `command`, `budget_s` and `last_state`; the slot lands in `ERROR` with the same message. |
 | `SlotConfigError` | 400 | — |
 | `NpuExclusivityViolation` | 409 | Only one `device=npu, type=llm` slot with a bound model is allowed at a time (AMD XDNA hardware context limit). |
 | `SlotPinned` | 409 | A pinned slot needs `?force=true` to unload or delete. |

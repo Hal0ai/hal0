@@ -117,6 +117,16 @@ slots, hot-reloadable with no `hal0-api` restart), `default_size`
 dashboard's Settings → Image-gen panel or edit the slot's TOML directly —
 see [Edit configuration](/docs/guides/configure).
 
+### Which container image the `img` slot runs
+
+The `img` slot resolves its image in this order: `image_pin` (top-level or
+`[slot]`-nested, honored verbatim), then a legacy string `image` key, then the
+`comfyui` runner's resolved image (`HAL0_TOOLBOX_IMAGE_COMFYUI`, then the
+release manifest digest pin, then the bundled tag). Before 1.3.0 the pin was
+ignored for this slot. `hal0 slot migrate-flags` folds an old `image` value
+into `image_pin`, so clear `image_pin` in `/etc/hal0/slots/img.toml` if you
+want the resolved default.
+
 ## Generate an image
 
 ```sh

@@ -288,8 +288,8 @@ Two endpoints report health, for different consumers:
   when `unit_state.active_state` is `"failed"`, grey **down** for any other
   managed service, and a plain grey **—** for an unmanaged one
   (`ui/src/dash/services.jsx:67`).
-- `GET /api/services/health` — an older, stable three-service summary
-  (OpenWebUI, ComfyUI, Hermes only — no Hindsight) that feeds the Overview
+- `GET /api/services/health` — a stable summary over the same service
+  catalog (OpenWebUI, ComfyUI, Hermes, Hindsight) that feeds the Overview
   page's Services widget. It collapses the same probes into
   `state: "up" | "stopped" | "down"`, splitting "not up" into a deliberate
   `stopped` (unit `inactive` — comes back on demand) from `down` (unit
@@ -302,8 +302,10 @@ queued" job count); Hermes and Hindsight both fall back to systemd
 `active_state == "active"`. Every probe is fail-soft by design — a probe or
 systemd failure degrades to `up=false` with an honest detail, never a
 fabricated "up" and never a 500. A service with no wired probe would report
-`detail: "unmonitored"`, though none of the four registered services hits
-that path today.
+`up: false, state: "down", detail: "unmonitored"`, though none of the four
+registered services hits that path today. The summary's probes run
+concurrently, so one hung or raising probe reports its own row as `down`
+without dropping the rest.
 
 ### mDNS discovery toggle
 

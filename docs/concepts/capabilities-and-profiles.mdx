@@ -40,6 +40,13 @@ the model or device swaps it. On first boot, hal0 seeds `capabilities.toml`
 from whatever the slots already declare, so the overlay reflects reality
 immediately.
 
+An apply that enables a child (`enabled: true`) whose selected model has no
+weights on disk is refused with `409 capability.model_not_downloaded` before
+anything is written or started. When the model is pullable, the error
+`details` carry a `pull_endpoint` (`/api/models/{id}/pull`). Pull first, then
+apply — or stage the choice with `enabled: false`, which is still accepted.
+Selections on the `npu` backend are exempt.
+
 <Aside type="note">
 The capability layer is a convenience, not a separate runtime. Underneath, every
 capability resolves to an ordinary [slot](/docs/concepts/slots) that the

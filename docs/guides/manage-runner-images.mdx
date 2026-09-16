@@ -80,6 +80,11 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
    override or a release manifest digest pin, in that order.
 </Steps>
 
+The `img` (ComfyUI) slot resolves through its own provider instead —
+`image_pin`, then a legacy `image` string, then the `comfyui` runner image —
+and has no `[slots].default_images` tier. See
+[Generate images](/docs/guides/generate-images).
+
 ## The Runner Images page
 
 Open **Slots → Runner Images**. The list is every catalogued image; the

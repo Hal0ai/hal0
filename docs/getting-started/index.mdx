@@ -106,11 +106,12 @@ backend selection degrades to CPU rather than refusing to run.
   />
 </CardGrid>
 
-<Aside type="caution" title="No built-in auth or TLS">
-`hal0-api` binds `0.0.0.0:8080` and treats every request as authenticated
-by network reachability — the right posture for a trusted LAN appliance.
-If hal0 is reachable from anywhere you do not control, front it with a
-reverse proxy that owns auth and TLS.
+<Aside type="caution" title="Open on the LAN by default, no TLS">
+`hal0-api` binds `0.0.0.0:8080` and, until you configure an admin key,
+treats every request as authenticated by network reachability — the right
+posture for a trusted LAN appliance. hal0's own auth is opt-in (see
+[Authentication](/docs/operate/auth/)). If hal0 is reachable from anywhere you
+do not control, front it with a reverse proxy that owns TLS.
 </Aside>
 
 ## Sections

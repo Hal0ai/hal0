@@ -199,10 +199,8 @@ Two concepts sit alongside plain facts:
     A standing question ("what does the operator prefer for X") whose
     answer is kept refreshed from memory rather than re-derived on every
     ask. Created with a `name` and `source_query`; the first answer builds
-    as an async operation, and later refreshes are triggered manually or
-    (per the dashboard's Add-model form) on a schedule — though only the
-    manual `memory_mental_model_refresh` trigger is actually wired to the
-    backend today; a mental model can be marked `is_stale`, surfaced in the
+    as an async operation, and later refreshes are triggered manually with
+    `memory_mental_model_refresh`; a mental model can be marked `is_stale`, surfaced in the
     dashboard as a warning badge.
   </Card>
 </CardGrid>
