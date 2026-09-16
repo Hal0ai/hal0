@@ -27,7 +27,7 @@ def test_shape_and_class_completeness(client: TestClient) -> None:
     for rule in body["rules"]:
         assert set(rule) == {"label", "auth_class", "methods", "pattern", "kind"}
         assert rule["auth_class"] in body["classes"]
-        assert rule["kind"] in ("exact", "prefix", "catchall")
+        assert rule["kind"] in ("exact", "prefix", "template", "catchall")
 
 
 def test_open_allowlist_matches_the_live_table(client: TestClient) -> None:
@@ -50,3 +50,13 @@ def test_this_route_itself_is_admin_and_present_in_the_table(client: TestClient)
 
 def test_exposure_classified_admin_get() -> None:
     assert classify("GET", "/api/auth/exposure") is AuthClass.ADMIN
+
+
+def test_oauth_callback_rule_is_served_as_a_template(client: TestClient) -> None:
+    """#2266: the callback carve-out is a template rule, and the table says so."""
+    body = client.get("/api/auth/exposure").json()
+    matches = [r for r in body["rules"] if r["pattern"] == "/api/oauth/{provider_id}/callback"]
+    assert len(matches) == 1
+    assert matches[0]["kind"] == "template"
+    assert matches[0]["auth_class"] == "open"
+    assert matches[0]["methods"] == ["GET", "HEAD"]

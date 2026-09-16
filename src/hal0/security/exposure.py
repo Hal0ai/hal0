@@ -61,6 +61,7 @@ already resolves to the admin tier. The three docstrings now say this.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -89,6 +90,65 @@ def _exact(path: str) -> Matcher:
     # never consulted by match()/applies() itself.
     _match.pattern = path  # type: ignore[attr-defined]
     _match.kind = "exact"  # type: ignore[attr-defined]
+    return _match
+
+
+_TEMPLATE_PARAM_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+def _template(template: str) -> Matcher:
+    """Match a FastAPI-style path template, one segment per ``{param}``.
+
+    ``_template("/api/oauth/{provider_id}/callback")`` matches
+    ``/api/oauth/google/callback`` (and the literal template itself, which
+    is how the exposure-CI ratchet enumerates routes). Deliberately narrow,
+    because every rule built on it has so far been an OPEN carve-out:
+
+    - each ``{param}`` matches exactly ONE non-empty path segment -- never a
+      ``/``, never an empty segment (``/api/oauth//callback``), never a
+      dot segment (``.`` / ``..``);
+    - literal segments compare exactly;
+    - the segment count must be identical, so there are no sub-path
+      (``.../callback/extra``) or trailing-slash (``.../callback/``)
+      variants. The latter only holds because :func:`match_rule` hands this
+      matcher the raw, un-normalized path (``raw_path`` below) instead of
+      the trailing-slash-stripped one the other matchers see.
+
+    Only whole-segment ``{name}`` params are accepted; converter syntax
+    (``{x:path}``) or a param embedded in a literal (``v{n}``) raises at
+    import time instead of silently widening the match.
+    """
+    if not template.startswith("/"):
+        raise ValueError(f"template must be absolute: {template!r}")
+    parts = template.split("/")[1:]
+    params: list[bool] = []
+    for part in parts:
+        if _TEMPLATE_PARAM_RE.match(part):
+            params.append(True)
+        elif "{" in part or "}" in part or part == "":
+            raise ValueError(f"unsupported template segment {part!r} in {template!r}")
+        else:
+            params.append(False)
+
+    def _match(candidate: str) -> bool:
+        if not candidate.startswith("/"):
+            return False
+        segments = candidate.split("/")[1:]
+        if len(segments) != len(parts):
+            return False
+        for segment, part, is_param in zip(segments, parts, params, strict=True):
+            if is_param:
+                if segment in ("", ".", ".."):
+                    return False
+            elif segment != part:
+                return False
+        return True
+
+    _match.pattern = template  # type: ignore[attr-defined]
+    _match.kind = "template"  # type: ignore[attr-defined]
+    # Tells match_rule() to pass the raw request path, not the
+    # trailing-slash-normalized one (see docstring).
+    _match.raw_path = True  # type: ignore[attr-defined]
     return _match
 
 
@@ -286,10 +346,13 @@ RULES: tuple[_Rule, ...] = (
     # BEFORE the ADMIN catch-all below so it isn't swallowed by the prefix
     # rule. Every other /api/oauth/* route (start/status/disconnect/registry
     # edits) is ADMIN — same posture as /api/providers and /api/secrets,
-    # which this feature composes.
+    # which this feature composes. `_template`, not `_exact`: the middleware
+    # classifies the concrete request path (/api/oauth/google/callback), so a
+    # literal compare against the `{provider_id}` placeholder never matched a
+    # real redirect and it fell through to the ADMIN prefix below (#2266).
     _Rule(
         "oauth callback (public redirect target)",
-        _exact("/api/oauth/{provider_id}/callback"),
+        _template("/api/oauth/{provider_id}/callback"),
         AuthClass.OPEN,
         _GET,
     ),
@@ -353,7 +416,8 @@ def match_rule(method: str, path: str) -> _Rule | None:
     """
     normalized = path if path == "/" else path.rstrip("/") or "/"
     for rule in RULES:
-        if rule.applies(method, normalized):
+        candidate = path if getattr(rule.match, "raw_path", False) else normalized
+        if rule.applies(method, candidate):
             return rule
     return None
 
