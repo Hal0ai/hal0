@@ -616,6 +616,50 @@ def test_posture_gate_admin_session_reaches_admin_route_from_lan_peer(
     assert resp.status_code not in (401, 403), resp.text
 
 
+def test_oauth_callback_not_gated_by_lan_admin_gate(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2266: a provider redirect from an off-box browser with no hal0 session
+    must reach the callback handler (which then enforces the state nonce),
+    while its ADMIN siblings stay gated."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        resp = c.get("/api/oauth/google/callback", params={"code": "c", "state": "never-issued"})
+        # Reached the route: the handler's own bad-state page, not auth.required.
+        assert resp.status_code == 400, resp.text
+        assert "not recognized" in resp.text
+
+        assert c.get("/api/oauth/google/status").status_code == 401
+        assert c.get("/api/oauth/google/callback/extra").status_code == 401
+        assert c.get("/api/oauth/a/b/callback").status_code == 401
+
+
+def test_oauth_callback_not_gated_when_require_auth_on(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2266 with full enforcement on: the callback is OPEN, everything else
+    under /api/oauth still answers 401 without credentials."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "true")
+    auth_mod._require_auth_cache = None
+    app = auth_app_factory()
+    with TestClient(app) as c:
+        resp = c.get("/api/oauth/google/callback", params={"code": "c", "state": "never-issued"})
+        assert resp.status_code == 400, resp.text
+        assert "not recognized" in resp.text
+
+        assert c.get("/api/oauth/google/status").status_code == 401
+        assert c.get("/api/oauth/providers").status_code == 401
+        assert c.post("/api/oauth/google/callback").status_code == 401
+    auth_mod._require_auth_cache = None
+
+
 def test_posture_gate_covers_approvals_route(
     auth_app_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

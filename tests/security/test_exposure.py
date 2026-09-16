@@ -243,6 +243,84 @@ def test_oauth_callback_is_open_but_nothing_else_under_oauth_is() -> None:
     assert classify("POST", "/api/oauth/{provider_id}/callback") is AuthClass.ADMIN
 
 
+@pytest.mark.parametrize("provider_id", ["google", "spotify", "my-provider_2", "g.co"])
+def test_concrete_oauth_callback_paths_are_open(provider_id: str) -> None:
+    """#2266: the middleware classifies the REAL request path, not the template.
+
+    The rule used to be ``_exact("/api/oauth/{provider_id}/callback")`` -- a
+    literal compare that only the placeholder path itself ever matched, so a
+    provider's redirect to ``/api/oauth/google/callback`` fell through to the
+    ADMIN ``/api/oauth`` prefix rule and was 401'd under enforcement.
+    """
+    path = f"/api/oauth/{provider_id}/callback"
+    assert classify("GET", path) is AuthClass.OPEN
+    assert classify("HEAD", path) is AuthClass.OPEN
+    for method in ("POST", "PUT", "DELETE", "PATCH"):
+        assert classify(method, path) is not AuthClass.OPEN, f"{method} {path}"
+        assert classify(method, path) is AuthClass.ADMIN, f"{method} {path}"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/oauth",
+        "/api/oauth/providers",
+        "/api/oauth/google",
+        "/api/oauth/google/start",
+        "/api/oauth/google/status",
+        "/api/oauth/google/client-secret",
+        "/api/oauth/callback",
+        "/api/oauth/google/callback/extra",
+        "/api/oauth//callback",
+        "/api/oauth/a/b/callback",
+        "/api/oauth/../callback",
+        "/api/oauth/./callback",
+        "/api/oauth/google/callback/",
+        "/api/oauth/google/callback//",
+        "/api/oauth/google/callbackx",
+        "/api/oauth/google/callback.json",
+        "/api/oauthx/google/callback",
+        "/api/oauth/google/../google/callback",
+    ],
+)
+def test_near_miss_oauth_paths_are_not_open(path: str) -> None:
+    """Only exactly one non-empty, non-dot segment may stand in for the provider id."""
+    assert classify("GET", path) is not AuthClass.OPEN, path
+    if path.startswith("/api/oauth/") or path == "/api/oauth":
+        assert classify("GET", path) is AuthClass.ADMIN, path
+
+
+def test_template_matcher_semantics() -> None:
+    from hal0.security.exposure import _template
+
+    m = _template("/api/x/{a}/y/{b}")
+    assert m.kind == "template"  # type: ignore[attr-defined]
+    assert m.pattern == "/api/x/{a}/y/{b}"  # type: ignore[attr-defined]
+
+    assert m("/api/x/1/y/2")
+    assert m("/api/x/{a}/y/{b}")  # the template itself (route-table identity)
+    assert m("/api/x/a-b_c.d~e/y/%2F")  # any non-empty, non-dot segment
+
+    for miss in [
+        "/api/x/1/y",  # too few segments
+        "/api/x/1/y/2/3",  # sub-path
+        "/api/x/1/y/2/",  # trailing slash
+        "/api/x//y/2",  # empty param
+        "/api/x/1/y/",  # empty trailing param
+        "/api/x/./y/2",
+        "/api/x/../y/2",
+        "/api/x/1/z/2",  # literal mismatch
+        "/api/X/1/y/2",  # literals are case-sensitive
+        "api/x/1/y/2",  # not absolute
+        "",
+    ]:
+        assert not m(miss), miss
+
+    for bad in ["api/x/{a}", "/api/{a:path}", "/api/v{n}", "/api//{a}", "/api/{a}/", "/api/{}"]:
+        with pytest.raises(ValueError):
+            _template(bad)
+
+
 def test_representative_client_routes_are_client() -> None:
     """Spot-check the read-only introspection + inference surface stays CLIENT."""
     client_examples = [
