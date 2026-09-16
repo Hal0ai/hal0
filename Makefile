@@ -13,6 +13,9 @@ HAL0_TEST_SSH_KEY ?= ~/.ssh/id_ed25519
 # shared LXC. Falls back to "local-$$" when not run from CI.
 HAL0_TEST_PREFIX  ?= ci-h-$(if $(GITHUB_RUN_ID),$(GITHUB_RUN_ID),local-$$$$)
 HAL0_TEST_REPORT  ?= tests/release-gate-report.json
+# Remote hal0 CLI path. Empty = the installer's FHS venv binary
+# (/usr/lib/hal0/venv/bin/hal0), else `hal0` on the remote PATH.
+HAL0_TEST_BIN     ?=
 
 help:
 	@echo "hal0 — common dev tasks"
@@ -85,6 +88,7 @@ release-test:
 	HAL0_TEST_SSH_KEY="$(HAL0_TEST_SSH_KEY)" \
 	HAL0_TEST_PREFIX="$(HAL0_TEST_PREFIX)" \
 	HAL0_TEST_REPORT="$(HAL0_TEST_REPORT)" \
+	HAL0_TEST_BIN="$(HAL0_TEST_BIN)" \
 	bash scripts/release-test.sh
 
 release-test-report:
