@@ -185,6 +185,10 @@ make release-test
 # Override host / key:
 make release-test HAL0_TEST_HOST=192.0.2.10 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
 
+# Point at a non-default hal0 CLI on the test host (default: the installer's
+# FHS venv binary /usr/lib/hal0/venv/bin/hal0, else `hal0` on the remote PATH):
+make release-test HAL0_TEST_BIN=/path/to/hal0
+
 # Pretty-print the most recent report:
 make release-test-report
 ```
@@ -200,6 +204,8 @@ The hal0-test LXC is shared with other agents; `make release-test`
 uses a per-run prefix (`ci-h-<job-id>` in CI, `ci-h-local-<pid>` from
 a developer machine) and tears every slot it created down on exit,
 even on failure.
+Pre-flight logs the resolved remote CLI and its `--version`, so the
+run log records which build was exercised.
 
 ### Pre-tag check
 

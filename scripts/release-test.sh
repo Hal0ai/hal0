@@ -17,6 +17,9 @@
 #   HAL0_TEST_SSH_KEY  SSH key  (default ~/.ssh/id_ed25519)
 #   HAL0_TEST_PREFIX   Unique slot prefix for this run (default ci-h-<job>-<pid>)
 #   HAL0_TEST_REPORT   Output JSON path (default tests/release-gate-report.json)
+#   HAL0_TEST_BIN      Remote hal0 CLI path (default: the installer's FHS venv
+#                      binary /usr/lib/hal0/venv/bin/hal0 when executable,
+#                      else `hal0` on the remote PATH)
 #
 # Cross-team notes (PLAN §10.2):
 #   - Team A owns toolbox image presence in manifest.json. Rows that need
@@ -98,10 +101,28 @@ fi
 log_info "ssh to ${HAL0_TEST_USER}@${HAL0_TEST_HOST} OK"
 log_info "run prefix: ${HAL0_TEST_PREFIX}"
 
-# Detect remote hal0 install (assume /opt/hal0 from install.sh or env override).
-REMOTE_HAL0_BIN="$(ssh_exec 'which hal0 2>/dev/null || echo /opt/hal0/.venv/bin/hal0')"
+# Resolve the remote hal0 CLI (#2263). Order: HAL0_TEST_BIN override, then
+# the installer's FHS venv binary — ${HAL0_FHS_ROOT}/venv/bin/hal0
+# (installer/install.sh VENV_DIR / HAL0_BIN), the same binary hal0-api.service
+# ExecStart runs — then whatever `hal0` is on the remote PATH. The venv comes
+# before PATH on purpose: a dangling or drifted PATH link must not silently
+# swap in a different build than the installed release under test.
+HAL0_TEST_BIN="${HAL0_TEST_BIN:-}"
+if [[ -n "${HAL0_TEST_BIN}" ]]; then
+    REMOTE_HAL0_BIN="${HAL0_TEST_BIN}"
+else
+    REMOTE_HAL0_BIN="$(ssh_exec 'for b in /usr/lib/hal0/venv/bin/hal0 "$(command -v hal0 2>/dev/null)"; do [ -n "$b" ] && [ -x "$b" ] && { echo "$b"; exit 0; }; done; echo hal0')"
+fi
 REMOTE_HAL0_API="$(ssh_exec 'echo "${HAL0_API_URL:-http://127.0.0.1:8080}"')"
 log_info "remote hal0 binary: ${REMOTE_HAL0_BIN}"
+# Record which build is under test; a CLI that cannot even print its version
+# would fail every row at its first call, so stop at pre-flight instead.
+if ! REMOTE_HAL0_VERSION="$(ssh_exec "${REMOTE_HAL0_BIN} --version" 2>&1)"; then
+    log_err "remote hal0 CLI not runnable: ${REMOTE_HAL0_BIN} --version failed: ${REMOTE_HAL0_VERSION}"
+    log_err "Set HAL0_TEST_BIN to the hal0 binary on ${HAL0_TEST_HOST}"
+    exit 2
+fi
+log_info "remote hal0 version: ${REMOTE_HAL0_VERSION}"
 log_info "remote hal0 API:    ${REMOTE_HAL0_API}"
 
 # ── manifest gate ────────────────────────────────────────────────────────────
@@ -183,6 +204,10 @@ cleanup() {
 trap cleanup EXIT
 
 # Track + create a unique slot on the LXC.
+# Returns the slot name in the global SLOT rather than on stdout (#2262):
+# a `SLOT="$(remote_slot_create …)"` capture runs the function in a
+# subshell, so its CREATED_SLOTS append never reached the EXIT trap and
+# cleanup() tore down nothing. Call it directly, never inside $(...).
 # Current create contract (slot_commands.py::slot_create): positional NAME,
 # --type (dispatcher slot type), --hardware (vulkan|rocm|cpu), -m/--model
 # (required). Provider + runtime profile are inferred from type/hardware
@@ -191,10 +216,11 @@ trap cleanup EXIT
 remote_slot_create() {
     # remote_slot_create <suffix> <type> <hardware> <model_id>
     local slot="${HAL0_TEST_PREFIX}-$1" type="$2" hardware="$3" model="$4"
+    # Record before creating so a create that half-succeeds is still torn down.
     CREATED_SLOTS+=("${slot}")
+    SLOT="${slot}"
     ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --type ${type} --hardware ${hardware} -m '${model}'" \
         >/dev/null 2>&1 || true
-    echo "${slot}"
 }
 
 # First installed registry model of the given dispatcher type, or empty.
@@ -251,7 +277,7 @@ if [[ -z "${DIGEST}" ]]; then
 elif [[ -z "${MODEL}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
-    SLOT="$(remote_slot_create vulkan llm vulkan "${MODEL}")"
+    remote_slot_create vulkan llm vulkan "${MODEL}"
     # Auth: any /v1 call needs the admin bearer when HAL0_ADMIN_KEY is set;
     # source it from api.env the same way the unit's EnvironmentFile does.
     if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
@@ -282,7 +308,7 @@ elif ! ssh_exec "test -e /dev/kfd"; then
 elif [[ -z "${MODEL}" ]]; then
     add_row "rocm" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
-    SLOT="$(remote_slot_create rocm llm rocm "${MODEL}")"
+    remote_slot_create rocm llm rocm "${MODEL}"
     if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
         add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready on the gpu-rocm backend serving ${MODEL} (readiness includes the #1922 output-sanity probe)"
     else
@@ -329,7 +355,7 @@ elif [[ -z "${MODEL}" ]]; then
 else
     # A transcription+cpu slot infers the moonshine provider + profile
     # (slot_commands.py::slot_create help; install/profile_derive.py).
-    SLOT="$(remote_slot_create moonshine transcription cpu "${MODEL}")"
+    remote_slot_create moonshine transcription cpu "${MODEL}"
     # Generate a 1s 440Hz sine WAV on the remote, post it to
     # /v1/audio/transcriptions. The `model` form field is REQUIRED by the
     # gateway (v1.py::audio_transcriptions, require_model=True) and routes
@@ -376,7 +402,7 @@ else
     # `voice` is optional (the kokoro server falls back to its default
     # voice); response_format must be requested as wav explicitly — the
     # kokoro server's default is mp3, which would fail the RIFF check.
-    SLOT="$(remote_slot_create kokoro tts cpu "${MODEL}")"
+    remote_slot_create kokoro tts cpu "${MODEL}"
     if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
         && ssh_exec '
         set -e
