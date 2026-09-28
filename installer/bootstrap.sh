@@ -92,12 +92,12 @@ _MANIFEST_SIGNER_ISSUER='https://token.actions.githubusercontent.com'
 # opens a review PR on drift; nothing auto-merges.
 # tests/installer/test_bootstrap_cosign_fetch.py pins the shape of these
 # constants so a malformed or half-finished bump fails CI.
-_COSIGN_VERSION='v3.1.2'
+_COSIGN_VERSION='v3.1.3'
 _COSIGN_BASE_URL='https://github.com/sigstore/cosign/releases/download'
 # Digests below are the published sha256 of the official release assets for
 # _COSIGN_VERSION, taken from that release's cosign_checksums.txt.
-_COSIGN_SHA256_LINUX_AMD64='f7622ed3cf22e55e1ae6377c080979ff77a22da9981c11df222a2e444991e7cf'
-_COSIGN_SHA256_LINUX_ARM64='90e7ae0b5dfd60f20816b52c012addf7fc055ebcc7bea4ce81c428ca8518c302'
+_COSIGN_SHA256_LINUX_AMD64='4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71'
+_COSIGN_SHA256_LINUX_ARM64='c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a'
 
 # Resolved exactly once by ensure_cosign(); every cosign invocation goes
 # through it so a fetched binary and a system one are indistinguishable to
