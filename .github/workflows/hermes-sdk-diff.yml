@@ -46,7 +46,7 @@ jobs:
 
     steps:
       - name: Checkout hal0
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6

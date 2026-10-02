@@ -213,12 +213,12 @@ jobs:
 
     steps:
       - name: Checkout hal0 (source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hal0
 
       - name: Checkout Hal0ai/hal0-web (target)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Hal0ai/hal0-web
           token: ${{ secrets.HALO_WEB_MIRROR_TOKEN }}
