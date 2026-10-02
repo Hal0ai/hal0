@@ -17,8 +17,9 @@
 #   The redaction list here is a bash mirror of
 #   src/hal0/api/_redact.py's _SENSITIVE_RE key-name pattern — the two
 #   must be kept in sync by hand (there is no shared source between a
-#   Python regex and a bash one); test_failure_report_redaction.py pins
-#   both against the same fixture set so a drift is caught in CI.
+#   Python regex and a bash one); tests/installer/test_failure_report.py
+#   (test_redaction_matches_the_python_pattern) pins both against the same
+#   fixture set so a drift is caught in CI.
 
 # shellcheck shell=bash
 

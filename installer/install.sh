@@ -148,8 +148,9 @@ MODELS_DIR="${HAL0_MODELS_DIR:-}"
 MODELS_DIR_EXPLICIT=0
 [[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
 # --summary-json=PATH: write a machine-readable install summary (schema
-# hal0.install-summary.v1) at PATH once the install finishes (or fails —
-# see the ERR trap). Empty means "don't write one" (the default).
+# hal0.install-summary.v1) at PATH once the install finishes successfully.
+# A failed install writes the failure report instead (see the ERR trap).
+# Empty means "don't write one" (the default).
 SUMMARY_JSON_PATH=""
 for arg in "$@"; do
     case "$arg" in
@@ -4089,6 +4090,7 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 # explicit finalize) and report the total wall-clock time.
 ui_step_finalize
 info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
+[[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
 
 # ── --summary-json ───────────────────────────────────────────────────────────
 # Versioned, machine-readable install summary (docs/getting-started/install.mdx).
@@ -4107,9 +4109,15 @@ try:
 except Exception:
     print("unknown unknown")
 else:
-    hc = data.get("hardware_class") or {}
-    cid = str(hc.get("id", "unknown")).replace(" ", "_") or "unknown"
-    label = str(hc.get("label", "unknown")).replace(" ", "_") or "unknown"
+    # hardware.json (hal0.config.schema.HardwareInfo) has no "hardware_class"
+    # key: the class id is its top-level "platform" string ('strix-halo',
+    # 'bare-metal-nvidia-gpu', ...) and the label is the primary GPU's name.
+    # The id must stay one token (bash `read` splits on whitespace); the label
+    # is the rest of the line, so it may contain spaces.
+    cid = "_".join(str(data.get("platform") or "unknown").split()) or "unknown"
+    gpus = data.get("gpus") or []
+    gpu_name = gpus[0].get("name") if gpus and isinstance(gpus[0], dict) else ""
+    label = " ".join(str(gpu_name or cid).split()) or "unknown"
     print(f"{cid} {label}")
 PYEOF
         )
@@ -4128,7 +4136,7 @@ PYEOF
         "$(_ui_read_version)" \
         "${DEV_MODE}" "${NO_START}" \
         "${LIB_DIR:-}" "${MODELS_DIR:-}" \
-        "0.0.0.0" "${HAL0_PORT}" "3001" \
+        "${API_BIND_HOST}" "${HAL0_PORT}" "3001" \
         "${_summary_hw_class_id}" "${_summary_hw_class_label}" \
         "${_summary_brain_model:-none}" \
         "${UI_WARN_COUNT:-0}" "${UI_ERR_COUNT:-0}" \
@@ -4148,7 +4156,7 @@ from datetime import datetime, timezone
 ) = sys.argv[1:]
 
 # UI_STEP_DURATIONS (bash assoc array "Title=seconds") is exported as one
-# NUL-joined blob via HAL0_STEP_DURATIONS_BLOB below rather than argv, since
+# RS-joined (0x1e) blob via HAL0_STEP_DURATIONS_BLOB above rather than argv, since
 # step titles contain spaces/parens that don't survive positional argv cleanly.
 steps = {}
 blob = os.environ.get("HAL0_STEP_DURATIONS_BLOB", "")

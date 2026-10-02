@@ -184,7 +184,7 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
   "hal0_version": "1.3.0",
   "install": { "dev_mode": false, "no_start": false, "prefix": "/usr/lib/hal0/hal0-1.3.0", "models_dir": "/var/lib/hal0/models" },
   "network": { "bind_host": "0.0.0.0", "port": 8080, "openwebui_port": 3001 },
-  "hardware_class": { "id": "gfx1151", "label": "AMD Strix Halo" },
+  "hardware_class": { "id": "strix-halo", "label": "AMD Radeon 8060S" },
   "brain_model": "lfm2.5-2.6b",
   "warnings": 1,
   "errors": 0,
@@ -193,7 +193,8 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
 }
 ```
 
-`hardware_class` reads `/etc/hal0/hardware.json` (absent → `"unknown"`/
+`hardware_class` reads `/etc/hal0/hardware.json` — `id` is its `platform`
+value, `label` the primary GPU's name (absent file → `"unknown"`/
 `"unknown"`); `brain_model` is `null` when the brain pull was skipped
 (`HAL0_SKIP_BRAIN_MODEL`/`HAL0_SKIP_SETUP`) or never completed. There is no
 `auth` field — see [Authentication & TLS](#authentication--tls): hal0-api
