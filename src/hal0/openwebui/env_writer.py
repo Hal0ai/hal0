@@ -75,15 +75,25 @@ live-truth resolver that gathers those values from ``capabilities.toml`` and
 the registry is :mod:`hal0.openwebui.wiring` (a separate module precisely so
 *that* import weight — ``hal0.capabilities``, ``hal0.registry``,
 ``hal0.providers.comfyui_workflows`` — never lands on this module's cold
-``python -m`` path). Every dynamic key is explicitly nulled when its gate is
-false, not merely omitted: ``preserve_existing`` keeps whatever a prior write
-left in the file for any key an override doesn't mention, so a capability
-that WAS wired and got unwired (slot deleted, capability disabled) needs an
-explicit ``None`` to actually disappear on the next render — an omitted key
-would survive as a stale claim (ODS's own Apple footgun — a VRAM fallback
-that "assumes zero current usage" and can over-report what fits,
-``ods/extensions/services/dashboard-api/routers/features.py:27-32`` in the
-ODS reference tree — never claim a capability that isn't there).
+``python -m`` path).
+
+Ownership (#2256). hal0 owns a dynamic key only while it has something to
+say about it. Every dynamic key is explicitly nulled when its gate is false,
+not merely omitted — but ``None`` means "hal0 has no claim here", not "delete
+this line". ``preserve_existing`` keeps whatever a prior write left in the
+file for any key an override doesn't mention, so a capability that WAS wired
+and got unwired (slot deleted, capability disabled) needs the ``None`` to
+actually disappear on the next render — an omitted key would survive as a
+stale claim (ODS's own Apple footgun — a VRAM fallback that "assumes zero
+current usage" and can over-report what fits,
+``ods/extensions/services/dashboard-api/routers/features.py:27-32`` in the ODS
+reference tree — never claim a capability that isn't there). But a ``None``
+removes only a key hal0 itself wrote: every claim hal0 renders is recorded on
+a ``# hal0-managed: KEY,KEY`` line in the file header, and a line the operator
+wrote by hand — say a self-hosted SearXNG's ``WEB_SEARCH_ENGINE`` while no
+search provider ships — is not on that list, so the same ``None`` leaves it
+alone. The converse holds too: while hal0 does have a claim (an embed slot is
+bound) it overwrites a hand edit to those keys, and the header says so.
 """
 
 from __future__ import annotations
@@ -91,6 +101,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import textwrap
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -163,9 +175,11 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
 }
 
 
-#: Written at the top of openwebui.env. The generic slot header
+#: Opening lines of the openwebui.env header. The generic slot header
 #: ``write_env_atomic`` defaults to says edits "will be overwritten on next
-#: slot load" — wrong on both counts for this file since #1514.
+#: slot load" — wrong on both counts for this file since #1514. The full
+#: header, including the managed-keys exception and the ``# hal0-managed:``
+#: marker, is built by :func:`_env_header`.
 _ENV_HEADER: tuple[str, str, str] = (
     "# hal0 OpenWebUI environment — written by hal0.openwebui.env_writer",
     "# Hand edits are PRESERVED across install/upgrade runs; hal0 only adds",
@@ -272,6 +286,51 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
     "SEARXNG_QUERY_URL",
     "WEB_SEARCH_RESULT_COUNT",
 )
+
+#: Prefix of the header line recording which keys hal0 itself wrote, as
+#: ``# hal0-managed: KEY,KEY``. It is the only thing that lets a later render
+#: tell a stale hal0 claim (remove it) from a value the operator set by hand
+#: (leave it) — see :func:`write_openwebui_env`.
+_MANAGED_MARKER = "# hal0-managed:"
+
+
+def _env_header(managed: Iterable[str]) -> tuple[str, ...]:
+    """The full header: the preserve promise, its one exception, and the
+    machine-readable ``# hal0-managed:`` line for *managed* keys."""
+    keys = textwrap.wrap(
+        ", ".join(_DYNAMIC_ENV_KEYS),
+        width=74,
+        initial_indent="#   ",
+        subsequent_indent="#   ",
+    )
+    return (
+        *_ENV_HEADER,
+        "#",
+        "# One exception: hal0 wires these keys from live capability state (an",
+        "# embed slot, an img slot, a search provider):",
+        *keys,
+        "# While hal0 has such a backend to point at, it writes them and replaces a",
+        "# hand edit. When the backend goes away it removes only the keys it wrote",
+        "# itself, listed on the next line; a value you set by hand while hal0 has",
+        "# nothing to claim is left alone.",
+        f"{_MANAGED_MARKER} {','.join(sorted(managed))}".rstrip(),
+    )
+
+
+def _read_managed_keys(target: Path) -> set[str]:
+    """Keys the previous render recorded on its ``# hal0-managed:`` line;
+    empty if the file or the line is absent (a file hal0 never claimed
+    anything in — every value in it is the operator's)."""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith(_MANAGED_MARKER):
+            names = line[len(_MANAGED_MARKER) :].split(",")
+            return {name.strip() for name in names if name.strip()}
+    return set()
 
 
 def _rag_env_block(embed_model_id: str) -> dict[str, str]:
@@ -403,8 +462,11 @@ def write_openwebui_env(
                    ``HAL0_HOME``-aware ``/etc/hal0/openwebui.env``.
         overrides: Optional per-key overrides merged on top of the defaults.
                    Useful for non-standard hal0 API ports or custom
-                   ``WEBUI_NAME``.  ``None`` values in *overrides* delete
-                   the corresponding default key.
+                   ``WEBUI_NAME``.  A ``None`` value means "hal0 has no
+                   claim on this key": it deletes the shipped default, and
+                   with *preserve_existing* it also deletes a line hal0
+                   itself wrote earlier (recorded on the ``# hal0-managed:``
+                   header line) — but never a line the operator wrote.
         preserve_existing: Merge instead of replace (#1514).  Every key
                    already in the file keeps its value — including keys hal0
                    does not ship — and only genuinely new defaults are added.
@@ -420,7 +482,8 @@ def write_openwebui_env(
                    Precedence, weakest to strongest: shipped default < value
                    already in the file < explicit ``overrides``. An override is
                    the caller stating intent; a preserved value is merely an
-                   absent one.
+                   absent one. A ``None`` override states no intent about an
+                   operator's own value, so it does not displace it (#2256).
 
     Returns:
         The path that was written, for the caller to log / verify.
@@ -433,16 +496,29 @@ def write_openwebui_env(
     target: Path = Path(path) if path is not None else _default_path()
 
     env_vars = default_openwebui_env()
+    existing: dict[str, str] = {}
+    managed: set[str] = set()
     if preserve_existing:
-        env_vars.update(_read_existing_env(target))
+        existing = _read_existing_env(target)
+        managed = _read_managed_keys(target)
+        env_vars.update(existing)
     if overrides:
         for key, value in overrides.items():
-            if value is None:
-                env_vars.pop(key, None)
-            else:
+            if value is not None:
                 env_vars[key] = value
+                managed.add(key)
+            elif key in managed or key not in existing:
+                # No claim any more: drop what hal0 wrote, or a shipped
+                # default that was never in the file at all.
+                env_vars.pop(key, None)
+                managed.discard(key)
+            # else: the operator's own line — hal0 has nothing to say about
+            # it, so it stays (#2256).
 
-    write_env_atomic(target, env_vars, header=_ENV_HEADER)
+    # Carry the record forward across a render that doesn't mention a key (the
+    # installer's override-less pass), but never list a key that isn't there.
+    managed &= env_vars.keys()
+    write_env_atomic(target, env_vars, header=_env_header(managed))
     return target
 
 

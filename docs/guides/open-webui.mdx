@@ -75,12 +75,14 @@ images](/docs/guides/generate-images) for the underlying capability).
 
 ## Web search
 
-No search provider ships with hal0 today, so `ENABLE_WEB_SEARCH` stays
-off — the toggle in Open WebUI has nothing to query. This is a seam for a
-future extension (e.g. a SearXNG addon), not a missing feature you can
-turn on by hand-editing the env file; a hand-added `SEARXNG_QUERY_URL`
-would be silently overwritten the next time anything re-renders the env
-(see below).
+No search provider ships with hal0 today, so hal0 has nothing to point
+Open WebUI's search at and renders no `ENABLE_WEB_SEARCH`. That is a seam
+for a future extension (e.g. a SearXNG addon), not a switch you are locked
+out of: while no provider exists hal0 leaves the five web-search keys
+(`ENABLE_WEB_SEARCH`, `ENABLE_SEARCH_QUERY_GENERATION`, `WEB_SEARCH_ENGINE`,
+`SEARXNG_QUERY_URL`, `WEB_SEARCH_RESULT_COUNT`) alone, so a self-hosted
+SearXNG you wire up by hand in `/etc/hal0/openwebui.env` survives every
+re-render and never restarts the container on its own (see below).
 
 ## Checking what's actually wired
 
@@ -119,10 +121,17 @@ hand for any of this. It re-renders (and the Open WebUI container restarts
   Services page's Retry button on Open WebUI's version row, or the
   boot-time convergence check.
 
-Hand edits to keys hal0 doesn't manage (or the exposure knobs documented
-in the installer — `HAL0_BIND_HOST`, `HAL0_OWUI_TRUSTED_EMAIL_HEADER`) are
-preserved across every re-render; only the RAG/image-gen/web-search keys
-listed above are hal0-owned and rewritten on every pass.
+Hand edits are preserved across every re-render, with one exception: the
+sixteen RAG / image-generation / web-search keys listed in the file's own
+header. hal0 owns one of those keys only while it has something to point
+Open WebUI at — an enabled `embed` slot, an enabled `img` slot, an installed
+search provider. While it does, it writes the keys and replaces a hand edit
+to them; when that backend goes away it removes only the keys it wrote itself
+(recorded on the `# hal0-managed:` line in the header). A value you set by
+hand while hal0 has nothing to claim for that block — a SearXNG pointed at
+by hand, say — is never touched. The exposure knobs documented in the
+installer (`HAL0_BIND_HOST`, `HAL0_OWUI_TRUSTED_EMAIL_HEADER`) and every
+other key are always preserved.
 
 ## See also
 

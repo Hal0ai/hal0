@@ -3,9 +3,13 @@
 Reads the actually-bound capability state — an embed-capable slot, a
 ComfyUI (img) slot, a search provider — and turns it into the overrides
 :func:`hal0.openwebui.env_writer.write_openwebui_env` merges on top of its
-defaults. :func:`openwebui_wiring_status` is the SAME classifier the
-Services route exposes for the dashboard's wired chips (one classifier on
-the server — the UI never re-derives "is documents/images wired").
+defaults. A block with nothing bound comes back as ``None`` per key, which the
+writer reads as "no claim": it clears only keys hal0 wrote itself, never an
+operator's hand-set value (#2256).
+
+:func:`openwebui_wiring_status` is the SAME classifier the Services route
+exposes for the dashboard's wired chips (one classifier on the server — the UI
+never re-derives "is documents/images wired").
 
 Deliberately a separate module from :mod:`hal0.openwebui.env_writer`: this
 one imports ``hal0.capabilities``, ``hal0.registry`` and
@@ -164,6 +168,14 @@ def _search_provider_lookup() -> dict[str, str] | None:
     "assumes zero current usage" and can over-report what fits,
     ``ods/extensions/services/dashboard-api/routers/features.py:27-32`` in
     the ODS reference tree).
+
+    ``None`` is "hal0 has no claim on the web-search keys", not "delete them":
+    :func:`~hal0.openwebui.env_writer.write_openwebui_env` removes a dynamic
+    key on ``None`` only if hal0 itself wrote it earlier. While no provider
+    exists hal0 has written none, so a hand-set self-hosted SearXNG
+    (``WEB_SEARCH_ENGINE``, ``SEARXNG_QUERY_URL``, …) is left exactly as the
+    operator wrote it and a render that changes nothing else changes no
+    bytes — and so triggers no companion restart (#2256).
     """
     return None
 

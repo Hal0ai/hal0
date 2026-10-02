@@ -234,6 +234,33 @@ def test_reconcile_openwebui_env_restarts_only_when_bytes_change(tmp_path) -> No
     assert _restart_calls(runner) == []
 
 
+def test_reconcile_leaves_operator_search_config_alone_and_does_not_restart(tmp_path) -> None:
+    """#2256: no search provider ships, so the web-search block has nothing to
+    claim. An operator's self-hosted SearXNG stays in the file and — because
+    the render changes no bytes — the companion is not restarted."""
+    from hal0.config.env import write_env_atomic
+    from hal0.openwebui.env_writer import _env_header, default_openwebui_env
+
+    _installed_unit(tmp_path)
+    env_path = tmp_path / "etc" / "hal0" / "openwebui.env"
+    operator = {
+        "ENABLE_WEB_SEARCH": "True",
+        "WEB_SEARCH_ENGINE": "searxng",
+        "SEARXNG_QUERY_URL": "http://searx.lan:8080/search?q=<query>",
+    }
+    write_env_atomic(env_path, {**default_openwebui_env(), **operator}, header=_env_header(set()))
+    runner = _ok_runner()
+
+    res = openwebui_arm.reconcile_openwebui_env(runner=runner, is_hal0_user=lambda: False)
+
+    assert res["status"] == "unchanged"
+    assert res["env_changed"] is False
+    assert _restart_calls(runner) == []
+    text = env_path.read_text(encoding="utf-8")
+    for key, value in operator.items():
+        assert f"{key}={value}" in text
+
+
 def test_reconcile_openwebui_env_resolver_failure_is_fail_soft(tmp_path) -> None:
     _installed_unit(tmp_path)
     runner = _ok_runner()
