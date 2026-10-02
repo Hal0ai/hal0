@@ -65,6 +65,58 @@ function uptimeFrom(since) {
   return `up ${Math.round(s / 86400)}d`
 }
 
+// ── OpenWebUI wired chips (RAG/image-gen/web-search full wiring) ─────────────
+// Data comes straight off svc.wired (GET /api/services), which is the SAME
+// classifier hal0.openwebui.wiring renders openwebui.env from — one
+// classifier on the server, never re-derived here. Hint copy is
+// consequence-first per the dashboard's drawer language.
+const _WIRED_CHIPS = [
+  { key: 'chat', label: 'Chat' },
+  { key: 'voice', label: 'Voice' },
+  { key: 'documents', label: 'Documents' },
+  { key: 'images', label: 'Images' },
+  { key: 'web_search', label: 'Web search' },
+]
+
+function _wiredHint(key, on, wired) {
+  switch (key) {
+    case 'chat':
+      return 'Chat in Open WebUI routes through hal0\'s own /v1 — the default llama.cpp-compatible endpoint.'
+    case 'voice':
+      return 'Call mode\'s mic capture and playback route through hal0\'s STT and TTS endpoints.'
+    case 'documents':
+      return on
+        ? `Uploads in Open WebUI are embedded by slot "${wired.embed_model}".`
+        : 'No embed-capable slot is bound — document uploads will fail until one is (Capabilities → embed).'
+    case 'images':
+      return on
+        ? `The image button generates through slot "${wired.image_model}" via ComfyUI.`
+        : 'No ComfyUI slot is bound — the image button has nothing to generate against (Capabilities → img).'
+    case 'web_search':
+      return 'No search provider is installed — the web-search toggle in Open WebUI has nothing to query.'
+    default:
+      return ''
+  }
+}
+
+function WiredChips({ wired }) {
+  if (!wired) return null
+  return (
+    <div className="svcp-wired" data-testid="svcp-wired-openwebui">
+      {_WIRED_CHIPS.map(({ key, label }) => {
+        const on = !!wired[key]
+        return (
+          <span key={key} className={'svcp-wired-chip' + (on ? ' on' : ' off')} data-testid={`svcp-wired-${key}`}>
+            <span className={'sdot ' + (on ? 'serving' : 'offline')} style={{ width: 6, height: 6 }} />
+            {label}
+            <FieldInfoIcon description={_wiredHint(key, on, wired)} />
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 function StatePill({ svc }) {
   const cls = svc.up ? 'serving' : (svc.unit_state?.active_state === 'failed' ? 'error' : 'offline')
   const label = svc.up ? 'up' : (svc.unit_state?.active_state === 'failed' ? 'failed' : (svc.managed ? 'down' : '—'))
@@ -234,6 +286,7 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, compone
 
       <div className="svcp-desc">{svc.description}</div>
       <div className="svcp-detail">{svc.detail}{svc.stat ? ` · ${svc.stat.value} ${svc.stat.label}` : ''}</div>
+      {svc.wired && <WiredChips wired={svc.wired} />}
       {component && <ComponentVersionLine component={component} />}
 
       <div className="svcp-meta mono">
