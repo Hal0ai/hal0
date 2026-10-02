@@ -14,6 +14,7 @@
 // Window-global: Object.assign(window, {ServicesCard})
 
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
+import { statusCopyForServiceState } from './status-copy'
 import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
 import { useComponents } from '@/api/hooks/useComponents'
 import { pendingCount } from './components-pure'
@@ -92,9 +93,18 @@ function serviceIcon(id) {
 }
 
 // ── Status pill ───────────────────────────────────────────────────────────────
-function StatusPill({ up }) {
+// `title` carries the consequence-first sentence for the service's precise
+// health word (services_health.py's up|stopped|down) beside the pill's own
+// simplified up/idle label — see status-copy.ts. `state` is absent on a
+// synthesized row (ComfyUI fallback) and on older backends, so fall back to
+// `up`; `detail` lets an unwired-probe row ("unmonitored", #2250) say so
+// instead of being described as crashed.
+function StatusPill({ up, state, detail }) {
   return (
-    <span className={'svc-pill' + (up ? ' svc-pill-up' : ' svc-pill-idle')}>
+    <span
+      className={'svc-pill' + (up ? ' svc-pill-up' : ' svc-pill-idle')}
+      title={statusCopyForServiceState(state ?? (up ? 'up' : 'down'), detail)}
+    >
       <span className={'sdot ' + (up ? 'serving' : 'offline')} style={{ width: 6, height: 6 }} />
       {up ? 'up' : 'idle'}
     </span>
@@ -247,7 +257,7 @@ function ServiceRow({ svc, isComfy, comfyReachable, expanded, onToggle }) {
         {/* Name + status pill */}
         <span className="svc-info">
           <span className="svc-name">{svc.name}</span>
-          <StatusPill up={svc.up} />
+          <StatusPill up={svc.up} state={svc.state} detail={svc.detail} />
         </span>
 
         {/* Role/sub line */}
