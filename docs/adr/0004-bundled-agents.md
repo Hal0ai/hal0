@@ -26,7 +26,7 @@ Concretely:
   one is a driver module + a `BUNDLED_AGENTS` entry, not new runtime
   code.
 - **Single-pick, but only between daemon-kind agents**
-  (`src/hal0/agents/manager.py:294-335`, spec D1). Hermes is a
+  (`AgentManager.install` in `src/hal0/agents/manager.py`, spec D1). Hermes is a
   service-shaped, systemd-supervised daemon; a `cli`-kind agent (`pi`)
   installs alongside anything, since it has no gateway/persona surface
   to collide over. `hal0 agent install <name> --switch` performs an
@@ -78,8 +78,9 @@ Concretely:
 
 ## References
 
-- `src/hal0/agents/manager.py:1-38,117,294-338` — module contract,
-  `BUNDLED_AGENTS`, single-pick enforcement
+- `src/hal0/agents/manager.py` — module docstring contract,
+  `BUNDLED_AGENTS` (`:117`), `AGENT_KINDS`, `AgentManager.install`
+  (single-pick enforcement)
 - `installer/systemd/hal0-agent@.service` — sandboxed daemon unit
 - `src/hal0/api/agents/chat_proxy.py` — WS proxy, Origin allowlist
 - `src/hal0/mcp/admin.py` — tool catalog, "Platform-management expansion"

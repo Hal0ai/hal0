@@ -7,6 +7,19 @@ the current state; the original write-up lived in the gitignored
 `docs/internal/adr/0012-remove-auth-and-caddy.md` (see `ARCHITECTURE.md`
 "Decision records").
 
+**Partly superseded by KB-1 (v1.0 line).** The decision below removed the
+first-run password / OTP lockfile, the Bearer-token store, and the bundled
+Caddy, and those stay removed. But `hal0-api` has since regained an
+**optional, off-by-default** key gate: `src/hal0/api/auth.py`
+(`require_auth_enabled()` defaults OFF) enforcing the deny-by-default route
+classes in `src/hal0/security/exposure.py` (`OPEN` / `BOOTSTRAP` / `CLIENT`
+/ `ADMIN`), with `HAL0_ADMIN_KEY` / `HAL0_CLIENT_KEY` credentials. Since
+v1.3.0 (`CHANGELOG.md` `[1.3.0]` "Breaking"), a configured admin key on a
+box bound past loopback also gates `ADMIN` routes for off-box callers even
+with `require_auth` off. Read the Decision and Consequences below as the
+v0.3 cut; "no authentication of its own" holds today only for a box with
+no admin key and enforcement off. Current model: `docs/operate/auth.mdx`.
+
 ## Context
 
 An earlier decision moved auth into FastAPI and reduced the bundled
@@ -32,7 +45,7 @@ packaging, and the corresponding test suites.
 proxy. Document upstream-proxy patterns as the recommended way to add
 auth and TLS on a hostile network.** `hal0-api` binds `0.0.0.0:8080` with
 no authentication of its own
-(`ARCHITECTURE.md` "The dedicated auth packages ... were removed").
+(as of the v0.3 cut; see the KB-1 note under Status).
 
 Operators who need a password, TLS, or origin restriction put a real
 reverse proxy in front and own auth at the edge — `docs/operate/auth.mdx`
@@ -52,15 +65,16 @@ right `private:<agent_id>` memory namespace.
   fewer systemd unit (`hal0-caddy.service` gone).
 - First-run UX is "open the dashboard," not "find the OTP in the install
   log, paste it into a wizard, set a password."
-- There is no password-protected dashboard and no Bearer-token store:
-  anyone who can reach `:8080` can drive every admin endpoint and every
-  `/v1/*` call. Operators on an untrusted or multi-tenant network **must**
+- At the v0.3 cut there was no password-protected dashboard and no
+  Bearer-token store: anyone who could reach `:8080` could drive every
+  admin endpoint and every `/v1/*` call (still true on a box with no admin
+  key and enforcement off; see the KB-1 note above). Operators on an untrusted or multi-tenant network **must**
   add an upstream proxy — the installer offers no "secure by default"
   fallback, and the docs are loud about that (`docs/operate/auth.mdx`,
   `docs/concepts/security.mdx`).
-- `X-hal0-Agent` is self-asserted and unauthenticated — hal0 has no
-  credential to check it against post this ADR. It is a namespace-routing
-  signal between cooperating local agents, not a security boundary
+- `X-hal0-Agent` is self-asserted: the key tiers above authenticate the
+  caller, not the claimed agent id, so it was and remains a
+  namespace-routing signal between cooperating local agents, not a security boundary
   against a hostile LAN caller (`docs/concepts/security.mdx`).
 - The subsequent OpenRouter OAuth callback work had to explicitly reckon
   with this LAN-trust posture rather than assume Bearer auth was still
@@ -68,9 +82,8 @@ right `private:<agent_id>` memory namespace.
 
 ## References
 
-- `ARCHITECTURE.md` — "The dedicated auth packages ... were removed:
-  hal0-api binds `0.0.0.0:8080` open, and LAN trust plus an upstream
-  reverse proxy own authentication."
+- `ARCHITECTURE.md` — the auth paragraph under the module layout (what
+  was removed, and the optional KB-1 key gate that exists today)
 - `src/hal0/api/mcp_mount.py` — `X-hal0-Agent` identity header, replacing
   the retired Bearer-token MCP middleware
 - `docs/operate/auth.mdx` — upstream reverse-proxy patterns

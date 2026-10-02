@@ -31,33 +31,33 @@ the normal slot-alias machinery.**
 
 - **`agent`** is the canonical default/anchor slot — every `hal0/<slot>`
   fallback chain ends in `agent`
-  (`src/hal0/normalize/resolver.py:13-19`, `DEFAULT_CHAINS`). `chat` and
+  (`src/hal0/normalize/resolver.py`, `_ANCHOR_NAME` / `DEFAULT_CHAINS`). `chat` and
   `primary` are retired as slot/role names.
 - **`utility`** is the cheap-helper role, seeded on every install, and is
   never the fallback for general chat — only for its own targeted uses
-  (`resolver.py:29`).
+  (`DEFAULT_CHAINS["hal0/utility"]` in `resolver.py`).
 - **Slot routing key is the slot `name`, not a separate `role` field.**
   The legacy `role` field on `SlotConfig` is gone; identity IS the
   routing key for `hal0/<slot>` aliases
-  (`CHANGELOG.md`, `v0.7.x` "Slot routing key is now the slot `name`, not
+  (`CHANGELOG.md`, `v0.9.5` "Slot routing key is now the slot `name`, not
   `role` (ADR-0023 §2.1)"). One escape hatch: the special name `npu`
   additionally matches any slot with `device == "npu"`, so the NPU trio's
   chat edge answers `hal0/npu` regardless of its literal slot name.
 - **`hal0/<slot>` generalizes to any enabled LLM slot**, not just the
   three advertised virtual names, so an operator-chosen slot (e.g. a
   memory-extraction slot) is addressable without a hardcoded resolver
-  entry (`resolver.py:41-46`, ADR-0023 §2).
+  entry (`_chain_for` in `resolver.py`, ADR-0023 §2).
 - **Hindsight is the platform memory engine; the cognee wrapper is
   gone.** `[memory.graph].extraction_slot` names a local, enabled LLM
   slot (resolved via the same `hal0/<slot>` alias machinery) that
   Hindsight's graph builder uses; `route`/`upstream` config fields from
-  the cognee era are retired (`src/hal0/config/schema.py:2606-2951`,
-  `MemoryGraphConfig`, `MemoryEmbeddingConfig`). Hindsight embeds
+  the cognee era are retired (`src/hal0/config/schema.py`,
+  `MemoryGraphConfig` at `:2605`, `MemoryEmbeddingConfig` at `:2930`). Hindsight embeds
   server-side with its own bundled model, so hal0 no longer pins a
   separate embedding model for memory.
 - **`extraction_slot` propagates to `hindsight-api` as environment**,
   resolved by the dispatcher to that slot's live model
-  (`src/hal0/memory/extraction_env.py:1,14`).
+  (`src/hal0/memory/extraction_env.py`, `apply_extraction_slot`).
 
 ## Consequences
 
@@ -80,13 +80,13 @@ the normal slot-alias machinery.**
 ## References
 
 - `CHANGELOG.md`, `v0.8.0-beta.3` — "Canonical LLM roles + Hindsight-native
-  memory extraction (ADR-0023)"; `v0.7.x` — "Slot routing key is now the
+  memory extraction (ADR-0023)"; `v0.9.5` — "Slot routing key is now the
   slot `name`, not `role` (ADR-0023 §2.1)"
-- `src/hal0/normalize/resolver.py:13-46` — `_ANCHOR_NAME`, `DEFAULT_CHAINS`,
+- `src/hal0/normalize/resolver.py` — `_ANCHOR_NAME`, `DEFAULT_CHAINS`,
   the `hal0/<slot>` generalization
-- `src/hal0/config/schema.py:2602-2951` — `MemoryGraphConfig`,
-  `MemoryEmbeddingConfig`
-- `src/hal0/memory/extraction_env.py:1,14,91` — extraction-slot env
+- `src/hal0/config/schema.py` — `MemoryGraphConfig` (`:2605`),
+  `MemoryEmbeddingConfig` (`:2930`)
+- `src/hal0/memory/extraction_env.py` — extraction-slot env
   propagation to `hindsight-api`
 - `src/hal0/memory/__init__.py:222` — Hindsight as the platform engine
 - `src/hal0/dispatcher/_capability_resolve.py:28,156,239,248` — rule-9

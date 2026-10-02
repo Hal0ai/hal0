@@ -11,8 +11,9 @@ original write-up lived in the gitignored
 
 ## Context
 
-`hal0-api` binds `0.0.0.0:8080` with no Bearer authentication (ADR-0012).
-That LAN-trust posture holds because every privileged surface is either
+`hal0-api` binds `0.0.0.0:8080` and, by default, enforces no authentication
+(ADR-0012; the optional KB-1 key gate is off unless enabled). That LAN-trust
+posture holds because every privileged surface is either
 loopback-only or deliberately operator-aware.
 
 OpenRouter's bring-your-own-key delegate-routing flow needs OAuth 2.0
@@ -54,6 +55,16 @@ would force allowlisting the rest of the deliberately open-LAN API).
   either dual-binding the callback behind its own auth model or running
   the flow from the host's local browser — explicitly deferred, and
   re-opens ADR-0012 if pursued.
+
+## Scope
+
+This ADR covers only the OpenRouter BYOK callback. The generic OAuth
+passthrough for agent skills added in v1.3.0 (`hal0 oauth`,
+`/api/oauth/{provider_id}/callback`, `src/hal0/api/routes/oauth.py`) is a
+different design: its callback is classified `OPEN` in
+`src/hal0/security/exposure.py` (a provider redirect carries none of
+hal0's credentials) and is guarded by a single-use, server-issued `state`
+nonce rather than a loopback check.
 
 ## Status of the implementation
 

@@ -50,6 +50,27 @@ applying. Add those subsections to a version's section to surface them; see
   component-convergence pass. The Services page's Open WebUI card now shows a
   wired chip per feature (Chat, Voice, Documents, Images, Web search),
   exposed via `GET /api/services`.
+### Changed
+
+- **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
+  with the code** they describe. The Hermes provisioner section now
+  documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline
+  (not the retired 15-phase checkpointed one); `BUNDLED_AGENTS`'s value
+  and order (`("hermes", "pi")`, with single-pick applying only between
+  daemon-kind agents) now match `src/hal0/agents/manager.py`; the
+  `hal0-agent@.service` unit's `Documentation=` now points at a tracked
+  doc (`docs/guides/run-agents.mdx`) instead of a path that never
+  existed; the "hal0 keeps no ADR tree" claim is replaced with the real
+  rule (a public `docs/adr/` plus a gitignored `docs/internal/adr/`),
+  five ADRs are reconstructed from source + CHANGELOG history
+  (`docs/adr/0004`, `0012`, `0013`, `0020`, `0023`) to close the largest
+  "ghost citation" gaps — `0012` and `0013` carry notes on what the KB-1
+  key gate and v1.3.0 user-installed MCP servers changed since — and a
+  mislabeled ADR link in `docs/concepts/memory.mdx` is fixed. The stale
+  `voice/` entry (the package was fully deleted in #620, not merely
+  emptied) is removed from `ARCHITECTURE.md`'s module tree, and the
+  "auth was removed" claims now describe the optional KB-1 key gate. No
+  behavior change. (#2244)
 
 ## [1.3.0] — 2026-09-16
 
@@ -235,23 +256,6 @@ applying. Add those subsections to a version's section to surface them; see
   silently drop a key, and a preview whose promise the apply doesn't keep)
   as regression fixtures against the general settings surface (#1967,
   #2195, #2203, #1511).
-### Changed
-
-- **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
-  with the code** they describe. The Hermes provisioner section now
-  documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline
-  (not the retired 15-phase checkpointed one); `BUNDLED_AGENTS`'s value
-  and order now match `src/hal0/agents/manager.py`; the
-  `hal0-agent@.service` unit's `Documentation=` now points at a tracked
-  doc (`docs/guides/run-agents.mdx`) instead of a path that never
-  existed; the "hal0 keeps no ADR tree" claim is replaced with the real
-  rule (a public `docs/adr/` plus a gitignored `docs/internal/adr/`),
-  five ADRs are reconstructed from source + CHANGELOG history
-  (`docs/adr/0004`, `0012`, `0013`, `0020`, `0023`) to close the largest
-  "ghost citation" gaps, and a mislabeled ADR link in
-  `docs/concepts/memory.mdx` is fixed. The stale `voice/` entry (the
-  package was fully deleted in #620, not merely emptied) is removed from
-  `ARCHITECTURE.md`'s module tree. No behavior change. (#2244)
 
 ### Fixed
 

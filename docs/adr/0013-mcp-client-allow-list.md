@@ -25,8 +25,8 @@ never globally.**
 
 - **Config lives at `/etc/hal0/agents/<name>.toml`**, one file per agent,
   under `[mcp.servers.<name>]` blocks
-  (`src/hal0/agents/hermes_provision.py:2548` reads `[mcp.servers.*]`
-  from this file). A server not listed is unreachable — there is no
+  (`_load_agent_allowlist` in `src/hal0/agents/hermes_provision.py` reads
+  `[mcp.servers.*]` from `AGENT_ALLOWLIST_PATH`, `/etc/hal0/agents/hermes.toml`). A server not listed is unreachable — there is no
   discover-and-connect fallback.
 - **Three-tier tool classification per server**
   (`ToolPolicy`, `src/hal0/config/schema.py:2726`): `allow` (autonomous
@@ -44,8 +44,8 @@ never globally.**
   TOML edit can.
 - **Built-in servers (`hal0-admin`, `hal0-memory`) are always reachable**
   for a bundled agent and carry the identity header
-  (`mcp_servers.<name>.headers.X-hal0-Agent`,
-  `hermes_provision.py:2020`) that scopes memory writes into the
+  (`mcp_servers.<name>.headers.X-hal0-Agent`, set in the
+  config overlay in `hermes_provision.py`) that scopes memory writes into the
   agent's own `private:<agent_id>` namespace (ADR-0005).
 
 ## Consequences
@@ -58,6 +58,13 @@ never globally.**
   than a binary system, in exchange for letting an agent use a risky-but-
   needed tool (`gated`) without either fully trusting it (`allow`) or
   losing it entirely (`blocked`).
+- Since v1.3.0, servers an operator installs (`hal0 mcp install`, the
+  registry under `/etc/hal0/mcp-servers/`) reach Hermes through
+  `src/hal0/mcp/hermes_join.py`, which mirrors each server's `ToolPolicy`
+  into the same `/etc/hal0/agents/hermes.toml` `[mcp.servers.*]` blocks —
+  so `AgentMCPClient.classify()` governs them on the same two axes (see
+  ADR-0015). Default-deny is unchanged: a freshly installed server has no
+  callable tools until promoted (`hal0 mcp allow|gate|block`).
 - `AgentConfig` / `MCPServerConfig` / `ToolPolicy`
   (`src/hal0/config/schema.py`) and `src/hal0/agents/mcp_client.py` are
   the schema and enforcement point this ADR called for; both exist in the
@@ -69,8 +76,9 @@ never globally.**
 - `src/hal0/config/schema.py:2726` (`ToolPolicy`), `:2796`
   (`MCPServerConfig`), `:2890` (`AgentConfig`)
 - `src/hal0/agents/mcp_client.py` — per-agent MCP client enforcement
-- `src/hal0/agents/hermes_provision.py:2548,2840-2988` (`_phase_mcp_wire`)
-  — reads `[mcp.servers.*]`, probes each allowed connection
+- `src/hal0/agents/hermes_provision.py` — `_load_agent_allowlist` and
+  `_phase_mcp_wire`: read `[mcp.servers.*]`, probe each allowed connection
+- `src/hal0/mcp/hermes_join.py`, ADR-0015 — user-installed servers
 - `ui/src/api/hooks/useAgentMcpClients.ts` — dashboard per-agent
   MCP-client allow-list view
 - ADR-0004 — bundled agents, the approval-queue surface `gated` reuses
