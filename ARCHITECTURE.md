@@ -8,10 +8,14 @@ Scope/roadmap live in the maintainer planning doc (`docs/.devdocs/PLAN.md`, loca
 live under `docs/` (Starlight `.mdx`).
 
 > **One authoritative doc.** This file replaces the former split across
-> `ARCHITECTURE.md`, `CONTEXT.md`, and `AGENTS.md`. Every standing decision
-> below is explained inline: hal0 keeps no separate ADR tree, so nothing
-> here cites a decision record by number — the rationale lives next to the
-> statement it justifies.
+> `ARCHITECTURE.md`, `CONTEXT.md`, and `AGENTS.md`. A handful of standing
+> decisions are recorded as numbered ADRs in `docs/adr/` (see "Decision
+> records" below); everything else is explained here inline, next to the
+> statement it justifies. Source comments citing `ADR-00NN` for a number
+> with no file in `docs/adr/` are usually pointing at `docs/internal/adr/`
+> — a second, gitignored ADR tree for decisions that carry lab
+> topology/IP data (`.gitignore`, closed by #627/#638) — not at a missing
+> or deleted document.
 
 ## hal0 in one paragraph
 
@@ -101,16 +105,19 @@ src/hal0/
 │                    #   (spec: update system)
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
-├── voice/           # emptied in #620 (in-process Moonshine/Kokoro
-│                    #   providers deleted); STT runs in the npu FLM
-│                    #   container, TTS in the tts container
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
 
-The dedicated auth packages (`auth/`, `api/auth/`,
-`api/middleware/auth.py`) were removed: hal0-api binds `0.0.0.0:8080`
-open, and LAN trust plus an upstream reverse proxy own authentication.
+The v0.3-era auth stack (first-run password/OTP, Bearer-token store,
+bundled Caddy — ADR-0012) was removed. hal0-api binds `0.0.0.0:8080` and
+ships trusted-LAN-open: the only built-in auth is an optional, off-by-
+default three-tier key gate (`src/hal0/api/auth.py`, with the route
+classification table in `src/hal0/security/exposure.py`; `HAL0_ADMIN_KEY`
+/ `HAL0_CLIENT_KEY`, `require_auth`). Since v1.3.0 a configured admin key
+also gates ADMIN-class routes for off-box callers on a LAN-bound box even
+with `require_auth` off. TLS and user directories stay with an upstream
+reverse proxy (`docs/operate/auth.mdx`).
 
 **Component updates.** `components/` catalogs the four hal0-shipped
 components that converge alongside a `hal0 update`: OpenWebUI (the
@@ -270,8 +277,10 @@ model advertised and will 4xx on inference attempts (issue #31).
 A bundled agent in v0.3 is a third-party agent runtime running as a
 sibling systemd unit with hal0 wired in as its local AI provider. Two
 agents ship as first-class bundled agents —
-`BUNDLED_AGENTS = ("pi-coder", "hermes")` in
-`src/hal0/agents/manager.py`, single-pick at install; `hermes` is the
+`BUNDLED_AGENTS = ("hermes", "pi")` in
+`src/hal0/agents/manager.py:117`. Single-pick applies between
+daemon-kind agents only (`AGENT_KINDS`: `hermes` is `daemon`, `pi` is
+`cli`), so installing `pi` never displaces Hermes; `hermes` is the
 default integration. The boundary is intentionally narrow: hal0 owns
 provisioning, identity, MCP wiring, and the chat-surface proxy. Runtime
 is whatever the bundled upstream does natively.
@@ -301,9 +310,9 @@ bundled agents are not a revival of it.)
 ### Install & lifecycle
 
 ```
-sudo hal0 agent provision hermes         # one-shot 15-phase bootstrap
+sudo hal0 agent install hermes           # one-shot 12-step converging install
 sudo systemctl status hal0-agent@hermes  # unit health
-hal0 agent personas                      # list personas (TOML store)
+hal0 agent personas list                 # list personas (TOML store)
 hal0 agent personas activate coder       # swap active persona
 ```
 
@@ -314,13 +323,25 @@ and the composite `hal0` upstream config — all idempotently.
 
 ### Surfaces
 
-* **Provision** — `hal0 agent provision hermes` → the 15-phase
-  orchestrator in `src/hal0/agents/hermes_provision.py`
-  (preflight → install → env_probe → home_init → install_artifacts →
-  persona_seed → config_write → mcp_wire → context_link →
-  namespace_register → model_automap → voice_wire →
-  gateway_secrets_wire → smoke_tests → self_report). Idempotent +
-  checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`.
+* **Provision** — `hal0 agent install hermes` (root: installs the CLI
+  wrapper + hal0-owned skeleton, then re-execs `hal0 agent bootstrap
+  hermes` as the `hal0` user) → the 12-step, deliberately
+  **uncheckpointed** pipeline in `src/hal0/agents/hermes_provision.py`
+  (`_INSTALL_STEPS`): `preflight → install →
+  env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire →
+  config_write → context_link → voice_wire → gateway_secrets_wire →
+  smoke_tests`. Every step converges its slice of host state (a
+  re-run over an already-provisioned box mutates nothing —
+  `report.converged`); there is no resumable `provision.json` checkpoint
+  machinery — a last-run report is written to
+  `/var/lib/hal0/state/agents/hermes/provision.json` purely for `hal0
+  agent status`/`log` to render, not to resume from. The brain/persona/
+  memory-identity steps (`persona_seed`, `namespace_register`,
+  `brain_profile_seed`, `brain_profile_mcp_wire`, `self_report`) used to
+  run in this pipeline too; they now run in the `hal0-api` boot lifespan
+  instead (`src/hal0/api/__init__.py`, around the `lifespan()` function) —
+  the phase functions are unchanged and still directly callable, only
+  their membership in `_INSTALL_STEPS` moved.
 * **Service** — `hal0-agent@<id>.service` (template; v0.3 instances:
   `hermes` only). Sandboxed (`NoNewPrivileges`, `ProtectSystem=strict`,
   `ProtectHome=yes`). Type=notify + `WatchdogSec=60`. The agent reaches
@@ -373,10 +394,10 @@ and the composite `hal0` upstream config — all idempotently.
 | Module                                         | Owns                                         |
 |------------------------------------------------|----------------------------------------------|
 | `src/hal0/agents/manager.py`                   | single-pick install / uninstall              |
-| `src/hal0/agents/hermes_provision.py`          | 15-phase Hermes bootstrap orchestrator       |
+| `src/hal0/agents/hermes_provision.py`          | 12-step Hermes install pipeline + brain-lane bootstrap phases |
 | `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
-| `installer/agents/hermes/plugins/hal0-memory/`| hal0-hindsight MemoryProvider plugin (canonical source) |
+| `src/hal0/agents/hermes/plugins/memory_hindsight/` | hal0-memory `MemoryProvider` plugin (canonical source; mirrored byte-for-byte into `installer/agents/hermes/plugins/hal0-memory/` at install time, guarded by `tests/agents/hermes_plugins/test_seed_parity.py`) |
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
 | `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
@@ -389,11 +410,11 @@ and the composite `hal0` upstream config — all idempotently.
 
 ### Standing decisions
 
-These decisions are settled and explained here inline (hal0 keeps no ADR
-tree):
+These decisions are settled. Some are recorded as ADRs in `docs/adr/`
+(see "Decision records" below); the rest are explained here inline:
 
 * **Agent bundling** — hal0 bundles third-party runtimes
-  (`pi-coder`, `hermes`) and runs them as sandboxed sibling units; it
+  (`hermes`, `pi`) and runs them as sandboxed sibling units; it
   does not build its own runtime.
 * **MCP allow-list** — the MCP client is default-deny on two axes
   (server-axis + tool-axis); a persona's `tools_allowed` opens the gate.
@@ -402,9 +423,11 @@ tree):
 * **LLM roles** — the canonical chat roles are `agent` (default anchor)
   and `utility`; the older `chat` / `primary` roles are retired.
 * **Memory engine** — Hindsight only (Cognee removed).
-* **Auth** — hal0-api runs as `hal0` and binds open on the LAN; route
-  auth was removed except the chat-proxy HMAC seam. LAN trust plus an
-  upstream reverse proxy own authentication.
+* **Auth** — hal0-api runs as `hal0` and binds open on the LAN; the
+  shipped default is trusted-LAN-open, with the optional KB-1 key gate
+  (`docs/operate/auth.mdx`) layered on when an operator configures an
+  admin key. The chat-proxy keeps its own HMAC session-cookie seam. TLS
+  and user directories belong to an upstream reverse proxy.
 
 ### Upstream pin
 
@@ -431,7 +454,7 @@ Two distinct senses in this repo. Disambiguate by context.
 1. **internal dev sense** — a Claude teammate (the multi-agent fan-out
    pattern used when building hal0; see [`CONTRIBUTING.md`](./CONTRIBUTING.md)).
    Never user-facing. About *how we build hal0*, not what hal0 is.
-2. **product sense** — a bundled agent app (`pi-coder` or `Hermes-Agent`).
+2. **product sense** — a bundled agent app (`pi` or `Hermes-Agent`).
    User-facing. About *what users do with hal0*.
 
 When in doubt, ask which sense applies before writing the word.
@@ -448,8 +471,9 @@ runtime.
 
 A third-party agent application installed alongside hal0, prewired to use
 hal0 as its local AI provider and to consume hal0's MCP servers. Supports
-`pi-coder` (CLI shape) and `Hermes-Agent` (service shape). Single-pick at
-install.
+`pi` (CLI shape; `kind="cli"`) and `Hermes-Agent` (service shape;
+`kind="daemon"`). Single-pick among daemon-kind agents; a CLI-shape agent
+installs alongside.
 
 ### Hindsight
 
@@ -492,7 +516,8 @@ scopes — don't displace one with the other.
 
 ### pi-coder
 
-Bundled agent option (CLI shape). Upstream: `earendil-works/pi` (formerly
+Bundled agent option (CLI shape), registered as `pi` in `BUNDLED_AGENTS`
+(`pi-coder` is the shim's module name, `hal0.agents.pi_coder`). Upstream: `earendil-works/pi` (formerly
 `badlogic/pi-mono`), hard-forked at `Hal0ai/pi-mono`. Track-latest
 upstream (NOT pinned). hal0's shim (`hal0.agents.pi_coder`) wires it up on
 install:
@@ -897,28 +922,30 @@ hal0-api's `/v1` surface, not in a Hermes-side profile.
 ### Hal0MemoryProvider
 
 A hal0-owned Hermes plugin extending `agent.memory_provider.MemoryProvider`.
-Lives at `$HERMES_HOME/plugins/memory/hal0-memory/`. Native memory
+Lives at `$HERMES_HOME/plugins/hal0-memory/`. Native memory
 injection: implements `system_prompt_block`, `prefetch`, `sync_turn`,
 etc. — memory is part of the prompt, not a tool the agent has to remember
 to call. Talks to `hal0-memory` MCP at `/mcp/memory` over HTTP. v0.3.
 
 ### hermes_provision
 
-The hal0 module at `src/hal0/agents/hermes_provision.py` that orchestrates
-the 15-phase Hermes bootstrap (preflight → install → env_probe →
-home_init → install_artifacts → persona_seed → config_write → mcp_wire →
-context_link → namespace_register → model_automap → voice_wire →
-gateway_secrets_wire → smoke_tests → self_report). Idempotent +
-checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`. CLI
-verb is `hal0 agent bootstrap hermes`. Renamed from `hermes_bootstrap.py`
+The hal0 module at `src/hal0/agents/hermes_provision.py` that runs the
+12-step Hermes install pipeline (`_INSTALL_STEPS`: preflight → install →
+env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire →
+config_write → context_link → voice_wire → gateway_secrets_wire →
+smoke_tests). Convergent, not checkpointed; the last-run report lands in
+`/var/lib/hal0/state/agents/hermes/provision.json` for `hal0 agent
+status`/`log`. CLI verb is `hal0 agent bootstrap hermes` (run as the `hal0`
+user by `hal0 agent install hermes`). Renamed from `hermes_bootstrap.py`
 to avoid a soft collision with upstream's Windows-UTF8 module of the same
 filename.
 
 ### HERMES_HOME (v0.3)
 
-Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not
-`~/.hermes`). Multi-agent-root-ready: pi-coder and future agents land at
-`/var/lib/hal0/agents/<name>/`. Wrapper `/usr/local/bin/hal0-hermes`
+Pinned to `/var/lib/hal0/.hermes/` (`HERMES_HOME_DEFAULT` in
+`hermes_provision.py`; `manager.py`'s `_AGENT_HOME_SUBDIR`) for
+hal0-bundled installs (not `~/.hermes`). Agents without an entry there
+keep the per-name layout `/var/lib/hal0/agents/<name>/`. Wrapper `/usr/local/bin/hal0-hermes`
 sources `/var/lib/hal0/secrets/agents/hermes.env`, exports `HERMES_HOME`,
 and execs `/var/lib/hal0/venvs/hermes/bin/hermes`. Raw
 `/usr/local/bin/hermes` stays unwrapped so human SSH sessions get normal
@@ -971,30 +998,31 @@ The compact agent panel rendered in the v3 dashboard sidebar —
 service-status chip, persona picker, memory chip, skills list, approvals
 bell, [Open chat] button. Lives at
 `ui/src/dash/agents/SidebarAgentBlock.jsx`. Parameterised by `agent_id` so
-pi-coder lights up by adding a row. The service chip wires `POST
+a second agent lights up by adding a row. The service chip wires `POST
 /api/agents/{id}/restart`; the memory chip reads `GET
 /api/agents/{id}/memory/stats`; the skills list reads `GET
 /api/agents/skills`.
 
 ### persona TOML
 
-A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring
+A file under `/var/lib/hal0/.hermes/personas/{id}.toml` declaring
 `[persona]` (`id`, `display_name`, `summary`, `system_prompt`,
 `tools_allowed`, `memory_namespace`, `preferred_upstream`,
 `preferred_model`) and `[persona.approval]` (`default_policy`,
 `auto_approve`, `require_approval`). The filename stem MUST match
 `[persona].id` — `load_persona` raises `PersonaError` on a mismatch to
 prevent silent renames. Seeded by `hermes_provision`; operator-edited via
-`hal0 agent personas` or the dashboard persona editor. The active persona
+`hal0 agent personas list|show|activate` or the dashboard persona editor. The active persona
 is the contents of `active.txt` next to the personas dir; switching swaps
 the system-prompt scope on the next turn without restart.
 
 ### hal0-memory (Hermes plugin)
 
 The hal0-owned `MemoryProvider` plugin at
-`installer/agents/hermes/plugins/hal0-memory/` (renamed from
-`hal0-cognee`; this is the canonical, shipped source — no mirror
-elsewhere), mounted into `$HERMES_HOME/plugins/hal0-memory/` by the
+`src/hal0/agents/hermes/plugins/memory_hindsight/` (renamed from
+`hal0-cognee`; canonical source, mirrored byte-for-byte as the
+`installer/agents/hermes/plugins/hal0-memory/` seed, guarded by
+`tests/agents/hermes_plugins/test_seed_parity.py`), mounted into `$HERMES_HOME/plugins/hal0-memory/` by the
 provisioner. Wraps hal0-memory's REST surface
 (`/api/memory/{add,search,recall,list,delete}`) so memory injection
 happens inside Hermes's prompt pipeline (`system_prompt_block` +
@@ -1023,15 +1051,16 @@ The browser-facing authn seam on hal0-api's chat-proxy surface
 signature `HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at
 `/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use).
 `HttpOnly` + `SameSite=Lax` + 8h TTL. Belongs to the chat-proxy
-specifically (route auth was removed from the rest of the API; identity on
-hal0-api is carried by the `X-hal0-Agent` header, below). See
+specifically (the rest of the API uses the optional KB-1 key gate, off by
+default; agent identity on hal0-api is carried by the `X-hal0-Agent`
+header, below). See
 `src/hal0/api/agents/_auth.py`.
 
 ### X-hal0-Agent
 
 The HTTP header hal0-api sets on outbound hops to hermes (and that bundled
 agents set on inbound hops to hal0-api). Carries the agent's stable id
-(e.g. `hermes`, `pi-coder`). It is the identity claim on hal0-api (NOT
+(e.g. `hermes`, `pi`). It is the identity claim on hal0-api (NOT
 Bearer); per the security baseline the chat-proxy injects it, the browser
 never sees or sets it. The hal0-memory MCP resolver derives the per-agent
 private namespace from this header.
@@ -1257,6 +1286,38 @@ then clean `[gone]` branches.
 **6. Record memory-worthy outcomes** (PR/merge, gotcha, decision) to the
 hal0 Hindsight engine via the `hal0-memory` skill — see the standing rules
 in `CLAUDE.md`.
+
+## Decision records
+
+`docs/adr/` is the public, tracked ADR tree — decisions safe to ship in
+the open-source repo, numbered independently of anything else. As of
+this writing: `0001` (Moonshine CPU STT reinstatement), `0002` (agent
+credential isolation), `0003` (ONNX text-generation via the NPU —
+deferred), `0004` (bundled agents), `0005` (memory namespace grammar),
+`0006` (every shipped runner image is a registry runner), `0012`
+(auth + Caddy removal — partly superseded by the KB-1 key gate), `0013`
+(per-agent MCP client allow-list), `0015` (MCP process supervisor and
+Hermes exposure join), `0020` (localhost-callback-only OAuth PKCE for
+OpenRouter), `0023` (canonical LLM roles + Hindsight-native memory
+extraction). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
+`0022` are gaps in this tree, not missing numbers to fill — see the next
+paragraph.
+
+A second ADR tree, `docs/internal/adr/`, is gitignored
+(`.gitignore`, closed by #627/#638): decisions whose write-up leans on
+lab topology, box names, or LAN addresses stay there, local to the
+machine that wrote them, the same way `docs/.devdocs/` and
+`docs/superpowers/` do (see this repo's `CLAUDE.md`). Its numbering is
+**independent** of `docs/adr/`'s — the two trees have collided on
+low numbers more than once (e.g. the current `docs/adr/0001` is
+unrelated to the `docs/internal/adr/0001` an early auth ADR once used).
+A source comment citing `ADR-00NN` with no matching file in `docs/adr/`
+is very likely citing the internal tree, not a ghost document; check
+there (if present on your box) before assuming the citation is stale.
+Some early internal ADRs (`0006`, `0008`–`0010`, `0022`) describe the
+pre-#687 Lemonade-fronted inference runtime, which the
+container-switchover epic replaced — those decisions are superseded
+by the current per-slot podman runtime and are not reconstructed here.
 
 ## See also
 
