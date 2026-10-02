@@ -1,28 +1,29 @@
 # shellcheck shell=sh
-# run-as-hal0.sh — sourced privilege-drop guard for hal0-managed wrappers.
+# run-as-hal0.sh
 #
-# hal0_ensure_runas <user> <cmd> [args...]
-#
-#   When the caller is root, RE-EXEC <cmd> as <user> with that user's HOME and
-#   a sanitized env (HERMES_HOME stripped), so a hal0-managed process never runs
-#   as root. Running as root would resolve `~/.hermes` to /root/.hermes (a
-#   split-brain state tree the hal0 service never reads) and create root:root
-#   files the hal0 user later can't read — the "root-clobber regression" (#843).
-#
+# Purpose: Sourced privilege-drop guard for hal0-managed wrappers —
+#          `hal0_ensure_runas <user> <cmd> [args...]` re-execs <cmd> as
+#          <user> (with that user's HOME and a sanitized env, HERMES_HOME
+#          stripped) when the caller is root, so a hal0-managed process
+#          never runs as root. Running as root would resolve `~/.hermes` to
+#          /root/.hermes (a split-brain state tree the hal0 service never
+#          reads) and create root:root files the hal0 user later can't read
+#          (the "root-clobber regression", #843).
+# Expects: POSIX sh (not bash — wrappers sourcing this may run under dash).
+#          HAL0_RUNAS_TEST_UID overrides the detected euid — TEST ONLY (we
+#          can't become root in CI); never set it in production.
+# Provides: hal0_ensure_runas <user> <cmd> [args...]
 #   * non-root caller      -> return 0; the caller proceeds with its own perms.
 #   * root + HAL0_ALLOW_ROOT (1/true/yes) -> return 0; deliberate root debug.
 #   * root, no <user>       -> return 0; nothing to drop to.
 #   * root                  -> exec <cmd...> as <user> (this process is replaced).
 #   * root, no dropper tool -> return non-zero + a refusal on stderr; we never
 #                              proceed silently as root.
-#
+# Modder notes:
 #   Privilege-drop tool preference: runuser (util-linux, sets HOME via passwd)
 #   -> setpriv --init-groups -> sudo -H. The command is always wrapped in
 #   `env HOME=<home> -u HERMES_HOME` so HOME is correct and any inherited
 #   HERMES_HOME is dropped regardless of which tool is used.
-#
-#   HAL0_RUNAS_TEST_UID overrides the detected euid — TEST ONLY (we can't become
-#   root in CI). Never set it in production.
 
 hal0_ensure_runas() {
     _hru_user="${1:-}"
