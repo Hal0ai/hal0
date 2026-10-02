@@ -75,7 +75,7 @@ jobs:
           fi
 
       - name: Checkout hal0
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install cosign
         # The runner has no cosign. The script would otherwise bootstrap one

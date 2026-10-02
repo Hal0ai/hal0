@@ -21,7 +21,7 @@ jobs:
   sunset:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -45,7 +45,7 @@ jobs:
         # range so Python-version drift still gates the protected branch.
         python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12"]')) || fromJSON('["3.12","3.13","3.14"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -84,7 +84,7 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "22"

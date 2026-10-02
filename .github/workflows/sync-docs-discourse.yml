@@ -70,7 +70,7 @@ jobs:
 
       - name: Checkout hal0
         if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # workflow_dispatch has no branch input, so a manual run is
           # pinned to main here rather than defaulting to whatever ref it
@@ -84,7 +84,7 @@ jobs:
       # reference (/screenshots/*.png) live here, not in hal0/docs/.
       - name: Checkout hal0-web (for screenshot assets)
         if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Hal0ai/hal0-web
           path: hal0-web

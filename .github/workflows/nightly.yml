@@ -44,7 +44,7 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
     steps:
       - name: Checkout main (full history + tags)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
