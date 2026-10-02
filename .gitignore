@@ -154,3 +154,4 @@ docs/.dev/
 # as a workflow artifact instead of committing it — see
 # scripts/docs_discourse_sync/README.md)
 /scripts/docs_discourse_sync/redirect-map.json
+tests/release-validation/boxes.toml
