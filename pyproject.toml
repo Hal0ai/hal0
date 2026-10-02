@@ -49,7 +49,7 @@ dependencies = [
   # ADR-0004 (Phase 8): hal0 ships /mcp/admin + /mcp/memory MCP servers.
   # MIT-licensed Python SDK; consumed by hal0.mcp.* — required at
   # import time, hence core (not optional).
-  "mcp==1.28.1",
+  "mcp==2.2.0",
   # v0.3 Hermes-Agent bootstrap (issue #241): config_write phase
   # renders $HERMES_HOME/config.yaml from a Jinja2 template + deep-merges
   # /etc/hal0/agents/hermes/overrides.yaml. Both libs were already
