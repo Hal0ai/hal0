@@ -4,6 +4,7 @@ import {
   SERVICE_HEALTH_COPY,
   statusCopyForSlotState,
   statusCopyForServiceState,
+  SERVICE_UNMONITORED_COPY,
 } from './status-copy'
 
 // The 9 wire values of hal0.slots.state.SlotState — pinned again (in Python)
@@ -50,6 +51,13 @@ describe('statusCopyForSlotState / statusCopyForServiceState', () => {
       expect(statusCopyForSlotState(state)).toBe(SLOT_STATE_COPY[state as keyof typeof SLOT_STATE_COPY])
     }
     expect(statusCopyForServiceState('up')).toBe(SERVICE_HEALTH_COPY.up)
+  })
+
+  it('describes an unmonitored service (down + detail "unmonitored") as unknown, not crashed', () => {
+    expect(statusCopyForServiceState('down', 'unmonitored')).toBe(SERVICE_UNMONITORED_COPY)
+    expect(statusCopyForServiceState('down', 'unmonitored')).not.toBe(SERVICE_HEALTH_COPY.down)
+    // A genuine failure keeps the crash sentence.
+    expect(statusCopyForServiceState('down', 'crashed — systemd unit failed')).toBe(SERVICE_HEALTH_COPY.down)
   })
 
   it('falls back honestly on an unknown or missing word instead of throwing', () => {

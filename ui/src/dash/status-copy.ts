@@ -14,11 +14,14 @@
 // `SLOT_STATE_COPY`'s keys are `src/hal0/slots/state.py`'s `SlotState` wire
 // values exactly — pinned by `tests/ui_contracts/test_status_copy_mirror.py`
 // so a new lifecycle state can't ship without also getting a sentence here.
-// `SERVICE_HEALTH_COPY`'s keys are the three words
-// `src/hal0/api/routes/services_health.py`'s `_owui_state`/`_hermes_state`
-// helpers emit (`up` | `stopped` | `down`) — no Python enum backs those (they
-// are literal strings), so there is nothing to mirror-test against; the
-// vitest completeness test below is the whole contract.
+// `SERVICE_HEALTH_COPY`'s keys are the three `state` words
+// `src/hal0/api/routes/services_health.py` emits per service (`up` |
+// `stopped` | `down`, see `_down_state` and the `/health` docstring) — no
+// Python enum backs those (they are literal strings), so there is nothing to
+// mirror-test against; the vitest completeness test below is the whole
+// contract. A service with no wired probe reports `state: "down"` with
+// `detail: "unmonitored"` (#2250) — that is "we cannot tell", not "crashed",
+// so it gets its own sentence rather than the `down` one.
 
 export type SlotStateWord =
   | 'offline'
@@ -52,6 +55,11 @@ export const SERVICE_HEALTH_COPY: Readonly<Record<ServiceHealthWord, string>> = 
 }
 
 const SLOT_STATE_FALLBACK = 'Unrecognised lifecycle state — treat as unavailable until confirmed otherwise.'
+// services_health.py's `_health_unmonitored` detail string (#2028/#2250).
+export const SERVICE_UNMONITORED_DETAIL = 'unmonitored'
+export const SERVICE_UNMONITORED_COPY =
+  'No health probe is wired for this service yet — hal0 cannot tell whether it is running.'
+
 const SERVICE_HEALTH_FALLBACK = 'Unrecognised health word — treat as unavailable until confirmed otherwise.'
 
 export function statusCopyForSlotState(state: string | null | undefined): string {
@@ -61,7 +69,11 @@ export function statusCopyForSlotState(state: string | null | undefined): string
   return SLOT_STATE_FALLBACK
 }
 
-export function statusCopyForServiceState(state: string | null | undefined): string {
+export function statusCopyForServiceState(
+  state: string | null | undefined,
+  detail?: string | null,
+): string {
+  if (detail === SERVICE_UNMONITORED_DETAIL) return SERVICE_UNMONITORED_COPY
   if (state && Object.prototype.hasOwnProperty.call(SERVICE_HEALTH_COPY, state)) {
     return SERVICE_HEALTH_COPY[state as ServiceHealthWord]
   }
