@@ -53,9 +53,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 |---|---|
 | **What it is** | One control plane, `hal0-api` on `:8080`, turning a Linux box into an OpenAI-compatible inference appliance — chat, embeddings, rerank, transcription, speech and image generation, each capability in its own podman container. |
 | **Install** | One `curl \| sudo bash` line. The installer probes hardware, seeds every capability slot, and starts the API — there is no separate setup wizard to run afterward. |
-| **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan, CUDA and CPU fallbacks everywhere else. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
+| **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan and CPU fallbacks everywhere else, plus experimental CUDA. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
 | **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
-| **Auth** | Off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
+| **Auth** | Enforcement is off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. Once an admin key is configured, a LAN-bound box also gates mutating routes for off-box callers, even with enforcement off (v1.3.0). No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
 | **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. |
 | **Updates** | Cosign-signed tarball releases via `hal0 update`, with one-flag rollback. |
 

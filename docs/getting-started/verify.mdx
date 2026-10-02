@@ -34,7 +34,7 @@ aggregate self-check), so a failure tells you roughly where to look.
 
    A good answer lists at least one entry — the hal0-brain steward model the
    installer downloads by default. An empty list means the pull step failed
-   or was skipped (`--no-pull`); pull one with `hal0 model pull <ref>` (see
+   or was skipped (`HAL0_SKIP_BRAIN_MODEL=1`); pull one with `hal0 model pull <ref>` (see
    [Load your first model](/docs/getting-started/first-model/)).
 
 3. **First chat** — does inference actually run end to end?
@@ -42,14 +42,18 @@ aggregate self-check), so a failure tells you roughly where to look.
    ```sh
    curl http://localhost:8080/v1/chat/completions \
      -H "Content-Type: application/json" \
-     -d '{"model": "agent", "messages": [{"role": "user", "content": "Say hello in one sentence."}]}'
+     -d '{"model": "hal0/brain", "messages": [{"role": "user", "content": "Say hello in one sentence."}]}'
    ```
 
    A good answer is an OpenAI-shaped completion with real text in
    `choices[0].message.content`, back within a few seconds on a warm slot
    (longer on the first request, while the container image pulls and the
-   model loads). `model` here is the **slot name** (`agent`), not a raw
-   model id — hal0 rewrites the alias before dispatching. See
+   model loads). `hal0/brain` is a virtual model name for the brain slot —
+   the one slot a default install gives a model — not a raw model id; hal0
+   rewrites the alias before dispatching. The `agent` slot (`hal0/agent`)
+   stays model-less unless you accepted the installer's optional agent-model
+   offer (`HAL0_PULL_AGENT_MODEL=1` opts in unattended), so use that name only
+   once you've assigned it a model. See
    [Send your first chat](/docs/getting-started/first-chat/) for the
    streaming variant and OpenWebUI equivalent.
 
@@ -79,8 +83,8 @@ aggregate self-check), so a failure tells you roughly where to look.
    ```
 
    A good answer is a pass/warn/fail report card with every row green
-   (`ok`) — API reachability, capability slots, memory, OpenWebUI, Hermes,
-   auth posture, and more, plus the box's live URLs. The command exits
+   (`ok`) — API reachability, DNS, runner health, capability slots, memory,
+   OpenWebUI, and Hermes, plus the box's live URLs. The command exits
    non-zero only on a critical failure (no reachable URL, or zero healthy
    runners); isolated warnings are worth reading but don't fail the check.
    `hal0 doctor verify --json` gives the same report as structured JSON —
@@ -89,17 +93,19 @@ aggregate self-check), so a failure tells you roughly where to look.
 </Steps>
 
 <Aside type="tip">
-`hal0 doctor all --json` runs every read-only doctor audit in one pass
-(`perms`, `models`, `migrations`, `profiles`, plus the `doctor verify`
-checks) if you want one command that rolls up all six areas above into a
-single report — useful for scripting a post-install gate.
+`hal0 doctor all --json` runs every read-only doctor check in one pass —
+the `doctor verify` rows plus auth posture, model-store integrity, pending
+migrations, bound slot ports, and the privileged sudo seams — if you want
+one command that rolls these up into a single report. It exits `1` on any
+non-critical failure and `2` on a critical one, which makes it a stricter
+post-install gate for scripting than `doctor verify`.
 </Aside>
 
 ## If a step fails
 
 - **Health fails** — `systemctl status hal0-api`, then `journalctl -u hal0-api` for the crash reason.
 - **Model list is empty** — re-run the pull: `hal0 model pull <ref>`.
-- **First chat fails or times out** — check the slot: `hal0 slot status agent`, `hal0 slot logs agent`.
+- **First chat fails or times out** — check the slot: `hal0 slot status brain`, `hal0 slot logs brain`.
 - **Dashboard won't load** — same unit as health; a health failure explains a dashboard failure too.
 - **Logs show repeating tracebacks** — `hal0 doctor bundle` collects a redacted diagnostic archive to attach to a bug report.
-- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`, …); `hal0 doctor <row>`-shaped subcommands (`doctor perms`, `doctor models`, `doctor profiles`) can fix several of them directly with `--fix`.
+- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`); `hal0 doctor all` adds `auth`, `models`, `migrations`, `ports` and more. `doctor perms --fix` and `doctor models --fix` repair ownership drift directly; `doctor profiles` is audit-only.
