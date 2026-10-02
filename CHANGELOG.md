@@ -11,8 +11,10 @@ could not.
 
 Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
-ADR-level architecture decisions are kept internal (the `docs/internal/`
-tree is gitignored, #638) and referenced by number throughout the code.
+ADR-level architecture decisions referenced by number throughout the
+code live in one of two trees: `docs/adr/` (public, tracked) or
+`docs/internal/adr/` (gitignored, #638, for decisions that carry lab
+topology/IP data) — see `ARCHITECTURE.md` "Decision records".
 
 **Release automation.** On a tagged release the matching `## [<version>]`
 section below is bundled into the release tarball as `RELEASE_NOTES.md`, and its
@@ -48,6 +50,95 @@ applying. Add those subsections to a version's section to surface them; see
   component-convergence pass. The Services page's Open WebUI card now shows a
   wired chip per feature (Chat, Voice, Documents, Images, Web search),
   exposed via `GET /api/services`.
+
+- **Installer forensics**: every install now leaves evidence behind instead of
+  only a terminal scrollback. `install.sh` tees the whole run to
+  `/var/log/hal0/install-<ts>.log` (falling back to `/tmp/hal0-install-<ts>.log`
+  when not root), prints that path at the start and end, and includes the
+  latest one in `hal0 doctor bundle`'s `logs/` section. An ERR-trapped abort
+  now also writes `hal0-install-report-<ts>.txt` next to the log — redacted
+  environment (mirrors `hal0.api._redact`'s key-name pattern), port owners,
+  hal0 unit status, a hardware summary, and a log tail — via the new
+  `installer/lib/failure-report.sh`, and the trap prints its path alongside
+  the existing step-specific recovery advice. Every `installer/lib/*.sh` and
+  `install.sh`'s own top now carries the `Purpose / Expects / Provides /
+  Modder notes` header convention (documented in `installer/README.md`) so a
+  future decomposition of the 4,000-line script into standalone steps has a
+  contract to extract against. `ui_step` gained an optional per-step time
+  estimate (`EST. TIME: ~30s`) and now measures real per-step durations
+  (`UI_STEP_DURATIONS`), with total elapsed time printed at the end. A new
+  `--summary-json=PATH` flag writes a versioned (`hal0.install-summary.v1`),
+  atomically-written machine-readable install summary — versions, dev/no-start
+  mode, network bind info, hardware class, the brain model pulled, warning/
+  error counts, and per-step durations — documented in
+  `docs/getting-started/install.mdx`. Container-image pulls (the OpenWebUI
+  background warm-cache pull in `install.sh`, and the dashboard's
+  runner-image pull job in `hal0.registry.runner_pull`) now retry transient
+  failures with backoff (`installer/lib/pull-retry.sh` on the bash side,
+  `is_retryable_pull_error`/`pull_backoff_delay` in Python), classify
+  auth/404/manifest-unknown/disk-full failures as non-retryable so they fail
+  fast instead of spinning, and verify the image actually landed in local
+  storage after an apparent success before declaring victory. (#2243)
+
+- **The Doctor panel's next steps are now real, not empty.** `health_report.py`'s
+  seven `hal0 doctor verify` classifiers (API, mDNS, runners, capability
+  slots, memory engine, OpenWebUI, Hermes) used to hard-code
+  `next_steps=[]` on every row despite the typed `Diagnosis.next_steps` /
+  `NextStep(kind="command"|"manual"|"doc")` shape already existing — so
+  `GET /api/doctor` and `hal0 doctor verify --json` always answered with an
+  empty list, and the dashboard's `DiagnosisPanel` chips carried the
+  remediation command only as a `title=` tooltip. Every fail/warn branch now
+  emits at least one real `NextStep`: the exact command an operator would
+  run (`hal0 serve`, `hal0 slot restart <name>`, `systemctl restart
+  hal0-api`/`hindsight-api`/`hal0-openwebui`/`hal0-agent@hermes`), a doc
+  link, or a manual instruction where no single command exists. In the
+  dashboard, `command` chips now show the command text inline in mono (not
+  only in a tooltip) and offer **Copy**, plus **Run** through the existing
+  typed `useServiceRepair`/`useSlotRestart` hooks when the command maps onto
+  one of those actions; `doc` chips open the link; `manual` chips expand.
+  A new **StepsDrawer** (numbered steps, same copy/Run/open affordances)
+  appears on any diagnosis with two or more next steps, reusable as-is for
+  a future extension-enable-steps surface. A new `status-copy.ts` module
+  gives every slot lifecycle state (`offline`/`pulling`/`starting`/
+  `warming`/`ready`/`serving`/`idle`/`unloading`/`error`) and companion-service
+  health word (`up`/`stopped`/`down`) a one-sentence, consequence-first
+  "what this means for you" line, surfaced as a tooltip beside the existing
+  precise vocabulary in the slot drawer, the slot card's status dot, and the
+  Services card — the precise words themselves are unchanged. (#2240)
+
+- Parity documentation pass: an "At a glance" block and an
+  if-you-know-Ollama/llama.cpp/Open WebUI/LocalAI comparison table in
+  `README.md`; `docs/getting-started/verify.mdx` (the six-step post-install
+  checklist); `docs/reference/support-matrix.mdx` (platform/GPU-lane support,
+  honestly separating installer-level detection from CI- and
+  fleet-exercised coverage); `docs/reference/validation-matrix.mdx` (the
+  α/β/γ test tiers and the `rc-validate` release-validation kit mapped onto
+  a hal0-specific "User Green" definition); `docs/reference/generated-files.mdx`
+  (every config file hal0 generates or rewrites, its writer, and whether
+  operator edits survive it); and an area→required-validation table in
+  `CONTRIBUTING.md` mirroring the PR template's §14.1 high-risk map. (#2242)
+
+### Changed
+
+- **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
+  with the code** they describe. The Hermes provisioner section now
+  documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline
+  (not the retired 15-phase checkpointed one); `BUNDLED_AGENTS`'s value
+  and order (`("hermes", "pi")`, with single-pick applying only between
+  daemon-kind agents) now match `src/hal0/agents/manager.py`; the
+  `hal0-agent@.service` unit's `Documentation=` now points at a tracked
+  doc (`docs/guides/run-agents.mdx`) instead of a path that never
+  existed; the "hal0 keeps no ADR tree" claim is replaced with the real
+  rule (a public `docs/adr/` plus a gitignored `docs/internal/adr/`),
+  five ADRs are reconstructed from source + CHANGELOG history
+  (`docs/adr/0004`, `0012`, `0013`, `0020`, `0023`) to close the largest
+  "ghost citation" gaps — `0012` and `0013` carry notes on what the KB-1
+  key gate and v1.3.0 user-installed MCP servers changed since — and a
+  mislabeled ADR link in `docs/concepts/memory.mdx` is fixed. The stale
+  `voice/` entry (the package was fully deleted in #620, not merely
+  emptied) is removed from `ARCHITECTURE.md`'s module tree, and the
+  "auth was removed" claims now describe the optional KB-1 key gate. No
+  behavior change. (#2244)
 
 ## [1.3.0] — 2026-09-16
 
