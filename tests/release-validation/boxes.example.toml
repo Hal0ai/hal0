@@ -1,0 +1,100 @@
+# Template for the validation fleet file. Copy to `boxes.toml` (gitignored, operator-local) and
+# fill in your own lab. Never commit real addresses, host names or key paths.
+#
+# `role` is what the lane registry in kit.toml keys off ("fresh", "update", "prod").
+# Everything else is context handed to the preflight agent, which verifies it before the run
+# starts. If a fact here is stale, preflight fails the run — that is the point.
+
+hypervisor = "192.0.2.10"      # Proxmox; `pct` runs here. SSH direct to the guests, not via this.
+ssh_key = "~/.ssh/<your-key>"
+ssh_user = "root"
+
+[boxes.ct151-cpu-fresh]
+role = "fresh"
+ctid = 151
+hostname = "hal0-fresh-example"
+ip = "192.0.2.151"
+os = "ubuntu 26.04"
+privileged = false
+gpu = true          # dev0 /dev/dri/renderD128 (iGPU) + dev3 /dev/accel/accel0 (NPU), gid=991
+cores = 8
+ram_gb = 16
+snapshot = "pristine"    # the snapshot `pct rollback` resets to (pre-install)
+api = "http://192.0.2.151:8080"
+auth_required = false
+status = "<neutral one-line status of the box>"
+notes = """
+Fresh-install lane. Reset: `pct rollback 151 pristine` on the hypervisor, THEN the
+POST-ROLLBACK CHECKLIST below, THEN run the installer fresh. Budget the full installer run into
+any reset of this box. Do NOT assert "no models on a fresh install" — the installer pulls the
+brain model.
+
+GOTCHAS, in order:
+  1. The pristine snapshot may have broken DNS. Fix it on the HYPERVISOR with
+     `pct set 151 --nameserver <ip>`: editing /etc/resolv.conf inside the container does NOT
+     stick — PVE regenerates it on every boot.
+  2. Test models must be rsynced into the box; use `rsync -L` when sources are symlinks.
+  3. `pct rollback 151 pristine` DELETES the dev0/dev3 passthrough entries from the CT config
+     outright when the snapshot predates them. Re-add them on the hypervisor before installing
+     (`pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991`), then
+     confirm the gid stuck on both, or the installer's GPU preflight aborts.
+  4. The pristine minimal Ubuntu image ships with NEITHER curl NOR jq — `apt install -y curl jq`
+     up front, before the bootstrap/installer fetch.
+
+POST-ROLLBACK CHECKLIST (every `pct rollback 151 pristine`, in order):
+  1. `pct set 151 --dev0 /dev/dri/renderD128,gid=991 --dev3 /dev/accel/accel0,gid=991`, then
+     confirm gid=991 on both entries.
+  2. `pct set 151 --nameserver <ip>` on the hypervisor (never edit resolv.conf inside the
+     container).
+  3. Boot the CT, `apt install -y curl jq`.
+  4. Only then run the installer/bootstrap.
+"""
+
+[boxes.ct150-update]
+role = "update"
+ctid = 150
+hostname = "hal0-update-example"
+ip = "192.0.2.150"
+os = "ubuntu 24.04"
+privileged = true    # /proc/1/uid_map = full map; prod-class hardware, unlike the fresh boxes
+gpu = true           # iGPU passthrough + /dev/kfd
+api = "http://192.0.2.150:8080"
+auth_required = false
+notes = """
+In-place upgrade lane. Left on the PREVIOUS release; the run upgrades it to the RC under test.
+No snapshot reset: its value is accumulated upgrade history, so record the exact from-version
+in CONTEXT.md before upgrading.
+"""
+
+[boxes.ct163-cpu-fresh]
+role = "fresh-alt"
+ctid = 163
+hostname = "hal0-fresh-alt-example"
+ip = "192.0.2.163"
+os = "ubuntu 24.04"
+privileged = true
+gpu = false
+cores = 8
+ram_gb = 16
+snapshot = "pristine"
+api = "http://192.0.2.163:8080"
+auth_required = false
+notes = """
+Second fresh-install box: privileged, older Ubuntu, no GPU device passthrough. Not in the
+default matrix — enable it when a finding smells privilege- or distro-specific.
+"""
+
+[boxes.ct105-prod]
+role = "prod"
+ctid = 105
+hostname = "hal0-prod-example"
+ip = "192.0.2.105"
+gpu = true
+api = "http://192.0.2.105:8080"
+auth_required = true
+notes = """
+PRODUCTION. READ-ONLY, always — no slot loads, no config writes, no service restarts. Its job
+in a validation run is to answer "is this finding an artifact of the CPU-only test box?" on
+real GPU hardware. Anonymous /api/* returns 401; run `hal0 ...` on the box instead of curl
+from the workstation. Not part of the default matrix; opt in per run.
+"""
