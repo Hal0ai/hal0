@@ -1,0 +1,55 @@
+name: Bug report
+description: Something hal0 does wrong on a real box.
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Steps, or the file and line if you found it in the code.
+    validations:
+      required: true
+  - type: dropdown
+    id: impact
+    attributes:
+      label: If nobody fixes it
+      description: What happens to a box that keeps running with this bug.
+      options:
+        - Breaks a feature
+        - Data or state at risk
+        - Security or privacy exposure
+        - Operator confusion
+        - Degraded experience
+        - Cosmetic
+        - Nothing
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Fix size, your best guess
+      options:
+        - XS (one function)
+        - S (one file)
+        - M (a few files)
+        - L (needs design)
+        - Don't know
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hal0 version
+      placeholder: hal0 --version
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      render: shell

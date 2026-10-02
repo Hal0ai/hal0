@@ -1,0 +1,37 @@
+name: Enhancement
+description: A concrete proposal for something hal0 should do.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why, and what it unlocks
+    validations:
+      required: true
+  - type: dropdown
+    id: without
+    attributes:
+      label: If we never build it
+      options:
+        - A feature stays unusable
+        - Operators work around it by hand
+        - Mild inconvenience
+        - Nothing
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size, your best guess
+      options:
+        - XS (one function)
+        - S (one file)
+        - M (a few files)
+        - L (needs design)
+        - Don't know
