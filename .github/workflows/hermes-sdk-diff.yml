@@ -12,7 +12,7 @@ name: Hermes SDK drift (weekly)
 #
 # Failure handling:
 #   On drift, open (or update) a single tracking issue tagged
-#   `upstream-drift` + `triage`. One issue per drift state — we refuse
+#   `upstream-drift` + `needs-triage`. One issue per drift state — we refuse
 #   to spam a fresh ticket every Monday while the same surface change
 #   is unresolved. Mirrors agent-shim-smoke.yml's `notify` shape.
 
@@ -121,7 +121,7 @@ jobs:
 
   # ── failure-issue handling ───────────────────────────────────────────
   # Runs only when drift was detected. Opens a fresh issue tagged
-  # `upstream-drift` + `triage` if none is open, or comments on the
+  # `upstream-drift` + `needs-triage` if none is open, or comments on the
   # existing one with the new run's URL + the new HEAD short sha.
   # Mirrors agent-shim-smoke.yml's `notify` job shape (ADR-0015 §2).
   notify:
@@ -150,7 +150,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const labels = ['upstream-drift', 'triage'];
+            const labels = ['upstream-drift', 'needs-triage'];
             const primary = labels[0];
             const runUrl = process.env.RUN_URL;
             const pinned = process.env.PINNED_SHORT;
