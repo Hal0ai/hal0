@@ -37,7 +37,7 @@ dependencies = [
   # entire MCP surface with the API still reporting healthy. Raise this
   # deliberately, after running tests/mcp/test_admin_route_map_nested.py against
   # the new version.
-  "fastapi>=0.115,<0.140",
+  "fastapi>=0.115,<0.143",
   "uvicorn[standard]>=0.32",
   "httpx>=0.28",
   "pydantic>=2.10",
