@@ -37,12 +37,12 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "allowScripts": {
     "esbuild@0.25.12": true
   },
   "overrides": {
-    "js-yaml": "^4.3.1"
+    "js-yaml": "^4.3.2"
   }
 }
