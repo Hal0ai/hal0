@@ -107,7 +107,7 @@ sentry = [
 # src/hal0/bench/adapters/__init__.py and install box-side, not as extras of
 # this distribution.
 bench-guidellm = [
-  "guidellm==0.7.3",
+  "guidellm==0.7.4",
 ]
 
 [project.scripts]
