@@ -344,9 +344,15 @@ _state.setdefault("grants", {})[gkey] = {..., "approver": req.approver, ...}
 - **To:** `src/hal0/mcp/approval_queue.py`
 - **Why:** hal0's queue is explicitly in-memory (`approval_queue.py:11-14`) — an `hal0-api` restart
   drops pending approvals silently. Persisting the pending set (and binding an approval to an args
-  hash so an approved `model_pull qwen3:0.6b` cannot authorise `model_pull something-else`) is a
-  small, self-contained hardening. The module's own docstring already anticipates it: *"A future ADR
-  can promote this to a persisted table."*
+  hash so an approved `model_pull qwen3:0.6b` cannot authorise `model_pull something-else`) is the
+  hardening; the module's own docstring anticipates it: *"A future ADR can promote this to a
+  persisted table."* It is **not** table-only, though (*correction 2026-10-04*): each entry executes
+  through an in-memory `_executor` closure bound at enqueue time (`approval_queue.py:127,216`,
+  built in `admin.py:1887-1900`), and `approve()` fails with `no executor bound to approval` when
+  it is missing (`approval_queue.py:262-276`). A persisted approval therefore needs a trusted
+  dispatcher that rebuilds execution from the stored `(server, tool, args, args_hash)` after
+  re-running `ToolPolicy.classify` and session validation (`admin.py:1769-1795,1860`) — the
+  closure itself cannot be serialised.
 
 ### D5. Baseline/scratch separator for self-edited agent files — **LOW value, note only**
 
@@ -449,7 +455,12 @@ at an empty `url`. Two shapes actually work:
    as files under `$CREDENTIALS_DIRECTORY`, so the adapter must read each one and set the mapped
    variable in the *child's* environment; a stdio server (like hal0's own client,
    `agents/mcp_client.py:222`) looks up a plain environment name, not a credential file
-   (*correction 2026-10-04*) — `ProtectSystem=strict` still applies, and the exposure join renders the *bridge's* URL — which
+   (*correction 2026-10-04*). Nor can the unit point `LoadCredential=` at `api.env`: that copies
+   the *whole* file into one credential (`LoadCredential=ID:PATH`), and the box's secrets live in
+   that one aggregate `KEY=value` file (`service_identity.py:47-57`), so a per-`[secrets]` mapping
+   needs a root broker — an `ExecStartPre=+` helper that extracts only the selected keys into
+   per-unit `systemd-creds encrypt`ed files consumed through `LoadCredentialEncrypted=` — or a
+   per-secret store (*second correction 2026-10-04*) — `ProtectSystem=strict` still applies, and the exposure join renders the *bridge's* URL — which
    makes a stdio server indistinguishable from an http one to everything downstream, including the
    policy proxy the §E.3 correction asks for.
 

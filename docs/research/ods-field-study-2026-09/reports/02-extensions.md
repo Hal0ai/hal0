@@ -533,6 +533,16 @@ translation is **rendered env, computed at unit-render time from live truth**:
   feature. ODS's static DNS names and `.env` ports have the same staleness problem; the
   honest claim is "gateway-routed by default, so a slot move is invisible", not "the URL
   follows the port".
+  (iii) *Correction (2026-10-04):* `host.docker.internal` resolves to the host's address on
+  the podman bridge (`--add-host=host.docker.internal:host-gateway`, `env_writer.py:102-105`),
+  not to 127.0.0.1. Report 05's gateway work wants the direct ports off the LAN; if that is
+  done by binding hal0-api to loopback alone, every bridge extension — and hal0's own Open
+  WebUI — loses inference, STT, TTS and image routes. The two must be designed together:
+  hal0-api keeps a listener the bridge can reach (a second bind on the podman gateway
+  address, or an authenticated container-facing listener on a shared internal network) while
+  the LAN-facing :8080/:3001 go away, or the LAN cut is an nftables rule that exempts the
+  bridge subnet. `HAL0_BIND_HOST` is a single value today (`config/network.py:37-45`), so the
+  two-listener form is new work, not configuration.
 - Env lands in `/etc/hal0/extensions/<id>.env`, written atomically by
   `hal0.config.env.write_env_atomic` (the same primitive slot env files use) and
   referenced from the generated unit — keeping secrets out of the unit file and out of

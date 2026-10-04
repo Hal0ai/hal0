@@ -627,8 +627,12 @@ that *is* the "tiny model first". The port is conceptual:
    --unit=hal0-model-pull@…`; *correction 2026-10-04*: `--unit=` only names the
    unit — without `--uid`/`--gid` the pull inherits the installer's root identity
    and leaves model directories, status files and registry state root-owned for
-   the `User=hal0` API, `packaging/sudoers/hal0-systemctl:3`) rather than `nohup` — hal0 is a systemd product and gets journald logging,
-   restart policy, and `systemctl status` for free.
+   the `User=hal0` API, `packaging/sudoers/hal0-systemctl:3`) rather than `nohup` — hal0 is a systemd product and gets journald logging
+   and `systemctl status` for free. Restart is *not* free (*correction
+   2026-10-04*): a transient unit defaults to `Restart=no`, so a registry or
+   network hiccup leaves it failed; pass `--property=Restart=on-failure
+   --property=RestartSec=30s` (and a `StartLimitBurst` the pull can survive), or
+   use a static `hal0-model-pull@.service` template that declares them.
 3. Copy ODS's **status-file contract** (`data/bootstrap-status.json`:
    `status/percent/bytesDownloaded/bytesTotal/speedBytesPerSec/eta`, written
    atomically) so the dashboard can render progress.

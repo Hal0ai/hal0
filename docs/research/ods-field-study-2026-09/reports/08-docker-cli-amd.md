@@ -449,7 +449,12 @@ the less robust of the two once Podman/rootless edge cases are in play.
    report "tuning applied" on every LXC. The hal0 port must branch on
    `systemd-detect-virt --container` (the installer already distinguishes LXC in
    `preflight_gpu`, `install.sh:363-380,500-509`): on bare metal apply as above; in
-   a container compute the same values but **print the host-side recipe** (the
+   a container do **not** derive the tier from the guest's memory — an LXC sees
+   its cgroup allocation, not host RAM (`docs/getting-started/proxmox.mdx:171-173`;
+   the recipe's 32 GB guest on a 128 GB host would pick the wrong tier and
+   undersize the host GTT; *correction 2026-10-04*) — so emit a host-side script that reads the host's `/proc/meminfo`
+   and computes the tier there, or take `--host-ram-gb` explicitly, and **print
+   the host-side recipe** (the
    GTT/TTM `/etc/default/grub` additions, `update-grub`, the `/etc/modprobe.d/`
    drop-in, the sysctls) for the operator to run on the Proxmox host, and record the phase as
    `skipped: container`, never as applied. The `hal0 doctor` arm (item 3) should
@@ -470,7 +475,14 @@ the less robust of the two once Podman/rootless edge cases are in play.
    toolboxes/README.md:53`) plus ODS's version-gated remediation pattern
    (`installers/phases/05-docker.sh:194-244`). Target: a new check in
    `src/hal0/cli/doctor_commands.py` reading `uname -r` and `rpm -q`/`dpkg
-   -l` for `linux-firmware`. Size: ~40-60 lines. Risk: **low** — read-only.
+   -l` for `linux-firmware`. *Correction (2026-10-04):* inside an LXC the
+   kernel half still holds (`uname -r` is the host kernel) but the firmware
+   half does not — the GPU runs firmware the **host** kernel loaded from the
+   Proxmox host's `linux-firmware`, so the guest package is irrelevant. Under
+   `systemd-detect-virt --container` the check must say "firmware is host-side",
+   print the host command (`dpkg -l linux-firmware` on the Proxmox host) and
+   accept host-sourced evidence, rather than passing or warning on the guest's
+   package. Size: ~40-60 lines. Risk: **low** — read-only.
 
 4. **Resource limits on slot Quadlet units.** Source: ODS's
    `deploy.resources.limits.{cpus,memory}` convention

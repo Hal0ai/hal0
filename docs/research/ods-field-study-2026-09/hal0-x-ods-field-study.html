@@ -458,7 +458,7 @@
     <p>hal0's runtime is the stronger design: Podman Quadlets with systemd's geometric restart backoff, a boot-time GPU device-group converge service, digest pins on every image, and Pydantic validation at load time. Its CLI is a modular Typer tree with issue-annotated mount points. Two source-confirmed defects match your complaints: unbounded silent lifecycle verbs (#1870/#1869) and <code>hal0 update</code> never re-linking <code>/usr/local/bin/hal0</code> (#1844, which already caused #2092).</p>
     <div class="two">
       <div class="copy"><h4>Copy</h4><ul>
-        <li>The AMD tuning phase as <code>installer/lib/amd-tuning.sh</code>, opt-in first, default-on for the Strix Halo class once proven, with the reboot banner.</li>
+        <li>The AMD tuning phase as <code>installer/lib/amd-tuning.sh</code>, opt-in only (kernels ≥ 6.14 size GTT dynamically; see D7), GTT/TTM + sysctl + tuned, with the reboot banner.</li>
         <li>gfx1151 <code>HSA_OVERRIDE_GFX_VERSION</code> auto-detection without clobbering an operator value.</li>
         <li>Known-bad kernel and firmware checks in <code>hal0 doctor</code> (kernel &lt; 6.18.4, the broken linux-firmware release), from the toolbox README.</li>
         <li>Optional <code>MemoryMax=</code>/<code>CPUQuota=</code> on slot quadlets, off by default.</li>
@@ -615,10 +615,13 @@ pct exec $CTID -- su - ods -c 'cd ~/ODS/ods &amp;&amp; ./install.sh --all --summ
 
 # ── plain LXD host (not Proxmox) ────────────────────────────────────────────────
 lxc launch images:ubuntu/24.04 ods-lab -c security.privileged=true -c security.nesting=true
-lxc config device add ods-lab kfd unix-char path=/dev/kfd
-lxc config device add ods-lab dri unix-char path=/dev/dri/renderD128
-lxc config device add ods-lab models disk source=/var/lib/hal0/models path=/mnt/hal0-models
-lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS and `git checkout 21f4b3a` before install.sh…'</code></pre>
+RG=$(lxc exec ods-lab -- sh -c 'getent group render &gt;/dev/null || groupadd -r render; getent group render' | cut -d: -f3)
+lxc config device add ods-lab kfd unix-char path=/dev/kfd gid=$RG
+lxc config device add ods-lab dri unix-char path=/dev/dri/renderD128 gid=$RG
+mkdir -p /var/lib/ods-lab/models
+lxc config device add ods-lab hal0models disk source=/var/lib/hal0/models path=/mnt/hal0-models readonly=true
+lxc config device add ods-lab odsmodels disk source=/var/lib/ods-lab/models path=/mnt/ods-models
+lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS, `git checkout 21f4b3a`, chown + symlink /mnt/ods-models to ~/ODS/ods/data/models exactly as in the Proxmox branch, then install.sh…'</code></pre>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
@@ -668,7 +671,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
       <tr><td>2.5</td><td>Persist the approval queue; args-fingerprinted one-shot grants; windowed caps + circuit breaker keyed on (server, tool)</td><td><code>ape/main.py:482-612</code>, <code>:954-1010</code></td><td><code>mcp/approval_queue.py</code>, new <code>mcp/limits.py</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>2.6</td><td>Schema-driven settings renderer; one <code>ChangeSet</code> diff shared by preview and apply</td><td><code>settings.py:194-241</code>, <code>ods-cli:6261-6324</code></td><td>settings pages, <code>slot_config</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>#2108, #1967, #2195, #2203, #1511</td></tr>
       <tr><td colspan="8" style="background:var(--bg-2);font-family:var(--jbm);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-3)">Wave 3 · product surfaces (each gated on a decision below)</td></tr>
-      <tr><td>3.1</td><td>Single-URL LAN gateway: Caddy forward_auth on :80, <code>&lt;host&gt;.local</code> subdomains, owner card + guest invite</td><td><code>ods-proxy/Caddyfile</code>, <code>hermes-proxy/Caddyfile:54-129</code>, <code>routers/magic_link.py</code></td><td>new <code>packaging/hal0-proxy/</code>, <code>api/routes/services.py:38-73</code> (X-Forwarded-Host); <b>prerequisites:</b> rebind hal0-api, Open WebUI and ComfyUI to loopback first (<code>install.sh:157,1567</code> seed <code>0.0.0.0</code> today) and keep it converged on upgrade, or <code>forward_auth</code> is bypassable on :8080/:3001; plus an mDNS address publisher for the subdomains (<code>services/mdns.py</code> writes <code>_http._tcp</code> service records only)</td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
+      <tr><td>3.1</td><td>Single-URL LAN gateway: Caddy forward_auth on :80, <code>&lt;host&gt;.local</code> subdomains, owner card + guest invite</td><td><code>ods-proxy/Caddyfile</code>, <code>hermes-proxy/Caddyfile:54-129</code>, <code>routers/magic_link.py</code></td><td>new <code>packaging/hal0-proxy/</code>, <code>api/routes/services.py:38-73</code> (X-Forwarded-Host); <b>prerequisites:</b> take the direct ports off the LAN first (<code>install.sh:157,1567</code> seed <code>0.0.0.0</code> today) and keep that converged on upgrade, or <code>forward_auth</code> is bypassable on :8080/:3001 — but not by binding hal0-api to loopback alone: Open WebUI and every bridge-network extension reach it via <code>host.docker.internal</code>, the podman bridge gateway, not 127.0.0.1 (<code>openwebui/env_writer.py:102-128</code>), so hal0-api needs a second listener on the bridge gateway address or an nftables rule that drops LAN ingress to :8080/:3001 while exempting the bridge subnet; plus an mDNS address publisher for the subdomains (<code>services/mdns.py</code> writes <code>_http._tcp</code> service records only)</td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>3.2</td><td>Bootstrap-then-hot-swap for first-run tiers via <code>systemd-run</code>, status JSON, snapshot/rollback, verified-before-cleanup</td><td><code>bootstrap-model.sh</code>, <code>11-services.sh:673-690</code>, <code>bootstrap-upgrade.sh:305-452</code></td><td><code>install/agent_model.py</code>, new <code>install/background_pull.py</code>, <code>hal0-model-pull@.service</code></td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
       <tr><td>3.3</td><td>Agent-driven OAuth passthrough + provider registry + persona addendum</td><td><code>routers/oauth_passthrough.py</code>, <code>hermes/oauth-providers.json</code></td><td>new <code>api/routes/oauth.py</code>, <code>installer/agents/hermes/</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>3.4</td><td>Phone chat portal on the pooled-bridge pattern (only if decided)</td><td><code>hermes_bridge.py:162-528</code>, <code>routers/talk.py</code></td><td>new REST/SSE surface beside <code>api/agents/chat_proxy.py</code></td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
@@ -809,7 +812,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
         <li>Do not fork ODS or vendor its tree. Take shapes; the files are wrong-shaped for podman/systemd.</li>
         <li>Do not start Wave 1 while any Wave 0 item is open.</li>
         <li>Do not begin the extension loader before the allow-list width (D4) is written down.</li>
-        <li>Do not build the Caddy gateway before D1 is decided; it changes the trust model — and never enable <code>forward_auth</code> on :80 while hal0-api (:8080) and Open WebUI (:3001) still bind <code>0.0.0.0</code>, or the gateway is decorative.</li>
+        <li>Do not build the Caddy gateway before D1 is decided; it changes the trust model — and never enable <code>forward_auth</code> on :80 while hal0-api (:8080) and Open WebUI (:3001) still answer the LAN directly, or the gateway is decorative — and closing them must keep the container path open (Open WebUI reaches hal0-api through <code>host.docker.internal</code>, not loopback).</li>
         <li>Do not add a first-run wizard. Strengthen the end of the installer instead.</li>
         <li>Do not ship hal0-Max's coder pick until 0.2 has a recorded verdict.</li>
         <li>Do not port ODS's memory pieces to fix #1834 or #2016; those are Hindsight problems.</li>
@@ -2156,7 +2159,17 @@ translation is <strong>rendered env, computed at unit-render time from live trut
   extension convergence — a hook that does not exist today and must ship with the
   feature. ODS's static DNS names and <code>.env</code> ports have the same staleness problem; the
   honest claim is "gateway-routed by default, so a slot move is invisible", not "the URL
-  follows the port".</li>
+  follows the port".
+  (iii) <em>Correction (2026-10-04):</em> <code>host.docker.internal</code> resolves to the host's address on
+  the podman bridge (<code>--add-host=host.docker.internal:host-gateway</code>, <code>env_writer.py:102-105</code>),
+  not to 127.0.0.1. Report 05's gateway work wants the direct ports off the LAN; if that is
+  done by binding hal0-api to loopback alone, every bridge extension — and hal0's own Open
+  WebUI — loses inference, STT, TTS and image routes. The two must be designed together:
+  hal0-api keeps a listener the bridge can reach (a second bind on the podman gateway
+  address, or an authenticated container-facing listener on a shared internal network) while
+  the LAN-facing :8080/:3001 go away, or the LAN cut is an nftables rule that exempts the
+  bridge subnet. <code>HAL0_BIND_HOST</code> is a single value today (<code>config/network.py:37-45</code>), so the
+  two-listener form is new work, not configuration.</li>
 <li>Env lands in <code>/etc/hal0/extensions/&lt;id&gt;.env</code>, written atomically by
   <code>hal0.config.env.write_env_atomic</code> (the same primitive slot env files use) and
   referenced from the generated unit — keeping secrets out of the unit file and out of
@@ -2907,8 +2920,12 @@ that <em>is</em> the "tiny model first". The port is conceptual:</p>
    --unit=hal0-model-pull@…</code>; <em>correction 2026-10-04</em>: <code>--unit=</code> only names the
    unit — without <code>--uid</code>/<code>--gid</code> the pull inherits the installer's root identity
    and leaves model directories, status files and registry state root-owned for
-   the <code>User=hal0</code> API, <code>packaging/sudoers/hal0-systemctl:3</code>) rather than <code>nohup</code> — hal0 is a systemd product and gets journald logging,
-   restart policy, and <code>systemctl status</code> for free.</li>
+   the <code>User=hal0</code> API, <code>packaging/sudoers/hal0-systemctl:3</code>) rather than <code>nohup</code> — hal0 is a systemd product and gets journald logging
+   and <code>systemctl status</code> for free. Restart is <em>not</em> free (<em>correction
+   2026-10-04</em>): a transient unit defaults to <code>Restart=no</code>, so a registry or
+   network hiccup leaves it failed; pass <code>--property=Restart=on-failure
+   --property=RestartSec=30s</code> (and a <code>StartLimitBurst</code> the pull can survive), or
+   use a static <code>hal0-model-pull@.service</code> template that declares them.</li>
 <li>Copy ODS's <strong>status-file contract</strong> (<code>data/bootstrap-status.json</code>:
    <code>status/percent/bytesDownloaded/bytesTotal/speedBytesPerSec/eta</code>, written
    atomically) so the dashboard can render progress.</li>
@@ -3565,10 +3582,10 @@ of this repo's own "verify against source, not memory" rule.</p>
 <tr>
 <td>1</td>
 <td>Close the #1822 gap: cross-check bind + auth in the doctor</td>
-<td><code>src/hal0/cli/doctor_all.py:62-83</code> (<code>check_auth_posture</code>); needs <code>hal0.config.network.bind_host()</code> (<code>src/hal0/config/network.py:37-45</code>) or <code>GET /api/config/urls</code> as the bind signal</td>
+<td><code>src/hal0/cli/doctor_all.py:62-83</code> (<code>check_auth_posture</code>); needs the <em>daemon's</em> bind as the signal — <code>GET /api/config/urls</code> (<code>api/routes/config.py</code>; add the bind host to it if it does not carry one) or a parse of <code>/etc/hal0/api.env</code>, the unit's <code>EnvironmentFile</code> (<code>install.sh:1605</code>), the way <code>service_identity.py:47-57</code> already reads it — <strong>not</strong> <code>hal0.config.network.bind_host()</code> from the CLI process: <code>doctor</code> runs in the operator's shell, so that call sees no <code>HAL0_BIND_HOST</code> and returns its loopback fallback (<code>network.py:37-45</code>), reproducing the false PASS (<em>correction 2026-10-04</em>)</td>
 <td>~20-30 line diff + 1 test</td>
 <td><strong>Very low</strong> — read-only, additive, no behavior change</td>
-<td>Demote to <code>_WARN</code> when <code>bind_host() not in _LOOPBACK_BIND_HOSTS and not required</code>; message: <code>"open on a LAN-reachable bind — run 'hal0 auth require on' or set HAL0_BIND_HOST=127.0.0.1"</code>. This is the single highest-leverage, lowest-risk fix in this whole report.</td>
+<td>Demote to <code>_WARN</code> when <code>&lt;daemon bind&gt; not in _LOOPBACK_BIND_HOSTS and not required</code>; message: <code>"open on a LAN-reachable bind — run 'hal0 auth require on' or set HAL0_BIND_HOST=127.0.0.1"</code>. This is the single highest-leverage, lowest-risk fix in this whole report.</td>
 </tr>
 <tr>
 <td>2</td>
@@ -3584,7 +3601,7 @@ of this repo's own "verify against source, not memory" rule.</p>
 <td>New <code>packaging/hal0-proxy/Caddyfile</code> + a systemd/quadlet unit; <code>installer/install.sh</code> hookup; must respect <code>X-Forwarded-Host</code> in <code>_behind_proxy</code>/<code>_resolve_host</code> (<code>services.py:38-73</code>) so links don't regress to raw ports</td>
 <td>~150-250 lines</td>
 <td><strong>Medium</strong> — WS/SSE passthrough needs the same header-stripping care <code>hermes-proxy/Caddyfile:104-119</code> documents; must not fight hal0's existing request-Host link trick (<code>useConfigUrls.ts:1-12</code>)</td>
-<td>Ports almost verbatim from <code>ods-proxy/Caddyfile</code>'s <code>chat.&lt;device&gt;.local</code> block (lines 66-78), service names swapped for <code>127.0.0.1:8080</code>/<code>:3001</code>/<code>:8188</code>. <strong>Correction (2026-10-04) — two prerequisites this row omitted.</strong> (a) A stock install seeds <code>API_BIND_HOST="0.0.0.0"</code> (<code>installer/install.sh:157</code>) into <code>api.env</code> and publishes Open WebUI on <code>${API_BIND_HOST}:3001</code> (<code>install.sh:1567</code>), so a <code>forward_auth</code> listener on :80 leaves :8080 and :3001 reachable directly and the auth is bypassable; the gateway work must rebind every upstream to loopback (<code>HAL0_BIND_HOST=127.0.0.1</code>, the Open WebUI env writer, ComfyUI) and keep that converged across upgrades before it is the single audited edge. (b) <code>src/hal0/services/mdns.py:82-96</code> renders <code>_http._tcp</code> service records on the machine hostname and publishes no A/AAAA records, so <code>chat.&lt;host&gt;.local</code> needs an address publisher (<code>avahi-publish -a</code> per name, or a zeroconf daemon like ODS's <code>bin/ods-mdns.py:173-187</code>) whose name set is pinned to the Caddyfile the way ODS's <code>tests/test_mdns_subdomains.py</code> pins it.</td>
+<td>Ports almost verbatim from <code>ods-proxy/Caddyfile</code>'s <code>chat.&lt;device&gt;.local</code> block (lines 66-78), service names swapped for <code>127.0.0.1:8080</code>/<code>:3001</code>/<code>:8188</code>. <strong>Correction (2026-10-04) — two prerequisites this row omitted.</strong> (a) A stock install seeds <code>API_BIND_HOST="0.0.0.0"</code> (<code>installer/install.sh:157</code>) into <code>api.env</code> and publishes Open WebUI on <code>${API_BIND_HOST}:3001</code> (<code>install.sh:1567</code>), so a <code>forward_auth</code> listener on :80 leaves :8080 and :3001 reachable directly and the auth is bypassable; the gateway work must take every upstream off the LAN interface and keep that converged across upgrades before it is the single audited edge — and <em>not</em> by <code>HAL0_BIND_HOST=127.0.0.1</code> alone: Open WebUI and every bridge-network extension reach hal0-api through <code>host.docker.internal</code>, the podman bridge gateway address, not loopback (<code>openwebui/env_writer.py:102-128</code>), so hal0-api needs a bridge-reachable listener (second bind or shared internal network) or the LAN cut is an nftables rule that exempts the bridge subnet (report 02 §D.5 (iii)). (b) <code>src/hal0/services/mdns.py:82-96</code> renders <code>_http._tcp</code> service records on the machine hostname and publishes no A/AAAA records, so <code>chat.&lt;host&gt;.local</code> needs an address publisher (<code>avahi-publish -a</code> per name, or a zeroconf daemon like ODS's <code>bin/ods-mdns.py:173-187</code>) whose name set is pinned to the Caddyfile the way ODS's <code>tests/test_mdns_subdomains.py</code> pins it.</td>
 </tr>
 <tr>
 <td>4</td>
@@ -4067,9 +4084,15 @@ _state.setdefault(&quot;grants&quot;, {})[gkey] = {..., &quot;approver&quot;: re
 <li><strong>To:</strong> <code>src/hal0/mcp/approval_queue.py</code></li>
 <li><strong>Why:</strong> hal0's queue is explicitly in-memory (<code>approval_queue.py:11-14</code>) — an <code>hal0-api</code> restart
   drops pending approvals silently. Persisting the pending set (and binding an approval to an args
-  hash so an approved <code>model_pull qwen3:0.6b</code> cannot authorise <code>model_pull something-else</code>) is a
-  small, self-contained hardening. The module's own docstring already anticipates it: <em>"A future ADR
-  can promote this to a persisted table."</em></li>
+  hash so an approved <code>model_pull qwen3:0.6b</code> cannot authorise <code>model_pull something-else</code>) is the
+  hardening; the module's own docstring anticipates it: <em>"A future ADR can promote this to a
+  persisted table."</em> It is <strong>not</strong> table-only, though (<em>correction 2026-10-04</em>): each entry executes
+  through an in-memory <code>_executor</code> closure bound at enqueue time (<code>approval_queue.py:127,216</code>,
+  built in <code>admin.py:1887-1900</code>), and <code>approve()</code> fails with <code>no executor bound to approval</code> when
+  it is missing (<code>approval_queue.py:262-276</code>). A persisted approval therefore needs a trusted
+  dispatcher that rebuilds execution from the stored <code>(server, tool, args, args_hash)</code> after
+  re-running <code>ToolPolicy.classify</code> and session validation (<code>admin.py:1769-1795,1860</code>) — the
+  closure itself cannot be serialised.</li>
 </ul>
 <h5 id="d5-baselinescratch-separator-for-self-edited-agent-files-low-value-note-only">D5. Baseline/scratch separator for self-edited agent files — <strong>LOW value, note only</strong></h5>
 <p><code>memory-shepherd</code>'s <code>---</code> contract (<code>README.md:133-148</code>, <code>memory-shepherd.sh:151-180</code>) only applies
@@ -4161,7 +4184,12 @@ at an empty <code>url</code>. Two shapes actually work:</p>
    as files under <code>$CREDENTIALS_DIRECTORY</code>, so the adapter must read each one and set the mapped
    variable in the <em>child's</em> environment; a stdio server (like hal0's own client,
    <code>agents/mcp_client.py:222</code>) looks up a plain environment name, not a credential file
-   (<em>correction 2026-10-04</em>) — <code>ProtectSystem=strict</code> still applies, and the exposure join renders the <em>bridge's</em> URL — which
+   (<em>correction 2026-10-04</em>). Nor can the unit point <code>LoadCredential=</code> at <code>api.env</code>: that copies
+   the <em>whole</em> file into one credential (<code>LoadCredential=ID:PATH</code>), and the box's secrets live in
+   that one aggregate <code>KEY=value</code> file (<code>service_identity.py:47-57</code>), so a per-<code>[secrets]</code> mapping
+   needs a root broker — an <code>ExecStartPre=+</code> helper that extracts only the selected keys into
+   per-unit <code>systemd-creds encrypt</code>ed files consumed through <code>LoadCredentialEncrypted=</code> — or a
+   per-secret store (<em>second correction 2026-10-04</em>) — <code>ProtectSystem=strict</code> still applies, and the exposure join renders the <em>bridge's</em> URL — which
    makes a stdio server indistinguishable from an http one to everything downstream, including the
    policy proxy the §E.3 correction asks for.</li>
 </ol>
@@ -4792,7 +4820,7 @@ delight is a goal, at some cost to a brand-new user's ability to tell what an
 </tr>
 <tr>
 <td><code>docker-compose.base.yml:82-175</code> full Open WebUI env wiring (RAG/websearch/image-gen)</td>
-<td><code>src/hal0/openwebui/env_writer.py</code> — conditionally add <code>RAG_EMBEDDING_*</code>/<code>ENABLE_IMAGE_GENERATION</code>/<code>COMFYUI_*</code> only when the relevant hal0 slot is actually bound, mirroring ODS's <code>ENABLE_COMFYUI:-false}</code> gating discipline (<code>docker-compose.base.yml:126-127</code>)</td>
+<td><code>src/hal0/openwebui/env_writer.py</code> — conditionally add <code>RAG_EMBEDDING_*</code>/<code>ENABLE_IMAGE_GENERATION</code>/<code>COMFYUI_*</code> only when the relevant hal0 slot is actually bound, mirroring ODS's <code>ENABLE_COMFYUI:-false}</code> gating discipline (<code>docker-compose.base.yml:126-127</code>). <em>Correction (2026-10-04):</em> a one-shot gate drifts — <code>openwebui.env</code> is written at install and the writer's <code>preserve_existing</code> merge keeps every existing key on upgrade (<code>env_writer.py:251-267</code>), so a flag set true stays true after the slot is unbound and nothing re-renders when one is bound later. The generated keys need their own owned block, re-rendered (with an Open WebUI restart) from the slot-change hook report 02 §D.5 calls <code>depends_on_slots</code> — or point Open WebUI at stable hal0-api routes that answer with a clear error when no slot is bound, so no env rewrite is needed</td>
 <td>M</td>
 <td>Medium — must gate on live slot state or it repeats ODS's own Apple-VRAM-fallback footgun (<code>features.py:27-32</code>) of claiming a capability that isn't really there</td>
 </tr>
@@ -5293,7 +5321,12 @@ the less robust of the two once Podman/rootless edge cases are in play.</p>
    report "tuning applied" on every LXC. The hal0 port must branch on
    <code>systemd-detect-virt --container</code> (the installer already distinguishes LXC in
    <code>preflight_gpu</code>, <code>install.sh:363-380,500-509</code>): on bare metal apply as above; in
-   a container compute the same values but <strong>print the host-side recipe</strong> (the
+   a container do <strong>not</strong> derive the tier from the guest's memory — an LXC sees
+   its cgroup allocation, not host RAM (<code>docs/getting-started/proxmox.mdx:171-173</code>;
+   the recipe's 32 GB guest on a 128 GB host would pick the wrong tier and
+   undersize the host GTT; <em>correction 2026-10-04</em>) — so emit a host-side script that reads the host's <code>/proc/meminfo</code>
+   and computes the tier there, or take <code>--host-ram-gb</code> explicitly, and <strong>print
+   the host-side recipe</strong> (the
    GTT/TTM <code>/etc/default/grub</code> additions, <code>update-grub</code>, the <code>/etc/modprobe.d/</code>
    drop-in, the sysctls) for the operator to run on the Proxmox host, and record the phase as
    <code>skipped: container</code>, never as applied. The <code>hal0 doctor</code> arm (item 3) should
@@ -5316,7 +5349,14 @@ the less robust of the two once Podman/rootless edge cases are in play.</p>
    toolboxes/README.md:53</code>) plus ODS's version-gated remediation pattern
    (<code>installers/phases/05-docker.sh:194-244</code>). Target: a new check in
    <code>src/hal0/cli/doctor_commands.py</code> reading <code>uname -r</code> and <code>rpm -q</code>/<code>dpkg
-   -l</code> for <code>linux-firmware</code>. Size: ~40-60 lines. Risk: <strong>low</strong> — read-only.</p>
+   -l</code> for <code>linux-firmware</code>. <em>Correction (2026-10-04):</em> inside an LXC the
+   kernel half still holds (<code>uname -r</code> is the host kernel) but the firmware
+   half does not — the GPU runs firmware the <strong>host</strong> kernel loaded from the
+   Proxmox host's <code>linux-firmware</code>, so the guest package is irrelevant. Under
+   <code>systemd-detect-virt --container</code> the check must say "firmware is host-side",
+   print the host command (<code>dpkg -l linux-firmware</code> on the Proxmox host) and
+   accept host-sourced evidence, rather than passing or warning on the guest's
+   package. Size: ~40-60 lines. Risk: <strong>low</strong> — read-only.</p>
 </li>
 <li>
 <p><strong>Resource limits on slot Quadlet units.</strong> Source: ODS's

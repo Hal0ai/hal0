@@ -61,3 +61,14 @@ The install ran in a remote sandbox (no GPU, CPU tier 0, rootless install user, 
   transient pull runs `--uid=hal0 --gid=hal0`; model cleanup is reference-aware and never
   removes the still-bound brain model. Report 06: `LoadCredential=` delivers files, so the bridge
   must export them into the child's environment.
+- **2026-10-04 (round 5)** — Gateway and bridge extensions designed together: taking :8080/:3001
+  off the LAN must not be `HAL0_BIND_HOST=127.0.0.1` alone, because Open WebUI and bridge
+  extensions reach hal0-api via `host.docker.internal`, the podman bridge gateway
+  (`openwebui/env_writer.py:102-128`); report 02 §D.5 (iii), report 05 D3, plan row 3.1 and the
+  principles say so. Report 05 D1: the doctor must read the daemon's bind, not `bind_host()` in
+  the CLI process. Report 03: the transient pull needs `Restart=on-failure` passed explicitly.
+  Report 06: persisted approvals need a dispatcher that rebuilds the `_executor`; per-secret
+  credentials need a root broker because `api.env` is one aggregate file. Report 07: generated
+  Open WebUI keys must be converged on slot changes. Report 08: in an LXC, size GTT from host RAM
+  and check firmware on the host. The LXD recipe branch mirrors the Proxmox one (gid, read-only
+  hal0 store, writable ODS store); the summary's Copy list no longer says default-on.
