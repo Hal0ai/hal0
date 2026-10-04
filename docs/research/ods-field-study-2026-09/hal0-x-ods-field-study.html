@@ -264,12 +264,12 @@
   </div>
 
   <h3 style="margin-top:1.6rem">Three premise corrections</h3>
-  \1 <em>Update 2026-10-04: two of the three closed on main — #2253 (ADR-0015) shipped the exposure join, <code>[secrets]</code>/<code>[tools]</code>/<code>[exposure]</code> and the CLI/REST verbs for http/sse servers; the stdio supervisor is deferred and the drawer is #2245. Review also found that the shipped join mirrors the tool policy without enforcing it on Hermes's call path — see report 06 §E.3 and hal0 issue #2303.</em>\2
+  <div class="callout ods"><h4>ODS ships no MCP at all.</h4><p>No <code>mcp_servers</code> block in the Hermes template, no MCP for OpenCode or Open WebUI, no MCP UI or CLI verb. The n8n "RAG pipelines" are sticky-note stubs. There is nothing to port on this axis. Meanwhile hal0 already has most of the "user-added MCP servers" feature you asked for: a per-server TOML registry at <code>/etc/hal0/mcp-servers/</code>, a 945-line REST router, <code>hal0 mcp list|install|uninstall</code>, and an SSRF-guarded manifest resolver. Three gaps remain: no process supervisor (the route literally says "pending ADR-0015"), no join between installed servers and the Hermes config, and no install drawer in the dashboard. <em>Update 2026-10-04: two of the three closed on main — #2253 (ADR-0015) shipped the exposure join, <code>[secrets]</code>/<code>[tools]</code>/<code>[exposure]</code> and the CLI/REST verbs for http/sse servers; the stdio supervisor is deferred and the drawer is #2245. Review also found that the shipped join mirrors the tool policy without enforcing it on Hermes's call path — see report 06 §E.3 and hal0 issue #2303.</em></p></div>
   <div class="callout hal0"><h4>hal0 already has mDNS.</h4><p><code>src/hal0/services/mdns.py</code> writes avahi service-group XML, is wired to a dashboard card, and is tested. ODS runs its own zeroconf daemon plus a Caddy host-router on :80 to get <code>chat.ods.local</code>. hal0's approach is lighter for what it does. What hal0 lacks is not mDNS, it is the single friendly URL and a safe LAN posture, and one dead path: the base <code>hal0.service</code> avahi file the dashboard promises is never written.</p></div>
   <div class="callout ods"><h4>ODS's Hermes is packaging; the product around it is the prize.</h4><p>ODS runs the pinned upstream container with five files of glue and a regex YAML patcher for upgrades. hal0's provisioner is more rigorous (<code>hermes config migrate</code> + <code>config set</code>, converging writes, a backup, an operator overrides file), its context-floor logic reads the floor from the installed Hermes instead of hard-coding 65536, and its systemd sandbox is tighter than the container. What ODS does better is everything an operator touches: magic-link auth with owner cards, a mobile chat portal whose pooled WebSocket bridge keeps the prompt cache warm, agent-driven OAuth setup, and a persona written from live testing. Keep pip-installed Hermes. Copy the product layer.</p></div>
 
   <h3 style="margin-top:1.6rem">Two findings that should not wait for a plan</h3>
-  \1 <em>Update 2026-10-04: addressed on main for the LAN-bound case by #2246 (<code>946c512</code>) — ADMIN routes, approvals included, now require an admin session/key from any non-loopback caller when the box is LAN-bound, even with <code>require_auth</code> off. The loopback dev-open path remains by design.</em>\2</div>
+  <div class="callout err"><h4>A. Approval endpoints execute gated tools with auth removed.</h4><p><code>/api/agent/approvals/{id}/approve</code> runs <code>model_pull</code>, <code>slot_delete</code> and <code>config_write</code> and its module explicitly notes auth was removed (<code>src/hal0/api/routes/approvals.py:24-27</code>), on an API that binds <code>0.0.0.0:8080</code> by default. ODS's <code>session_signer.py</code> (171 lines, stdlib only) plus its <code>verify-session</code>/<code>admin-session</code> routes are a near-verbatim fix, and hal0 already has half the machinery in <code>api/agents/_auth.py</code>. About 250 lines. Do this before anything else in this document. <em>Update 2026-10-04: addressed on main for the LAN-bound case by #2246 (<code>946c512</code>) — ADMIN routes, approvals included, now require an admin session/key from any non-loopback caller when the box is LAN-bound, even with <code>require_auth</code> off. The loopback dev-open path remains by design.</em></p></div>
   <div class="callout err"><h4>B. hal0-Max recommends a model ODS found broken on unified memory.</h4><p>hal0's top first-run bundle for the 100 GB Strix Halo class sets <code>chat.coder = Qwen3-Coder-Next-80B-A3B</code> (<code>curated.py:260-275</code>). ODS's fleet testing found that exact family produces all-<code>?</code> output on unified-memory backends, reproduced on Strix Halo and on Grace-Blackwell, and now hard-routes every unified-memory host away from it (<code>installers/lib/tier-map.sh:100-138</code>, <code>scripts/select-model.py:326-372</code>). ODS tested against llama.cpp b9014 and its own Lemonade path, so this may not reproduce on hal0's ROCm runner. It costs one afternoon on a real 395 to find out and it decides whether the flagship pick is a correctness bug.</p></div>
   <p class="prose muted">A third, smaller item: the sandbox install surfaced a real ODS bug (the host agent inherits the installer's lock file descriptor in the non-systemd fallback path, so later model operations block forever). Details in <a href="#install">the install section</a>. Since permission flows both ways, it is worth sending upstream.</p>
 </section>
@@ -288,7 +288,7 @@
     <li><b>No AMD host tuning.</b> GTT/TTM sizing, <code>amd_iommu=off</code>, swappiness, and a tuned profile are absent from hal0's installer even though hal0's own upstream toolbox README documents them as required for Strix Halo.</li>
     <li><b>Open WebUI is half wired.</b> hal0 sets chat and voice, but not RAG embeddings, web search or image generation, so Open WebUI's own upload and image buttons point at nothing. ODS wires all of it, including a baked ComfyUI workflow.</li>
     <li><b>The copy explains internals, not consequences.</b> Tooltips read like <code>hal0.toml [memory] · requires restart</code>. ODS's status vocabulary and settings hints lead with what happens to you. This is an audience choice, but it should be a choice.</li>
-    \1 <em>(ADR bookkeeping reconciled on main by #2244: <code>docs/adr/</code> now holds 0004, 0012, 0013, 0015, 0020 and 0023.)</em>\2
+    <li><b>Own docs have drifted.</b> The "15-phase, checkpointed" provisioner is 12 steps and deliberately uncheckpointed; <code>BUNDLED_AGENTS</code> is misquoted; a unit's <code>Documentation=</code> path does not exist; two byte-identical 629-line memory providers have no sync; <code>CLAUDE.md</code> says <code>docs/adr/</code> holds the decision records while <code>ARCHITECTURE.md</code> says hal0 keeps no ADR tree, and the ADR numbers the code cites (0012, 0015, 0023) live in the gitignored internal tree per <code>CHANGELOG.md</code>, so a contributor reading <code>routes/mcp.py</code> cannot find the decision it defers to. Fix these before anyone ports against them. <em>(ADR bookkeeping reconciled on main by #2244: <code>docs/adr/</code> now holds 0004, 0012, 0013, 0015, 0020 and 0023.)</em></li>
   </ol>
 </section>
 
@@ -413,7 +413,7 @@
   <div class="domain" id="d-mcp">
     <div class="dh"><h3>MCP and memory</h3><span class="chip hal0">hal0</span><a class="sz" href="#appx-06-mcp-memory">report 06</a></div>
     <p>ODS has no MCP. Its memory is upstream Hermes's own files plus <code>memory-shepherd</code>, a 338-line timer that archives everything below a <code>---</code> separator in a markdown file every three hours. Qdrant and TEI are deployed and the README says vectors land in Qdrant; nothing writes to it. The one genuinely excellent pattern here is generated-config discipline: <code>patch-hermes-config.py</code> is a block-scoped, comment-preserving patcher that distinguishes "operator wins" keys (fill only if missing) from "ODS converges" keys (re-assert unconditionally), returns <code>changed: bool</code>, and writes only on diff. APE's approval grants are bound to an args fingerprint and are strictly one-shot; that idea is worth stealing even though APE itself is not.</p>
-    \1 <em>Corrected 2026-10-04 (report 06 §E.2–E.3): the builtin loop's admin bearer must not be reused for third-party URLs; the <code>[tools]</code> mirror only describes policy — Hermes talks to the server directly and nothing enforces allow/gated/blocked until hal0 fronts user-installed servers with a policy proxy mount (issue #2303); and a stdio server needs a client-attached bridge, not a free-standing unit.</em>\2
+    <p>The user-added-MCP design in the report is concrete and reuses hal0's own pieces: extend the existing per-server TOML with <code>[secrets]</code> (indirection into <code>/etc/hal0/api.env</code>), <code>[tools]</code> (the existing <code>ToolPolicy</code>, so a new server starts with zero callable tools), and <code>[exposure]</code> (<code>hermes</code>, <code>brain</code> now; <code>openwebui</code>/<code>opencode</code> return <code>501</code> until built); regenerate Hermes's <code>mcp_servers</code> block on every registry mutation, deleting only entries hal0 itself wrote (main's #2253 keeps that ownership list in a side-car manifest rather than sentinel comments, since YAML comments do not survive a re-dump); add <code>hal0 mcp test &lt;id&gt;</code> that probes the server and prints each tool with its verdict; run stdio servers behind a client-attached bridge unit (<code>hal0-mcp@&lt;id&gt;</code> executing a hal0-owned stdio↔streamable-http adapter), never as a free-standing process with nobody on its pipe. Write ADR-0015 first; the code already promises it. <em>Corrected 2026-10-04 (report 06 §E.2–E.3): the builtin loop's admin bearer must not be reused for third-party URLs; the <code>[tools]</code> mirror only describes policy — Hermes talks to the server directly and nothing enforces allow/gated/blocked until hal0 fronts user-installed servers with a policy proxy mount (issue #2303); and a stdio server needs a client-attached bridge, not a free-standing unit.</em></p>
     <div class="two">
       <div class="copy"><h4>Copy</h4><ul>
         <li>The block-scoped patcher for one job: removing stale hal0-owned <code>mcp_servers</code> blocks, which <code>hermes config set</code> cannot express.</li>
@@ -565,9 +565,15 @@ pct create $CTID local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname ods-lab --cores 8 --memory 32768 --swap 0 --rootfs local-lvm:64 \
   --net0 name=eth0,bridge=vmbr0,ip=dhcp \
   --unprivileged 0 --features nesting=1,keyctl=1,fuse=1,mknod=1
+# first boot WITHOUT GPU lines: the gid= value must be the render group's id INSIDE the guest,
+# which cannot be known before the guest exists (docs/getting-started/proxmox.mdx §3 does the same dance)
+pct start $CTID
+RG=$(pct exec $CTID -- sh -c 'getent group render &gt;/dev/null || groupadd -r render; getent group render' | cut -d: -f3)
+echo "guest render gid: $RG"
+pct stop $CTID
 # GPU nodes + the shared model store go in the CT config (PVE 8.2+ dev passthrough)
-cat &gt;&gt; /etc/pve/lxc/$CTID.conf &lt;&lt;'EOF'
-dev0: /dev/dri/renderD128,gid=&lt;render gid INSIDE the CT&gt;
+cat &gt;&gt; /etc/pve/lxc/$CTID.conf &lt;&lt;EOF
+dev0: /dev/dri/renderD128,gid=$RG
 dev1: /dev/kfd
 mp0: /var/lib/hal0/models,mp=/mnt/hal0-models
 lxc.cgroup2.devices.allow: c 226:* rwm
@@ -575,10 +581,12 @@ lxc.cgroup2.devices.allow: c 234:* rwm
 lxc.prlimit.memlock: unlimited
 EOF
 pct start $CTID
+pct exec $CTID -- stat -c '%g %n' /dev/dri/renderD128 /dev/kfd    # renderD128 must show $RG (docs/getting-started/drivers.mdx)
 pct exec $CTID -- bash -lc 'apt-get update &amp;&amp; apt-get install -y curl jq git rsync docker.io docker-compose-v2 &amp;&amp; \
   useradd -m -s /bin/bash ods &amp;&amp; usermod -aG docker,render,video ods &amp;&amp; \
   echo "ods ALL=(ALL) NOPASSWD:ALL" &gt; /etc/sudoers.d/ods'
-pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS/ods &amp;&amp; \
+# 21f4b3a is the ODS revision every citation and result in this study is pinned to
+pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS &amp;&amp; git checkout 21f4b3a &amp;&amp; cd ods &amp;&amp; \
   ./install.sh --all --summary-json ~/ods-summary.json'
 # ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel —
 # apply the printed GTT/IOMMU values on the host instead (report 08 §D.1), then reboot the host.
@@ -589,7 +597,7 @@ lxc launch images:ubuntu/24.04 ods-lab -c security.privileged=true -c security.n
 lxc config device add ods-lab kfd unix-char path=/dev/kfd
 lxc config device add ods-lab dri unix-char path=/dev/dri/renderD128
 lxc config device add ods-lab models disk source=/var/lib/hal0/models path=/mnt/hal0-models
-lxc exec ods-lab -- bash -lc '…same package / user / clone steps as above…'</code></pre>
+lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS and `git checkout 21f4b3a` before install.sh…'</code></pre>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
@@ -599,9 +607,9 @@ lxc exec ods-lab -- bash -lc '…same package / user / clone steps as above…'<
     <h3>Principles</h3>
     <ul>
       <li><strong>Copy shapes, not files.</strong> The ODS artifacts that are literally droppable are small (the session signer, the patcher, the progress protocol, the AMD tuning math). Everything else is a design decision hal0 re-implements in Python on podman and systemd.</li>
-      <li><strong>Extensions are companion services, never slots.</strong> A separate unit family, <code>hal0-ext@&lt;id&gt;</code>, rootless from day one, rendered from a typed manifest, never from an author-written unit body.</li>
+      <li><strong>Extensions are companion services, never slots.</strong> A separate unit family, <code>hal0-ext@&lt;id&gt;</code>, rendered from a typed manifest, never from an author-written unit body. Explicitly <em>rootful</em> in v1 — it goes through the same system-scope seam as slots — with compensating controls (digest-pinned images, volumes confined to <code>/var/lib/hal0/ext/&lt;id&gt;/</code>, no devices, capabilities dropped) and third-party import disabled until a user-scope seam makes rootless real (report 02, Decision 3, corrected 2026-10-04).</li>
       <li><strong>Keep what is better.</strong> Quadlets, digest pins, the cosign updater, pip Hermes, the Typer CLI, Hindsight, the shared health classifier. None of these are on the table.</li>
-      <li><strong>Every installed thing stays pre-wired to the slots.</strong> Pre-wiring in hal0 is rendered env, computed at unit-render time from live truth: <code>OPENAI_BASE_URL</code> to hal0-api, <code>OPENAI_MODEL=hal0/brain</code>, and <code>slot:&lt;name&gt;</code> references resolved through the port authority so an extension follows a slot when its port moves. That is stronger than ODS's static DNS names.</li>
+      <li><strong>Every installed thing stays pre-wired to the slots.</strong> Pre-wiring in hal0 is rendered env, computed at unit-render time from live truth: <code>OPENAI_BASE_URL</code> to hal0-api, <code>OPENAI_MODEL=hal0/brain</code>, and <code>slot:&lt;name&gt;</code> references resolved to hal0-api's gateway route for that modality — slots are loopback-only on the host, so a bridge-network extension cannot reach a slot port directly, and a value rendered once does not follow a later port change, whereas the gateway's port is stable and the dispatcher follows the slot. Direct <code>127.0.0.1:&lt;slot port&gt;</code> wiring is reserved for host-network extensions and needs a slot-change convergence hook that does not exist yet (report 02 §D.5, corrected 2026-10-04). Still stronger than ODS's static DNS names, for a narrower claim.</li>
       <li><strong>Finish before starting.</strong> Wave 0 closes completely before Wave 1 opens. The backlog already has enough 80 % threads.</li>
     </ul>
   </div>
@@ -706,7 +714,7 @@ lxc exec ods-lab -- bash -lc '…same package / user / clone steps as above…'<
 
   <div class="decision"><h3>D4. What an extension is allowed to be</h3>
     <div class="opts">
-      <div class="opt rec"><b>What I'd do</b>Companion services only, never slots; rootless under the <code>hal0</code> user from day one; a small first-party set (OpenWebUI converted as proof, then n8n); third-party import behind an explicit flag with envelope checksums; allow-list widened by exactly two literal-pinned keys; may consume a specific slot via <code>slot:&lt;name&gt;</code>.</div>
+      <div class="opt rec"><b>What I'd do</b>Companion services only, never slots; explicitly rootful in v1 with the compensating controls in report 02 Decision 3 (a user-scope seam is the gate for rootless and for third-party import); a small first-party set (OpenWebUI converted as proof, then n8n); third-party import behind an explicit flag with envelope checksums; allow-list widened by exactly two literal-pinned keys; may consume a specific slot via <code>slot:&lt;name&gt;</code>.</div>
       <div class="opt"><b>Safe version</b>API-only consumption (no <code>slot:</code> refs). The eligibility half of the design collapses and v1 gets meaningfully cheaper.</div>
       <div class="opt"><b>Cheap test</b>Write OpenWebUI's <code>manifest.toml</code> by hand before writing any loader. If it cannot be expressed, the schema is wrong.</div>
     </div>
@@ -5474,7 +5482,7 @@ this on a real box" land in Direct port or Pattern adoption.</p>
 <td>LXC /dev/kfd seeds gpu-vulkan</td>
 <td>Pattern adoption</td>
 <td><code>installers/lib/detection.sh:187-233; installers/phases/02-detection.sh:159-168</code></td>
-<td>Make device-node presence (kfd_present()) sufficient for the ROCm lane; never gate a lane on a userspace tool being installed</td>
+<td>Make device-node presence (kfd_present() AND render_node_present()) sufficient for the ROCm lane; never gate a lane on a userspace tool being installed</td>
 <td>S</td>
 <td>H</td>
 </tr>
@@ -6621,7 +6629,7 @@ function that demotes a box to CPU with a stated reason
 envelope (<code>tier-map.sh:200-330</code>, <code>select-model.py:134-182</code>,
 <code>llama-memory-budget.sh:6-31</code>).</p>
 <p>In hal0 this is: (1) live-probe fallback when <code>hardware.json</code> is stale/absent;
-(2) <code>kfd_present()</code> sufficient for the ROCm lane; (3) one <code>apply_cpu_fallback()</code> that
+(2) <code>kfd_present()</code> <strong>and</strong> <code>render_node_present()</code> together sufficient for the ROCm lane; (3) one <code>apply_cpu_fallback()</code> that
 rewrites the whole verdict; (4) one memory-envelope function that seed context sizes, the
 memory ruler, the extraction sizing and the anchor-window floor all read.</p>
 <h5 id="d-update-deploy-delivery-integrity">D. Update / deploy delivery integrity</h5>

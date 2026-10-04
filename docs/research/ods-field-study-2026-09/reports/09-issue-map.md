@@ -49,7 +49,7 @@ this on a real box" land in Direct port or Pattern adoption.
 | 1512 | stacks import never verifies checksum | Direct port | `ods-restore.sh:273-310` | Verify the envelope digest on the commit path; fail closed; keep --skip-verify as the explicit opt-out | S | H |
 | 2234 | default_images[family] only on llama path | Pattern adoption | `installers/lib/compose-images.sh:40-71` | Resolve every slot image through one plan-derived seam so no provider path can bypass default_images[family] | M | M |
 | 2221 | last_crash_line None on exit 64 | Pattern adoption | `installers/lib/compose-failure-report.sh:92-186; ods-cli:1080-1128` | Replace the single crash-line regex with a bounded evidence report: exit code + last N unit-log lines + likely image | M | M |
-| 2216 | LXC /dev/kfd seeds gpu-vulkan | Pattern adoption | `installers/lib/detection.sh:187-233; installers/phases/02-detection.sh:159-168` | Make device-node presence (kfd_present()) sufficient for the ROCm lane; never gate a lane on a userspace tool being installed | S | H |
+| 2216 | LXC /dev/kfd seeds gpu-vulkan | Pattern adoption | `installers/lib/detection.sh:187-233; installers/phases/02-detection.sh:159-168` | Make device-node presence (kfd_present() AND render_node_present()) sufficient for the ROCm lane; never gate a lane on a userspace tool being installed | S | H |
 | 2212 | verify-files / re-pull for model + mmproj | Pattern adoption | `ods-restore.sh:273-310; config/model-library.json:5-14 (gguf_sha256)` | Carry per-file sha256 in the registry row and verify/re-pull on demand for model + mmproj | M | M |
 | 2203 | seed-profile route emits changed_fields always | Pattern adoption | `ods-cli:6261-6324 (_template_preview delta)` | Compute the real delta once and emit changed_fields only when it is non-empty | S | M |
 | 2201 | runs_on reads hardware per row per poll | Pattern adoption | `extensions/services/dashboard-api/helpers.py:26-56, 585-619` | Resolve hardware once per request from a TTL-cached snapshot written by a poller, not per row | S | M |
@@ -474,7 +474,7 @@ envelope (`tier-map.sh:200-330`, `select-model.py:134-182`,
 `llama-memory-budget.sh:6-31`).
 
 In hal0 this is: (1) live-probe fallback when `hardware.json` is stale/absent;
-(2) `kfd_present()` sufficient for the ROCm lane; (3) one `apply_cpu_fallback()` that
+(2) `kfd_present()` **and** `render_node_present()` together sufficient for the ROCm lane; (3) one `apply_cpu_fallback()` that
 rewrites the whole verdict; (4) one memory-envelope function that seed context sizes, the
 memory ruler, the extraction sizing and the anchor-window floor all read.
 
