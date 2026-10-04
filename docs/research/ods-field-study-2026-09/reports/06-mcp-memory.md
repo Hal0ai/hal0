@@ -383,7 +383,7 @@ name         = "GitHub MCP"
 spec         = "npm:@modelcontextprotocol/server-github"
 transport    = "stdio"                 # stdio | streamable-http | sse   (NEW: sse)
 command      = "npx"                   # NEW — stdio only
-args         = ["-y", "@modelcontextprotocol/server-github"]   # NEW
+args         = ["-y", "@modelcontextprotocol/server-github@<pinned>"]   # NEW — exact version, see below
 url          = ""                      # http/sse only (already implied by transport)
 enabled      = true
 
@@ -404,6 +404,13 @@ brain     = false
 openwebui = false
 opencode  = false
 ```
+
+**Correction (2026-10-04) — pin the executable.** `npx -y <pkg>` resolves whatever upstream
+publishes at start time, so a bridge restart could run a newer release with the configured GitHub
+token while the TOML never changed. `hal0 mcp install` must resolve the exact version once (`npm
+view <pkg> version`, a `uv` lock for `uvx:`), or better fetch the artifact into a hal0-owned cache
+with its integrity hash, persist that in the record, and render the pinned command into the
+supervised unit — the same digest-pinning posture hal0 already applies to runner images.
 
 Design notes, each tied to an existing hal0 decision:
 
@@ -487,7 +494,13 @@ surgically**, exactly as `patch-hermes-config.py` does:
    a third-party server. User-installed entries carry only `X-hal0-Agent`, the record's `[env]`
    literals, and its `[secrets]` resolved from `api.env` (an `AUTHORIZATION = "<api.env key>"` entry is
    how a server that wants a bearer gets *its own*); the hal0 service identity never leaves the box.
-   This is what main's `hal0.mcp.probe.build_headers` (#2253) does.
+   This is what main's `hal0.mcp.probe.build_headers` (#2253) does. **Correction (2026-10-04) — no
+   TLS gate exists.** Neither the record schema (`installed.py:110`, `url: str = Field(default="")`)
+   nor the join (`hermes_join.py:136-140,237`, non-empty check only) rejects a plaintext `http://`
+   URL on a non-loopback host, so a `[secrets]`-backed `AUTHORIZATION` header would cross the LAN in
+   the clear. The install verb must require `https://` whenever the host is not loopback (unix-socket
+   and `127.0.0.1` bridges exempt) and the record carries `[secrets]`, with at most an explicit,
+   logged `allow_insecure_http` override — filed as hal0 issue #2304, since main has the same gap.
 3. **Remove** `mcp_servers.<id>` blocks that hal0 previously wrote and no longer wants — the
    capability `hermes config set` cannot express, and the reason D1 is a prerequisite rather than a
    nice-to-have.

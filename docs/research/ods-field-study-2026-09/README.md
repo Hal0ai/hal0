@@ -72,3 +72,13 @@ The install ran in a remote sandbox (no GPU, CPU tier 0, rootless install user, 
   Open WebUI keys must be converged on slot changes. Report 08: in an LXC, size GTT from host RAM
   and check firmware on the host. The LXD recipe branch mirrors the Proxmox one (gid, read-only
   hal0 store, writable ODS store); the summary's Copy list no longer says default-on.
+- **2026-10-04 (round 6)** — The HTML gains a real preamble (`<!DOCTYPE html>`, `<meta
+  charset="utf-8">`) so a file:// open never renders mojibake. Proxmox recipe: device majors are
+  derived with `stat` like `hal0.sh:199-204`, never assumed; the host-tuning note says the values
+  ODS printed inside the CT were sized from the CT's RAM and must be recomputed on the host; the
+  LXD branch is now runnable commands. Wave 1's ROCm criterion requires both device nodes; D1 and
+  report 05 option (a) carry the bridge caveat. Report 02: extensions need their own container
+  namer (`hal0-ext-<id>`), and imported manifests' hooks never run on the host. Report 06: the stdio
+  example pins its package, and the `[secrets]`-to-header path needs an HTTPS gate for non-loopback
+  URLs — filed as hal0 issue #2304 because main has the same gap. Report 03: trap diagnostics run
+  under a timeout.

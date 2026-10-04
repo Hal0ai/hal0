@@ -531,7 +531,9 @@ Two parts. First, tee the narrator — every `info/warn/err` also appends its
 ANSI-stripped form to `$HAL0_INSTALL_LOG`. Second, a
 `hal0_write_failure_report` invoked from the existing ERR trap, copying ODS's
 report *shape*: privacy note → step name → environment (`systemctl --failed`,
-`podman info`, `podman images`) → port occupancy with owning process →
+`podman info`, `podman images` — each under `timeout 10`, a timed-out probe
+recorded as evidence rather than hanging the trap on the very subsystem that
+failed; *correction 2026-10-04*) → port occupancy with owning process →
 **redacted** `api.env`/`hal0.toml` → last 160 lines of the install log →
 `journalctl -u hal0-api -n 100`. Redact in two passes (*correction 2026-10-04*:
 the key-name redactor alone is not enough for a shareable file):

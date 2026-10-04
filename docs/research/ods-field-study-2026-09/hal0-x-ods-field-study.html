@@ -1,3 +1,8 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>hal0 × ODS Field Study</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -201,7 +206,8 @@
   .ledger td:nth-child(2){min-width:260px}
   footer{grid-column:1/-1;margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-family:var(--jbm);font-size:.74rem;color:var(--fg-4)}
 </style>
-
+</head>
+<body>
 <div class="page">
 <header class="masthead">
   <div class="eyebrow">docs/research · field study · 2026-09-05</div>
@@ -582,13 +588,16 @@ pct stop $CTID
 # hal0's store is mounted read-only; ODS gets its own writable model dir on host storage (mp1) so a
 # 15–31 GB download does not land on the 64 GB rootfs.
 mkdir -p /var/lib/ods-lab/models
+# derive the device majors the way hal0.sh:199-204 does (stat prints hex; cgroup rules want decimal) —
+# never assume 226/234
+DRI_MAJ=$(printf '%d' 0x$(stat -c '%t' /dev/dri/renderD128)); KFD_MAJ=$(printf '%d' 0x$(stat -c '%t' /dev/kfd))
 cat &gt;&gt; /etc/pve/lxc/$CTID.conf &lt;&lt;EOF
 dev0: /dev/dri/renderD128,gid=$RG
 dev1: /dev/kfd,gid=$RG
 mp0: /var/lib/hal0/models,mp=/mnt/hal0-models,ro=1
 mp1: /var/lib/ods-lab/models,mp=/mnt/ods-models
-lxc.cgroup2.devices.allow: c 226:* rwm
-lxc.cgroup2.devices.allow: c 234:* rwm
+lxc.cgroup2.devices.allow: c $DRI_MAJ:* rwm
+lxc.cgroup2.devices.allow: c $KFD_MAJ:* rwm
 lxc.prlimit.memlock: unlimited
 lxc.apparmor.profile: unconfined
 EOF
@@ -606,11 +615,14 @@ pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &am
 pct exec $CTID -- bash -lc 'chown ods:ods /mnt/ods-models &amp;&amp; mkdir -p /home/ods/ODS/ods/data &amp;&amp; ln -sfn /mnt/ods-models /home/ods/ODS/ods/data/models'
 pct exec $CTID -- su - ods -c 'cp /mnt/hal0-models/&lt;path&gt;/&lt;file&gt;.gguf /mnt/ods-models/'   # optional, once per model
 pct exec $CTID -- su - ods -c 'cd ~/ODS/ods &amp;&amp; ./install.sh --all --summary-json ~/ods-summary.json'
-# ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel.
-# Apply ONLY the GTT/TTM values it prints (amdgpu.gttsize, ttm.pages_limit, ttm.page_pool_size)
-# on the Proxmox host (report 08 §D.1), then reboot the host. Do NOT copy ODS's amd_iommu=off:
-# it removes /dev/accel (the XDNA NPU) and contradicts hal0's own iommu=pt amd_iommu=on
-# (docs/getting-started/drivers.mdx:102; docs/adr/0003-onnx-text-generation-npu.md:96-99).
+# ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel, and the
+# GTT/TTM numbers it printed are WRONG for the host: phase 10 sizes them from the CT's own MemTotal
+# (10-amd-tuning.sh:140-157) — 32 GB here, not the host's 128 GB. If you want fixed sizing at all (it is
+# opt-in; kernels ≥ 6.14 size GTT dynamically, drivers.mdx:86-97), recompute ON THE HOST from its own
+# /proc/meminfo — e.g. hal0's documented 128 GB line, drivers.mdx:100-104:
+#   amdgpu.gttsize=118784 ttm.pages_limit=30408704 ttm.page_pool_size=30408704
+# then reboot the host (report 08 §D.1). Do NOT copy ODS's amd_iommu=off: it removes /dev/accel (the
+# XDNA NPU) and contradicts hal0's own iommu=pt amd_iommu=on (drivers.mdx:102; ADR-0003:96-99).
 # afterwards: ods status; ods list; ods doctor --json; cat /tmp/ods-preflight-report.json
 
 # ── plain LXD host (not Proxmox) ────────────────────────────────────────────────
@@ -621,7 +633,13 @@ lxc config device add ods-lab dri unix-char path=/dev/dri/renderD128 gid=$RG
 mkdir -p /var/lib/ods-lab/models
 lxc config device add ods-lab hal0models disk source=/var/lib/hal0/models path=/mnt/hal0-models readonly=true
 lxc config device add ods-lab odsmodels disk source=/var/lib/ods-lab/models path=/mnt/ods-models
-lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS, `git checkout 21f4b3a`, chown + symlink /mnt/ods-models to ~/ODS/ods/data/models exactly as in the Proxmox branch, then install.sh…'</code></pre>
+lxc exec ods-lab -- bash -lc 'apt-get update &amp;&amp; apt-get install -y curl jq git rsync docker.io docker-compose-v2 &amp;&amp; \
+  useradd -m -s /bin/bash ods &amp;&amp; usermod -aG docker,render,video ods &amp;&amp; \
+  echo "ods ALL=(ALL) NOPASSWD:ALL" &gt; /etc/sudoers.d/ods'
+lxc exec ods-lab -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS &amp;&amp; git checkout 21f4b3a'
+lxc exec ods-lab -- bash -lc 'chown ods:ods /mnt/ods-models &amp;&amp; mkdir -p /home/ods/ODS/ods/data &amp;&amp; ln -sfn /mnt/ods-models /home/ods/ODS/ods/data/models'
+lxc exec ods-lab -- su - ods -c 'cd ~/ODS/ods &amp;&amp; ./install.sh --all --summary-json ~/ods-summary.json'
+# same host-side tuning caveat as the Proxmox branch: recompute on the LXD host from host RAM; never amd_iommu=off</code></pre>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
@@ -686,7 +704,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS, 
   <h3 id="waves" style="margin-top:1.8rem">Waves</h3>
   <p class="prose muted">Numbered because the order carries information: each wave makes the next one reviewable.</p>
   <div class="wave"><div class="n">0<small>~1 week</small></div><div class="body"><h3>Stop the bleeding <span class="sz">8 items, all S</span></h3><p class="goal">Close the auth hole, settle the flagship model question, land the five one-afternoon fixes the issue map ranks highest, and fix the documentation the later waves will be built against.</p><ul><li>Done when: approvals require a session; the 395 verdict on Qwen3-Coder-Next is recorded in an issue; <code>hal0 doctor all</code> warns on a LAN-open, auth-off box; no seam call is unbounded; <code>hal0 update</code> re-links the CLI; #1845's panel prints a command that works; <code>deploy.sh</code> cannot lie; <code>ARCHITECTURE.md</code> matches the code.</li></ul></div></div>
-  <div class="wave"><div class="n">1<small>2–3 weeks</small></div><div class="body"><h3>Cheap shapes, big returns <span class="sz">10 items, S–M</span></h3><p class="goal">Instrument the installer, make hardware truth fresh, give the doctor real next steps, wire Open WebUI fully, and offer the AMD host tuning hal0's own upstream documents (opt-in; see D7).</p><ul><li>Done when: a failed install leaves a log and a report; preflight verdicts are pinned by fixtures; every doctor row has a runnable step; the ROCm lane follows <code>/dev/kfd</code>; an image roll restarts slots; a 128 GB box's live GTT verdict is in the doctor and fixed sizing is offered, not applied; Open WebUI's upload and image buttons work.</li></ul></div></div>
+  <div class="wave"><div class="n">1<small>2–3 weeks</small></div><div class="body"><h3>Cheap shapes, big returns <span class="sz">10 items, S–M</span></h3><p class="goal">Instrument the installer, make hardware truth fresh, give the doctor real next steps, wire Open WebUI fully, and offer the AMD host tuning hal0's own upstream documents (opt-in; see D7).</p><ul><li>Done when: a failed install leaves a log and a report; preflight verdicts are pinned by fixtures; every doctor row has a runnable step; the ROCm lane follows <code>/dev/kfd</code> <b>and</b> a <code>renderD*</code> node together (<code>kfd_present()</code> and <code>render_node_present()</code>); an image roll restarts slots; a 128 GB box's live GTT verdict is in the doctor and fixed sizing is offered, not applied; Open WebUI's upload and image buttons work.</li></ul></div></div>
   <div class="wave"><div class="n">2<small>1–2 months</small></div><div class="body"><h3>Structural <span class="sz">6 items, M–L</span></h3><p class="goal">Decompose the installer, finish MCP, ship the extension model with OpenWebUI converted and n8n added, and build the progress seam the CLI needs.</p><ul><li>Done when: <code>installer/steps/</code> exists and <code>--dry-run</code> runs in CI; <code>hal0 mcp add</code> reaches Hermes with default-deny tools; <code>hal0 app install n8n</code> renders a unit, claims a port, wires env, probes health and shows a card with no code edit; <code>hal0 slot load</code> prints phases.</li></ul></div></div>
   <div class="wave"><div class="n">3<small>decide first</small></div><div class="body"><h3>Product surfaces <span class="sz">5 items, gated on decisions D1, D2, D8</span></h3><p class="goal">Only after the LAN-posture and phone-surface decisions: the single-URL gateway with owner cards, bootstrap-then-hot-swap, OAuth passthrough, an optional phone portal, and the copy pass.</p></div></div>
   <div class="wave"><div class="n">4<small>optional</small></div><div class="body"><h3>Design-pass items <span class="sz">3 items</span></h3><p class="goal">The stable alias, the fleet ledger, resource limits. Each needs its own design note before code.</p></div></div>
@@ -712,7 +730,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS, 
 
   <div class="decision"><h3>D1. LAN exposure model</h3>
     <div class="opts">
-      <div class="opt rec"><b>What I'd do</b>Default <code>HAL0_BIND_HOST</code> to loopback (the library fallback already is), add an explicit <code>--lan</code> like ODS, and gate mutation routes with the signed session regardless. Revisit the KB-1 objection: it no longer holds now that a login page and a Security settings page exist.</div>
+      <div class="opt rec"><b>What I'd do</b>Default <code>HAL0_BIND_HOST</code> to loopback (the library fallback already is) <em>together with</em> a bridge-reachable second listener or a LAN-ingress firewall cut — loopback alone cuts off Open WebUI and every bridge extension, which reach hal0-api via <code>host.docker.internal</code> (report 02 §D.5 (iii)) — add an explicit <code>--lan</code> like ODS, and gate mutation routes with the signed session regardless. Revisit the KB-1 objection: it no longer holds now that a login page and a Security settings page exist.</div>
       <div class="opt"><b>Safe version</b>Keep <code>0.0.0.0</code>, ship 0.1 (session on mutation routes) and 0.3 (doctor warning). Nobody gets locked out; the worst hole closes.</div>
       <div class="opt"><b>Cheap test</b>Ship 0.3 alone and count how many support threads mention the warning in a month.</div>
     </div>
@@ -2064,7 +2082,7 @@ class from <code>hardware.json</code>; use <code>[runtime] requires_device = "gp
 </tr>
 <tr>
 <td>Unit rendering</td>
-<td><code>ExtensionProvider.launch_plan(manifest) -&gt; RuntimeLaunchPlan</code>, then the <strong>existing</strong> <code>_render_quadlet_from_plan</code> (<code>container.py:803</code>)</td>
+<td><code>ExtensionProvider.launch_plan(manifest) -&gt; RuntimeLaunchPlan</code>, then the <strong>existing</strong> <code>_render_quadlet_from_plan</code> (<code>container.py:803</code>) — parameterised for the artifact family (<em>correction 2026-10-04</em>): as written it names every container through <code>slot_container_name()</code> (<code>slots/naming.py:70</code>; <code>ContainerName=hal0-slot-&lt;token&gt;</code>, <code>container.py:826,880</code>), so an extension id equal to a slot token would collide with that slot's podman container; extensions need their own namer (<code>hal0-ext-&lt;id&gt;</code>) threaded through the renderer</td>
 <td>compose fragment</td>
 </tr>
 <tr>
@@ -2108,12 +2126,20 @@ class from <code>hardware.json</code>; use <code>[runtime] requires_device = "gp
 <p>Promote <code>hal0 app</code> from a 1-entry frozenset to the extension registry, keeping the
 existing verb names (<code>src/hal0/cli/app_commands.py</code>):</p>
 <pre><code>hal0 app list                     # id, category, state (enabled|disabled|not-installed|incompatible)
-hal0 app install &lt;id&gt;             # render unit → seam write → daemon-reload → enable --now → post_install hook
+hal0 app install &lt;id&gt;             # render unit → seam write → daemon-reload → enable --now → post_install hook (bundled only; see below)
 hal0 app enable|disable &lt;id&gt;      # flips /etc/hal0/extensions.toml, converges the unit
 hal0 app uninstall &lt;id&gt;           # disable + remove unit; --purge also drops /var/lib/hal0/ext/&lt;id&gt;
 hal0 app import &lt;file|url&gt;        # .hal0ext.json envelope, checksum-verified
 hal0 app doctor [&lt;id&gt;]            # manifest validation ≙ scripts/audit-extensions.py
 </code></pre>
+<p><strong>Correction (2026-10-04) — hooks and the trust boundary.</strong> <code>post_install</code> as drawn runs on the
+host, after the unit is enabled, as whoever invoked the verb (<code>hal0</code> from the API, root from a
+shell). For an <em>imported</em> manifest that is arbitrary third-party code outside every rootless,
+capability-drop, read-only-root and mount restriction §E describes. Rule: host hooks are honoured
+only for bundled extensions that ship in the hal0 repository (already inside the trust boundary);
+an imported manifest's <code>hooks/</code> are either refused at <code>hal0 app import</code> or run as a one-shot
+<em>inside the extension's own container</em> under the same confinement (<code>ExecStartPost=</code> →
+<code>podman exec</code>), never on the host.</p>
 <p><code>hal0 doctor</code> gains an extensions arm; the ODS <code>audit-extensions.py</code> check list
 (schema version, id↔directory match, category/type enum, positive port, health starts
 with <code>/</code>, alias collisions, dangling <code>depends_on</code>, duplicate capability ids) ports
@@ -2839,7 +2865,9 @@ writable log dir. <strong>Risk:</strong> low — must not break <code>--dev</cod
 ANSI-stripped form to <code>$HAL0_INSTALL_LOG</code>. Second, a
 <code>hal0_write_failure_report</code> invoked from the existing ERR trap, copying ODS's
 report <em>shape</em>: privacy note → step name → environment (<code>systemctl --failed</code>,
-<code>podman info</code>, <code>podman images</code>) → port occupancy with owning process →
+<code>podman info</code>, <code>podman images</code> — each under <code>timeout 10</code>, a timed-out probe
+recorded as evidence rather than hanging the trap on the very subsystem that
+failed; <em>correction 2026-10-04</em>) → port occupancy with owning process →
 <strong>redacted</strong> <code>api.env</code>/<code>hal0.toml</code> → last 160 lines of the install log →
 <code>journalctl -u hal0-api -n 100</code>. Redact in two passes (<em>correction 2026-10-04</em>:
 the key-name redactor alone is not enough for a shareable file):
@@ -3675,7 +3703,11 @@ of this repo's own "verify against source, not memory" rule.</p>
    request Host" shape and simply default <code>HAL0_BIND_HOST</code> to loopback the
    way <code>hal0.config.network</code>'s own library fallback already does
    (<code>config/network.py:34</code>), pushing LAN exposure behind an explicit
-   opt-in the way ODS's <code>--lan</code> does; or (b) build the single-gateway
+   opt-in the way ODS's <code>--lan</code> does — <em>not</em> as a one-line default change
+   (<em>correction 2026-10-04</em>): a loopback-only hal0-api is unreachable from
+   Open WebUI and bridge extensions, which use <code>host.docker.internal</code>, so (a)
+   also needs the bridge-reachable second listener or LAN-ingress firewall
+   cut described in D3 and report 02 §D.5 (iii); or (b) build the single-gateway
    proxy (D3) and accept the added moving part in exchange for one URL and
    one audited edge. KB-1's own history (<code>api/auth.py:137-145</code>) shows an
    auto-enable-on-LAN-bind policy was tried and reverted because there was
@@ -4114,7 +4146,7 @@ name         = &quot;GitHub MCP&quot;
 spec         = &quot;npm:@modelcontextprotocol/server-github&quot;
 transport    = &quot;stdio&quot;                 # stdio | streamable-http | sse   (NEW: sse)
 command      = &quot;npx&quot;                   # NEW — stdio only
-args         = [&quot;-y&quot;, &quot;@modelcontextprotocol/server-github&quot;]   # NEW
+args         = [&quot;-y&quot;, &quot;@modelcontextprotocol/server-github@&lt;pinned&gt;&quot;]   # NEW — exact version, see below
 url          = &quot;&quot;                      # http/sse only (already implied by transport)
 enabled      = true
 
@@ -4135,6 +4167,12 @@ brain     = false
 openwebui = false
 opencode  = false
 </code></pre>
+<p><strong>Correction (2026-10-04) — pin the executable.</strong> <code>npx -y &lt;pkg&gt;</code> resolves whatever upstream
+publishes at start time, so a bridge restart could run a newer release with the configured GitHub
+token while the TOML never changed. <code>hal0 mcp install</code> must resolve the exact version once (<code>npm
+view &lt;pkg&gt; version</code>, a <code>uv</code> lock for <code>uvx:</code>), or better fetch the artifact into a hal0-owned cache
+with its integrity hash, persist that in the record, and render the pinned command into the
+supervised unit — the same digest-pinning posture hal0 already applies to runner images.</p>
 <p>Design notes, each tied to an existing hal0 decision:</p>
 <ul>
 <li><strong><code>[secrets]</code> is a <em>reference</em>, not a value.</strong> hal0 already has a secrets store at
@@ -4213,7 +4251,13 @@ surgically</strong>, exactly as <code>patch-hermes-config.py</code> does:</p>
    a third-party server. User-installed entries carry only <code>X-hal0-Agent</code>, the record's <code>[env]</code>
    literals, and its <code>[secrets]</code> resolved from <code>api.env</code> (an <code>AUTHORIZATION = "&lt;api.env key&gt;"</code> entry is
    how a server that wants a bearer gets <em>its own</em>); the hal0 service identity never leaves the box.
-   This is what main's <code>hal0.mcp.probe.build_headers</code> (#2253) does.</li>
+   This is what main's <code>hal0.mcp.probe.build_headers</code> (#2253) does. <strong>Correction (2026-10-04) — no
+   TLS gate exists.</strong> Neither the record schema (<code>installed.py:110</code>, <code>url: str = Field(default="")</code>)
+   nor the join (<code>hermes_join.py:136-140,237</code>, non-empty check only) rejects a plaintext <code>http://</code>
+   URL on a non-loopback host, so a <code>[secrets]</code>-backed <code>AUTHORIZATION</code> header would cross the LAN in
+   the clear. The install verb must require <code>https://</code> whenever the host is not loopback (unix-socket
+   and <code>127.0.0.1</code> bridges exempt) and the record carries <code>[secrets]</code>, with at most an explicit,
+   logged <code>allow_insecure_http</code> override — filed as hal0 issue #2304, since main has the same gap.</li>
 <li><strong>Remove</strong> <code>mcp_servers.&lt;id&gt;</code> blocks that hal0 previously wrote and no longer wants — the
    capability <code>hermes config set</code> cannot express, and the reason D1 is a prerequisite rather than a
    nice-to-have.</li>
@@ -6780,3 +6824,5 @@ and its siblings stop needing bespoke UI.</p>
 </main>
 <footer>hal0 × ODS field study · prepared 2026-09-05 · ODS is Apache-2.0 and its author has granted permission to copy · nothing in this document has been merged; it is a proposal</footer>
 </div>
+</body>
+</html>

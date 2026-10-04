@@ -434,7 +434,11 @@ of this repo's own "verify against source, not memory" rule.
    request Host" shape and simply default `HAL0_BIND_HOST` to loopback the
    way `hal0.config.network`'s own library fallback already does
    (`config/network.py:34`), pushing LAN exposure behind an explicit
-   opt-in the way ODS's `--lan` does; or (b) build the single-gateway
+   opt-in the way ODS's `--lan` does — *not* as a one-line default change
+   (*correction 2026-10-04*): a loopback-only hal0-api is unreachable from
+   Open WebUI and bridge extensions, which use `host.docker.internal`, so (a)
+   also needs the bridge-reachable second listener or LAN-ingress firewall
+   cut described in D3 and report 02 §D.5 (iii); or (b) build the single-gateway
    proxy (D3) and accept the added moving part in exchange for one URL and
    one audited edge. KB-1's own history (`api/auth.py:137-145`) shows an
    auto-enable-on-LAN-bind policy was tried and reverted because there was

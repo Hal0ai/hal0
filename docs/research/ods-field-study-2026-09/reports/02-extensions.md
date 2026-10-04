@@ -462,7 +462,7 @@ class from `hardware.json`; use `[runtime] requires_device = "gpu-rocm"` instead
 | `hal0.extensions.registry.load()` | walk the two roots, parse+validate manifests, memoise on mtime — a direct Python port of `sr_load` (`lib/service-registry.sh:50`) minus the bash-emitting subprocess | `service-registry.sh` |
 | `hal0.services.registry.SERVICES` | becomes `builtin_services() + extension_services()`; `ServiceDef` gains `source: "builtin"\|"extension"` and `manifest_path` | `config.py:load_extension_manifests` |
 | `GET /api/services` + Services page | zero changes — it already renders whatever the registry returns (`src/hal0/api/routes/services.py:140`) | `/api/services` |
-| Unit rendering | `ExtensionProvider.launch_plan(manifest) -> RuntimeLaunchPlan`, then the **existing** `_render_quadlet_from_plan` (`container.py:803`) | compose fragment |
+| Unit rendering | `ExtensionProvider.launch_plan(manifest) -> RuntimeLaunchPlan`, then the **existing** `_render_quadlet_from_plan` (`container.py:803`) — parameterised for the artifact family (*correction 2026-10-04*): as written it names every container through `slot_container_name()` (`slots/naming.py:70`; `ContainerName=hal0-slot-<token>`, `container.py:826,880`), so an extension id equal to a slot token would collide with that slot's podman container; extensions need their own namer (`hal0-ext-<id>`) threaded through the renderer | compose fragment |
 | Unit write | `SystemCtlSeam.write_quadlet` extended to accept the `hal0-ext@` prefix (`system/seam.py:283`), wrapper `validate_quadlet_body` reused unchanged | resolver `-f` flag |
 | Port claim | `hal0.ports.authority.collect_claims` gains an `"extension-config"` source | `config/ports.json` (better) |
 | Health | the `probe` field already dispatches http/systemd/comfyui in `services_health.py`; add `tcp`/`container` | `health-check.sh:159` |
@@ -478,12 +478,21 @@ existing verb names (`src/hal0/cli/app_commands.py`):
 
 ```
 hal0 app list                     # id, category, state (enabled|disabled|not-installed|incompatible)
-hal0 app install <id>             # render unit → seam write → daemon-reload → enable --now → post_install hook
+hal0 app install <id>             # render unit → seam write → daemon-reload → enable --now → post_install hook (bundled only; see below)
 hal0 app enable|disable <id>      # flips /etc/hal0/extensions.toml, converges the unit
 hal0 app uninstall <id>           # disable + remove unit; --purge also drops /var/lib/hal0/ext/<id>
 hal0 app import <file|url>        # .hal0ext.json envelope, checksum-verified
 hal0 app doctor [<id>]            # manifest validation ≙ scripts/audit-extensions.py
 ```
+
+**Correction (2026-10-04) — hooks and the trust boundary.** `post_install` as drawn runs on the
+host, after the unit is enabled, as whoever invoked the verb (`hal0` from the API, root from a
+shell). For an *imported* manifest that is arbitrary third-party code outside every rootless,
+capability-drop, read-only-root and mount restriction §E describes. Rule: host hooks are honoured
+only for bundled extensions that ship in the hal0 repository (already inside the trust boundary);
+an imported manifest's `hooks/` are either refused at `hal0 app import` or run as a one-shot
+*inside the extension's own container* under the same confinement (`ExecStartPost=` →
+`podman exec`), never on the host.
 
 `hal0 doctor` gains an extensions arm; the ODS `audit-extensions.py` check list
 (schema version, id↔directory match, category/type enum, positive port, health starts
