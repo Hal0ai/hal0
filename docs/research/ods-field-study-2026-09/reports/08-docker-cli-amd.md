@@ -183,6 +183,16 @@ runner images are built from) explicitly documents
 GRUB parameters for Strix Halo, citing a 5-12% performance delta — almost the
 exact tuning ODS automates — yet nothing in hal0's own installer applies it.
 
+**Correction (2026-10-04) — the IOMMU line is not part of the gap.** hal0's own
+Strix Halo guidance is `iommu=pt amd_iommu=on`
+(`docs/getting-started/drivers.mdx:100-112`), and ADR-0003 records why: the
+community `amd_iommu=off` tweak silently removes `/dev/accel`, the XDNA NPU
+device, so hal0 deliberately recommends it nowhere
+(`docs/adr/0003-onnx-text-generation-npu.md:96-99`). The toolbox README's 5-12%
+and ODS's "~6%" are both that IOMMU-off delta. The gap hal0 should close is
+GTT/TTM sizing, the sysctls and the tuned profile; the IOMMU parameter stays as
+hal0 documents it.
+
 ### A.4 CLI
 
 `ods-cli` is a single Bash file, 6,595 lines / 269,480 bytes
@@ -410,22 +420,28 @@ the less robust of the two once Podman/rootless edge cases are in play.
    "never fail the boot" posture (`gpu_perms.py:1-27`,
    `hal0-gpu-perms.service`'s `SuccessExitStatus=0 1`). Low-controversy on
    the merits: hal0's own upstream image source already publishes the
-   identical `amd_iommu=off amdgpu.gttsize=... ttm.pages_limit=...`
-   recommendation (`amd-strix-halo-toolboxes/README.md:186`); open questions
-   are packaging (default-on vs. flag) and reboot messaging.
+   `amdgpu.gttsize=... ttm.pages_limit=...` half of this recommendation
+   (`amd-strix-halo-toolboxes/README.md:186`); open questions are packaging
+   (default-on vs. flag) and reboot messaging.
+   **Scope (2026-10-04) — GTT/TTM, sysctl and tuned only.** The port must not
+   write ODS's `amd_iommu=off` (`10-amd-tuning.sh:186-229`): it removes
+   `/dev/accel` (the XDNA NPU) and contradicts hal0's documented
+   `iommu=pt amd_iommu=on` (`drivers.mdx:102`, ADR-0003:96-99). If the host
+   already carries hal0's IOMMU line, leave it; if it carries `amd_iommu=off`,
+   warn and leave it — the operator chose it knowingly.
    **Correction (2026-10-04) — a container guard is mandatory.** hal0's common
    deployment is a Proxmox LXC. Inside a container `/etc/default/grub`,
    `/etc/modprobe.d/`, the initramfs and `amdgpu` module parameters belong to the
    **host kernel**; editing the guest's copies and asking for a reboot applies
-   nothing, and the guest cannot see the host's IOMMU/GPU topology well enough to
-   choose `amd_iommu=off`. ODS's phase 10 has no such guard (`10-amd-tuning.sh`
+   nothing (and the IOMMU parameter is out of the port's scope regardless — see
+   above). ODS's phase 10 has no such guard (`10-amd-tuning.sh`
    only remarks that containers need `/dev/kfd`, `:33-55`), so a literal port would
    report "tuning applied" on every LXC. The hal0 port must branch on
    `systemd-detect-virt --container` (the installer already distinguishes LXC in
    `preflight_gpu`, `install.sh:363-380,500-509`): on bare metal apply as above; in
    a container compute the same values but **print the host-side recipe** (the
-   `/etc/default/grub` line, `update-grub`, the `/etc/modprobe.d/` drop-in, the
-   sysctls) for the operator to run on the Proxmox host, and record the phase as
+   GTT/TTM `/etc/default/grub` additions, `update-grub`, the `/etc/modprobe.d/`
+   drop-in, the sysctls) for the operator to run on the Proxmox host, and record the phase as
    `skipped: container`, never as applied. The `hal0 doctor` arm (item 3) should
    check live values (`/sys/module/amdgpu/parameters/gttsize`, `/proc/cmdline`)
    rather than the files it would have written.

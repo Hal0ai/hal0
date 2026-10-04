@@ -228,9 +228,9 @@ silent "which check wins" behaviour. `MCPServerConfig` requires a URL for non-bu
 
 **A user-installed server registry that already exists.** `src/hal0/mcp/installed.py` (issue #305)
 persists one TOML per server at `/etc/hal0/mcp-servers/<id>.toml` with `install` / `uninstall` /
-`patch_config` / `list_installed`, `fcntl` advisory locking on read-modify-write (`:261-278`, issue
-#382), 0700/0600 perm hardening because the `env` block holds API keys (`:111-133`), a tight id
-charset, and bundled-id reservation (`:139-161`).
+`patch_config` / `list_installed`, `fcntl` advisory locking on read-modify-write (`:261-278`,
+issue #382), 0700/0600 perm hardening because the `env` block holds API keys (`:111-133`), a
+tight id charset, and bundled-id reservation (`:139-161`).
 
 **A REST API and a CLI.** `src/hal0/api/routes/mcp.py` (945 lines) serves
 `GET /servers|clients|catalog|resolve|stream|{id}/logs`, `POST /install`, `DELETE /{id}`,

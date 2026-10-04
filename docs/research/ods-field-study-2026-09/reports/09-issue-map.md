@@ -92,7 +92,7 @@ this on a real box" land in Direct port or Pattern adoption.
 | 1969 | nothing pins llama-server LOADING | Informs only | `extensions/services/dashboard-api/helpers.py:661-672 (degraded != down)` | Model 'up but loading' as a distinct state and never feed it to the output-sanity gate | S | M |
 | 1967 | save_slot_config drops keys on round-trip | Informs only | `extensions/services/dashboard-api/settings.py:194-241` | Round-trip through a schema-derived field table so unknown keys survive the write | M | M |
 | 1947 | support CIRU vLLM distributions | Informs only | `extensions/services/*/manifest.yaml; docker-compose.*.yml overlays` | Add a runtime family as manifest + overlay data rather than code | L | M |
-| 1932 | read_slot_ceiling assumes .toml | Informs only | `lib/service-registry.sh:29-48` | Resolve the ceiling through the naming seam rather than assuming <name>.toml | S | M |
+| 1932 | read_slot_ceiling assumes .toml | Informs only | `lib/service-registry.sh:29-48` | Resolve the ceiling through the naming seam rather than assuming `<name>.toml` | S | M |
 | 1931 | extraction preflight trusts config | Informs only | `extensions/services/dashboard-api/helpers.py:624-680` | Preflight the LIVE drop-in/endpoint, not the configured intent | S | M |
 | 1930 | MCP memory_add has no ctx preflight | Informs only | `extensions/services/dashboard-api/helpers.py:624-680` | Route both HTTP and MCP add paths through one preflight helper | S | M |
 | 1929 | memory-map GTT fallback reads dead keys | Informs only | `installers/lib/llama-memory-budget.sh:6-31` | Same single-source memory envelope; fail loudly rather than silently substituting system RAM | S | M |

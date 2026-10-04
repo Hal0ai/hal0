@@ -39,3 +39,12 @@ The install ran in a remote sandbox (no GPU, CPU tier 0, rootless install user, 
   #2253 shipped the user-installed-MCP schema, join and verbs; #2246 gates ADMIN routes,
   approvals included, on LAN-bound boxes; #2244 reconciled the `docs/adr/` tree. Citations stay
   pinned to `108b366` unless a note says otherwise.
+- **2026-10-04 (round 3)** — Proxmox recipe: the template file name is resolved from
+  `pveam available` the way `scripts/proxmox-ve/hal0.sh:278` does, the privileged + GPU
+  container gets `lxc.apparmor.profile: unconfined` (`docs/getting-started/proxmox.mdx`
+  §AppArmor), and the host-side tuning note is GTT/TTM only. Report 08 §B and §D.1, the
+  summary bullet, plan row 1.7 and decision D7 carry the same IOMMU caveat: hal0 documents
+  `iommu=pt amd_iommu=on` (`drivers.mdx:102`, ADR-0003:96-99) because `amd_iommu=off`
+  removes the NPU's `/dev/accel`, so the gap is GTT/TTM, sysctl and tuned — not the IOMMU
+  line. Three Markdown escaping defects (reports 01, 06, 09) that rendered as a stray `<h1>`
+  and raw `<name>` tags in the HTML are fixed.

@@ -285,7 +285,7 @@
     <li><b>Remediation is designed but empty.</b> <code>Diagnosis.next_steps</code> and a panel that renders them exist, yet <code>health_report.to_diagnosis()</code> hard-codes <code>next_steps=[]</code> for every check. Issues #1845, #1870, #1994 and #2108 are all this gap wearing different hats.</li>
     <li><b>Long privileged calls are unbounded and silent.</b> <code>ContainerProvider._run</code> defaults <code>timeout=None</code> and the load path passes nothing; the CLI blocks up to ~2,400 s with no output. ODS bounds every hang-prone call and prints while it waits.</li>
     <li><b>Hardware truth goes stale.</b> A missing or old <code>hardware.json</code> books VRAM as RAM; the ROCm lane depends on <code>rocm-smi</code> being installed rather than on <code>/dev/kfd</code> existing; seed slots copy <code>context_size = 65536</code> onto every box. ODS rebuilds its capability profile every run and derives every number from it.</li>
-    <li><b>No AMD host tuning.</b> GTT/TTM sizing, <code>amd_iommu=off</code>, swappiness, and a tuned profile are absent from hal0's installer even though hal0's own upstream toolbox README documents them as required for Strix Halo.</li>
+    <li><b>No AMD host tuning.</b> GTT/TTM sizing, swappiness, and a tuned profile are absent from hal0's installer even though hal0's own upstream toolbox README documents them as required for Strix Halo. <em>Update 2026-10-04: the IOMMU half of that README (<code>amd_iommu=off</code>) is <b>not</b> for hal0 to port — it removes <code>/dev/accel</code> (the XDNA NPU) and hal0's own guidance is <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003). The gap is GTT/TTM, sysctl and tuned.</em></li>
     <li><b>Open WebUI is half wired.</b> hal0 sets chat and voice, but not RAG embeddings, web search or image generation, so Open WebUI's own upload and image buttons point at nothing. ODS wires all of it, including a baked ComfyUI workflow.</li>
     <li><b>The copy explains internals, not consequences.</b> Tooltips read like <code>hal0.toml [memory] · requires restart</code>. ODS's status vocabulary and settings hints lead with what happens to you. This is an audience choice, but it should be a choice.</li>
     <li><b>Own docs have drifted.</b> The "15-phase, checkpointed" provisioner is 12 steps and deliberately uncheckpointed; <code>BUNDLED_AGENTS</code> is misquoted; a unit's <code>Documentation=</code> path does not exist; two byte-identical 629-line memory providers have no sync; <code>CLAUDE.md</code> says <code>docs/adr/</code> holds the decision records while <code>ARCHITECTURE.md</code> says hal0 keeps no ADR tree, and the ADR numbers the code cites (0012, 0015, 0023) live in the gitignored internal tree per <code>CHANGELOG.md</code>, so a contributor reading <code>routes/mcp.py</code> cannot find the decision it defers to. Fix these before anyone ports against them. <em>(ADR bookkeeping reconciled on main by #2244: <code>docs/adr/</code> now holds 0004, 0012, 0013, 0015, 0020 and 0023.)</em></li>
@@ -454,7 +454,7 @@
 
   <div class="domain" id="d-rt">
     <div class="dh"><h3>Container runtime, CLI, AMD host tuning</h3><span class="chip hal0">hal0</span><a class="sz" href="#appx-08-docker-cli-amd">report 08</a></div>
-    <p>ODS is Docker Compose with a formal layering contract (base + hardware overlay + mode overlay + extension fragments), resource limits and healthchecks on every service, an env schema validated in a five-tier CI matrix, and tag-only image pins with a written ADR accepting <code>:latest</code> for three images. Podman is tolerated only when it wears the Docker CLI mask. The <code>ods-cli</code> is one 6,595-line Bash file with a written but unexecuted decomposition plan and inconsistent JSON flags. Where ODS is clearly ahead is <code>10-amd-tuning.sh</code>: render/video groups, <code>amdkfd</code> modprobe, swappiness and cache pressure, <code>amdgpu ppfeaturemask</code>, RAM-scaled GTT/TTM sizing (90 % of RAM at ≥ 96 GB → about 115 GB on a 128 GB box), <code>amd_iommu=off</code> on single-GPU APUs, a <code>tuned accelerator-performance</code> profile, and a reboot banner. hal0's own upstream toolbox README documents the same GRUB parameters as required and hal0's installer applies none of them.</p>
+    <p>ODS is Docker Compose with a formal layering contract (base + hardware overlay + mode overlay + extension fragments), resource limits and healthchecks on every service, an env schema validated in a five-tier CI matrix, and tag-only image pins with a written ADR accepting <code>:latest</code> for three images. Podman is tolerated only when it wears the Docker CLI mask. The <code>ods-cli</code> is one 6,595-line Bash file with a written but unexecuted decomposition plan and inconsistent JSON flags. Where ODS is clearly ahead is <code>10-amd-tuning.sh</code>: render/video groups, <code>amdkfd</code> modprobe, swappiness and cache pressure, <code>amdgpu ppfeaturemask</code>, RAM-scaled GTT/TTM sizing (90 % of RAM at ≥ 96 GB → about 115 GB on a 128 GB box), <code>amd_iommu=off</code> on single-GPU APUs, a <code>tuned accelerator-performance</code> profile, and a reboot banner. hal0's own upstream toolbox README documents the same GTT/TTM GRUB parameters as required and hal0's installer applies none of them. <em>(The README's <code>amd_iommu=off</code> is the one line hal0 should keep ignoring: it drops the NPU's <code>/dev/accel</code> and hal0 documents <code>iommu=pt amd_iommu=on</code> — see D7.)</em></p>
     <p>hal0's runtime is the stronger design: Podman Quadlets with systemd's geometric restart backoff, a boot-time GPU device-group converge service, digest pins on every image, and Pydantic validation at load time. Its CLI is a modular Typer tree with issue-annotated mount points. Two source-confirmed defects match your complaints: unbounded silent lifecycle verbs (#1870/#1869) and <code>hal0 update</code> never re-linking <code>/usr/local/bin/hal0</code> (#1844, which already caused #2092).</p>
     <div class="two">
       <div class="copy"><h4>Copy</h4><ul>
@@ -505,7 +505,7 @@
       <tr><td>Remediation UX</td><td>Numbered steps + deep links from the API; status sentences</td><td>Typed next_steps model, rendered, but empty</td><td><span class="chip ods">ODS</span></td><td>Plumbing exists; fill it</td></tr>
       <tr><td>Open WebUI wiring</td><td>Chat, RAG, search, STT, TTS, image with baked workflow</td><td>Chat, STT, TTS</td><td><span class="chip ods">ODS</span></td><td>Native buttons point at nothing</td></tr>
       <tr><td>Container runtime</td><td>Compose, tag pins, <code>:latest</code> ADR, Docker 29.3 workaround</td><td>Quadlets, systemd backoff, digest pins, boot GPU converge</td><td><span class="chip hal0">hal0</span></td><td>Cleaner primitive, no daemon</td></tr>
-      <tr><td>AMD host tuning</td><td>GTT/TTM, iommu, sysctl, tuned, reboot banner</td><td>Diagnosis only; none applied</td><td><span class="chip ods">ODS</span></td><td>Corroborated by hal0's own toolbox README</td></tr>
+      <tr><td>AMD host tuning</td><td>GTT/TTM, iommu, sysctl, tuned, reboot banner</td><td>Diagnosis only; none applied</td><td><span class="chip ods">ODS</span></td><td>Corroborated by hal0's own toolbox README for GTT/TTM; <code>amd_iommu=off</code> is NPU-hostile and stays out (D7)</td></tr>
       <tr><td>CLI</td><td>6,595-line Bash file; presets; masked config show</td><td>35-file Typer tree, issue-annotated; silent long waits</td><td><span class="chip hal0">hal0</span></td><td>Architecture; fix the waits</td></tr>
       <tr><td>Config validation</td><td>Bash/jq schema validator, CI matrix per tier</td><td>Pydantic at load; no materialized-config CI</td><td><span class="chip hal0">hal0</span></td><td>Add the CI matrix</td></tr>
       <tr><td>Doc hygiene</td><td>Dense operator docs; several stale claims</td><td>Good taxonomy; several stale claims and an ADR gap</td><td><span class="chip tie">tie</span></td><td>Both need a drift pass</td></tr>
@@ -557,11 +557,14 @@
   <h3 style="margin-top:1.4rem">Reproduce it properly on the Strix Halo box</h3>
   <p style="font-size:.9rem;color:var(--fg-3)">Corrected 2026-10-04: the first draft used <code>lxc launch</code> / <code>lxc config</code>, which is LXD's client, not Proxmox's. On a Proxmox VE host the container CLI is <code>pct</code> and device passthrough lives in <code>/etc/pve/lxc/&lt;CTID&gt;.conf</code>; the recipe below mirrors hal0's own <code>docs/getting-started/proxmox.mdx</code>. The LXD form follows for anyone on a plain LXD host.</p>
   <pre><code># ── Proxmox VE host ──────────────────────────────────────────────────────────
-# pick a template; ODS's tested list includes Ubuntu 24.04
-pveam update &amp;&amp; pveam available --section system | grep ubuntu-24.04
-pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst   # exact name from the line above
+# pick a template; ODS's tested list includes Ubuntu 24.04. Resolve the exact file name the way
+# hal0's scripts/proxmox-ve/hal0.sh:278 does rather than hard-coding a build number
+pveam update
+TPL=$(pveam available | awk '$1=="system" &amp;&amp; $2 ~ /^ubuntu-24.04-standard.*amd64.tar.zst$/ {print $2; exit}')
+[ -n "$TPL" ] || { echo "no ubuntu-24.04 template offered by pveam"; exit 1; }
+pveam download local "$TPL"
 CTID=9105
-pct create $CTID local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+pct create $CTID local:vztmpl/$TPL \
   --hostname ods-lab --cores 8 --memory 32768 --swap 0 --rootfs local-lvm:64 \
   --net0 name=eth0,bridge=vmbr0,ip=dhcp \
   --unprivileged 0 --features nesting=1,keyctl=1,fuse=1,mknod=1
@@ -571,7 +574,9 @@ pct start $CTID
 RG=$(pct exec $CTID -- sh -c 'getent group render &gt;/dev/null || groupadd -r render; getent group render' | cut -d: -f3)
 echo "guest render gid: $RG"
 pct stop $CTID
-# GPU nodes + the shared model store go in the CT config (PVE 8.2+ dev passthrough)
+# GPU nodes + the shared model store go in the CT config (PVE 8.2+ dev passthrough).
+# A privileged CT with GPU nodes also needs an unconfined AppArmor profile, or the container
+# runtime inside the guest cannot launch (docs/getting-started/proxmox.mdx §AppArmor; hal0.sh:387-391)
 cat &gt;&gt; /etc/pve/lxc/$CTID.conf &lt;&lt;EOF
 dev0: /dev/dri/renderD128,gid=$RG
 dev1: /dev/kfd
@@ -579,6 +584,7 @@ mp0: /var/lib/hal0/models,mp=/mnt/hal0-models
 lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.cgroup2.devices.allow: c 234:* rwm
 lxc.prlimit.memlock: unlimited
+lxc.apparmor.profile: unconfined
 EOF
 pct start $CTID
 pct exec $CTID -- stat -c '%g %n' /dev/dri/renderD128 /dev/kfd    # renderD128 must show $RG (docs/getting-started/drivers.mdx)
@@ -588,8 +594,11 @@ pct exec $CTID -- bash -lc 'apt-get update &amp;&amp; apt-get install -y curl jq
 # 21f4b3a is the ODS revision every citation and result in this study is pinned to
 pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS &amp;&amp; git checkout 21f4b3a &amp;&amp; cd ods &amp;&amp; \
   ./install.sh --all --summary-json ~/ods-summary.json'
-# ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel —
-# apply the printed GTT/IOMMU values on the host instead (report 08 §D.1), then reboot the host.
+# ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel.
+# Apply ONLY the GTT/TTM values it prints (amdgpu.gttsize, ttm.pages_limit, ttm.page_pool_size)
+# on the Proxmox host (report 08 §D.1), then reboot the host. Do NOT copy ODS's amd_iommu=off:
+# it removes /dev/accel (the XDNA NPU) and contradicts hal0's own iommu=pt amd_iommu=on
+# (docs/getting-started/drivers.mdx:102; docs/adr/0003-onnx-text-generation-npu.md:96-99).
 # afterwards: ods status; ods list; ods doctor --json; cat /tmp/ods-preflight-report.json
 
 # ── plain LXD host (not Proxmox) ────────────────────────────────────────────────
@@ -635,7 +644,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
       <tr><td>1.4</td><td>Populate <code>next_steps</code> for the seven doctor checks; chips copy or run; enable-steps modal shape</td><td><code>routers/features.py:130-144</code>, <code>:188-250</code>, <code>FeatureDiscovery.jsx</code></td><td><code>health_report.py:246-283</code>, <code>DiagnosisPanel.jsx</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip err">high</span></td><td>#1845, #1994</td></tr>
       <tr><td>1.5</td><td>Hardware re-detect cluster: live-probe fallback for stale <code>hardware.json</code>; <code>kfd_present() and render_node_present()</code> sufficient for ROCm; one <code>apply_cpu_fallback()</code>; clamp seed <code>context_size</code> to the envelope</td><td><code>detection.sh:26-46</code>, <code>:187-257</code>, <code>select-model.py:134-182</code></td><td><code>slots/capacity.py:499-585</code>, <code>install/profile_derive.py:110</code>, <code>install/static_seeds.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>#1862, #2216, #1936, #1966, #1868</td></tr>
       <tr><td>1.6</td><td>Manifest-driven services health with <code>gather(return_exceptions=True)</code>; first row of the extension registry</td><td><code>dashboard-api/config.py:297-431</code>, <code>helpers.py:624-700</code></td><td><code>api/routes/services_health.py:198-307</code>, <code>services/registry.py</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip err">high</span></td><td>#2028, #2192, #1859</td></tr>
-      <tr><td>1.7</td><td>AMD host tuning lib (opt-in flag first; container-guarded — prints the host-side recipe inside an LXC, never claims applied); gfx1151 HSA auto; kernel/firmware known-bad checks in doctor</td><td><code>10-amd-tuning.sh:100-302</code>, <code>.env.example:477</code></td><td>new <code>installer/lib/amd-tuning.sh</code>, <code>install/profile_derive.py</code>, <code>cli/doctor_commands.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
+      <tr><td>1.7</td><td>AMD host tuning lib (opt-in flag first; GTT/TTM + sysctl + tuned only — never <code>amd_iommu=off</code>, which drops the NPU's <code>/dev/accel</code> and contradicts <code>drivers.mdx:102</code>; container-guarded — prints the host-side recipe inside an LXC, never claims applied); gfx1151 HSA auto; kernel/firmware known-bad checks in doctor</td><td><code>10-amd-tuning.sh:100-302</code>, <code>.env.example:477</code></td><td>new <code>installer/lib/amd-tuning.sh</code>, <code>install/profile_derive.py</code>, <code>cli/doctor_commands.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
       <tr><td>1.8</td><td>Full Open WebUI wiring (RAG embeddings, SearXNG-style search if present, image gen with baked workflow), gated on bound slots</td><td><code>docker-compose.base.yml:100-168</code></td><td><code>openwebui/env_writer.py:106-131</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>1.9</td><td>Update recreates slots on image roll by default (opt-out flag); stack import verifies checksum on commit; uninstall gates its final line on per-step outcomes; TTL on negative FLM probe; retention prune on a timer</td><td><code>ods-cli:2049</code>, <code>ods-restore.sh:273-310</code>, <code>ods-uninstall.sh:362-402</code>, <code>helpers.py:26-56</code></td><td><code>cli/update_commands.py:516</code>, <code>stacks/portable.py</code>, agent uninstall, <code>capabilities/catalog.py:178</code>, activity prune</td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>#2096, #1512, #1519, #1974, #1521</td></tr>
       <tr><td>1.10</td><td>Docs: generated-config-writers table; area → required-validation table; reinstall contract; known-good versions; README "at a glance"; post-install checklist</td><td><code>INSTALLER-ARCHITECTURE.md:118-135</code>, <code>HIGH_RISK_CHANGE_MAP.md</code>, <code>KNOWN-GOOD-VERSIONS.md</code></td><td><code>ARCHITECTURE.md</code>, <code>CONTRIBUTING.md</code>, <code>docs/reference/</code>, <code>README.md</code></td><td>S</td><td><span class="chip ok">none</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
@@ -740,9 +749,9 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
 
   <div class="decision"><h3>D7. AMD host tuning: default-on or opt-in</h3>
     <div class="opts">
-      <div class="opt rec"><b>What I'd do</b>Opt-in flag for one release, then default-on for the Strix Halo hardware class with a clear reboot banner and <code>--no-host-tuning</code>. It edits GRUB, so start reversible.</div>
+      <div class="opt rec"><b>What I'd do</b>Opt-in flag for one release, then default-on for the Strix Halo hardware class with a clear reboot banner and <code>--no-host-tuning</code>. It edits GRUB, so start reversible. Scope it to GTT/TTM, sysctl and tuned: never write ODS's <code>amd_iommu=off</code>, which removes <code>/dev/accel</code> (XDNA NPU) — hal0 documents <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003:96-99) and the port must leave that line as hal0 documents it.</div>
       <div class="opt"><b>Safe version</b>Doctor-only: detect the missing GRUB parameters and print the exact lines, never write them.</div>
-      <div class="opt"><b>Cheap test</b>Apply the toolbox README's GRUB line on one box and benchmark before and after; ODS claims 5 to 8 % and the toolbox 5 to 12 %.</div>
+      <div class="opt"><b>Cheap test</b>Apply the toolbox README's GTT/TTM values (with hal0's <code>iommu=pt amd_iommu=on</code>, not the README's <code>amd_iommu=off</code>) on one box and confirm the fit: a GGUF that previously failed the live GTT check now loads. Do not chase the README's 5 to 12 % or ODS's ~6 %; both are the IOMMU-off delta hal0 forgoes to keep the NPU.</div>
     </div>
     <p class="why"><em>Slow down here</em>: this is the one item in the plan that can leave a box unbootable if the initramfs step fails.</p>
   </div>
@@ -1119,9 +1128,9 @@ accepted the prompt, so a retry can never duplicate tool calls (<code>:63-73</co
 Safari closes idle streams during 30-60 s cold prefill) and client-disconnect
 cancellation so an abandoned tab does not pin an inference slot (<code>:444-460</code>). A
 <code>_TOOL_LABELS</code> table maps Hermes tool names to spinner captions with an honest
-<code>Using \</code><name>`…<code>fallback (</code>:404-442<code>).</code>/api/talk/status<code>composes Hermes,
+<code>Using `&lt;name&gt;`…</code> fallback (<code>:404-442</code>). <code>/api/talk/status</code> composes Hermes,
 whisper and TTS health plus model compatibility into a capabilities dict
-including</code>live_mic_requires_secure_context<code>(</code>:560-590`).</p>
+including <code>live_mic_requires_secure_context</code> (<code>:560-590</code>).</p>
 <h5 id="a7-oauth-passthrough">A.7 OAuth passthrough</h5>
 <p><code>routers/oauth_passthrough.py</code> closes the "copy the code from your URL bar"
 gap. <code>POST /api/oauth/init</code> mints a nonce bound to <code>{skill_id, return_url}</code>;
@@ -3878,9 +3887,9 @@ silent "which check wins" behaviour. <code>MCPServerConfig</code> requires a URL
 (<code>:2833-2838</code>); auth is <code>bearer-from-env</code> only, so tokens never live in TOML (<code>:2682-2723</code>).</p>
 <p><strong>A user-installed server registry that already exists.</strong> <code>src/hal0/mcp/installed.py</code> (issue #305)
 persists one TOML per server at <code>/etc/hal0/mcp-servers/&lt;id&gt;.toml</code> with <code>install</code> / <code>uninstall</code> /
-<code>patch_config</code> / <code>list_installed</code>, <code>fcntl</code> advisory locking on read-modify-write (<code>:261-278</code>, issue</p>
-<h1 id="382-07000600-perm-hardening-because-the-env-block-holds-api-keys-111-133-a-tight-id">382), 0700/0600 perm hardening because the <code>env</code> block holds API keys (<code>:111-133</code>), a tight id</h1>
-<p>charset, and bundled-id reservation (<code>:139-161</code>).</p>
+<code>patch_config</code> / <code>list_installed</code>, <code>fcntl</code> advisory locking on read-modify-write (<code>:261-278</code>,
+issue #382), 0700/0600 perm hardening because the <code>env</code> block holds API keys (<code>:111-133</code>), a
+tight id charset, and bundled-id reservation (<code>:139-161</code>).</p>
 <p><strong>A REST API and a CLI.</strong> <code>src/hal0/api/routes/mcp.py</code> (945 lines) serves
 <code>GET /servers|clients|catalog|resolve|stream|{id}/logs</code>, <code>POST /install</code>, <code>DELETE /{id}</code>,
 <code>PATCH /{id}/config</code>. <code>src/hal0/cli/mcp_commands.py</code> (376 lines) gives
@@ -5005,6 +5014,15 @@ runner images are built from) explicitly documents
 <code>amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856</code> as required
 GRUB parameters for Strix Halo, citing a 5-12% performance delta — almost the
 exact tuning ODS automates — yet nothing in hal0's own installer applies it.</p>
+<p><strong>Correction (2026-10-04) — the IOMMU line is not part of the gap.</strong> hal0's own
+Strix Halo guidance is <code>iommu=pt amd_iommu=on</code>
+(<code>docs/getting-started/drivers.mdx:100-112</code>), and ADR-0003 records why: the
+community <code>amd_iommu=off</code> tweak silently removes <code>/dev/accel</code>, the XDNA NPU
+device, so hal0 deliberately recommends it nowhere
+(<code>docs/adr/0003-onnx-text-generation-npu.md:96-99</code>). The toolbox README's 5-12%
+and ODS's "~6%" are both that IOMMU-off delta. The gap hal0 should close is
+GTT/TTM sizing, the sysctls and the tuned profile; the IOMMU parameter stays as
+hal0 documents it.</p>
 <h5 id="a4-cli">A.4 CLI</h5>
 <p><code>ods-cli</code> is a single Bash file, 6,595 lines / 269,480 bytes
 (<code>ods-cli:1-6595</code>, confirmed via <code>wc -l</code>/<code>ls -la</code>), dispatched from one
@@ -5214,22 +5232,28 @@ the less robust of the two once Podman/rootless edge cases are in play.</p>
    "never fail the boot" posture (<code>gpu_perms.py:1-27</code>,
    <code>hal0-gpu-perms.service</code>'s <code>SuccessExitStatus=0 1</code>). Low-controversy on
    the merits: hal0's own upstream image source already publishes the
-   identical <code>amd_iommu=off amdgpu.gttsize=... ttm.pages_limit=...</code>
-   recommendation (<code>amd-strix-halo-toolboxes/README.md:186</code>); open questions
-   are packaging (default-on vs. flag) and reboot messaging.
+   <code>amdgpu.gttsize=... ttm.pages_limit=...</code> half of this recommendation
+   (<code>amd-strix-halo-toolboxes/README.md:186</code>); open questions are packaging
+   (default-on vs. flag) and reboot messaging.
+   <strong>Scope (2026-10-04) — GTT/TTM, sysctl and tuned only.</strong> The port must not
+   write ODS's <code>amd_iommu=off</code> (<code>10-amd-tuning.sh:186-229</code>): it removes
+   <code>/dev/accel</code> (the XDNA NPU) and contradicts hal0's documented
+   <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003:96-99). If the host
+   already carries hal0's IOMMU line, leave it; if it carries <code>amd_iommu=off</code>,
+   warn and leave it — the operator chose it knowingly.
    <strong>Correction (2026-10-04) — a container guard is mandatory.</strong> hal0's common
    deployment is a Proxmox LXC. Inside a container <code>/etc/default/grub</code>,
    <code>/etc/modprobe.d/</code>, the initramfs and <code>amdgpu</code> module parameters belong to the
    <strong>host kernel</strong>; editing the guest's copies and asking for a reboot applies
-   nothing, and the guest cannot see the host's IOMMU/GPU topology well enough to
-   choose <code>amd_iommu=off</code>. ODS's phase 10 has no such guard (<code>10-amd-tuning.sh</code>
+   nothing (and the IOMMU parameter is out of the port's scope regardless — see
+   above). ODS's phase 10 has no such guard (<code>10-amd-tuning.sh</code>
    only remarks that containers need <code>/dev/kfd</code>, <code>:33-55</code>), so a literal port would
    report "tuning applied" on every LXC. The hal0 port must branch on
    <code>systemd-detect-virt --container</code> (the installer already distinguishes LXC in
    <code>preflight_gpu</code>, <code>install.sh:363-380,500-509</code>): on bare metal apply as above; in
    a container compute the same values but <strong>print the host-side recipe</strong> (the
-   <code>/etc/default/grub</code> line, <code>update-grub</code>, the <code>/etc/modprobe.d/</code> drop-in, the
-   sysctls) for the operator to run on the Proxmox host, and record the phase as
+   GTT/TTM <code>/etc/default/grub</code> additions, <code>update-grub</code>, the <code>/etc/modprobe.d/</code>
+   drop-in, the sysctls) for the operator to run on the Proxmox host, and record the phase as
    <code>skipped: container</code>, never as applied. The <code>hal0 doctor</code> arm (item 3) should
    check live values (<code>/sys/module/amdgpu/parameters/gttsize</code>, <code>/proc/cmdline</code>)
    rather than the files it would have written.</p>
@@ -5869,7 +5893,7 @@ this on a real box" land in Direct port or Pattern adoption.</p>
 <td>read_slot_ceiling assumes .toml</td>
 <td>Informs only</td>
 <td><code>lib/service-registry.sh:29-48</code></td>
-<td>Resolve the ceiling through the naming seam rather than assuming <name>.toml</td>
+<td>Resolve the ceiling through the naming seam rather than assuming <code>&lt;name&gt;.toml</code></td>
 <td>S</td>
 <td>M</td>
 </tr>

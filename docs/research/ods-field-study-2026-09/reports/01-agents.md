@@ -177,7 +177,7 @@ accepted the prompt, so a retry can never duplicate tool calls (`:63-73`,
 Safari closes idle streams during 30-60 s cold prefill) and client-disconnect
 cancellation so an abandoned tab does not pin an inference slot (`:444-460`). A
 `_TOOL_LABELS` table maps Hermes tool names to spinner captions with an honest
-`Using \`<name>\`…` fallback (`:404-442`). `/api/talk/status` composes Hermes,
+``Using `<name>`…`` fallback (`:404-442`). `/api/talk/status` composes Hermes,
 whisper and TTS health plus model compatibility into a capabilities dict
 including `live_mic_requires_secure_context` (`:560-590`).
 
