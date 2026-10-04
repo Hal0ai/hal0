@@ -231,6 +231,51 @@ def _resolved_bind_host() -> str:
     return os.environ.get("HAL0_BIND_HOST", "").strip() or DEFAULT_BIND_HOST
 
 
+#: hal0's own ``/v1`` as seen from inside the OpenWebUI container.
+_HAL0_V1_URL = "http://host.docker.internal:8080/v1"
+
+#: Placeholder key OpenWebUI sends when the box has no client key. hal0 with
+#: auth off ignores it; with auth on it is refused, which is why a real key
+#: is wired in below whenever one exists.
+_PLACEHOLDER_KEY = "sk-hal0-local"
+
+#: Each key OpenWebUI sends to an OpenAI-compatible base URL, paired with the
+#: base-URL variable it belongs to. The box client key is written only while
+#: that base URL still points at hal0, so an operator who re-pointed STT, TTS
+#: or chat at another service never has hal0's key sent there.
+_CLIENT_KEY_TARGETS: tuple[tuple[str, str], ...] = (
+    ("OPENAI_API_KEYS", "OPENAI_API_BASE_URLS"),
+    ("AUDIO_STT_OPENAI_API_KEY", "AUDIO_STT_OPENAI_API_BASE_URL"),
+    ("AUDIO_TTS_OPENAI_API_KEY", "AUDIO_TTS_OPENAI_API_BASE_URL"),
+    ("RAG_OPENAI_API_KEY", "RAG_OPENAI_API_BASE_URL"),
+)
+
+
+def _client_key(target: Path) -> str | None:
+    """The box client key OpenWebUI should present to hal0's ``/v1``.
+
+    ``HAL0_CLIENT_KEY`` from the environment (the running hal0-api, whose
+    rotation updates it live), else from the ``api.env`` beside *target*,
+    parsed inline for the same cold-import reason as :func:`_default_path`.
+    ``None`` when the box has none: OpenWebUI then keeps sending the
+    placeholder, which works while auth is off.
+    """
+    value = os.environ.get("HAL0_CLIENT_KEY", "").strip()
+    if value:
+        return value
+    api_env = target.with_name("api.env")
+    try:
+        text = api_env.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        key, sep, val = raw.strip().partition("=")
+        if sep and key.strip() == "HAL0_CLIENT_KEY":
+            val = val.strip().strip('"').strip("'")
+            return val or None
+    return None
+
+
 def _trusted_email_header() -> str:
     return os.environ.get(TRUSTED_EMAIL_HEADER_ENV, "").strip()
 
@@ -298,7 +343,7 @@ def _env_header(managed: Iterable[str]) -> tuple[str, ...]:
     """The full header: the preserve promise, its one exception, and the
     machine-readable ``# hal0-managed:`` line for *managed* keys."""
     keys = textwrap.wrap(
-        ", ".join(_DYNAMIC_ENV_KEYS),
+        ", ".join((*_DYNAMIC_ENV_KEYS, *(k for k, _ in _CLIENT_KEY_TARGETS[:3]))),
         width=74,
         initial_indent="#   ",
         subsequent_indent="#   ",
@@ -306,8 +351,8 @@ def _env_header(managed: Iterable[str]) -> tuple[str, ...]:
     return (
         *_ENV_HEADER,
         "#",
-        "# One exception: hal0 wires these keys from live capability state (an",
-        "# embed slot, an img slot, a search provider):",
+        "# One exception: hal0 wires these keys from live state (an embed slot,",
+        "# an img slot, a search provider, the box client key):",
         *keys,
         "# While hal0 has such a backend to point at, it writes them and replaces a",
         "# hand edit. When the backend goes away it removes only the keys it wrote",
@@ -515,11 +560,41 @@ def write_openwebui_env(
             # else: the operator's own line — hal0 has nothing to say about
             # it, so it stays (#2256).
 
+    _apply_client_key(env_vars, managed, _client_key(target))
+
     # Carry the record forward across a render that doesn't mention a key (the
     # installer's override-less pass), but never list a key that isn't there.
     managed &= env_vars.keys()
     write_env_atomic(target, env_vars, header=_env_header(managed))
     return target
+
+
+def _apply_client_key(env_vars: dict[str, str], managed: set[str], client_key: str | None) -> None:
+    """Point every hal0-bound OpenWebUI key at the box client key (in place).
+
+    With a client key, each ``_CLIENT_KEY_TARGETS`` pair whose base URL is
+    still hal0's ``/v1`` gets the key and is recorded as hal0-managed, so
+    OpenWebUI keeps working once auth is enabled. Without one (or once it is
+    gone), a value hal0 wrote earlier falls back to the placeholder, and
+    ``OPENAI_API_KEYS``, which ships no default, is dropped. A key whose base
+    URL points elsewhere, or that the operator set by hand, is never touched.
+    """
+    for key_var, url_var in _CLIENT_KEY_TARGETS:
+        points_at_hal0 = env_vars.get(url_var, "").rstrip("/") == _HAL0_V1_URL
+        if client_key and points_at_hal0:
+            env_vars[key_var] = client_key
+            managed.add(key_var)
+        elif key_var in managed and env_vars.get(key_var, _PLACEHOLDER_KEY) != _PLACEHOLDER_KEY:
+            # A key hal0 wrote earlier is still there but no longer wanted.
+            if key_var == "OPENAI_API_KEYS" or not points_at_hal0:
+                env_vars.pop(key_var, None)
+                managed.discard(key_var)
+            else:
+                env_vars[key_var] = _PLACEHOLDER_KEY
+                # The RAG block owns its key's lifecycle; the audio keys are
+                # plain shipped defaults again.
+                if key_var != "RAG_OPENAI_API_KEY":
+                    managed.discard(key_var)
 
 
 def main() -> None:

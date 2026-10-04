@@ -1454,33 +1454,51 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
-# ── Admin key ────────────────────────────────────────────────────────────────
+# ── Admin + client keys ──────────────────────────────────────────────────────
 # Every install leaves the box with an admin key, so enabling auth (Settings
-# -> Security, or `hal0 auth require on`) never needs a manual key step first.
-# Minted only when api.env has none — a re-run never replaces an existing key.
-# Generating a key does NOT turn auth on: `[security].require_auth` decides
-# that, and with it off every route stays open. The value never reaches
-# stdout (the install log is tee'd to a 0644 file); it is shown once on the
-# terminal itself at the end of the install, and is recoverable on-box with
-# `sudo hal0 auth reset-key`.
+# -> Security, or `hal0 auth require on`) never needs a manual key step first,
+# and a client key, which on-box companions (OpenWebUI, the memory engine)
+# present to /v1 so they keep working once auth is on. Each is minted only
+# when api.env has none — a re-run never replaces an existing key. Minting
+# does NOT turn auth on: `[security].require_auth` decides that. Neither
+# value ever reaches stdout (the install log is tee'd to a 0644 file); the
+# admin key is shown once on the terminal itself at the end of the install
+# and is recoverable on-box with `sudo hal0 auth reset-key`.
 ADMIN_KEY_CREATED=0
-if ! grep -qE '^HAL0_ADMIN_KEY=.+' "${API_ENV}" 2>/dev/null; then
-    new_admin_key="$("${VENV_DIR}/bin/python" -c \
+_mint_api_env_key() {
+    local name="$1" value
+    grep -qE "^${name}=.+" "${API_ENV}" 2>/dev/null && return 1
+    value="$("${VENV_DIR}/bin/python" -c \
         'from hal0.service_identity import generate_service_key; print(generate_service_key())' \
         2>/dev/null || true)"
-    if [[ -n "${new_admin_key}" ]]; then
-        # Terminate a last line that lacks a newline so the append starts clean.
-        if [[ -s "${API_ENV}" && -n "$(tail -c1 "${API_ENV}")" ]]; then
-            printf '\n' >> "${API_ENV}"
-        fi
-        printf 'HAL0_ADMIN_KEY=%s\n' "${new_admin_key}" >> "${API_ENV}"
-        chmod 0600 "${API_ENV}"
-        ADMIN_KEY_CREATED=1
-        info "generated an admin key in ${API_ENV} (shown once at the end of the install)"
-    else
-        warn "could not generate an admin key — run 'sudo hal0 auth reset-key' after the install"
+    [[ -n "${value}" ]] || return 2
+    # Terminate a last line that lacks a newline so the append starts clean.
+    if [[ -s "${API_ENV}" && -n "$(tail -c1 "${API_ENV}")" ]]; then
+        printf '\n' >> "${API_ENV}"
     fi
-fi
+    printf '%s=%s\n' "${name}" "${value}" >> "${API_ENV}"
+    chmod 0600 "${API_ENV}"
+    [[ "${name}" == "HAL0_ADMIN_KEY" ]] && new_admin_key="${value}"
+    return 0
+}
+for _key_name in HAL0_ADMIN_KEY HAL0_CLIENT_KEY; do
+    _mint_rc=0
+    _mint_api_env_key "${_key_name}" || _mint_rc=$?
+    case "${_mint_rc}" in
+        0)
+            info "generated ${_key_name} in ${API_ENV}"
+            [[ "${_key_name}" == "HAL0_ADMIN_KEY" ]] && ADMIN_KEY_CREATED=1
+            ;;
+        2)
+            if [[ "${_key_name}" == "HAL0_ADMIN_KEY" ]]; then
+                warn "could not generate ${_key_name} — run 'sudo hal0 auth reset-key' after the install"
+            else
+                warn "could not generate ${_key_name} — run 'sudo hal0 auth rotate client' after the install"
+            fi
+            ;;
+    esac
+done
+unset _key_name _mint_rc
 
 # ── avahi mDNS host-name sync (#2060)───────────────────────────────────────
 # The HAL0_HOSTNAME choice (env / answer-file network.hostname) already

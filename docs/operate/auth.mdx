@@ -83,12 +83,15 @@ A fresh install has an admin key and enforcement off. To lock it down:
 
 </Steps>
 
-<Aside type="caution">
-Companions that call `/v1` do not carry the admin key yet: the Open WebUI
-chat UI sends a placeholder key, so with enforcement on its chat, voice and
-document features answer `401` until it is wired with a real key. Agents
-(Hermes, pi) and the memory engine read the box key from `/etc/hal0/api.env`
-and keep working.
+<Aside type="note">
+On-box companions keep working with enforcement on. The installer also mints
+a **client** key (`HAL0_CLIENT_KEY`), and hal0 writes it into Open WebUI's
+env for every key that still points at hal0's `/v1` (chat, voice, document
+embeddings), so Open WebUI never sends a placeholder hal0 would refuse. The
+memory engine reads the same client key; agents (Hermes, pi) read the box
+key from `/etc/hal0/api.env`. On a box installed before client keys existed,
+mint one with `sudo hal0 auth rotate client`: hal0 re-renders Open WebUI's
+env and restarts it only if the rendered file changed.
 </Aside>
 
 To go back to open access: `hal0 auth require off`. That opens every route

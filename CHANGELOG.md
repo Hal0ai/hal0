@@ -28,6 +28,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **Open WebUI keeps working with auth on.** It used to send the placeholder
+  `sk-hal0-local` to hal0's `/v1`, which an auth-on box refuses, so its chat,
+  voice and document features answered 401. `install.sh` now also mints a
+  client key (`HAL0_CLIENT_KEY`) when `api.env` has none, and
+  `hal0.openwebui.env_writer` writes it into `OPENAI_API_KEYS` and the
+  STT/TTS/RAG API keys, but only where the matching base URL still points
+  at hal0. Those keys are recorded as hal0-managed, so a key re-pointed at
+  another service never receives hal0's, and removing the client key falls
+  back to the placeholder. Rotating the client key (`hal0 auth rotate
+  client`) re-renders Open WebUI's env and restarts it only when the render
+  changed.
+
 - **Every install now leaves the box with an admin key, and a lost key has a
   way back.** When `/etc/hal0/api.env` has no `HAL0_ADMIN_KEY`, `install.sh`
   generates one and shows it once, on the terminal only (`/dev/tty`), after

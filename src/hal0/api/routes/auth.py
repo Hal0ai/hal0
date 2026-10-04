@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from pydantic import BaseModel
 
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, set_session_cookie
@@ -182,7 +182,9 @@ async def set_require_auth(body: RequireAuthRequest, request: Request) -> dict[s
 
 
 @router.post("/rotate")
-async def rotate_key(body: RotateKeyRequest, request: Request) -> dict[str, object]:
+async def rotate_key(
+    body: RotateKeyRequest, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, object]:
     """Rotate the ``admin`` or ``client`` box key. ADMIN-gated, status-only.
 
     Mints a fresh ``secrets.token_urlsafe(32)`` key, writes it atomically into
@@ -250,6 +252,12 @@ async def rotate_key(body: RotateKeyRequest, request: Request) -> dict[str, obje
         )
         # A client-key rotation never touches the operator's admin session.
         session_preserved = True
+        # OpenWebUI presents the client key to /v1 (hal0.openwebui.env_writer);
+        # re-render its env and restart it only if the render changed.
+        from hal0.components.openwebui_arm import reconcile_openwebui_env_background
+
+        background_tasks.add_task(reconcile_openwebui_env_background)
+        note += " OpenWebUI is re-pointed at the new key automatically."
 
     if status_only.get("hindsight_llm_env_refreshed"):
         note += (
