@@ -413,6 +413,22 @@ the less robust of the two once Podman/rootless edge cases are in play.
    identical `amd_iommu=off amdgpu.gttsize=... ttm.pages_limit=...`
    recommendation (`amd-strix-halo-toolboxes/README.md:186`); open questions
    are packaging (default-on vs. flag) and reboot messaging.
+   **Correction (2026-10-04) — a container guard is mandatory.** hal0's common
+   deployment is a Proxmox LXC. Inside a container `/etc/default/grub`,
+   `/etc/modprobe.d/`, the initramfs and `amdgpu` module parameters belong to the
+   **host kernel**; editing the guest's copies and asking for a reboot applies
+   nothing, and the guest cannot see the host's IOMMU/GPU topology well enough to
+   choose `amd_iommu=off`. ODS's phase 10 has no such guard (`10-amd-tuning.sh`
+   only remarks that containers need `/dev/kfd`, `:33-55`), so a literal port would
+   report "tuning applied" on every LXC. The hal0 port must branch on
+   `systemd-detect-virt --container` (the installer already distinguishes LXC in
+   `preflight_gpu`, `install.sh:363-380,500-509`): on bare metal apply as above; in
+   a container compute the same values but **print the host-side recipe** (the
+   `/etc/default/grub` line, `update-grub`, the `/etc/modprobe.d/` drop-in, the
+   sysctls) for the operator to run on the Proxmox host, and record the phase as
+   `skipped: container`, never as applied. The `hal0 doctor` arm (item 3) should
+   check live values (`/sys/module/amdgpu/parameters/gttsize`, `/proc/cmdline`)
+   rather than the files it would have written.
 
 2. **HSA_OVERRIDE_GFX_VERSION auto-detection for gfx1151.** Source:
    `.env.example:477` + ODS's gfx1151-conditional phase-06 logic. Target:

@@ -261,9 +261,15 @@ ODS decides the AMD lane from **device nodes only** —
 `show_amd_gpu_device_guidance` (`detection.sh:218-233`) printing the LXC passthrough
 commands when it fails.
 
-Fix: make `kfd_present()` sufficient for the ROCm branch. hal0's `kfd_present`
-(`src/hal0/providers/_gpu.py:251-280`) is already *stricter* than ODS's — it checks
-openability by the slot runner uid — so this is a one-line predicate change.
+Fix: make **both device-node predicates together** sufficient for the ROCm branch —
+`kfd_present()` **and** `render_node_present()` — and drop the `rocm-smi` dependency.
+*Correction (2026-10-04):* the first draft said `kfd_present()` alone; that loses the
+second half of the ODS check (`renderD*` must exist, `detection.sh:200-204`), and a
+Strix Halo LXC with only `/dev/kfd` forwarded would then seed every slot `gpu-rocm` and
+launch it without a render device. hal0 already has both helpers
+(`src/hal0/providers/_gpu.py:251-280` `kfd_present`, `:397-420` `render_node_present`),
+each stricter than ODS's because they check openability by the slot runner uid, so this
+is still a one-expression predicate change.
 
 ### 7. #2028 — `/api/services/health` is a static three-branch construction  *(M / H)*
 

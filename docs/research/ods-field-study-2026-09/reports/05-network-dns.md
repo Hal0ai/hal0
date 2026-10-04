@@ -349,7 +349,8 @@ job is to tell them what's wrong.
 One historical note for anyone tracing "why no Caddy/auth already":
 `CHANGELOG.md:5050-5053` records `v0.3.0-alpha.1` as "**Caddy and the auth
 surface are removed**" per **ADR-0012**, which superseded ADR-0001's softer
-plan. `docs/adr/` on disk only goes up to `0006` and has no `0012` — this
+plan. `docs/adr/` on disk (at `108b366`) only goes up to `0006` and has no `0012` *(reconstructed
+into the tree by #2244 on main, together with 0004, 0013, 0015, 0020 and 0023)* — this
 is not drift, `CHANGELOG.md:14` explains ADRs are filed under a
 `docs/internal/` tree that is gitignored (issue `#638`), same convention
 as this repo's current `docs/.devdocs/`/`docs/superpowers/`. So ADR-0012's

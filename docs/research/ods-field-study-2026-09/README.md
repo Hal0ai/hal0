@@ -23,3 +23,19 @@ verdicts were written by the session itself after reading every report. Treat th
 
 The install ran in a remote sandbox (no GPU, CPU tier 0, rootless install user, Docker
 29.3.1), not on Strix Halo hardware; the journal states every sandbox-specific adjustment.
+
+## Amendments
+
+- **2026-10-04** — Post-review corrections (Codex review on PR #2237), each marked
+  *Correction (2026-10-04)* in place: report 06 §E.2 (a stdio server needs a client-attached
+  bridge, not a free-standing unit), §E.3 step 2 (never reuse the builtin loop's admin bearer for
+  third-party URLs), §E.3 step 4 (the `[tools]` mirror describes policy; enforcement needs a
+  hal0-fronted proxy mount — hal0 issue #2303); report 02 §D.5 (bridge extensions reach slots
+  only through hal0-api; render-time URLs do not follow port changes) and Decision 3 (the design
+  as written is rootful — say so, or build the user-scope seam); report 09 item 6 (the ROCm lane
+  needs `/dev/kfd` **and** a `renderD*` node); report 08 §D.1 (host tuning must detect containers
+  and emit host-side commands); the study's Proxmox reproduction recipe (was LXD syntax, now
+  `pct`). Also noted where main (`c177aa5`) has overtaken the pinned `108b366`: ADR-0015 and
+  #2253 shipped the user-installed-MCP schema, join and verbs; #2246 gates ADMIN routes,
+  approvals included, on LAN-bound boxes; #2244 reconciled the `docs/adr/` tree. Citations stay
+  pinned to `108b366` unless a note says otherwise.

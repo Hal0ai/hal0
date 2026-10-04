@@ -393,7 +393,7 @@ health, and shows it in the dashboard — with no code change anywhere.
     hooks/post_install.sh             # OPTIONAL
     README.md                         # OPTIONAL
 /etc/hal0/extensions.toml             # enable/disable state + operator overrides
-/etc/containers/systemd/hal0-ext@<id>.container   # GENERATED, never authored
+/etc/containers/systemd/hal0-ext@<id>.container   # GENERATED, never authored (rootful system Quadlet — see Decision 3)
 ```
 
 Discovery order mirrors `hal0.config.paths` conventions (`/var/lib` wins over
@@ -508,9 +508,31 @@ translation is **rendered env, computed at unit-render time from live truth**:
   `ods/current` swap-safety rule and should be documented the same way
   (`docs/SWAP-SAFE-EXTENSIONS.md:17-33` ports nearly verbatim).
 - `slot:<name>` refs in `[wiring].slot_env` resolve at render time through
-  `hal0.ports.authority` to `http://127.0.0.1:<slot port>` — so `WHISPER_URL` follows
-  the stt slot even if the operator moves its port. ODS cannot do this; its DNS names
-  are static and its ports come from `.env`.
+  `hal0.ports.authority`. *Correction (2026-10-04):* the first draft resolved them to
+  `http://127.0.0.1:<slot port>` unconditionally and claimed the URL "follows the slot if
+  the operator moves its port". Both halves were wrong. (i) Inside a bridge-network
+  extension `127.0.0.1` is the extension's own loopback, and `host.docker.internal` does
+  not help either: slots are deliberately **loopback-only** on the host —
+  `_loopback_fence_command` flips every `0.0.0.0` bind to `127.0.0.1` under
+  `Network=host` (`src/hal0/providers/container.py:619-647`; `providers/base.py:206`
+  "host port the container listens on (127.0.0.1 only)") — so the host-gateway address
+  cannot reach a slot port at all. A bridge extension must therefore go through
+  **hal0-api**, which does listen on the LAN interface: `slot:stt` →
+  `http://host.docker.internal:8080` plus the gateway's own route for that modality
+  (`POST /v1/audio/transcriptions` → the stt slot, `routes/v1.py:1398`;
+  `/v1/images/generations` → the img slot). This is exactly how
+  `openwebui/env_writer.py:112-128` already wires `AUDIO_STT_OPENAI_API_BASE_URL` and
+  `AUDIO_TTS_OPENAI_API_BASE_URL` — at hal0-api `:8080`, never at a slot. Only a
+  `network = "host"` extension may be handed `http://127.0.0.1:<slot port>` directly.
+  (ii) A render-time value does not follow anything: the generated env file keeps the
+  old port, and nothing in the convergence list re-renders dependants when a slot TOML
+  changes. Gateway URLs sidestep this (hal0-api's port is stable and the dispatcher
+  follows the slot); for the host-network direct form, record `depends_on_slots` in the
+  extension registry and have the slot-config write path (`SlotConfigStore`) trigger
+  extension convergence — a hook that does not exist today and must ship with the
+  feature. ODS's static DNS names and `.env` ports have the same staleness problem; the
+  honest claim is "gateway-routed by default, so a slot move is invisible", not "the URL
+  follows the port".
 - Env lands in `/etc/hal0/extensions/<id>.env`, written atomically by
   `hal0.config.env.write_env_atomic` (the same primitive slot env files use) and
   referenced from the generated unit — keeping secrets out of the unit file and out of
@@ -616,11 +638,33 @@ extensions live under `/var/lib/hal0/ext/<id>/` — the path constraint ODS cann
 because compose mounts are relative to a project dir the operator owns.
 
 **Decision 3 — Rootful vs. rootless for extension containers.** Slots run rootful
-podman today, and the wrapper's own HONEST BOUNDARY note (`hal0-systemctl:60-70`)
+podman today, and the wrapper's own HONEST BOUNDARY note (`hal0-systemctl:52-70`)
 concedes that anyone who can author a container spec can mount host paths. Third-party
-extensions raise the stakes materially. *Recommendation:* run `hal0-ext@` containers
-**rootless under the `hal0` user** from day one. It is easier to start restrictive than
-to retrofit, and it removes the sharpest edge in importing third-party manifests.
+extensions raise the stakes materially. *Correction (2026-10-04):* the first draft
+recommended "rootless under the `hal0` user from day one" while the implementation above
+(D.1, D.6) writes `/etc/containers/systemd/hal0-ext@<id>.container` through the
+system-scope `SystemCtlSeam` — that **is** the rootful Quadlet path (`hal0-systemctl:111`
+pins `QUADLET_DIR="/etc/containers/systemd"`; the wrapper has no `--user` mode), and a
+`User=` inside the container changes the process uid, not the Podman boundary. The two
+options, stated honestly:
+
+- **Explicitly rootful v1 (recommended for first-party extensions).** Keep the
+  system-scope seam; compensate with what the manifest can enforce: digest-pinned images,
+  `Volume=` sources confined to `/var/lib/hal0/ext/<id>/`, no `devices:`,
+  `NoNewPrivileges=yes`, `DropCapability=all`, `ReadOnly=yes` where the image allows, and
+  `User=` as defence in depth. Say in the docs that an extension runs in the same boundary
+  as a slot. Do **not** enable `hal0 app import` of third-party manifests under this mode.
+- **Real rootless path (prerequisite for third-party import).** Quadlets under
+  `~hal0/.config/containers/systemd/` (or `/etc/containers/systemd/users/<uid>/`),
+  `loginctl enable-linger hal0`, a user-scope variant of the seam (`systemctl --user`, a
+  second allow-list), the subuid/subgid ranges the installer already allocates
+  (`installer/install.sh:760`), GPU access via the `render` group membership `gpu_perms`
+  already manages, and a lab check that `host-gateway` resolves under the rootless network
+  backend (pasta vs. slirp4netns) before relying on `AddHost=host.docker.internal:host-gateway`.
+
+*Recommendation:* ship v1 explicitly rootful with the compensating controls and the import
+verb disabled; make the rootless seam the gate for Decision 4's third-party import rather
+than claiming rootless while rendering rootful.
 
 **Decision 4 — Who may publish?** ODS ships 33 library extensions it does not test on
 every hardware class and lets the dashboard install them at a click. hal0's culture

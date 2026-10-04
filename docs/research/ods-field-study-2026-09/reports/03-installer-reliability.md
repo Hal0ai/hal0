@@ -115,7 +115,9 @@ Highlights, all under `/home/user/ods/ods/installers/lib/`:
   `/proc/1/cgroup` regex, and `/proc/1/environ`; `ods_container_label()`
   (`:165-185`) names it (`lxc`, `docker`, …). This feeds
   `show_amd_gpu_device_guidance()` (`:219-233`), which prints *LXD-specific*
-  remedies (`lxc config device add <container> kfd unix-char path=/dev/kfd`) when
+  remedies (`lxc config device add <container> kfd unix-char path=/dev/kfd` — LXD syntax;
+  the Proxmox equivalent is a `dev0:`/`dev1:` line in `/etc/pve/lxc/<CTID>.conf`, cf.
+  hal0's `docs/getting-started/proxmox.mdx:91-101`) when
   inside a container and modprobe remedies when not. `apply_cpu_gpu_fallback()`
   (`:235-257`) then degrades the whole install to CPU coherently — it rewrites
   `GPU_BACKEND`, `CAP_*`, and clears compose overlays in one place, rather than

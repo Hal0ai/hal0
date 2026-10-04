@@ -373,7 +373,11 @@ traversal (`:1-36`). The v3 dashboard renders agents as trading-card style
    `routers/magic_link.py`, `hermes-proxy/Caddyfile`). hal0 has one HMAC seam on
    the chat proxy and explicitly unauthenticated approval endpoints
    (`approvals.py:24-27,46-48`) that execute `model_pull` / `slot_delete` /
-   `config_write`. That is the single largest gap.
+   `config_write`. That is the single largest gap. *(Update 2026-10-04: #2246 on main,
+   `946c512`, closes the LAN case — ADMIN routes, approvals included, now require an
+   admin session/key from any non-loopback caller when the box is LAN-bound, even with
+   `require_auth` off; the loopback dev-open path remains by design. The product-feature
+   gap — magic links, owner cards, admin-session — stands.)*
 2. **A mobile chat portal that never exposes the agent.** `hermes_bridge.py` +
    `talk.py` is better engineering than anything on either side: per-cookie WS
    pooling for prompt-cache warmth, one narrowly-scoped transparent retry,
@@ -547,7 +551,9 @@ overwriting the admin `SOUL.md.j2`. ~80 lines of prose. Risk none.
    yet `/api/agent/approvals/{id}/approve` executes gated tools unauthenticated
    (`approvals.py:24-27`). Either the standing decision needs a carve-out for
    mutation endpoints (D1 alone), or hal0 adopts the full ODS posture (D1+D2).
-   This is the decision that gates D2, D3 and D4.
+   This is the decision that gates D2, D3 and D4. *(#2246 answered the first half
+   on main with a posture-coupled gate for LAN-bound boxes rather than a blanket
+   carve-out; the D2–D4 question is untouched.)*
 3. **Do you want a phone surface?** ODS Talk (magic link → mobile portal →
    pooled bridge → TTS) is roughly three of the port candidates and the single
    biggest feature difference. If the answer is no, D2/D3/D4 drop to

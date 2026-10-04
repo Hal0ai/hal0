@@ -13,6 +13,30 @@ Source-level comparative study. All paths absolute. ODS = `/home/user/ods`, hal0
 
 ---
 
+
+> **Addendum, 2026-10-04 (post-review).** This report is pinned to `hal0ai/hal0@108b366`. Two things
+> have happened since.
+>
+> 1. **Main shipped most of section E.** ADR-0015 (`docs/adr/0015-mcp-supervisor-and-exposure.md`,
+>    accepted for http/sse) and #2253 (`df60d5b`) added `[secrets]`/`[tools]`/`[exposure]` to
+>    `InstalledServer`, the Hermes/brain exposure join (`src/hal0/mcp/hermes_join.py`),
+>    `hal0 mcp test|allow|gate|block|expose`, and `POST /{id}/test`, `PATCH /{id}/tools`,
+>    `PATCH /{id}/exposure`. The stdio supervisor is deferred (`409 mcp.exposure_needs_supervisor`);
+>    the dashboard drawer is #2245. `docs/adr/` now carries 0004, 0012, 0013, 0015, 0020 and 0023
+>    (#2244), which resolves the bookkeeping remarks in §E.2 and §G.3.
+> 2. **Three design errors in §E.2–E.3 were found in review and are corrected inline below**, each
+>    marked *Correction (2026-10-04)*. In short: (i) the builtin loop at
+>    `hermes_provision.py:2012-2021` attaches hal0's own admin service key, so it must not be reused
+>    verbatim for third-party URLs — main's `hal0.mcp.probe.build_headers` sends only `X-hal0-Agent`,
+>    the record's `[env]` literals and its resolved `[secrets]`, which is the right behaviour;
+>    (ii) mirroring `[tools]` into `hermes.toml` *describes* a policy but does not *enforce* it,
+>    because Hermes's own MCP client connects straight to `mcp_servers.<id>.url` and
+>    `AgentMCPClient` is never instantiated in production (true at `108b366`, still true at main
+>    `c177aa5`) — the two builtins are gated server-side inside hal0's `/mcp` mount, a third-party
+>    server has nothing in its path; main inherited this and it is filed as hal0 issue #2303;
+>    (iii) a `stdio` server cannot run as a free-standing systemd unit, because its client must own
+>    its stdin/stdout.
+
 ## A. ODS mechanism
 
 ### A.1 MCP in ODS: it does not exist
@@ -236,6 +260,9 @@ no document-ingest endpoint (#2016), a fresh uuid4 doc per turn (#2017), an unca
 queue that fails to drain on CPU-only boxes (#1834), `memory_add` with no preflight (#1930), and no
 guide for pointing external coding agents at hal0 memory (#2153).
 
+*(Status on main `c177aa5`: gap 2 closed by #2253/ADR-0015 for http/sse servers — with the
+enforcement caveat in the §E.3 correction; gap 1 open for stdio. See the addendum at the top.)*
+
 **The three real gaps in MCP:**
 
 1. **No supervisor.** `POST /api/mcp/{id}/{action}` raises `McpNotImplemented` with code
@@ -405,6 +432,27 @@ systemd units (`ARCHITECTURE.md:395-397`) — rather than inventing a supervisor
 - `http`/`sse` servers need no supervision — they are already reachable; only the exposure join and
   the tool policy apply.
 
+**Correction (2026-10-04).** The first bullet is wrong as written. A `stdio` MCP server speaks
+JSON-RPC over its own stdin/stdout, so whoever starts the process must *be* its client: a
+free-standing `hal0-mcp@<id>.service` would leave an `npx`/`uvx` server with nobody on the other end
+of the pipe, and the renderer in §E.3 (which emits only `{type,url,timeout}`) would then point Hermes
+at an empty `url`. Two shapes actually work:
+
+1. **Hermes spawns it.** Render `command`/`args` into Hermes's own `mcp_servers.<id>` block and let
+   Hermes's client fork the process (only if the pinned Hermes build accepts a stdio entry; hal0's
+   provisioner never writes one today). Cost: the server then runs inside `hal0-agent@hermes`'s
+   sandbox, `[secrets]` have to reach that unit's environment, and the process sits outside hal0's
+   policy path (see the §E.3 correction).
+2. **hal0 runs a bridge.** `hal0-mcp@<id>.service` executes a small hal0-owned adapter that forks
+   `command args…` as its child, speaks MCP to it over the pipe, and serves the same session as
+   streamable-http on a loopback port or unix socket. `LoadCredential=` still delivers `[secrets]`,
+   `ProtectSystem=strict` still applies, and the exposure join renders the *bridge's* URL — which
+   makes a stdio server indistinguishable from an http one to everything downstream, including the
+   policy proxy the §E.3 correction asks for.
+
+Recommend (2). ADR-0015's "Deferred: stdio supervisor" section still sketches the free-standing
+unit; whoever picks that work up should start from the bridge shape.
+
 **Write ADR-0015 first.** `routes/mcp.py:943` already promises it, hal0's `CLAUDE.md` requires an ADR
 before changing behaviour it covers, and `docs/adr/` currently holds only 0001, 0002, 0003, 0005,
 0006 while source cites 0004, 0008, 0012, 0013, 0015, 0020 and **0023 sixty times**. (See §G.)
@@ -417,22 +465,51 @@ surgically**, exactly as `patch-hermes-config.py` does:
 
 1. Build the desired set = `_default_mcp_servers()` (`hermes_provision.py:1462-1497`) **plus** every
    installed record with `enabled = true` and `exposure.hermes = true`.
-2. For each, write `mcp_servers.<id>.{type,url,timeout}` + `headers.X-hal0-Agent` + bearer, reusing
-   the existing loop at `hermes_provision.py:2012-2021`.
+2. For each, write `mcp_servers.<id>.{type,url,timeout}` + `headers.X-hal0-Agent`, reusing the
+   `hermes config set` mechanism behind the existing loop at `hermes_provision.py:2012-2021` — **but
+   not its bearer**. *Correction (2026-10-04):* that loop attaches `service_key(prefer="admin")`
+   (`hermes_provision.py:2011,2020-2021`) because its only targets are hal0's own ADMIN-classed `/mcp`
+   mounts. Reusing it verbatim for a user-installed URL would hand hal0's platform-admin credential to
+   a third-party server. User-installed entries carry only `X-hal0-Agent`, the record's `[env]`
+   literals, and its `[secrets]` resolved from `api.env` (an `AUTHORIZATION = "<api.env key>"` entry is
+   how a server that wants a bearer gets *its own*); the hal0 service identity never leaves the box.
+   This is what main's `hal0.mcp.probe.build_headers` (#2253) does.
 3. **Remove** `mcp_servers.<id>` blocks that hal0 previously wrote and no longer wants — the
    capability `hermes config set` cannot express, and the reason D1 is a prerequisite rather than a
    nice-to-have.
 4. Mirror the record's `[tools]` into `/etc/hal0/agents/hermes.toml` `[mcp.servers.<id>]` so
-   `AgentMCPClient.classify()` (`mcp_client.py:149`) governs the new server on the same two axes as
-   the bundled ones. Preserve the existing merge-never-clobber contract
-   (`hermes_provision.py:248-250`).
+   `AgentMCPClient.classify()` (`mcp_client.py:149`) can *report* the policy (`hal0 mcp test`, the
+   dashboard verdicts). Preserve the existing merge-never-clobber contract
+   (`hermes_provision.py:248-250`). *Correction (2026-10-04):* the mirror does **not** enforce
+   anything on the call path, and the original wording implied it did. `AgentMCPClient` has no
+   production instantiation (`grep -rn "AgentMCPClient(" src/` is empty at `108b366` and at main
+   `c177aa5`); Hermes's own MCP client connects directly to `mcp_servers.<id>.url`. The two builtins
+   are safe only because their gate is **server-side**: hal0's `/mcp` mount classifies every call
+   (`mcp/admin.py:1769-1795` `ToolPolicy.classify` → `run|gated|denied|refused`, `is_gated` +
+   `ApprovalQueue`; `api/mcp_mount.py:290-310`). A third-party server has no such server in front of
+   it, so `blocked` is not blocked and `gated` never reaches the approvals inbox — and ADR-0013's
+   "zero callable tools until promoted" default is void for exactly the servers it was written for.
+   The design fix is to put hal0 on the wire: expose user-installed servers to Hermes **only through
+   a hal0-hosted proxy mount** (e.g. `/mcp/ext/<id>`, ADMIN-classed like `/mcp`) that forwards
+   `initialize`/`tools/list`/`tools/call` upstream, hides tools outside `allow ∪ gated`, routes
+   `gated` calls through the same `ApprovalQueue`, rejects `blocked`, and injects the record's
+   `[secrets]` upstream while receiving the hal0 service bearer from Hermes like the builtins do. That
+   also collapses step 2's bearer question into one rule (hal0 identity on the Hermes→hal0 hop, the
+   record's own token on the hal0→upstream hop) and gives a stdio bridge (§E.2) the same front door.
+   Until the proxy exists, `exposure.hermes = true` honestly means "every advertised tool is
+   callable" and should either say so in the UI/CLI or be refused for records whose `[tools]` has a
+   non-empty `gated`/`blocked` list. Main's #2253 shipped the mirror without the proxy; tracked as
+   hal0 issue #2303.
 5. Re-run the `mcp_wire` probe for the new server only, so a bad URL surfaces at install time rather
    than at first agent turn.
 
 **Ownership marker.** Write hal0-managed blocks between sentinel comments
 (`# >>> hal0 mcp registry — do not edit <<<` … `# >>> end <<<`) so step 3 can delete precisely what
 hal0 owns and never touch an operator's hand-added block. This is a small addition to the ODS
-block-scoping approach, which locates blocks by key name only.
+block-scoping approach, which locates blocks by key name only. *(Main's #2253 keeps the ownership
+list in a side-car manifest, `/var/lib/hal0/mcp/hermes-managed.json`, instead of sentinel comments,
+because comments do not survive the `yaml.safe_dump` hal0 already applies to this file — ADR-0015
+"Rejected". Same guarantee, different carrier.)*
 
 ### E.4 CLI
 
@@ -477,9 +554,10 @@ an exposure toggle row. Reuse `useMcpServers` (`ui/src/api/hooks/useMcp.ts:126`)
 | Windowed caps / circuit breaker (optional, D3) | **ODS, adapted** — `extensions/services/ape/main.py:482-612` |
 | `[secrets]` indirection block | **New** |
 | `[exposure]` targets block | **New** |
-| Sentinel-delimited hal0-owned config region | **New** (extends ODS block-scoping) |
+| hal0-owned config region with an ownership record (sentinels proposed; main shipped a side-car manifest) | **New** (extends ODS block-scoping) |
 | `hal0 mcp test` | **New** |
-| systemd-unit-per-stdio-server supervisor | **New** (follows hal0's bundled-agent precedent) |
+| stdio bridge unit — `hal0-mcp@<id>` running a hal0-owned stdio↔streamable-http adapter (§E.2 correction) | **New** |
+| Policy proxy mount fronting user-installed servers (§E.3 correction) | **New** |
 
 ---
 
@@ -519,12 +597,14 @@ an exposure toggle row. Reuse `useMcpServers` (`ui/src/api/hooks/useMcp.ts:126`)
 2. **Write ADR-0015 (MCP process supervisor) — blocking.** `routes/mcp.py:943` promises it by name.
    Decide: systemd-unit-per-server (recommended, matches `ARCHITECTURE.md:395-397`) vs an in-process
    subprocess pool vs http/sse-only (drop `stdio` support entirely, which halves the work and covers
-   most hosted MCP servers).
+   most hosted MCP servers). *Resolved on main (#2253): ADR-0015 accepted for http/sse, stdio
+   deferred — read the §E.2 correction before implementing the deferred part.*
 3. **Resolve the ADR bookkeeping gap.** Source cites ADR-0004, 0008, 0012, 0013, 0015, 0020, and
    **0023 (60 times)**; `docs/adr/` holds only 0001, 0002, 0003, 0005, 0006. Separately,
    `ARCHITECTURE.md:392-393` states *"hal0 keeps no ADR tree"* while `CLAUDE.md` says
    *"`docs/adr/` holds the accepted decision records"*. One of those is stale. This matters here
-   because the MCP supervisor decision is supposed to land as an ADR.
+   because the MCP supervisor decision is supposed to land as an ADR. *Resolved on main (#2244):
+   `docs/adr/` now holds 0004, 0012, 0013, 0015, 0020 and 0023 alongside the original five.*
 4. **Scope of `[exposure]`.** Ship `hermes` + `brain` only in v1, with `openwebui`/`opencode`
    returning `501 mcp.exposure_unsupported`? Or defer the whole exposure block and wire Hermes
    unconditionally (simpler, but re-creates the "one hard-coded consumer" shape the owner is trying
