@@ -122,6 +122,27 @@ Signed-off-by: Jane Developer <jane@example.com>
 > A DCO status check may be enabled on PRs once the external-PR merge
 > window opens; until then, sign-offs are documented but not gated.
 
+## Filing issues
+
+Use the issue forms on GitHub (bug report, enhancement). Three rules keep the
+tracker honest, and they apply to agent sessions exactly as to people:
+
+1. **One defect per issue.** No "sweep: N items" bundles; a sweep is one
+   tracking issue with a checklist.
+2. **Say what happens if nobody fixes it**, how to reproduce it (or the
+   `file:line`), and roughly how big the fix is. Triage uses that to assign
+   `P0` (breaks, loses data, security or privacy), `P1` (wrong or confusing
+   for a user) or `P2` (nice to have), and a milestone.
+3. **Cosmetic findings are not filed** unless the same change fixes them.
+
+Every open issue carries exactly one status label (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) and, once
+triaged, exactly one priority label. `ready-for-agent` marks work an agent
+can finish on its own with tests. A weekly routine triages the inbox, fixes
+a few `ready-for-agent` issues, and posts a summary on the pinned "Weekly
+triage digest" issue, which is the quickest way to see the state of the
+queue.
+
 ## Test tiers
 
 hal0's test strategy is three tiers, each with a different
