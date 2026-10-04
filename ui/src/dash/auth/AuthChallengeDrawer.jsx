@@ -1,13 +1,12 @@
 // hal0 dashboard — sign-in-required drawer (#1822).
 //
-// A LAN-bound box with `require_auth` OFF still gates ADMIN-class
-// mutations (model pulls, slot deletes, config writes, approval execution)
-// for callers that didn't arrive over loopback — see
-// hal0.api.auth's posture-coupled gate. Full-page login (AuthGate/
-// LoginView) never fires for this case: `auth_required` genuinely reads
-// false, so the shell renders the app as usual. The FIRST time a mutation
-// hits that 401, `lib/queryClient.ts`'s global MutationCache.onError routes
-// it here via useAuthChallengeStore instead.
+// With auth on, AuthGate decides login only when the app loads. A session
+// that stops being valid mid-use (the cookie expired, or auth was turned
+// on from another device while this tab was open) surfaces as a 401 on the next mutation;
+// `lib/queryClient.ts`'s global MutationCache.onError routes that here via
+// useAuthChallengeStore instead of failing the action silently. With auth
+// off no route answers 401, so this drawer never opens (the v1.3.0 hidden
+// LAN gate that used to trigger it on "off" boxes is gone).
 //
 // Consequence-first copy (COMMON.md): say what happens to the operator,
 // then the mechanism. On a successful login, `retry()` re-executes the

@@ -43,9 +43,8 @@ rule table:
   return secrets or config. **Unclassified paths fall back to ADMIN** (deny-by-default).
 
 These classes are fully enforced once `[security].require_auth` is on. While it's off,
-the surface is trusted-LAN-open with one exception (since v1.3.0): with an admin key
-configured and the API bound past loopback, ADMIN-class requests from a non-loopback
-peer still need an admin credential (`_lan_admin_gate` in `src/hal0/api/auth.py`; see
+the whole surface is open, whatever the bind address and whether a key is configured
+(`AuthEnforcementMiddleware` in `src/hal0/api/auth.py`; see
 [Authentication](/docs/operate/auth/)). The table below states
 each group's class as enforced by `exposure.py`, not as a claim about the current
 default posture.

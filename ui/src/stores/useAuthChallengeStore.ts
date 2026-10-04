@@ -1,8 +1,8 @@
 // hal0 v3 dashboard — auth-challenge store (#1822).
 //
-// A LAN-bound box with `require_auth` OFF still requires an admin
-// session/key for ADMIN-class mutations from off-box callers
-// (hal0.api.auth's posture-coupled gate). That 401 (`auth.required`) can
+// With auth on, a session that lapses mid-use (cookie expiry, or auth was
+// turned on from another device) makes the next mutation answer 401
+// (`auth.required`). That can
 // land on ANY mutation anywhere in the dashboard, so it's caught once,
 // globally, via the TanStack Query `MutationCache`'s `onError` (see
 // `lib/queryClient.ts`) rather than threaded through every `useMutation`

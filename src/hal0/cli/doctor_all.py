@@ -85,18 +85,18 @@ def check_auth_posture(auth: dict[str, Any] | None) -> Check:
                     _WARN,
                     "reachable from your network with auth off and no admin key set — every "
                     "route, including model pulls, slot deletes and config writes, is "
-                    "unauthenticated from any LAN device. Set an admin key "
-                    "(`hal0 auth rotate admin`) or bind loopback (HAL0_BIND_HOST=127.0.0.1) "
-                    "to close this.",
+                    "unauthenticated from any LAN device. Mint an admin key "
+                    "(`sudo hal0 auth reset-key`) and then `hal0 auth require on`, or bind "
+                    "loopback (HAL0_BIND_HOST=127.0.0.1), to close this.",
                 )
             return Check(
                 "auth",
                 "Auth posture",
                 _WARN,
-                "reachable from your network with auth off — mutating routes already require "
-                "an admin sign-in automatically for off-box callers, but reads and inference "
-                "stay open. `hal0 auth require on` or binding loopback "
-                "(HAL0_BIND_HOST=127.0.0.1) protects everything, including reads.",
+                "reachable from your network with auth off — every route, including model "
+                "pulls, slot deletes and config writes, is open to any LAN device. "
+                "`hal0 auth require on` (you will sign in with the admin key) or binding "
+                "loopback (HAL0_BIND_HOST=127.0.0.1) closes this.",
             )
         return Check("auth", "Auth posture", _PASS, "open (auth not required — dev/loopback)")
     if not has_key:

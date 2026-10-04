@@ -28,12 +28,10 @@ dependency itself, and every route here classifies ``ADMIN`` in
 :mod:`hal0.security.exposure` (the ``"agent approvals"`` prefix rule). An
 approval's ``approve`` executes whatever gated tool call it wraps
 (``model_pull``, ``slot_delete``, ``config_write``, ...), so it carries the
-same posture as any other mutating route: with ``require_auth`` off on a
-loopback-bound box it rides through unauthenticated (dev-open, by design),
-but on a LAN-reachable box with an admin key configured,
-:mod:`hal0.api.auth`'s posture-coupled gate (#1822) requires an admin
-session/key for any caller that didn't arrive over loopback, even though
-the ``require_auth`` toggle itself is still off.
+same posture as any other mutating route: with ``require_auth`` on it needs
+an admin session or key; with it off it is open, exactly like every other
+route (the operator's explicit choice, flagged by ``hal0 doctor all`` when
+the box is LAN-reachable).
 """
 
 from __future__ import annotations
@@ -54,8 +52,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 router = APIRouter()
 
 # ADMIN-classified (exposure.py), like every other route in this module — see
-# the module docstring for the posture-coupled gate that now covers this
-# prefix even while ``require_auth`` is off.
+# the module docstring for how ``require_auth`` governs it.
 
 
 # SSE keep-alive cadence — matches /api/events to keep the proxy

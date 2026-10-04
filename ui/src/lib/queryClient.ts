@@ -10,9 +10,9 @@
 //   - `retry: 1` — surfaces 404 / 5xx quickly so the per-hook fallback
 //     (mock data or empty list) can render instead of spinning forever.
 //
-// `mutationCache.onError` (#1822): a LAN-bound box with auth off still
-// requires an admin session for ADMIN-class mutations from off-box callers
-// (hal0.api.auth's posture-coupled gate). That 401 (`Hal0Error` with
+// `mutationCache.onError` (#1822): with auth on, a session that lapses
+// mid-use (cookie expiry, or auth turned on from another device) makes the next
+// mutation 401. That 401 (`Hal0Error` with
 // `code: 'auth.required'`) can come from ANY mutation anywhere in the
 // dashboard, so it's caught here once — globally — instead of threading a
 // reauth callback through every `useMutation` call site. It hands the

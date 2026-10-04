@@ -1454,7 +1454,35 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
-# ── avahi mDNS host-name sync (#2060) ───────────────────────────────────────
+# ── Admin key ────────────────────────────────────────────────────────────────
+# Every install leaves the box with an admin key, so enabling auth (Settings
+# -> Security, or `hal0 auth require on`) never needs a manual key step first.
+# Minted only when api.env has none — a re-run never replaces an existing key.
+# Generating a key does NOT turn auth on: `[security].require_auth` decides
+# that, and with it off every route stays open. The value never reaches
+# stdout (the install log is tee'd to a 0644 file); it is shown once on the
+# terminal itself at the end of the install, and is recoverable on-box with
+# `sudo hal0 auth reset-key`.
+ADMIN_KEY_CREATED=0
+if ! grep -qE '^HAL0_ADMIN_KEY=.+' "${API_ENV}" 2>/dev/null; then
+    new_admin_key="$("${VENV_DIR}/bin/python" -c \
+        'from hal0.service_identity import generate_service_key; print(generate_service_key())' \
+        2>/dev/null || true)"
+    if [[ -n "${new_admin_key}" ]]; then
+        # Terminate a last line that lacks a newline so the append starts clean.
+        if [[ -s "${API_ENV}" && -n "$(tail -c1 "${API_ENV}")" ]]; then
+            printf '\n' >> "${API_ENV}"
+        fi
+        printf 'HAL0_ADMIN_KEY=%s\n' "${new_admin_key}" >> "${API_ENV}"
+        chmod 0600 "${API_ENV}"
+        ADMIN_KEY_CREATED=1
+        info "generated an admin key in ${API_ENV} (shown once at the end of the install)"
+    else
+        warn "could not generate an admin key — run 'sudo hal0 auth reset-key' after the install"
+    fi
+fi
+
+# ── avahi mDNS host-name sync (#2060)───────────────────────────────────────
 # The HAL0_HOSTNAME choice (env / answer-file network.hostname) already
 # reaches api.env, the mDNS URL building (services/mdns.py) and the WS
 # origin allowlist above — but avahi announces the MACHINE hostname from
@@ -4032,13 +4060,14 @@ SUMMARY_LINES=(
 )
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
     # hal0-api binds 0.0.0.0:8080. TLS / DNS is whatever upstream proxy
-    # you put in front. Auth (password + tokens) still works — set it
-    # up in the first-run wizard or via the dashboard Settings panel.
+    # you put in front. Auth is off until enabled in Settings -> Security
+    # (or `hal0 auth require on`); the admin key it needs already exists.
     SUMMARY_LINES+=(
         "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
         "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
         "$(printf 'TLS         %supstream-only (front with Traefik / nginx / Cloudflare Tunnel)%s' "${DIM}" "${RST}")"
-        "$(printf 'Auth        %sopen on the trusted LAN — front with a reverse proxy if exposed%s' "${DIM}" "${RST}")"
+        "$(printf 'Auth        %soff — enable in Settings > Security or with: hal0 auth require on%s' "${DIM}" "${RST}")"
+        "$(printf 'Admin key   %sin %s (root-only) — lost it? sudo hal0 auth reset-key%s' "${DIM}" "${API_ENV}" "${RST}")"
         "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
     )
 fi
@@ -4084,6 +4113,20 @@ SUMMARY_LINES+=(
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
+
+# Show a freshly generated admin key exactly once, on the terminal only:
+# stdout/stderr are tee'd into the world-readable install log, /dev/tty is
+# not. A headless run (no tty) never sees the value; the summary above tells
+# it how to mint one it can read.
+if [[ "${ADMIN_KEY_CREATED}" -eq 1 ]]; then
+    if { : > /dev/tty; } 2>/dev/null; then
+        printf '\n   %sYour hal0 admin key%s (shown once — store it in a password manager):\n\n      %s%s%s\n\n   Sign in with it when auth is on. Forgot it? On this box: %ssudo hal0 auth reset-key%s\n\n' \
+            "${BOLD}" "${RST}" "${BOLD}" "${new_admin_key}" "${RST}" "${BOLD}" "${RST}" > /dev/tty
+    else
+        info "admin key stored in ${API_ENV}; no terminal to show it on — run 'sudo hal0 auth reset-key' to mint and display one"
+    fi
+fi
+unset new_admin_key
 
 # Close out the last step's measured duration (ui_step only closes the
 # PREVIOUS step when the next one starts, so "Service start" needs this

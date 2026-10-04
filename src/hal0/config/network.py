@@ -52,14 +52,11 @@ def is_loopback_bind(host: str | None = None) -> bool:
     """True iff *host* (default: :func:`bind_host`) is a loopback-only bind.
 
     Wildcard binds (``0.0.0.0``/``::``) are NOT loopback — they are exactly
-    the LAN-reachable case this predicate exists to flag. Two consumers
-    (#1822): the posture-coupled ADMIN gate
-    (:mod:`hal0.api.auth`'s ``AuthEnforcementMiddleware``), which keeps
-    loopback-bound boxes frictionless even with ``require_auth`` off but
-    still requires an admin session for ADMIN-class requests on a
-    LAN-reachable box, and ``hal0 doctor all``'s auth-posture check, which
-    previously reported "open (dev/loopback)" without ever looking at the
-    bind host.
+    the LAN-reachable case this predicate exists to flag. Consumers (#1822):
+    ``GET /api/auth/status``'s ``lan_exposed`` field, which the dashboard
+    Security page and ``hal0 doctor all``'s auth-posture check read to warn
+    about a LAN-reachable box running with auth off. It does not change
+    enforcement: ``require_auth`` alone decides that.
     """
     return (host if host is not None else bind_host()) in _LOOPBACK_BIND_HOSTS
 

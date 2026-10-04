@@ -28,6 +28,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **Every install now leaves the box with an admin key, and a lost key has a
+  way back.** When `/etc/hal0/api.env` has no `HAL0_ADMIN_KEY`, `install.sh`
+  generates one and shows it once, on the terminal only (`/dev/tty`), after
+  the summary box, with a prompt to store it in a password manager. It never
+  reaches stdout/stderr, which are tee'd into the 0644 install log. A re-run
+  never replaces an existing key, and generating one does not turn auth on.
+  New `sudo hal0 auth reset-key` rotates the admin key and prints the new
+  value once: through `hal0-api` when it is up (applies live), or straight
+  into `api.env` when it is down (applies on the next restart).
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
@@ -139,6 +149,22 @@ applying. Add those subsections to a version's section to surface them; see
   emptied) is removed from `ARCHITECTURE.md`'s module tree, and the
   "auth was removed" claims now describe the optional KB-1 key gate. No
   behavior change. (#2244)
+
+### Fixed
+
+- **Auth "off" now means off: the dashboard no longer asks for the admin key
+  when auth is disabled.** v1.3.0's posture-coupled gate (#1822) kept
+  enforcing ADMIN-class routes for off-box callers on a LAN-bound box as soon
+  as an admin key merely existed, while `GET /api/auth/status` still answered
+  `auth_required: false`. The dashboard loaded as open, then 401'd its own
+  first-load calls (activity, approvals, settings, the dashboard-layout save)
+  and opened the sign-in drawer anyway. The hidden gate is removed:
+  `[security].require_auth` alone decides enforcement, for every bind, peer
+  and key combination, and the status route always reports what the
+  middleware does. **Security note:** a LAN-bound box with a key but auth off
+  is now fully open to the LAN, as the toggle says; `hal0 doctor all` and the
+  Settings ▸ Security page warn about that posture, and `hal0 auth require
+  on` closes it. Enforcement-on behavior is unchanged.
 
 ## [1.3.0] — 2026-09-16
 

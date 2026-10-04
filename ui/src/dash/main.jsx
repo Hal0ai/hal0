@@ -15,11 +15,9 @@ import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
 // enforcement is on and the session is anonymous; a no-op on open boxes (the
 // shipped default). Real ESM import, like SettingsShell above.
 import { AuthGate } from './auth/AuthGate.jsx'
-// #1822: sign-in-required drawer for the posture-coupled ADMIN gate (a LAN-
-// bound box gates mutations even with `require_auth` off — see
-// hal0.api.auth). Mounted unconditionally alongside AuthGate: this scenario
-// is by definition one where `auth_required` reads false, so AuthGate always
-// renders the app and this drawer is the only surface for the 401.
+// #1822: sign-in-required drawer for a session that lapses mid-use while
+// auth is on (AuthGate only decides at load). Mounted unconditionally
+// alongside AuthGate; it opens only when a mutation answers 401.
 import { AuthChallengeDrawer } from './auth/AuthChallengeDrawer.jsx'
 // VERS-flash (docs/rework/handoff-r5-drive2.md §3): same live-version
 // pattern as AboutPage.jsx — once mounted, keep document.title in sync with

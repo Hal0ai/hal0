@@ -119,3 +119,70 @@ def test_auth_is_registered_on_main_app() -> None:
     assert "status" in result.output
     assert "rotate" in result.output
     assert "require" in result.output
+
+
+# ── reset-key (lost-key recovery) ──────────────────────────────────────────────
+
+
+def _seed_api_env(tmp_path, monkeypatch: pytest.MonkeyPatch, content: str):
+    # rotate_api_env_key also exports the new key into os.environ; register the
+    # var with monkeypatch so it is restored and cannot leak into later tests
+    # (delenv alone records nothing when the var was already absent).
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "unset-by-test")
+    monkeypatch.delenv("HAL0_ADMIN_KEY")
+    etc = tmp_path / "etc" / "hal0"
+    etc.mkdir(parents=True)
+    (etc / "api.env").write_text(content, encoding="utf-8")
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths as cfg_paths
+
+    monkeypatch.setattr(cfg_paths, "etc", lambda: etc)
+    return etc / "api.env"
+
+
+def test_reset_key_refuses_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 1000)
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code != 0
+    assert "sudo hal0 auth reset-key" in " ".join(result.output.split())
+
+
+def test_reset_key_rotates_via_api_and_prints_new_key(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    """API up: rotate through the daemon (live), then print the key it wrote."""
+    api_env = _seed_api_env(tmp_path, monkeypatch, "HAL0_BIND_HOST=0.0.0.0\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+
+    real_post = auth_commands.api_post
+
+    def post_and_write(path: str, *, json: dict[str, Any] | None = None, **kw: Any):
+        # Stand-in for the daemon's rotate_api_env_key write.
+        api_env.write_text("HAL0_BIND_HOST=0.0.0.0\nHAL0_ADMIN_KEY=new-live-key\n")
+        return real_post(path, json=json, **kw)
+
+    monkeypatch.setattr(auth_commands, "api_post", post_and_write)
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/auth/rotate"
+    assert captured["body"] == {"tier": "admin"}
+    assert "new-live-key" in result.output
+    assert "Applied live" in result.output
+
+
+def test_reset_key_falls_back_to_local_write_when_api_down(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API down: mint straight into api.env and say a restart applies it."""
+    api_env = _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(auth_commands, "_api_unreachable", lambda _url: True)
+
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code == 0, result.output
+    text = api_env.read_text()
+    assert "old-key" not in text
+    new_key = text.split("HAL0_ADMIN_KEY=", 1)[1].strip()
+    assert len(new_key) >= 40
+    assert new_key in result.output
+    assert "systemctl restart hal0-api" in " ".join(result.output.split())

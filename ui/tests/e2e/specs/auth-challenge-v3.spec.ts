@@ -1,20 +1,18 @@
 /**
- * auth-challenge-v3 (#1822) — the posture-coupled ADMIN gate's dashboard UX.
+ * auth-challenge-v3 (#1822) — re-auth when a session lapses mid-use.
  *
- * A LAN-bound box with `require_auth` OFF still requires an admin session
- * for ADMIN-class mutations from off-box callers (hal0.api.auth's
- * posture-coupled gate) — model pulls, slot deletes, config writes, and
- * approval execution alike. `auth_required` genuinely reads false in this
- * scenario, so the full-page login (AuthGate/LoginView) never fires; the
- * FIRST mutation that hits the 401 (`auth.required`) is what has to surface
- * the prompt. `lib/queryClient.ts`'s global `MutationCache.onError` catches
+ * With auth on, AuthGate only decides login at load time. If the session
+ * stops being valid afterwards (cookie expiry, or auth turned on from
+ * another device), the next mutation answers 401 (`auth.required`) — model
+ * pulls, slot deletes, config writes and approval execution alike — and that
+ * is what has to surface the prompt. `lib/queryClient.ts`'s global `MutationCache.onError` catches
  * it and routes it to `AuthChallengeDrawer` via `useAuthChallengeStore` —
  * this spec drives that end-to-end through the approvals flow named in the
  * brief: mutation → 401 → sign-in → retried OK.
  */
 import { test, expect } from '../fixtures/apiMock'
 
-test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
+test.describe('Auth challenge drawer (#1822 mid-session re-auth)', () => {
   test('approve 401s once, the drawer prompts sign-in, and the retry succeeds', async ({
     page,
     mockState,

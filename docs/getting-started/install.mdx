@@ -131,6 +131,17 @@ next to the log (environment, port owners, unit status, hardware summary,
 log tail) and prints its path. See `installer/README.md` for the full
 breakdown of what each report contains.
 
+### Admin key
+
+When `/etc/hal0/api.env` has no admin key, the installer generates one and
+shows it **once**, on the terminal only, after the summary box. It is never
+written to the install log. Store it in a password manager: you sign in with
+it once auth is on. Auth itself stays off until you enable it (Settings ▸
+Security, or `hal0 auth require on`); see
+[Authentication](/docs/operate/auth/). A headless run with no terminal never
+sees the value. To mint a new key and print it, which is also the way back in
+if you lose it, run `sudo hal0 auth reset-key` on the box.
+
 ### `--summary-json`
 
 ```sh
