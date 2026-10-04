@@ -265,7 +265,7 @@
 
   <h3 style="margin-top:1.6rem">Three premise corrections</h3>
   <div class="callout ods"><h4>ODS ships no MCP at all.</h4><p>No <code>mcp_servers</code> block in the Hermes template, no MCP for OpenCode or Open WebUI, no MCP UI or CLI verb. The n8n "RAG pipelines" are sticky-note stubs. There is nothing to port on this axis. Meanwhile hal0 already has most of the "user-added MCP servers" feature you asked for: a per-server TOML registry at <code>/etc/hal0/mcp-servers/</code>, a 945-line REST router, <code>hal0 mcp list|install|uninstall</code>, and an SSRF-guarded manifest resolver. Three gaps remain: no process supervisor (the route literally says "pending ADR-0015"), no join between installed servers and the Hermes config, and no install drawer in the dashboard. <em>Update 2026-10-04: two of the three closed on main — #2253 (ADR-0015) shipped the exposure join, <code>[secrets]</code>/<code>[tools]</code>/<code>[exposure]</code> and the CLI/REST verbs for http/sse servers; the stdio supervisor is deferred and the drawer is #2245. Review also found that the shipped join mirrors the tool policy without enforcing it on Hermes's call path — see report 06 §E.3 and hal0 issue #2303.</em></p></div>
-  <div class="callout hal0"><h4>hal0 already has mDNS.</h4><p><code>src/hal0/services/mdns.py</code> writes avahi service-group XML, is wired to a dashboard card, and is tested. ODS runs its own zeroconf daemon plus a Caddy host-router on :80 to get <code>chat.ods.local</code>. hal0's approach is lighter for what it does. What hal0 lacks is not mDNS, it is the single friendly URL and a safe LAN posture, and one dead path: the base <code>hal0.service</code> avahi file the dashboard promises is never written.</p></div>
+  <div class="callout hal0"><h4>hal0 already has mDNS.</h4><p><code>src/hal0/services/mdns.py</code> writes avahi service-group XML, is wired to a dashboard card, and is tested. ODS runs its own zeroconf daemon plus a Caddy host-router on :80 to get <code>chat.ods.local</code>. hal0's approach is lighter for what it does. What hal0 lacks is not mDNS, it is the single friendly URL and a safe LAN posture, an address publisher if subdomain URLs are wanted (avahi service files advertise <code>_http._tcp</code> records on the machine's hostname; they do not create <code>chat.&lt;host&gt;.local</code> A-records, which is exactly what ODS's <code>bin/ods-mdns.py</code> exists for), and one dead path: the base <code>hal0.service</code> avahi file the dashboard promises is never written.</p></div>
   <div class="callout ods"><h4>ODS's Hermes is packaging; the product around it is the prize.</h4><p>ODS runs the pinned upstream container with five files of glue and a regex YAML patcher for upgrades. hal0's provisioner is more rigorous (<code>hermes config migrate</code> + <code>config set</code>, converging writes, a backup, an operator overrides file), its context-floor logic reads the floor from the installed Hermes instead of hard-coding 65536, and its systemd sandbox is tighter than the container. What ODS does better is everything an operator touches: magic-link auth with owner cards, a mobile chat portal whose pooled WebSocket bridge keeps the prompt cache warm, agent-driven OAuth setup, and a persona written from live testing. Keep pip-installed Hermes. Copy the product layer.</p></div>
 
   <h3 style="margin-top:1.6rem">Two findings that should not wait for a plan</h3>
@@ -285,7 +285,7 @@
     <li><b>Remediation is designed but empty.</b> <code>Diagnosis.next_steps</code> and a panel that renders them exist, yet <code>health_report.to_diagnosis()</code> hard-codes <code>next_steps=[]</code> for every check. Issues #1845, #1870, #1994 and #2108 are all this gap wearing different hats.</li>
     <li><b>Long privileged calls are unbounded and silent.</b> <code>ContainerProvider._run</code> defaults <code>timeout=None</code> and the load path passes nothing; the CLI blocks up to ~2,400 s with no output. ODS bounds every hang-prone call and prints while it waits.</li>
     <li><b>Hardware truth goes stale.</b> A missing or old <code>hardware.json</code> books VRAM as RAM; the ROCm lane depends on <code>rocm-smi</code> being installed rather than on <code>/dev/kfd</code> existing; seed slots copy <code>context_size = 65536</code> onto every box. ODS rebuilds its capability profile every run and derives every number from it.</li>
-    <li><b>No AMD host tuning.</b> GTT/TTM sizing, swappiness, and a tuned profile are absent from hal0's installer even though hal0's own upstream toolbox README documents them as required for Strix Halo. <em>Update 2026-10-04: the IOMMU half of that README (<code>amd_iommu=off</code>) is <b>not</b> for hal0 to port — it removes <code>/dev/accel</code> (the XDNA NPU) and hal0's own guidance is <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003). The gap is GTT/TTM, sysctl and tuned.</em></li>
+    <li><b>No AMD host tuning.</b> GTT/TTM sizing, swappiness, and a tuned profile are absent from hal0's installer even though hal0's own upstream toolbox README documents them as required for Strix Halo. <em>Update 2026-10-04: the IOMMU half of that README (<code>amd_iommu=off</code>) is <b>not</b> for hal0 to port — it removes <code>/dev/accel</code> (the XDNA NPU) and hal0's own guidance is <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003). The gap is GTT/TTM, sysctl and tuned — and on kernels ≥ 6.14 even GTT pinning is an opt-in floor, not a default: amdgpu sizes the pool dynamically and hal0 reads the live value per request (<code>drivers.mdx:86-97</code>), see D7.</em></li>
     <li><b>Open WebUI is half wired.</b> hal0 sets chat and voice, but not RAG embeddings, web search or image generation, so Open WebUI's own upload and image buttons point at nothing. ODS wires all of it, including a baked ComfyUI workflow.</li>
     <li><b>The copy explains internals, not consequences.</b> Tooltips read like <code>hal0.toml [memory] · requires restart</code>. ODS's status vocabulary and settings hints lead with what happens to you. This is an audience choice, but it should be a choice.</li>
     <li><b>Own docs have drifted.</b> The "15-phase, checkpointed" provisioner is 12 steps and deliberately uncheckpointed; <code>BUNDLED_AGENTS</code> is misquoted; a unit's <code>Documentation=</code> path does not exist; two byte-identical 629-line memory providers have no sync; <code>CLAUDE.md</code> says <code>docs/adr/</code> holds the decision records while <code>ARCHITECTURE.md</code> says hal0 keeps no ADR tree, and the ADR numbers the code cites (0012, 0015, 0023) live in the gitignored internal tree per <code>CHANGELOG.md</code>, so a contributor reading <code>routes/mcp.py</code> cannot find the decision it defers to. Fix these before anyone ports against them. <em>(ADR bookkeeping reconciled on main by #2244: <code>docs/adr/</code> now holds 0004, 0012, 0013, 0015, 0020 and 0023.)</em></li>
@@ -574,26 +574,38 @@ pct start $CTID
 RG=$(pct exec $CTID -- sh -c 'getent group render &gt;/dev/null || groupadd -r render; getent group render' | cut -d: -f3)
 echo "guest render gid: $RG"
 pct stop $CTID
-# GPU nodes + the shared model store go in the CT config (PVE 8.2+ dev passthrough).
+# GPU nodes + model stores go in the CT config (PVE 8.2+ dev passthrough). BOTH nodes carry gid=$RG:
+# hal0's installer realigns /dev/kfd to the render gid itself (install.sh:487-498; hal0.sh:253,411-446
+# does the same on the host side) but ODS's does not, so a kfd left at the host's gid is unreadable by ods.
 # A privileged CT with GPU nodes also needs an unconfined AppArmor profile, or the container
-# runtime inside the guest cannot launch (docs/getting-started/proxmox.mdx §AppArmor; hal0.sh:387-391)
+# runtime inside the guest cannot launch (docs/getting-started/proxmox.mdx §AppArmor; hal0.sh:387-391).
+# hal0's store is mounted read-only; ODS gets its own writable model dir on host storage (mp1) so a
+# 15–31 GB download does not land on the 64 GB rootfs.
+mkdir -p /var/lib/ods-lab/models
 cat &gt;&gt; /etc/pve/lxc/$CTID.conf &lt;&lt;EOF
 dev0: /dev/dri/renderD128,gid=$RG
-dev1: /dev/kfd
-mp0: /var/lib/hal0/models,mp=/mnt/hal0-models
+dev1: /dev/kfd,gid=$RG
+mp0: /var/lib/hal0/models,mp=/mnt/hal0-models,ro=1
+mp1: /var/lib/ods-lab/models,mp=/mnt/ods-models
 lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.cgroup2.devices.allow: c 234:* rwm
 lxc.prlimit.memlock: unlimited
 lxc.apparmor.profile: unconfined
 EOF
 pct start $CTID
-pct exec $CTID -- stat -c '%g %n' /dev/dri/renderD128 /dev/kfd    # renderD128 must show $RG (docs/getting-started/drivers.mdx)
+pct exec $CTID -- stat -c '%g %n' /dev/dri/renderD128 /dev/kfd    # BOTH must show $RG before installing (docs/getting-started/drivers.mdx)
 pct exec $CTID -- bash -lc 'apt-get update &amp;&amp; apt-get install -y curl jq git rsync docker.io docker-compose-v2 &amp;&amp; \
   useradd -m -s /bin/bash ods &amp;&amp; usermod -aG docker,render,video ods &amp;&amp; \
   echo "ods ALL=(ALL) NOPASSWD:ALL" &gt; /etc/sudoers.d/ods'
 # 21f4b3a is the ODS revision every citation and result in this study is pinned to
-pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS &amp;&amp; git checkout 21f4b3a &amp;&amp; cd ods &amp;&amp; \
-  ./install.sh --all --summary-json ~/ods-summary.json'
+pct exec $CTID -- su - ods -c 'git clone https://github.com/Osmantic/ODS.git &amp;&amp; cd ODS &amp;&amp; git checkout 21f4b3a'
+# ODS reads ./data/models/*.gguf relative to ~/ODS/ods (docker-compose.base.yml:29; 11-services.sh:668,697) and
+# writes its bootstrap download there (bootstrap-model.sh:44), so point that path at the writable host dir
+# before install.sh runs. Seed it with any hal0 GGUF you want ODS to reuse — the file name must match ODS's
+# catalog entry or the installer downloads its own copy regardless.
+pct exec $CTID -- bash -lc 'chown ods:ods /mnt/ods-models &amp;&amp; mkdir -p /home/ods/ODS/ods/data &amp;&amp; ln -sfn /mnt/ods-models /home/ods/ODS/ods/data/models'
+pct exec $CTID -- su - ods -c 'cp /mnt/hal0-models/&lt;path&gt;/&lt;file&gt;.gguf /mnt/ods-models/'   # optional, once per model
+pct exec $CTID -- su - ods -c 'cd ~/ODS/ods &amp;&amp; ./install.sh --all --summary-json ~/ods-summary.json'
 # ODS's phase 10 edits grub/modprobe INSIDE the CT; those belong to the Proxmox host kernel.
 # Apply ONLY the GTT/TTM values it prints (amdgpu.gttsize, ttm.pages_limit, ttm.page_pool_size)
 # on the Proxmox host (report 08 §D.1), then reboot the host. Do NOT copy ODS's amd_iommu=off:
@@ -644,7 +656,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
       <tr><td>1.4</td><td>Populate <code>next_steps</code> for the seven doctor checks; chips copy or run; enable-steps modal shape</td><td><code>routers/features.py:130-144</code>, <code>:188-250</code>, <code>FeatureDiscovery.jsx</code></td><td><code>health_report.py:246-283</code>, <code>DiagnosisPanel.jsx</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip err">high</span></td><td>#1845, #1994</td></tr>
       <tr><td>1.5</td><td>Hardware re-detect cluster: live-probe fallback for stale <code>hardware.json</code>; <code>kfd_present() and render_node_present()</code> sufficient for ROCm; one <code>apply_cpu_fallback()</code>; clamp seed <code>context_size</code> to the envelope</td><td><code>detection.sh:26-46</code>, <code>:187-257</code>, <code>select-model.py:134-182</code></td><td><code>slots/capacity.py:499-585</code>, <code>install/profile_derive.py:110</code>, <code>install/static_seeds.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>#1862, #2216, #1936, #1966, #1868</td></tr>
       <tr><td>1.6</td><td>Manifest-driven services health with <code>gather(return_exceptions=True)</code>; first row of the extension registry</td><td><code>dashboard-api/config.py:297-431</code>, <code>helpers.py:624-700</code></td><td><code>api/routes/services_health.py:198-307</code>, <code>services/registry.py</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip err">high</span></td><td>#2028, #2192, #1859</td></tr>
-      <tr><td>1.7</td><td>AMD host tuning lib (opt-in flag first; GTT/TTM + sysctl + tuned only — never <code>amd_iommu=off</code>, which drops the NPU's <code>/dev/accel</code> and contradicts <code>drivers.mdx:102</code>; container-guarded — prints the host-side recipe inside an LXC, never claims applied); gfx1151 HSA auto; kernel/firmware known-bad checks in doctor</td><td><code>10-amd-tuning.sh:100-302</code>, <code>.env.example:477</code></td><td>new <code>installer/lib/amd-tuning.sh</code>, <code>install/profile_derive.py</code>, <code>cli/doctor_commands.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
+      <tr><td>1.7</td><td>AMD host tuning lib (opt-in only, no default-on: kernels ≥ 6.14 size GTT dynamically and hal0 reads the live pool, <code>drivers.mdx:86-97</code>; GTT/TTM + sysctl + tuned only — never <code>amd_iommu=off</code>, which drops the NPU's <code>/dev/accel</code> and contradicts <code>drivers.mdx:102</code>; container-guarded — prints the host-side recipe inside an LXC, never claims applied); gfx1151 HSA auto; kernel/firmware known-bad checks in doctor</td><td><code>10-amd-tuning.sh:100-302</code>, <code>.env.example:477</code></td><td>new <code>installer/lib/amd-tuning.sh</code>, <code>install/profile_derive.py</code>, <code>cli/doctor_commands.py</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
       <tr><td>1.8</td><td>Full Open WebUI wiring (RAG embeddings, SearXNG-style search if present, image gen with baked workflow), gated on bound slots</td><td><code>docker-compose.base.yml:100-168</code></td><td><code>openwebui/env_writer.py:106-131</code></td><td>M</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>1.9</td><td>Update recreates slots on image roll by default (opt-out flag); stack import verifies checksum on commit; uninstall gates its final line on per-step outcomes; TTL on negative FLM probe; retention prune on a timer</td><td><code>ods-cli:2049</code>, <code>ods-restore.sh:273-310</code>, <code>ods-uninstall.sh:362-402</code>, <code>helpers.py:26-56</code></td><td><code>cli/update_commands.py:516</code>, <code>stacks/portable.py</code>, agent uninstall, <code>capabilities/catalog.py:178</code>, activity prune</td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>#2096, #1512, #1519, #1974, #1521</td></tr>
       <tr><td>1.10</td><td>Docs: generated-config-writers table; area → required-validation table; reinstall contract; known-good versions; README "at a glance"; post-install checklist</td><td><code>INSTALLER-ARCHITECTURE.md:118-135</code>, <code>HIGH_RISK_CHANGE_MAP.md</code>, <code>KNOWN-GOOD-VERSIONS.md</code></td><td><code>ARCHITECTURE.md</code>, <code>CONTRIBUTING.md</code>, <code>docs/reference/</code>, <code>README.md</code></td><td>S</td><td><span class="chip ok">none</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
@@ -656,7 +668,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
       <tr><td>2.5</td><td>Persist the approval queue; args-fingerprinted one-shot grants; windowed caps + circuit breaker keyed on (server, tool)</td><td><code>ape/main.py:482-612</code>, <code>:954-1010</code></td><td><code>mcp/approval_queue.py</code>, new <code>mcp/limits.py</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>2.6</td><td>Schema-driven settings renderer; one <code>ChangeSet</code> diff shared by preview and apply</td><td><code>settings.py:194-241</code>, <code>ods-cli:6261-6324</code></td><td>settings pages, <code>slot_config</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>#2108, #1967, #2195, #2203, #1511</td></tr>
       <tr><td colspan="8" style="background:var(--bg-2);font-family:var(--jbm);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-3)">Wave 3 · product surfaces (each gated on a decision below)</td></tr>
-      <tr><td>3.1</td><td>Single-URL LAN gateway: Caddy forward_auth on :80, <code>&lt;host&gt;.local</code> subdomains, owner card + guest invite</td><td><code>ods-proxy/Caddyfile</code>, <code>hermes-proxy/Caddyfile:54-129</code>, <code>routers/magic_link.py</code></td><td>new <code>packaging/hal0-proxy/</code>, <code>api/routes/services.py:38-73</code> (X-Forwarded-Host)</td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
+      <tr><td>3.1</td><td>Single-URL LAN gateway: Caddy forward_auth on :80, <code>&lt;host&gt;.local</code> subdomains, owner card + guest invite</td><td><code>ods-proxy/Caddyfile</code>, <code>hermes-proxy/Caddyfile:54-129</code>, <code>routers/magic_link.py</code></td><td>new <code>packaging/hal0-proxy/</code>, <code>api/routes/services.py:38-73</code> (X-Forwarded-Host); <b>prerequisites:</b> rebind hal0-api, Open WebUI and ComfyUI to loopback first (<code>install.sh:157,1567</code> seed <code>0.0.0.0</code> today) and keep it converged on upgrade, or <code>forward_auth</code> is bypassable on :8080/:3001; plus an mDNS address publisher for the subdomains (<code>services/mdns.py</code> writes <code>_http._tcp</code> service records only)</td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>3.2</td><td>Bootstrap-then-hot-swap for first-run tiers via <code>systemd-run</code>, status JSON, snapshot/rollback, verified-before-cleanup</td><td><code>bootstrap-model.sh</code>, <code>11-services.sh:673-690</code>, <code>bootstrap-upgrade.sh:305-452</code></td><td><code>install/agent_model.py</code>, new <code>install/background_pull.py</code>, <code>hal0-model-pull@.service</code></td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip err">high</span></td><td>—</td></tr>
       <tr><td>3.3</td><td>Agent-driven OAuth passthrough + provider registry + persona addendum</td><td><code>routers/oauth_passthrough.py</code>, <code>hermes/oauth-providers.json</code></td><td>new <code>api/routes/oauth.py</code>, <code>installer/agents/hermes/</code></td><td>M</td><td><span class="chip ok">low</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
       <tr><td>3.4</td><td>Phone chat portal on the pooled-bridge pattern (only if decided)</td><td><code>hermes_bridge.py:162-528</code>, <code>routers/talk.py</code></td><td>new REST/SSE surface beside <code>api/agents/chat_proxy.py</code></td><td>L</td><td><span class="chip warn">med</span></td><td><span class="chip warn">med</span></td><td>—</td></tr>
@@ -671,7 +683,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
   <h3 id="waves" style="margin-top:1.8rem">Waves</h3>
   <p class="prose muted">Numbered because the order carries information: each wave makes the next one reviewable.</p>
   <div class="wave"><div class="n">0<small>~1 week</small></div><div class="body"><h3>Stop the bleeding <span class="sz">8 items, all S</span></h3><p class="goal">Close the auth hole, settle the flagship model question, land the five one-afternoon fixes the issue map ranks highest, and fix the documentation the later waves will be built against.</p><ul><li>Done when: approvals require a session; the 395 verdict on Qwen3-Coder-Next is recorded in an issue; <code>hal0 doctor all</code> warns on a LAN-open, auth-off box; no seam call is unbounded; <code>hal0 update</code> re-links the CLI; #1845's panel prints a command that works; <code>deploy.sh</code> cannot lie; <code>ARCHITECTURE.md</code> matches the code.</li></ul></div></div>
-  <div class="wave"><div class="n">1<small>2–3 weeks</small></div><div class="body"><h3>Cheap shapes, big returns <span class="sz">10 items, S–M</span></h3><p class="goal">Instrument the installer, make hardware truth fresh, give the doctor real next steps, wire Open WebUI fully, and apply the AMD tuning hal0's own upstream says is required.</p><ul><li>Done when: a failed install leaves a log and a report; preflight verdicts are pinned by fixtures; every doctor row has a runnable step; the ROCm lane follows <code>/dev/kfd</code>; an image roll restarts slots; a 128 GB box gets its GTT sized; Open WebUI's upload and image buttons work.</li></ul></div></div>
+  <div class="wave"><div class="n">1<small>2–3 weeks</small></div><div class="body"><h3>Cheap shapes, big returns <span class="sz">10 items, S–M</span></h3><p class="goal">Instrument the installer, make hardware truth fresh, give the doctor real next steps, wire Open WebUI fully, and offer the AMD host tuning hal0's own upstream documents (opt-in; see D7).</p><ul><li>Done when: a failed install leaves a log and a report; preflight verdicts are pinned by fixtures; every doctor row has a runnable step; the ROCm lane follows <code>/dev/kfd</code>; an image roll restarts slots; a 128 GB box's live GTT verdict is in the doctor and fixed sizing is offered, not applied; Open WebUI's upload and image buttons work.</li></ul></div></div>
   <div class="wave"><div class="n">2<small>1–2 months</small></div><div class="body"><h3>Structural <span class="sz">6 items, M–L</span></h3><p class="goal">Decompose the installer, finish MCP, ship the extension model with OpenWebUI converted and n8n added, and build the progress seam the CLI needs.</p><ul><li>Done when: <code>installer/steps/</code> exists and <code>--dry-run</code> runs in CI; <code>hal0 mcp add</code> reaches Hermes with default-deny tools; <code>hal0 app install n8n</code> renders a unit, claims a port, wires env, probes health and shows a card with no code edit; <code>hal0 slot load</code> prints phases.</li></ul></div></div>
   <div class="wave"><div class="n">3<small>decide first</small></div><div class="body"><h3>Product surfaces <span class="sz">5 items, gated on decisions D1, D2, D8</span></h3><p class="goal">Only after the LAN-posture and phone-surface decisions: the single-URL gateway with owner cards, bootstrap-then-hot-swap, OAuth passthrough, an optional phone portal, and the copy pass.</p></div></div>
   <div class="wave"><div class="n">4<small>optional</small></div><div class="body"><h3>Design-pass items <span class="sz">3 items</span></h3><p class="goal">The stable alias, the fleet ledger, resource limits. Each needs its own design note before code.</p></div></div>
@@ -749,7 +761,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
 
   <div class="decision"><h3>D7. AMD host tuning: default-on or opt-in</h3>
     <div class="opts">
-      <div class="opt rec"><b>What I'd do</b>Opt-in flag for one release, then default-on for the Strix Halo hardware class with a clear reboot banner and <code>--no-host-tuning</code>. It edits GRUB, so start reversible. Scope it to GTT/TTM, sysctl and tuned: never write ODS's <code>amd_iommu=off</code>, which removes <code>/dev/accel</code> (XDNA NPU) — hal0 documents <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003:96-99) and the port must leave that line as hal0 documents it.</div>
+      <div class="opt rec"><b>What I'd do</b>Opt-in only, and stay there: on kernels ≥ 6.14 amdgpu sizes GTT dynamically and hal0 already reads the live pool per request (<code>drivers.mdx:86-97</code>), so a fixed 65–90 % reservation is an operator's floor, not a product default — and on a shared Proxmox host it takes that RAM from every other guest. Ship it as an explicit <code>--apply</code> with a reboot banner; the doctor reports the live GTT and offers the pinned recipe only when the kernel is older than 6.14 or the operator asks. It edits GRUB, so keep it reversible. Scope it to GTT/TTM, sysctl and tuned: never write ODS's <code>amd_iommu=off</code>, which removes <code>/dev/accel</code> (XDNA NPU) — hal0 documents <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003:96-99) and the port must leave that line as hal0 documents it.</div>
       <div class="opt"><b>Safe version</b>Doctor-only: detect the missing GRUB parameters and print the exact lines, never write them.</div>
       <div class="opt"><b>Cheap test</b>Apply the toolbox README's GTT/TTM values (with hal0's <code>iommu=pt amd_iommu=on</code>, not the README's <code>amd_iommu=off</code>) on one box and confirm the fit: a GGUF that previously failed the live GTT check now loads. Do not chase the README's 5 to 12 % or ODS's ~6 %; both are the IOMMU-off delta hal0 forgoes to keep the NPU.</div>
     </div>
@@ -797,7 +809,7 @@ lxc exec ods-lab -- bash -lc '…same package / user steps as above; clone ODS a
         <li>Do not fork ODS or vendor its tree. Take shapes; the files are wrong-shaped for podman/systemd.</li>
         <li>Do not start Wave 1 while any Wave 0 item is open.</li>
         <li>Do not begin the extension loader before the allow-list width (D4) is written down.</li>
-        <li>Do not build the Caddy gateway before D1 is decided; it changes the trust model.</li>
+        <li>Do not build the Caddy gateway before D1 is decided; it changes the trust model — and never enable <code>forward_auth</code> on :80 while hal0-api (:8080) and Open WebUI (:3001) still bind <code>0.0.0.0</code>, or the gateway is decorative.</li>
         <li>Do not add a first-run wizard. Strengthen the end of the installer instead.</li>
         <li>Do not ship hal0-Max's coder pick until 0.2 has a recorded verdict.</li>
         <li>Do not port ODS's memory pieces to fix #1834 or #2016; those are Hindsight problems.</li>
@@ -2816,9 +2828,16 @@ ANSI-stripped form to <code>$HAL0_INSTALL_LOG</code>. Second, a
 report <em>shape</em>: privacy note → step name → environment (<code>systemctl --failed</code>,
 <code>podman info</code>, <code>podman images</code>) → port occupancy with owning process →
 <strong>redacted</strong> <code>api.env</code>/<code>hal0.toml</code> → last 160 lines of the install log →
-<code>journalctl -u hal0-api -n 100</code>. Reuse <code>hal0.api._redact</code> rather than ODS's awk
-redactor (hal0's is better) and print the path in the trap so the user has one
-file to attach. Payoff: <code>hal0 doctor</code> gains an <code>install_artifacts</code> surface exactly
+<code>journalctl -u hal0-api -n 100</code>. Redact in two passes (<em>correction 2026-10-04</em>:
+the key-name redactor alone is not enough for a shareable file):
+<code>hal0.api._redact.redact_config</code> for the structured <code>api.env</code>/<code>hal0.toml</code>
+section (it masks by key name, <code>_redact.py:52-68</code>, and its text pass knows only
+a few token shapes), <strong>then</strong> — as ODS's <code>_ods_report_redact_stream</code> does
+(<code>compose-failure-report.sh:51-83</code>) — collect the literal values of every
+sensitive key and replace them across the <em>whole</em> assembled report, because a
+provider token masked in the config section can still sit verbatim in the
+install log, a command line, a URL or the journal under an innocuous key. Print
+the path in the trap so the user has one file to attach. Payoff: <code>hal0 doctor</code> gains an <code>install_artifacts</code> surface exactly
 as ODS's does, and a <code>HAL0-INSTALL-*</code> diagnosis family can key off it.</p>
 <h5 id="d4-decompose-installsh-into-steps-impact-very-high-effort-high-risk-medium">D.4 — Decompose <code>install.sh</code> into steps (impact: very high, effort: high, risk: medium)</h5>
 <p><strong>ODS:</strong> <code>install-core.sh</code> + <code>installers/phases/01..13</code>.
@@ -2884,8 +2903,11 @@ that <em>is</em> the "tiny model first". The port is conceptual:</p>
 <ol>
 <li>Keep the unconditional <code>lfm2.5-2.6b</code> brain pull (that is the bootstrap model).</li>
 <li>Replace the blocking 15–31 GB agent-model prompt with: ask, then hand the pull
-   to a <strong>transient systemd unit</strong> (<code>systemd-run --unit=hal0-model-pull@…</code>)
-   rather than <code>nohup</code> — hal0 is a systemd product and gets journald logging,
+   to a <strong>transient systemd unit</strong> (<code>systemd-run --uid=hal0 --gid=hal0
+   --unit=hal0-model-pull@…</code>; <em>correction 2026-10-04</em>: <code>--unit=</code> only names the
+   unit — without <code>--uid</code>/<code>--gid</code> the pull inherits the installer's root identity
+   and leaves model directories, status files and registry state root-owned for
+   the <code>User=hal0</code> API, <code>packaging/sudoers/hal0-systemctl:3</code>) rather than <code>nohup</code> — hal0 is a systemd product and gets journald logging,
    restart policy, and <code>systemctl status</code> for free.</li>
 <li>Copy ODS's <strong>status-file contract</strong> (<code>data/bootstrap-status.json</code>:
    <code>status/percent/bytesDownloaded/bytesTotal/speedBytesPerSec/eta</code>, written
@@ -2902,9 +2924,16 @@ that <em>is</em> the "tiny model first". The port is conceptual:</p>
        if   [[ -f "$snap"          ]]; then cp -p "$snap" "$dst"
        elif [[ -f "$snap.missing"  ]]; then rm -f "$dst"; fi
    }</code></li>
-<li>Copy the <strong>verified-before-cleanup</strong> rule: only delete the old model after the
-   new slot has answered a real completion (<code>HOT_SWAP_VERIFIED=true</code>,
-   <code>bootstrap-upgrade.sh:3200-3202</code>).</li>
+<li>Copy the <strong>verified-before-cleanup</strong> rule — only delete after the new slot has
+   answered a real completion (<code>HOT_SWAP_VERIFIED=true</code>,
+   <code>bootstrap-upgrade.sh:3200-3202</code>) — but make the <em>what</em> reference-aware
+   (<em>correction 2026-10-04</em>). ODS replaces one bootstrap model in one server;
+   here <code>lfm2.5-2.6b</code> stays bound to the brain slot while the agent model lands
+   in a separate slot, so there is no "old model" to remove, and treating the
+   brain model as one would strip a live slot of its weights. Cleanup must consult
+   <code>registry.discover.referenced_model_ids()</code> (<code>discover.py:551</code>) and go through
+   the refcount GC in <code>registry/gc.py</code>, reaping only models no slot or stack
+   references — never the brain model.</li>
 <li>Copy the <strong>lock</strong>: <code>model-lifecycle-lock.sh</code> is 83 lines and directly reusable —
    the installer and a background pull must not both rewrite a slot config.
    hal0 already has <code>hal0_config_file_lock</code> in <code>config/loader.py</code>; extend that
@@ -3555,7 +3584,7 @@ of this repo's own "verify against source, not memory" rule.</p>
 <td>New <code>packaging/hal0-proxy/Caddyfile</code> + a systemd/quadlet unit; <code>installer/install.sh</code> hookup; must respect <code>X-Forwarded-Host</code> in <code>_behind_proxy</code>/<code>_resolve_host</code> (<code>services.py:38-73</code>) so links don't regress to raw ports</td>
 <td>~150-250 lines</td>
 <td><strong>Medium</strong> — WS/SSE passthrough needs the same header-stripping care <code>hermes-proxy/Caddyfile:104-119</code> documents; must not fight hal0's existing request-Host link trick (<code>useConfigUrls.ts:1-12</code>)</td>
-<td>Ports almost verbatim from <code>ods-proxy/Caddyfile</code>'s <code>chat.&lt;device&gt;.local</code> block (lines 66-78), service names swapped for <code>127.0.0.1:8080</code>/<code>:3001</code>/<code>:8188</code>.</td>
+<td>Ports almost verbatim from <code>ods-proxy/Caddyfile</code>'s <code>chat.&lt;device&gt;.local</code> block (lines 66-78), service names swapped for <code>127.0.0.1:8080</code>/<code>:3001</code>/<code>:8188</code>. <strong>Correction (2026-10-04) — two prerequisites this row omitted.</strong> (a) A stock install seeds <code>API_BIND_HOST="0.0.0.0"</code> (<code>installer/install.sh:157</code>) into <code>api.env</code> and publishes Open WebUI on <code>${API_BIND_HOST}:3001</code> (<code>install.sh:1567</code>), so a <code>forward_auth</code> listener on :80 leaves :8080 and :3001 reachable directly and the auth is bypassable; the gateway work must rebind every upstream to loopback (<code>HAL0_BIND_HOST=127.0.0.1</code>, the Open WebUI env writer, ComfyUI) and keep that converged across upgrades before it is the single audited edge. (b) <code>src/hal0/services/mdns.py:82-96</code> renders <code>_http._tcp</code> service records on the machine hostname and publishes no A/AAAA records, so <code>chat.&lt;host&gt;.local</code> needs an address publisher (<code>avahi-publish -a</code> per name, or a zeroconf daemon like ODS's <code>bin/ods-mdns.py:173-187</code>) whose name set is pinned to the Caddyfile the way ODS's <code>tests/test_mdns_subdomains.py</code> pins it.</td>
 </tr>
 <tr>
 <td>4</td>
@@ -4128,8 +4157,11 @@ at an empty <code>url</code>. Two shapes actually work:</p>
    policy path (see the §E.3 correction).</li>
 <li><strong>hal0 runs a bridge.</strong> <code>hal0-mcp@&lt;id&gt;.service</code> executes a small hal0-owned adapter that forks
    <code>command args…</code> as its child, speaks MCP to it over the pipe, and serves the same session as
-   streamable-http on a loopback port or unix socket. <code>LoadCredential=</code> still delivers <code>[secrets]</code>,
-   <code>ProtectSystem=strict</code> still applies, and the exposure join renders the <em>bridge's</em> URL — which
+   streamable-http on a loopback port or unix socket. <code>LoadCredential=</code> still delivers <code>[secrets]</code> —
+   as files under <code>$CREDENTIALS_DIRECTORY</code>, so the adapter must read each one and set the mapped
+   variable in the <em>child's</em> environment; a stdio server (like hal0's own client,
+   <code>agents/mcp_client.py:222</code>) looks up a plain environment name, not a credential file
+   (<em>correction 2026-10-04</em>) — <code>ProtectSystem=strict</code> still applies, and the exposure join renders the <em>bridge's</em> URL — which
    makes a stdio server indistinguishable from an http one to everything downstream, including the
    policy proxy the §E.3 correction asks for.</li>
 </ol>
@@ -5022,7 +5054,9 @@ device, so hal0 deliberately recommends it nowhere
 (<code>docs/adr/0003-onnx-text-generation-npu.md:96-99</code>). The toolbox README's 5-12%
 and ODS's "~6%" are both that IOMMU-off delta. The gap hal0 should close is
 GTT/TTM sizing, the sysctls and the tuned profile; the IOMMU parameter stays as
-hal0 documents it.</p>
+hal0 documents it. The GTT/TTM half is also narrower than ODS's default-on: on
+kernels ≥ 6.14 amdgpu sizes the pool dynamically and hal0 reads the live value
+per request (<code>drivers.mdx:86-97</code>), so fixed sizing is an opt-in floor (see D.1).</p>
 <h5 id="a4-cli">A.4 CLI</h5>
 <p><code>ods-cli</code> is a single Bash file, 6,595 lines / 269,480 bytes
 (<code>ods-cli:1-6595</code>, confirmed via <code>wc -l</code>/<code>ls -la</code>), dispatched from one
@@ -5241,6 +5275,14 @@ the less robust of the two once Podman/rootless edge cases are in play.</p>
    <code>iommu=pt amd_iommu=on</code> (<code>drivers.mdx:102</code>, ADR-0003:96-99). If the host
    already carries hal0's IOMMU line, leave it; if it carries <code>amd_iommu=off</code>,
    warn and leave it — the operator chose it knowingly.
+   <strong>Default (2026-10-04) — opt-in, never default-on.</strong> <code>drivers.mdx:86-97</code>: on
+   kernels ≥ 6.14 amdgpu grows the GTT limit dynamically, hal0 reads the live
+   <code>mem_info_gtt_total</code> on every request, and pinning is documented as an
+   operator choice. So the lib applies fixed sizing only on an explicit request
+   (flag or <code>--apply</code>), the doctor reports the live pool and offers the recipe,
+   and on a kernel ≥ 6.14 the default is to change nothing — above all on a
+   multi-tenant Proxmox host, where a 65–90 % reservation starves every other
+   guest and adds a boot-critical GRUB/initramfs edit for no measured gain.
    <strong>Correction (2026-10-04) — a container guard is mandatory.</strong> hal0's common
    deployment is a Proxmox LXC. Inside a container <code>/etc/default/grub</code>,
    <code>/etc/modprobe.d/</code>, the initramfs and <code>amdgpu</code> module parameters belong to the
@@ -5329,7 +5371,8 @@ the less robust of the two once Podman/rootless edge cases are in play.</p>
 </ul>
 <h4 id="f-owner-decisions">F. Owner decisions</h4>
 <ol>
-<li><strong>Adopt AMD host tuning (D.1) as default-on or opt-in?</strong> It touches GRUB
+<li><strong>Adopt AMD host tuning (D.1) as default-on or opt-in?</strong> (Answered
+   2026-10-04: opt-in — see the <em>Default</em> note in D.1.) It touches GRUB
    and needs a reboot; hal0 would want a "reboot recommended" banner (ODS's
    pattern, <code>installers/phases/10-amd-tuning.sh:289-302</code>) and a call on
    whether a single-target-hardware product should just always apply it.</li>

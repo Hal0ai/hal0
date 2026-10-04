@@ -48,3 +48,16 @@ The install ran in a remote sandbox (no GPU, CPU tier 0, rootless install user, 
   removes the NPU's `/dev/accel`, so the gap is GTT/TTM, sysctl and tuned — not the IOMMU
   line. Three Markdown escaping defects (reports 01, 06, 09) that rendered as a stray `<h1>`
   and raw `<name>` tags in the HTML are fixed.
+- **2026-10-04 (round 4)** — Proxmox recipe: `/dev/kfd` carries `gid=$RG` too (ODS's installer
+  does not realign it the way hal0's `install.sh:487-498` does), hal0's store is mounted
+  read-only, and ODS gets a writable host-backed `data/models` (its compose and bootstrap read
+  and write that path) instead of a mount nothing pointed at. Report 05 D3 and plan row 3.1: a
+  Caddy `forward_auth` edge is bypassable until hal0-api/Open WebUI stop binding `0.0.0.0`
+  (`install.sh:157,1567`), and `chat.<host>.local` needs an mDNS address publisher (hal0's
+  `services/mdns.py` emits service records only). D7, plan row 1.7, Wave 1 and report 08: GTT
+  pinning is opt-in, never default-on, because kernels ≥ 6.14 size GTT dynamically and hal0
+  reads the live pool (`drivers.mdx:86-97`). Report 03: the failure report must literal-replace
+  known secret values across the whole file, not only key-name-redact the config section; the
+  transient pull runs `--uid=hal0 --gid=hal0`; model cleanup is reference-aware and never
+  removes the still-bound brain model. Report 06: `LoadCredential=` delivers files, so the bridge
+  must export them into the child's environment.

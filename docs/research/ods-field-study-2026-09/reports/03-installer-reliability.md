@@ -533,9 +533,16 @@ ANSI-stripped form to `$HAL0_INSTALL_LOG`. Second, a
 report *shape*: privacy note → step name → environment (`systemctl --failed`,
 `podman info`, `podman images`) → port occupancy with owning process →
 **redacted** `api.env`/`hal0.toml` → last 160 lines of the install log →
-`journalctl -u hal0-api -n 100`. Reuse `hal0.api._redact` rather than ODS's awk
-redactor (hal0's is better) and print the path in the trap so the user has one
-file to attach. Payoff: `hal0 doctor` gains an `install_artifacts` surface exactly
+`journalctl -u hal0-api -n 100`. Redact in two passes (*correction 2026-10-04*:
+the key-name redactor alone is not enough for a shareable file):
+`hal0.api._redact.redact_config` for the structured `api.env`/`hal0.toml`
+section (it masks by key name, `_redact.py:52-68`, and its text pass knows only
+a few token shapes), **then** — as ODS's `_ods_report_redact_stream` does
+(`compose-failure-report.sh:51-83`) — collect the literal values of every
+sensitive key and replace them across the *whole* assembled report, because a
+provider token masked in the config section can still sit verbatim in the
+install log, a command line, a URL or the journal under an innocuous key. Print
+the path in the trap so the user has one file to attach. Payoff: `hal0 doctor` gains an `install_artifacts` surface exactly
 as ODS's does, and a `HAL0-INSTALL-*` diagnosis family can key off it.
 
 ### D.4 — Decompose `install.sh` into steps (impact: very high, effort: high, risk: medium)
@@ -616,8 +623,11 @@ that *is* the "tiny model first". The port is conceptual:
 
 1. Keep the unconditional `lfm2.5-2.6b` brain pull (that is the bootstrap model).
 2. Replace the blocking 15–31 GB agent-model prompt with: ask, then hand the pull
-   to a **transient systemd unit** (`systemd-run --unit=hal0-model-pull@…`)
-   rather than `nohup` — hal0 is a systemd product and gets journald logging,
+   to a **transient systemd unit** (`systemd-run --uid=hal0 --gid=hal0
+   --unit=hal0-model-pull@…`; *correction 2026-10-04*: `--unit=` only names the
+   unit — without `--uid`/`--gid` the pull inherits the installer's root identity
+   and leaves model directories, status files and registry state root-owned for
+   the `User=hal0` API, `packaging/sudoers/hal0-systemctl:3`) rather than `nohup` — hal0 is a systemd product and gets journald logging,
    restart policy, and `systemctl status` for free.
 3. Copy ODS's **status-file contract** (`data/bootstrap-status.json`:
    `status/percent/bytesDownloaded/bytesTotal/speedBytesPerSec/eta`, written
@@ -635,9 +645,16 @@ that *is* the "tiny model first". The port is conceptual:
        elif [[ -f "$snap.missing"  ]]; then rm -f "$dst"; fi
    }
    ```
-5. Copy the **verified-before-cleanup** rule: only delete the old model after the
-   new slot has answered a real completion (`HOT_SWAP_VERIFIED=true`,
-   `bootstrap-upgrade.sh:3200-3202`).
+5. Copy the **verified-before-cleanup** rule — only delete after the new slot has
+   answered a real completion (`HOT_SWAP_VERIFIED=true`,
+   `bootstrap-upgrade.sh:3200-3202`) — but make the *what* reference-aware
+   (*correction 2026-10-04*). ODS replaces one bootstrap model in one server;
+   here `lfm2.5-2.6b` stays bound to the brain slot while the agent model lands
+   in a separate slot, so there is no "old model" to remove, and treating the
+   brain model as one would strip a live slot of its weights. Cleanup must consult
+   `registry.discover.referenced_model_ids()` (`discover.py:551`) and go through
+   the refcount GC in `registry/gc.py`, reaping only models no slot or stack
+   references — never the brain model.
 6. Copy the **lock**: `model-lifecycle-lock.sh` is 83 lines and directly reusable —
    the installer and a background pull must not both rewrite a slot config.
    hal0 already has `hal0_config_file_lock` in `config/loader.py`; extend that

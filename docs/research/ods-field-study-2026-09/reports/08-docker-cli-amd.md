@@ -191,7 +191,9 @@ device, so hal0 deliberately recommends it nowhere
 (`docs/adr/0003-onnx-text-generation-npu.md:96-99`). The toolbox README's 5-12%
 and ODS's "~6%" are both that IOMMU-off delta. The gap hal0 should close is
 GTT/TTM sizing, the sysctls and the tuned profile; the IOMMU parameter stays as
-hal0 documents it.
+hal0 documents it. The GTT/TTM half is also narrower than ODS's default-on: on
+kernels ≥ 6.14 amdgpu sizes the pool dynamically and hal0 reads the live value
+per request (`drivers.mdx:86-97`), so fixed sizing is an opt-in floor (see D.1).
 
 ### A.4 CLI
 
@@ -429,6 +431,14 @@ the less robust of the two once Podman/rootless edge cases are in play.
    `iommu=pt amd_iommu=on` (`drivers.mdx:102`, ADR-0003:96-99). If the host
    already carries hal0's IOMMU line, leave it; if it carries `amd_iommu=off`,
    warn and leave it — the operator chose it knowingly.
+   **Default (2026-10-04) — opt-in, never default-on.** `drivers.mdx:86-97`: on
+   kernels ≥ 6.14 amdgpu grows the GTT limit dynamically, hal0 reads the live
+   `mem_info_gtt_total` on every request, and pinning is documented as an
+   operator choice. So the lib applies fixed sizing only on an explicit request
+   (flag or `--apply`), the doctor reports the live pool and offers the recipe,
+   and on a kernel ≥ 6.14 the default is to change nothing — above all on a
+   multi-tenant Proxmox host, where a 65–90 % reservation starves every other
+   guest and adds a boot-critical GRUB/initramfs edit for no measured gain.
    **Correction (2026-10-04) — a container guard is mandatory.** hal0's common
    deployment is a Proxmox LXC. Inside a container `/etc/default/grub`,
    `/etc/modprobe.d/`, the initramfs and `amdgpu` module parameters belong to the
@@ -511,7 +521,8 @@ the less robust of the two once Podman/rootless edge cases are in play.
 
 ## F. Owner decisions
 
-1. **Adopt AMD host tuning (D.1) as default-on or opt-in?** It touches GRUB
+1. **Adopt AMD host tuning (D.1) as default-on or opt-in?** (Answered
+   2026-10-04: opt-in — see the *Default* note in D.1.) It touches GRUB
    and needs a reboot; hal0 would want a "reboot recommended" banner (ODS's
    pattern, `installers/phases/10-amd-tuning.sh:289-302`) and a call on
    whether a single-target-hardware product should just always apply it.

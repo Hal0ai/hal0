@@ -445,8 +445,11 @@ at an empty `url`. Two shapes actually work:
    policy path (see the §E.3 correction).
 2. **hal0 runs a bridge.** `hal0-mcp@<id>.service` executes a small hal0-owned adapter that forks
    `command args…` as its child, speaks MCP to it over the pipe, and serves the same session as
-   streamable-http on a loopback port or unix socket. `LoadCredential=` still delivers `[secrets]`,
-   `ProtectSystem=strict` still applies, and the exposure join renders the *bridge's* URL — which
+   streamable-http on a loopback port or unix socket. `LoadCredential=` still delivers `[secrets]` —
+   as files under `$CREDENTIALS_DIRECTORY`, so the adapter must read each one and set the mapped
+   variable in the *child's* environment; a stdio server (like hal0's own client,
+   `agents/mcp_client.py:222`) looks up a plain environment name, not a credential file
+   (*correction 2026-10-04*) — `ProtectSystem=strict` still applies, and the exposure join renders the *bridge's* URL — which
    makes a stdio server indistinguishable from an http one to everything downstream, including the
    policy proxy the §E.3 correction asks for.
 
