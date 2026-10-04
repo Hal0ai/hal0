@@ -80,6 +80,19 @@ A fresh install has no admin key and enforcement off. To lock it down:
 
 </Steps>
 
+<Aside type="note">
+On-box companions keep working with enforcement on. The installer mints a
+**client** key (`HAL0_CLIENT_KEY`) when `/etc/hal0/api.env` has none, and
+hal0 writes it into Open WebUI's env for every key that still points at
+hal0's `/v1` (chat, voice, document embeddings), so Open WebUI never sends a
+placeholder hal0 would refuse. The memory engine reads the same client key;
+agents (Hermes, pi) read the box key from `/etc/hal0/api.env`. A client key
+does not turn enforcement on and does not count as an admin key for the
+LAN rule below. On a box installed before client keys existed, mint one with
+`hal0 auth rotate client`: hal0 re-renders Open WebUI's env and restarts it
+only if the rendered file changed.
+</Aside>
+
 To go back to open access: `hal0 auth require off`. On a box bound past
 loopback that still has an admin key, this does not re-open ADMIN-class
 routes to off-box callers — see the next section.

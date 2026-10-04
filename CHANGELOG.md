@@ -67,6 +67,19 @@ applying. Add those subsections to a version's section to surface them; see
   revoked one at a time: `docs/operate/auth.mdx` documents how to end all of
   them at once by deleting the signing secret.
 
+- **Open WebUI keeps working with auth on.** It used to send the placeholder
+  `sk-hal0-local` to hal0's `/v1`, which an auth-on box refuses, so its chat,
+  voice and document features answered 401. `install.sh` now mints a client
+  key (`HAL0_CLIENT_KEY`) when `api.env` has none, without ever writing it to
+  the install log, and `hal0.openwebui.env_writer` writes it into
+  `OPENAI_API_KEYS` and the STT/TTS/RAG API keys, but only where the matching
+  base URL still points at hal0. Those keys are recorded as hal0-managed, so
+  a key re-pointed at another service never receives hal0's, and removing the
+  client key falls back to the placeholder. Rotating the client key (`hal0
+  auth rotate client`) re-renders Open WebUI's env and restarts it only when
+  the render changed. No admin key is minted, so a fresh install's auth
+  posture is unchanged. (#2314)
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
