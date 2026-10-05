@@ -126,7 +126,6 @@ slot's own `device`, never from a profile's fields:
 |---|---|
 | `gpu-rocm` | Sets `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES` to the index. |
 | `gpu-vulkan` | Sets `GGML_VK_VISIBLE_DEVICES` to the index. |
-| `gpu-cuda` | Maps only that GPU in via CDI (`--device nvidia.com/gpu=<n>`) and sets `CUDA_VISIBLE_DEVICES=0` inside the container, since the CDI mapping already exposes just the one card as ordinal 0. |
 
 Leaving `gpu_index` unset (the default) targets every GPU the backend can see,
 unchanged from single-GPU behaviour. Any explicit `[server].env` entry you set
@@ -325,8 +324,9 @@ have a cheap local model to target).
 
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
-`gpu-cuda`, `cpu`, or `npu` — `gpu-cuda` is the experimental path for
-non-Strix-Halo NVIDIA hosts). hal0 keeps back-compat **aliases** so older
+`cpu`, or `npu`; NVIDIA hosts use `gpu-vulkan` — `gpu-cuda` is still accepted
+when an older config is read, but CUDA is not supported in this release and
+such a slot is refused at load). hal0 keeps back-compat **aliases** so older
 callers keep working: `agent-hermes` resolves to `agent`, and `embed-rerank`
 (the rerank capability slot's briefly-used old name) resolves to `rerank`.
 Aliases are never written to disk and never appear in slot listings —

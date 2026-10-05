@@ -24,18 +24,18 @@ from fastapi import APIRouter, Request, Response
 
 from hal0 import __version__
 from hal0.model_meta import (
-    BACKEND_TO_DEVICE,
-    CANONICAL_DEVICES,
     CAPABILITY_ALIASES,
     CURATED_MODEL_TAGS,
     DEVICE_CLASSES,
-    DEVICE_TO_DEFAULT_PROFILE,
-    LEGACY_BACKENDS,
-    MODEL_BACKENDS,
     MODEL_CAPABILITIES,
     RUNTIME_FAMILIES,
     SELECTABLE_BACKENDS,
     SLOT_TYPES,
+    offered_backend_to_device,
+    offered_device_default_profiles,
+    offered_devices,
+    offered_legacy_backends,
+    offered_model_backends,
 )
 
 router = APIRouter()
@@ -88,6 +88,11 @@ async def get_enums(request: Request, response: Response) -> Any:
     - ``backend_to_device`` / ``device_default_profiles``: the two
       canonical translation maps.
 
+    CUDA: while :data:`hal0.model_meta.CUDA_ENABLED` is off (this release)
+    every list/map above omits ``gpu-cuda`` / ``cuda`` — the dashboard never
+    offers a lane the slot write/load paths would refuse. The tokens remain
+    valid on disk so existing configs still parse.
+
     Static data — served with a version-keyed ETag so clients can cache
     across the session and revalidate for free (304).
     """
@@ -96,8 +101,8 @@ async def get_enums(request: Request, response: Response) -> Any:
         return Response(status_code=304, headers=cache_headers)
     response.headers.update(cache_headers)
     return {
-        "devices": [asdict(d) for d in CANONICAL_DEVICES],
-        "backends": list(LEGACY_BACKENDS),
+        "devices": [asdict(d) for d in offered_devices()],
+        "backends": list(offered_legacy_backends()),
         "selectable_backends": list(SELECTABLE_BACKENDS),
         "device_classes": list(DEVICE_CLASSES),
         "slot_types": list(SLOT_TYPES),
@@ -105,9 +110,9 @@ async def get_enums(request: Request, response: Response) -> Any:
         "modalities": list(MODEL_CAPABILITIES),
         "capability_aliases": dict(CAPABILITY_ALIASES),
         "model_capability_flags": [dict(f) for f in MODEL_CAPABILITY_FLAGS],
-        "model_backends": list(MODEL_BACKENDS),
+        "model_backends": list(offered_model_backends()),
         "curated_model_tags": list(CURATED_MODEL_TAGS),
         "runtime_families": list(RUNTIME_FAMILIES),
-        "backend_to_device": dict(BACKEND_TO_DEVICE),
-        "device_default_profiles": dict(DEVICE_TO_DEFAULT_PROFILE),
+        "backend_to_device": offered_backend_to_device(),
+        "device_default_profiles": offered_device_default_profiles(),
     }

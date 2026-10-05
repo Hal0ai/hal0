@@ -634,20 +634,45 @@ def test_create_with_explicit_device_class_still_honored(client: TestClient) -> 
     assert r.json()["device_class"] == "gpu"
 
 
-def test_cuda_backend_accepted_on_create_and_update(client: TestClient) -> None:
-    """`ProfileConfig.backend` accepts rocm|vulkan|cuda but the route DTOs only
-    accepted rocm|vulkan, so a CUDA profile could be imported yet 422'd on every
-    subsequent PUT — un-editable through the API that created it."""
+def test_cuda_backend_refused_on_create(client: TestClient) -> None:
+    """CUDA is switched off in this release (hal0.model_meta.CUDA_ENABLED): a
+    NEW profile pointing at the cuda lane is refused with the Vulkan-lane hint
+    instead of being stored and failing later at slot apply."""
     r = client.post(
         "/api/profiles",
         json={"name": "cuda-tune", "flags": "-fa on", "device_class": "gpu", "backend": "cuda"},
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["backend"] == "cuda"
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert "profiles.cuda_not_supported" in r.text
+    assert "Vulkan lane" in str(body)
+    r2 = client.post(
+        "/api/profiles",
+        json={"name": "cuda-runner", "flags": "-fa on", "runner": "cuda"},
+    )
+    assert r2.status_code == 400, r2.text
+
+
+def test_stored_cuda_profile_stays_editable(client: TestClient) -> None:
+    """`ProfileConfig.backend` still accepts cuda so a profile stored by an
+    earlier release loads; re-sending its own stored cuda backend (the drawer
+    re-sends every field) is grandfathered, while changing a profile TO cuda
+    is refused."""
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import ProfileCatalog
+
+    ProfileCatalog().create(
+        "cuda-tune", ProfileConfig(flags="-fa on", device_class="gpu", backend="cuda")
+    )
     r2 = client.put("/api/profiles/cuda-tune", json={"backend": "cuda", "intent": "NVIDIA"})
     assert r2.status_code == 200, r2.text
     assert r2.json()["backend"] == "cuda"
     assert r2.json()["intent"] == "NVIDIA"
+
+    r3 = client.post("/api/profiles", json={"name": "vk-tune", "flags": "-fa on"})
+    assert r3.status_code == 201, r3.text
+    r4 = client.put("/api/profiles/vk-tune", json={"backend": "cuda"})
+    assert r4.status_code == 400, r4.text
 
 
 # ── #1411: a pre-1.0 custom profile must stay editable ────────────────────────

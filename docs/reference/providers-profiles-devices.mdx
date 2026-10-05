@@ -94,7 +94,7 @@ runtime image reference.
 | `flags` | Bench-tuned llama-server CLI flags. |
 | `mtp` | **Informational only** — MTP is model-owned, not profile-owned (see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/)). |
 | `device_class` | `gpu \| cpu \| npu \| img \| null`. |
-| `backend` | `rocm \| vulkan \| cuda \| null`. |
+| `backend` | `rocm \| vulkan \| null` (`cuda` still parses on a stored profile, but creating or changing a profile to it is refused — CUDA is not supported in this release). |
 | `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |
@@ -139,7 +139,7 @@ in the repository, not published to these docs).
 
 ## Runner images
 
-`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can launch. Every entry carries a bundled default image ref, a `runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), an optional `backend` (`rocm`/`vulkan`/`cuda`), a `supported_backends` tuple, and operator-facing display metadata (`title`, `blurb`, `is_default`) surfaced by `GET /api/system-info`'s `backends` object (keyed by runner key, one entry per `RUNNER_IMAGES` row).
+`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can launch. Every entry carries a bundled default image ref, a `runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), an optional `backend` (`rocm`/`vulkan`), a `supported_backends` tuple, and operator-facing display metadata (`title`, `blurb`, `is_default`) surfaced by `GET /api/system-info`'s `backends` object (keyed by runner key, one entry per `RUNNER_IMAGES` row).
 
 As of ADR-0006 (`docs/adr/0006-every-shipped-image-is-a-registry-runner.md`), every image hal0 ships gets its own `RUNNER_IMAGES` entry — a pin-only image, catalogued for discovery but reachable only through a slot's `image_pin` escape hatch, is retired as a shipping shape. `image_pin` remains available as a debug-only hatch (a custom build, a rollback, a hand-edited ref) but is never how an operator normally reaches a shipped runtime.
 
@@ -150,7 +150,7 @@ The registry today:
 | `rocmfpx` | `llama-server` | `rocm`, `vulkan` | Default (`is_default=True`) | The only runner allowed two `supported_backends` — one Vulkan-portable image serves both lanes. Denies the `qwen4exp` GGUF architecture (see the arch fit-check below). |
 | `promptforge` | `llama-server` | `rocm` | Optional | HIP-only build; accelerated PromptForge model distributions. |
 | `strix` | `llama-server` | `vulkan` | Optional | Vulkan-only; qwen4exp + MTP speculative decode support. Deliberately excluded from `FPX_RUNNER_KEYS`, so an FPX-family GGUF is refused cleanly on this runner instead of SIGSEGVing (the #1790 quant/runner guard). Image: `ghcr.io/hal0ai/hal0-strix-vulkan` (manifest digest pin, key `strix`). Supersedes the retired pin-only `combined-upstream` image as the intended runtime for `qwen4exp` slots. |
-| `cuda` | `llama-server` | `cuda` | Optional | NVIDIA GPUs. |
+| `cuda` | `llama-server` | `cuda` | **Hidden** | CUDA is not supported in this release. The entry stays in the registry so an existing slot naming it resolves and gets the refusal message (`slot.cuda_not_supported`), but `GET /api/system-info` and the runner-image catalogue never list it (`hal0.runners.offered_runner_images`). |
 | `cpu` | `llama-server` | `cpu` (device_class `cpu`) | Optional | Portable `-march`, no GPU required. |
 | `flm` | `flm` | `npu` (device_class `npu`) | Optional | FastFlowLM. |
 | `kokoro` | `kokoro` | `cpu` (device_class `cpu`) | Optional | TTS. |
@@ -177,6 +177,6 @@ slot.
 
 See [Hardware matrix](/docs/reference/hardware-matrix/) for
 the full table. In short: `hal0.model_meta.CANONICAL_DEVICES` is the single source of
-truth for the 5 valid device ids (`gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu`),
+truth for the 5 valid device ids (`gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu` — `gpu-cuda` is accepted only so older configs parse; CUDA is not supported in this release and `/api/meta/enums` omits it),
 consumed by `SlotConfig.device`, a profile's (now inert) `device_class`, and every
 other call site that used to duplicate this list.

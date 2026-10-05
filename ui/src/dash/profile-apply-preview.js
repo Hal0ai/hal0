@@ -18,13 +18,12 @@ import { deviceBackend } from "@/api/hooks/useRuntimes";
 import { diffFlags } from "./flags-tune.js";
 
 // Lane token → display title (hw-cascade.js's runnerOptions/laneValues deal
-// only in the raw backend tokens — rocm/vulkan/cuda/cpu — so the display copy
+// only in the raw backend tokens — rocm/vulkan/cpu — so the display copy
 // lives here). Exported because the slot drawer names lanes in its own prose
 // with the same table.
 export const LANE_TITLE = {
 	rocm: "ROCm",
 	vulkan: "Vulkan",
-	cuda: "CUDA",
 	cpu: "CPU",
 };
 export function laneTitle(lane) {

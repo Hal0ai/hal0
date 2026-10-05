@@ -42,11 +42,12 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 |---|---|---|---|---|
 | `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
 | `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — so it is the lane for a box with no `/dev/kfd`. **Measures faster than ROCm on Strix Halo** (+13.96% prefill, +20.45% decode — see the lane comparison below); it is not the seeded default for maturity reasons, not speed ones. LLM slots on this device are gated on a Vulkan-validated runner image (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, whisper.cpp, ComfyUI). |
-| `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
+| `gpu-cuda` | GPU (CUDA) | — | `chat` | **Not supported in this release.** Still accepted when a config is read, so older configs parse, but never offered, never picked by detection, and refused at slot create/load (`slot.cuda_not_supported`). NVIDIA GPUs use `gpu-vulkan`. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
 | `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
 
-`VALID_DEVICES` is the frozenset of these 5 ids. A legacy v0.1 `backend` enum
+`VALID_DEVICES` is the frozenset of these 5 ids (`gpu-cuda` included only so older
+configs still parse; `/api/meta/enums` offers the other four). A legacy v0.1 `backend` enum
 (`rocm|vulkan|cuda|cpu|flm|moonshine|kokoro`) is deprecated and round-trips for one
 release; `map_backend_to_device()` maps unknown legacy values to `"cpu"` as a safe
 fallback rather than crashing config load.
@@ -67,11 +68,11 @@ dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
    runner image or slot load refuses it by name (#1888/#1948) — the `ade07ba`
    lineage's Vulkan backend emitted invalid tokens for every model.
 3. **AMD**, neither ROCm compute nor a usable Vulkan device → **CPU**.
-4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
-   under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
-5. **NVIDIA**, no CDI → **Vulkan** fallback.
-6. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
-7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
+4. **NVIDIA** → **Vulkan** (works on the NVIDIA proprietary driver with no container
+   toolkit). CUDA is not supported in this release, so detection never picks it, even
+   when the NVIDIA Container Toolkit is installed.
+5. **Intel iGPU** / unknown-but-`vulkan_capable` → **Vulkan**.
+6. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
    correct").
 
 ### ROCm vs Vulkan on AMD — what the numbers actually say

@@ -51,9 +51,9 @@ def _openwebui_converge(**kwargs: Any) -> dict[str, Any]:
 
 
 def _runner_images_pinned() -> str:
-    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners import offered_runner_images
 
-    return f"{len(RUNNER_IMAGES)} images"
+    return f"{len(offered_runner_images())} images"
 
 
 def _runner_images_installed() -> str | None:

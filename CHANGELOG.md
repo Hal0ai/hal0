@@ -120,6 +120,25 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **CUDA is no longer offered: the supported lanes are ROCm, Vulkan, CPU, and
+  the NPU via FLM** (LLM, embeddings, whisper STT). Integrated GPUs are
+  served by the ROCm/Vulkan lanes; ONNX on the NPU stays planned and blocked
+  upstream (ADR-0003); Kokoro/Moonshine ONNX keep running on CPU. NVIDIA GPUs
+  now always get the **Vulkan** lane: hardware detection never recommends
+  `gpu-cuda` (even with the NVIDIA Container Toolkit installed),
+  `/api/meta/enums`, `/api/system-info` and the runner-image catalogue
+  no longer list the CUDA device/runtime, newly registered GGUF models no
+  longer list `cuda` as a compatible backend, and creating, re-pointing or
+  loading a slot with `device = "gpu-cuda"` or the `cuda` runtime is
+  refused with `slot.cuda_not_supported` ("CUDA is not supported in this
+  release; NVIDIA GPUs run on the Vulkan lane"). Creating a profile with a
+  `cuda` backend/runtime is refused the same way (`profiles.cuda_not_supported`).
+  Existing configs that name CUDA still load, so you can move such a slot to
+  `gpu-vulkan`. The change is one switch (`CUDA_ENABLED` in
+  `hal0.model_meta`) and is reversible. The dashboard also stops showing
+  CUDA lanes, and no longer marks a lane feasible on an AMD box (or ROCm on
+  an NVIDIA box) just because the GPU reports `compute_capable`.
+
 - **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
   with the code** they describe. The Hermes provisioner section now
   documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline

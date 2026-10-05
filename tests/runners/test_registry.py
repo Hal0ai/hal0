@@ -294,3 +294,24 @@ def test_llama_server_entries_have_display_metadata():
 def test_exactly_one_default_gpu_runtime():
     defaults = [k for k, r in RUNNER_IMAGES.items() if r.is_default]
     assert defaults == ["rocmfpx"]
+
+
+def test_offered_runner_images_hide_cuda_while_switched_off() -> None:
+    """CUDA is not supported in this release: the registry keeps the entry
+    (existing configs still resolve) but listing surfaces never offer it."""
+    from hal0.runners import offered_runner_images, runner_offered
+
+    assert "cuda" in RUNNER_IMAGES
+    offered = offered_runner_images()
+    assert "cuda" not in offered
+    assert set(offered) == set(RUNNER_IMAGES) - {"cuda"}
+    assert runner_offered("cuda") is False
+    assert runner_offered("rocmfpx") is True
+
+
+def test_offered_runner_images_follow_the_switch(monkeypatch) -> None:
+    from hal0 import model_meta
+    from hal0.runners import offered_runner_images
+
+    monkeypatch.setattr(model_meta, "CUDA_ENABLED", True)
+    assert "cuda" in offered_runner_images()

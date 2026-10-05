@@ -53,7 +53,6 @@
   --dev-rocm:     #d76b6b;
   --dev-vulkan:   #7fb8ff;
   --dev-cpu:      #9c9c95;
-  --dev-cuda:     #8fce6f;  /* CUDA lane chip (runtime cascade) */
   --dev-npu:      #c896ff;
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
 

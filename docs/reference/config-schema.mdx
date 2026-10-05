@@ -62,7 +62,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
-| `default_images` | dict[str,str] | `{}` | keys must be a known `RUNNER_IMAGES` family (`rocmfpx`, `promptforge`, `strix`, `cuda`, `cpu`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`; the legacy `vulkanfpx` key is still accepted and folds to `rocmfpx`); values must be non-empty image refs; sending `null` for a family clears its override |
+| `default_images` | dict[str,str] | `{}` | keys must be a known `RUNNER_IMAGES` family (`rocmfpx`, `promptforge`, `strix`, `cpu`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`; the legacy `vulkanfpx` key is still accepted and folds to `rocmfpx`); values must be non-empty image refs; sending `null` for a family clears its override |
 
 ### `[dispatcher]`
 
@@ -265,7 +265,7 @@ top-level scalars are accepted on load and normalized.
 | `id` | int \| null | `null` | — | `>= 1` |
 | `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
 | `port` | int | — | **required** | `8081-8200` |
-| `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu` |
+| `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, cpu, npu` (`gpu-cuda` still parses so older configs load, but CUDA is not supported in this release: such a slot is refused at create/load with `slot.cuda_not_supported`) |
 | `gpu_index` | int \| null | `null` | — | `>= 0` |
 | `n_gpu_layers` | int | `-1` | — | `-1` = all, `0` = CPU-only |
 | `threads` | int | `0` | — | `>= 0`; `0` = unset |
@@ -424,7 +424,7 @@ copy — they can't be edited or deleted, only cloned.
 | `flags` | str | `""` | bench-tuned llama-server CLI flags |
 | `mtp` | bool | `false` | **informational only** — MTP is model-owned, not profile-owned |
 | `device_class` | `"gpu"\|"cpu"\|"npu"\|"img"` \| null | `null` | `null` = device-agnostic |
-| `backend` | `"rocm"\|"vulkan"\|"cuda"` \| null | `null` | |
+| `backend` | `"rocm"\|"vulkan"\|"cuda"` \| null | `null` | `cuda` parses for back-compat only; CUDA is not supported in this release |
 | `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |

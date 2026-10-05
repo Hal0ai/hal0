@@ -45,6 +45,9 @@ def test_list_runner_images_empty(client: TestClient) -> None:
     # over catalogued rows.
     assert body["families"]
     assert {f["family"] for f in body["families"]} >= {"rocmfpx", "cpu"}
+    # The cuda family is hidden while the CUDA lane is switched off
+    # (hal0.model_meta.CUDA_ENABLED) — never offered as a runtime.
+    assert "cuda" not in {f["family"] for f in body["families"]}
 
 
 def test_get_unknown_runner_image_404s(client: TestClient) -> None:
