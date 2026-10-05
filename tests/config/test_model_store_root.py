@@ -35,8 +35,8 @@ def test_env_var_wins(monkeypatch) -> None:
 
 def test_config_store_used_when_no_env(monkeypatch) -> None:
     monkeypatch.delenv("HAL0_MODEL_STORE", raising=False)
-    monkeypatch.setattr(loader, "load_hal0_config", lambda: _Cfg("/home/cuken/ai/models"))
-    assert paths.model_store_root() == "/home/cuken/ai/models"
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: _Cfg("/srv/models"))
+    assert paths.model_store_root() == "/srv/models"
 
 
 def test_default_when_store_empty(monkeypatch) -> None:

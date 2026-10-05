@@ -291,7 +291,7 @@ succeeds:
 
 ```
 HAL0_API_URL=http://127.0.0.1:18080
-HAL0_HOME=/home/halo/dev/hal0/.harness/install-12345
+HAL0_HOME=<repo>/.harness/install-12345
 HAL0_SERVE_PID=12346
 ```
 

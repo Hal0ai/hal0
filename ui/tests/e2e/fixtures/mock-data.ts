@@ -360,7 +360,7 @@ export type MockData = typeof MOCK_DATA
 
 // ── Operator Board mock data (feat/operator-board) ─────────────────────────
 //
-// Ported from /home/halo/Development/Projects/hal0/kanban/board/board-data.jsx.
+// Ported from the kanban board prototype (board-data.jsx).
 // Wire fields use snake_case so the useBoard.ts normaliser is exercised.
 // Keep prototype ids (t_a17f3c20 etc.) so specs can reference specific tasks.
 

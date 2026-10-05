@@ -34,7 +34,7 @@ update_budget_min = 20
 
 # Scratch root for run artifacts (CONTEXT.md, raw lane output). Not in the repo — only the
 # final report is committed.
-run_root = "/mnt/mintdev/artifacts/hal0-release-validation"
+run_root = "<artifacts-root>/hal0-release-validation"
 
 # ── Read-only lanes ──────────────────────────────────────────────────────────
 # Safe to run fully in parallel. No mutations of any kind.

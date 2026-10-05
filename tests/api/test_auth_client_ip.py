@@ -85,20 +85,20 @@ def test_trust_forwarded_for_env_override_wins(monkeypatch: pytest.MonkeyPatch) 
 
 def test_client_ip_uses_raw_peer_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Untrusted by default: X-Forwarded-For present but ignored."""
-    req = _request(client=("10.0.1.200", 51234), forwarded_for="198.51.100.7")
-    assert _client_ip(req) == "10.0.1.200"
+    req = _request(client=("10.0.0.200", 51234), forwarded_for="198.51.100.7")
+    assert _client_ip(req) == "10.0.0.200"
 
 
 def test_client_ip_honours_forwarded_for_when_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAL0_TRUST_FORWARDED_FOR", "1")
-    req = _request(client=("10.0.1.200", 51234), forwarded_for="198.51.100.7")
+    req = _request(client=("10.0.0.200", 51234), forwarded_for="198.51.100.7")
     assert _client_ip(req) == "198.51.100.7"
 
 
 def test_client_ip_takes_leftmost_forwarded_for_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """A multi-hop chain: leftmost is the original client (single trusted hop convention)."""
     monkeypatch.setenv("HAL0_TRUST_FORWARDED_FOR", "1")
-    req = _request(client=("10.0.1.200", 51234), forwarded_for="198.51.100.7, 10.0.1.200")
+    req = _request(client=("10.0.0.200", 51234), forwarded_for="198.51.100.7, 10.0.0.200")
     assert _client_ip(req) == "198.51.100.7"
 
 
@@ -106,8 +106,8 @@ def test_client_ip_falls_back_to_peer_when_trusted_but_header_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HAL0_TRUST_FORWARDED_FOR", "1")
-    req = _request(client=("10.0.1.200", 51234), forwarded_for=None)
-    assert _client_ip(req) == "10.0.1.200"
+    req = _request(client=("10.0.0.200", 51234), forwarded_for=None)
+    assert _client_ip(req) == "10.0.0.200"
 
 
 def test_client_ip_falls_back_to_unknown_with_no_client_tuple(

@@ -846,7 +846,7 @@ def test_hermes_mcp_auth_warns_on_unreadable_config(tmp_path) -> None:  # type: 
 # release survives — the smoke probes never run at all. ``hal0 doctor`` is what
 # an operator runs when the agent misbehaves, so the row lives here too.
 #
-# The payloads below are verbatim captures from ct152 (10.0.1.152, rc.5), a box
+# The payloads below are verbatim captures from ct152 (rc.5), a box
 # whose agent slot is offline: ``hal0/agent`` resolves through the routing
 # fallback chain to the brain slot's 32,768-token window (under Hermes' 64,000
 # floor, i.e. it cannot chat) while ``/v1/models`` lists no ``agent`` row at all.

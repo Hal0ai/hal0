@@ -1,7 +1,7 @@
 """Unit tests for the active-stack pointer + drift detection.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-apply && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_drift.py -q
+    uv run pytest tests/stacks/test_drift.py -q
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Tests for converge() capability-child routing pass.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-lifecycle && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_converge_capabilities.py -q
+    uv run pytest tests/stacks/test_converge_capabilities.py -q
 """
 
 from __future__ import annotations

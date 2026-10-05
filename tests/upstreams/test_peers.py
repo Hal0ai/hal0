@@ -25,14 +25,14 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
     [
         # The canonical hal0 peer shape: /v1 is a sibling of /api.
         (
-            "http://10.0.1.150:8080/v1",
+            "http://10.0.0.150:8080/v1",
             "/api/slots/metrics",
-            "http://10.0.1.150:8080/api/slots/metrics",
+            "http://10.0.0.150:8080/api/slots/metrics",
         ),
         (
-            "http://10.0.1.150:8080/v1/",
+            "http://10.0.0.150:8080/v1/",
             "/api/stats/hardware",
-            "http://10.0.1.150:8080/api/stats/hardware",
+            "http://10.0.0.150:8080/api/stats/hardware",
         ),
         # No /v1 at all.
         ("http://peer.lan:8080", "/api/slots/metrics", "http://peer.lan:8080/api/slots/metrics"),
@@ -75,8 +75,8 @@ def test_peer_api_url_join(base: str, suffix: str, expected: str) -> None:
         "https://openrouter.ai/api",
         "https://openrouter.ai/api/",
         "https://api.minimax.io/v1",
-        "http://10.0.1.150:8080/v1",
-        "http://10.0.1.150:8080/api/v1",
+        "http://10.0.0.150:8080/v1",
+        "http://10.0.0.150:8080/api/v1",
         "http://peer.lan/",
         "http://peer.lan",
     ],
@@ -95,7 +95,7 @@ def test_no_doubled_api_segment_is_constructible(base: str, suffix: str) -> None
     [
         "127.0.0.1",
         "0.0.0.0",
-        "10.0.1.150",
+        "10.0.0.150",
         "192.168.1.20",
         "172.16.4.9",
         "169.254.10.1",
@@ -150,7 +150,7 @@ def test_third_party_providers_are_never_peers() -> None:
 
 def test_private_remote_is_a_peer_by_default() -> None:
     """The haloai-style LAN fanout keeps working with no operator action."""
-    assert is_hal0_peer(_u("peer", "http://10.0.1.150:8080/v1")) is True
+    assert is_hal0_peer(_u("peer", "http://10.0.0.150:8080/v1")) is True
 
 
 def test_slot_kind_is_never_a_peer() -> None:
@@ -160,14 +160,14 @@ def test_slot_kind_is_never_a_peer() -> None:
 
 
 def test_disabled_upstream_is_never_a_peer() -> None:
-    assert is_hal0_peer(_u("peer", "http://10.0.1.150:8080/v1", enabled=False)) is False
+    assert is_hal0_peer(_u("peer", "http://10.0.0.150:8080/v1", enabled=False)) is False
 
 
 def test_explicit_flag_wins_both_ways() -> None:
     # Opt a public-hostname hal0 peer IN.
     assert is_hal0_peer(_u("peer", "https://hal0.example.com/v1", hal0_peer=True)) is True
     # Opt a private host OUT.
-    assert is_hal0_peer(_u("nope", "http://10.0.1.150:8080/v1", hal0_peer=False)) is False
+    assert is_hal0_peer(_u("nope", "http://10.0.0.150:8080/v1", hal0_peer=False)) is False
     # ...but an explicit flag never overrides the slot-kind self-call guard.
     u = _u("agent", "http://127.0.0.1:8087/v1", kind="slot", slot_name="agent", hal0_peer=True)
     assert is_hal0_peer(u) is False
@@ -177,7 +177,7 @@ def test_hal0_peer_upstreams_filters_a_real_registry() -> None:
     reg = UpstreamRegistry()
     reg.add(_u("openrouter", "https://openrouter.ai/api/v1"))
     reg.add(_u("minimax", "https://api.minimax.io/v1"))
-    reg.add(_u("peer", "http://10.0.1.150:8080/v1"))
+    reg.add(_u("peer", "http://10.0.0.150:8080/v1"))
     reg.add(_u("agent", "http://127.0.0.1:8087/v1", kind="slot", slot_name="agent"))
     assert [u.name for u in hal0_peer_upstreams(reg)] == ["peer"]
 

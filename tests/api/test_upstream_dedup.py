@@ -154,7 +154,7 @@ async def test_priming_is_a_noop_when_operator_defines_a_real_hal0_upstream() ->
         Upstream(
             name="hal0",
             kind="remote",
-            url="https://hal0.thinmint.dev/v1",
+            url="https://hal0.example.com/v1",
             auth_style="none",
         )
     )
@@ -166,7 +166,7 @@ async def test_priming_is_a_noop_when_operator_defines_a_real_hal0_upstream() ->
     hal0 = registry.get("hal0")
     assert hal0 is not None
     assert hal0.kind == "remote"
-    assert hal0.url == "https://hal0.thinmint.dev/v1"
+    assert hal0.url == "https://hal0.example.com/v1"
     # Untouched — priming didn't overwrite the operator upstream's own cache.
     assert model_cache["hal0"] == ["already-fetched-remote-model"]
 

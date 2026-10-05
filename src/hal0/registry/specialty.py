@@ -72,8 +72,7 @@ SPECIALTY_KINDS: dict[str, SpecialtyKind] = {
             ),
         ),
         # Card-verbatim mode envs, admitted by the #1891 ct150 gate
-        # (2026-08-30; report at
-        # /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md,
+        # (2026-08-30; gate report 2026-08-30 (operator artefact store),
         # results on #1946). These exact four values ran the whole gate:
         # temp-0 Paris probe green, HumanEval+ 0.939/0.909 with the card's
         # disclosed task-130 regression reproducing precisely, MTP depth-4 at

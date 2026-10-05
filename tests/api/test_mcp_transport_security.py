@@ -24,12 +24,12 @@ def test_default_is_localhost_only(monkeypatch):
     assert "127.0.0.1:*" in sec.allowed_hosts
     assert "localhost:*" in sec.allowed_hosts
     # No operator hosts leaked into the default allowlist.
-    assert "10.0.1.142:8080" not in sec.allowed_hosts
+    assert "192.0.2.142:8080" not in sec.allowed_hosts
 
 
 def test_extra_hosts_added_and_origins_derived(monkeypatch):
     # Note the stray whitespace — it must be trimmed.
-    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "10.0.1.142:8080, hal0.thinmint.dev")
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8080, hal0.example.com")
     monkeypatch.delenv("HAL0_MCP_ALLOWED_ORIGINS", raising=False)
 
     sec = _mcp_transport_security()
@@ -37,12 +37,12 @@ def test_extra_hosts_added_and_origins_derived(monkeypatch):
     assert sec.enable_dns_rebinding_protection is True
     # Localhost defaults are preserved alongside the operator additions.
     assert "127.0.0.1:*" in sec.allowed_hosts
-    assert "10.0.1.142:8080" in sec.allowed_hosts
-    assert "hal0.thinmint.dev" in sec.allowed_hosts
+    assert "192.0.2.142:8080" in sec.allowed_hosts
+    assert "hal0.example.com" in sec.allowed_hosts
     # http+https origins are derived from each added host for browser clients.
-    assert "http://10.0.1.142:8080" in sec.allowed_origins
-    assert "https://10.0.1.142:8080" in sec.allowed_origins
-    assert "https://hal0.thinmint.dev" in sec.allowed_origins
+    assert "http://192.0.2.142:8080" in sec.allowed_origins
+    assert "https://192.0.2.142:8080" in sec.allowed_origins
+    assert "https://hal0.example.com" in sec.allowed_origins
 
 
 def test_wildcard_disables_protection(monkeypatch):
@@ -56,14 +56,14 @@ def test_wildcard_disables_protection(monkeypatch):
 
 
 def test_explicit_origins_override_derivation(monkeypatch):
-    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "10.0.1.142:8080")
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8080")
     monkeypatch.setenv("HAL0_MCP_ALLOWED_ORIGINS", "https://app.example.test")
 
     sec = _mcp_transport_security()
 
     assert "https://app.example.test" in sec.allowed_origins
     # When origins are given explicitly, host-derived origins are skipped.
-    assert "http://10.0.1.142:8080" not in sec.allowed_origins
+    assert "http://192.0.2.142:8080" not in sec.allowed_origins
 
 
 def _streamable_client(monkeypatch):
@@ -96,14 +96,14 @@ def _initialize_body() -> dict:
 
 
 def test_allowed_host_is_not_rejected_over_http(monkeypatch):
-    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "10.0.1.142:8090")
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8090")
     monkeypatch.delenv("HAL0_MCP_ALLOWED_ORIGINS", raising=False)
 
     with _streamable_client(monkeypatch) as client:
         resp = client.post(
             "/mcp",
             headers={
-                "Host": "10.0.1.142:8090",
+                "Host": "192.0.2.142:8090",
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
             },
@@ -116,7 +116,7 @@ def test_allowed_host_is_not_rejected_over_http(monkeypatch):
 
 
 def test_unconfigured_host_still_rejected(monkeypatch):
-    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "10.0.1.142:8090")
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8090")
     monkeypatch.delenv("HAL0_MCP_ALLOWED_ORIGINS", raising=False)
 
     with _streamable_client(monkeypatch) as client:

@@ -60,7 +60,7 @@ or templating multiple hosts.
 | `STORAGE`                 | `local-lvm` if present, else first rootdir pool | |
 | `BRIDGE`                  | first `vmbr*` in `/etc/network/interfaces` | |
 | `NET_CONFIG`              | `name=eth0,bridge=$BRIDGE,ip=dhcp`       | full `--net0` arg if you need static IP / VLAN |
-| `IP_CIDR` / `GATEWAY`     | *(empty → DHCP)*                         | static IPv4, e.g. `10.0.1.90/24` + `10.0.1.1` |
+| `IP_CIDR` / `GATEWAY`     | *(empty → DHCP)*                         | static IPv4, e.g. `192.0.2.90/24` + `192.0.2.1` |
 | `NAMESERVER`              | *(pve default)*                          | space-separated resolvers |
 | `SEARCHDOMAIN`            | *(pve default)*                          | |
 | `TIMEZONE`                | *(pve default)*                          | |

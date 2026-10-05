@@ -3070,7 +3070,7 @@ class TestAnchorContextWindowPreflight:
         a probe that looks the anchor up by its spelled alias sees nothing,
         calls the window unknown, and reports a PASS.
 
-        Payloads are verbatim captures from 10.0.1.152 — the expectation comes
+        Payloads are verbatim captures from ct152 — the expectation comes
         from the gateway itself, not from anything hal0's resolver computes.
         """
         hh = tmp_path / "hh"
@@ -3141,7 +3141,7 @@ class TestAnchorContextWindowPreflight:
         assert out.details["failures"] == []
 
 
-#: Verbatim ``GET /v1/models`` from ct152 (10.0.1.152, rc.5, agent slot
+#: Verbatim ``GET /v1/models`` from ct152 (rc.5, agent slot
 #: offline). Note what is NOT here: any row spelled ``agent`` or ``hal0/agent``.
 _CT152_CATALOG: list[dict[str, Any]] = [
     {

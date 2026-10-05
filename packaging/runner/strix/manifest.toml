@@ -38,8 +38,8 @@
 # manifest.json toolbox_images.strix pin): ct150 (kfd-present) + ct151
 # (kfd-absent, renderD128-only) — Vulkan0 offload, temp-0 Paris, 256-token
 # clean tail byte-identical across boxes, json_schema constrained, #1936
-# device-less exit 78. Report: /mnt/mintdev/artifacts/
-# hal0-strix-gate-2026-08-31.md. A REBUILD does not inherit this: new
+# device-less exit 78. Report: gate report 2026-08-31 (operator artefact
+# store). A REBUILD does not inherit this: new
 # digest, new gate.
 # Driver note: the reference deployment ran system RADV (Fedora Mesa
 # 26.1.7); this image likewise uses the base toolbox's dnf

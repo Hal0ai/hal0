@@ -84,7 +84,7 @@ def test_bad_sample_rate_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_scrub_drops_user_block() -> None:
-    event = {"user": {"id": "alexander", "ip_address": "10.0.1.42"}, "message": "hi"}
+    event = {"user": {"id": "operator", "ip_address": "192.0.2.42"}, "message": "hi"}
     scrubbed = sentry.scrub_event(dict(event))
     assert scrubbed is not None
     assert "user" not in scrubbed
@@ -97,7 +97,7 @@ def test_scrub_drops_request_body_cookies_and_query() -> None:
             "query_string": "api_key=sk-live-abcdef0123456789",
             "cookies": {"hal0_session": "deadbeef"},
             "data": {"messages": [{"role": "user", "content": "my private prompt"}]},
-            "env": {"REMOTE_ADDR": "10.0.1.42"},
+            "env": {"REMOTE_ADDR": "192.0.2.42"},
             "headers": {
                 "Authorization": "Bearer sk-live-abcdef0123456789",
                 "User-Agent": "curl/8.5.0",

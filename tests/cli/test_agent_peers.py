@@ -69,7 +69,7 @@ def test_peers_survives_hal0_state_as_json_string(fake_urlopen) -> None:
                         "agent_id": "hermes-ct150",
                         "display_name": "Hermes",
                         "roles": ["chat"],
-                        "endpoint": {"url": "http://10.0.1.150:9000"},
+                        "endpoint": {"url": "http://192.0.2.150:9000"},
                         # The defect: a JSON string instead of a nested object.
                         "hal0_state": json.dumps({"registered_at": "2026-08-10T00:00:00Z"}),
                     }
@@ -159,7 +159,7 @@ def test_peers_renders_normal_dict_shaped_cards(fake_urlopen) -> None:
                         "agent_id": "hermes-ct105",
                         "display_name": "Hermes",
                         "roles": ["chat", "voice"],
-                        "endpoint": {"url": "http://10.0.1.105:9000"},
+                        "endpoint": {"url": "http://192.0.2.105:9000"},
                         "hal0_state": {"registered_at": "2026-08-01T00:00:00Z"},
                     }
                 }

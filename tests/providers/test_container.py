@@ -303,7 +303,7 @@ class TestRenderUnit:
         """A custom HAL0_MODEL_STORE is what the slot bind-mounts — so a model
         dir outside /mnt/ai-models is visible inside the container (the Fedora
         'No such file or directory' bug). Regression guard for #768."""
-        custom = "/home/cuken/ai/models"
+        custom = "/srv/models"
         monkeypatch.setenv("HAL0_MODEL_STORE", custom)
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)

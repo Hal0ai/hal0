@@ -1,7 +1,7 @@
 """Tests for stack export: reference embedding + envelope + checksum.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-export && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_export.py -q
+    uv run pytest tests/stacks/test_export.py -q
 """
 
 from __future__ import annotations

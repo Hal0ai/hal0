@@ -79,9 +79,9 @@ def test_from_env_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_from_env_reads_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HERMES_DASHBOARD_BASE_URL", "http://10.0.1.142:9119")
+    monkeypatch.setenv("HERMES_DASHBOARD_BASE_URL", "http://192.0.2.142:9119")
     client = HermesKanbanClient.from_env()
-    assert client._base_url == "http://10.0.1.142:9119"
+    assert client._base_url == "http://192.0.2.142:9119"
 
 
 # ── prefix + forwarding ────────────────────────────────────────────────────

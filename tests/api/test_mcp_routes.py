@@ -865,7 +865,7 @@ def test_resolve_route_blocks_lan_ssrf(client: TestClient) -> None:
     """
     response = client.get(
         "/api/mcp/resolve",
-        params={"url": "http://10.0.1.142:8080/api/slots"},
+        params={"url": "http://192.0.2.142:8080/api/slots"},
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "mcp.ssrf_blocked"
