@@ -55,6 +55,7 @@ from hal0.slots import metrics_collect as _metrics_collect
 from hal0.slots import port_alloc as _port_alloc
 from hal0.slots import voices as _voices
 from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.naming import slot_token_for, slot_unit_name
 from hal0.slots.state import SlotNotFound
 
 log = structlog.get_logger(__name__)
@@ -1792,7 +1793,8 @@ async def slot_logs(
             }
         raise
 
-    text, hint = await _logs.read_tail(f"hal0-slot@{name}.service", lines, quiet)
+    unit = slot_unit_name(await slot_token_for(sm, name))
+    text, hint = await _logs.read_tail(unit, lines, quiet)
     if hint is not None:
         return {"name": name, "logs": text, "hint": hint}
     return {"name": name, "logs": text}
@@ -1862,6 +1864,8 @@ async def slot_logs_stream(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    unit = slot_unit_name(await slot_token_for(sm, name))
+
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
             # B13: use a custom 'degraded' event name, NOT the reserved SSE
@@ -1877,9 +1881,7 @@ async def slot_logs_stream(
         # 400-line backfill into a ring with content-dedup deliberately off.
         # ``None`` is the idle tick; matches the 15 s cadence of the journal
         # and activity streams so one proxy timeout value covers them all.
-        async for line in _logs.tail_journal_keepalive(
-            f"hal0-slot@{name}.service", backfill, quiet
-        ):
+        async for line in _logs.tail_journal_keepalive(unit, backfill, quiet):
             if line is None:
                 yield ": keepalive\n\n"
                 continue
