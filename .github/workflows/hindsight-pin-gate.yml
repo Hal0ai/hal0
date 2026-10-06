@@ -43,7 +43,7 @@ jobs:
       changed: ${{ steps.diff.outputs.changed }}
       old_pin: ${{ steps.diff.outputs.old_pin }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Full history so the base commit's copy of the file is fetchable.
           fetch-depth: 0
@@ -76,7 +76,7 @@ jobs:
     # embedder) plus two embedded-postgres first boots and a one-way migration.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # BEFORE setup-python, deliberately: this step deletes preinstalled
       # toolchains, and anything it removed after setup-python would be gone
       # from under the interpreter the job then depends on.

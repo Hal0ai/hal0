@@ -25,6 +25,7 @@ from hal0.capabilities.catalog import available_backends, get_backend
 from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
 from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error, NotFound
+from hal0.slots.naming import slot_token_for, slot_unit_name
 
 router = APIRouter()
 
@@ -431,6 +432,8 @@ async def unload_npu_model(request: Request, slot_manager: SlotManagerDep) -> di
             details={"slot": slot_name, "prefix": _NPU_SLOT_PREFIX},
         )
 
+    # Resolve the unit BEFORE delete — the config (and its id) is gone after.
+    unit = slot_unit_name(await slot_token_for(slot_manager, slot_name))
     await slot_manager.unload(slot_name)
     await slot_manager.delete(slot_name)
     # Clear systemd's residual "failed" state for the template instance —
@@ -444,7 +447,7 @@ async def unload_npu_model(request: Request, slot_manager: SlotManagerDep) -> di
         proc = await _asyncio.create_subprocess_exec(
             "systemctl",
             "reset-failed",
-            f"hal0-slot@{slot_name}.service",
+            unit,
             stdout=_asyncio.subprocess.DEVNULL,
             stderr=_asyncio.subprocess.DEVNULL,
         )

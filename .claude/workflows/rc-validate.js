@@ -39,7 +39,7 @@ if (!VERSION) throw new Error('rc-validate requires args.version, e.g. "1.0.0-rc
 const KIT = `${REPO}/tests/release-validation`
 const RUN = `${ARTIFACTS}/hal0-release-validation/${VERSION}`
 
-// Box id -> role. Mirrors tests/release-validation/boxes.toml.
+// Box id -> role. Mirrors tests/release-validation/boxes.example.toml (operator copy: boxes.toml, gitignored).
 // ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) — there is no CPU-only fresh box left.
 const BOX_ROLES = {
   'ct151-cpu-fresh': 'fresh',

@@ -15,7 +15,7 @@ mechanical enough, into `pytest`/`release-test.sh` so they stop needing an agent
 | Path | What it is |
 |---|---|
 | `kit.toml` | Kit version, lane registry, model tier per lane, phase configuration |
-| `boxes.toml` | The fleet: box profiles, access details, capabilities, reset procedure |
+| `boxes.toml` | The fleet: box profiles, access details, capabilities, reset procedure. Gitignored and operator-local: create it by copying `boxes.example.toml` and filling in your own lab |
 | `known-issues.yaml` | Do-not-re-report list — open dupes and adjudicated by-design behaviour |
 | `regressions.yaml` | Every previously filed finding, re-probed on every subsequent release |
 | `lanes/readonly/*.md` | Read-only surface briefs (safe to run in parallel, no mutations) |

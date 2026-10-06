@@ -159,6 +159,18 @@ applying. Add those subsections to a version's section to surface them; see
   "auth was removed" claims now describe the optional KB-1 key gate. No
   behavior change. (#2244)
 
+### Removed
+
+- **Two agent-session planning files and the standalone HTML migration guide
+  are no longer tracked.** `docs/superpowers/plans/2026-08-29-specialty-distributions.md`
+  and `docs/superpowers/specs/2026-08-29-specialty-distributions-design.md`
+  were still committed although `.gitignore` has excluded `docs/superpowers/`
+  since #1988. `docs/hal0-install-migration-guide.html`, the v1.0-era
+  quick start and migration walkthrough, sat outside the `.mdx` docs tree;
+  `docs/getting-started/` is the published path. Earlier CHANGELOG entries
+  that cite these files describe history and are left as written. No
+  behavior change.
+
 ## [1.3.0] — 2026-09-16
 
 ### Highlights
