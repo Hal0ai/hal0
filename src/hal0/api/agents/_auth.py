@@ -12,7 +12,9 @@ This module fixes that for the chat-proxy WebSocket routes by:
 1. Origin allowlist on every WS upgrade. Configured via
    ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
    hal0.local hostname and dev origins (``localhost:5173`` for Vite,
-   ``127.0.0.1:8080`` for the bundled SPA). The check is FREE; missing
+   ``127.0.0.1:8080`` for the bundled SPA). An Origin equal to the
+   request's own IP-literal origin (``Host`` header) also passes, so a
+   LAN IP change never strands the dashboard. The check is FREE; missing
    it leaves the rest of this scheme
    moot because any drive-by site could WebSocket into hal0-api from
    the user's own browser session.
@@ -39,6 +41,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -46,6 +49,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
 from starlette.websockets import WebSocket
@@ -187,8 +191,10 @@ def verify_session_cookie(value: str, now: float | None = None) -> bool:
 def set_session_cookie(response: Response, *, secure: bool | None = None) -> str:
     """Mint + attach a session cookie to ``response``. Returns its value.
 
-    ``secure`` defaults to ``True`` on production-style origins and can
-    be forced for tests via the kwarg.
+    ``secure`` defaults to ``False``: hal0-api serves plain HTTP on the
+    LAN and TLS, when present, is terminated by an upstream proxy
+    (ADR-0012), so a ``Secure`` cookie would never reach the WS gate on
+    a plain-HTTP box. Pass ``secure=True`` to force the attribute.
     """
     value = mint_session_cookie()
     response.set_cookie(
@@ -215,15 +221,65 @@ def require_browser_auth(request: Request) -> None:
         raise HTTPException(status_code=403, detail="session_cookie_invalid")
 
 
+def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
+    """True iff ``origin`` is this request's own origin on an IP-literal host.
+
+    This is the "box's LAN IP changed since install" case (#2277): the
+    browser typed ``http://<ip>:<port>``, so it sends that as ``Origin``
+    and ``<ip>:<port>`` as ``Host``. Strict on everything else:
+
+    * ``Host`` must be an IP literal. A DNS name can be rebound to the box
+      by an attacker page, which then sends a matching ``Origin``/``Host``
+      pair *and* can mint its own session cookie via the handshake; an IP
+      literal cannot be rebound. Named origins (``hal0.local``, the
+      installer hostname, a reverse proxy's ``public_url``) are seeded into
+      :func:`allowed_origins` by ``hal0.install.network`` and are stable
+      across an IP change.
+    * the ``Origin`` scheme must be ``http``/``https`` (opaque ``null`` and
+      extension origins never match), and its authority must equal
+      ``Host`` exactly, port included; a userinfo- or path-bearing value is
+      not a browser Origin.
+    * a ``wss`` upgrade that hal0 terminated itself only matches an
+      ``https`` page. A ``ws`` upgrade may come from an ``https`` page,
+      because a TLS-terminating upstream proxy (ADR-0012) forwards plain
+      ``ws`` with ``Host`` preserved.
+    """
+    if not origin or not host:
+        return False
+    try:
+        parts = urlsplit(origin)
+        hostname = urlsplit(f"//{host}").hostname or ""
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    if request_scheme == "wss" and parts.scheme != "https":
+        return False
+    if "@" in parts.netloc or parts.path or parts.query or parts.fragment:
+        return False
+    return parts.netloc.lower() == host.lower()
+
+
 def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
     """Return ``True`` iff Origin is allowlisted AND cookie is valid.
 
     Used as the gate on every WS upgrade in :mod:`chat_proxy`. Returning
     ``False`` lets the caller send the policy-violation close code
     (4403) before any frame is ever exchanged.
+
+    The Origin half passes when Origin is in :func:`allowed_origins` or is
+    the request's own IP-literal origin (:func:`_is_same_origin`), a
+    narrower form of the REST Origin gate's fallback
+    (``hal0.api.auth._origin_allowed``). Without
+    it, a DHCP change to the box's LAN IP turns the install-time allowlist
+    stale and the dashboard's own WS upgrade gets 4403 (#2277). A missing
+    Origin is still denied: browsers always send one on a WS upgrade.
     """
     origin = ws.headers.get("origin", "")
-    if origin not in allowed_origins():
+    if origin not in allowed_origins() and not _is_same_origin(
+        origin, ws.headers.get("host", ""), ws.url.scheme
+    ):
         return False
     cookie = ws.cookies.get(SESSION_COOKIE_NAME)
     return bool(cookie and verify_session_cookie(cookie))
