@@ -8,6 +8,10 @@
 // `lib/queryClient.ts`) rather than threaded through every `useMutation`
 // call site.
 //
+// The same drawer is also the sign-in surface the operator opens themselves
+// (`prompt()`, from the top-bar session chip while browsing read-only) — then
+// `pending` is null and a successful login simply closes it.
+//
 // This store holds the ONE pending challenge (a second 401 while a drawer
 // is already open replaces the retry target rather than queueing — the
 // operator only has one login form to fill in at a time) and the retry
@@ -34,6 +38,12 @@ interface AuthChallengeState {
   pending: PendingChallenge | null
   /** Called by the global MutationCache.onError when a mutation 401s with auth.required. */
   request: (mutation: ExecutableMutation, variables: unknown) => void
+  /**
+   * Open the drawer on the operator's own initiative (the top-bar "Sign in"
+   * chip) — nothing was refused, so there is nothing to retry. A refused
+   * action already waiting is kept, not discarded.
+   */
+  prompt: () => void
   /** Dismiss without retrying — the original mutation stays failed. */
   dismiss: () => void
   /** Re-run the pending mutation (call after a successful login). */
@@ -46,6 +56,10 @@ export const useAuthChallengeStore = create<AuthChallengeState>((set, get) => ({
 
   request(mutation, variables) {
     set({ open: true, pending: { mutation, variables } })
+  },
+
+  prompt() {
+    set({ open: true })
   },
 
   dismiss() {

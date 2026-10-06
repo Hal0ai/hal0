@@ -68,6 +68,28 @@ def test_verify_rejects_expired_cookie() -> None:
     assert _auth.verify_session_cookie(cookie, now=10**12) is False
 
 
+def test_mint_honours_a_longer_ttl() -> None:
+    """Remember-me sessions are the same signed cookie with a later expiry."""
+    thirty_days = _auth.SESSION_COOKIE_REMEMBER_TTL_SECONDS
+    assert thirty_days == 30 * 24 * 60 * 60
+    cookie = _auth.mint_session_cookie(now=1_000, ttl_seconds=thirty_days)
+    assert _auth.verify_session_cookie(cookie, now=1_000 + thirty_days - 1) is True
+    assert _auth.verify_session_cookie(cookie, now=1_000 + thirty_days) is False
+    # ...and the default is still the 8h workday session.
+    default = _auth.mint_session_cookie(now=1_000)
+    assert _auth.verify_session_cookie(default, now=1_000 + 8 * 3600 - 1) is True
+    assert _auth.verify_session_cookie(default, now=1_000 + 8 * 3600) is False
+
+
+def test_session_cookie_expiry_reads_only_verified_cookies() -> None:
+    cookie = _auth.mint_session_cookie(now=1_000, ttl_seconds=600)
+    assert _auth.session_cookie_expiry(cookie, now=1_000) == 1_600
+    assert _auth.session_cookie_expiry(cookie, now=1_600) is None  # expired
+    assert _auth.session_cookie_expiry("garbage") is None
+    payload, _, sig = cookie.partition(".")
+    assert _auth.session_cookie_expiry(f"{payload}.{sig[:-2]}AA") is None  # forged
+
+
 def test_secret_file_chmod_0600(isolate_secret: Path) -> None:
     """The on-disk secret is mode 0600 after first creation."""
     _auth.mint_session_cookie()
@@ -147,6 +169,39 @@ def test_handshake_sets_session_cookie(client: TestClient) -> None:
     assert resp.status_code == 200
     assert resp.json() == {"agent_id": "hermes", "ok": True}
     assert _auth.SESSION_COOKIE_NAME in resp.cookies
+
+
+def test_handshake_does_not_shorten_a_longer_lived_session(client: TestClient) -> None:
+    """Opening agent chat must not swap a 30-day remember-me cookie for an 8h one.
+
+    The handshake mints the same cookie the login does; left unconditional it
+    silently logged a "remembered" operator out the next morning.
+    """
+    import time
+
+    long_lived = _auth.mint_session_cookie(ttl_seconds=_auth.SESSION_COOKIE_REMEMBER_TTL_SECONDS)
+    client.cookies.set(_auth.SESSION_COOKIE_NAME, long_lived)
+
+    resp = client.get("/api/agents/hermes/session/handshake")
+
+    assert resp.status_code == 200
+    assert _auth.SESSION_COOKIE_NAME not in resp.cookies  # nothing re-issued
+    held = client.cookies.get(_auth.SESSION_COOKIE_NAME)
+    assert _auth.verify_session_cookie(held, now=time.time() + 29 * 24 * 3600) is True
+
+
+def test_handshake_still_renews_a_session_about_to_lapse(client: TestClient) -> None:
+    """The existing behaviour for workday sessions: attaching extends to a full 8h."""
+    import time
+
+    nearly_gone = _auth.mint_session_cookie(ttl_seconds=60)
+    client.cookies.set(_auth.SESSION_COOKIE_NAME, nearly_gone)
+
+    resp = client.get("/api/agents/hermes/session/handshake")
+
+    renewed = resp.cookies.get(_auth.SESSION_COOKIE_NAME)
+    assert renewed is not None
+    assert _auth.verify_session_cookie(renewed, now=time.time() + 7 * 3600) is True
 
 
 def test_ws_upgrade_with_missing_cookie_rejected(client: TestClient) -> None:
