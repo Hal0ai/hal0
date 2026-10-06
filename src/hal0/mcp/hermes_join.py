@@ -147,13 +147,49 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
                 host=exposure[0],
                 header_keys=exposure[1],
             )
-        entries[record.id] = {
+        entry: dict[str, Any] = {
             "type": "sse" if record.transport == "sse" else "http",
             "url": record.url,
             "timeout": 60,
             "headers": build_headers(record, agent_id=_AGENT_ID),
         }
+        if record.header_value_keys():
+            # #2304: Hermes's content-type preflight re-sends these headers
+            # with follow_redirects=True and strips nothing, so an https
+            # endpoint redirecting to plaintext http would receive them in
+            # clear. The pinned Hermes honours `skip_preflight`; hal0's own
+            # probe (which refuses redirects) covers the same "is this MCP?"
+            # check. Hermes's live client still follows redirects, keeping
+            # every header but Authorization on a cross-origin hop — see
+            # #2330; hal0 cannot configure that.
+            entry["skip_preflight"] = True
+        entries[record.id] = entry
     return entries
+
+
+def reconcile_stale_joins() -> list[str]:
+    """Remove joins hal0 owns but no longer wants; run once at hal0-api startup.
+
+    :func:`sync_exposure` otherwise runs only from MCP mutation routes. A
+    record that stops loading — e.g. one the #2304 TLS gate now refuses
+    after an upgrade — would leave its entry, resolved secret headers
+    included, in Hermes's config until some unrelated mutation. Runs the
+    full sync only when the ownership manifest names an id that is no
+    longer desired, so a converged box does no ``hermes config set`` work
+    on boot. Returns the stale ids found (empty when nothing was stale).
+    """
+    manifest = _load_manifest()
+    stale = sorted(
+        {sid for t in JOIN_TARGETS for sid in set(manifest.get(t, [])) - set(_desired_entries(t))}
+    )
+    if stale:
+        report = sync_exposure()
+        log.warning(
+            "hal0.mcp.hermes_join.stale_joins_removed",
+            server_ids=stale,
+            errors=report.get("errors", []),
+        )
+    return stale
 
 
 def _seed_tools_block(records_by_id: dict[str, InstalledServer]) -> dict[str, Any]:
@@ -295,4 +331,4 @@ def _mirror_seed_toml(
     write_toml_atomic(path, merged, mode=0o600)
 
 
-__all__ = ["JOIN_TARGETS", "sync_exposure"]
+__all__ = ["JOIN_TARGETS", "reconcile_stale_joins", "sync_exposure"]

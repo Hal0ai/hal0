@@ -2181,6 +2181,8 @@ def apply_mcp_server_entries(
                 (f"mcp_servers.{sid}.url", spec["url"]),
                 (f"mcp_servers.{sid}.timeout", spec.get("timeout", 60)),
             ]
+            if spec.get("skip_preflight"):
+                pairs.append((f"mcp_servers.{sid}.skip_preflight", True))
             for hk, hv in (spec.get("headers") or {}).items():
                 pairs.append((f"mcp_servers.{sid}.headers.{hk}", hv))
         hermes_bin = _hermes_bin(venv)
@@ -2272,6 +2274,8 @@ def apply_brain_profile_mcp_entries(
                     "headers": dict(spec.get("headers") or {}),
                     "timeout": spec.get("timeout", 60),
                 }
+                if spec.get("skip_preflight"):
+                    servers[sid]["skip_preflight"] = True
         out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
         changed = out != current
         if changed:

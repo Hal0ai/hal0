@@ -239,6 +239,14 @@ class InstalledServer(BaseModel):
             )
         return self
 
+    def header_value_keys(self) -> list[str]:
+        """Keys whose values :func:`hal0.mcp.probe.build_headers` sends as headers.
+
+        Every ``[secrets]`` key (resolved at send time) and every ``[env]``
+        key with a non-empty literal; an empty ``[env]`` value carries nothing.
+        """
+        return sorted(set(self.secrets) | {k for k, v in self.env.items() if v})
+
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
         """``(host, header keys)`` when header values would cross a network
         in clear text, else ``None``. Ignores ``allow_insecure_http``.
@@ -251,7 +259,7 @@ class InstalledServer(BaseModel):
         """
         if self.transport not in ("streamable-http", "sse") or not self.url:
             return None
-        keys = sorted(set(self.secrets) | {k for k, v in self.env.items() if v})
+        keys = self.header_value_keys()
         if not keys:
             return None
         try:
