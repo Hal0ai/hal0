@@ -182,10 +182,13 @@ def _entry_drifted(desired: dict[str, Any], persisted: Any) -> bool:
         return True
     if bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight")):
         return True
-    # Header *keys* only (values are coerced by `hermes config set`): a key on
-    # disk that is no longer rendered is a removed credential still being sent.
+    # Header *keys* only (values are coerced by `hermes config set`), compared
+    # both ways: a key on disk no longer rendered is a removed credential still
+    # being sent; a rendered key missing on disk is a credential (e.g. a secret
+    # unresolved at the last sync) Hermes never received.
     on_disk = persisted.get("headers")
-    return isinstance(on_disk, dict) and bool(set(on_disk) - set(desired.get("headers") or {}))
+    on_disk_keys = set(on_disk) if isinstance(on_disk, dict) else set()
+    return on_disk_keys != set(desired.get("headers") or {})
 
 
 def _report_errors(report: dict[str, Any]) -> list[str]:
@@ -218,9 +221,11 @@ def reconcile_stale_joins() -> list[str]:
 
     Runs the full sync when membership differs from the ownership manifest
     (either direction) or when a desired entry's :data:`_RECONCILED_FIELDS`
-    differ from the persisted one. A converged box does no ``hermes config
-    set`` work on boot; a config file hal0 cannot read is not treated as
-    drift. Returns the ids that triggered the sync (empty when converged).
+    differ from the persisted one (an absent main config, with Hermes
+    installed, reads as empty, so its entries are recreated). A converged box
+    does no ``hermes config set`` work on boot; a config file hal0 cannot
+    read is logged but not treated as drift. Returns the ids that triggered
+    the sync (empty when converged).
     """
     from hal0.agents import hermes_provision
 
@@ -230,10 +235,19 @@ def reconcile_stale_joins() -> list[str]:
         desired = _desired_entries(target)
         owned = set(manifest.get(target, []))
         triggered |= owned ^ set(desired)
-        persisted = hermes_provision.persisted_mcp_servers(target, hermes_home=_hermes_home())
-        if persisted is not None:
+        persisted = hermes_provision.persisted_mcp_servers(
+            target, hermes_home=_hermes_home(), venv=_hermes_venv()
+        )
+        if persisted.error is not None:
+            log.warning(
+                "hal0.mcp.hermes_join.persisted_config_unreadable",
+                target=target,
+                error=persisted.error,
+            )
+        if persisted.servers is not None:
+            servers = persisted.servers
             triggered |= {
-                sid for sid, entry in desired.items() if _entry_drifted(entry, persisted.get(sid))
+                sid for sid, entry in desired.items() if _entry_drifted(entry, servers.get(sid))
             }
     if triggered:
         report = sync_exposure()

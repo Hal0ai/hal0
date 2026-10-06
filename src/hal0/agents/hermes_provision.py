@@ -2272,18 +2272,49 @@ def _prune_mcp_servers_yaml(
             )
         return removed, None
     except (OSError, yaml.YAMLError) as exc:
-        return [], str(exc)
+        return [], _yaml_error_summary(exc)
 
 
-def persisted_mcp_servers(target: str, *, hermes_home: Path | str) -> dict[str, Any] | None:
+def _yaml_error_summary(exc: Exception) -> str:
+    """Name and position of a YAML/IO error, safe to log or return.
+
+    ``str()`` of a PyYAML error quotes a snippet of the offending line, and
+    in Hermes's ``config.yaml`` that line can hold a resolved header value.
+    """
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"{type(exc).__name__} at line {mark.line + 1}, column {mark.column + 1}"
+    if isinstance(exc, OSError):
+        return str(exc)
+    return type(exc).__name__
+
+
+class PersistedMcpServers(NamedTuple):
+    """What :func:`persisted_mcp_servers` found on disk."""
+
+    servers: dict[str, Any] | None
+    """The ``mcp_servers`` table, or ``None`` when there is nothing to compare."""
+    error: str | None
+    """Set when the file exists but cannot be read (never a value snippet)."""
+
+
+def persisted_mcp_servers(
+    target: str, *, hermes_home: Path | str, venv: Path | str
+) -> PersistedMcpServers:
     """The ``mcp_servers`` table that the ``target`` join writer edits, as on disk.
 
     ``target`` is ``"hermes"`` (the main ``config.yaml`` that
     :func:`apply_mcp_server_entries` writes) or ``"brain"`` (the profile
-    config :func:`apply_brain_profile_mcp_entries` writes). Returns ``None``
-    when there is nothing to compare against — file absent, unreadable,
-    malformed, or PyYAML missing — so a caller never mistakes "cannot read"
-    for "differs".
+    config :func:`apply_brain_profile_mcp_entries` writes).
+
+    * Main config absent while the hermes binary exists: an empty table, so
+      every desired entry reads as missing — ``hermes config set`` recreates
+      the file. Without the binary nothing could write it: ``servers=None``.
+    * Brain profile config absent: ``servers=None``; the brain writer only
+      edits an existing profile (the hermes binary owns profile creation).
+    * File present but unreadable, malformed, or PyYAML missing:
+      ``servers=None`` plus ``error``, so a caller never mistakes "cannot
+      read" for "differs" yet can still report it.
     """
     home = Path(hermes_home)
     path = (
@@ -2292,15 +2323,21 @@ def persisted_mcp_servers(target: str, *, hermes_home: Path | str) -> dict[str, 
         else home / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
     )
     if not path.exists():
-        return None
+        if target == "hermes" and _hermes_bin(Path(venv)).exists():
+            return PersistedMcpServers({}, None)
+        return PersistedMcpServers(None, None)
     try:
         import yaml
-
+    except ImportError:
+        return PersistedMcpServers(None, "PyYAML unavailable")
+    try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (ImportError, OSError, yaml.YAMLError):
-        return None
-    servers = data.get("mcp_servers") if isinstance(data, dict) else None
-    return servers if isinstance(servers, dict) else {}
+    except (OSError, yaml.YAMLError) as exc:
+        return PersistedMcpServers(None, _yaml_error_summary(exc))
+    if not isinstance(data, dict):
+        return PersistedMcpServers(None, f"{path.name} is not a YAML mapping")
+    servers = data.get("mcp_servers")
+    return PersistedMcpServers(servers if isinstance(servers, dict) else {}, None)
 
 
 def apply_brain_profile_mcp_entries(
@@ -2368,11 +2405,12 @@ def apply_brain_profile_mcp_entries(
         if changed:
             _atomic_write(path, out)
     except (OSError, yaml.YAMLError) as exc:
+        summary = _yaml_error_summary(exc)
         return {
             "wired": False,
-            "error": str(exc),
+            "error": summary,
             "path": str(path),
-            "remove_errors": [str(exc)] if remove_ids else [],
+            "remove_errors": [summary] if remove_ids else [],
         }
 
     return {

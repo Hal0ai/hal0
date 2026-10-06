@@ -382,6 +382,8 @@ def test_reconcile_is_a_noop_when_persisted_entries_match(tmp_hal0_home: str, mo
             "github": {
                 "type": "http",
                 "url": "https://github.example.com/mcp",
+                # GITHUB_MCP_TOKEN is unset here, so only the agent tag renders.
+                "headers": {"X-hal0-Agent": "hermes"},
                 "skip_preflight": True,
             }
         }
@@ -393,6 +395,87 @@ def test_reconcile_is_a_noop_when_persisted_entries_match(tmp_hal0_home: str, mo
 
     monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
     assert hermes_join.reconcile_stale_joins() == []
+
+
+def test_reconcile_recreates_entries_when_main_config_was_deleted(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Hermes installed, manifest matches, but config.yaml is gone: re-sync."""
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    _install("github", exposure=installed.ExposureConfig(hermes=True))
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+    assert not (cfg_paths.var_lib() / ".hermes" / "config.yaml").exists()
+
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    assert [
+        hermes_bin,
+        "config",
+        "set",
+        "mcp_servers.github.url",
+        "https://github.example.com/mcp",
+    ] in calls
+
+
+def test_reconcile_writes_a_desired_header_key_missing_on_disk(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """A secret unresolved at the previous sync and set since: startup writes it."""
+    monkeypatch.setenv("GITHUB_MCP_TOKEN", "shh-secret-value")
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+    )
+    _write_hermes_config(
+        {
+            "github": {
+                "url": "https://github.example.com/mcp",
+                "headers": {"X-hal0-Agent": "hermes"},
+                "skip_preflight": True,
+            }
+        }
+    )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    assert [
+        hermes_bin,
+        "config",
+        "set",
+        "mcp_servers.github.headers.AUTHORIZATION",
+        "shh-secret-value",
+    ] in calls
+
+
+def test_malformed_main_config_is_logged_not_drift(tmp_hal0_home: str, monkeypatch) -> None:
+    """Unreadable is not 'differs' (no sync), but it is surfaced — without
+    PyYAML's snippet of the offending line, which can hold a header value."""
+    from structlog.testing import capture_logs
+
+    _fake_hermes(monkeypatch)
+    _install("github", exposure=installed.ExposureConfig(hermes=True))
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    hermes_cfg.parent.mkdir(parents=True, exist_ok=True)
+    hermes_cfg.write_text(
+        "mcp_servers:\n  github:\n    headers: {AUTHORIZATION: SUPERSECRET-VALUE\n",
+        encoding="utf-8",
+    )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    def _no_sync(**kwargs: object) -> dict:
+        raise AssertionError("an unreadable config must not count as drift")
+
+    monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
+    with capture_logs() as logs:
+        assert hermes_join.reconcile_stale_joins() == []
+    unreadable = [
+        e for e in logs if e["event"] == "hal0.mcp.hermes_join.persisted_config_unreadable"
+    ]
+    assert len(unreadable) == 1
+    assert unreadable[0]["target"] == "hermes"
+    assert "line" in unreadable[0]["error"]
+    assert "SUPERSECRET-VALUE" not in repr(logs)
 
 
 def test_skip_preflight_cleared_when_header_values_removed(tmp_hal0_home: str, monkeypatch) -> None:
