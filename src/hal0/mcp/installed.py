@@ -66,8 +66,13 @@ BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 _SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
-def _is_loopback_host(host: str) -> bool:
-    """``localhost`` or any loopback IP literal (``127.0.0.0/8``, ``::1``)."""
+def is_loopback_destination(host: str) -> bool:
+    """``localhost`` or any loopback IP literal (``127.0.0.0/8``, ``::1``).
+
+    The #2304 exemption for plaintext ``http://``. It only holds if the
+    request really goes direct, so :mod:`hal0.mcp.probe` ignores
+    environment proxies for these hosts.
+    """
     if host == "localhost":
         return True
     try:
@@ -254,7 +259,7 @@ class InstalledServer(BaseModel):
             host = parts.hostname or ""
         except ValueError:
             return (self.url, keys)
-        if parts.scheme.lower() == "https" or _is_loopback_host(host):
+        if parts.scheme.lower() == "https" or is_loopback_destination(host):
             return None
         return (host or self.url, keys)
 
@@ -601,6 +606,7 @@ __all__ = [
     "InstalledServer",
     "get_installed",
     "install",
+    "is_loopback_destination",
     "list_enabled_exposed",
     "list_installed",
     "patch_config",
