@@ -147,3 +147,44 @@ def test_headers_omit_unresolved_secret(tmp_hal0_home: str) -> None:
     )
     entries = hermes_join._desired_entries("hermes")
     assert "Authorization" not in entries["github"]["headers"]
+
+
+def test_allow_insecure_http_renders_and_warns_on_every_render(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """#2304: the explicit override is honoured, and never silently."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("GITHUB_MCP_TOKEN", "shh-secret-value")
+    _install(
+        "github",
+        url="http://192.0.2.10:8765/mcp",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+        allow_insecure_http=True,
+    )
+    for _ in range(2):
+        with capture_logs() as logs:
+            entries = hermes_join._desired_entries("hermes")
+        assert entries["github"]["headers"]["AUTHORIZATION"] == "shh-secret-value"
+        warnings = [e for e in logs if e["event"] == "hal0.mcp.hermes_join.insecure_http"]
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["server_id"] == "github"
+        assert warnings[0]["host"] == "192.0.2.10"
+        assert warnings[0]["header_keys"] == ["AUTHORIZATION"]
+
+
+def test_https_record_renders_without_insecure_warning(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("GITHUB_MCP_TOKEN", "shh-secret-value")
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+    )
+    with capture_logs() as logs:
+        entries = hermes_join._desired_entries("hermes")
+    assert entries["github"]["headers"]["AUTHORIZATION"] == "shh-secret-value"
+    assert not [e for e in logs if e["event"] == "hal0.mcp.hermes_join.insecure_http"]

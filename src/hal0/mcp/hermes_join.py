@@ -135,6 +135,18 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
             continue
         if not record.url:
             continue
+        # #2304: a record that would send header values in clear text only
+        # loads with the explicit `allow_insecure_http` opt-in — say so on
+        # every render rather than once at install.
+        exposure = record.plaintext_header_exposure() if record.allow_insecure_http else None
+        if exposure is not None:
+            log.warning(
+                "hal0.mcp.hermes_join.insecure_http",
+                server_id=record.id,
+                target=target,
+                host=exposure[0],
+                header_keys=exposure[1],
+            )
         entries[record.id] = {
             "type": "sse" if record.transport == "sse" else "http",
             "url": record.url,

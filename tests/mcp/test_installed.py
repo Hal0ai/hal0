@@ -292,3 +292,114 @@ def test_patch_config_traversal_id_creates_no_file_outside_the_registry(
 
     assert victim.read_text(encoding="utf-8") == "do not truncate me\n"
     assert not (outside_dir / "victim.toml.lock").exists()
+
+
+# ── #2304: no [secrets]/[env] headers over plaintext http to a non-loopback host ──
+
+
+def _http_record(url: str, **overrides: object) -> registry.InstalledServer:
+    fields: dict[str, object] = {
+        "spec": "https://github.example.com/manifest.json",
+        "transport": "streamable-http",
+        "url": url,
+    }
+    fields.update(overrides)
+    return _record("github", **fields)
+
+
+def test_https_url_with_secrets_accepted(tmp_hal0_home: str) -> None:
+    saved = registry.install(
+        _http_record(
+            "https://github.example.com/mcp", secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"}
+        )
+    )
+    assert saved.secrets == {"AUTHORIZATION": "GITHUB_MCP_TOKEN"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://127.0.0.1:8765/mcp", "http://localhost:8765/mcp", "http://[::1]:8765/mcp"],
+)
+def test_loopback_http_with_secrets_accepted(tmp_hal0_home: str, url: str) -> None:
+    saved = registry.install(_http_record(url, secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"}))
+    assert saved.url == url
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
+def test_lan_http_with_secrets_refused(tmp_hal0_home: str, transport: str) -> None:
+    with pytest.raises(ValueError, match=r"AUTHORIZATION") as exc:
+        _http_record(
+            "http://192.0.2.10:8765/mcp",
+            transport=transport,
+            secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+        )
+    assert "192.0.2.10" in str(exc.value)
+    assert "https://" in str(exc.value)
+
+
+def test_lan_http_with_env_literal_refused(tmp_hal0_home: str) -> None:
+    """``build_headers`` forwards every ``[env]`` literal as a header too."""
+    with pytest.raises(ValueError, match=r"X_API_KEY") as exc:
+        _http_record("http://192.0.2.10:8765/mcp", env={"X_API_KEY": "literal"})
+    assert "192.0.2.10" in str(exc.value)
+
+
+def test_lan_http_without_secrets_accepted(tmp_hal0_home: str) -> None:
+    """No header values to leak: plain http to a LAN host is the operator's call.
+
+    An ``[env]`` key with an empty value (what ``POST /install`` writes for
+    each ``env_required`` name) carries nothing, so it does not trip the gate.
+    """
+    saved = registry.install(_http_record("http://192.0.2.10:8765/mcp", env={"X_API_KEY": ""}))
+    assert saved.url == "http://192.0.2.10:8765/mcp"
+
+
+def test_allow_insecure_http_override_accepted(tmp_hal0_home: str) -> None:
+    saved = registry.install(
+        _http_record(
+            "http://192.0.2.10:8765/mcp",
+            secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+            allow_insecure_http=True,
+        )
+    )
+    reloaded = registry.get_installed("github")
+    assert saved.allow_insecure_http is True
+    assert reloaded.allow_insecure_http is True
+    assert reloaded.secrets == {"AUTHORIZATION": "GITHUB_MCP_TOKEN"}
+
+
+def test_patch_config_refuses_header_value_over_lan_http(tmp_hal0_home: str) -> None:
+    """``patch_config`` builds via ``model_copy`` (no validators) — it must re-check."""
+    registry.install(_http_record("http://192.0.2.10:8765/mcp"))
+    with pytest.raises(BadRequest) as exc:
+        registry.patch_config("github", secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"})
+    assert exc.value.code == "mcp.insecure_url"
+    assert "AUTHORIZATION" in str(exc.value)
+    assert "192.0.2.10" in str(exc.value)
+    with pytest.raises(BadRequest) as exc:
+        registry.patch_config("github", env={"X_API_KEY": "literal"})
+    assert exc.value.code == "mcp.insecure_url"
+    # Nothing was written: the on-disk record is unchanged.
+    reloaded = registry.get_installed("github")
+    assert reloaded.secrets == {}
+    assert reloaded.env == {}
+
+
+def test_hand_edited_lan_http_record_with_secrets_is_refused_on_load(
+    tmp_hal0_home: str,
+) -> None:
+    """A TOML edited by hand never went through install/PATCH; loading refuses it."""
+    path = registry._registry_path("github")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'id = "github"\nname = "github"\nspec = "https://github.example.com/manifest.json"\n'
+        'transport = "streamable-http"\nurl = "http://192.0.2.10:8765/mcp"\n'
+        '[secrets]\nAUTHORIZATION = "GITHUB_MCP_TOKEN"\n',
+        encoding="utf-8",
+    )
+    assert registry.list_installed() == []
+    with pytest.raises(BadRequest) as exc:
+        registry.get_installed("github")
+    assert exc.value.code == "mcp.record_malformed"
+    assert "AUTHORIZATION" in exc.value.details["reason"]
+    assert "192.0.2.10" in exc.value.details["reason"]

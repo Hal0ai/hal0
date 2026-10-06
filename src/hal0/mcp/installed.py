@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import ipaddress
 import os
 import re
 import tomllib
@@ -35,9 +36,10 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from hal0.config import paths as cfg_paths
 from hal0.config.loader import write_toml_atomic
@@ -61,6 +63,25 @@ BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 #: rather than imported so this domain module doesn't reach up into the
 #: API route layer for a one-line regex.
 _SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """``localhost`` or any loopback IP literal (``127.0.0.0/8``, ``::1``)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _insecure_http_message(server_id: str, host: str, keys: list[str]) -> str:
+    """Operator-facing refusal for the #2304 plaintext-header gate."""
+    return (
+        f"MCP server {server_id!r}: header value(s) {keys} from [secrets]/[env] "
+        f"would be sent in clear text to non-loopback host {host!r}; use an "
+        f"https:// url or a loopback host, or set allow_insecure_http = true"
+    )
 
 
 class ExposureConfig(BaseModel):
@@ -135,6 +156,10 @@ class InstalledServer(BaseModel):
     """The manifest URL the install was resolved against, when applicable."""
     author: str = Field(default="user")
     verified: bool = Field(default=False)
+    allow_insecure_http: bool = Field(default=False)
+    """Explicit opt-in to send ``[secrets]``/``[env]`` header values over
+    plaintext ``http://`` to a non-loopback host (#2304). Off by default;
+    when set, :mod:`hal0.mcp.hermes_join` logs a warning on every render."""
 
     @field_validator("secrets")
     @classmethod
@@ -154,6 +179,44 @@ class InstalledServer(BaseModel):
                 f"(^[A-Z][A-Z0-9_]{{0,63}}$): {sorted(bad)}"
             )
         return v
+
+    @model_validator(mode="after")
+    def _header_values_need_tls(self) -> InstalledServer:
+        """Refuse a record that would send header values in clear text (#2304).
+
+        Raised as ``ValueError`` like the ``secrets`` validator above, so a
+        hand-edited record fails to load (``list_installed`` skips it with
+        ``hal0.mcp.installed.bad_record``; ``get_installed`` returns
+        ``mcp.record_malformed``) instead of being joined to Hermes.
+        """
+        exposure = None if self.allow_insecure_http else self.plaintext_header_exposure()
+        if exposure is not None:
+            raise ValueError(_insecure_http_message(self.id, *exposure))
+        return self
+
+    def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
+        """``(host, header keys)`` when header values would cross a network
+        in clear text, else ``None``. Ignores ``allow_insecure_http``.
+
+        :func:`hal0.mcp.probe.build_headers` turns every ``[secrets]`` entry
+        and every ``[env]`` literal into a request header, sent to ``url``
+        by both the probe and Hermes (via :mod:`hal0.mcp.hermes_join`). That
+        is only safe over ``https://`` or to a loopback host. An ``[env]``
+        key with an empty value carries nothing and is not counted.
+        """
+        if self.transport not in ("streamable-http", "sse") or not self.url:
+            return None
+        keys = sorted(set(self.secrets) | {k for k, v in self.env.items() if v})
+        if not keys:
+            return None
+        try:
+            parts = urlsplit(self.url)
+            host = parts.hostname or ""
+        except ValueError:
+            return (self.url, keys)
+        if parts.scheme.lower() == "https" or _is_loopback_host(host):
+            return None
+        return (host or self.url, keys)
 
     def to_toml_dict(self) -> dict[str, Any]:
         """Serialise to a tomli_w-compatible dict (drops None values).
@@ -327,6 +390,22 @@ def get_installed(server_id: str) -> InstalledServer:
         ) from exc
 
 
+def _require_tls_for_header_values(record: InstalledServer) -> None:
+    """Raise ``400 mcp.insecure_url`` for a record failing the #2304 gate.
+
+    The model validator covers construction and load; this covers records
+    built with ``model_copy`` (no validators), i.e. :func:`patch_config`.
+    """
+    exposure = None if record.allow_insecure_http else record.plaintext_header_exposure()
+    if exposure is not None:
+        host, keys = exposure
+        raise BadRequest(
+            _insecure_http_message(record.id, host, keys),
+            code="mcp.insecure_url",
+            details={"server_id": record.id, "host": host, "header_keys": keys},
+        )
+
+
 def install(record: InstalledServer) -> InstalledServer:
     """Write a new installed-server record. Raises :class:`Conflict` on dup.
 
@@ -335,6 +414,7 @@ def install(record: InstalledServer) -> InstalledServer:
     we don't re-resolve here, that's a separate route concern.
     """
     _validate_id(record.id)
+    _require_tls_for_header_values(record)
     path = _registry_path(record.id)
     if path.exists():
         raise Conflict(
@@ -435,6 +515,7 @@ def patch_config(
         if not updates:
             return record
         next_record = record.model_copy(update=updates)
+        _require_tls_for_header_values(next_record)
         target_path = _registry_path(server_id)
         write_toml_atomic(target_path, next_record.to_toml_dict())
         _harden_registry_perms(target_path)
