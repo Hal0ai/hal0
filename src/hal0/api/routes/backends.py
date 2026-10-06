@@ -14,6 +14,7 @@ returns 0 until a stats source lands).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -21,7 +22,7 @@ from fastapi import APIRouter, Request
 
 from hal0.api.deps import SlotManagerDep
 from hal0.api.middleware.error_codes import BadRequest
-from hal0.capabilities.catalog import available_backends, get_backend
+from hal0.capabilities.catalog import available_backends
 from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
 from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error, NotFound
@@ -238,9 +239,8 @@ async def _loaded_children_for_backend(
     return out
 
 
-def _state_for_backend(backend_id: str) -> str:
+def _state_for_backend(backend_id: str, available_ids: set[str]) -> str:
     """Return ``ready`` / ``offline`` / ``error`` for the backend card."""
-    available_ids = {b["id"] for b in available_backends()}
     if backend_id in available_ids:
         return "ready"
     return "offline"
@@ -249,8 +249,18 @@ def _state_for_backend(backend_id: str) -> str:
 # ── routes ────────────────────────────────────────────────────────────────────
 
 
+async def _available_backends_off_loop() -> list[dict[str, Any]]:
+    """:func:`available_backends`, run on a worker thread (#1974).
+
+    It reaches the FLM-image probe, a blocking seam call that can take up to
+    its 10 s timeout when podman is wedged. Off the loop, a hung seam stalls
+    this request only, not every request hal0-api is serving.
+    """
+    return await asyncio.to_thread(available_backends)
+
+
 async def _build_backend_payload(
-    backend: dict[str, Any], slot_manager: SlotManagerDep
+    backend: dict[str, Any], slot_manager: SlotManagerDep, available_ids: set[str]
 ) -> dict[str, Any]:
     """Render one backend descriptor + live status into the response shape."""
     backend_id = backend["id"]
@@ -264,7 +274,7 @@ async def _build_backend_payload(
         "multiplex": bool(backend.get("multiplex", False)),
         "hardware": _hardware_for_backend(backend_id),
         "driver": _driver_for_backend(backend_id),
-        "state": _state_for_backend(backend_id),
+        "state": _state_for_backend(backend_id, available_ids),
         "memUsedMb": mem_used,
         "memTotalMb": mem_total,
         "totalReqPerSec": 0,
@@ -275,9 +285,11 @@ async def _build_backend_payload(
 @router.get("")
 async def list_backends(request: Request, slot_manager: SlotManagerDep) -> list[dict[str, Any]]:
     """Return one row per available backend with live status."""
+    backends = await _available_backends_off_loop()
+    available_ids = {b["id"] for b in backends}
     out: list[dict[str, Any]] = []
-    for backend in available_backends():
-        out.append(await _build_backend_payload(backend, slot_manager))
+    for backend in backends:
+        out.append(await _build_backend_payload(backend, slot_manager, available_ids))
     return out
 
 
@@ -288,14 +300,15 @@ async def get_backend_details(
     slot_manager: SlotManagerDep,
 ) -> dict[str, Any]:
     """Single-backend variant of :func:`list_backends`."""
-    backend = get_backend(backend_id)
+    backends = await _available_backends_off_loop()
+    backend = next((b for b in backends if b["id"] == backend_id), None)
     if backend is None:
         raise NotFound(
             f"backend {backend_id!r} not available on this host",
             code="backend.not_found",
             details={"id": backend_id},
         )
-    return await _build_backend_payload(backend, slot_manager)
+    return await _build_backend_payload(backend, slot_manager, {b["id"] for b in backends})
 
 
 # ── NPU dynamic-slot endpoints ────────────────────────────────────────────────

@@ -32,6 +32,7 @@ and non-NPU devices keep spawning their own slot via the regular
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from pathlib import Path
@@ -329,8 +330,16 @@ class CapabilityOrchestrator:
         from hal0.capabilities.catalog import available_backends, catalogs_by_slot
 
         cfg = self._load()
-        backends = available_backends()
-        catalogs = catalogs_by_slot(registry=self._registry)
+
+        # #1974: both reads reach the FLM-image probe, a blocking seam call
+        # that can take up to its 10 s timeout when podman is wedged. Run them
+        # on a worker thread so a hung seam stalls this request, never the
+        # event loop (and with it every other request). The registry they
+        # scan is RLock-guarded, so the thread hop is safe.
+        def _backends_and_catalogs() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            return available_backends(), catalogs_by_slot(registry=self._registry)
+
+        backends, catalogs = await asyncio.to_thread(_backends_and_catalogs)
 
         selections_out: dict[str, dict[str, dict[str, Any]]] = {}
         for slot in LEGAL_SLOTS:
