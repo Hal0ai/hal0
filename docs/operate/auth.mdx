@@ -124,15 +124,17 @@ show it.
 The dashboard therefore asks for the admin key at the front door in this
 posture: a browser whose ADMIN requests would be refused gets the login screen
 on load, worded for this case ("This hal0 is reachable from your network")
-rather than as if enforcement were on. **View read-only** skips it for the
-browser tab and shows the open pages; a **Sign in** chip in the top bar then
+rather than as if enforcement were on. The login is asked for on every page.
+**View this page read-only** dismisses it for the page you are on (a
+top-level section such as Slots, with its tabs) and shows what is open there;
+moving to another section asks again; a **Sign in** chip in the top bar then
 opens the admin-key drawer at any time, and a change attempted while
 read-only opens the same drawer and retries once you sign in. Signed in, the
-chip reads **Admin** with a **Log out** button. When the 8-hour session
+chip reads **Admin** with a **Log out** button. When the session
 lapses, the next refused request brings the login screen back. Whenever the
 login screen appears, whether after a log-out or a lapse, the dashboard
 discards what it had fetched under the previous session, so none of it is
-readable through **View read-only**. A browser on
+readable through the read-only view. A browser on
 the box itself (loopback), or any browser on a box with no admin key, sees
 none of this. From other clients, send the admin key on the request. To make the
 posture explicit, run `hal0 auth require on`; to take the box off the LAN
@@ -155,10 +157,13 @@ All under `/api/auth`:
 
 ### `POST /api/auth/login`
 
-Body: `{"key": "<candidate>"}`. Rate-limited per caller IP *before* the key
-is even compared (constant-time `hmac.compare_digest`, so a blocked caller
-never reaches the check). On success, sets an HttpOnly session cookie and
-returns `{"ok": true, "tier": "admin"}`. On a bad key: `401`,
+Body: `{"key": "<candidate>", "remember": false}`; `remember` is optional.
+Rate-limited per caller IP *before* the key is even compared (constant-time
+`hmac.compare_digest`, so a blocked caller never reaches the check). On
+success, sets an HttpOnly session cookie and returns
+`{"ok": true, "tier": "admin", "session_ttl_s": 28800}`. With
+`"remember": true` the session lasts 30 days instead of 8 hours and
+`session_ttl_s` is `2592000` (see Sessions below). On a bad key: `401`,
 `code: "auth.invalid_key"`. On a limiter trip: `429`,
 `code: "auth.rate_limited"`, `details: {"retry_after_s": <int>}`.
 
@@ -223,10 +228,29 @@ Never returns secrets — safe for the dashboard to poll unauthenticated.
 
 The session cookie (`hal0_session`) is `<payload>.<hmac>`, base64url-encoded:
 payload is `{session_id, expires_at}`, signature is
-`HMAC-SHA256(secret, payload)`. TTL is **8 hours**. The signing secret is a
-32-byte random value generated on first use at
-`/var/lib/hal0/agents/secret.bin` (mode `0600`) and never leaves the hal0
-service user. The cookie is set `HttpOnly`, `SameSite=Lax`.
+`HMAC-SHA256(secret, payload)`. The signing secret is a 32-byte random value
+generated on first use at `/var/lib/hal0/agents/secret.bin` (mode `0600`) and
+never leaves the hal0 service user. The cookie is set `HttpOnly`,
+`SameSite=Lax`.
+
+A session lasts **8 hours** by default. Ticking **Remember me** on the login
+screen (`"remember": true` on `POST /api/auth/login`) makes it **30 days**.
+The expiry is inside the signed payload, so a browser cannot extend its own
+session, and the cookie's `Max-Age` is set to match. The dashboard remembers
+only whether the box was ticked last time, never the key. Opening agent chat
+renews a session to a full 8 hours but never shortens a longer one.
+
+Sessions are not stored server-side, so one cannot be revoked on its own, and
+rotating the admin key does not end them. To end **every** session at once —
+for example after signing in with **Remember me** on a machine you no longer
+trust — delete the signing secret on the box:
+
+```bash
+sudo rm /var/lib/hal0/agents/secret.bin
+```
+
+A new secret is generated on the next request, every existing cookie stops
+verifying immediately, and no restart is needed.
 
 ## Rate limiting
 

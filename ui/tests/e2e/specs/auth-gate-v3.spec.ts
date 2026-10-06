@@ -49,6 +49,7 @@ async function installAuth(page: Page, opts: AuthOpts = {}) {
     retryAfterS,
   } = opts
   let loggedIn = startLoggedIn
+  let lastLoginBody: Record<string, unknown> | null = null
 
   await page.route('**/api/auth/status', (route) =>
     json(route, {
@@ -82,9 +83,14 @@ async function installAuth(page: Page, opts: AuthOpts = {}) {
       )
     }
     const body = route.request().postDataJSON?.() ?? {}
+    lastLoginBody = body
     if (body.key === correctKey) {
       loggedIn = true
-      return json(route, { ok: true, tier: 'admin' })
+      return json(route, {
+        ok: true,
+        tier: 'admin',
+        session_ttl_s: body.remember ? 30 * 24 * 3600 : 8 * 3600,
+      })
     }
     return json(route, { error: { code: 'auth.invalid_key', message: 'invalid key' } }, 401)
   })
@@ -95,6 +101,8 @@ async function installAuth(page: Page, opts: AuthOpts = {}) {
       loggedIn = false
     },
     isLoggedIn: () => loggedIn,
+    /** The JSON body of the most recent POST /api/auth/login. */
+    lastLoginBody: () => lastLoginBody,
   }
 }
 
@@ -197,7 +205,7 @@ test.describe('App-shell auth gate — posture-coupled gate (auth off, LAN-bound
     const signIn = page.getByTestId('tb-session-signin')
     await expect(signIn).toBeVisible()
 
-    // The read-only choice survives a reload of the tab.
+    // The read-only choice survives a reload of the same page.
     await page.reload()
     await expect(page.locator('.app')).toBeVisible()
     await expect(page.getByTestId('login-view')).toHaveCount(0)
@@ -240,6 +248,96 @@ test.describe('App-shell auth gate — posture-coupled gate (auth off, LAN-bound
 
     await expect(page.getByTestId('login-view')).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('.app')).toHaveCount(0)
+  })
+
+  test('the login is asked for on every page: read-only on one page does not carry to the next', async ({ page }) => {
+    await installAuth(page, POSTURE)
+    await page.goto('/')
+    const login = page.getByTestId('login-view')
+    const app = page.locator('.app')
+
+    await page.getByTestId('login-view-read-only').click()
+    await expect(app).toBeVisible()
+
+    // Another section → asked again, app gone.
+    await page.evaluate(() => { window.location.hash = '#slots' })
+    await expect(login).toBeVisible()
+    await expect(app).toHaveCount(0)
+
+    // Dismiss it there; a tab inside the same section does not ask again,
+    // and neither does reloading it.
+    await page.getByTestId('login-view-read-only').click()
+    await expect(app).toBeVisible()
+    await page.evaluate(() => { window.location.hash = '#slots/endpoints' })
+    await expect(app).toBeVisible()
+    await expect(login).toHaveCount(0)
+    await page.reload()
+    await expect(app).toBeVisible()
+    await expect(login).toHaveCount(0)
+
+    // Back to the page dismissed earlier → asked again: one page at a time.
+    await page.evaluate(() => { window.location.hash = '#dashboard' })
+    await expect(login).toBeVisible()
+
+    // Signing in ends it everywhere.
+    await page.getByTestId('login-key-input').fill('the-right-key')
+    await page.getByTestId('login-submit').click()
+    await expect(app).toBeVisible()
+    await page.evaluate(() => { window.location.hash = '#models' })
+    await expect(app).toBeVisible()
+    await expect(login).toHaveCount(0)
+  })
+
+  test('enforcement on: the login is on every page and cannot be dismissed', async ({ page }) => {
+    await installAuth(page, { requireAuth: true })
+    for (const hash of ['', '#slots', '#settings/security', '#logs']) {
+      await page.goto('/' + hash)
+      await expect(page.getByTestId('login-view')).toBeVisible()
+      await expect(page.getByTestId('login-view-read-only')).toHaveCount(0)
+      await expect(page.locator('.app')).toHaveCount(0)
+    }
+  })
+
+  test('remember me: off by default, and when ticked the login asks for the long session', async ({ page }) => {
+    const auth = await installAuth(page, POSTURE)
+    await page.goto('/')
+    const remember = page.getByTestId('login-remember')
+    await expect(remember).not.toBeChecked()
+
+    // Default login: no long session requested.
+    await page.getByTestId('login-key-input').fill('the-right-key')
+    await page.getByTestId('login-submit').click()
+    await expect(page.getByTestId('tb-session-admin')).toBeVisible()
+    expect(auth.lastLoginBody()).toMatchObject({ key: 'the-right-key', remember: false })
+
+    // Log out, tick it, log in again → the request carries remember: true.
+    await page.getByTestId('tb-session-logout').click()
+    await expect(page.getByTestId('login-view')).toBeVisible()
+    await remember.check()
+    await page.getByTestId('login-key-input').fill('the-right-key')
+    await page.getByTestId('login-submit').click()
+    await expect(page.getByTestId('tb-session-admin')).toBeVisible()
+    expect(auth.lastLoginBody()).toMatchObject({ key: 'the-right-key', remember: true })
+
+    // The tick is the remembered preference next time (the key never is).
+    await page.getByTestId('tb-session-logout').click()
+    await expect(page.getByTestId('login-view')).toBeVisible()
+    await expect(remember).toBeChecked()
+    await expect(page.getByTestId('login-key-input')).toHaveValue('')
+  })
+
+  test('remember me is offered in the in-app sign-in drawer too', async ({ page }) => {
+    const auth = await installAuth(page, POSTURE)
+    await page.goto('/')
+    await page.getByTestId('login-view-read-only').click()
+    await page.getByTestId('tb-session-signin').click()
+
+    await page.getByTestId('auth-challenge-remember').check()
+    await page.getByTestId('auth-challenge-key-input').fill('the-right-key')
+    await page.getByTestId('auth-challenge-submit').click()
+
+    await expect(page.getByTestId('tb-session-admin')).toBeVisible()
+    expect(auth.lastLoginBody()).toMatchObject({ remember: true })
   })
 
   const AUTH_REQUIRED_401 = {

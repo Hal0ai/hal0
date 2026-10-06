@@ -150,7 +150,11 @@ export function SecurityPage() {
             </div>
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 3, lineHeight: 1.55, maxWidth: 460 }}>
               {{
-                armed: 'Every route requires the admin key (or a logged-in session). Applies live — no restart.',
+                unknown: errored
+                  ? 'Could not read the auth posture from the server, so nothing is claimed here. Reload to retry.'
+                  : 'Reading the auth posture…',
+                armed:
+                  'Enforcement is on. Admin routes (settings, memory, logs, changes to the box) need the admin key or a logged-in session; inference (/v1) and the basic status reads need a client or admin key; only the small open allowlist (health checks, login) answers without one. Applies live — no restart.',
                 lan_gated:
                   'Auth is off, but this box is reachable from your network and has an admin key — so other devices are already asked to sign in for settings, memory, logs, approvals and changes to the box (model pulls, slot edits, config writes). Inference (/v1) and the basic status reads (slots, models, hardware) stay open. Enable to require a login for those too.',
                 open: 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.',
