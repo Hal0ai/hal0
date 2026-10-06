@@ -59,6 +59,7 @@ from hal0.api.agents._auth import (
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_TTL_SECONDS,
     check_ws_origin_and_cookie,
+    request_uses_tls,
     require_browser_auth,
     session_cookie_expiry,
     set_session_cookie,
@@ -528,7 +529,7 @@ async def session_handshake(agent_id: str, request: Request, response: Response)
     """
     held = session_cookie_expiry(request.cookies.get(SESSION_COOKIE_NAME, ""))
     if held is None or held < time.time() + SESSION_COOKIE_TTL_SECONDS:
-        set_session_cookie(response)
+        set_session_cookie(response, secure=request_uses_tls(request))
     return {"agent_id": agent_id, "ok": True}
 
 

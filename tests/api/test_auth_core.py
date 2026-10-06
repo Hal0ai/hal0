@@ -698,6 +698,67 @@ def test_login_with_remember_is_a_thirty_day_session(
     assert agents_auth.verify_session_cookie(cookie, now=time.time() + 31 * day) is False
 
 
+# ``Secure``: the session cookie must not travel in cleartext when the browser
+# reached hal0 over TLS (a reverse proxy in front of the plain :8080 listener).
+# Plain-HTTP installs keep working: Secure is set only when TLS was observed.
+
+
+def _set_cookie(resp) -> str:
+    return resp.headers.get("set-cookie", "")
+
+
+def test_login_over_plain_http_leaves_cookie_without_secure(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "the-real-key"})
+    assert resp.status_code == 200
+    assert "secure" not in _set_cookie(resp).lower()
+
+
+def test_login_over_https_marks_cookie_secure(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    with TestClient(auth_app_factory(), base_url="https://hal0.example") as c:
+        resp = c.post("/api/auth/login", json={"key": "the-real-key"})
+    assert resp.status_code == 200
+    assert "; secure" in _set_cookie(resp).lower()
+
+
+def test_login_behind_tls_proxy_marks_cookie_secure(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proxy terminates TLS and speaks plain HTTP to :8080; it says so
+    with X-Forwarded-Proto. Honouring that header can only ADD Secure to the
+    sender's own cookie, so it needs no trust setting."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post(
+        "/api/auth/login",
+        json={"key": "the-real-key"},
+        headers={"X-Forwarded-Proto": "https"},
+    )
+    assert resp.status_code == 200
+    assert "; secure" in _set_cookie(resp).lower()
+
+
+def test_logout_over_https_clears_with_secure(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clearing Set-Cookie carries the same attribute, so a browser that
+    refuses to let a non-Secure cookie touch a Secure one still deletes it."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    with TestClient(auth_app_factory(), base_url="https://hal0.example") as c:
+        c.post("/api/auth/login", json={"key": "the-real-key"})
+        resp = c.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert "; secure" in _set_cookie(resp).lower()
+
+
 def test_login_remember_with_wrong_key_sets_no_cookie(
     auth_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
