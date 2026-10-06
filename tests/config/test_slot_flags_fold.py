@@ -368,10 +368,12 @@ class _RegistryWithout(_FakeRegistry):
     """A fake whose ``update`` raises like the real store for unknown ids."""
 
     def __init__(self, missing: set[str]) -> None:
+        """Record writes; raise ModelNotFound for ids in ``missing``."""
         super().__init__()
         self.missing = missing
 
     def update(self, model_id: str, updates: dict) -> None:
+        """Raise like the real store for a missing id, else record."""
         if model_id in self.missing:
             from hal0.registry.store import ModelNotFound
 
@@ -380,6 +382,7 @@ class _RegistryWithout(_FakeRegistry):
 
 
 def _three_slot_plan():
+    """Plan for slots one/two/three on a-model/b-ghost/c-model (all keyed)."""
     # Folds apply in model-id order, so the unregistered model sits in the
     # MIDDLE: before #2180 the first model was written and the third never was.
     return plan_slot_flags_fold(
@@ -394,6 +397,7 @@ def _three_slot_plan():
 
 
 def test_unregistered_model_is_skipped_and_the_rest_still_fold():
+    """A write-time ModelNotFound skips that model; the others still fold."""
     reg = _RegistryWithout({"b-ghost"})
     with pytest.raises(FoldPartiallyApplied) as exc:
         apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
@@ -410,6 +414,7 @@ def test_unregistered_model_is_skipped_and_the_rest_still_fold():
 
 
 def test_two_of_three_unregistered_both_skip_and_the_third_folds():
+    """Several misses are all collected; the one registered model folds."""
     reg = _RegistryWithout({"a-model", "b-ghost"})
     with pytest.raises(FoldPartiallyApplied) as exc:
         apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
@@ -422,6 +427,7 @@ def test_two_of_three_unregistered_both_skip_and_the_third_folds():
 
 
 def test_skip_on_the_last_fold_still_signals_partial():
+    """A miss on the final fold still raises the partial result."""
     reg = _RegistryWithout({"c-model"})
     with pytest.raises(FoldPartiallyApplied) as exc:
         apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
@@ -432,6 +438,7 @@ def test_skip_on_the_last_fold_still_signals_partial():
 
 
 def test_all_registered_models_fold_without_a_partial_signal():
+    """With every model registered the applier returns normally."""
     reg = _RegistryWithout(set())
     lines = apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
     assert [m for m, _u in reg.updates] == ["a-model", "b-ghost", "c-model"]
@@ -439,8 +446,13 @@ def test_all_registered_models_fold_without_a_partial_signal():
 
 
 def test_unexpected_write_error_is_not_treated_as_a_skip():
+    """Only ModelNotFound is a skip; any other write error propagates."""
+
     class _Broken(_FakeRegistry):
+        """Registry whose write for b-ghost fails with an OSError."""
+
         def update(self, model_id: str, updates: dict) -> None:
+            """Fail the b-ghost write, record the rest."""
             if model_id == "b-ghost":
                 raise OSError("disk full")
             super().update(model_id, updates)
@@ -510,3 +522,42 @@ def test_provider_lane_registry_miss_is_an_informational_skip_not_partial():
     lines = apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)  # no raise
     assert [m for m, _u in reg.updates] == ["a-model"]
     assert "skip model 'qwen3-tts' <- slots=['voice']: provider-lane, no registry row" in lines
+
+
+def test_lane_classification_is_per_slot_not_per_display_name():
+    """Two slot files can share a display name (a half-applied rename, or an
+    id-keyed 10.toml/11.toml pair). A provider-lane "voice" must not vouch
+    for a llama-server "voice" whose model is unregistered."""
+    lane_voice = {**_slot("voice", "ghost"), "type": "tts"}
+    llama_voice = _slot("voice", "ghost", extra_args="-b 2048")
+    plan = plan_slot_flags_fold(
+        [lane_voice, llama_voice],
+        {"rocm": ""},
+        {},
+        is_provider_lane=lambda cfg: cfg.get("type") == "tts",
+    )
+    assert plan.lane_skips == []
+    assert [(m.model_id, m.slot_names) for m in plan.missing] == [("ghost", ("voice", "voice"))]
+
+
+def test_dry_run_classification_never_persists_a_legacy_profile(tmp_hal0_home: str) -> None:
+    """The classifier runs under dry-run (the updater probe, the CLI preview).
+    Resolving a shipped legacy profile through ProfileCatalog.resolve() would
+    write profiles.toml on a fresh box (_materialize_legacy); it must not."""
+    from hal0.config import paths
+    from hal0.config.migrations.slot_flags_fold import run_migration
+
+    slots = paths.slots_config_dir()
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / "agent.toml").write_text(
+        'name = "agent"\ntype = "llm"\nport = 8081\nprofile = "chadrock-moe"\n'
+        '[model]\ndefault = "ghost"\n[server]\nextra_args = "-b 2048"\n',
+        encoding="utf-8",
+    )
+    assert not paths.profiles_toml().exists()
+
+    lines = run_migration(dry_run=True)
+
+    assert not paths.profiles_toml().exists()
+    # chadrock-moe is a llama-server profile, so the miss is ordinary work.
+    assert "SKIP model 'ghost' <- slots=['agent']: not in registry" in lines

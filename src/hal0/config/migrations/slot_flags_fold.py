@@ -383,7 +383,11 @@ def plan_slot_flags_fold(
     """
     # 1. Compute every slot's fold, grouped by target model.
     by_model: dict[str, list[SlotRef]] = {}
-    lane_slots: set[str] = set()
+    # One flag per bound slot, keyed by model — not a set of slot names: names
+    # are not unique across slot files (an id-keyed 10.toml and 11.toml can
+    # both say name = "x"), so a name set could let a provider-lane slot
+    # vouch for a llama-server slot's miss.
+    lane_by_model: dict[str, list[bool]] = {}
     for slot_cfg in slots:
         model_tbl = slot_cfg.get("model")
         model_tbl = model_tbl if isinstance(model_tbl, Mapping) else {}
@@ -396,8 +400,8 @@ def plan_slot_flags_fold(
         profile = str(profile) if profile else None
         pflags = profile_flags.get(profile, "") if profile else ""
         folded = compute_folded_tune(slot_cfg, pflags, model_defaults.get(model_id))
-        if is_provider_lane is not None and is_provider_lane(slot_cfg):
-            lane_slots.add(slot_name)
+        lane = is_provider_lane is not None and is_provider_lane(slot_cfg)
+        lane_by_model.setdefault(model_id, []).append(lane)
         by_model.setdefault(model_id, []).append(
             SlotRef(slot_name=slot_name, model_id=model_id, profile=profile, folded=folded)
         )
@@ -408,7 +412,7 @@ def plan_slot_flags_fold(
     for model_id, refs in sorted(by_model.items()):
         if model_id not in model_defaults:
             names = tuple(r.slot_name for r in refs)
-            if lane_slots.issuperset(names):
+            if all(lane_by_model[model_id]):
                 plan.lane_skips.append(
                     SkippedFold(model_id, names, "provider-lane, no registry row")
                 )
@@ -448,6 +452,7 @@ def plan_slot_flags_fold(
 
 
 def _skip_line(skip: SkippedFold, *, pending: bool) -> str:
+    """Format one registry-miss report line; ``pending`` picks the prefix."""
     # The prefix is load-bearing: the updater's convergence probe drops lines
     # starting "skip " as nothing-to-do (updater.detect_pending_ownership_
     # migrations) and counts every other line as pending. An ordinary registry
@@ -457,21 +462,52 @@ def _skip_line(skip: SkippedFold, *, pending: bool) -> str:
     return f"{prefix} model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
 
 
-def _is_provider_lane(slot_cfg: Mapping[str, Any]) -> bool:
-    """True when the slot launches through a non-llama-server provider.
+def _provider_lane_classifier(profiles: Any) -> Callable[[Mapping[str, Any]], bool]:
+    """Build the planner's ``is_provider_lane`` predicate from loaded profiles.
 
+    True when the slot launches through a non-llama-server provider. The
+    dispatch is the launch path's own (:func:`hal0.providers.container.
+    _provider_for_family`, which returns ``None`` only for the llama-server
+    default — the one lane that reads the folded ``model.defaults`` tune).
     Private import, deliberate (same precedent as the updater's vulkan
-    migration): this must be the exact discriminator the launch path uses,
-    which returns ``None`` only for the llama-server default — the one lane
-    that reads the folded ``model.defaults`` tune. An unresolvable runtime
+    migration), so the two cannot drift.
+
+    The runtime family comes from the already-loaded ``profiles`` catalog, NOT
+    ``ProfileCatalog.resolve()``: that adopts a shipped legacy profile by
+    WRITING profiles.toml (``_materialize_legacy``), and this runs under the
+    dry run (updater probe, CLI preview) before any consent or backup. A
+    not-yet-adopted legacy name is judged on its shipped definition — the one
+    resolve() would adopt — without persisting it. An unresolvable runtime
     counts as llama-server, so its miss stays visible as pending work.
     """
-    from hal0.providers.container import _spec_provider_for
+    from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig
+    from hal0.profiles import runtime_family_of
+    from hal0.providers.container import _provider_for_family
 
-    try:
-        return _spec_provider_for(dict(slot_cfg)) is not None
-    except Exception:
-        return False
+    adopted = profiles.adopted_legacy_names()
+
+    def _family(slot_cfg: Mapping[str, Any]) -> str | None:
+        """Runtime family of the slot's profile, or None (no profile / unknown)."""
+        nested = slot_cfg.get("slot")
+        name = str(
+            slot_cfg.get("profile")
+            or (nested.get("profile") if isinstance(nested, Mapping) else "")
+        )
+        if not name:
+            return None
+        profile = profiles.profile.get(name)
+        if profile is None and name in LEGACY_SEED_PROFILES and name not in adopted:
+            profile = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[name])
+        return runtime_family_of(name, profile) if profile is not None else None
+
+    def _is_lane(slot_cfg: Mapping[str, Any]) -> bool:
+        """True when the slot's provider is not the llama-server default."""
+        try:
+            return _provider_for_family(dict(slot_cfg), _family(slot_cfg)) is not None
+        except Exception:
+            return False
+
+    return _is_lane
 
 
 class DeployWindowRequired(RuntimeError):
@@ -488,6 +524,7 @@ class FoldPartiallyApplied(Exception):
     """
 
     def __init__(self, lines: list[str], skipped: list[SkippedFold]) -> None:
+        """Keep the full report and the skipped folds for the caller to print."""
         self.lines = lines
         self.skipped = skipped
         names = ", ".join(f"{s.model_id!r} (slots {list(s.slot_names)})" for s in skipped)
@@ -592,6 +629,13 @@ def collect_inputs() -> tuple[list[dict[str, Any]], dict[str, str], dict[str, An
     separate from :func:`plan_slot_flags_fold` so the planner stays
     filesystem-free and unit-testable; only :func:`run_migration` needs disk.
     """
+    return _collect_inputs_and_profiles()[:4]
+
+
+def _collect_inputs_and_profiles() -> tuple[
+    list[dict[str, Any]], dict[str, str], dict[str, Any], Any, Any
+]:
+    """:func:`collect_inputs` plus the loaded profiles catalog (for the classifier)."""
     from hal0.config.loader import list_slots, load_profiles_config, load_slot_config
     from hal0.registry.store import ModelRegistry
 
@@ -612,7 +656,7 @@ def collect_inputs() -> tuple[list[dict[str, Any]], dict[str, str], dict[str, An
         d = m.defaults
         model_defaults[m.id] = d.model_dump() if d is not None else None
 
-    return slots, profile_flags, model_defaults, registry
+    return slots, profile_flags, model_defaults, registry, profiles
 
 
 def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[str]:
@@ -626,10 +670,11 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
     :class:`FoldPartiallyApplied` after a write pass that had to skip a model
     with no registry row (see :func:`apply_fold_plan`).
     """
-    slots, profile_flags, model_defaults, registry = collect_inputs()
-    plan = plan_slot_flags_fold(
-        slots, profile_flags, model_defaults, is_provider_lane=_is_provider_lane
-    )
+    slots, profile_flags, model_defaults, registry, profiles = _collect_inputs_and_profiles()
+    # The classifier reads the catalog already loaded here; it never goes
+    # through ProfileCatalog.resolve(), which can write (see the classifier).
+    is_lane = _provider_lane_classifier(profiles)
+    plan = plan_slot_flags_fold(slots, profile_flags, model_defaults, is_provider_lane=is_lane)
     return apply_fold_plan(plan, registry, deploy_window=deploy_window, dry_run=dry_run)
 
 
