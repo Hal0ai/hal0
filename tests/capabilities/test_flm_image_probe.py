@@ -120,7 +120,7 @@ def test_seam_failure_is_not_cached_as_absent(
     re-probes and a now-answering seam brings NPU back."""
     seam = _Seam(ImageProbe("unknown", "podman-failed"), ImageProbe("present"))
     _install_seam(monkeypatch, seam)
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
 
     assert "npu" not in _ids()
     assert _ids()[0] == "npu"
@@ -133,7 +133,7 @@ def test_seam_failure_is_not_reprobed_inside_the_retry_window(
     """The GET must not spawn a probe per call while the seam is down."""
     seam = _Seam(ImageProbe("unknown", "podman-failed"), ImageProbe("present"))
     _install_seam(monkeypatch, seam)
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 3600.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 3600.0, raising=False)
 
     assert "npu" not in _ids()
     assert "npu" not in _ids()
@@ -145,7 +145,7 @@ def test_later_seam_failure_does_not_evict_a_known_present_image(
 ) -> None:
     seam = _Seam(ImageProbe("present"), ImageProbe("unknown", "podman-failed"))
     _install_seam(monkeypatch, seam)
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
 
     assert _ids()[0] == "npu"
     assert _ids()[0] == "npu"
@@ -158,7 +158,7 @@ def test_reset_drops_a_cached_failure_too(
     """After an FLM pull the reset hook must re-probe even inside the window."""
     seam = _Seam(ImageProbe("unknown", "podman-failed"), ImageProbe("present"))
     _install_seam(monkeypatch, seam)
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 3600.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 3600.0, raising=False)
 
     assert "npu" not in _ids()
     catalog.reset_flm_image_present_cache()
@@ -200,7 +200,7 @@ def test_dev_box_podman_operational_failure_is_not_cached_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _dev_box(monkeypatch, 125, 0)
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
 
     assert "npu" not in _ids()
     assert _ids()[0] == "npu"
@@ -210,7 +210,7 @@ def test_dev_box_podman_operational_failure_is_not_cached_as_absent(
 def test_no_runtime_is_not_cached_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Old code cached ``False`` forever when no runtime resolved."""
     _install_seam(monkeypatch, _Seam(ImageProbe("unknown", "not-service-user")))
-    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
     resolved: list[bool] = [False, True]
 
     def fake_runtime() -> str:
@@ -225,3 +225,51 @@ def test_no_runtime_is_not_cached_as_absent(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert "npu" not in _ids()
     assert _ids()[0] == "npu"
+
+
+# ── end to end: the real seam client, only the subprocess faked ─────────────
+
+
+def test_end_to_end_seam_failure_then_recovery_through_real_seam_client(
+    monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
+) -> None:
+    """Exercise catalog → ContainerProvider.image_present → the REAL
+    ``podman_introspect.image_presence`` (service-user gate, ``_seam_read``,
+    the wrapper rc → reason map) with only the ``sudo`` call faked.
+
+    rc 66 is the wrapper's ``podman-failed``: an operational failure that must
+    hide NPU for now without being remembered as "absent". The re-probe then
+    gets rc 0 / ``present`` and NPU comes back.
+    """
+    real_presence = container_mod.podman_introspect.image_presence
+    seam_calls: list[list[str]] = []
+    outcomes = [(66, ""), (0, "present\n")]
+
+    def fake_seam_run(argv: list[str], **_kw: object) -> Any:
+        seam_calls.append(list(argv))
+        rc, out = outcomes[min(len(seam_calls), len(outcomes)) - 1]
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    def presence_via_real_client(image: str) -> ImageProbe:
+        return real_presence(image, run=fake_seam_run, is_hal0_user=lambda: True)
+
+    _install_seam(monkeypatch, presence_via_real_client)  # type: ignore[arg-type]
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
+
+    assert "npu" not in _ids()
+    assert _ids()[0] == "npu"
+    assert _ids()[0] == "npu"  # now cached: no third seam call
+    assert (
+        seam_calls
+        == [
+            [
+                "sudo",
+                "-n",
+                container_mod.podman_introspect.SEAM_BIN,
+                "image-exists",
+                catalog._FLM_TOOLBOX_IMAGE,
+            ]
+        ]
+        * 2
+    )
+    assert no_rootless == []

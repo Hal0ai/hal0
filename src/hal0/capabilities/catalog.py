@@ -186,7 +186,9 @@ _FLM_BROKEN_TAGS: dict[str, str] = {
 # :func:`reset_flm_image_present_cache` (called after an FLM pull). An
 # unanswerable probe (#1974: seam denied, podman broken, no runtime) is NOT an
 # answer, so it is held only for :data:`_FLM_PROBE_RETRY_S` and then re-asked —
-# caching it as ``False`` dropped NPU from the picker until restart.
+# caching it as ``False`` dropped NPU from the picker until restart. Note a
+# definitive "absent" still sticks until restart or an FLM pull through hal0:
+# an image pulled by hand outside hal0 does not surface NPU before then.
 _flm_image_present_cache: bool | None = None
 _flm_image_unknown_at: float | None = None
 
