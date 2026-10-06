@@ -269,6 +269,7 @@ def accepted_ws(monkeypatch: pytest.MonkeyPatch) -> None:
     from hal0.api.agents import chat_proxy
 
     async def _stub_proxy_ws(browser_ws: WebSocket, **_: object) -> None:
+        """Replace the upstream WS proxy with a stub that accepts and closes."""
         await browser_ws.send_text("ok")
         await browser_ws.close()
 
@@ -316,6 +317,7 @@ def _wss_close_code(client: TestClient, origin: str) -> int | None:
 
 
 def test_wss_same_origin_https_page_accepted(client: TestClient, accepted_ws: None) -> None:
+    """A wss upgrade from an https page on the same IP-literal origin is accepted."""
     assert _wss_close_code(client, "https://192.0.2.20:8443") is None
 
 
@@ -327,6 +329,7 @@ def test_wss_rejects_plain_http_page_on_same_authority(
 
 
 def test_ws_same_origin_ipv6_literal_accepted(client: TestClient, accepted_ws: None) -> None:
+    """An IPv6-literal Origin matching Host is accepted, case-insensitively."""
     headers = {"origin": "http://[2001:db8::20]:8080", "host": "[2001:DB8::20]:8080"}
     assert _ws_close_code(client, headers) is None
 
@@ -351,6 +354,9 @@ def test_ws_same_origin_ipv6_literal_accepted(client: TestClient, accepted_ws: N
         ("http://user@192.0.2.20:8080", "user@192.0.2.20:8080"),
         ("http://192.0.2.20:8080/x", "192.0.2.20:8080"),
         ("http://192.0.2.20:8080/", "192.0.2.20:8080"),
+        # Nor is one carrying a query string or a fragment.
+        ("http://192.0.2.20:8080?x=1", "192.0.2.20:8080"),
+        ("http://192.0.2.20:8080#x", "192.0.2.20:8080"),
         # Same address, different spelling: never normalised into a match.
         ("http://[::ffff:192.0.2.20]:8080", "192.0.2.20:8080"),
         ("http://192.0.2.20", "192.0.2.20:80"),
@@ -363,6 +369,7 @@ def test_ws_same_origin_ipv6_literal_accepted(client: TestClient, accepted_ws: N
 def test_ws_cross_origin_still_rejected(
     client: TestClient, accepted_ws: None, origin: str, host: str
 ) -> None:
+    """Anything that is not an exact IP-literal same-origin match is rejected."""
     assert _ws_close_code(client, {"origin": origin, "host": host}) == 4403
 
 
