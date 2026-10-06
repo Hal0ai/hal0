@@ -25,7 +25,7 @@
 
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSetRequireAuth, useLogout } from '@/api/hooks/useAuthActions'
-import { loginErrorMessage } from '@/dash/auth/gateDecision.js'
+import { enforcementPosture, loginErrorMessage } from '@/dash/auth/gateDecision.js'
 import { RotateKeyDialog } from './RotateKeyDialog.jsx'
 import { ExposureTable } from './ExposureTable.jsx'
 
@@ -149,11 +149,12 @@ export function SecurityPage() {
               </span>
             </div>
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-5)', marginTop: 3, lineHeight: 1.55, maxWidth: 460 }}>
-              {authArmed
-                ? 'Every route requires the admin key (or a logged-in session). Applies live — no restart.'
-                : s?.lan_exposed
-                  ? 'Auth is off, but this box is reachable from your network — changes (model pulls, slot edits, config writes) already ask for the admin key automatically from other devices; reads and inference stay open. Enable to require a login for everything, including reads.'
-                  : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.'}
+              {{
+                armed: 'Every route requires the admin key (or a logged-in session). Applies live — no restart.',
+                lan_gated:
+                  'Auth is off, but this box is reachable from your network and has an admin key — so other devices are already asked to sign in for settings, memory, logs, approvals and changes to the box (model pulls, slot edits, config writes). Inference (/v1) and the basic status reads (slots, models, hardware) stay open. Enable to require a login for those too.',
+                open: 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.',
+              }[enforcementPosture(s)]}
             </div>
           </div>
           {authArmed ? (

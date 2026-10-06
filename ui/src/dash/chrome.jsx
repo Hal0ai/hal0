@@ -17,6 +17,7 @@ import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { slotIndicatorFromPhase } from './slot-status.js'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
+import { SessionChip } from './auth/SessionChip.jsx'
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
@@ -458,6 +459,9 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
       >
         {Icons.docs}
       </a>
+      {/* Signed-in state / sign-in entry point. Renders nothing on a box that
+          gates nothing for this browser (keyless or loopback). */}
+      <SessionChip />
       <NotificationBell />
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button

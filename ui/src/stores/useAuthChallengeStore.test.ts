@@ -49,6 +49,25 @@ describe('useAuthChallengeStore', () => {
     expect(state.pending).toBeNull()
   })
 
+  it('prompt() opens the drawer with nothing to retry (the top-bar "Sign in" path)', () => {
+    resetStore()
+    useAuthChallengeStore.getState().prompt()
+
+    const state = useAuthChallengeStore.getState()
+    expect(state.open).toBe(true)
+    expect(state.pending).toBeNull()
+  })
+
+  it('prompt() does not discard a refused action already waiting to retry', () => {
+    resetStore()
+    const execute = vi.fn().mockResolvedValue(undefined)
+    useAuthChallengeStore.getState().request({ execute }, { id: '123' })
+
+    useAuthChallengeStore.getState().prompt()
+
+    expect(useAuthChallengeStore.getState().pending?.variables).toEqual({ id: '123' })
+  })
+
   it('retry() with nothing pending is a safe no-op', async () => {
     resetStore()
     await expect(useAuthChallengeStore.getState().retry()).resolves.toBeUndefined()

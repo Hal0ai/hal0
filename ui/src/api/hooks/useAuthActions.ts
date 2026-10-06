@@ -7,9 +7,10 @@
 //     whole shell (AuthGate) re-reads posture immediately.
 //   - useLogout — POST /api/auth/logout: clear the HttpOnly session cookie.
 //     After it, the next 'auth-status' read is anonymous → AuthGate shows the
-//     login view (when enforcement is on).
+//     login view (when this browser has to sign in), and everything fetched
+//     under the session is dropped from the query cache (dropSessionData).
 
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
@@ -57,11 +58,40 @@ export function useRotateKey() {
   })
 }
 
+/**
+ * End-of-session cache hygiene: re-read posture, then discard every payload
+ * that was fetched under the session.
+ *
+ * The cookie being gone is not enough. A query keeps its last good data when
+ * a refetch fails, so the now-401ing ADMIN reads would go on showing the
+ * admin's Settings / Memory / Logs to whoever uses this browser next — and on
+ * a posture-gated box the login view's "View read-only" walks straight back
+ * into those pages. Posture is awaited first so the shell has already routed
+ * (usually unmounting the app) before the reset; the reset itself is not
+ * awaited — any still-mounted read just refetches, and logout must not wait
+ * on that.
+ */
+export async function dropSessionData(qc: QueryClient): Promise<void> {
+  await qc.invalidateQueries({ queryKey: ['auth-status'] })
+  resetSessionQueries(qc)
+}
+
+/**
+ * Discard every cached payload except the auth posture itself. Shared by an
+ * explicit logout (above) and by AuthGate whenever the login view takes over
+ * — a session that simply lapsed leaves the same cached pages behind as one
+ * that was logged out of. Not awaited by design: resetting is synchronous,
+ * the returned promise only tracks refetches of still-mounted reads.
+ */
+export function resetSessionQueries(qc: QueryClient): void {
+  void qc.resetQueries({ predicate: (q) => q.queryKey[0] !== 'auth-status' })
+}
+
 /** POST /api/auth/logout — end the browser session (clears the cookie). */
 export function useLogout() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiPost(ENDPOINTS.authLogout),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['auth-status'] }),
+    onSuccess: () => dropSessionData(qc),
   })
 }

@@ -12,14 +12,15 @@ import { SettingsShell } from './settings/SettingsShell.jsx'
 import { MigrationBanner } from './migration/MigrationBanner.jsx'
 import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
 // O19: app-shell auth gate. Renders the login view in place of the app when
-// enforcement is on and the session is anonymous; a no-op on open boxes (the
-// shipped default). Real ESM import, like SettingsShell above.
+// this session has to sign in — enforcement on, or the posture-coupled ADMIN
+// gate (#1822) refusing this caller while enforcement reads off. A no-op on
+// boxes that gate nothing (the shipped keyless default). Real ESM import,
+// like SettingsShell above.
 import { AuthGate } from './auth/AuthGate.jsx'
-// #1822: sign-in-required drawer for the posture-coupled ADMIN gate (a LAN-
-// bound box gates mutations even with `require_auth` off — see
-// hal0.api.auth). Mounted unconditionally alongside AuthGate: this scenario
-// is by definition one where `auth_required` reads false, so AuthGate always
-// renders the app and this drawer is the only surface for the 401.
+// #1822: admin-key drawer. With the front door above, it is the in-app
+// sign-in surface for an operator who chose "View read-only": opened by the
+// top-bar session chip, or by the first mutation that 401s (which it then
+// retries). Mounted alongside the app, inside the gate.
 import { AuthChallengeDrawer } from './auth/AuthChallengeDrawer.jsx'
 // VERS-flash (docs/rework/handoff-r5-drive2.md §3): same live-version
 // pattern as AboutPage.jsx — once mounted, keep document.title in sync with
