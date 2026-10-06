@@ -295,6 +295,14 @@ def test_ws_same_origin_ipv6_literal_accepted(client: TestClient, accepted_ws: N
         # An Origin carrying userinfo or a path is not a browser Origin.
         ("http://user@192.0.2.20:8080", "user@192.0.2.20:8080"),
         ("http://192.0.2.20:8080/x", "192.0.2.20:8080"),
+        ("http://192.0.2.20:8080/", "192.0.2.20:8080"),
+        # Same address, different spelling: never normalised into a match.
+        ("http://[::ffff:192.0.2.20]:8080", "192.0.2.20:8080"),
+        ("http://192.0.2.20", "192.0.2.20:80"),
+        # A trailing-dot Host is not an IP literal.
+        ("http://192.0.2.20.:8080", "192.0.2.20.:8080"),
+        # IPv6 zone ids are rejected even when byte-identical.
+        ("http://[fe80::1%25eth0]:8080", "[fe80::1%25eth0]:8080"),
     ],
 )
 def test_ws_cross_origin_still_rejected(

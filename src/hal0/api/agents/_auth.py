@@ -242,9 +242,15 @@ def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
     * a ``wss`` upgrade that hal0 terminated itself only matches an
       ``https`` page. A ``ws`` upgrade may come from an ``https`` page,
       because a TLS-terminating upstream proxy (ADR-0012) forwards plain
-      ``ws`` with ``Host`` preserved.
+      ``ws`` with ``Host`` preserved. The same leniency applies when
+      uvicorn trusts ``X-Forwarded-Proto`` from more peers than loopback
+      (``FORWARDED_ALLOW_IPS`` widened): ``request_scheme`` is then whatever
+      a trusted peer claims; only the ``wss`` rule reads it, never the
+      Origin/Host match itself.
     """
-    if not origin or not host:
+    # IPv6 zone ids (``%eth0``) are link-local plumbing no browser Origin
+    # carries; reject them outright rather than reason about their encoding.
+    if not origin or not host or "%" in host:
         return False
     try:
         parts = urlsplit(origin)
