@@ -416,6 +416,31 @@ class DeployWindowRequired(RuntimeError):
     """Raised when a write is attempted without the deploy-window ack."""
 
 
+@dataclass(frozen=True)
+class SkippedFold:
+    """A fold that could not be written because its model has no registry row."""
+
+    model_id: str
+    slot_names: tuple[str, ...]
+    reason: str
+
+
+class FoldPartiallyApplied(Exception):
+    """Raised AFTER the write loop when some folds were skipped (#2180).
+
+    Every other fold has already been written; ``lines`` is the full report
+    (applied folds + skips) and ``skipped`` names each slot left unfolded. Not
+    a ``RuntimeError`` on purpose: callers treat ``RuntimeError`` from this
+    module as a divergent-share refusal, which writes nothing.
+    """
+
+    def __init__(self, lines: list[str], skipped: list[SkippedFold]) -> None:
+        self.lines = lines
+        self.skipped = skipped
+        names = ", ".join(f"{s.model_id!r} (slots {list(s.slot_names)})" for s in skipped)
+        super().__init__(f"slot_flags_fold skipped {len(skipped)} model(s): {names}")
+
+
 def apply_fold_plan(
     plan: FoldPlan,
     registry: Any,
@@ -441,8 +466,15 @@ def apply_fold_plan(
         DeployWindowRequired: a real write was requested without ``deploy_window``.
         RuntimeError: the plan has divergent-share refusals — refuse to apply a
             partial fold; the operator must resolve the conflicts first.
+        FoldPartiallyApplied: a write hit a model with no registry row. That
+            fold is skipped, every other fold is still written (each
+            ``registry.update`` is its own transaction), and this is raised at
+            the end with the full report. Any other write error propagates.
     """
+    from hal0.registry.store import ModelNotFound
+
     lines: list[str] = []
+    skipped: list[SkippedFold] = []
 
     if plan.refusals:
         for r in plan.refusals:
@@ -472,8 +504,20 @@ def apply_fold_plan(
                 "slot_flags_fold.apply_fold_plan: refusing to write outside the "
                 "deploy window — pass deploy_window=True to acknowledge (spec §5)."
             )
-        registry.update(fold.model_id, {"defaults": fold.new_defaults})
+        try:
+            registry.update(fold.model_id, {"defaults": fold.new_defaults})
+        except ModelNotFound:
+            # #2180: a slot default that resolves outside the registry (e.g. a
+            # provider-lane model) must not strand every other slot unfolded.
+            # The update raised before writing, so nothing of this fold landed.
+            skip = SkippedFold(fold.model_id, fold.slot_names, "not in registry")
+            skipped.append(skip)
+            lines[-1] = (
+                f"SKIP model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
+            )
 
+    if skipped:
+        raise FoldPartiallyApplied(lines, skipped)
     return lines
 
 
@@ -517,8 +561,9 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
     BOTH ``deploy_window=True`` and ``dry_run=False``. Snapshot the config/
     registry first — standard migration-window rule — before a non-dry-run pass.
 
-    Returns the report lines. Raises on divergent-share refusal (see
-    :func:`apply_fold_plan`).
+    Returns the report lines. Raises on divergent-share refusal, and with
+    :class:`FoldPartiallyApplied` after a write pass that had to skip a model
+    with no registry row (see :func:`apply_fold_plan`).
     """
     slots, profile_flags, model_defaults, registry = collect_inputs()
     plan = plan_slot_flags_fold(slots, profile_flags, model_defaults)
@@ -528,9 +573,11 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
 __all__ = [
     "DeployWindowRequired",
     "DivergentRefusal",
+    "FoldPartiallyApplied",
     "FoldPlan",
     "FoldedTune",
     "ModelFold",
+    "SkippedFold",
     "SlotRef",
     "apply_fold_plan",
     "collect_inputs",

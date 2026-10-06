@@ -12,6 +12,7 @@ import pytest
 from hal0.config.migrations.slot_flags_fold import (
     DeployWindowRequired,
     FoldedTune,
+    FoldPartiallyApplied,
     apply_fold_plan,
     compute_folded_tune,
     plan_slot_flags_fold,
@@ -358,3 +359,70 @@ def test_divergent_share_is_detected_through_the_reparked_shape():
     assert not plan.ok
     assert [r.model_id for r in plan.refusals] == ["shared"]
     assert plan.folds == []
+
+
+# ── per-model isolation: an unregistered model skips, it does not abort (#2180) ──
+
+
+class _RegistryWithout(_FakeRegistry):
+    """A fake whose ``update`` raises like the real store for unknown ids."""
+
+    def __init__(self, missing: set[str]) -> None:
+        super().__init__()
+        self.missing = missing
+
+    def update(self, model_id: str, updates: dict) -> None:
+        if model_id in self.missing:
+            from hal0.registry.store import ModelNotFound
+
+            raise ModelNotFound(f"model {model_id!r} not in registry")
+        super().update(model_id, updates)
+
+
+def _three_slot_plan():
+    # Folds apply in model-id order, so the unregistered model sits in the
+    # MIDDLE: before #2180 the first model was written and the third never was.
+    return plan_slot_flags_fold(
+        [
+            _slot("one", "a-model", extra_args="-fa on"),
+            _slot("two", "b-ghost", extra_args="-b 512"),
+            _slot("three", "c-model", extra_args="-b 2048"),
+        ],
+        {"rocm": ""},
+        {"a-model": None, "b-ghost": None, "c-model": None},
+    )
+
+
+def test_unregistered_model_is_skipped_and_the_rest_still_fold():
+    reg = _RegistryWithout({"b-ghost"})
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
+
+    assert [m for m, _u in reg.updates] == ["a-model", "c-model"]
+    [skip] = exc.value.skipped
+    assert skip.model_id == "b-ghost"
+    assert skip.slot_names == ("two",)
+    assert "not in registry" in skip.reason
+    # The report still carries every applied fold plus the named skip.
+    assert any("'a-model'" in ln for ln in exc.value.lines)
+    assert any("'c-model'" in ln for ln in exc.value.lines)
+    assert any("b-ghost" in ln and "two" in ln for ln in exc.value.lines)
+
+
+def test_all_registered_models_fold_without_a_partial_signal():
+    reg = _RegistryWithout(set())
+    lines = apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
+    assert [m for m, _u in reg.updates] == ["a-model", "b-ghost", "c-model"]
+    assert len([ln for ln in lines if ln.startswith("fold ")]) == 3
+
+
+def test_unexpected_write_error_is_not_treated_as_a_skip():
+    class _Broken(_FakeRegistry):
+        def update(self, model_id: str, updates: dict) -> None:
+            if model_id == "b-ghost":
+                raise OSError("disk full")
+            super().update(model_id, updates)
+
+    reg = _Broken()
+    with pytest.raises(OSError, match="disk full"):
+        apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)

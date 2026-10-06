@@ -608,6 +608,12 @@ such unit is up, so the command it prints carries `--stop-services` for you
 when that's the case (stopping those units before proceeding) — copy the
 line verbatim rather than adding the flag yourself.
 
+`migrate-flags --apply` folds every slot it can. A slot whose default model
+has no registry row is skipped and named in the summary, the other slots
+still fold, and the command exits `2` (applied, some slots skipped) rather
+than `0`. Register the model or rebind the slot, then re-run; models that
+already folded are a no-op.
+
 ## Related
 
 - [Pull and register models](/docs/guides/pull-and-register-models) — get

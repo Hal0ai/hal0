@@ -231,3 +231,91 @@ def test_apply_refuses_while_hal0_units_are_live(
         slot_migrate_flags(apply=True, yes=True, stop_services=False)
     assert exc.value.exit_code == 1
     assert (registry.get("m").defaults is None) or (registry.get("m").defaults.extra_args is None)
+
+
+def _three_slot_tree(paths_mod, *, register_ghost: bool):
+    """Slots one/two/three; two's default model is optionally unregistered.
+
+    Folds apply in model-id order, so the unregistered model is the middle
+    write — the #2180 shape where the first model landed and the third never did.
+    """
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    cfg = paths_mod.slots_config_dir()
+    _write_slot(cfg, "one", _slot_body(name="one", model="a-model", extra_args="-fa on"))
+    _write_slot(cfg, "two", _slot_body(name="two", model="b-ghost", extra_args="-b 512"))
+    _write_slot(cfg, "three", _slot_body(name="three", model="c-model", extra_args="-b 2048"))
+    registry = ModelRegistry()
+    registry.add(Model(id="a-model", path="/models/a.gguf"))
+    registry.add(Model(id="c-model", path="/models/c.gguf"))
+    if register_ghost:
+        registry.add(Model(id="b-ghost", path="/models/b.gguf"))
+    return registry
+
+
+def test_apply_skips_a_slot_whose_model_is_not_in_the_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2180: one unregistered default must not abort the whole fold.
+
+    Slots one and three fold, slot two is named as skipped with its model id,
+    and the exit is 2 (applied, work outstanding) — the same split `hal0
+    update` uses — rather than 0 (clean) or a traceback.
+    """
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths
+
+    registry = _three_slot_tree(paths, register_ghost=False)
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
+
+    with pytest.raises(typer.Exit) as exc:
+        slot_migrate_flags(apply=True, yes=True, stop_services=False)
+    assert exc.value.exit_code == 2
+
+    assert "-fa on" in (registry.get("a-model").defaults.extra_args or "")
+    assert "-b 2048" in (registry.get("c-model").defaults.extra_args or "")
+
+    out = capsys.readouterr().out
+    assert "two" in out
+    assert "b-ghost" in out
+    assert "not in registry" in out
+
+
+def test_apply_with_every_model_registered_exits_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths
+
+    registry = _three_slot_tree(paths, register_ghost=True)
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
+
+    slot_migrate_flags(apply=True, yes=True, stop_services=False)  # no Exit raised
+
+    assert "-fa on" in (registry.get("a-model").defaults.extra_args or "")
+    assert "-b 512" in (registry.get("b-ghost").defaults.extra_args or "")
+    assert "-b 2048" in (registry.get("c-model").defaults.extra_args or "")
+
+
+def test_apply_surfaces_an_unexpected_write_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only "model not in registry" is a skip; anything else still raises."""
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths
+    from hal0.registry.store import ModelRegistry
+
+    _three_slot_tree(paths, register_ghost=True)
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
+    real_update = ModelRegistry.update
+
+    def _update(self, model_id, updates):
+        if model_id == "b-ghost":
+            raise OSError("disk full")
+        return real_update(self, model_id, updates)
+
+    monkeypatch.setattr(ModelRegistry, "update", _update)
+
+    with pytest.raises(OSError, match="disk full"):
+        slot_migrate_flags(apply=True, yes=True, stop_services=False)
