@@ -67,6 +67,20 @@ def test_non_root_healthy_box_is_info_not_fail(tmp_path: Path) -> None:
     assert "ERRS:0 WARNS:0" in out, out
     assert "not writable:" not in out, out
     assert "sudo hal0 doctor" in out, out
+    paths = " ".join(str(tmp_path / n) for n in ("opt", "lib", "etc"))
+    assert f"cannot verify {paths} (" in out, out
+
+
+def test_non_root_mixed_set_names_only_the_unwritable_tree(tmp_path: Path) -> None:
+    """One unwritable tree among writable ones -> rc 0, and only it is named."""
+    rc, out = _run(tmp_path, root=False, unwritable=("lib",))
+    assert rc == 0, out
+    assert "ERRS:0 WARNS:0" in out, out
+    assert "not writable:" not in out, out
+    assert f"cannot verify {tmp_path / 'lib'} (" in out, out
+    assert str(tmp_path / "opt") not in out, out
+    assert str(tmp_path / "etc") not in out, out
+    assert "writable paths: ok" not in out, out
 
 
 def test_non_root_all_writable_is_ok(tmp_path: Path) -> None:
