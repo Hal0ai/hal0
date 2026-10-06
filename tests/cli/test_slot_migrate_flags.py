@@ -278,7 +278,7 @@ def test_apply_skips_a_slot_whose_model_is_not_in_the_registry(
 
     out_lines = [ln.rstrip() for ln in capsys.readouterr().out.splitlines()]
     # The per-fold report line, then the summary block naming slot + model.
-    assert "  SKIP model 'b-ghost' <- slots=['two']: not in registry" in out_lines
+    assert "  skip model 'b-ghost' <- slots=['two']: not in registry" in out_lines
     assert "!  summary — 1 model(s) skipped, not in the registry:" in out_lines
     assert "  slots two → model 'b-ghost'" in out_lines
 
@@ -347,3 +347,27 @@ def test_apply_surfaces_an_unexpected_write_error(
 
     with pytest.raises(OSError, match="disk full"):
         slot_migrate_flags(apply=True, yes=True, stop_services=False)
+
+
+def test_apply_names_an_unregistered_slot_even_when_it_has_nothing_to_fold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    cfg = paths.slots_config_dir()
+    _write_slot(cfg, "one", _slot_body(name="one", model="a-model", extra_args="-fa on"))
+    _write_slot(cfg, "two", _slot_body(name="two", model="b-ghost", extra_args=""))
+    registry = ModelRegistry()
+    registry.add(Model(id="a-model", path="/models/a.gguf"))
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
+
+    with pytest.raises(typer.Exit) as exc:
+        slot_migrate_flags(apply=True, yes=True, stop_services=False)
+    assert exc.value.exit_code == 2
+
+    assert "-fa on" in (registry.get("a-model").defaults.extra_args or "")
+    out_lines = [ln.rstrip() for ln in capsys.readouterr().out.splitlines()]
+    assert "  slots two → model 'b-ghost'" in out_lines

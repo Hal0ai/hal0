@@ -153,6 +153,15 @@ class DivergentRefusal:
     slot_tunes: dict[str, FoldedTune]
 
 
+@dataclass(frozen=True)
+class SkippedFold:
+    """A fold that could not be written because its model has no registry row."""
+
+    model_id: str
+    slot_names: tuple[str, ...]
+    reason: str
+
+
 @dataclass
 class FoldPlan:
     """Result of :func:`plan_slot_flags_fold`."""
@@ -161,6 +170,9 @@ class FoldPlan:
     refusals: list[DivergentRefusal] = field(default_factory=list)
     #: (model_id, reason) for slots that contribute nothing / already-folded.
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    #: Bound models with no registry row — classified BEFORE the no-op and
+    #: divergence checks, so they never block or hide behind them (#2180).
+    missing: list[SkippedFold] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -352,7 +364,8 @@ def plan_slot_flags_fold(
             whose profile is absent here folds with an empty profile tune (the
             profile contributed no flags / is gone).
         model_defaults: model-id -> the model's current ``defaults`` dict (or
-            ``None``). Missing ids fold onto an empty defaults.
+            ``None``), one key per registered model. A slot bound to an id
+            with no key is reported in :attr:`FoldPlan.missing`, not folded.
 
     Returns:
         A :class:`FoldPlan`. When two+ slots fold DIVERGENT tunes onto one
@@ -380,6 +393,10 @@ def plan_slot_flags_fold(
 
     # 2. Resolve each model: sole/consensus → fold; divergent → refuse.
     for model_id, refs in sorted(by_model.items()):
+        if model_id not in model_defaults:
+            names = tuple(r.slot_name for r in refs)
+            plan.missing.append(SkippedFold(model_id, names, "not in registry"))
+            continue
         distinct = {r.folded for r in refs}
         existing = model_defaults.get(model_id)
         if len(distinct) > 1:
@@ -412,17 +429,15 @@ def plan_slot_flags_fold(
 # ── applier (deploy-window gated, dry-run by default) ─────────────────────────
 
 
+def _skip_line(skip: SkippedFold) -> str:
+    # Lower-case "skip " on purpose: the updater's convergence probe treats
+    # those lines as nothing-to-do (updater.detect_pending_ownership_migrations),
+    # and an unregistered binding is not work this fold can ever finish.
+    return f"skip model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
+
+
 class DeployWindowRequired(RuntimeError):
     """Raised when a write is attempted without the deploy-window ack."""
-
-
-@dataclass(frozen=True)
-class SkippedFold:
-    """A fold that could not be written because its model has no registry row."""
-
-    model_id: str
-    slot_names: tuple[str, ...]
-    reason: str
 
 
 class FoldPartiallyApplied(Exception):
@@ -466,10 +481,12 @@ def apply_fold_plan(
         DeployWindowRequired: a real write was requested without ``deploy_window``.
         RuntimeError: the plan has divergent-share refusals — refuse to apply a
             partial fold; the operator must resolve the conflicts first.
-        FoldPartiallyApplied: a write hit a model with no registry row. That
-            fold is skipped, every other fold is still written (each
-            ``registry.update`` is its own transaction), and this is raised at
-            the end with the full report. Any other write error propagates.
+        FoldPartiallyApplied: a bound model has no registry row — listed in
+            ``plan.missing`` by the planner, or (backstop) a write that raised
+            ``ModelNotFound``. That model is skipped, every other fold is still
+            written (each ``registry.update`` is its own transaction), and this
+            is raised at the end with the full report. A dry run only names the
+            skips. Any other write error propagates.
     """
     from hal0.registry.store import ModelNotFound
 
@@ -487,6 +504,11 @@ def apply_fold_plan(
             "slot overrides; resolve (pick one tune or split model rows) and re-run. "
             + " | ".join(lines)
         )
+
+    for miss in plan.missing:
+        lines.append(_skip_line(miss))
+        if not dry_run:
+            skipped.append(miss)
 
     for m in plan.skipped:
         lines.append(f"skip model {m[0]!r}: {m[1]}")
@@ -512,9 +534,7 @@ def apply_fold_plan(
             # The update raised before writing, so nothing of this fold landed.
             skip = SkippedFold(fold.model_id, fold.slot_names, "not in registry")
             skipped.append(skip)
-            lines[-1] = (
-                f"SKIP model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
-            )
+            lines[-1] = _skip_line(skip)
 
     if skipped:
         raise FoldPartiallyApplied(lines, skipped)

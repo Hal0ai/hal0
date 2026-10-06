@@ -611,7 +611,7 @@ line verbatim rather than adding the flag yourself.
 `migrate-flags --apply` folds every slot it can. A slot whose default model
 has no registry row is skipped and named in the summary, the other slots
 still fold, and the command exits `2` (applied, some slots skipped) rather
-than `0`. Register the model or rebind the slot, then re-run (models that
+than `0`; the dry-run preview names the same skips. Register the model or rebind the slot, then re-run (models that
 already folded are a no-op). Models served through a provider lane, such as
 the GPU text-to-speech model `qwen3-tts`, have no registry row and will keep
 reporting this skip.

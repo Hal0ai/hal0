@@ -428,7 +428,7 @@ def test_skip_on_the_last_fold_still_signals_partial():
 
     assert [m for m, _u in reg.updates] == ["a-model", "b-ghost"]
     assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("c-model", ("three",))]
-    assert exc.value.lines[-1] == "SKIP model 'c-model' <- slots=['three']: not in registry"
+    assert exc.value.lines[-1] == "skip model 'c-model' <- slots=['three']: not in registry"
 
 
 def test_all_registered_models_fold_without_a_partial_signal():
@@ -448,3 +448,47 @@ def test_unexpected_write_error_is_not_treated_as_a_skip():
     reg = _Broken()
     with pytest.raises(OSError, match="disk full"):
         apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
+
+
+# ── unregistered models are classified before no-op / divergence pruning ──────
+
+
+def test_unregistered_model_with_an_empty_tune_is_named_not_noop():
+    """A binding with nothing to fold must still be reported as unregistered,
+    not as "already folded" — otherwise --apply exits 0 and never names it."""
+    plan = plan_slot_flags_fold(
+        [_slot("one", "a-model", extra_args="-fa on"), _slot("two", "b-ghost")],
+        {"rocm": ""},
+        {"a-model": None},
+    )
+    assert plan.skipped == []
+
+    preview = apply_fold_plan(plan, _FakeRegistry(), dry_run=True)
+    assert "skip model 'b-ghost' <- slots=['two']: not in registry" in preview
+
+    reg = _FakeRegistry()
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
+    assert [m for m, _u in reg.updates] == ["a-model"]
+    assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("b-ghost", ("two",))]
+
+
+def test_divergent_tunes_on_an_unregistered_model_skip_instead_of_refusing_the_run():
+    """Divergence on a model that cannot be written anyway must not block every
+    other slot: it is a skip, and the registered model still folds."""
+    plan = plan_slot_flags_fold(
+        [
+            _slot("a", "ghost", extra_args="-b 512"),
+            _slot("b", "ghost", extra_args="-b 999"),
+            _slot("c", "m", extra_args="-fa on"),
+        ],
+        {"rocm": ""},
+        {"m": None},
+    )
+    assert plan.ok
+
+    reg = _FakeRegistry()
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
+    assert [m for m, _u in reg.updates] == ["m"]
+    assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("ghost", ("a", "b"))]

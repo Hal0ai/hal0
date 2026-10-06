@@ -99,6 +99,25 @@ def test_flags_fold_noop_skips_are_not_counted_as_pending(
     assert report["detail"]["flags"]["lines"] == []
 
 
+def test_flags_fold_binding_to_an_unregistered_model_is_not_pending(tmp_hal0_home: str) -> None:
+    """#2180/#2324: a slot bound outside the registry (a provider-lane model)
+    can never be folded, so it must not keep `hal0 update` at exit 2."""
+    _write_slot(
+        "tts",
+        'name = "tts"\ntype = "tts"\nport = 8095\n\n[model]\ndefault = "unregistered-tts"\n\n'
+        '[server]\nextra_args = "--default_voice Ryan"\n',
+    )
+    from hal0.config.migrations.slot_flags_fold import run_migration
+
+    # The planner sees the binding and names it (guards against a vacuous pass).
+    assert run_migration(dry_run=True) == [
+        "skip model 'unregistered-tts' <- slots=['tts']: not in registry"
+    ]
+    report = U.detect_pending_ownership_migrations()
+    assert "flags" not in report["pending"]
+    assert report["detail"]["flags"]["error"] is None
+
+
 def test_real_fold_work_is_reported_with_its_command(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

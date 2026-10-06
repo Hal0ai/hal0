@@ -1621,7 +1621,7 @@ def slot_migrate_flags(
     if partial is not None:
         # #2180: the other folds landed; name what did not. Exit 2 = applied,
         # work outstanding — the same split `hal0 update` draws against 1.
-        # The per-fold SKIP lines above are the report; this is the summary.
+        # The per-model "skip" lines above are the report; this is the summary.
         console.print(
             f"\n[yellow]![/yellow]  summary — {len(partial.skipped)} model(s) skipped, "
             "not in the registry:"
