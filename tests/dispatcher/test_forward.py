@@ -238,6 +238,42 @@ async def test_forward_write_timeout_is_a_504() -> None:
 
 
 @pytest.mark.asyncio
+async def test_forward_streaming_open_write_timeout_is_a_504() -> None:
+    """The streaming open path takes the same write-timeout mapping."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.WriteTimeout("", request=req)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UpstreamTimeout) as ei:
+            await dispatcher.forward(_call(streaming=True))
+        assert ei.value.status == 504
+        assert ei.value.code == "dispatch.upstream_timeout"
+        assert ei.value.details["timeout"] == "write"
+        assert ei.value.details["error"] == "WriteTimeout"
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_connect_error_never_leaves_details_error_blank() -> None:
+    """A message-less connect failure still names what happened (#2282)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("", request=req)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UpstreamUnavailable) as ei:
+            await dispatcher.forward(_call())
+        assert ei.value.status == 502
+        assert ei.value.details["error"] == "ConnectTimeout"
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
 async def test_aclose_is_idempotent() -> None:
     dispatcher = Dispatcher()  # lazy client never instantiated
     await dispatcher.aclose()

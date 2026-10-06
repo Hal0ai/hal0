@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -116,16 +117,18 @@ _DEAD_PORT_TRANSPORT_ERRORS = (
 # a refused connect gets (#2282) — a slow slot must not look like a dead one
 # to clients or to anything keying retries/health on the status code.
 # ``httpx.ConnectTimeout`` is deliberately absent: never reaching the upstream
-# *is* unreachable.  ``PoolTimeout`` means every pooled connection to it was
-# still busy past the pool deadline.  The builtin ``TimeoutError`` is the
-# ``asyncio.wait_for`` bound on the streaming header wait; it is an ``OSError``
-# subclass, so this clause must run before the generic one.
+# *is* unreachable.  The builtin ``TimeoutError`` is the ``asyncio.wait_for``
+# bound on the streaming header wait; it is an ``OSError`` subclass, so this
+# clause must run before the generic one.
 _DEADLINE_ERRORS = (
     httpx.ReadTimeout,
     httpx.WriteTimeout,
-    httpx.PoolTimeout,
     TimeoutError,
 )
+# ``httpx.PoolTimeout`` is hal0's *own* client pool saturating (no free
+# connection within the pool deadline) — not the upstream missing a deadline —
+# so it is a 503 ``DispatcherPoolExhausted`` with a Retry-After hint.
+_TIMEOUT_ERRORS = (*_DEADLINE_ERRORS, httpx.PoolTimeout)
 
 # Path defaults used only for routing — never written back into the body.
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.  ``_DEFAULT_MODEL`` (the
@@ -144,6 +147,8 @@ _IMAGE_DEFAULT = "img"
 # new requests when many slow upstream calls are in-flight (#415).
 _DISPATCHER_MAX_CONNECTIONS: int = 64
 _DISPATCHER_MAX_KEEPALIVE: int = 16
+# How long a request waits for a free pooled connection before PoolTimeout.
+_DISPATCHER_POOL_TIMEOUT_S: float = 5.0
 
 # Non-streaming (direct) read timeout.  300 s was too generous: a stuck
 # upstream could hold a connection slot for 5 min, rapidly exhausting the
@@ -264,12 +269,26 @@ class UpstreamTimeout(UpstreamUnavailable):
     A slow model (a long non-streaming generation, an overloaded slot) is not
     a dead one, so this is a 504 rather than the 502 "unreachable" of
     :class:`UpstreamUnavailable` (#2282).  It subclasses it because, as there,
-    no HTTP response was received.  ``details`` adds ``timeout`` (``read``,
-    ``write`` or ``pool``) and ``timeout_s`` (``None`` when unknown).
+    no HTTP response was received.  ``details`` adds ``timeout`` (``read``
+    or ``write``) and ``timeout_s`` (``None`` when unknown).
     """
 
     code = "dispatch.upstream_timeout"
     status = 504
+
+
+class DispatcherPoolExhausted(DispatchError):
+    """hal0's own upstream connection pool had no free connection in time.
+
+    ``httpx.PoolTimeout`` on the dispatcher client: every pooled connection
+    was busy for the whole pool deadline, so the request never left hal0.
+    That is local back-pressure, not an upstream fault — a retryable 503
+    whose ``details.retry_after_s`` the error middleware promotes to a
+    ``Retry-After`` header (#2282).
+    """
+
+    code = "dispatch.pool_exhausted"
+    status = 503
 
 
 class SlotLoading(DispatchError):
@@ -511,7 +530,7 @@ class Dispatcher:
                     connect=5.0,
                     read=self._direct_read_timeout_s,
                     write=10.0,
-                    pool=5.0,
+                    pool=_DISPATCHER_POOL_TIMEOUT_S,
                 ),
                 limits=httpx.Limits(
                     max_connections=_DISPATCHER_MAX_CONNECTIONS,
@@ -1119,12 +1138,16 @@ class Dispatcher:
             },
         }
 
-    def _deadline_error(self, call: UpstreamCall, exc: BaseException) -> UpstreamTimeout:
-        """Build the 504 for a ``_DEADLINE_ERRORS`` member (#2282).
+    def _timeout_error(
+        self, call: UpstreamCall, exc: BaseException
+    ) -> UpstreamTimeout | DispatcherPoolExhausted:
+        """Map a ``_TIMEOUT_ERRORS`` member to its typed error (#2282).
 
-        Names the deadline that expired: httpx records the per-request
-        timeouts on ``request.extensions["timeout"]``, so an injected client
-        or a per-request override reports its real value.  The builtin
+        Read/write/header-wait timeouts are a 504 :class:`UpstreamTimeout`;
+        a pool timeout is a 503 :class:`DispatcherPoolExhausted`.  Names the
+        deadline that expired: httpx records the per-request timeouts on
+        ``request.extensions["timeout"]``, so an injected client or a
+        per-request override reports its real value.  The builtin
         ``TimeoutError`` is the streaming header-wait bound, which is
         ``direct_read_timeout_s`` itself.
         """
@@ -1144,29 +1167,33 @@ class Dispatcher:
             timeout_s = self._direct_read_timeout_s
         within = f" within {timeout_s:g}s" if timeout_s is not None else ""
         name = call.upstream_name
+        details: dict[str, Any] = {
+            "upstream": name,
+            "target": call.target_url,
+            "error": str(exc) or type(exc).__name__,
+            "timeout": kind,
+            "timeout_s": timeout_s,
+        }
+        if kind == "pool":
+            # Retry after about one pool deadline (whole seconds, >= 1: the
+            # middleware truncates the header value to an int).
+            details["retry_after_s"] = max(
+                1, math.ceil(timeout_s if timeout_s else _DISPATCHER_POOL_TIMEOUT_S)
+            )
+            return DispatcherPoolExhausted(
+                f"no connection to upstream {name!r} became free{within} "
+                "(dispatcher connection pool exhausted)",
+                details=details,
+            )
         if kind == "read":
             message = (
                 f"upstream {name!r} did not respond{within} ([dispatcher].direct_read_timeout_s)"
             )
             if not call.streaming:
                 message += "; for long generations send stream: true"
-        elif kind == "write":
-            message = f"upstream {name!r} did not accept the request body{within}"
         else:
-            message = (
-                f"no connection to upstream {name!r} became free{within} "
-                "(dispatcher connection pool exhausted)"
-            )
-        return UpstreamTimeout(
-            message,
-            details={
-                "upstream": name,
-                "target": call.target_url,
-                "error": str(exc) or type(exc).__name__,
-                "timeout": kind,
-                "timeout_s": timeout_s,
-            },
-        )
+            message = f"upstream {name!r} did not accept the request body{within}"
+        return UpstreamTimeout(message, details=details)
 
     async def _forward_plain(self, call: UpstreamCall) -> Response:
         client = self._get_http_client()
@@ -1254,11 +1281,11 @@ class Dispatcher:
                 details={
                     "upstream": call.upstream_name,
                     "target": call.target_url,
-                    "error": str(exc),
+                    "error": str(exc) or type(exc).__name__,
                 },
             ) from exc
-        except _DEADLINE_ERRORS as exc:
-            err = self._deadline_error(call, exc)
+        except _TIMEOUT_ERRORS as exc:
+            err = self._timeout_error(call, exc)
             log.warning(
                 "dispatch.forward_failed",
                 upstream=call.upstream_name,
@@ -1282,7 +1309,7 @@ class Dispatcher:
                 details={
                     "upstream": call.upstream_name,
                     "target": call.target_url,
-                    "error": str(exc),
+                    "error": str(exc) or type(exc).__name__,
                 },
             ) from exc
 
@@ -1313,7 +1340,9 @@ class Dispatcher:
         timeout: httpx.Timeout | httpx._client.UseClientDefault
         guard_active = bool(self._stream_total_timeout_s or self._stream_idle_timeout_s)
         if guard_active:
-            timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
+            timeout = httpx.Timeout(
+                connect=5.0, read=None, write=10.0, pool=_DISPATCHER_POOL_TIMEOUT_S
+            )
         else:
             timeout = httpx.USE_CLIENT_DEFAULT
         try:
@@ -1334,7 +1363,7 @@ class Dispatcher:
             # status line would hang forward() forever (#1918 review,
             # blocking).  Bound the header wait explicitly, matching the
             # pre-guard direct-request timeout — asyncio.TimeoutError is the
-            # builtin TimeoutError, which _DEADLINE_ERRORS maps to the same
+            # builtin TimeoutError, which _TIMEOUT_ERRORS maps to the same
             # 504 UpstreamTimeout as an httpx read timeout (#2282).
             if guard_active:
                 resp = await asyncio.wait_for(
@@ -1357,11 +1386,11 @@ class Dispatcher:
                 details={
                     "upstream": call.upstream_name,
                     "target": call.target_url,
-                    "error": str(exc),
+                    "error": str(exc) or type(exc).__name__,
                 },
             ) from exc
-        except _DEADLINE_ERRORS as exc:
-            err = self._deadline_error(call, exc)
+        except _TIMEOUT_ERRORS as exc:
+            err = self._timeout_error(call, exc)
             log.warning(
                 "dispatch.forward_stream_open_failed",
                 upstream=call.upstream_name,
@@ -1385,7 +1414,7 @@ class Dispatcher:
                 details={
                     "upstream": call.upstream_name,
                     "target": call.target_url,
-                    "error": str(exc),
+                    "error": str(exc) or type(exc).__name__,
                 },
             ) from exc
 
@@ -1882,6 +1911,7 @@ def _stall_sse_frames(
 __all__ = [
     "DispatchError",
     "Dispatcher",
+    "DispatcherPoolExhausted",
     "LegacyResolutionFailed",
     "NoRouteFound",
     "RegistryLoadFailed",
