@@ -14,7 +14,12 @@ hal0's streaming forward path in the dispatcher (`hal0.dispatcher.router`).
 
 - The upstream connection is opened **eagerly** (`httpx.AsyncClient.send(req, stream=True)`)
   specifically so a connect failure surfaces as a clean `502 UpstreamUnavailable`
-  rather than failing partway through an already-started response generator.
+  rather than failing partway through an already-started response generator. An
+  upstream that accepts the connection but sends no response headers within
+  `[dispatcher].direct_read_timeout_s` gets a `504 dispatch.upstream_timeout`
+  instead (the same mapping as a non-streaming read timeout). Once headers are
+  relayed the status is already on the wire, so a later stall cannot change it;
+  the stall guard below ends the stream instead.
 - The client response is a Starlette `StreamingResponse` whose body iterator does a
   **raw byte passthrough** — every upstream chunk is yielded unmodified. hal0
   does **not** parse or re-emit SSE events itself; the OpenAI-standard

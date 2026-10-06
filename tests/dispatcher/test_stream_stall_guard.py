@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamUnavailable
+from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamTimeout
 
 
 class _EndlessStream(httpx.AsyncByteStream):
@@ -362,13 +362,18 @@ async def test_header_wedge_with_guard_active_terminates_bounded() -> None:
             stream_idle_timeout_s=60.0,
         )
         try:
-            with pytest.raises(UpstreamUnavailable):
+            with pytest.raises(UpstreamTimeout) as ei:
                 await asyncio.wait_for(
                     dispatcher.forward(
                         _call(target_url=f"http://127.0.0.1:{port}/v1/chat/completions")
                     ),
                     timeout=5.0,
                 )
+            # The upstream accepted the connection: a missed header deadline
+            # is a 504, not a 502 "unreachable" (#2282).
+            assert ei.value.status == 504
+            assert ei.value.details["timeout_s"] == 0.2
+            assert "0.2s" in ei.value.message
         finally:
             await dispatcher.aclose()
 

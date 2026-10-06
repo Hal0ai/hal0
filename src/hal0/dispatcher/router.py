@@ -111,6 +111,22 @@ _DEAD_PORT_TRANSPORT_ERRORS = (
     httpx.RemoteProtocolError,
 )
 
+# Deadline errors: the upstream was reached but did not answer in time, so
+# they surface as a 504 ``UpstreamTimeout`` instead of the 502 "unreachable"
+# a refused connect gets (#2282) — a slow slot must not look like a dead one
+# to clients or to anything keying retries/health on the status code.
+# ``httpx.ConnectTimeout`` is deliberately absent: never reaching the upstream
+# *is* unreachable.  ``PoolTimeout`` means every pooled connection to it was
+# still busy past the pool deadline.  The builtin ``TimeoutError`` is the
+# ``asyncio.wait_for`` bound on the streaming header wait; it is an ``OSError``
+# subclass, so this clause must run before the generic one.
+_DEADLINE_ERRORS = (
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    TimeoutError,
+)
+
 # Path defaults used only for routing — never written back into the body.
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.  ``_DEFAULT_MODEL`` (the
 # ADR-0023 `agent` anchor) now lives in ``dispatcher._capability_resolve`` and
@@ -240,6 +256,20 @@ class UpstreamUnavailable(DispatchError):
 
     code = "dispatch.upstream_unavailable"
     status = 502
+
+
+class UpstreamTimeout(UpstreamUnavailable):
+    """The upstream was reached but did not answer within the deadline.
+
+    A slow model (a long non-streaming generation, an overloaded slot) is not
+    a dead one, so this is a 504 rather than the 502 "unreachable" of
+    :class:`UpstreamUnavailable` (#2282).  It subclasses it because, as there,
+    no HTTP response was received.  ``details`` adds ``timeout`` (``read``,
+    ``write`` or ``pool``) and ``timeout_s`` (``None`` when unknown).
+    """
+
+    code = "dispatch.upstream_timeout"
+    status = 504
 
 
 class SlotLoading(DispatchError):
@@ -1089,6 +1119,55 @@ class Dispatcher:
             },
         }
 
+    def _deadline_error(self, call: UpstreamCall, exc: BaseException) -> UpstreamTimeout:
+        """Build the 504 for a ``_DEADLINE_ERRORS`` member (#2282).
+
+        Names the deadline that expired: httpx records the per-request
+        timeouts on ``request.extensions["timeout"]``, so an injected client
+        or a per-request override reports its real value.  The builtin
+        ``TimeoutError`` is the streaming header-wait bound, which is
+        ``direct_read_timeout_s`` itself.
+        """
+        if isinstance(exc, httpx.WriteTimeout):
+            kind = "write"
+        elif isinstance(exc, httpx.PoolTimeout):
+            kind = "pool"
+        else:
+            kind = "read"
+        timeout_s: float | None = None
+        if isinstance(exc, httpx.TimeoutException):
+            try:
+                timeout_s = exc.request.extensions["timeout"][kind]
+            except (RuntimeError, KeyError, TypeError):  # no request attached
+                timeout_s = None
+        if timeout_s is None and kind == "read":
+            timeout_s = self._direct_read_timeout_s
+        within = f" within {timeout_s:g}s" if timeout_s is not None else ""
+        name = call.upstream_name
+        if kind == "read":
+            message = (
+                f"upstream {name!r} did not respond{within} ([dispatcher].direct_read_timeout_s)"
+            )
+            if not call.streaming:
+                message += "; for long generations send stream: true"
+        elif kind == "write":
+            message = f"upstream {name!r} did not accept the request body{within}"
+        else:
+            message = (
+                f"no connection to upstream {name!r} became free{within} "
+                "(dispatcher connection pool exhausted)"
+            )
+        return UpstreamTimeout(
+            message,
+            details={
+                "upstream": name,
+                "target": call.target_url,
+                "error": str(exc) or type(exc).__name__,
+                "timeout": kind,
+                "timeout_s": timeout_s,
+            },
+        )
+
     async def _forward_plain(self, call: UpstreamCall) -> Response:
         client = self._get_http_client()
         if call.streaming:
@@ -1178,6 +1257,17 @@ class Dispatcher:
                     "error": str(exc),
                 },
             ) from exc
+        except _DEADLINE_ERRORS as exc:
+            err = self._deadline_error(call, exc)
+            log.warning(
+                "dispatch.forward_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=err.message,
+                error_type=type(exc).__name__,
+            )
+            raise err from exc
         except (httpx.HTTPError, OSError) as exc:
             log.warning(
                 "dispatch.forward_failed",
@@ -1243,10 +1333,9 @@ class Dispatcher:
             # accepts the TCP connection and then wedges before writing a
             # status line would hang forward() forever (#1918 review,
             # blocking).  Bound the header wait explicitly, matching the
-            # pre-guard direct-request timeout — asyncio.TimeoutError is a
-            # builtin TimeoutError, itself an OSError subclass, so it falls
-            # into the same UpstreamUnavailable handling as a transport
-            # error below.
+            # pre-guard direct-request timeout — asyncio.TimeoutError is the
+            # builtin TimeoutError, which _DEADLINE_ERRORS maps to the same
+            # 504 UpstreamTimeout as an httpx read timeout (#2282).
             if guard_active:
                 resp = await asyncio.wait_for(
                     client.send(req, stream=True), timeout=self._direct_read_timeout_s
@@ -1271,6 +1360,17 @@ class Dispatcher:
                     "error": str(exc),
                 },
             ) from exc
+        except _DEADLINE_ERRORS as exc:
+            err = self._deadline_error(call, exc)
+            log.warning(
+                "dispatch.forward_stream_open_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=err.message,
+                error_type=type(exc).__name__,
+            )
+            raise err from exc
         except (httpx.HTTPError, OSError) as exc:
             log.warning(
                 "dispatch.forward_stream_open_failed",
@@ -1789,6 +1889,7 @@ __all__ = [
     "SlotLoading",
     "UnknownUpstream",
     "UpstreamCall",
+    "UpstreamTimeout",
     "UpstreamUnavailable",
     "resolve_by_capability",
 ]

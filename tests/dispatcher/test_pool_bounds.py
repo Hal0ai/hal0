@@ -24,7 +24,7 @@ from hal0.dispatcher.router import (
     _DISPATCHER_MAX_KEEPALIVE,
     Dispatcher,
     UpstreamCall,
-    UpstreamUnavailable,
+    UpstreamTimeout,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -96,14 +96,16 @@ def test_lazy_http_client_read_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool_timeout_raises_upstream_unavailable() -> None:
-    """A PoolTimeout from a saturated pool surfaces as UpstreamUnavailable.
+async def test_pool_timeout_raises_upstream_timeout() -> None:
+    """A PoolTimeout from a saturated pool surfaces as UpstreamTimeout.
 
     We inject an httpx.PoolTimeout via a transport that raises it directly,
     simulating what happens when all connections in a bounded pool are
     occupied.  Before #415 the dispatcher had no limits= so PoolTimeout
     would never fire; after the fix, _forward_direct catches the broader
-    httpx.HTTPError (which PoolTimeout extends) and wraps it.
+    httpx.HTTPError (which PoolTimeout extends) and wraps it.  Since #2282
+    it is the 504 deadline subclass, not the 502 "unreachable" a refused
+    connect gets: every pooled connection was busy, the upstream is alive.
     """
 
     def pool_timeout_handler(req: httpx.Request) -> httpx.Response:
@@ -113,18 +115,19 @@ async def test_pool_timeout_raises_upstream_unavailable() -> None:
     dispatcher = Dispatcher(http_client=client)
 
     try:
-        with pytest.raises(UpstreamUnavailable) as exc_info:
+        with pytest.raises(UpstreamTimeout) as exc_info:
             await dispatcher.forward(_call(streaming=False))
         # Ensure the error is correctly attributed and carries the upstream name.
         assert "test-upstream" in exc_info.value.message
-        assert exc_info.value.status == 502
+        assert exc_info.value.status == 504
+        assert exc_info.value.details["timeout"] == "pool"
     finally:
         await dispatcher.aclose()
 
 
 @pytest.mark.asyncio
-async def test_pool_timeout_streaming_raises_upstream_unavailable() -> None:
-    """A PoolTimeout on stream-open also surfaces as UpstreamUnavailable."""
+async def test_pool_timeout_streaming_raises_upstream_timeout() -> None:
+    """A PoolTimeout on stream-open also surfaces as the 504 UpstreamTimeout."""
 
     def pool_timeout_handler(req: httpx.Request) -> httpx.Response:
         raise httpx.PoolTimeout("connection pool is full", request=req)
@@ -133,9 +136,9 @@ async def test_pool_timeout_streaming_raises_upstream_unavailable() -> None:
     dispatcher = Dispatcher(http_client=client)
 
     try:
-        with pytest.raises(UpstreamUnavailable) as exc_info:
+        with pytest.raises(UpstreamTimeout) as exc_info:
             await dispatcher.forward(_call(streaming=True))
         assert "test-upstream" in exc_info.value.message
-        assert exc_info.value.status == 502
+        assert exc_info.value.status == 504
     finally:
         await dispatcher.aclose()
