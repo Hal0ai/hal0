@@ -7,8 +7,11 @@
 //     polled hooks override per-query with `refetchInterval`.
 //   - `refetchOnWindowFocus: false` — operators leave the dashboard open
 //     all day; refocus pings are noise.
-//   - `retry: 1` — surfaces 404 / 5xx quickly so the per-hook fallback
+//   - one retry — surfaces 404 / 5xx quickly so the per-hook fallback
 //     (mock data or empty list) can render instead of spinning forever.
+//     Except a 401 `auth.required`, which is never retried: no retry can
+//     succeed without a session, and an operator browsing read-only has a
+//     dozen ADMIN reads polling — retrying each doubled the refused traffic.
 //
 // `mutationCache.onError` (#1822): a LAN-bound box with auth off still
 // requires an admin session for ADMIN-class mutations from off-box callers
@@ -69,6 +72,12 @@ export function shouldRecheckAuthStatus(
   return sinceLastRecheckMs >= AUTH_RECHECK_MIN_INTERVAL_MS
 }
 
+/** Default query retry policy: once, but never for a missing-session refusal. */
+export function retryUnlessAuthRequired(failureCount: number, error: unknown): boolean {
+  if (isPostureReauthChallenge(error)) return false
+  return failureCount < 1
+}
+
 export const queryClient: QueryClient = new QueryClient({
   queryCache: new QueryCache({
     onError: (error, query) => {
@@ -94,7 +103,7 @@ export const queryClient: QueryClient = new QueryClient({
       gcTime: 5 * 60_000,
       refetchOnWindowFocus: false,
       refetchOnReconnect: true,
-      retry: 1,
+      retry: retryUnlessAuthRequired,
     },
     mutations: {
       retry: 0,

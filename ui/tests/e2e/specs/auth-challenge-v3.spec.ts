@@ -16,7 +16,25 @@
  */
 import { test, expect } from '../fixtures/apiMock'
 
+// The forced-mock default for GET /api/updates/state reports an available
+// update, which the bell badge also counts. Left alone, the badge's steady
+// state here is 2 (approval + update) and `toHaveText('1')` only passed when
+// the approval happened to render a frame earlier (#2335). Pin "no update"
+// through the same seam notification-bell-v3.spec.ts uses, so the one seeded
+// approval is the only thing the badge can count.
+const NO_UPDATE = {
+  hal0: { current: '0.3.0-alpha.1', available: null, channel: 'stable' },
+  flm: { current: 'v0.9.42', source: 'manual-deb' },
+  autoCheck: true,
+}
+
 test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript((p) => {
+      ;(window as any).__hal0UpdateStateOverride = p
+    }, NO_UPDATE)
+  })
+
   test('approve 401s once, the drawer prompts sign-in, and the retry succeeds', async ({
     page,
     mockState,
@@ -89,7 +107,10 @@ test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
 
     await expect(drawer).toHaveCount(0)
     expect(loginAttempts).toBe(1)
-    expect(approveAttempts).toBe(2)
+    // The drawer closes BEFORE the retry is sent (the store clears the
+    // challenge, then executes it), so the second approve may still be in
+    // flight at this point — poll for it rather than reading the counter once.
+    await expect.poll(() => approveAttempts).toBe(2)
 
     // The retried approve succeeded: the entry is gone from the pending list.
     await expect(page.getByTestId('approvals-empty')).toBeVisible()

@@ -8,7 +8,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Hal0Error } from '@/api/client'
-import { AUTH_RECHECK_MIN_INTERVAL_MS, queryClient, shouldRecheckAuthStatus } from './queryClient'
+import { QueryObserver } from '@tanstack/react-query'
+import {
+  AUTH_RECHECK_MIN_INTERVAL_MS,
+  queryClient,
+  retryUnlessAuthRequired,
+  shouldRecheckAuthStatus,
+} from './queryClient'
 
 const authRequired = () =>
   new Hal0Error('authentication required', { code: 'auth.required', status: 401 })
@@ -92,5 +98,42 @@ describe('queryClient — a refused read', () => {
     vi.setSystemTime(clock + AUTH_RECHECK_MIN_INTERVAL_MS)
     await refusedRead()
     expect(queryClient.getQueryState(['auth-status'])?.isInvalidated).toBe(true)
+  })
+})
+
+describe('retry policy', () => {
+  it('never retries a request refused for lack of a session — it cannot succeed', () => {
+    expect(retryUnlessAuthRequired(0, authRequired())).toBe(false)
+  })
+
+  it('still retries any other failure once', () => {
+    const boom = new Hal0Error('upstream down', { code: 'system.unknown', status: 502 })
+    expect(retryUnlessAuthRequired(0, boom)).toBe(true)
+    expect(retryUnlessAuthRequired(1, boom)).toBe(false)
+    expect(retryUnlessAuthRequired(0, new Error('Failed to fetch'))).toBe(true)
+  })
+
+  it('is the default for mounted reads: a refused read hits the server once per poll, not twice', async () => {
+    queryClient.setQueryData(['auth-status'], KNOWN_SIGNED_OUT)
+    let calls = 0
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ['memory', 'banks'],
+      queryFn: () => {
+        calls += 1
+        return Promise.reject(authRequired())
+      },
+    })
+    const settled = new Promise<void>((resolve) => {
+      const unsubscribe = observer.subscribe((result) => {
+        if (result.isError) {
+          unsubscribe()
+          resolve()
+        }
+      })
+    })
+
+    await settled
+
+    expect(calls).toBe(1)
   })
 })
