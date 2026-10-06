@@ -37,7 +37,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from hal0.capabilities.catalog import models_for_capability, prime_flm_image_probe
+from hal0.capabilities.catalog import models_for_capability
 from hal0.capabilities.config import (
     CapabilitySelection,
     capabilities_toml_path,
@@ -252,10 +252,6 @@ def migrate(
     legal.
     """
     del dry_run  # deprecated hidden flag — dry-run is the unconditional default now
-    # #1974: the catalog's FLM-image probe never blocks and this process
-    # starts cold, so wait for it once here. Otherwise NPU reads as absent and
-    # ``--apply`` would snap every NPU selection to another backend.
-    prime_flm_image_probe()
     # SC-10: the load → diff → save is one read-modify-write. Hold the same
     # capabilities.toml advisory lock the running API uses so a ``migrate``
     # invoked while hal0-api is applying a selection cannot read a stale copy

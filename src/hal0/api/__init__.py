@@ -1737,6 +1737,17 @@ async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
         log.warning("capabilities.init_failed", error=str(exc))
     app.state.capability_orchestrator = ctx.capability_orchestrator
 
+    # #1974: start the FLM-image probe now, in the background, so NPU is
+    # advertised from the first dashboard request rather than the second.
+    # Fire-and-forget: starts a daemon thread (no-op without an NPU) and
+    # never waits on the seam, so it cannot delay or fail the boot.
+    try:
+        from hal0.capabilities.catalog import start_flm_image_probe
+
+        start_flm_image_probe()
+    except Exception as exc:
+        log.warning("capabilities.flm_image_probe_start_failed", error=str(exc))
+
 
 async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
     """Phase — per-slot metric registries + the SQLite MetricsService."""

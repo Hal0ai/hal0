@@ -34,8 +34,6 @@ def stub_config(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr(cc, "save_capabilities_config", _save)
         monkeypatch.setattr(cc, "file_lock", lambda *_a, **_k: _NullLock())
-        # #1974: keep migrate hermetic; the real prime waits on a podman probe.
-        monkeypatch.setattr(cc, "prime_flm_image_probe", lambda *_a, **_k: None)
         return cfg
 
     _install.saved = saved  # type: ignore[attr-defined]
@@ -263,23 +261,99 @@ def test_capability_set_passes_the_lifecycle_timeout(
     )
 
 
-def test_migrate_settles_the_flm_probe_before_reading_the_catalog(
-    stub_config, monkeypatch: pytest.MonkeyPatch
+# ── #1974: migrate and the FLM-image probe ──────────────────────────────────
+
+
+def _probe_recorder(
+    monkeypatch: pytest.MonkeyPatch, *, npu: bool, answer: bool | None
+) -> list[str]:
+    """Real catalog path; record every FLM-image probe instead of shelling podman."""
+    import types
+
+    import hal0.providers.container as container_mod
+    import hal0.providers.flm as flm_mod
+    from hal0.capabilities import catalog
+
+    calls: list[str] = []
+
+    class _Provider:
+        def image_present(self, image: str) -> bool | None:
+            calls.append(image)
+            return answer
+
+    monkeypatch.setattr(container_mod, "container_provider", lambda: _Provider())
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=npu), gpus=[]),
+    )
+    monkeypatch.setattr(
+        flm_mod,
+        "flm_served_models",
+        lambda: [
+            {
+                "tag": "embed-gemma:300m",
+                "capabilities": ["embed"],
+                "installed": True,
+                "size_bytes": 300_000_000,
+                "footprint_gb": 0.6,
+                "family": "embed-gemma",
+            }
+        ],
+    )
+    monkeypatch.setattr(catalog, "_flm_last_definitive", None)
+    catalog.reset_flm_image_present_cache()
+    return calls
+
+
+def _settle_and_reset() -> None:
+    from hal0.capabilities import catalog
+
+    if catalog._flm_probe_thread is not None:
+        catalog._flm_probe_thread.join(timeout=5)
+    catalog.reset_flm_image_present_cache()
+
+
+def test_migrate_on_a_non_npu_host_never_probes_the_flm_image(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:
-    """#1974: the catalog's FLM-image probe never blocks, and a CLI process
-    starts with a cold cache. ``migrate`` must wait for it first, or NPU reads
-    as absent and ``--apply`` snaps every NPU selection to another backend."""
+    """The catalog consults the FLM-image probe only behind NPU presence, and
+    ``migrate`` adds no probe of its own, so CPU/GPU-only hosts never probe."""
+    calls = _probe_recorder(monkeypatch, npu=False, answer=True)
     stub_config(_illegal_selection())
-    order: list[str] = []
-    monkeypatch.setattr(cc, "prime_flm_image_probe", lambda *_a, **_k: order.append("prime"))
-
-    def _rows(*_a: object, **_k: object) -> list[dict[str, Any]]:
-        order.append("catalog")
-        return []
-
-    monkeypatch.setattr(cc, "models_for_capability", _rows)
 
     result = runner.invoke(cc.app, ["migrate"])
+    _settle_and_reset()
 
     assert result.exit_code == 0, result.output
-    assert order[:2] == ["prime", "catalog"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("answer", [False, None, True])
+def test_migrate_verdict_does_not_depend_on_the_flm_image_probe(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, answer: bool | None
+) -> None:
+    """Why ``migrate`` needs no settled FLM-image answer: NPU catalog rows come
+    from ``flm list`` (``flm_served_models``), never from the image probe, so an
+    absent or unanswerable probe leaves an NPU selection legal."""
+    from hal0.capabilities import catalog
+
+    _probe_recorder(monkeypatch, npu=True, answer=answer)
+    catalog.prime_flm_image_probe(timeout=5)  # land this probe answer first
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+    verdict = cc._classify_pair("embed", "embed-gemma:300m", "npu", None)
+    _settle_and_reset()
+
+    assert result.exit_code == 0, result.output
+    assert stub_config.saved["cfg"] is None, "an NPU selection was rewritten"
+    assert verdict == ("ok", ["npu"])
+
+
+def _npu_selection() -> dict[str, dict[str, CapabilitySelection]]:
+    return {
+        "embed": {
+            "embed": CapabilitySelection(device="npu", provider="flm", model="embed-gemma:300m")
+        }
+    }

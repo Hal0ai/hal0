@@ -296,14 +296,39 @@ def _run_flm_probe(generation: int) -> None:
         _flm_last_definitive = answer
 
 
+def _host_has_npu() -> bool:
+    """Same NPU-presence test :func:`available_backends` gates the probe on."""
+    try:
+        hw = load_hardware_info()
+    except Exception:
+        return False
+    return bool(hw and hw.npu and hw.npu.present)
+
+
+def start_flm_image_probe() -> None:
+    """Start the FLM-image probe in the background if one is due. Never blocks.
+
+    Called once from hal0-api boot (``_boot_capabilities``) so the cold window,
+    during which NPU is not yet advertised, ends seconds after boot instead
+    of on the first dashboard request. No-op on a host without an NPU, where
+    :func:`available_backends` never consults the probe either.
+    """
+    if not _host_has_npu():
+        return
+    with _flm_probe_lock:
+        if _flm_probe_due_locked():
+            _start_flm_probe_locked()
+
+
 def prime_flm_image_probe(timeout: float = 15.0) -> None:
     """Start the FLM-image probe if one is due and wait up to ``timeout``.
 
-    For one-shot SYNC callers that read the catalog once per process and must
-    not act on a cold cache, e.g. ``hal0 capabilities migrate``, which would
-    otherwise see NPU as absent and rewrite NPU selections. Never call this
-    from the event loop or a request path: that is the stall #1974 removed.
+    For SYNC callers that need a settled answer, such as tests and one-shot
+    tools; no-op on a host without an NPU. Never call this from the event
+    loop or a request path: that is the stall #1974 removed.
     """
+    if not _host_has_npu():
+        return
     with _flm_probe_lock:
         thread = _flm_probe_thread
         if _flm_probe_due_locked():

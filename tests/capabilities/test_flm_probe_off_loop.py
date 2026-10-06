@@ -340,3 +340,181 @@ def test_known_answer_is_kept_while_a_reset_re_probes(slow_probe: _SlowProvider)
     assert time.monotonic() - started < _FAST_S
     _settle()
     assert len(slow_probe.probe_threads) == 2
+
+
+# ── boot-time start (#1974 review: confine the cold window to boot) ─────────
+
+
+def _boot_ctx() -> tuple[Any, Any]:
+    app = types.SimpleNamespace(state=types.SimpleNamespace())
+    ctx = types.SimpleNamespace(
+        slot_manager=_NoSlots(), model_registry=None, capability_orchestrator=None
+    )
+    return app, ctx
+
+
+def test_start_probe_is_non_blocking_on_an_npu_host(slow_probe: _SlowProvider) -> None:
+    started = time.monotonic()
+    catalog.start_flm_image_probe()
+    assert time.monotonic() - started < _FAST_S, "start_flm_image_probe waited on the seam"
+    _settle()
+    assert len(slow_probe.probe_threads) == 1
+    assert catalog._flm_image_present() is True, "the boot probe's answer serves request one"
+
+
+def test_start_and_prime_are_no_ops_without_an_npu(
+    slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=False), gpus=[]),
+    )
+    catalog.start_flm_image_probe()
+    catalog.prime_flm_image_probe(timeout=5)
+    assert slow_probe.probe_threads == []
+
+
+async def test_boot_capabilities_phase_starts_the_probe_without_blocking(
+    slow_probe: _SlowProvider, tmp_hal0_home: str
+) -> None:
+    from hal0.api import _boot_capabilities
+
+    app, ctx = _boot_ctx()
+    started = time.monotonic()
+    await _boot_capabilities(app, ctx)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < _FAST_S, f"boot waited on the FLM-image probe ({elapsed:.2f}s)"
+    assert catalog._flm_probe_thread is not None, "boot did not start the probe"
+    ticks = await _probe_lands_while_loop_runs()
+    _assert_probe_ran_off_loop(slow_probe, ticks, threading.get_ident())
+    assert catalog._flm_image_present() is True
+
+
+async def test_boot_survives_a_failing_probe_start(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.api import _boot_capabilities
+
+    def _boom() -> None:
+        raise RuntimeError("probe start failed")
+
+    monkeypatch.setattr(catalog, "start_flm_image_probe", _boom)
+    app, ctx = _boot_ctx()
+
+    await _boot_capabilities(app, ctx)
+
+    assert app.state.capability_orchestrator is not None
+
+
+# ── one response is internally consistent ───────────────────────────────────
+
+_EMBED_FLM_TAG = {
+    "tag": "embed-gemma:300m",
+    "capabilities": ["embed"],
+    "installed": True,
+    "size_bytes": 300_000_000,
+    "footprint_gb": 0.6,
+    "family": "embed-gemma",
+}
+
+
+async def test_probe_landing_mid_get_state_yields_a_consistent_response(
+    slow_probe: _SlowProvider,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``get_state`` reads ``available_backends()`` and then builds catalogs that
+    read it again. Land the probe exactly between the two reads: the catalogs
+    must equal what a settled-absent and a settled-present probe produce,
+    because catalog rows never depend on NPU presence (NPU rows come from
+    ``flm list``; ``host_backends`` gates only the gpu-*/cpu lanes)."""
+    import hal0.agents.hermes_refresh as _hr
+    import hal0.providers.flm as flm_mod
+
+    monkeypatch.setattr(_hr, "spawn_context_refresh", lambda *a, **k: None)
+    monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [dict(_EMBED_FLM_TAG)])
+    real_catalogs = catalog.catalogs_by_slot
+
+    def _settled(answer: bool) -> Any:
+        slow_probe.answer = answer
+        catalog.reset_flm_image_present_cache()
+        catalog._flm_image_present()
+        _settle()
+        assert catalog._flm_image_present() is answer
+        return real_catalogs(registry=None)
+
+    when_absent = _settled(False)
+    when_present = _settled(True)
+    assert any(
+        b["id"] == "npu" for row in when_present["embed"]["embed"] for b in row["backends"]
+    ), "fixture: the catalog should carry an NPU row"
+    assert when_absent == when_present
+
+    slow_probe.answer = True
+    monkeypatch.setattr(catalog, "_flm_last_definitive", None)
+    catalog.reset_flm_image_present_cache()
+    landed_between: list[bool] = []
+
+    def _catalogs_after_probe_lands(registry: Any = None) -> Any:
+        _settle()  # the probe started by get_state's first read lands right here
+        landed_between.append(catalog._flm_image_present())
+        return real_catalogs(registry=registry)
+
+    monkeypatch.setattr(catalog, "catalogs_by_slot", _catalogs_after_probe_lands)
+    caps = tmp_path / "capabilities.toml"
+    caps.write_text("", encoding="utf-8")
+    orch = CapabilityOrchestrator(slot_manager=_NoSlots(), config_path=caps)  # type: ignore[arg-type]
+
+    state = await orch.get_state()
+
+    assert landed_between == [True], "the probe did not land between the two reads"
+    assert "npu" not in [b["id"] for b in state["backends"]]
+    assert state["catalogs"] == when_present == when_absent
+
+
+# ── FLM pull path keeps the known answer across its reset ───────────────────
+
+
+async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
+    slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run_flm_pull`` → ``reset_flm_image_present_cache()`` (registry/pull.py)
+    must not flicker NPU off while the re-probe runs."""
+    import sys
+
+    import hal0.providers.flm as flm_mod
+    from hal0.registry import pull as pull_mod
+    from hal0.registry.pull import PullJob, run_flm_pull
+
+    catalog._flm_image_present()
+    _settle()
+    assert catalog._flm_image_present() is True
+
+    host_models_dir = str(tmp_path)
+    fake_pull = "import os, sys; os.makedirs(os.path.join(sys.argv[1], 'Repo'), exist_ok=True)"
+    monkeypatch.setattr(
+        flm_mod,
+        "flm_pull_command",
+        lambda tag: ([sys.executable, "-c", fake_pull, host_models_dir], host_models_dir),
+    )
+    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
+    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
+    monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])
+    monkeypatch.setattr(flm_mod, "reset_flm_catalog_cache", lambda: None)
+    monkeypatch.setattr(pull_mod, "_register_flm_pulled", lambda *a, **k: None)
+    monkeypatch.setattr(pull_mod, "_flm_install_path", lambda hmd, tag: str(tmp_path / "Repo"))
+    generation_before = catalog._flm_probe_generation
+
+    job = PullJob(job_id="j1", model_id="fake:tag")
+    await run_flm_pull(job, tag="fake:tag", registry=object())
+
+    assert job.state == "completed"
+    assert catalog._flm_probe_generation == generation_before + 1, "the pull did not reset"
+    started = time.monotonic()
+    assert catalog._flm_image_present() is True, "NPU flickered off after the FLM pull"
+    assert time.monotonic() - started < _FAST_S
+    _settle()
+    assert len(slow_probe.probe_threads) == 2, "the pull's reset should trigger a re-probe"
