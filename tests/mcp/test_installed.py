@@ -403,3 +403,74 @@ def test_hand_edited_lan_http_record_with_secrets_is_refused_on_load(
     assert exc.value.code == "mcp.record_malformed"
     assert "AUTHORIZATION" in exc.value.details["reason"]
     assert "192.0.2.10" in exc.value.details["reason"]
+
+
+def test_refused_record_never_echoes_env_literal(tmp_hal0_home: str) -> None:
+    """The refusal names keys and host, never the [env] literal it protects.
+
+    pydantic's ``str(ValidationError)`` appends ``input_value={...}``; neither
+    the ``bad_record`` journal line nor the 400's ``details.reason`` may carry
+    it. The reason also tells the operator the way out (no API path exists
+    for a record that will not load: edit the TOML or DELETE it).
+    """
+    from structlog.testing import capture_logs
+
+    path = registry._registry_path("github")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'id = "github"\nname = "github"\nspec = "https://github.example.com/manifest.json"\n'
+        'transport = "sse"\nurl = "http://192.0.2.10:8765/sse"\n'
+        '[env]\nX_API_KEY = "SUPERSECRET-LITERAL"\n',
+        encoding="utf-8",
+    )
+    with capture_logs() as logs:
+        assert registry.list_installed() == []
+    bad = [e for e in logs if e["event"] == "hal0.mcp.installed.bad_record"]
+    assert len(bad) == 1
+    logged = repr(bad[0])
+    assert "SUPERSECRET-LITERAL" not in logged
+    assert "X_API_KEY" in logged
+    assert "192.0.2.10" in logged
+
+    with pytest.raises(BadRequest) as exc:
+        registry.get_installed("github")
+    reason = exc.value.details["reason"]
+    assert "SUPERSECRET-LITERAL" not in reason
+    assert "SUPERSECRET-LITERAL" not in repr(exc.value.details)
+    assert "SUPERSECRET-LITERAL" not in str(exc.value)
+    assert "X_API_KEY" in reason
+    assert "192.0.2.10" in reason
+    assert str(path) in reason
+    assert "allow_insecure_http = true" in reason
+    assert "DELETE" in reason
+
+
+def test_bad_record_warning_once_per_file_version(tmp_hal0_home: str) -> None:
+    """``list_installed`` runs on every dashboard poll; warn once per edit, not per call."""
+    from structlog.testing import capture_logs
+
+    path = registry._registry_path("broken")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('id = "broken"\n', encoding="utf-8")  # missing required fields
+    with capture_logs() as logs:
+        registry.list_installed()
+        registry.list_installed()
+    assert len([e for e in logs if e["event"] == "hal0.mcp.installed.bad_record"]) == 1
+
+    stat = path.stat()
+    path.write_text('id = "broken"\nname = "broken"\n', encoding="utf-8")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    with capture_logs() as logs:
+        registry.list_installed()
+    assert len([e for e in logs if e["event"] == "hal0.mcp.installed.bad_record"]) == 1
+
+
+def test_uppercase_http_scheme_still_gated(tmp_hal0_home: str) -> None:
+    with pytest.raises(ValueError, match=r"AUTHORIZATION"):
+        _http_record("HTTP://192.0.2.10:8765/mcp", secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"})
+    saved = registry.install(
+        _http_record(
+            "HTTPS://github.example.com/mcp", secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"}
+        )
+    )
+    assert saved.url == "HTTPS://github.example.com/mcp"

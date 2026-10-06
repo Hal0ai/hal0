@@ -40,6 +40,7 @@ from urllib.parse import urlsplit
 
 import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from hal0.config import paths as cfg_paths
 from hal0.config.loader import write_toml_atomic
@@ -76,12 +77,29 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _insecure_http_message(server_id: str, host: str, keys: list[str]) -> str:
-    """Operator-facing refusal for the #2304 plaintext-header gate."""
+    """Operator-facing refusal for the #2304 plaintext-header gate.
+
+    Names the header *keys* and the host — never a value.
+    """
     return (
         f"MCP server {server_id!r}: header value(s) {keys} from [secrets]/[env] "
-        f"would be sent in clear text to non-loopback host {host!r}; use an "
-        f"https:// url or a loopback host, or set allow_insecure_http = true"
+        f"would be sent in clear text to non-loopback host {host!r}"
     )
+
+
+def _validation_reason(exc: ValidationError) -> str:
+    """Operator-facing summary of a record's validation failure.
+
+    Built from each error's ``loc``/``msg`` only. ``str(exc)`` would append
+    pydantic's ``input_value=...``, which for a record is the whole TOML
+    dict — ``[env]`` literals included — and this string lands in the
+    journal and in a 400 response body.
+    """
+    parts = []
+    for err in exc.errors(include_url=False, include_context=False, include_input=False):
+        loc = ".".join(str(x) for x in err["loc"])
+        parts.append(f"{loc}: {err['msg']}" if loc else err["msg"])
+    return "; ".join(parts)
 
 
 class ExposureConfig(BaseModel):
@@ -110,6 +128,10 @@ class InstalledServer(BaseModel):
     the dashboard can render an installed entry alongside a catalog one
     without a translation layer.
     """
+
+    # A record's input carries [env] literals; keep them out of every
+    # ValidationError rendering (see _validation_reason, #2304).
+    model_config = {"hide_input_in_errors": True}
 
     id: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=128)
@@ -184,14 +206,32 @@ class InstalledServer(BaseModel):
     def _header_values_need_tls(self) -> InstalledServer:
         """Refuse a record that would send header values in clear text (#2304).
 
-        Raised as ``ValueError`` like the ``secrets`` validator above, so a
-        hand-edited record fails to load (``list_installed`` skips it with
+        In practice this fires on load: ``POST /install`` never writes header
+        values, and ``[secrets]`` is set by editing the TOML. Such a record
+        fails to load (``list_installed`` skips it with
         ``hal0.mcp.installed.bad_record``; ``get_installed`` returns
-        ``mcp.record_malformed``) instead of being joined to Hermes.
+        ``mcp.record_malformed``), so PATCH and ``/test`` cannot reach it
+        either — the message names the only ways out. Hermes keeps an entry
+        it already joined for the server until the next registry mutation
+        runs :func:`hal0.mcp.hermes_join.sync_exposure`.
         """
         exposure = None if self.allow_insecure_http else self.plaintext_header_exposure()
         if exposure is not None:
-            raise ValueError(_insecure_http_message(self.id, *exposure))
+            record_path = _registry_dir() / f"{self.id}.toml"
+            raise PydanticCustomError(
+                "mcp_insecure_url",
+                "{reason}",
+                {
+                    "reason": (
+                        f"{_insecure_http_message(self.id, *exposure)}; the record is "
+                        f"not loaded. Edit {record_path} to use an https:// url or a "
+                        f"loopback host, set allow_insecure_http = true, or DELETE "
+                        f"the server. Hermes keeps any entry it already joined for "
+                        f"this server until the next MCP change that re-syncs it "
+                        f"(install, uninstall, or a tools/exposure/enabled PATCH)."
+                    )
+                },
+            )
         return self
 
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
@@ -359,13 +399,27 @@ def list_installed() -> list[InstalledServer]:
             with p.open("rb") as f:
                 raw = tomllib.load(f)
             rows.append(InstalledServer.from_toml_dict(raw))
+            _warned_bad_records.pop(str(p), None)
         except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
-            log.warning(
-                "hal0.mcp.installed.bad_record",
-                path=str(p),
-                error=str(exc),
-            )
+            _warn_bad_record(p, exc)
     return rows
+
+
+#: ``path -> st_mtime_ns`` of malformed records already reported, so the
+#: dashboard's polling of :func:`list_installed` logs each edit once.
+_warned_bad_records: dict[str, int] = {}
+
+
+def _warn_bad_record(path: Path, exc: Exception) -> None:
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = -1
+    if _warned_bad_records.get(str(path)) == mtime:
+        return
+    _warned_bad_records[str(path)] = mtime
+    error = _validation_reason(exc) if isinstance(exc, ValidationError) else str(exc)
+    log.warning("hal0.mcp.installed.bad_record", path=str(path), error=error)
 
 
 def get_installed(server_id: str) -> InstalledServer:
@@ -386,7 +440,10 @@ def get_installed(server_id: str) -> InstalledServer:
         raise BadRequest(
             f"installed-server record at {path} is malformed",
             code="mcp.record_malformed",
-            details={"server_id": server_id, "reason": str(exc)},
+            details={
+                "server_id": server_id,
+                "reason": _validation_reason(exc) if isinstance(exc, ValidationError) else str(exc),
+            },
         ) from exc
 
 
@@ -400,7 +457,8 @@ def _require_tls_for_header_values(record: InstalledServer) -> None:
     if exposure is not None:
         host, keys = exposure
         raise BadRequest(
-            _insecure_http_message(record.id, host, keys),
+            f"{_insecure_http_message(record.id, host, keys)}; use an https:// url "
+            f"or a loopback host, or set allow_insecure_http = true",
             code="mcp.insecure_url",
             details={"server_id": record.id, "host": host, "header_keys": keys},
         )
