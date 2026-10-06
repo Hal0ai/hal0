@@ -98,7 +98,7 @@ def refuse_cuda_selection(cfg_dict: Any, changed: set[str] | None = None) -> Non
 
     ``hal0.model_meta.CUDA_ENABLED`` is ``False`` in this release: NVIDIA
     GPUs run on the Vulkan lane. A config selects CUDA when its ``device`` is
-    ``gpu-cuda``, its legacy ``backend`` is ``cuda``, its ``binary`` (runner)
+    ``gpu-cuda``, its v0.1 ``backend`` value is ``cuda``, its ``binary`` (runner)
     is the ``cuda`` runner, or — only where the slot leaves that field unset —
     its profile's ``backend`` / ``runner`` is ``cuda``.
 
