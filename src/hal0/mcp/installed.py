@@ -92,6 +92,21 @@ def _insecure_http_message(server_id: str, host: str, keys: list[str]) -> str:
     )
 
 
+def _proxy_header_message(server_id: str, keys: list[str]) -> str:
+    """Refusal for a ``Proxy-Authorization`` header value (#2304 review).
+
+    urllib (hal0's probe) moves that header onto the proxy ``CONNECT``
+    request, ahead of the TLS tunnel, so an ``http://`` proxy receives it in
+    clear text whatever the record's url. Names keys only, never a value.
+    """
+    return (
+        f"MCP server {server_id!r}: header value(s) {keys} from [secrets]/[env] are "
+        f"Proxy-Authorization, which is sent on the proxy CONNECT request outside TLS, "
+        f"so no url makes it safe (allow_insecure_http does not cover it); remove it "
+        f"and configure proxy credentials in the proxy environment instead"
+    )
+
+
 def _validation_reason(exc: ValidationError) -> str:
     """Operator-facing summary of a record's validation failure.
 
@@ -221,9 +236,21 @@ class InstalledServer(BaseModel):
         (:func:`hal0.mcp.hermes_join.reconcile_stale_joins`) or registry
         mutation, whichever comes first.
         """
+        record_path = _registry_dir() / f"{self.id}.toml"
+        proxy_keys = self.proxy_header_keys()
+        if proxy_keys:
+            raise PydanticCustomError(
+                "mcp_proxy_header",
+                "{reason}",
+                {
+                    "reason": (
+                        f"{_proxy_header_message(self.id, proxy_keys)}. The record is "
+                        f"not loaded: edit {record_path} or DELETE the server."
+                    )
+                },
+            )
         exposure = None if self.allow_insecure_http else self.plaintext_header_exposure()
         if exposure is not None:
-            record_path = _registry_dir() / f"{self.id}.toml"
             raise PydanticCustomError(
                 "mcp_insecure_url",
                 "{reason}",
@@ -248,6 +275,10 @@ class InstalledServer(BaseModel):
         key with a non-empty literal; an empty ``[env]`` value carries nothing.
         """
         return sorted(set(self.secrets) | {k for k, v in self.env.items() if v})
+
+    def proxy_header_keys(self) -> list[str]:
+        """Header-value keys naming ``Proxy-Authorization`` (any case); never safe."""
+        return [k for k in self.header_value_keys() if k.lower() == "proxy-authorization"]
 
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
         """``(host, header keys)`` when header values would cross a network
@@ -468,6 +499,13 @@ def _require_tls_for_header_values(record: InstalledServer) -> None:
     The model validator covers construction and load; this covers records
     built with ``model_copy`` (no validators), i.e. :func:`patch_config`.
     """
+    proxy_keys = record.proxy_header_keys()
+    if proxy_keys:
+        raise BadRequest(
+            _proxy_header_message(record.id, proxy_keys),
+            code="mcp.proxy_header",
+            details={"server_id": record.id, "header_keys": proxy_keys},
+        )
     exposure = None if record.allow_insecure_http else record.plaintext_header_exposure()
     if exposure is not None:
         host, keys = exposure

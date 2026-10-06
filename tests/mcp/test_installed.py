@@ -474,3 +474,47 @@ def test_uppercase_http_scheme_still_gated(tmp_hal0_home: str) -> None:
         )
     )
     assert saved.url == "HTTPS://github.example.com/mcp"
+
+
+@pytest.mark.parametrize(
+    "key", ["Proxy-Authorization", "PROXY-AUTHORIZATION", "proxy-authorization"]
+)
+@pytest.mark.parametrize("url", ["https://github.example.com/mcp", "http://127.0.0.1:8765/mcp"])
+def test_proxy_authorization_header_value_refused_for_any_url(
+    tmp_hal0_home: str, key: str, url: str
+) -> None:
+    """urllib moves Proxy-Authorization onto the CONNECT request, which a plain
+    http:// proxy carries in clear — https on the record does not protect it."""
+    with pytest.raises(ValueError, match="CONNECT") as exc:
+        _http_record(url, secrets={key: "GITHUB_MCP_TOKEN"})
+    assert key in str(exc.value)
+    with pytest.raises(ValueError, match="CONNECT"):
+        _http_record(url, secrets={key: "GITHUB_MCP_TOKEN"}, allow_insecure_http=True)
+
+
+def test_proxy_authorization_env_literal_refused_without_echoing_it(
+    tmp_hal0_home: str,
+) -> None:
+    with pytest.raises(ValueError, match="Proxy-Authorization") as exc:
+        _http_record(
+            "https://github.example.com/mcp", env={"Proxy-Authorization": "Basic SUPERSECRET"}
+        )
+    assert "SUPERSECRET" not in str(exc.value)
+    # An empty literal carries nothing and is not refused.
+    _http_record("https://github.example.com/mcp", env={"Proxy-Authorization": ""})
+
+
+def test_install_and_patch_refuse_proxy_authorization(tmp_hal0_home: str) -> None:
+    base = _http_record("https://github.example.com/mcp")
+    with pytest.raises(BadRequest) as exc:
+        registry.install(base.model_copy(update={"secrets": {"Proxy-Authorization": "TOKEN"}}))
+    assert exc.value.code == "mcp.proxy_header"
+    assert exc.value.details["header_keys"] == ["Proxy-Authorization"]
+
+    registry.install(base)
+    with pytest.raises(BadRequest) as exc:
+        registry.patch_config("github", env={"proxy-authorization": "Basic SUPERSECRET"})
+    assert exc.value.code == "mcp.proxy_header"
+    assert "SUPERSECRET" not in str(exc.value)
+    assert "SUPERSECRET" not in repr(exc.value.details)
+    assert registry.get_installed("github").env == {}

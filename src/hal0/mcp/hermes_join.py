@@ -167,10 +167,11 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
     return entries
 
 
-#: Entry fields :func:`reconcile_stale_joins` compares with what is on disk.
-#: Deliberately not ``headers``/``timeout``/``type``: ``hermes config set``
-#: coerces scalar strings (``"true"``, ``"123"``) on the way in, so comparing
-#: those would never converge and every boot would re-sync.
+#: Entry fields :func:`reconcile_stale_joins` compares with what is on disk,
+#: plus the *set of header keys*. Deliberately not header values, ``timeout``
+#: or ``type``: ``hermes config set`` coerces scalar strings (``"true"``,
+#: ``"123"``) on the way in, so comparing those would never converge and
+#: every boot would re-sync.
 _RECONCILED_FIELDS = ("url", "skip_preflight")
 
 
@@ -179,7 +180,29 @@ def _entry_drifted(desired: dict[str, Any], persisted: Any) -> bool:
         return True
     if persisted.get("url") != desired["url"]:
         return True
-    return bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight"))
+    if bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight")):
+        return True
+    # Header *keys* only (values are coerced by `hermes config set`): a key on
+    # disk that is no longer rendered is a removed credential still being sent.
+    on_disk = persisted.get("headers")
+    return isinstance(on_disk, dict) and bool(set(on_disk) - set(desired.get("headers") or {}))
+
+
+def _report_errors(report: dict[str, Any]) -> list[str]:
+    """Every error in a :func:`sync_exposure` report, per-target ones prefixed.
+
+    The writers report under ``report[<target>]`` (``errors``, the brain
+    writer's single ``error``, ``remove_errors``); only writer exceptions
+    reach the top-level ``errors``. Deduplicated, order kept.
+    """
+    out: list[str] = list(report.get("errors") or [])
+    for target in JOIN_TARGETS:
+        result = report.get(target) or {}
+        nested = [*(result.get("errors") or []), *(result.get("remove_errors") or [])]
+        if result.get("error"):
+            nested.append(str(result["error"]))
+        out += [f"{target}: {err}" for err in nested]
+    return list(dict.fromkeys(out))
 
 
 def reconcile_stale_joins() -> list[str]:
@@ -217,7 +240,7 @@ def reconcile_stale_joins() -> list[str]:
         log.warning(
             "hal0.mcp.hermes_join.startup_resync",
             server_ids=sorted(triggered),
-            errors=report.get("errors", []),
+            errors=_report_errors(report),
         )
     return sorted(triggered)
 

@@ -330,9 +330,17 @@ def test_failed_removal_keeps_ownership_so_the_next_run_retries(tmp_hal0_home: s
     hermes_cfg.write_text("mcp_servers: [unclosed\n", encoding="utf-8")  # malformed YAML
     hermes_join._write_manifest({"hermes": ["github"], "brain": []})
     _write_quarantined_record("github")
+    from structlog.testing import capture_logs
 
-    assert hermes_join.reconcile_stale_joins() == ["github"]
+    with capture_logs() as logs:
+        assert hermes_join.reconcile_stale_joins() == ["github"]
     assert hermes_join._load_manifest()["hermes"] == ["github"]
+    # The per-target failure is surfaced, naming the target and the reason.
+    resync = [e for e in logs if e["event"] == "hal0.mcp.hermes_join.startup_resync"]
+    assert len(resync) == 1
+    assert any(err.startswith("hermes: ") and "remove" in err for err in resync[0]["errors"]), (
+        resync[0]["errors"]
+    )
 
     # Operator repairs the file; the next boot retries and now succeeds.
     _write_hermes_config(
@@ -410,3 +418,70 @@ def test_skip_preflight_cleared_when_header_values_removed(tmp_hal0_home: str, m
     assert [hermes_bin, "config", "set", "mcp_servers.github.skip_preflight", "false"] in calls
     brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
     assert brain["mcp_servers"]["github"].get("skip_preflight", False) is False
+
+
+def test_removed_header_key_is_pruned_from_hermes_config(tmp_hal0_home: str, monkeypatch) -> None:
+    """#2332: `hermes config set` only adds keys, so a removed credential's header
+    would stay in config.yaml (and, with skip_preflight cleared, reach the
+    redirect-following preflight). The writer prunes it."""
+    import yaml
+
+    monkeypatch.setenv("GITHUB_MCP_TOKEN", "shh-secret-value")
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+        env={"X_API_KEY": "literal-value"},
+    )
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    # What the first sync left on disk (the fake binary does not write it).
+    _write_hermes_config(
+        {
+            "github": {
+                "type": "http",
+                "url": "https://github.example.com/mcp",
+                "headers": {
+                    "X-hal0-Agent": "hermes",
+                    "AUTHORIZATION": "shh-secret-value",
+                    "X_API_KEY": "literal-value",
+                },
+                "skip_preflight": True,
+            },
+            "operator-added": {"url": "https://op.example.com/mcp", "headers": {"K": "v"}},
+        }
+    )
+
+    installed.patch_config("github", secrets={})
+    hermes_join.sync_exposure()
+
+    servers = yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert "AUTHORIZATION" not in servers["github"]["headers"]
+    assert servers["github"]["headers"]["X_API_KEY"] == "literal-value"
+    assert servers["operator-added"]["headers"] == {"K": "v"}
+    assert [hermes_bin, "config", "set", "mcp_servers.github.skip_preflight", "true"] in calls
+
+    installed.patch_config("github", env={})
+    calls.clear()
+    hermes_join.sync_exposure()
+
+    servers = yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert set(servers["github"]["headers"]) <= {"X-hal0-Agent"}
+    assert [hermes_bin, "config", "set", "mcp_servers.github.skip_preflight", "false"] in calls
+
+
+def test_reconcile_resyncs_when_disk_has_stale_header_keys(tmp_hal0_home: str, monkeypatch) -> None:
+    """Startup also catches a header key on disk that the registry no longer renders."""
+    _fake_hermes(monkeypatch)
+    _install("github", exposure=installed.ExposureConfig(hermes=True))
+    _write_hermes_config(
+        {
+            "github": {
+                "url": "https://github.example.com/mcp",
+                "headers": {"X-hal0-Agent": "hermes", "AUTHORIZATION": "old-value"},
+                "skip_preflight": False,
+            }
+        }
+    )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+    assert hermes_join.reconcile_stale_joins() == ["github"]
