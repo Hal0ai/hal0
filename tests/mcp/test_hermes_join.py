@@ -299,3 +299,114 @@ def test_reconcile_stale_joins_is_a_noop_when_nothing_is_stale(
 
     monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
     assert hermes_join.reconcile_stale_joins() == []
+
+
+def _fake_hermes(monkeypatch) -> tuple[str, list[list[str]]]:
+    """A present hermes binary whose `config set` calls are recorded, not run."""
+    from hal0.agents import hermes_provision
+
+    hermes_bin = cfg_paths.var_lib() / "venvs" / "hermes" / "bin" / "hermes"
+    hermes_bin.parent.mkdir(parents=True, exist_ok=True)
+    hermes_bin.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        hermes_provision.subprocess, "run", lambda argv, **kw: calls.append(list(argv))
+    )
+    return str(hermes_bin), calls
+
+
+def _write_hermes_config(servers: dict) -> None:
+    import yaml
+
+    path = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"mcp_servers": servers}), encoding="utf-8")
+
+
+def test_failed_removal_keeps_ownership_so_the_next_run_retries(tmp_hal0_home: str) -> None:
+    """A stale id is only forgotten once its entry is really gone from Hermes."""
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    hermes_cfg.parent.mkdir(parents=True, exist_ok=True)
+    hermes_cfg.write_text("mcp_servers: [unclosed\n", encoding="utf-8")  # malformed YAML
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+    _write_quarantined_record("github")
+
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    assert hermes_join._load_manifest()["hermes"] == ["github"]
+
+    # Operator repairs the file; the next boot retries and now succeeds.
+    _write_hermes_config(
+        {"github": {"url": "http://192.0.2.10:8765/mcp", "headers": {"AUTHORIZATION": "s"}}}
+    )
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    import yaml
+
+    assert "github" not in (yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"])
+    assert hermes_join._load_manifest()["hermes"] == []
+
+
+def test_reconcile_resyncs_existing_join_missing_skip_preflight(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Upgrade path: an owned, still-desired join written before skip_preflight
+    existed is re-applied at startup, not at the next unrelated mutation."""
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+    )
+    _write_hermes_config({"github": {"type": "http", "url": "https://github.example.com/mcp"}})
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    assert [hermes_bin, "config", "set", "mcp_servers.github.skip_preflight", "true"] in calls
+
+
+def test_reconcile_is_a_noop_when_persisted_entries_match(tmp_hal0_home: str, monkeypatch) -> None:
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+    )
+    _write_hermes_config(
+        {
+            "github": {
+                "type": "http",
+                "url": "https://github.example.com/mcp",
+                "skip_preflight": True,
+            }
+        }
+    )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    def _no_sync(**kwargs: object) -> dict:
+        raise AssertionError("sync_exposure must not run on a converged box")
+
+    monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
+    assert hermes_join.reconcile_stale_joins() == []
+
+
+def test_skip_preflight_cleared_when_header_values_removed(tmp_hal0_home: str, monkeypatch) -> None:
+    import yaml
+
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    brain_cfg = cfg_paths.var_lib() / ".hermes" / "profiles" / "hal0-brain" / "config.yaml"
+    brain_cfg.parent.mkdir(parents=True, exist_ok=True)
+    brain_cfg.write_text("mcp_servers: {}\n", encoding="utf-8")
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True, brain=True),
+        secrets={"AUTHORIZATION": "GITHUB_MCP_TOKEN"},
+    )
+    hermes_join.sync_exposure()
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
+    assert brain["mcp_servers"]["github"]["skip_preflight"] is True
+
+    installed.patch_config("github", secrets={})
+    calls.clear()
+    hermes_join.sync_exposure()
+
+    assert [hermes_bin, "config", "set", "mcp_servers.github.skip_preflight", "false"] in calls
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
+    assert brain["mcp_servers"]["github"].get("skip_preflight", False) is False

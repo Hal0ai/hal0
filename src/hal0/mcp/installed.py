@@ -216,9 +216,10 @@ class InstalledServer(BaseModel):
         fails to load (``list_installed`` skips it with
         ``hal0.mcp.installed.bad_record``; ``get_installed`` returns
         ``mcp.record_malformed``), so PATCH and ``/test`` cannot reach it
-        either — the message names the only ways out. Hermes keeps an entry
-        it already joined for the server until the next registry mutation
-        runs :func:`hal0.mcp.hermes_join.sync_exposure`.
+        either — the message names the only ways out. An entry already joined
+        to Hermes for the server is removed at the next hal0-api start
+        (:func:`hal0.mcp.hermes_join.reconcile_stale_joins`) or registry
+        mutation, whichever comes first.
         """
         exposure = None if self.allow_insecure_http else self.plaintext_header_exposure()
         if exposure is not None:
@@ -232,8 +233,9 @@ class InstalledServer(BaseModel):
                         f"not loaded. Edit {record_path} to use an https:// url or a "
                         f"loopback host, set allow_insecure_http = true, or DELETE "
                         f"the server. Hermes keeps any entry it already joined for "
-                        f"this server until the next MCP change that re-syncs it "
-                        f"(install, uninstall, or a tools/exposure/enabled PATCH)."
+                        f"this server until the next hal0-api restart or MCP change "
+                        f"that re-syncs it (install, uninstall, or a tools/exposure/"
+                        f"enabled PATCH)."
                     )
                 },
             )

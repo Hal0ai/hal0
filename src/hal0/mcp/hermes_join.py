@@ -167,29 +167,59 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
     return entries
 
 
-def reconcile_stale_joins() -> list[str]:
-    """Remove joins hal0 owns but no longer wants; run once at hal0-api startup.
+#: Entry fields :func:`reconcile_stale_joins` compares with what is on disk.
+#: Deliberately not ``headers``/``timeout``/``type``: ``hermes config set``
+#: coerces scalar strings (``"true"``, ``"123"``) on the way in, so comparing
+#: those would never converge and every boot would re-sync.
+_RECONCILED_FIELDS = ("url", "skip_preflight")
 
-    :func:`sync_exposure` otherwise runs only from MCP mutation routes. A
-    record that stops loading — e.g. one the #2304 TLS gate now refuses
-    after an upgrade — would leave its entry, resolved secret headers
-    included, in Hermes's config until some unrelated mutation. Runs the
-    full sync only when the ownership manifest names an id that is no
-    longer desired, so a converged box does no ``hermes config set`` work
-    on boot. Returns the stale ids found (empty when nothing was stale).
+
+def _entry_drifted(desired: dict[str, Any], persisted: Any) -> bool:
+    if not isinstance(persisted, dict):
+        return True
+    if persisted.get("url") != desired["url"]:
+        return True
+    return bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight"))
+
+
+def reconcile_stale_joins() -> list[str]:
+    """Bring Hermes/brain joins back in line with the registry; run at hal0-api startup.
+
+    :func:`sync_exposure` otherwise runs only from MCP mutation routes, so
+    after an upgrade (#2304):
+
+    * a record the TLS gate now refuses on load would keep its entry,
+      resolved secret headers included, in Hermes's config; and
+    * a still-desired entry written before ``skip_preflight`` existed would
+      keep Hermes's header-forwarding preflight on.
+
+    Runs the full sync when membership differs from the ownership manifest
+    (either direction) or when a desired entry's :data:`_RECONCILED_FIELDS`
+    differ from the persisted one. A converged box does no ``hermes config
+    set`` work on boot; a config file hal0 cannot read is not treated as
+    drift. Returns the ids that triggered the sync (empty when converged).
     """
+    from hal0.agents import hermes_provision
+
     manifest = _load_manifest()
-    stale = sorted(
-        {sid for t in JOIN_TARGETS for sid in set(manifest.get(t, [])) - set(_desired_entries(t))}
-    )
-    if stale:
+    triggered: set[str] = set()
+    for target in JOIN_TARGETS:
+        desired = _desired_entries(target)
+        owned = set(manifest.get(target, []))
+        triggered |= owned ^ set(desired)
+        persisted = hermes_provision.persisted_mcp_servers(target, hermes_home=_hermes_home())
+        if persisted is not None:
+            triggered |= {
+                sid for sid, entry in desired.items() if _entry_drifted(entry, persisted.get(sid))
+            }
+    if triggered:
         report = sync_exposure()
         log.warning(
-            "hal0.mcp.hermes_join.stale_joins_removed",
-            server_ids=stale,
+            "hal0.mcp.hermes_join.startup_resync",
+            server_ids=sorted(triggered),
             errors=report.get("errors", []),
         )
-    return stale
+    return sorted(triggered)
 
 
 def _seed_tools_block(records_by_id: dict[str, InstalledServer]) -> dict[str, Any]:
@@ -253,10 +283,14 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
                 )
         except Exception as exc:
             log.warning("hal0.mcp.hermes_join.apply_failed", target=target, error=str(exc))
-            result = {"errors": [str(exc)]}
             report["errors"].append(f"{target}: {exc}")
+            result = {"errors": [str(exc)], "remove_errors": [str(exc)]}
         report[target] = result
-        new_manifest[target] = sorted(desired.keys())
+        # Ownership of a stale id is only released once its removal really
+        # happened; otherwise the id stays in the manifest and the next sync
+        # (or boot, via reconcile_stale_joins) retries it.
+        kept = set(remove_ids) if result.get("remove_errors") else set()
+        new_manifest[target] = sorted(set(desired) | kept)
 
     _write_manifest(new_manifest)
 
