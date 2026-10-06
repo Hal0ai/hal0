@@ -34,6 +34,7 @@ from hal0.providers.podman_introspect import ImageProbe
 
 
 def _npu_only_hw() -> Any:
+    """A HardwareInfo-shaped stub: NPU present, no GPUs."""
     return types.SimpleNamespace(npu=types.SimpleNamespace(present=True), gpus=[])
 
 
@@ -45,6 +46,7 @@ def _ids() -> list[str]:
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """NPU-only host, podman runtime, and a fresh probe cache around every test."""
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "_flm_last_definitive", None)
@@ -59,10 +61,12 @@ class _Seam:
     """Scripted ``podman_introspect.image_presence``: one probe per call."""
 
     def __init__(self, *answers: ImageProbe) -> None:
+        """Queue the probe answers to hand out, in order."""
         self._answers = list(answers)
         self.calls: list[str] = []
 
     def __call__(self, image: str) -> ImageProbe:
+        """Record the asked image and return the next scripted answer."""
         self.calls.append(image)
         return self._answers[min(len(self.calls), len(self._answers)) - 1]
 
@@ -74,6 +78,7 @@ def no_rootless(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def _boom(argv: list[str], **_kw: object) -> None:
+        """Fail the test if anything reaches the rootless podman path."""
         calls.append(list(argv))
         raise AssertionError(f"rootless podman was invoked: {argv}")
 
@@ -82,6 +87,7 @@ def no_rootless(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 
 def _install_seam(monkeypatch: pytest.MonkeyPatch, seam: _Seam) -> None:
+    """Replace ``podman_introspect.image_presence`` with the scripted seam."""
     monkeypatch.setattr(container_mod.podman_introspect, "image_presence", seam)
 
 
@@ -91,6 +97,7 @@ def _install_seam(monkeypatch: pytest.MonkeyPatch, seam: _Seam) -> None:
 def test_present_in_root_store_advertises_npu_without_touching_rootless_store(
     monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
 ) -> None:
+    """Root store says present: NPU is advertised and rootless podman is never run."""
     seam = _Seam(ImageProbe("present"))
     _install_seam(monkeypatch, seam)
 
@@ -102,6 +109,7 @@ def test_present_in_root_store_advertises_npu_without_touching_rootless_store(
 def test_missing_from_root_store_hides_npu_and_is_cached(
     monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
 ) -> None:
+    """Root store says missing: NPU is hidden and that definitive answer is cached."""
     seam = _Seam(ImageProbe("missing"), ImageProbe("present"))
     _install_seam(monkeypatch, seam)
 
@@ -114,6 +122,7 @@ def test_missing_from_root_store_hides_npu_and_is_cached(
 def test_seam_failure_never_falls_back_to_rootless_store(
     monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]], reason: str
 ) -> None:
+    """No seam failure reason falls back to hal0-api's own rootless store."""
     _install_seam(monkeypatch, _Seam(ImageProbe("unknown", reason)))  # type: ignore[arg-type]
 
     assert "npu" not in _ids()
@@ -154,6 +163,7 @@ def test_seam_failure_is_not_reprobed_inside_the_retry_window(
 def test_later_seam_failure_does_not_evict_a_known_present_image(
     monkeypatch: pytest.MonkeyPatch, no_rootless: list[list[str]]
 ) -> None:
+    """A cached 'present' survives a later failing probe."""
     seam = _Seam(ImageProbe("present"), ImageProbe("unknown", "podman-failed"))
     _install_seam(monkeypatch, seam)
     monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
@@ -180,11 +190,13 @@ def test_reset_drops_a_cached_failure_too(
 
 
 def _dev_box(monkeypatch: pytest.MonkeyPatch, *rcs: int) -> list[list[str]]:
+    """Simulate a dev box: the seam is skipped and local podman answers with ``rcs``."""
     _install_seam(monkeypatch, _Seam(ImageProbe("unknown", "not-service-user")))
     calls: list[list[str]] = []
     answers = list(rcs)
 
     def fake_run(argv: list[str], **_kw: object) -> Any:
+        """Record the podman argv and answer the next scripted return code."""
         calls.append(list(argv))
         return types.SimpleNamespace(returncode=answers[min(len(calls), len(answers)) - 1])
 
@@ -193,6 +205,7 @@ def _dev_box(monkeypatch: pytest.MonkeyPatch, *rcs: int) -> list[list[str]]:
 
 
 def test_dev_box_uses_image_exists_not_inspect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dev-box fallback asks ``podman image exists``, never ``inspect``."""
     calls = _dev_box(monkeypatch, 0)
 
     assert _ids()[0] == "npu"
@@ -200,6 +213,7 @@ def test_dev_box_uses_image_exists_not_inspect(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_dev_box_absent_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dev box, rc 1 (absent): hidden and cached."""
     calls = _dev_box(monkeypatch, 1, 0)
 
     assert "npu" not in _ids()
@@ -210,6 +224,7 @@ def test_dev_box_absent_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dev_box_podman_operational_failure_is_not_cached_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Dev box, rc 125 (podman broke): hidden for now, re-probed after the window."""
     calls = _dev_box(monkeypatch, 125, 0)
     monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0, raising=False)
 
@@ -225,6 +240,7 @@ def test_no_runtime_is_not_cached_as_absent(monkeypatch: pytest.MonkeyPatch) -> 
     resolved: list[bool] = [False, True]
 
     def fake_runtime() -> str:
+        """Fail runtime resolution once, then resolve to podman."""
         if not resolved.pop(0):
             raise RuntimeError("no podman runtime found")
         return "podman"
@@ -257,11 +273,13 @@ def test_end_to_end_seam_failure_then_recovery_through_real_seam_client(
     outcomes = [(66, ""), (0, "present\n")]
 
     def fake_seam_run(argv: list[str], **_kw: object) -> Any:
+        """Answer the sudo seam call with the next scripted (rc, stdout)."""
         seam_calls.append(list(argv))
         rc, out = outcomes[min(len(seam_calls), len(outcomes)) - 1]
         return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
 
     def presence_via_real_client(image: str) -> ImageProbe:
+        """Call the real seam client with the faked run and the service-user gate open."""
         return real_presence(image, run=fake_seam_run, is_hal0_user=lambda: True)
 
     _install_seam(monkeypatch, presence_via_real_client)  # type: ignore[arg-type]

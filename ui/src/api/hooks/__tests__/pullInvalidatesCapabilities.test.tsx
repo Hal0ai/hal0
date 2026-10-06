@@ -30,6 +30,7 @@ vi.mock('@/api/client', async () => {
 
 type Listener = (evt: MessageEvent) => void
 
+/** Controllable stand-in for EventSource: tests emit named SSE events on it. */
 class FakeEventSource {
   static instances: FakeEventSource[] = []
   url: string
@@ -37,17 +38,21 @@ class FakeEventSource {
   onerror: (() => void) | null = null
   closed = false
   listeners: Record<string, Listener[]> = {}
+  /** Register the instance so the test can reach it. */
   constructor(url: string) {
     this.url = url
     FakeEventSource.instances.push(this)
   }
+  /** Subscribe to a named SSE event, as usePullJob does. */
   addEventListener(type: string, fn: Listener) {
     ;(this.listeners[type] ??= []).push(fn)
   }
+  /** Deliver a named SSE event with a JSON payload to its listeners. */
   emit(type: string, data: unknown) {
     const evt = { data: JSON.stringify(data) } as MessageEvent
     for (const fn of this.listeners[type] ?? []) fn(evt)
   }
+  /** Mark the stream closed. */
   close() {
     this.closed = true
   }
@@ -57,11 +62,13 @@ class FakeEventSource {
 const { usePullJob } = await import('@/api/hooks/useModels')
 const { CAPABILITIES_QUERY_KEY } = await import('@/api/hooks/useCapabilities')
 
+/** Surfaces usePullJob's latest snapshot to the test. */
 function Probe({ onSnapshot }: { onSnapshot: (snap: ReturnType<typeof usePullJob>) => void }) {
   onSnapshot(usePullJob())
   return null
 }
 
+/** Mount the probe under a QueryClient that already holds a settled capabilities response. */
 function mountProbe() {
   let snapshot!: ReturnType<typeof usePullJob>
   const host = document.createElement('div')
@@ -86,6 +93,7 @@ function mountProbe() {
   return { root, qc, get: () => snapshot }
 }
 
+/** Has the capabilities query been marked stale (it will refetch)? */
 function capabilitiesInvalidated(qc: QueryClient): boolean {
   return qc.getQueryState(CAPABILITIES_QUERY_KEY)?.isInvalidated === true
 }

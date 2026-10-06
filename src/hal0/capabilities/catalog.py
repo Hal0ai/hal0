@@ -21,6 +21,7 @@ cache the heavy work upstream.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -333,6 +334,25 @@ def flm_image_probe_settled() -> bool:
         return True
     with _flm_probe_lock:
         return _flm_image_present_cache is not None
+
+
+def flm_image_probe_retry_in_s() -> int:
+    """Whole seconds until the next FLM-image probe is due; 0 if due, running or moot.
+
+    Non-zero only while an unanswerable result is held: the rest of its
+    :data:`_FLM_PROBE_RETRY_S` window, rounded up. 0 when settled (see
+    :func:`flm_image_probe_settled`), when the cache is cold, or once the
+    window has passed and a probe is (about to be) in flight. The dashboard
+    polls at ``max(2 s, this)`` while unsettled (``backends_retry_in_s`` in
+    ``GET /api/capabilities``). Never blocks.
+    """
+    if not _host_has_npu():
+        return 0
+    with _flm_probe_lock:
+        if _flm_image_present_cache is not None or _flm_image_unknown_at is None:
+            return 0
+        remaining = _FLM_PROBE_RETRY_S - (time.monotonic() - _flm_image_unknown_at)
+    return max(0, math.ceil(remaining))
 
 
 def prime_flm_image_probe(timeout: float = 15.0) -> None:

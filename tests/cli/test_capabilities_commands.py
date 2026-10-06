@@ -277,7 +277,10 @@ def _probe_recorder(
     calls: list[str] = []
 
     class _Provider:
+        """Provider stand-in that records each image probe."""
+
         def image_present(self, image: str) -> bool | None:
+            """Record the probe and return the configured answer."""
             calls.append(image)
             return answer
 
@@ -307,6 +310,7 @@ def _probe_recorder(
 
 
 def _settle_and_reset() -> None:
+    """Let any background probe finish, then clear the probe cache."""
     from hal0.capabilities import catalog
 
     if catalog._flm_probe_thread is not None:
@@ -352,6 +356,7 @@ def test_migrate_verdict_does_not_depend_on_the_flm_image_probe(
 
 
 def _npu_selection() -> dict[str, dict[str, CapabilitySelection]]:
+    """One enabled NPU (FLM) embed selection."""
     return {
         "embed": {
             "embed": CapabilitySelection(device="npu", provider="flm", model="embed-gemma:300m")

@@ -60,6 +60,10 @@ export interface CapabilitiesBag {
   // False while the backend's FLM-image probe has no answer yet (just after
   // boot or an FLM pull), so `backends` may still gain/lose NPU (#1974).
   backends_settled?: boolean
+  // Whole seconds until the backend's next FLM-image probe is due: 0 while a
+  // probe is pending, the rest of its 30 s retry window while the probe could
+  // not answer (podman/sudo broken). Sets the re-poll cadence below.
+  backends_retry_in_s?: number
   catalogs: Record<string, Record<string, CapabilityCatalogItem[]>>
   selections: Record<string, Record<string, CapabilitySelection>>
 }
@@ -69,12 +73,20 @@ export interface CapabilitiesBag {
 // FLM-image probe (#1974), without restating the literal.
 export const CAPABILITIES_QUERY_KEY = ['capabilities'] as const
 
+/** Re-poll cadence for useCapabilities: ms, or false to stop polling (#1974). */
+export function capabilitiesRefetchInterval(data: CapabilitiesBag | undefined): number | false {
+  if (data?.backends_settled !== false) return false
+  return Math.max(2000, (data.backends_retry_in_s ?? 0) * 1000)
+}
+
 export function useCapabilities() {
   return useQuery({
     queryKey: CAPABILITIES_QUERY_KEY,
     queryFn: () => apiGet<CapabilitiesBag>(ENDPOINTS.capabilities),
-    // Re-poll only while NPU presence is still being probed (#1974).
-    refetchInterval: (query) => (query.state.data?.backends_settled === false ? 2000 : false),
+    // Re-poll only while NPU presence is unsettled (#1974): every 2 s while a
+    // probe is pending, once per retry window while it cannot answer, never
+    // once settled (or against an API without the field).
+    refetchInterval: (query) => capabilitiesRefetchInterval(query.state.data),
   })
 }
 

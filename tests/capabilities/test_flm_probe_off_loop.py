@@ -52,21 +52,25 @@ class _SlowProvider:
     hung seam, then answers ``answer``."""
 
     def __init__(self, answer: bool | None = True) -> None:
+        """Remember the answer to give and which threads probed."""
         self.answer = answer
         self.probe_threads: list[int] = []
 
     def image_present(self, image: str) -> bool | None:
+        """Block like a hung seam, then answer."""
         self.probe_threads.append(threading.get_ident())
         time.sleep(_PROBE_BLOCK_S)
         return self.answer
 
 
 def _npu_only_hw() -> Any:
+    """A HardwareInfo-shaped stub: NPU present, no GPUs."""
     return types.SimpleNamespace(npu=types.SimpleNamespace(present=True), gpus=[])
 
 
 @pytest.fixture
 def slow_probe(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Install a slow provider on an NPU-only host with a fresh probe cache."""
     provider = _SlowProvider()
     monkeypatch.setattr(container_mod, "container_provider", lambda: provider)
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
@@ -79,6 +83,7 @@ def slow_probe(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _settle() -> None:
+    """Wait for any due or running background probe to land."""
     catalog.prime_flm_image_probe(timeout=5)
 
 
@@ -88,6 +93,7 @@ async def _probe_lands_while_loop_runs() -> int:
     done = asyncio.Event()
 
     async def beat() -> None:
+        """Tick every heartbeat interval until told to stop."""
         nonlocal ticks
         while not done.is_set():
             await asyncio.sleep(_HEARTBEAT_S)
@@ -103,6 +109,7 @@ async def _probe_lands_while_loop_runs() -> int:
 
 
 def _assert_probe_ran_off_loop(provider: _SlowProvider, ticks: int, loop_thread: int) -> None:
+    """Assert the probe ran, off the loop thread, while the loop kept ticking."""
     assert provider.probe_threads, "the FLM-image probe was never started"
     assert loop_thread not in provider.probe_threads, "probe ran on the event-loop thread"
     # ~_PROBE_BLOCK_S / _HEARTBEAT_S ticks when the loop is free; 0-1 if blocked.
@@ -113,16 +120,20 @@ class _NoSlots:
     """Slot manager with nothing loaded: every lookup misses."""
 
     async def iter_configs(self) -> list[dict[str, Any]]:
+        """No slot configs."""
         return []
 
     async def status(self, slot_name: str) -> Any:
+        """Every slot lookup misses."""
         raise LookupError(slot_name)
 
     async def list(self) -> list[Any]:
+        """No live slots."""
         return []
 
 
 def _raise() -> Any:
+    """Stand-in hardware loader that has no probe file."""
     raise FileNotFoundError("no hardware probe in unit tests")
 
 
@@ -190,6 +201,7 @@ async def test_direct_handlers_cold_cache_do_not_wait_on_probe(
     orch = CapabilityOrchestrator(slot_manager=_NoSlots(), config_path=caps)  # type: ignore[arg-type]
 
     async def ids() -> list[str]:
+        """Backend ids from the handler under test."""
         if path == "capabilities":
             return [b["id"] for b in (await orch.get_state())["backends"]]
         if path == "backends":
@@ -215,12 +227,14 @@ async def test_direct_handlers_cold_cache_do_not_wait_on_probe(
 
 
 def test_concurrent_cold_cache_callers_start_one_probe(slow_probe: _SlowProvider) -> None:
+    """16 concurrent cold-cache callers return at once and start exactly one probe."""
     n = 16
     barrier = threading.Barrier(n)
     results: list[bool] = []
     elapsed: list[float] = []
 
     def caller() -> None:
+        """Wait for the others, then read the probe and time the call."""
         barrier.wait()
         started = time.monotonic()
         results.append(catalog._flm_image_present())
@@ -241,6 +255,7 @@ def test_concurrent_cold_cache_callers_start_one_probe(slow_probe: _SlowProvider
 async def test_concurrent_handler_burst_starts_one_probe(
     slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A burst of concurrent /api/backends requests starts exactly one probe."""
     monkeypatch.setattr(backends_routes, "load_hardware_info", _raise)
 
     await asyncio.gather(
@@ -252,6 +267,7 @@ async def test_concurrent_handler_burst_starts_one_probe(
 
 
 def test_background_answer_serves_the_next_call_and_is_cached(slow_probe: _SlowProvider) -> None:
+    """The landed answer serves the next call and is cached."""
     assert catalog._flm_image_present() is False  # cold: probe started, not awaited
     _settle()
     assert catalog._flm_image_present() is True
@@ -260,6 +276,7 @@ def test_background_answer_serves_the_next_call_and_is_cached(slow_probe: _SlowP
 
 
 def test_definitive_absent_is_cached_too(slow_probe: _SlowProvider) -> None:
+    """A definitive 'absent' is cached like 'present'."""
     slow_probe.answer = False
     catalog._flm_image_present()
     _settle()
@@ -271,6 +288,7 @@ def test_definitive_absent_is_cached_too(slow_probe: _SlowProvider) -> None:
 def test_unanswerable_probe_is_retried_after_the_window(
     slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An unanswerable result is re-probed once its window has passed."""
     slow_probe.answer = None
     monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
     catalog._flm_image_present()
@@ -294,7 +312,10 @@ def test_reset_during_a_probe_drops_its_answer_and_never_waits(
     calls: list[str] = []
 
     class _GatedProvider:
+        """Provider whose first probe blocks until released, then answers absent."""
+
         def image_present(self, image: str) -> bool | None:
+            """First call blocks until released and answers absent; later calls answer present."""
             calls.append(image)
             if len(calls) == 1:
                 started.set()
@@ -346,6 +367,7 @@ def test_known_answer_is_kept_while_a_reset_re_probes(slow_probe: _SlowProvider)
 
 
 def _boot_ctx() -> tuple[Any, Any]:
+    """A minimal app and boot context for ``_boot_capabilities``."""
     app = types.SimpleNamespace(state=types.SimpleNamespace())
     ctx = types.SimpleNamespace(
         slot_manager=_NoSlots(), model_registry=None, capability_orchestrator=None
@@ -354,6 +376,7 @@ def _boot_ctx() -> tuple[Any, Any]:
 
 
 def test_start_probe_is_non_blocking_on_an_npu_host(slow_probe: _SlowProvider) -> None:
+    """``start_flm_image_probe`` returns at once and its answer serves the next call."""
     started = time.monotonic()
     catalog.start_flm_image_probe()
     assert time.monotonic() - started < _FAST_S, "start_flm_image_probe waited on the seam"
@@ -365,6 +388,7 @@ def test_start_probe_is_non_blocking_on_an_npu_host(slow_probe: _SlowProvider) -
 def test_start_and_prime_are_no_ops_without_an_npu(
     slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Without an NPU, neither start nor prime ever probes."""
     monkeypatch.setattr(
         catalog,
         "load_hardware_info",
@@ -378,6 +402,7 @@ def test_start_and_prime_are_no_ops_without_an_npu(
 async def test_boot_capabilities_phase_starts_the_probe_without_blocking(
     slow_probe: _SlowProvider, tmp_hal0_home: str
 ) -> None:
+    """The boot phase starts the probe and does not wait for it."""
     from hal0.api import _boot_capabilities
 
     app, ctx = _boot_ctx()
@@ -395,9 +420,11 @@ async def test_boot_capabilities_phase_starts_the_probe_without_blocking(
 async def test_boot_survives_a_failing_probe_start(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A failing probe start is logged and never fails the boot phase."""
     from hal0.api import _boot_capabilities
 
     def _boom() -> None:
+        """Simulate the probe start raising."""
         raise RuntimeError("probe start failed")
 
     monkeypatch.setattr(catalog, "start_flm_image_probe", _boom)
@@ -439,6 +466,7 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
     real_catalogs = catalog.catalogs_by_slot
 
     def _settled(answer: bool) -> Any:
+        """Catalogs computed with the probe settled on ``answer``."""
         slow_probe.answer = answer
         catalog.reset_flm_image_present_cache()
         catalog._flm_image_present()
@@ -459,6 +487,7 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
     landed_between: list[bool] = []
 
     def _catalogs_after_probe_lands(registry: Any = None) -> Any:
+        """Let the in-flight probe land, then build the catalogs."""
         _settle()  # the probe started by get_state's first read lands right here
         landed_between.append(catalog._flm_image_present())
         return real_catalogs(registry=registry)
@@ -524,6 +553,7 @@ async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
 
 
 def test_settled_is_false_cold_and_true_once_the_probe_lands(slow_probe: _SlowProvider) -> None:
+    """Cold or in flight: unsettled; landed: settled; after a reset: unsettled again."""
     assert catalog.flm_image_probe_settled() is False  # cold, nothing probed yet
     catalog._flm_image_present()
     assert catalog.flm_image_probe_settled() is False  # probe in flight
@@ -536,6 +566,7 @@ def test_settled_is_false_cold_and_true_once_the_probe_lands(slow_probe: _SlowPr
 def test_settled_stays_false_while_only_an_unanswerable_result_is_held(
     slow_probe: _SlowProvider,
 ) -> None:
+    """An unanswerable result never counts as settled."""
     slow_probe.answer = None
     catalog._flm_image_present()
     _settle()
@@ -545,6 +576,7 @@ def test_settled_stays_false_while_only_an_unanswerable_result_is_held(
 def test_settled_is_true_without_an_npu(
     slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No NPU: always settled, and nothing is probed."""
     monkeypatch.setattr(
         catalog,
         "load_hardware_info",
@@ -555,6 +587,7 @@ def test_settled_is_true_without_an_npu(
 
 
 def _state_orch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CapabilityOrchestrator:
+    """An orchestrator over an empty slot manager with stubbed catalogs."""
     import hal0.agents.hermes_refresh as _hr
 
     monkeypatch.setattr(_hr, "spawn_context_refresh", lambda *a, **k: None)
@@ -567,6 +600,7 @@ def _state_orch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CapabilityOr
 async def test_get_state_reports_backends_settled(
     slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``get_state`` reports unsettled cold and settled once the probe lands."""
     orch = _state_orch(tmp_path, monkeypatch)
 
     cold = await orch.get_state()
@@ -590,6 +624,7 @@ async def test_probe_landing_mid_get_state_never_reports_a_stale_list_as_settled
     real_available = catalog.available_backends
 
     def _available_after_probe_lands() -> list[dict[str, Any]]:
+        """Let the in-flight probe land, then read the backends."""
         _settle()
         return real_available()
 
@@ -601,3 +636,64 @@ async def test_probe_landing_mid_get_state_never_reports_a_stale_list_as_settled
     assert not (state["backends_settled"] and not npu_listed), "stale list reported as settled"
     assert state["backends_settled"] is False
     assert npu_listed
+
+
+# ── backends_retry_in_s: the re-poll cadence while unsettled ────────────────
+
+
+def test_retry_in_is_zero_while_cold_or_in_flight(slow_probe: _SlowProvider) -> None:
+    """A pending probe (cold cache, or one running) means "poll again soon": 0."""
+    assert catalog.flm_image_probe_retry_in_s() == 0  # cold
+    catalog._flm_image_present()
+    assert catalog.flm_image_probe_retry_in_s() == 0  # probe in flight
+    _settle()
+
+
+def test_retry_in_counts_down_the_window_while_unanswerable(
+    slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unanswerable result held: the rest of the retry window, then 0 once due."""
+    slow_probe.answer = None
+    catalog._flm_image_present()
+    _settle()
+    retry = catalog.flm_image_probe_retry_in_s()
+    assert 1 <= retry <= int(catalog._FLM_PROBE_RETRY_S)
+    assert retry >= int(catalog._FLM_PROBE_RETRY_S) - 2  # just started
+    assert catalog.flm_image_probe_settled() is False
+
+    monkeypatch.setattr(catalog, "_FLM_PROBE_RETRY_S", 0.0)
+    assert catalog.flm_image_probe_retry_in_s() == 0, "window over: a probe is due now"
+
+
+def test_retry_in_is_zero_once_settled_or_without_an_npu(
+    slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settled (definitive answer) or no NPU at all: nothing to wait for."""
+    catalog._flm_image_present()
+    _settle()
+    assert catalog.flm_image_probe_settled() is True
+    assert catalog.flm_image_probe_retry_in_s() == 0
+
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=False), gpus=[]),
+    )
+    assert catalog.flm_image_probe_retry_in_s() == 0
+
+
+async def test_get_state_reports_backends_retry_in_s(
+    slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``get_state`` carries the cadence next to ``backends_settled``."""
+    orch = _state_orch(tmp_path, monkeypatch)
+    slow_probe.answer = None
+
+    cold = await orch.get_state()
+    assert cold["backends_settled"] is False
+    assert cold["backends_retry_in_s"] == 0
+
+    _settle()
+    held = await orch.get_state()
+    assert held["backends_settled"] is False
+    assert held["backends_retry_in_s"] >= int(catalog._FLM_PROBE_RETRY_S) - 2
