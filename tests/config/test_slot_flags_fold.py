@@ -409,6 +409,28 @@ def test_unregistered_model_is_skipped_and_the_rest_still_fold():
     assert any("b-ghost" in ln and "two" in ln for ln in exc.value.lines)
 
 
+def test_two_of_three_unregistered_both_skip_and_the_third_folds():
+    reg = _RegistryWithout({"a-model", "b-ghost"})
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
+
+    assert [m for m, _u in reg.updates] == ["c-model"]
+    assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [
+        ("a-model", ("one",)),
+        ("b-ghost", ("two",)),
+    ]
+
+
+def test_skip_on_the_last_fold_still_signals_partial():
+    reg = _RegistryWithout({"c-model"})
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)
+
+    assert [m for m, _u in reg.updates] == ["a-model", "b-ghost"]
+    assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("c-model", ("three",))]
+    assert exc.value.lines[-1] == "SKIP model 'c-model' <- slots=['three']: not in registry"
+
+
 def test_all_registered_models_fold_without_a_partial_signal():
     reg = _RegistryWithout(set())
     lines = apply_fold_plan(_three_slot_plan(), reg, deploy_window=True, dry_run=False)

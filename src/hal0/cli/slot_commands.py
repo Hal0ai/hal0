@@ -1621,12 +1621,20 @@ def slot_migrate_flags(
     if partial is not None:
         # #2180: the other folds landed; name what did not. Exit 2 = applied,
         # work outstanding — the same split `hal0 update` draws against 1.
-        console.print("\n[yellow]![/yellow]  skipped — the bound model is not in the registry:")
+        # The per-fold SKIP lines above are the report; this is the summary.
+        console.print(
+            f"\n[yellow]![/yellow]  summary — {len(partial.skipped)} model(s) skipped, "
+            "not in the registry:"
+        )
         for skip in partial.skipped:
             console.print(f"  slots {', '.join(skip.slot_names)} → model {skip.model_id!r}")
+        # A provider-lane model (e.g. qwen3-tts) launches from its profile
+        # flags with no registry row (slots/manager.py tolerates the miss), so
+        # "register it" is not always the remedy.
         console.print(
-            "[dim]Register the model (or rebind the slot) and re-run; already-folded "
-            "models are a no-op. (exit 2 = applied, some slots skipped)[/dim]"
+            "[dim]Register the model or rebind the slot, then re-run; models served "
+            "through a provider lane will keep reporting this skip. "
+            "(exit 2 = applied, some slots skipped)[/dim]"
         )
         raise typer.Exit(2)
 
