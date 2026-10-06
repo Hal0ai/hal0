@@ -36,9 +36,14 @@ async def get_capabilities(orchestrator: CapabilityOrchestratorDep) -> dict[str,
 
         {
           "backends": [{...}],
+          "backends_settled": true,
           "catalogs": { "embed": {...}, "voice": {...}, "img": {...} },
           "selections": { "embed": {...}, "voice": {...}, "img": {...} }
         }
+
+    ``backends_settled`` is False while the FLM-image probe has no answer
+    yet (shortly after boot, or after an FLM pull's reset), so ``backends``
+    may still change; the dashboard re-polls until it is True (#1974).
     """
     return await orchestrator.get_state()
 

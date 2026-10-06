@@ -57,6 +57,9 @@ export interface CapabilityBackend {
 // what the API (or mockFixtures.ts buildCapabilities()) actually ships.
 export interface CapabilitiesBag {
   backends: CapabilityBackend[]
+  // False while the backend's FLM-image probe has no answer yet (just after
+  // boot or an FLM pull), so `backends` may still gain/lose NPU (#1974).
+  backends_settled?: boolean
   catalogs: Record<string, Record<string, CapabilityCatalogItem[]>>
   selections: Record<string, Record<string, CapabilitySelection>>
 }
@@ -65,6 +68,8 @@ export function useCapabilities() {
   return useQuery({
     queryKey: ['capabilities'],
     queryFn: () => apiGet<CapabilitiesBag>(ENDPOINTS.capabilities),
+    // Re-poll only while NPU presence is still being probed (#1974).
+    refetchInterval: (query) => (query.state.data?.backends_settled === false ? 2000 : false),
   })
 }
 

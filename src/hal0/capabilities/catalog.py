@@ -320,6 +320,21 @@ def start_flm_image_probe() -> None:
             _start_flm_probe_locked()
 
 
+def flm_image_probe_settled() -> bool:
+    """Is the NPU entry of :func:`available_backends` final for now?
+
+    True when a definitive answer is cached for the current generation (a
+    reset clears it), or when the host has no NPU and the probe never applies.
+    False while the cache is cold, after a reset, or while only an
+    unanswerable result is held: the dashboard keeps polling until it flips
+    (``backends_settled`` in ``GET /api/capabilities``). Never blocks.
+    """
+    if not _host_has_npu():
+        return True
+    with _flm_probe_lock:
+        return _flm_image_present_cache is not None
+
+
 def prime_flm_image_probe(timeout: float = 15.0) -> None:
     """Start the FLM-image probe if one is due and wait up to ``timeout``.
 

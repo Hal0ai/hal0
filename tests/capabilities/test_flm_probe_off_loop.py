@@ -518,3 +518,86 @@ async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
     assert time.monotonic() - started < _FAST_S
     _settle()
     assert len(slow_probe.probe_threads) == 2, "the pull's reset should trigger a re-probe"
+
+
+# ── backends_settled: the dashboard re-polls until NPU presence is final ────
+
+
+def test_settled_is_false_cold_and_true_once_the_probe_lands(slow_probe: _SlowProvider) -> None:
+    assert catalog.flm_image_probe_settled() is False  # cold, nothing probed yet
+    catalog._flm_image_present()
+    assert catalog.flm_image_probe_settled() is False  # probe in flight
+    _settle()
+    assert catalog.flm_image_probe_settled() is True
+    catalog.reset_flm_image_present_cache()
+    assert catalog.flm_image_probe_settled() is False, "a reset (FLM pull) unsettles it"
+
+
+def test_settled_stays_false_while_only_an_unanswerable_result_is_held(
+    slow_probe: _SlowProvider,
+) -> None:
+    slow_probe.answer = None
+    catalog._flm_image_present()
+    _settle()
+    assert catalog.flm_image_probe_settled() is False
+
+
+def test_settled_is_true_without_an_npu(
+    slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=False), gpus=[]),
+    )
+    assert catalog.flm_image_probe_settled() is True
+    assert slow_probe.probe_threads == []
+
+
+def _state_orch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CapabilityOrchestrator:
+    import hal0.agents.hermes_refresh as _hr
+
+    monkeypatch.setattr(_hr, "spawn_context_refresh", lambda *a, **k: None)
+    monkeypatch.setattr(catalog, "catalogs_by_slot", lambda registry=None: {})
+    caps = tmp_path / "capabilities.toml"
+    caps.write_text("", encoding="utf-8")
+    return CapabilityOrchestrator(slot_manager=_NoSlots(), config_path=caps)  # type: ignore[arg-type]
+
+
+async def test_get_state_reports_backends_settled(
+    slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orch = _state_orch(tmp_path, monkeypatch)
+
+    cold = await orch.get_state()
+    assert cold["backends_settled"] is False
+    assert "npu" not in [b["id"] for b in cold["backends"]]
+
+    _settle()
+    warm = await orch.get_state()
+    assert warm["backends_settled"] is True
+    assert "npu" in [b["id"] for b in warm["backends"]]
+
+
+async def test_probe_landing_mid_get_state_never_reports_a_stale_list_as_settled(
+    slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag is read before ``backends``: if the probe lands in between, the
+    response may say unsettled with a fresh list (one extra poll), but it can
+    never say settled while carrying the pre-probe list (polling would stop)."""
+    orch = _state_orch(tmp_path, monkeypatch)
+    catalog._flm_image_present()  # probe in flight
+    real_available = catalog.available_backends
+
+    def _available_after_probe_lands() -> list[dict[str, Any]]:
+        _settle()
+        return real_available()
+
+    monkeypatch.setattr(catalog, "available_backends", _available_after_probe_lands)
+
+    state = await orch.get_state()
+
+    npu_listed = "npu" in [b["id"] for b in state["backends"]]
+    assert not (state["backends_settled"] and not npu_listed), "stale list reported as settled"
+    assert state["backends_settled"] is False
+    assert npu_listed
