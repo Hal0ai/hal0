@@ -64,9 +64,14 @@ export interface CapabilitiesBag {
   selections: Record<string, Record<string, CapabilitySelection>>
 }
 
+// Query-key root for GET /api/capabilities. Exported so other hooks can
+// invalidate it, e.g. usePullJob after an FLM pull resets the backend's
+// FLM-image probe (#1974), without restating the literal.
+export const CAPABILITIES_QUERY_KEY = ['capabilities'] as const
+
 export function useCapabilities() {
   return useQuery({
-    queryKey: ['capabilities'],
+    queryKey: CAPABILITIES_QUERY_KEY,
     queryFn: () => apiGet<CapabilitiesBag>(ENDPOINTS.capabilities),
     // Re-poll only while NPU presence is still being probed (#1974).
     refetchInterval: (query) => (query.state.data?.backends_settled === false ? 2000 : false),
