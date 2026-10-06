@@ -388,6 +388,7 @@ def plan_slot_flags_fold(
     # both say name = "x"), so a name set could let a provider-lane slot
     # vouch for a llama-server slot's miss.
     lane_by_model: dict[str, list[bool]] = {}
+    unregistered: dict[str, list[str]] = {}
     for slot_cfg in slots:
         model_tbl = slot_cfg.get("model")
         model_tbl = model_tbl if isinstance(model_tbl, Mapping) else {}
@@ -396,29 +397,34 @@ def plan_slot_flags_fold(
             continue
         model_id = str(model_id)
         slot_name = str(slot_cfg.get("name") or slot_cfg.get("id") or "?")
+        lane = is_provider_lane is not None and is_provider_lane(slot_cfg)
+        lane_by_model.setdefault(model_id, []).append(lane)
+        if model_id not in model_defaults:
+            # Classified BEFORE the slot's flags are parsed: a binding that can
+            # never be folded must not abort the run on malformed extra_args
+            # (an unmatched quote makes shlex.split raise ValueError).
+            unregistered.setdefault(model_id, []).append(slot_name)
+            continue
         profile = slot_cfg.get("profile")
         profile = str(profile) if profile else None
         pflags = profile_flags.get(profile, "") if profile else ""
         folded = compute_folded_tune(slot_cfg, pflags, model_defaults.get(model_id))
-        lane = is_provider_lane is not None and is_provider_lane(slot_cfg)
-        lane_by_model.setdefault(model_id, []).append(lane)
         by_model.setdefault(model_id, []).append(
             SlotRef(slot_name=slot_name, model_id=model_id, profile=profile, folded=folded)
         )
 
     plan = FoldPlan()
 
-    # 2. Resolve each model: sole/consensus → fold; divergent → refuse.
+    # 2a. Registry misses: provider-lane only when EVERY bound slot is one.
+    for model_id, slot_names in sorted(unregistered.items()):
+        names = tuple(slot_names)
+        if all(lane_by_model[model_id]):
+            plan.lane_skips.append(SkippedFold(model_id, names, "provider-lane, no registry row"))
+        else:
+            plan.missing.append(SkippedFold(model_id, names, "not in registry"))
+
+    # 2b. Resolve each registered model: sole/consensus → fold; divergent → refuse.
     for model_id, refs in sorted(by_model.items()):
-        if model_id not in model_defaults:
-            names = tuple(r.slot_name for r in refs)
-            if all(lane_by_model[model_id]):
-                plan.lane_skips.append(
-                    SkippedFold(model_id, names, "provider-lane, no registry row")
-                )
-            else:
-                plan.missing.append(SkippedFold(model_id, names, "not in registry"))
-            continue
         distinct = {r.folded for r in refs}
         existing = model_defaults.get(model_id)
         if len(distinct) > 1:

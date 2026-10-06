@@ -561,3 +561,21 @@ def test_dry_run_classification_never_persists_a_legacy_profile(tmp_hal0_home: s
     assert not paths.profiles_toml().exists()
     # chadrock-moe is a llama-server profile, so the miss is ordinary work.
     assert "SKIP model 'ghost' <- slots=['agent']: not in registry" in lines
+
+
+def test_unparseable_flags_on_an_unregistered_slot_do_not_abort_planning():
+    """The registry miss is classified before the slot's flags are parsed: an
+    unmatched quote in a binding that can never be folded must not raise
+    ValueError and strand the registered models in the same run."""
+    plan = plan_slot_flags_fold(
+        [_slot("one", "a-model", extra_args="-fa on"), _slot("two", "b-ghost", extra_args="'")],
+        {"rocm": ""},
+        {"a-model": None},
+    )
+    assert [m.model_id for m in plan.missing] == ["b-ghost"]
+
+    reg = _FakeRegistry()
+    with pytest.raises(FoldPartiallyApplied) as exc:
+        apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
+    assert [m for m, _u in reg.updates] == ["a-model"]
+    assert "SKIP model 'b-ghost' <- slots=['two']: not in registry" in exc.value.lines
