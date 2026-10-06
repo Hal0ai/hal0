@@ -473,10 +473,10 @@ def _provider_lane_classifier(profiles: Any) -> Callable[[Mapping[str, Any]], bo
     migration), so the two cannot drift.
 
     The runtime family comes from the already-loaded ``profiles`` catalog, NOT
-    ``ProfileCatalog.resolve()``: that adopts a shipped legacy profile by
+    ``ProfileCatalog.resolve()``: that adopts a shipped seed profile by
     WRITING profiles.toml (``_materialize_legacy``), and this runs under the
     dry run (updater probe, CLI preview) before any consent or backup. A
-    not-yet-adopted legacy name is judged on its shipped definition — the one
+    not-yet-adopted seed name is judged on its shipped definition — the one
     resolve() would adopt — without persisting it. An unresolvable runtime
     counts as llama-server, so its miss stays visible as pending work.
     """
