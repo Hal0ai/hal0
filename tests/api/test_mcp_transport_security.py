@@ -37,12 +37,15 @@ def test_extra_hosts_added_and_origins_derived(monkeypatch):
     assert sec.enable_dns_rebinding_protection is True
     # Localhost defaults are preserved alongside the operator additions.
     assert "127.0.0.1:*" in sec.allowed_hosts
-    assert "192.0.2.142:8080" in sec.allowed_hosts
-    assert "hal0.example.com" in sec.allowed_hosts
+    # Exact-element checks, written as subsets so they read as list membership
+    # rather than URL substring matching.
+    assert {"192.0.2.142:8080", "hal0.example.com"} <= set(sec.allowed_hosts)
     # http+https origins are derived from each added host for browser clients.
-    assert "http://192.0.2.142:8080" in sec.allowed_origins
-    assert "https://192.0.2.142:8080" in sec.allowed_origins
-    assert "https://hal0.example.com" in sec.allowed_origins
+    assert {
+        "http://192.0.2.142:8080",
+        "https://192.0.2.142:8080",
+        "https://hal0.example.com",
+    } <= set(sec.allowed_origins)
 
 
 def test_wildcard_disables_protection(monkeypatch):
