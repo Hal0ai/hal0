@@ -63,9 +63,17 @@ DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
 )
 
 # Cookie name + lifetime. 8h chosen so a workday session never expires
-# mid-conversation; renewal happens on the next dashboard load.
+# mid-conversation; the agent-chat handshake renews it on attach.
 SESSION_COOKIE_NAME: Final[str] = "hal0_session"
 SESSION_COOKIE_TTL_SECONDS: Final[int] = 8 * 60 * 60
+
+# "Remember me" lifetime (``POST /api/auth/login`` with ``remember: true``).
+# Same cookie, same signature, later ``expires_at`` -- an operator who ticks
+# it is not sent back to the login every morning. There is no server-side
+# session table, so a cookie cannot be revoked one at a time: deleting the
+# HMAC secret file (``_secret_path()``) invalidates every session at once,
+# and a fresh secret is generated on the next request.
+SESSION_COOKIE_REMEMBER_TTL_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
 # Secret file location. Lives under /var/lib/hal0 so the systemd unit's
 # ``ReadWritePaths=/var/lib/hal0`` already covers it. The path is
@@ -134,67 +142,89 @@ def allowed_origins() -> tuple[str, ...]:
     return parsed or DEFAULT_ALLOWED_ORIGINS
 
 
-def mint_session_cookie(now: float | None = None) -> str:
+def mint_session_cookie(
+    now: float | None = None, *, ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS
+) -> str:
     """Generate a fresh signed session cookie value.
 
     The payload is JSON-serialised ``{"session_id", "expires_at"}``; the
     output is ``<b64url(payload)>.<b64url(hmac)>``. Caller is responsible
     for setting it on a response via :func:`set_session_cookie`.
+
+    ``ttl_seconds`` sets how far ahead ``expires_at`` lands. The expiry is
+    inside the signed payload, so a holder cannot extend their own session.
     """
     secret = _load_or_create_secret()
     ts = int(now if now is not None else time.time())
     payload = {
         "session_id": uuid.uuid4().hex,
-        "expires_at": ts + SESSION_COOKIE_TTL_SECONDS,
+        "expires_at": ts + ttl_seconds,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
     return f"{_b64url_encode(payload_bytes)}.{_b64url_encode(sig)}"
 
 
-def verify_session_cookie(value: str, now: float | None = None) -> bool:
-    """Return ``True`` iff the cookie's signature is valid AND unexpired.
+def session_cookie_expiry(value: str, now: float | None = None) -> int | None:
+    """Return the cookie's ``expires_at`` iff its signature is valid AND unexpired.
 
+    ``None`` for anything else -- absent, unparseable, forged or expired --
+    so a caller can never act on an expiry the server did not sign.
     Constant-time compare on the signature keeps a timing oracle off the
-    table. An unparseable cookie returns ``False`` (no exception leaks).
+    table; no exception leaks.
     """
     if not value or "." not in value:
-        return False
+        return None
     try:
         payload_b64, sig_b64 = value.split(".", 1)
         payload_bytes = _b64url_decode(payload_b64)
         sig = _b64url_decode(sig_b64)
     except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
-        return False
+        return None
 
     secret = _load_or_create_secret()
     expected = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
     if not hmac.compare_digest(expected, sig):
-        return False
+        return None
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
+    except (UnicodeDecodeError, ValueError):  # JSONDecodeError is a ValueError
+        return None
+    if not isinstance(payload, dict):
+        return None
 
     expires_at = payload.get("expires_at")
-    if not isinstance(expires_at, int):
-        return False
+    # bool is an int subclass; a signed payload never carries one, but be exact.
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        return None
     ts = int(now if now is not None else time.time())
-    return ts < expires_at
+    return expires_at if ts < expires_at else None
 
 
-def set_session_cookie(response: Response, *, secure: bool | None = None) -> str:
+def verify_session_cookie(value: str, now: float | None = None) -> bool:
+    """Return ``True`` iff the cookie's signature is valid AND unexpired."""
+    return session_cookie_expiry(value, now) is not None
+
+
+def set_session_cookie(
+    response: Response,
+    *,
+    secure: bool | None = None,
+    ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS,
+) -> str:
     """Mint + attach a session cookie to ``response``. Returns its value.
 
     ``secure`` defaults to ``True`` on production-style origins and can
-    be forced for tests via the kwarg.
+    be forced for tests via the kwarg. ``ttl_seconds`` sets both halves of
+    the lifetime together -- the signed ``expires_at`` the server honours
+    and the ``Max-Age`` the browser keeps the cookie for.
     """
-    value = mint_session_cookie()
+    value = mint_session_cookie(ttl_seconds=ttl_seconds)
     response.set_cookie(
         SESSION_COOKIE_NAME,
         value,
-        max_age=SESSION_COOKIE_TTL_SECONDS,
+        max_age=ttl_seconds,
         httponly=True,
         samesite="lax",
         secure=bool(secure) if secure is not None else False,
@@ -232,11 +262,13 @@ def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
 __all__ = [
     "DEFAULT_ALLOWED_ORIGINS",
     "SESSION_COOKIE_NAME",
+    "SESSION_COOKIE_REMEMBER_TTL_SECONDS",
     "SESSION_COOKIE_TTL_SECONDS",
     "allowed_origins",
     "check_ws_origin_and_cookie",
     "mint_session_cookie",
     "require_browser_auth",
+    "session_cookie_expiry",
     "set_session_cookie",
     "verify_session_cookie",
 ]

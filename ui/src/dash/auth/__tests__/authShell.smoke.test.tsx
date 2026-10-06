@@ -66,24 +66,38 @@ describe('AuthGate', () => {
     expect(gate(OPEN_BOX)).toContain('data-testid="the-app"')
   })
 
-  it('remembers a read-only choice for the tab and renders the app', () => {
+  // A read-only choice is stored as the PAGE it was made on (these renders
+  // have no window, so the current page is the router default, 'dashboard').
+  const rememberReadOnlyOn = (page: string) =>
     vi.stubGlobal('sessionStorage', {
-      getItem: (k: string) => (k === READ_ONLY_STORAGE_KEY ? '1' : null),
+      getItem: (k: string) => (k === READ_ONLY_STORAGE_KEY ? page : null),
       setItem: () => undefined,
       removeItem: () => undefined,
     })
+
+  it('keeps a read-only choice for the page it was made on', () => {
+    rememberReadOnlyOn('dashboard')
     const html = gate(POSTURE_GATED)
     expect(html).toContain('data-testid="the-app"')
     expect(html).not.toContain('data-testid="login-view"')
   })
 
+  it('asks again on every other page — read-only on one page is not read-only everywhere', () => {
+    rememberReadOnlyOn('slots')
+    const html = gate(POSTURE_GATED)
+    expect(html).toContain('data-testid="login-view"')
+    expect(html).not.toContain('data-testid="the-app"')
+  })
+
   it('does not let a remembered read-only choice bypass real enforcement', () => {
-    vi.stubGlobal('sessionStorage', {
-      getItem: () => '1',
-      setItem: () => undefined,
-      removeItem: () => undefined,
-    })
+    rememberReadOnlyOn('dashboard')
     expect(gate(ENFORCED_ANON)).toContain('data-testid="login-view"')
+  })
+
+  it('offers "remember me" on the login view, unticked by default', () => {
+    const html = gate(POSTURE_GATED)
+    expect(html).toContain('data-testid="login-remember"')
+    expect(html).not.toMatch(/data-testid="login-remember"[^>]*checked/)
   })
 })
 

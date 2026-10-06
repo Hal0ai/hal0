@@ -8,7 +8,13 @@
 // error copy — stay in gateDecision.test.mjs.)
 
 import { describe, expect, it } from 'vitest'
-import { authGateView, canViewReadOnly, enforcementPosture, sessionChipState } from '../gateDecision.js'
+import {
+  authGateView,
+  canViewReadOnly,
+  enforcementPosture,
+  pageOfHash,
+  sessionChipState,
+} from '../gateDecision.js'
 
 const POSTURE_GATED = {
   auth_required: false,
@@ -112,8 +118,43 @@ describe('enforcementPosture — what the Security page says "off" means', () =>
     expect(enforcementPosture(OPEN_BOX)).toBe('open')
   })
 
-  it('is "open" on a loopback-bound box and before status loads', () => {
+  it('is "open" on a loopback-bound box', () => {
     expect(enforcementPosture({ auth_required: false, has_admin_key: true, lan_exposed: false })).toBe('open')
-    expect(enforcementPosture(undefined)).toBe('open')
+  })
+
+  it('is "unknown" without a status — a failed probe must not be described as open', () => {
+    expect(enforcementPosture(undefined)).toBe('unknown')
+    expect(enforcementPosture(null)).toBe('unknown')
+  })
+})
+
+describe('pageOfHash — the unit a "View read-only" choice applies to', () => {
+  it('is the top-level section of the hash route', () => {
+    expect(pageOfHash('#slots')).toBe('slots')
+    expect(pageOfHash('#settings/security')).toBe('settings')
+    expect(pageOfHash('#agent/memory?subsection=peer')).toBe('agent')
+  })
+
+  it('treats tabs and query strings inside a section as the same page', () => {
+    expect(pageOfHash('#slots/endpoints')).toBe(pageOfHash('#slots'))
+    expect(pageOfHash('#slots?focus=1')).toBe(pageOfHash('#slots'))
+  })
+
+  it('follows the router\'s legacy redirects, so a dismissal lands on the page actually shown', () => {
+    // main.jsx parseRoute() rewrites these before rendering; without the same
+    // mapping, "View this page read-only" on #connections would be stored as
+    // "connections", the app would rewrite the hash to #slots/endpoints, and the
+    // login would come straight back.
+    expect(pageOfHash('#connections')).toBe('slots')
+    expect(pageOfHash('#profiles')).toBe('models')
+    expect(pageOfHash('#slots/profiles')).toBe('models')
+    expect(pageOfHash('#peers')).toBe('agent')
+    expect(pageOfHash('#agents/mcp')).toBe('mcp')
+  })
+
+  it('maps an empty hash to the dashboard, like the router does', () => {
+    expect(pageOfHash('')).toBe('dashboard')
+    expect(pageOfHash('#')).toBe('dashboard')
+    expect(pageOfHash(undefined)).toBe('dashboard')
   })
 })

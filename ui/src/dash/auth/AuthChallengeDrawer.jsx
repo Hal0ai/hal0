@@ -26,6 +26,8 @@ import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { Drawer } from '@/dash/primitives.jsx'
 import { loginErrorMessage } from './gateDecision.js'
+import { RememberMeField } from './RememberMeField.jsx'
+import { readRememberPreference, writeRememberPreference } from './rememberPreference.js'
 import { useAuthChallengeStore } from '@/stores/useAuthChallengeStore'
 
 export function AuthChallengeDrawer() {
@@ -37,6 +39,7 @@ export function AuthChallengeDrawer() {
 
   const [key, setKey] = useState('')
   const [error, setError] = useState(null)
+  const [remember, setRemember] = useState(readRememberPreference)
 
   useEffect(() => {
     if (!open) {
@@ -46,10 +49,11 @@ export function AuthChallengeDrawer() {
   }, [open])
 
   const login = useMutation({
-    mutationFn: (k) => apiPost(ENDPOINTS.authLogin, { key: k }),
-    onSuccess: async () => {
+    mutationFn: (body) => apiPost(ENDPOINTS.authLogin, body),
+    onSuccess: async (_data, body) => {
       setError(null)
       setKey('')
+      writeRememberPreference(body.remember)
       await qc.invalidateQueries({ queryKey: ['auth-status'] })
       // The gate refuses ADMIN-class READS too, so every panel that 401'd
       // while signed out is sitting on a cached error. Refetch them all —
@@ -64,7 +68,7 @@ export function AuthChallengeDrawer() {
     e.preventDefault()
     if (!key || login.isPending) return
     setError(null)
-    login.mutate(key)
+    login.mutate({ key, remember })
   }
 
   // Mount NOTHING until a challenge is actually raised. `Drawer` renders its
@@ -117,6 +121,13 @@ export function AuthChallengeDrawer() {
             disabled={login.isPending}
             placeholder="admin key"
             className="input mono"
+          />
+
+          <RememberMeField
+            testId="auth-challenge-remember"
+            checked={remember}
+            onChange={setRemember}
+            disabled={login.isPending}
           />
 
           {error && (

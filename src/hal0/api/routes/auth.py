@@ -16,7 +16,12 @@ import structlog
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
-from hal0.api.agents._auth import SESSION_COOKIE_NAME, set_session_cookie
+from hal0.api.agents._auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_REMEMBER_TTL_SECONDS,
+    SESSION_COOKIE_TTL_SECONDS,
+    set_session_cookie,
+)
 from hal0.api.auth import (
     admin_gated,
     admin_sign_in_required,
@@ -39,6 +44,10 @@ router = APIRouter()
 
 class LoginRequest(BaseModel):
     key: str
+    # "Remember me": a 30-day session instead of the 8h default. Off unless
+    # the operator asks for it -- a shared or borrowed browser should not
+    # keep an admin session for a month by default.
+    remember: bool = False
 
 
 class RequireAuthRequest(BaseModel):
@@ -103,6 +112,12 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
     Bearer/``?api_key=``-only by design (it's meant for programmatic /
     embedded callers, not a browser session).
 
+    ``remember`` picks the session lifetime: 8 hours by default, 30 days
+    when true (``SESSION_COOKIE_REMEMBER_TTL_SECONDS``). The response echoes
+    the lifetime actually granted as ``session_ttl_s``. Either way it is one
+    signed cookie whose expiry the holder cannot extend; there is no
+    per-session revocation, see :mod:`hal0.api.agents._auth`.
+
     Brute-force guard: every attempt (success OR failure) is metered by a
     per-IP sliding-window limiter (``app.state.login_limiter``) BEFORE the
     key is checked, so an automated guesser is capped at a handful of tries
@@ -123,9 +138,10 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
     if not verify_admin_key(body.key):
         log.warning("hal0.auth.login_failed")
         raise Unauthorized("invalid key", code="auth.invalid_key")
-    set_session_cookie(response)
-    log.info("hal0.auth.login_ok")
-    return {"ok": True, "tier": "admin"}
+    ttl = SESSION_COOKIE_REMEMBER_TTL_SECONDS if body.remember else SESSION_COOKIE_TTL_SECONDS
+    set_session_cookie(response, ttl_seconds=ttl)
+    log.info("hal0.auth.login_ok", remember=body.remember)
+    return {"ok": True, "tier": "admin", "session_ttl_s": ttl}
 
 
 @router.post("/logout")

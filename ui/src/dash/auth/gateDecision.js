@@ -28,8 +28,9 @@ const AUTHED_TIERS = new Set(['admin', 'client'])
  * @param {{ data?: {auth_required?: boolean, admin_sign_in_required?: boolean, tier?: string, has_admin_key?: boolean}, isPending?: boolean, isError?: boolean }} q
  *   The useAuthStatus() query result (subset).
  * @param {{ readOnly?: boolean }} [opts]
- *   `readOnly` — the operator dismissed the login screen to look around
- *   without signing in. Honoured only for the posture-coupled gate.
+ *   `readOnly` — the operator dismissed the login screen to look at the
+ *   current page without signing in (AuthGate scopes that to one page, see
+ *   pageOfHash). Honoured only for the posture-coupled gate.
  * @returns {'loading'|'login'|'app'}
  *   - 'loading' — first probe in flight, nothing decided yet (render a neutral
  *     splash, NOT the app, to avoid flashing locked UI).
@@ -53,6 +54,31 @@ export function authGateView(q, opts) {
   if (data.auth_required) return 'login'
   if (data.admin_sign_in_required) return readOnly ? 'app' : 'login'
   return 'app'
+}
+
+/**
+ * The "page" a hash route belongs to: its top-level section (`#slots/endpoints`
+ * and `#slots?x=1` are both `slots`), with an empty hash meaning the dashboard,
+ * as in main.jsx's router.
+ *
+ * This is the unit a "View read-only" choice applies to. The login is asked
+ * for on every page; dismissing it lets the operator look at THAT page, and
+ * moving to another section asks again. Tabs inside a section do not.
+ *
+ * @param {string} [hash] `window.location.hash`
+ * @returns {string}
+ */
+export function pageOfHash(hash) {
+  const path = String(hash || '').replace(/^#/, '').split('?')[0]
+  const [head, second] = path.split('/')
+  // Legacy hashes main.jsx's parseRoute() rewrites before rendering. Mapped
+  // here too, so a dismissal is recorded against the page that then shows —
+  // otherwise the rewrite would look like navigating away and prompt again.
+  if (head === 'connections') return 'slots'
+  if (head === 'profiles' || (head === 'slots' && second === 'profiles')) return 'models'
+  if (head === 'peers') return 'agent'
+  if (head === 'agents' && second === 'mcp') return 'mcp'
+  return head || 'dashboard'
 }
 
 /**
@@ -95,8 +121,10 @@ export function sessionChipState(status) {
  * Box-wide on purpose (unlike the per-caller verdicts above): the page
  * describes how the box treats OTHER devices, whoever is reading it.
  *
- * @param {{auth_required?: boolean, has_admin_key?: boolean, lan_exposed?: boolean}} [status]
- * @returns {'armed'|'lan_gated'|'open'}
+ * @param {{auth_required?: boolean, has_admin_key?: boolean, lan_exposed?: boolean} | null} [status]
+ * @returns {'armed'|'lan_gated'|'open'|'unknown'}
+ *   - 'unknown'   — no status to describe (probe failed or still loading);
+ *     never rendered as "open", which would be a claim we cannot back.
  *   - 'armed'     — enforcement is on.
  *   - 'lan_gated' — enforcement is off, but the box is LAN-bound AND has an
  *     admin key, so the posture-coupled gate applies to off-box callers.
@@ -104,7 +132,8 @@ export function sessionChipState(status) {
  *     here too: the gate cannot apply without a key to sign in with.
  */
 export function enforcementPosture(status) {
-  if (status?.auth_required) return 'armed'
+  if (!status) return 'unknown'
+  if (status.auth_required) return 'armed'
   if (status?.lan_exposed && status?.has_admin_key) return 'lan_gated'
   return 'open'
 }

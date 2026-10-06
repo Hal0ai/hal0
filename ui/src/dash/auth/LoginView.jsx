@@ -14,6 +14,9 @@
 //   - The key value is NEVER displayed (masked input) and NEVER persisted
 //     (no localStorage) — the browser only ever holds the HttpOnly session
 //     cookie the server mints on success.
+//   - "Remember me" asks the server for a 30-day session instead of 8h. The
+//     lifetime is signed into that cookie by the server; the only thing kept
+//     client-side is whether the box was ticked (rememberPreference.js).
 //   - Errors never echo the key back (see gateDecision.loginErrorMessage).
 //
 // On success the session cookie is set and we invalidate every query;
@@ -26,11 +29,14 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { loginErrorMessage } from './gateDecision.js'
+import { RememberMeField } from './RememberMeField.jsx'
+import { readRememberPreference, writeRememberPreference } from './rememberPreference.js'
 
 export function LoginView({ status, onViewReadOnly }) {
   const qc = useQueryClient()
   const [key, setKey] = useState('')
   const [error, setError] = useState(null)
+  const [remember, setRemember] = useState(readRememberPreference)
   const hasAdminKey = status ? status.has_admin_key !== false : true
   // Enforcement on vs. the posture-coupled gate: different reasons, so
   // different words. Telling an operator "authentication is enabled" while
@@ -39,10 +45,11 @@ export function LoginView({ status, onViewReadOnly }) {
   const enforced = status ? status.auth_required !== false : true
 
   const login = useMutation({
-    mutationFn: (k) => apiPost(ENDPOINTS.authLogin, { key: k }),
-    onSuccess: async () => {
+    mutationFn: (body) => apiPost(ENDPOINTS.authLogin, body),
+    onSuccess: async (_data, body) => {
       setError(null)
       setKey('')
+      writeRememberPreference(body.remember)
       // Re-read posture → AuthGate routes to the app. Refetch is awaited so
       // the app doesn't briefly re-flash the login view on the next tick.
       // Everything is invalidated, not just 'auth-status': while this view is
@@ -57,7 +64,7 @@ export function LoginView({ status, onViewReadOnly }) {
     e.preventDefault()
     if (!key || login.isPending) return
     setError(null)
-    login.mutate(key)
+    login.mutate({ key, remember })
   }
 
   return (
@@ -143,6 +150,13 @@ export function LoginView({ status, onViewReadOnly }) {
           </div>
         )}
 
+        <RememberMeField
+          testId="login-remember"
+          checked={remember}
+          onChange={setRemember}
+          disabled={login.isPending}
+        />
+
         <button
           type="submit"
           data-testid="login-submit"
@@ -186,11 +200,12 @@ export function LoginView({ status, onViewReadOnly }) {
               className="btn ghost sm"
               style={{ alignSelf: 'flex-start' }}
             >
-              View read-only
+              View this page read-only
             </button>
             <div className="mono" style={{ fontSize: 10.5, lineHeight: 1.55, color: 'var(--fg-5, #777)', wordBreak: 'normal', overflowWrap: 'break-word' }}>
               Slots, models and hardware stay visible. Settings, memory, logs and any change need
-              the key — sign in any time from the top bar.
+              the key. You will be asked again on each page, and can sign in any time from the
+              top bar.
             </div>
           </div>
         )}

@@ -656,8 +656,55 @@ def test_login_success_sets_session_cookie(auth_client, monkeypatch: pytest.Monk
     monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
     resp = auth_client.post("/api/auth/login", json={"key": "the-real-key"})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "tier": "admin"}
+    assert resp.json() == {"ok": True, "tier": "admin", "session_ttl_s": 8 * 3600}
     assert agents_auth.SESSION_COOKIE_NAME in resp.cookies
+
+
+def _max_age(resp) -> int:
+    import re
+
+    match = re.search(r"max-age=(\d+)", resp.headers.get("set-cookie", ""), re.IGNORECASE)
+    assert match, resp.headers.get("set-cookie")
+    return int(match.group(1))
+
+
+def test_login_without_remember_is_an_eight_hour_session(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "the-real-key"})
+    cookie = resp.cookies[agents_auth.SESSION_COOKIE_NAME]
+    assert _max_age(resp) == 8 * 3600
+    assert agents_auth.verify_session_cookie(cookie, now=time.time() + 9 * 3600) is False
+
+
+def test_login_with_remember_is_a_thirty_day_session(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Remember me": the browser keeps the cookie, and the server honours it,
+    for 30 days -- both halves, or the operator is back at the login tomorrow."""
+    import time
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "the-real-key", "remember": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "tier": "admin", "session_ttl_s": 30 * 24 * 3600}
+    cookie = resp.cookies[agents_auth.SESSION_COOKIE_NAME]
+    assert _max_age(resp) == 30 * 24 * 3600
+    day = 24 * 3600
+    assert agents_auth.verify_session_cookie(cookie, now=time.time() + 29 * day) is True
+    assert agents_auth.verify_session_cookie(cookie, now=time.time() + 31 * day) is False
+
+
+def test_login_remember_with_wrong_key_sets_no_cookie(
+    auth_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    resp = auth_client.post("/api/auth/login", json={"key": "nope", "remember": True})
+    assert resp.status_code == 401
+    assert agents_auth.SESSION_COOKIE_NAME not in resp.cookies
 
 
 def test_logout_clears_session_cookie(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -28,6 +28,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **"Remember me" at login.** Ticking it on the dashboard login (or the
+  in-app sign-in drawer) asks for a 30-day session instead of the 8-hour
+  default: `POST /api/auth/login` accepts `"remember": true` and reports the
+  lifetime it granted as `session_ttl_s`. The expiry is signed into the
+  session cookie by the server, so a browser cannot extend it; the dashboard
+  keeps only whether the box was ticked, never the key. Off by default.
+  Opening agent chat used to re-issue an 8-hour cookie unconditionally,
+  which would have cut a remembered session short; the handshake now renews
+  a short session but never shortens a longer one. Sessions still cannot be
+  revoked one at a time: `docs/operate/auth.mdx` documents how to end all of
+  them at once by deleting the signing secret.
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
@@ -119,6 +131,14 @@ applying. Add those subsections to a version's section to surface them; see
   `CONTRIBUTING.md` mirroring the PR template's §14.1 high-risk map. (#2242)
 
 ### Changed
+
+- **The dashboard login is asked for on every page, and "View read-only"
+  now applies to one page at a time.** On a LAN-bound box with an admin key
+  and enforcement off, dismissing the login would have switched the whole
+  browser tab to read-only. It now dismisses it for the page you are on (a
+  top-level section such as Slots, including its tabs, and across a reload);
+  moving to another section asks again. With "Require authentication" on,
+  the login is on every page and cannot be dismissed, as before.
 
 - **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
   with the code** they describe. The Hermes provisioner section now
