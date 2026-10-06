@@ -29,8 +29,10 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -645,14 +647,12 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # ── /banks/{bank_id}/document-transfer — cross-bank migration (NOT a table
 #    passthrough) ─────────────────────────────────────────────────────────────
 #
-# hindsight-api>=0.8.0 (source-verified against the v0.8.4 tag and re-checked
-# against the 0.9.2 wheels — both endpoints unchanged; 0.9.2 additionally
-# ships an async ``document-transfer/export`` variant this router does not
-# use. Absent from the 0.7.2 instance this router was built against — gate on
-# ``features.document_export_api``/``document_import_api`` from ``/version``,
-# not the version string). GET returns a ZIP file (source bank's documents +
-# optionally their observations); POST accepts that ZIP as a multipart
-# upload and starts an async transfer into the target bank
+# hindsight-api>=0.8.0 (source-verified against the v0.8.4 tag and the 0.9.2
+# wheels. Absent from the 0.7.2 instance this router was built against — gate
+# on ``features.document_export_api``/``document_import_api`` from
+# ``/version``, not the version string). GET returns a ZIP file (source bank's
+# documents + optionally their observations); POST accepts that ZIP as a
+# multipart upload and starts an async transfer into the target bank
 # (``?on_conflict=skip|replace|new-id``, default ``skip``), returning
 # ``202 {operation_id}`` — poll the existing ``operations/{id}`` passthrough
 # for ``result_metadata`` (documents_imported / facts_imported /
@@ -662,6 +662,22 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # second public method to hal0.memory.hindsight_client, which is owned by a
 # parallel unified-bank effort (see PLAN note in the CLI's migrate_unify
 # docstring for the full boundary rationale).
+#
+# Export on 0.9.x (#2155): the synchronous engine GET is a 410 tombstone
+# (``api_export_documents_removed`` in hindsight_api/api/http.py) while
+# ``/version`` still advertises ``features.document_export_api: true``, so the
+# feature flag cannot select the flow. hal0's GET keeps its contract (it
+# returns the ZIP) and picks the engine flow on the 410 itself: try the 0.8.x
+# sync GET first; on 410, submit ``POST .../document-transfer/export``, poll
+# ``GET .../operations/{id}`` until it settles, then fetch the archive named by
+# ``result_metadata.download_url`` — only ever from the configured engine
+# origin (see ``_export_download_target``).
+
+#: Server-side budget for the async export operation. Mirrors the CLI's
+#: ``_POLL_INTERVAL_S``/``_POLL_TIMEOUT_S`` in hal0.cli.memory_migrate_commands.
+_EXPORT_POLL_INTERVAL_S = 2.0
+_EXPORT_POLL_TIMEOUT_S = 900.0
+_EXPORT_FAILED_STATUSES = ("failed", "cancelled", "not_found")
 
 
 async def _raise_transfer_error(exc: Exception) -> None:
@@ -685,6 +701,103 @@ async def _raise_transfer_error(exc: Exception) -> None:
     raise exc
 
 
+def _export_error(message: str, *, http_status: int = 502, **details: Any) -> MemoryEngineError:
+    err = MemoryEngineError(message, details=details)
+    err.status = http_status
+    return err
+
+
+def _export_download_target(client: Any, bank_id: str, meta: dict[str, Any]) -> str:
+    """Resolve the export archive location to a URL on the configured engine.
+
+    ``download_url`` is engine-root-relative for the default PostgreSQL file
+    store (``/v1/default/files/download/{key}``) but an object-store backend
+    (S3/GCS/Azure) returns a pre-signed URL on another host. hal0-api never
+    follows a URL off the engine origin; for those it fetches the same
+    archive through the engine's own ``files/download/{storage_key}`` route.
+    """
+    base = client._http.base_url
+    raw = meta.get("download_url")
+    if isinstance(raw, str) and raw:
+        try:
+            url: httpx.URL | None = httpx.URL(raw)
+        except httpx.InvalidURL:
+            url = None
+        if url is not None:
+            if not url.scheme and not url.host and raw.startswith("/"):
+                return raw
+            if url.scheme and (url.scheme, url.host, url.port) == (
+                base.scheme,
+                base.host,
+                base.port,
+            ):
+                return raw
+    key = meta.get("storage_key")
+    if isinstance(key, str):
+        parts = key.split("/")
+        if (
+            len(parts) > 2
+            and parts[0] == "banks"
+            and parts[1] == bank_id
+            and all(p and p not in (".", "..") for p in parts)
+        ):
+            return "/v1/default/files/download/" + quote(key, safe="/")
+    raise _export_error(
+        "memory engine export archive is not downloadable from the engine origin",
+        download_url=raw,
+        storage_key=key,
+    )
+
+
+async def _async_export_archive(
+    client: Any, bank_id: str, include_observations: str
+) -> httpx.Response:
+    """0.9.x export: submit, poll the operation, download the archive (#2155)."""
+    submit = await client._http.post(
+        f"/v1/default/banks/{bank_id}/document-transfer/export",
+        headers=client._headers(),
+        params={"include_observations": include_observations},
+    )
+    submit.raise_for_status()
+    body = submit.json() if submit.content else {}
+    operation_id = str(body.get("operation_id") or "") if isinstance(body, dict) else ""
+    if not _SEG_RE.match(operation_id):
+        raise _export_error("memory engine export returned no usable operation_id", upstream=body)
+
+    deadline = time.monotonic() + _EXPORT_POLL_TIMEOUT_S
+    while True:
+        poll = await client._http.get(
+            f"/v1/default/banks/{bank_id}/operations/{operation_id}",
+            headers=client._headers(),
+        )
+        poll.raise_for_status()
+        op = poll.json() if poll.content else {}
+        op = op if isinstance(op, dict) else {}
+        status = op.get("status")
+        if status == "completed":
+            break
+        if status in _EXPORT_FAILED_STATUSES:
+            raise _export_error(
+                "memory engine export did not complete",
+                operation_id=operation_id,
+                status=status,
+                error_message=op.get("error_message"),
+            )
+        if time.monotonic() >= deadline:
+            raise _export_error(
+                f"memory engine export did not complete within {_EXPORT_POLL_TIMEOUT_S:g}s",
+                http_status=504,
+                operation_id=operation_id,
+                status="timed_out",
+                last_status=status,
+            )
+        await asyncio.sleep(_EXPORT_POLL_INTERVAL_S)
+
+    meta = op.get("result_metadata")
+    target = _export_download_target(client, bank_id, meta if isinstance(meta, dict) else {})
+    return await client._http.get(target, headers=client._headers())
+
+
 @router.get("/banks/{bank_id}/document-transfer")
 async def bank_document_transfer_export(request: Request, bank_id: str) -> Response:
     client = _client(request)
@@ -696,6 +809,9 @@ async def bank_document_transfer_export(request: Request, bank_id: str) -> Respo
             headers=client._headers(),
             params={"include_observations": include_observations},
         )
+        if resp.status_code == 410:
+            # hindsight-api 0.9.x removed the sync export (see block comment).
+            resp = await _async_export_archive(client, bank_id, include_observations)
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         await _raise_transfer_error(exc)

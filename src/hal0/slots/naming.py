@@ -76,9 +76,26 @@ def slot_container_name(token: str) -> str:
     return f"hal0-slot-{token}"
 
 
+async def slot_token_for(manager: Any, name: str) -> str:
+    """Instance token for the slot called *name*, read from its on-disk config.
+
+    Duck-typed on ``manager.get_config`` (the SlotManager). Falls back to the
+    bare *name* when the config cannot be read (name-keyed box, deleted slot,
+    manager without ``get_config``) — the pre-M5 behaviour. The config's ``id``
+    (not ``Slot.slot_id``, which the identity store stamps even before the
+    migration renames the artefacts) is what decides the token.
+    """
+    try:
+        cfg = await manager.get_config(name)
+    except Exception:
+        return name
+    return slot_instance_token(cfg) or name
+
+
 __all__ = [
     "slot_container_name",
     "slot_instance_token",
     "slot_quadlet_name",
+    "slot_token_for",
     "slot_unit_name",
 ]

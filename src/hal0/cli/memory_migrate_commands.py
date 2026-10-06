@@ -5,14 +5,17 @@ bank by tag, so multiple per-agent private banks can be consolidated under
 a shared/unified bank without losing which agent a fact came from.
 
 Upstream mechanics (source-verified against the hindsight-api v0.8.4 tag and
-re-checked against the 0.9.2 wheels — every endpoint/flag below is unchanged
-there, and 0.9.2's import replays the archive deterministically without LLM
-calls, so a unify stays cheap; ``--apply`` gates on ``/version``'s
-``features.document_export_api``/``document_import_api`` flags so it fails
-loud rather than guessing):
+re-checked against the 0.9.2 wheels — 0.9.2's import replays the archive
+deterministically without LLM calls, so a unify stays cheap; ``--apply``
+gates on ``/version``'s ``features.document_export_api``/
+``document_import_api`` flags so it fails loud rather than guessing):
 
 * ``GET .../document-transfer?include_observations=`` exports a source
-  bank's documents (optionally their observations) as a ZIP.
+  bank's documents (optionally their observations) as a ZIP. On 0.9.x the
+  engine's sync export is a 410 tombstone (#2155); hal0-api's GET hides
+  that by running the engine's async export (submit, poll, download)
+  server-side, so this call can block for the whole export — hence the
+  long read timeout on it.
   ``include_observations=true`` combined with a document-id subset is a
   400 upstream — whole-bank export only when observations are included,
   which is what this command always does.
@@ -71,6 +74,9 @@ _ON_CONFLICT_CHOICES = ("skip", "replace", "new-id")
 _TERMINAL_OP_STATUSES = ("completed", "failed", "cancelled")
 _POLL_INTERVAL_S = 2.0
 _POLL_TIMEOUT_S = 900.0  # 15min — document-transfer + retain is LLM-bound
+# Export GET read budget: the server-side async-export poll (same 15min) plus
+# slack for the archive download itself (#2155).
+_EXPORT_READ_TIMEOUT_S = _POLL_TIMEOUT_S + 60.0
 _RETAG_MAX_WORKERS = 4
 
 
@@ -265,6 +271,9 @@ def migrate_unify_cmd(
                 zip_bytes, _ct = api_get_bytes(
                     f"/api/memory/banks/{src}/document-transfer",
                     params={"include_observations": str(include_observations).lower()},
+                    # hal0-api polls the engine's async export for up to
+                    # memory_admin._EXPORT_POLL_TIMEOUT_S before answering.
+                    timeout=_EXPORT_READ_TIMEOUT_S,
                 )
                 submit = api_post(
                     f"/api/memory/banks/{target}/document-transfer",
