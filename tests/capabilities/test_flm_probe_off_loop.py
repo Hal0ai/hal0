@@ -159,3 +159,75 @@ async def test_get_backend_details_probes_off_the_loop(
 
 def _raise() -> Any:
     raise FileNotFoundError("no hardware probe in unit tests")
+
+
+# ── concurrent misses share one probe (#1974 review P2) ─────────────────────
+
+
+def test_concurrent_cold_cache_callers_share_one_probe(slow_probe: _SlowProvider) -> None:
+    """N threads missing the cache at once must cost ONE seam call, not N.
+    Each would otherwise hold a default-executor thread for the whole probe."""
+    n = 8
+    barrier = threading.Barrier(n)
+    results: list[bool] = []
+
+    def caller() -> None:
+        barrier.wait()
+        results.append(catalog._flm_image_present())
+
+    threads = [threading.Thread(target=caller) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert results == [True] * n
+    assert len(slow_probe.probe_threads) == 1
+
+
+async def test_concurrent_handler_requests_share_one_probe(
+    slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The burst Codex described: several /api/backends GETs on a cold cache."""
+    monkeypatch.setattr(backends_routes, "load_hardware_info", _raise)
+
+    rows = await asyncio.gather(
+        *(backends_routes.list_backends(None, _NoSlots()) for _ in range(5))  # type: ignore[arg-type]
+    )
+
+    assert all(r[0]["id"] == "npu" for r in rows)
+    assert len(slow_probe.probe_threads) == 1
+
+
+def test_reset_during_a_probe_drops_its_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A probe that started before an FLM pull's reset must not cache its
+    (possibly pre-pull) answer, and the reset must not wait for the probe."""
+    started, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+
+    class _GatedProvider:
+        def image_present(self, image: str) -> bool | None:
+            calls.append(image)
+            if len(calls) == 1:
+                started.set()
+                release.wait(timeout=5)
+                return False
+            return True
+
+    monkeypatch.setattr(container_mod, "container_provider", lambda: _GatedProvider())
+    catalog.reset_flm_image_present_cache()
+    first: list[bool] = []
+    t = threading.Thread(target=lambda: first.append(catalog._flm_image_present()))
+    t.start()
+    assert started.wait(timeout=5)
+
+    reset_began = time.monotonic()
+    catalog.reset_flm_image_present_cache()
+    assert time.monotonic() - reset_began < 0.1, "reset waited on the in-flight probe"
+    release.set()
+    t.join(timeout=5)
+
+    assert first == [False]
+    assert catalog._flm_image_present() is True, "stale pre-reset 'absent' was cached"
+    assert len(calls) == 2
+    catalog.reset_flm_image_present_cache()

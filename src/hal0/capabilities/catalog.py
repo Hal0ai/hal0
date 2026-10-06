@@ -21,6 +21,7 @@ cache the heavy work upstream.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -192,6 +193,17 @@ _FLM_BROKEN_TAGS: dict[str, str] = {
 _flm_image_present_cache: bool | None = None
 _flm_image_unknown_at: float | None = None
 
+# Serializes the cache-miss path (#1974 review): the probe runs on worker
+# threads, so concurrent GETs on a cold or expired cache would otherwise each
+# run the same up-to-10 s seam call and could tie up the shared executor.
+# Callers that miss wait for the one in-flight probe and reuse its answer.
+# :func:`reset_flm_image_present_cache` deliberately does NOT take this lock
+# (it runs on the event loop after an FLM pull and must not wait out a probe);
+# it bumps :data:`_flm_probe_generation` instead, and a probe that started
+# before a reset drops its answer rather than caching a stale one.
+_flm_probe_lock = threading.Lock()
+_flm_probe_generation = 0
+
 #: How long an unanswerable FLM-image probe is held before the next call
 #: re-probes. Long enough that a broken seam doesn't cost a sudo round-trip
 #: per ``available_backends`` call, short enough that a recovered podman
@@ -207,9 +219,22 @@ def reset_flm_image_present_cache() -> None:
     toolbox image flips the NPU backend on without a process restart.
     Also exposed for tests.
     """
-    global _flm_image_present_cache, _flm_image_unknown_at
+    global _flm_image_present_cache, _flm_image_unknown_at, _flm_probe_generation
+    _flm_probe_generation += 1
     _flm_image_present_cache = None
     _flm_image_unknown_at = None
+
+
+def _flm_image_cached() -> bool | None:
+    """The cached answer to give without probing, or ``None`` to probe."""
+    if _flm_image_present_cache is not None:
+        return _flm_image_present_cache
+    if (
+        _flm_image_unknown_at is not None
+        and time.monotonic() - _flm_image_unknown_at < _FLM_PROBE_RETRY_S
+    ):
+        return False
+    return None
 
 
 def _flm_image_present() -> bool:
@@ -232,26 +257,33 @@ def _flm_image_present() -> bool:
     apart here: ``True``/``False`` are cached until
     :func:`reset_flm_image_present_cache`; ``None`` ("nobody could look")
     hides NPU for now but is re-probed after :data:`_FLM_PROBE_RETRY_S`
-    instead of being remembered as "absent".
+    instead of being remembered as "absent". Concurrent misses share one
+    probe (double-checked under :data:`_flm_probe_lock`).
     """
     global _flm_image_present_cache, _flm_image_unknown_at
-    if _flm_image_present_cache is not None:
-        return _flm_image_present_cache
-    if (
-        _flm_image_unknown_at is not None
-        and time.monotonic() - _flm_image_unknown_at < _FLM_PROBE_RETRY_S
-    ):
-        return False
+    cached = _flm_image_cached()
+    if cached is not None:
+        return cached
 
     from hal0.providers.container import container_provider
 
-    answer = container_provider().image_present(_FLM_TOOLBOX_IMAGE)
-    if answer is None:
-        _flm_image_unknown_at = time.monotonic()
-        return False
-    _flm_image_unknown_at = None
-    _flm_image_present_cache = answer
-    return answer
+    with _flm_probe_lock:
+        # Another caller may have probed while we waited for the lock.
+        cached = _flm_image_cached()
+        if cached is not None:
+            return cached
+        generation = _flm_probe_generation
+        answer = container_provider().image_present(_FLM_TOOLBOX_IMAGE)
+        if generation != _flm_probe_generation:
+            # Reset mid-probe (an FLM pull just finished): this answer may
+            # predate the pull, so use it for this call only.
+            return bool(answer)
+        if answer is None:
+            _flm_image_unknown_at = time.monotonic()
+            return False
+        _flm_image_unknown_at = None
+        _flm_image_present_cache = answer
+        return answer
 
 
 def available_backends() -> list[dict[str, Any]]:
