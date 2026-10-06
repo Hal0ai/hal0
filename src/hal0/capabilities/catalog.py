@@ -21,6 +21,7 @@ cache the heavy work upstream.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -178,12 +179,22 @@ _FLM_BROKEN_TAGS: dict[str, str] = {
 }
 
 
-# Cached result of the FLM-image-present probe (None = not yet probed).
-# The probe shells a container runtime, which the module contract
-# (``GET /api/capabilities`` must not spawn subprocesses on every load)
-# forbids doing per-GET — so we run it once and reuse it.
-# :func:`reset_flm_image_present_cache` drops it after an FLM pull.
+# Cached result of the FLM-image-present probe. The probe shells a container
+# runtime, which the module contract (``GET /api/capabilities`` must not spawn
+# subprocesses on every load) forbids doing per-GET — so we reuse its answer.
+# ``None`` = not yet probed. A definitive ``True``/``False`` is kept until
+# :func:`reset_flm_image_present_cache` (called after an FLM pull). An
+# unanswerable probe (#1974: seam denied, podman broken, no runtime) is NOT an
+# answer, so it is held only for :data:`_FLM_PROBE_RETRY_S` and then re-asked —
+# caching it as ``False`` dropped NPU from the picker until restart.
 _flm_image_present_cache: bool | None = None
+_flm_image_unknown_at: float | None = None
+
+#: How long an unanswerable FLM-image probe is held before the next call
+#: re-probes. Long enough that a broken seam doesn't cost a sudo round-trip
+#: per ``available_backends`` call, short enough that a recovered podman
+#: brings NPU back without a restart.
+_FLM_PROBE_RETRY_S = 30.0
 
 
 def reset_flm_image_present_cache() -> None:
@@ -194,12 +205,13 @@ def reset_flm_image_present_cache() -> None:
     toolbox image flips the NPU backend on without a process restart.
     Also exposed for tests.
     """
-    global _flm_image_present_cache
+    global _flm_image_present_cache, _flm_image_unknown_at
     _flm_image_present_cache = None
+    _flm_image_unknown_at = None
 
 
 def _flm_image_present() -> bool:
-    """True iff the FLM toolbox image is already pulled locally.
+    """True iff the FLM toolbox image is known to be in the slot image store.
 
     Picking ``backend=npu`` rewrites the slot TOML and asks the container
     runtime to spawn the FLM container. The image is gated on ghcr.io
@@ -209,42 +221,35 @@ def _flm_image_present() -> bool:
     Advertising NPU as a backend only after we know the runtime can spawn
     the container avoids that whole class of failure.
 
-    Checked via ``<runtime> image inspect`` which returns 0 iff the image
-    id resolves locally. The runtime binary is resolved through the shared
-    :func:`hal0.providers.container._container_runtime` path (podman →
-    docker → RuntimeError) so a podman-only host probes podman rather than
-    a missing ``docker``. The result is cached at module scope (see
-    :data:`_flm_image_present_cache`) so the /api/capabilities GET doesn't
-    re-spawn the probe on every load.
+    #1974: asked through
+    :meth:`hal0.providers.container.ContainerProvider.image_present` — the
+    same probe ``image_status`` uses — so it reads ROOT's store via the
+    ``hal0-podman-ro`` seam on a provisioned box (a bare ``podman image
+    inspect`` from hal0-api reads its own rootless store, #1889) and only
+    falls back to the local store on a dev box. Its tri-state answer is kept
+    apart here: ``True``/``False`` are cached until
+    :func:`reset_flm_image_present_cache`; ``None`` ("nobody could look")
+    hides NPU for now but is re-probed after :data:`_FLM_PROBE_RETRY_S`
+    instead of being remembered as "absent".
     """
-    global _flm_image_present_cache
+    global _flm_image_present_cache, _flm_image_unknown_at
     if _flm_image_present_cache is not None:
         return _flm_image_present_cache
-
-    import subprocess
-
-    from hal0.providers.container import _container_runtime
-
-    try:
-        runtime = _container_runtime()
-    except RuntimeError:
-        # No container runtime installed — the NPU backend can't spawn.
-        _flm_image_present_cache = False
+    if (
+        _flm_image_unknown_at is not None
+        and time.monotonic() - _flm_image_unknown_at < _FLM_PROBE_RETRY_S
+    ):
         return False
 
-    try:
-        proc = subprocess.run(
-            [runtime, "image", "inspect", _FLM_TOOLBOX_IMAGE],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2.0,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        # Transient probe failure — don't cache, so a later GET can retry.
+    from hal0.providers.container import container_provider
+
+    answer = container_provider().image_present(_FLM_TOOLBOX_IMAGE)
+    if answer is None:
+        _flm_image_unknown_at = time.monotonic()
         return False
-    _flm_image_present_cache = proc.returncode == 0
-    return _flm_image_present_cache
+    _flm_image_unknown_at = None
+    _flm_image_present_cache = answer
+    return answer
 
 
 def available_backends() -> list[dict[str, Any]]:

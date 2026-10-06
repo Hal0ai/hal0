@@ -63,7 +63,7 @@ def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_npu_hidden_when_image_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Runtime resolves but the image inspect fails → no NPU backend."""
+    """Runtime resolves but the image probe reports it absent → no NPU backend."""
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
 
