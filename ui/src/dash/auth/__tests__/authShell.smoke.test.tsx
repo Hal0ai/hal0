@@ -18,12 +18,13 @@ const POSTURE_GATED = {
   auth_required: false,
   has_admin_key: true,
   lan_exposed: true,
+  admin_gated: true,
   admin_sign_in_required: true,
   tier: 'anon',
 }
 const SIGNED_IN = { ...POSTURE_GATED, admin_sign_in_required: false, tier: 'admin' }
 const ENFORCED_ANON = { ...POSTURE_GATED, auth_required: true }
-const OPEN_BOX = { ...POSTURE_GATED, has_admin_key: false, admin_sign_in_required: false }
+const OPEN_BOX = { ...POSTURE_GATED, has_admin_key: false, admin_gated: false, admin_sign_in_required: false }
 
 function render(status: Record<string, unknown>, node: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })

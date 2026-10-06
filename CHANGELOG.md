@@ -162,14 +162,16 @@ applying. Add those subsections to a version's section to surface them; see
   handled a refused *change*: pages rendered empty while their reads 401'd
   every poll, the top bar gave no hint of a session, and the admin-key drawer
   appeared only if you happened to try a mutation. Now `GET /api/auth/status`
-  reports `admin_sign_in_required` — whether this caller's ADMIN requests
-  would be refused, computed by the same predicates the enforcement
-  middleware runs — and the dashboard keys on it: the login screen appears at
+  reports two per-caller fields — `admin_gated` (are this caller's ADMIN
+  requests enforced at all) and `admin_sign_in_required` (would one be
+  refused right now), computed by the same predicates the enforcement
+  middleware runs — and the dashboard keys on them: the login screen appears at
   load (worded for this posture, with a **View read-only** way past it), a
   top-bar chip shows **Sign in** or **Admin · Log out**, a session that
   lapses mid-use brings the login screen back instead of silent 401s, and
   signing in refetches every panel rather than only the retried action.
-  Logging out now also discards everything the dashboard fetched under the
+  Whenever the login screen takes over — after a log-out or a lapsed
+  session — the dashboard now discards everything it fetched under that
   session, so the next person at that browser cannot read the previous
   admin's cached pages through **View read-only**. The Security page no
   longer claims that reads stay open in this posture. Boxes with no admin

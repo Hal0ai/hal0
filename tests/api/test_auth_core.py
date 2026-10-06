@@ -442,6 +442,7 @@ def test_status_route_reports_posture(auth_client) -> None:
         "auth_required": False,
         "has_admin_key": False,
         "lan_exposed": False,
+        "admin_gated": False,
         "admin_sign_in_required": False,
         "tier": "anon",
     }
@@ -561,6 +562,59 @@ def test_status_sign_in_required_for_client_key_on_gated_box(
     assert body["tier"] == "client"
     assert body["admin_sign_in_required"] is True
     assert admin_status == 403
+
+
+# ``admin_gated`` is the other half of the per-caller picture: is an admin
+# session what stands between THIS caller and ADMIN routes? It stays true after
+# signing in (that is how the dashboard knows "log out" means something) and is
+# false for a caller the gate exempts, whatever cookie they happen to hold.
+
+
+def test_status_admin_gated_stays_true_after_login_from_lan_peer(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        before = c.get("/api/auth/status").json()
+        assert c.post("/api/auth/login", json={"key": "the-real-key"}).status_code == 200
+        after = c.get("/api/auth/status").json()
+    assert (before["admin_gated"], before["admin_sign_in_required"]) == (True, True)
+    assert (after["admin_gated"], after["admin_sign_in_required"]) == (True, False)
+
+
+def test_status_admin_not_gated_for_loopback_peer_holding_a_session(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An on-box browser (or an SSH-forwarded one) is exempt from the posture
+    gate. A session cookie it holds changes nothing about its access, so the
+    dashboard must not present it as a signed-in session to log out of."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        assert c.post("/api/auth/login", json={"key": "the-real-key"}).status_code == 200
+        body = c.get("/api/auth/status").json()
+    assert body["tier"] == "admin"
+    assert body["admin_gated"] is False
+    assert body["admin_sign_in_required"] is False
+
+
+def test_status_admin_gated_when_enforcement_on(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    app = auth_app_factory()
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        assert c.get("/api/auth/status").json()["admin_gated"] is True
 
 
 def test_status_sign_in_required_when_enforcement_on_and_anonymous(

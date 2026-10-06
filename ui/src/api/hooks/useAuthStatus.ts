@@ -6,6 +6,7 @@
 //   { auth_required: bool,   // is the enforcement gate armed at all?
 //     has_admin_key: bool,   // is HAL0_ADMIN_KEY configured? (set/unset)
 //     lan_exposed: bool,     // is the bind reachable beyond loopback? (#1822)
+//     admin_gated: bool,             // are THIS caller's ADMIN requests enforced at all?
 //     admin_sign_in_required: bool,  // would THIS caller's ADMIN requests be refused?
 //     tier: "open"|"client"|"admin" }  // THIS caller's resolved identity
 //
@@ -23,10 +24,12 @@
 // the Security page explain why a sign-in is asked for even though "Require
 // authentication" reads as off.
 //
-// `admin_sign_in_required` is the per-caller verdict the three booleans above
-// cannot give (the gate depends on this request's own peer, which only the
-// server sees). AuthGate's login screen and the top-bar SessionChip key on
-// it; never re-derive the gate client-side.
+// `admin_gated` / `admin_sign_in_required` are the per-caller verdicts the
+// three booleans above cannot give (the gate depends on this request's own
+// peer, which only the server sees). `admin_gated` holds before and after
+// signing in; `admin_sign_in_required` only while the caller lacks a session.
+// AuthGate's login screen keys on the second and the top-bar SessionChip on
+// both; never re-derive the gate client-side.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
@@ -38,6 +41,7 @@ export interface AuthStatus {
   auth_required: boolean
   has_admin_key: boolean
   lan_exposed: boolean
+  admin_gated: boolean
   admin_sign_in_required: boolean
   tier: AuthTier
 }

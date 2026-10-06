@@ -124,7 +124,10 @@ browser tab and shows the open pages; a **Sign in** chip in the top bar then
 opens the admin-key drawer at any time, and a change attempted while
 read-only opens the same drawer and retries once you sign in. Signed in, the
 chip reads **Admin** with a **Log out** button. When the 8-hour session
-lapses, the next refused request brings the login screen back. A browser on
+lapses, the next refused request brings the login screen back. Whenever the
+login screen appears, whether after a log-out or a lapse, the dashboard
+discards what it had fetched under the previous session, so none of it is
+readable through **View read-only**. A browser on
 the box itself (loopback), or any browser on a box with no admin key, sees
 none of this. From other clients, send the admin key on the request. To make the
 posture explicit, run `hal0 auth require on`; to take the box off the LAN
@@ -185,6 +188,7 @@ caller on the old key stops working immediately.
   "auth_required": false,
   "has_admin_key": true,
   "lan_exposed": true,
+  "admin_gated": true,
   "admin_sign_in_required": true,
   "tier": "anon"
 }
@@ -193,12 +197,20 @@ caller on the old key stops working immediately.
 `lan_exposed` is true when the API is bound beyond loopback, independent of
 `auth_required`.
 
-`admin_sign_in_required` answers one question for the caller that asked: would
-an ADMIN-class request from you be refused right now? It is true when
-enforcement is on, or the LAN-bound rule above applies to this request's own
-peer, and the caller holds no admin session or key. The dashboard keys its
-login screen and session chip on this field alone; the example above is an
-off-box browser on a LAN-bound box with enforcement off.
+The last two fields are verdicts for the caller that asked, because the
+LAN-bound rule above depends on that request's own peer:
+
+- `admin_gated` — are ADMIN-class requests from you enforced at all? True when
+  enforcement is on, or the LAN-bound rule applies to your peer. It does not
+  change when you sign in.
+- `admin_sign_in_required` — would one be refused right now? True when
+  `admin_gated` is true and you hold no admin session or key.
+
+The dashboard shows its login screen on `admin_sign_in_required`, and its
+**Admin / Log out** chip only for an admin session where `admin_gated` is true.
+A browser on the box itself reads `false` for both, whatever cookie it holds.
+The example above is an off-box browser on a LAN-bound box with enforcement
+off.
 
 Never returns secrets — safe for the dashboard to poll unauthenticated.
 

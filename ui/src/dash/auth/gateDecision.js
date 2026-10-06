@@ -70,21 +70,22 @@ export function canViewReadOnly(status) {
 /**
  * What the top-bar session chip shows.
  *
- * @param {{auth_required?: boolean, admin_sign_in_required?: boolean, has_admin_key?: boolean, lan_exposed?: boolean, tier?: string}} [status]
+ * Both inputs are per-caller verdicts from GET /api/auth/status — never the
+ * box-wide `lan_exposed` / `has_admin_key`, which are also true for a caller
+ * the gate exempts (an on-box or SSH-forwarded browser).
+ *
+ * @param {{admin_gated?: boolean, admin_sign_in_required?: boolean, tier?: string}} [status]
  * @returns {'hidden'|'signin'|'admin'}
  *   - 'signin' — this caller's ADMIN requests are refused; offer the login.
- *   - 'admin'  — signed in on a box where the session is what grants access
- *     (so "log out" means something).
- *   - 'hidden' — nothing is gated for this caller. That includes a keyless
- *     box whose browser happens to hold an agent-chat session cookie (the
- *     same cookie resolves to the admin tier): nothing to sign in to or out of.
+ *   - 'admin'  — signed in AND this caller is gated, so the session is what
+ *     grants access and "log out" means something.
+ *   - 'hidden' — nothing is gated for this caller. That includes an exempt
+ *     caller that happens to hold a session cookie (the agent-chat handshake
+ *     mints the same cookie): nothing to sign in to or out of.
  */
 export function sessionChipState(status) {
   if (!status) return 'hidden'
-  if (status.tier === 'admin') {
-    const sessionMatters = !!status.has_admin_key && (!!status.auth_required || !!status.lan_exposed)
-    return sessionMatters ? 'admin' : 'hidden'
-  }
+  if (status.tier === 'admin') return status.admin_gated ? 'admin' : 'hidden'
   return status.admin_sign_in_required ? 'signin' : 'hidden'
 }
 

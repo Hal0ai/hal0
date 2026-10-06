@@ -14,6 +14,7 @@ const POSTURE_GATED = {
   auth_required: false,
   has_admin_key: true,
   lan_exposed: true,
+  admin_gated: true,
   admin_sign_in_required: true,
   tier: 'anon',
 }
@@ -23,6 +24,7 @@ const OPEN_BOX = {
   auth_required: false,
   has_admin_key: false,
   lan_exposed: true,
+  admin_gated: false,
   admin_sign_in_required: false,
   tier: 'anon',
 }
@@ -78,5 +80,20 @@ describe('sessionChipState', () => {
     // there is nothing to sign in to or out of, so no chip.
     expect(sessionChipState({ ...OPEN_BOX, tier: 'admin' })).toBe('hidden')
     expect(sessionChipState(undefined)).toBe('hidden')
+  })
+
+  it('stays hidden for a caller the gate exempts, even holding a session cookie', () => {
+    // On-box / SSH-forwarded browser on a LAN-bound keyed box: the box IS
+    // exposed and keyed, but this caller is not gated, so logging out would
+    // change nothing about its access. Box-wide flags must not light the chip.
+    const loopbackWithCookie = {
+      auth_required: false,
+      has_admin_key: true,
+      lan_exposed: true,
+      admin_gated: false,
+      admin_sign_in_required: false,
+      tier: 'admin',
+    }
+    expect(sessionChipState(loopbackWithCookie)).toBe('hidden')
   })
 })

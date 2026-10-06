@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, set_session_cookie
 from hal0.api.auth import (
+    admin_gated,
     admin_sign_in_required,
     has_admin_key,
     require_auth_enabled,
@@ -282,17 +283,21 @@ async def status(request: Request) -> dict[str, object]:
     dashboard and ``hal0 doctor all`` can both explain that ADMIN mutations
     already require a sign-in from off-box callers even while enforcement
     itself reads as "off" (see :mod:`hal0.api.auth`'s posture-coupled gate).
-    ``admin_sign_in_required`` is the per-caller answer the three fields
-    above cannot give on their own: would an ADMIN-class request from THIS
-    caller be refused right now? It folds in the caller's own peer
-    (loopback or not) and session, so the dashboard keys its login screen
-    and session chip on this one field rather than re-deriving the gate.
+    ``admin_gated`` and ``admin_sign_in_required`` are the per-caller
+    answers the three fields above cannot give on their own, because the
+    gate depends on this request's own peer (loopback or not):
+    ``admin_gated`` -- are ADMIN-class requests from THIS caller enforced at
+    all (true before and after signing in); ``admin_sign_in_required`` --
+    would one be refused right now. The dashboard keys its login screen on
+    the second and its session chip on both, rather than re-deriving the
+    gate client-side.
     """
     principal = resolve_principal_from_scope(request)
     return {
         "auth_required": require_auth_enabled(),
         "has_admin_key": has_admin_key(),
         "lan_exposed": not is_loopback_bind(),
+        "admin_gated": admin_gated(request),
         "admin_sign_in_required": admin_sign_in_required(request),
         "tier": principal.tier,
     }

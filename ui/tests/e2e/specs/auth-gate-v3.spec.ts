@@ -55,6 +55,7 @@ async function installAuth(page: Page, opts: AuthOpts = {}) {
       auth_required: requireAuth,
       has_admin_key: hasAdminKey,
       lan_exposed: postureGated,
+      admin_gated: requireAuth || postureGated,
       admin_sign_in_required: (requireAuth || postureGated) && !loggedIn,
       tier: loggedIn ? 'admin' : 'anon',
     }),
@@ -239,6 +240,74 @@ test.describe('App-shell auth gate — posture-coupled gate (auth off, LAN-bound
 
     await expect(page.getByTestId('login-view')).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('.app')).toHaveCount(0)
+  })
+
+  const AUTH_REQUIRED_401 = {
+    error: { code: 'auth.required', message: 'authentication required', details: {} },
+  }
+  const PENDING_APPROVAL = {
+    id: 'ap-1',
+    tool: 'model_pull',
+    args: { model: 'llama-3.1-8b' },
+    client_id: 'hermes',
+    enqueued_at: Date.now() / 1000 - 60,
+    state: 'pending',
+  }
+
+  test('viewing read-only after a lapsed session does not show the admin session\'s cached data', async ({ page }) => {
+    const auth = await installAuth(page, { ...POSTURE, startLoggedIn: true })
+    await page.route('**/api/agent/approvals', (route) =>
+      auth.isLoggedIn() ? json(route, { approvals: [PENDING_APPROVAL] }) : json(route, AUTH_REQUIRED_401, 401),
+    )
+    const cachedApprovals = () =>
+      page.evaluate(() => (window as any).Hal0QueryClient.getQueryData(['agents', 'approvals', 'list']))
+
+    await page.goto('/')
+    await expect(page.locator('.app')).toBeVisible()
+    // The ADMIN-class payload is in the query cache while signed in.
+    await expect.poll(cachedApprovals).toMatchObject({ approvals: [{ id: 'ap-1' }] })
+
+    auth.expireSession()
+    await expect(page.getByTestId('login-view')).toBeVisible({ timeout: 20_000 })
+    await page.getByTestId('login-view-read-only').click()
+    await expect(page.locator('.app')).toBeVisible()
+    await expect(page.getByTestId('tb-session-signin')).toBeVisible()
+
+    // A query keeps its last good data when a refetch 401s, so unless the
+    // cache is reset on the way into read-only the old payload is still here.
+    await expect.poll(cachedApprovals, { timeout: 5_000 }).toBeUndefined()
+  })
+
+  test('a mutation refused as the session lapses is dropped by the front-door login, not replayed', async ({ page }) => {
+    const auth = await installAuth(page, { ...POSTURE, startLoggedIn: true })
+    await page.route('**/api/agent/approvals', (route) =>
+      auth.isLoggedIn() ? json(route, { approvals: [PENDING_APPROVAL] }) : json(route, AUTH_REQUIRED_401, 401),
+    )
+    let approveAttempts = 0
+    await page.route('**/api/agent/approvals/*/approve', (route) => {
+      approveAttempts += 1
+      // The session is found to be gone on this very request.
+      auth.expireSession()
+      return json(route, AUTH_REQUIRED_401, 401)
+    })
+
+    await page.goto('/')
+    await page.getByTestId('tb-bell').click()
+    await page.getByTestId('notif-sec-attention').getByRole('button', { name: 'Review' }).click()
+    await page.locator('.approval-card').getByRole('button', { name: 'Approve' }).click()
+
+    // The refused mutation raises the drawer; the next refused read then
+    // swaps the whole shell for the login view, taking the drawer with it.
+    await expect(page.getByTestId('login-view')).toBeVisible({ timeout: 20_000 })
+    await page.getByTestId('login-key-input').fill('the-right-key')
+    await page.getByTestId('login-submit').click()
+    await expect(page.locator('.app')).toBeVisible()
+    await expect(page.getByTestId('tb-session-admin')).toBeVisible()
+
+    // Signed in once is signed in: no second key prompt waiting in the app,
+    // and the action is not silently replayed out of its original context.
+    await expect(page.locator('aside.drawer', { hasText: 'Sign-in required' })).toHaveCount(0)
+    expect(approveAttempts).toBe(1)
   })
 
   test('a box that gates nothing shows no session chip', async ({ page }) => {

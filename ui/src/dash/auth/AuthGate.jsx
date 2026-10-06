@@ -20,11 +20,25 @@
 // dropped again on sign-in, so a later session expiry returns to the login
 // view rather than silently to read-only.
 //
+// Whenever the login view takes over, whatever the previous session left
+// behind is cleared, so nothing of it survives into the next one or into
+// read-only browsing:
+//   - every cached query payload except the posture itself (a query keeps its
+//     last good data when its refetch 401s, so a lapsed session's Settings /
+//     Memory / Logs would otherwise still render under "View read-only");
+//   - a pending admin-key challenge (a mutation refused as the session lapsed
+//     opens the drawer just before the shell swaps to this view; left alone it
+//     would greet the operator with a second key prompt after they sign in
+//     here, and replay the action long after its context is gone).
+//
 // All routing lives in the pure, unit-tested authGateView() (gateDecision.js);
 // this component only binds it to the live query + renders.
 
 import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { resetSessionQueries } from '@/api/hooks/useAuthActions'
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
+import { useAuthChallengeStore } from '@/stores/useAuthChallengeStore'
 import { authGateView, canViewReadOnly } from './gateDecision.js'
 import { LoginView } from './LoginView.jsx'
 
@@ -74,6 +88,15 @@ export function AuthGate({ children }) {
   }, [signedIn, readOnly])
 
   const view = authGateView(q, { readOnly })
+
+  const qc = useQueryClient()
+  const dismissChallenge = useAuthChallengeStore((s) => s.dismiss)
+  useEffect(() => {
+    if (view !== 'login') return
+    dismissChallenge()
+    resetSessionQueries(qc)
+  }, [view, qc, dismissChallenge])
+
   if (view === 'loading') return <AuthSplash />
   if (view === 'login') {
     const viewReadOnly = canViewReadOnly(q.data)

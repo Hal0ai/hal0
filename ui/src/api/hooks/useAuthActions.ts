@@ -73,6 +73,17 @@ export function useRotateKey() {
  */
 export async function dropSessionData(qc: QueryClient): Promise<void> {
   await qc.invalidateQueries({ queryKey: ['auth-status'] })
+  resetSessionQueries(qc)
+}
+
+/**
+ * Discard every cached payload except the auth posture itself. Shared by an
+ * explicit logout (above) and by AuthGate whenever the login view takes over
+ * — a session that simply lapsed leaves the same cached pages behind as one
+ * that was logged out of. Not awaited by design: resetting is synchronous,
+ * the returned promise only tracks refetches of still-mounted reads.
+ */
+export function resetSessionQueries(qc: QueryClient): void {
   void qc.resetQueries({ predicate: (q) => q.queryKey[0] !== 'auth-status' })
 }
 
