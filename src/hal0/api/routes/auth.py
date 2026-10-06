@@ -20,6 +20,7 @@ from hal0.api.agents._auth import (
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_REMEMBER_TTL_SECONDS,
     SESSION_COOKIE_TTL_SECONDS,
+    request_uses_tls,
     set_session_cookie,
 )
 from hal0.api.auth import (
@@ -139,13 +140,13 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
         log.warning("hal0.auth.login_failed")
         raise Unauthorized("invalid key", code="auth.invalid_key")
     ttl = SESSION_COOKIE_REMEMBER_TTL_SECONDS if body.remember else SESSION_COOKIE_TTL_SECONDS
-    set_session_cookie(response, ttl_seconds=ttl)
+    set_session_cookie(response, ttl_seconds=ttl, secure=request_uses_tls(request))
     log.info("hal0.auth.login_ok", remember=body.remember)
     return {"ok": True, "tier": "admin", "session_ttl_s": ttl}
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, object]:
+async def logout(request: Request, response: Response) -> dict[str, object]:
     """Clear the browser session cookie so the operator returns to anonymous.
 
     OPEN (see :mod:`hal0.security.exposure`): clearing *your own* cookie is
@@ -154,7 +155,9 @@ async def logout(response: Response) -> dict[str, object]:
     only way the dashboard can end a session. Deleting a cookie the caller
     doesn't have is a no-op, so an anonymous hit is fine too.
     """
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    # Same ``Secure`` as the cookie being cleared: a browser may refuse to let
+    # a non-Secure Set-Cookie touch a Secure cookie of the same name.
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=request_uses_tls(request))
     log.info("hal0.auth.logout")
     return {"ok": True}
 

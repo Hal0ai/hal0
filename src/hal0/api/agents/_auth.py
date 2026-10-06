@@ -25,7 +25,9 @@ This module fixes that for the chat-proxy WebSocket routes by:
    ``{"session_id": "<uuid>", "expires_at": <unix-ts>}``. The signature
    is ``HMAC-SHA256(<secret>, <base64url(payload)>)``. Secret comes from
    ``/var/lib/hal0/agents/secret.bin`` (chmod 0600, generated on first
-   use). The cookie is set ``HttpOnly``, ``SameSite=Lax``.
+   use). The cookie is set ``HttpOnly``, ``SameSite=Lax``, and ``Secure``
+   whenever the request arrived over TLS (directly or via a proxy's
+   ``X-Forwarded-Proto``).
 
 The cookie is the only authorisation seam — there is no Bearer header
 to spoof, and the secret never leaves the hal0 service user.
@@ -211,6 +213,22 @@ def verify_session_cookie(value: str, now: float | None = None) -> bool:
     return session_cookie_expiry(value, now) is not None
 
 
+def request_uses_tls(request: Request) -> bool:
+    """Did the browser reach us over TLS?
+
+    True when the request itself arrived over ``https``, or a reverse proxy
+    that terminated TLS says so with ``X-Forwarded-Proto`` (hal0-api itself
+    listens on plain HTTP; the documented deployment puts a proxy in front).
+    The header is honoured without a trust setting on purpose: it only ever
+    ADDS the ``Secure`` attribute to the sender's own cookie, so a forged
+    value can restrict nobody but the forger.
+    """
+    if request.url.scheme == "https":
+        return True
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    return forwarded.split(",", 1)[0].strip().lower() == "https"
+
+
 def set_session_cookie(
     response: Response,
     *,
@@ -219,13 +237,12 @@ def set_session_cookie(
 ) -> str:
     """Mint + attach a session cookie to ``response``. Returns its value.
 
-    ``secure`` defaults to ``False``: hal0-api serves plain HTTP on the
-    LAN and TLS, when present, is terminated by an upstream proxy
-    (ADR-0012), so a ``Secure`` cookie would never reach the WS gate on
-    a plain-HTTP box. Pass ``secure=True`` to force the attribute.
-    ``ttl_seconds`` sets both halves of the lifetime together -- the
-    signed ``expires_at`` the server honours and the ``Max-Age`` the
-    browser keeps the cookie for.
+    ``secure`` marks the cookie ``Secure`` so the browser never sends it in
+    cleartext; callers pass :func:`request_uses_tls` for the request being
+    answered, so a plain-HTTP install keeps a cookie it can actually use
+    while a TLS-proxied one gets the attribute. ``ttl_seconds`` sets both
+    halves of the lifetime together -- the signed ``expires_at`` the server
+    honours and the ``Max-Age`` the browser keeps the cookie for.
     """
     value = mint_session_cookie(ttl_seconds=ttl_seconds)
     response.set_cookie(
@@ -234,7 +251,7 @@ def set_session_cookie(
         max_age=ttl_seconds,
         httponly=True,
         samesite="lax",
-        secure=bool(secure) if secure is not None else False,
+        secure=bool(secure),
         path="/",
     )
     return value
@@ -330,6 +347,7 @@ __all__ = [
     "allowed_origins",
     "check_ws_origin_and_cookie",
     "mint_session_cookie",
+    "request_uses_tls",
     "require_browser_auth",
     "session_cookie_expiry",
     "set_session_cookie",

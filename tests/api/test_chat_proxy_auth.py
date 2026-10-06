@@ -171,6 +171,14 @@ def test_handshake_sets_session_cookie(client: TestClient) -> None:
     assert _auth.SESSION_COOKIE_NAME in resp.cookies
 
 
+def test_handshake_cookie_is_secure_when_reached_over_tls(client: TestClient) -> None:
+    resp = client.get(
+        "/api/agents/hermes/session/handshake", headers={"X-Forwarded-Proto": "https"}
+    )
+    assert resp.status_code == 200
+    assert "; secure" in resp.headers.get("set-cookie", "").lower()
+
+
 def test_handshake_does_not_shorten_a_longer_lived_session(client: TestClient) -> None:
     """Opening agent chat must not swap a 30-day remember-me cookie for an 8h one.
 

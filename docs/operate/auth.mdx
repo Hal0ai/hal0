@@ -231,7 +231,11 @@ payload is `{session_id, expires_at}`, signature is
 `HMAC-SHA256(secret, payload)`. The signing secret is a 32-byte random value
 generated on first use at `/var/lib/hal0/agents/secret.bin` (mode `0600`) and
 never leaves the hal0 service user. The cookie is set `HttpOnly`,
-`SameSite=Lax`.
+`SameSite=Lax`, and `Secure` whenever the login arrived over TLS — directly,
+or through a reverse proxy that sets `X-Forwarded-Proto: https` — so a browser
+that reached hal0 over HTTPS never sends the session in cleartext. A plain-HTTP
+install (the bare `:8080` listener) gets a cookie without `Secure`, since the
+browser could not use one otherwise.
 
 A session lasts **8 hours** by default. Ticking **Remember me** on the login
 screen (`"remember": true` on `POST /api/auth/login`) makes it **30 days**.
