@@ -34,6 +34,8 @@ def stub_config(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr(cc, "save_capabilities_config", _save)
         monkeypatch.setattr(cc, "file_lock", lambda *_a, **_k: _NullLock())
+        # #1974: keep migrate hermetic; the real prime waits on a podman probe.
+        monkeypatch.setattr(cc, "prime_flm_image_probe", lambda *_a, **_k: None)
         return cfg
 
     _install.saved = saved  # type: ignore[attr-defined]
@@ -259,3 +261,25 @@ def test_capability_set_passes_the_lifecycle_timeout(
         f"timeout={kwargs['timeout']} is under the server's {floor}s worst case "
         f"(the orchestrator's swap branch)"
     )
+
+
+def test_migrate_settles_the_flm_probe_before_reading_the_catalog(
+    stub_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1974: the catalog's FLM-image probe never blocks, and a CLI process
+    starts with a cold cache. ``migrate`` must wait for it first, or NPU reads
+    as absent and ``--apply`` snaps every NPU selection to another backend."""
+    stub_config(_illegal_selection())
+    order: list[str] = []
+    monkeypatch.setattr(cc, "prime_flm_image_probe", lambda *_a, **_k: order.append("prime"))
+
+    def _rows(*_a: object, **_k: object) -> list[dict[str, Any]]:
+        order.append("catalog")
+        return []
+
+    monkeypatch.setattr(cc, "models_for_capability", _rows)
+
+    result = runner.invoke(cc.app, ["migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert order[:2] == ["prime", "catalog"]

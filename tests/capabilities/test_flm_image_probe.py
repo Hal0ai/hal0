@@ -13,6 +13,12 @@ The probe now goes through
 :meth:`hal0.providers.container.ContainerProvider.image_present` — the same
 root-store seam + dev-box rootless fallback slots use — and caches only
 definitive answers; an unanswerable probe is retried after a short window.
+
+The probe runs on a background thread and never blocks a caller (the
+non-blocking contract is pinned in ``test_flm_probe_off_loop.py``). These
+tests are about WHAT the probe asks and caches, so every read goes through
+:func:`_ids`, which first lets any due probe land via
+:func:`catalog.prime_flm_image_probe`.
 """
 
 from __future__ import annotations
@@ -32,6 +38,8 @@ def _npu_only_hw() -> Any:
 
 
 def _ids() -> list[str]:
+    """Backend ids once any due background probe has landed."""
+    catalog.prime_flm_image_probe(timeout=5)
     return [b["id"] for b in catalog.available_backends()]
 
 
@@ -39,8 +47,11 @@ def _ids() -> list[str]:
 def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
+    monkeypatch.setattr(catalog, "_flm_last_definitive", None)
     catalog.reset_flm_image_present_cache()
     yield
+    if catalog._flm_probe_thread is not None:
+        catalog._flm_probe_thread.join(timeout=5)
     catalog.reset_flm_image_present_cache()
 
 
