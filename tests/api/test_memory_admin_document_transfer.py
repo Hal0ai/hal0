@@ -27,24 +27,25 @@ from hal0.memory.hindsight_client import HindsightRestClient
 class _Recorder:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
-        self.next_response: httpx.Response | None = None
+        # FIFO: each queued response answers one upstream request, in order
+        # (the 0.9.2 async export is a multi-request exchange, #2155).
+        self.queue: list[httpx.Response] = []
 
     def respond_next(self, response: httpx.Response) -> None:
-        self.next_response = response
+        self.queue.append(response)
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(
             {
                 "method": request.method,
+                "host": request.url.host,
                 "path": request.url.path,
                 "params": dict(request.url.params),
                 "content_type": request.headers.get("content-type", ""),
                 "body": request.content,
             }
         )
-        resp = self.next_response or httpx.Response(200, json={})
-        self.next_response = None
-        return resp
+        return self.queue.pop(0) if self.queue else httpx.Response(200, json={})
 
 
 class _HindsightStubProvider:
@@ -92,6 +93,8 @@ def test_export_streams_zip_bytes(client: TestClient, recorder: _Recorder) -> No
     fwd = recorder.requests[-1]
     assert fwd["path"] == "/v1/default/banks/shared/document-transfer"
     assert fwd["params"] == {"include_observations": "true"}
+    # 0.8.4 engines answer the sync GET directly — no async export round-trip.
+    assert len(recorder.requests) == 1
 
 
 def test_export_forwards_include_observations_false(
@@ -120,6 +123,174 @@ def test_export_invalid_bank_id_400(client: TestClient) -> None:
     r = client.get("/api/memory/banks/bad..id/document-transfer")
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "memory.invalid_bank"
+
+
+# ── GET export on hindsight-api 0.9.2: sync GET is a 410 tombstone (#2155) ───
+
+_ZIP = b"PK\x03\x04async-export-zip"
+
+
+def _gone() -> httpx.Response:
+    return httpx.Response(
+        410,
+        json={
+            "detail": "Synchronous document export has been removed ... Submit an async "
+            "export via POST /v1/default/banks/shared/document-transfer/export"
+        },
+    )
+
+
+@pytest.fixture
+def fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(memory_admin, "_EXPORT_POLL_INTERVAL_S", 0.0, raising=False)
+
+
+def _queue_async_export(
+    recorder: _Recorder, *, download_url: str, extra_meta: dict[str, Any] | None = None
+) -> None:
+    recorder.respond_next(_gone())
+    recorder.respond_next(httpx.Response(202, json={"operation_id": "exp-1", "status": "pending"}))
+    recorder.respond_next(httpx.Response(200, json={"operation_id": "exp-1", "status": "pending"}))
+    recorder.respond_next(
+        httpx.Response(
+            200,
+            json={
+                "operation_id": "exp-1",
+                "status": "completed",
+                "result_metadata": {"download_url": download_url, **(extra_meta or {})},
+            },
+        )
+    )
+    recorder.respond_next(
+        httpx.Response(200, content=_ZIP, headers={"content-type": "application/zip"})
+    )
+
+
+def test_export_410_falls_back_to_async_export(
+    client: TestClient, recorder: _Recorder, fast_poll: None
+) -> None:
+    _queue_async_export(
+        recorder, download_url="/v1/default/files/download/banks/shared/exports/u1/transfer.zip"
+    )
+    r = client.get(
+        "/api/memory/banks/shared/document-transfer", params={"include_observations": "false"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.content == _ZIP
+    assert r.headers["content-type"].startswith("application/zip")
+    calls = [(q["method"], q["path"]) for q in recorder.requests]
+    assert calls == [
+        ("GET", "/v1/default/banks/shared/document-transfer"),
+        ("POST", "/v1/default/banks/shared/document-transfer/export"),
+        ("GET", "/v1/default/banks/shared/operations/exp-1"),
+        ("GET", "/v1/default/banks/shared/operations/exp-1"),
+        ("GET", "/v1/default/files/download/banks/shared/exports/u1/transfer.zip"),
+    ]
+    assert recorder.requests[1]["params"] == {"include_observations": "false"}
+    assert {q["host"] for q in recorder.requests} == {"127.0.0.1"}
+
+
+def test_export_async_accepts_absolute_same_origin_download_url(
+    client: TestClient, recorder: _Recorder, fast_poll: None
+) -> None:
+    _queue_async_export(
+        recorder, download_url="http://127.0.0.1:9177/v1/default/files/download/banks/shared/k.zip"
+    )
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 200, r.text
+    assert r.content == _ZIP
+    assert recorder.requests[-1]["path"] == "/v1/default/files/download/banks/shared/k.zip"
+
+
+def test_export_async_foreign_host_download_url_uses_engine_storage_key(
+    client: TestClient, recorder: _Recorder, fast_poll: None
+) -> None:
+    # An object-store backend hands out a pre-signed URL on another host;
+    # hal0-api must never follow it — it fetches the same archive from the
+    # engine's own files/download endpoint by storage_key instead.
+    _queue_async_export(
+        recorder,
+        download_url="https://bucket.example.invalid/banks/shared/k.zip?sig=x",
+        extra_meta={"storage_key": "banks/shared/exports/u2/transfer.zip"},
+    )
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 200, r.text
+    assert r.content == _ZIP
+    assert recorder.requests[-1]["path"] == (
+        "/v1/default/files/download/banks/shared/exports/u2/transfer.zip"
+    )
+    assert {q["host"] for q in recorder.requests} == {"127.0.0.1"}
+
+
+@pytest.mark.parametrize(
+    "download_url",
+    [
+        "http://169.254.169.254/latest/meta-data",
+        "http://127.0.0.1:9999/v1/default/files/download/banks/shared/k.zip",
+        "//evil.example.invalid/v1/default/files/download/banks/shared/k.zip",
+    ],
+)
+def test_export_async_foreign_origin_without_storage_key_is_refused(
+    client: TestClient, recorder: _Recorder, fast_poll: None, download_url: str
+) -> None:
+    _queue_async_export(recorder, download_url=download_url)
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "memory.engine_error"
+    # Nothing past the operation poll was fetched.
+    assert len(recorder.requests) == 4
+
+
+def test_export_async_operation_failed_surfaces_error(
+    client: TestClient, recorder: _Recorder, fast_poll: None
+) -> None:
+    recorder.respond_next(_gone())
+    recorder.respond_next(httpx.Response(202, json={"operation_id": "exp-1"}))
+    recorder.respond_next(
+        httpx.Response(
+            200, json={"operation_id": "exp-1", "status": "failed", "error_message": "disk full"}
+        )
+    )
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 502
+    body = r.json()["error"]
+    assert body["code"] == "memory.engine_error"
+    assert body["details"]["status"] == "failed"
+    assert body["details"]["error_message"] == "disk full"
+    assert len(recorder.requests) == 3
+
+
+def test_export_async_operation_poll_times_out(
+    client: TestClient, recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memory_admin, "_EXPORT_POLL_INTERVAL_S", 0.0, raising=False)
+    monkeypatch.setattr(memory_admin, "_EXPORT_POLL_TIMEOUT_S", 0.0, raising=False)
+    recorder.respond_next(_gone())
+    recorder.respond_next(httpx.Response(202, json={"operation_id": "exp-1"}))
+    recorder.respond_next(httpx.Response(200, json={"operation_id": "exp-1", "status": "pending"}))
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 504
+    body = r.json()["error"]
+    assert body["code"] == "memory.engine_error"
+    assert body["details"]["operation_id"] == "exp-1"
+    assert body["details"]["status"] == "timed_out"
+
+
+def test_export_async_submit_error_passes_through(
+    client: TestClient, recorder: _Recorder, fast_poll: None
+) -> None:
+    recorder.respond_next(_gone())
+    recorder.respond_next(httpx.Response(404, json={"detail": "Document export API is disabled."}))
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "memory.engine_error"
+
+
+def test_export_non_410_error_does_not_try_async(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond_next(httpx.Response(500, json={"detail": "boom"}))
+    r = client.get("/api/memory/banks/shared/document-transfer")
+    assert r.status_code == 502
+    assert len(recorder.requests) == 1
 
 
 # ── POST import ──────────────────────────────────────────────────────────────

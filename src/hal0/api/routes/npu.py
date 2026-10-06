@@ -29,6 +29,7 @@ from hal0.dispatcher.npu_swap_status import (
     NpuSwapStatus,
     fetch_npu_swap_status,
 )
+from hal0.slots.naming import slot_container_name, slot_token_for
 
 router = APIRouter()
 
@@ -237,7 +238,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         cols: list[int] = []
         is_loaded = raw_state in _LOADED_STATES
         if is_loaded:
-            probe = await cached_aie_columns(f"hal0-slot-{s.name}")
+            probe = await cached_aie_columns(slot_container_name(await slot_token_for(sm, s.name)))
             if probe and probe.get("partitions"):
                 columns_available = True
                 for part in probe["partitions"]:

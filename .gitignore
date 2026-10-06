@@ -96,6 +96,9 @@ docs/internal/
 # notes, not in a published repo. Source comments still cite the old
 # docs/superpowers/... paths — those citations predate the move.
 docs/superpowers/
+# Pre-mdx v1.0 quick start & migration guide, superseded by docs/getting-started/.
+# Kept local-only for operators who still have a copy; no longer published.
+docs/hal0-install-migration-guide.html
 
 # Internal test-harness ops log (lab-host run tables)
 tests/harness/FINDINGS.md
@@ -154,3 +157,4 @@ docs/.dev/
 # as a workflow artifact instead of committing it — see
 # scripts/docs_discourse_sync/README.md)
 /scripts/docs_discourse_sync/redirect-map.json
+tests/release-validation/boxes.toml

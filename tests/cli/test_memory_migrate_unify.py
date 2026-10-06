@@ -209,6 +209,28 @@ def test_unify_apply_success_exports_imports_polls_and_retags(stub_api) -> None:
     assert set(patch_body["tags"]) == {"existing", "agent:hermes", "visibility:private"}
 
 
+def test_unify_apply_export_read_timeout_covers_server_async_export(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2155: on hindsight-api 0.9.x hal0-api runs the engine's async export
+    # (submit + poll + download) inside the export GET, so the CLI's read
+    # budget must outlast the server-side poll, not api_get_bytes' 60s default.
+    from hal0.api.routes import memory_admin
+
+    stub_api["state"]["features"] = {"document_export_api": True, "document_import_api": True}
+    seen: list[Any] = []
+
+    def fake_get_bytes(path: str, **kw: Any) -> tuple[bytes, str]:
+        seen.append(kw.get("timeout"))
+        return b"PK\x03\x04fake-zip", "application/zip"
+
+    monkeypatch.setattr(mgc, "api_get_bytes", fake_get_bytes)
+    result = runner.invoke(mgc.app, ["unify", "--source", "private__hermes", "--apply", "--json"])
+    assert result.exit_code == 0, result.output
+    assert seen and seen[0] is not None
+    assert seen[0] > memory_admin._EXPORT_POLL_TIMEOUT_S
+
+
 def test_unify_apply_retag_ignores_concurrent_foreign_doc(stub_api) -> None:
     # A doc another writer lands in the target during the transfer window
     # (foreign id, not in the source bank) must NOT be retagged/mis-attributed.

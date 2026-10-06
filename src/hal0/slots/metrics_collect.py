@@ -41,6 +41,8 @@ import asyncio
 import logging
 from typing import Any
 
+from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
+
 log = logging.getLogger(__name__)
 
 # One-shot-per-port 501 notice (#1810): llama_metrics() is polled every few
@@ -384,7 +386,8 @@ async def collect_local(sm: Any) -> dict[str, dict[str, Any]]:
 
     async def _one(slot: Any) -> tuple[str, dict[str, Any]]:
         scrape_port = slot.port
-        unit = f"hal0-slot@{slot.name}.service"
+        token = await slot_token_for(sm, slot.name)
+        unit = slot_unit_name(token)
         # Fan systemd properties + docker cgroup + llama metrics out in
         # parallel — three independent IO waits, no point serialising.
         props_task = asyncio.create_task(
@@ -395,7 +398,7 @@ async def collect_local(sm: Any) -> dict[str, dict[str, Any]]:
                 "ActiveState",
             )
         )
-        mem_task = asyncio.create_task(container_mem_bytes(f"hal0-slot-{slot.name}"))
+        mem_task = asyncio.create_task(container_mem_bytes(slot_container_name(token)))
         metrics_task = asyncio.create_task(llama_metrics(scrape_port))
         props, mem_bytes, llm_metrics = await asyncio.gather(
             props_task, mem_task, metrics_task, return_exceptions=False
