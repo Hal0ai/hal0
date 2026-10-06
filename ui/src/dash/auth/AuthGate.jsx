@@ -91,6 +91,9 @@ export function AuthGate({ children }) {
   useEffect(() => {
     const onHash = () => setPage(currentPage())
     window.addEventListener('hashchange', onHash)
+    // The app may have rewritten a legacy hash while rendering, before this
+    // listener existed — read the hash it settled on.
+    onHash()
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
   const readOnly = readOnlyPage !== null && readOnlyPage === page

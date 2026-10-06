@@ -70,7 +70,15 @@ export function authGateView(q, opts) {
  */
 export function pageOfHash(hash) {
   const path = String(hash || '').replace(/^#/, '').split('?')[0]
-  return path.split('/')[0] || 'dashboard'
+  const [head, second] = path.split('/')
+  // Legacy hashes main.jsx's parseRoute() rewrites before rendering. Mapped
+  // here too, so a dismissal is recorded against the page that then shows —
+  // otherwise the rewrite would look like navigating away and prompt again.
+  if (head === 'connections') return 'slots'
+  if (head === 'profiles' || (head === 'slots' && second === 'profiles')) return 'models'
+  if (head === 'peers') return 'agent'
+  if (head === 'agents' && second === 'mcp') return 'mcp'
+  return head || 'dashboard'
 }
 
 /**

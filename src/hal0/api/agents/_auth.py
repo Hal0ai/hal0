@@ -189,13 +189,14 @@ def session_cookie_expiry(value: str, now: float | None = None) -> int | None:
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, ValueError):  # JSONDecodeError is a ValueError
         return None
     if not isinstance(payload, dict):
         return None
 
     expires_at = payload.get("expires_at")
-    if not isinstance(expires_at, int):
+    # bool is an int subclass; a signed payload never carries one, but be exact.
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
         return None
     ts = int(now if now is not None else time.time())
     return expires_at if ts < expires_at else None
