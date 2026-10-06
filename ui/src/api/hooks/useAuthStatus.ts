@@ -6,6 +6,7 @@
 //   { auth_required: bool,   // is the enforcement gate armed at all?
 //     has_admin_key: bool,   // is HAL0_ADMIN_KEY configured? (set/unset)
 //     lan_exposed: bool,     // is the bind reachable beyond loopback? (#1822)
+//     admin_sign_in_required: bool,  // would THIS caller's ADMIN requests be refused?
 //     tier: "open"|"client"|"admin" }  // THIS caller's resolved identity
 //
 // It NEVER returns a key value, and it does NOT report: the admin-key
@@ -17,10 +18,15 @@
 // it just isn't reflected back through this status probe.
 //
 // `lan_exposed` is independent of `auth_required` (#1822): a LAN-bound box
-// with enforcement OFF already gates ADMIN mutations for off-box callers
-// (hal0.api.auth's posture-coupled gate) — this field lets the Security page
-// and AuthChallengeDrawer explain why a 401 shows up even though "Require
+// with enforcement OFF already gates ADMIN-class routes — reads included —
+// for off-box callers (hal0.api.auth's posture-coupled gate). This field lets
+// the Security page explain why a sign-in is asked for even though "Require
 // authentication" reads as off.
+//
+// `admin_sign_in_required` is the per-caller verdict the three booleans above
+// cannot give (the gate depends on this request's own peer, which only the
+// server sees). AuthGate's login screen and the top-bar SessionChip key on
+// it; never re-derive the gate client-side.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
@@ -32,6 +38,7 @@ export interface AuthStatus {
   auth_required: boolean
   has_admin_key: boolean
   lan_exposed: boolean
+  admin_sign_in_required: boolean
   tier: AuthTier
 }
 

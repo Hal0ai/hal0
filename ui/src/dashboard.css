@@ -423,6 +423,45 @@ a { color: inherit; text-decoration: none; }
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .tb-docs:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+/* Session chip (dash/auth/SessionChip.jsx) — "Sign in" while this browser is
+   gated to read-only, "Admin · Log out" once signed in. Absent entirely on a
+   box that gates nothing. Kept visible on mobile: it is the only standing
+   sign-in affordance. */
+.tb-session {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg-2);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.tb-session.signin {
+  cursor: pointer;
+  color: var(--warn);
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.tb-session.signin:hover { color: var(--fg); border-color: var(--warn); }
+.tb-session.admin svg { color: var(--ok); }
+.tb-session-out {
+  margin-left: 2px;
+  padding: 0 0 0 8px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  font: inherit;
+  color: var(--fg-4);
+  cursor: pointer;
+}
+.tb-session-out:hover:not(:disabled) { color: var(--fg); }
+.tb-session-out:disabled { cursor: default; opacity: 0.6; }
 .notif-pop {
   position: absolute;
   top: calc(100% + 8px);

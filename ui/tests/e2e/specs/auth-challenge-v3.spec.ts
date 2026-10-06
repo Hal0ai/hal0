@@ -4,13 +4,15 @@
  * A LAN-bound box with `require_auth` OFF still requires an admin session
  * for ADMIN-class mutations from off-box callers (hal0.api.auth's
  * posture-coupled gate) — model pulls, slot deletes, config writes, and
- * approval execution alike. `auth_required` genuinely reads false in this
- * scenario, so the full-page login (AuthGate/LoginView) never fires; the
- * FIRST mutation that hits the 401 (`auth.required`) is what has to surface
- * the prompt. `lib/queryClient.ts`'s global `MutationCache.onError` catches
- * it and routes it to `AuthChallengeDrawer` via `useAuthChallengeStore` —
- * this spec drives that end-to-end through the approvals flow named in the
- * brief: mutation → 401 → sign-in → retried OK.
+ * approval execution alike. The shell now asks for the key at the front door
+ * in that posture (auth-gate-v3.spec.ts), so this drawer is what an operator
+ * who chose "View read-only" meets on their first refused mutation. (This
+ * spec leaves `/api/auth/status` unmocked, so the gate falls through to the
+ * app without the login view.)
+ * `lib/queryClient.ts`'s global `MutationCache.onError` catches the 401
+ * (`auth.required`) and routes it to `AuthChallengeDrawer` via
+ * `useAuthChallengeStore` — this spec drives that end-to-end through the
+ * approvals flow named in the brief: mutation → 401 → sign-in → retried OK.
  */
 import { test, expect } from '../fixtures/apiMock'
 

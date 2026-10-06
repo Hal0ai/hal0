@@ -19,7 +19,8 @@ enforcement off, so it is trusted-LAN-open — every route responds to any
 caller that can reach the port — until an operator configures an admin key
 or explicitly enables enforcement (see the Enabling auth section below).
 Since v1.3.0, configuring an admin key on a LAN-bound box is enough to gate
-the mutating (ADMIN-class) routes for off-box callers even with enforcement
+the ADMIN-class routes — every mutation, plus the reads that can expose
+configuration or box activity — for off-box callers even with enforcement
 off — see the ADMIN routes on a LAN-bound box section below. Leaving
 enforcement off by default is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
@@ -109,9 +110,23 @@ the keyless default stays open to the LAN. `hal0 doctor all` reports both
 LAN-reachable, auth-off postures as a warning on its `auth` row rather than a
 pass.
 
-In the dashboard, a mutation refused this way opens a sign-in drawer ("This
-box is reachable from your network") that takes the admin key and retries the
-action. From other clients, send the admin key on the request. To make the
+The rule is per route **class**, not per HTTP method. ADMIN covers every
+mutation, and also the reads that can expose configuration or box activity:
+settings, secrets, memory, logs, the activity and event streams, approvals,
+services and updates. So an off-box browser with no session can list slots,
+models and hardware, but most dashboard pages have nothing to show it.
+
+The dashboard therefore asks for the admin key at the front door in this
+posture: a browser whose ADMIN requests would be refused gets the login screen
+on load, worded for this case ("This hal0 is reachable from your network")
+rather than as if enforcement were on. **View read-only** skips it for the
+browser tab and shows the open pages; a **Sign in** chip in the top bar then
+opens the admin-key drawer at any time, and a change attempted while
+read-only opens the same drawer and retries once you sign in. Signed in, the
+chip reads **Admin** with a **Log out** button. When the 8-hour session
+lapses, the next refused request brings the login screen back. A browser on
+the box itself (loopback), or any browser on a box with no admin key, sees
+none of this. From other clients, send the admin key on the request. To make the
 posture explicit, run `hal0 auth require on`; to take the box off the LAN
 instead, set `HAL0_BIND_HOST=127.0.0.1` in `/etc/hal0/api.env` and restart
 `hal0-api` (the value sits in the installer-managed `hal0-network` block, which
@@ -166,11 +181,24 @@ caller on the old key stops working immediately.
 ### `GET /api/auth/status`
 
 ```json
-{ "auth_required": true, "has_admin_key": true, "lan_exposed": true, "tier": "client" }
+{
+  "auth_required": false,
+  "has_admin_key": true,
+  "lan_exposed": true,
+  "admin_sign_in_required": true,
+  "tier": "anon"
+}
 ```
 
 `lan_exposed` is true when the API is bound beyond loopback, independent of
 `auth_required`.
+
+`admin_sign_in_required` answers one question for the caller that asked: would
+an ADMIN-class request from you be refused right now? It is true when
+enforcement is on, or the LAN-bound rule above applies to this request's own
+peer, and the caller holds no admin session or key. The dashboard keys its
+login screen and session chip on this field alone; the example above is an
+off-box browser on a LAN-bound box with enforcement off.
 
 Never returns secrets — safe for the dashboard to poll unauthenticated.
 

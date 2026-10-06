@@ -39,8 +39,13 @@ ADMIN-classified request is treated exactly as if enforcement were on
 
 A loopback-bound box, or a loopback-originating request against a
 LAN-bound box (the operator at the console), stays fully frictionless —
-"auth off" still means "open on loopback". Reads (``OPEN``/``CLIENT``)
-are unaffected either way.
+"auth off" still means "open on loopback". ``OPEN``/``CLIENT`` routes
+are unaffected either way -- but note the gate is per *class*, not per
+method: an ADMIN-classified ``GET`` (settings, memory, approvals, the
+activity/log streams) is refused exactly like an ADMIN mutation.
+:func:`admin_sign_in_required` reports that per-caller outcome on
+``GET /api/auth/status`` so the dashboard can ask for the key at the
+front door instead of rendering pages whose reads all 401.
 
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (the existing
@@ -487,6 +492,27 @@ def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int,
     return False, status, code
 
 
+def admin_sign_in_required(scope: Any) -> bool:
+    """True iff an ADMIN-class request from this caller would be refused now.
+
+    The dashboard's single front-door signal (``GET /api/auth/status``).
+    ``auth_required`` alone cannot answer it: the posture-coupled gate
+    (:func:`_lan_admin_gate`) enforces ADMIN routes -- reads included --
+    while enforcement itself reads OFF, and whether it applies depends on
+    this request's own peer, which only the server can see. Built from the
+    same two predicates :class:`AuthEnforcementMiddleware` runs
+    (:func:`_lan_admin_gate` + :func:`_decide`) so the answer cannot drift
+    from what the middleware would actually do.
+
+    Accepts a raw ASGI scope or a Starlette ``Request``/``WebSocket``.
+    """
+    raw_scope = getattr(scope, "scope", scope)
+    if not require_auth_enabled() and not _lan_admin_gate(AuthClass.ADMIN, raw_scope):
+        return False
+    allowed, _status, _code = _decide(AuthClass.ADMIN, resolve_principal(raw_scope))
+    return not allowed
+
+
 # ---------------------------------------------------------------------------
 # Pure-ASGI enforcement middleware
 
@@ -601,6 +627,7 @@ __all__ = [
     "AuthEnforcementMiddleware",
     "AuthPrincipal",
     "Tier",
+    "admin_sign_in_required",
     "has_admin_key",
     "require_auth_enabled",
     "resolve_principal",

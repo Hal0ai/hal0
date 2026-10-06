@@ -8,6 +8,14 @@
 // IS enabled and the browser session is still anonymous, the shell renders
 // the login view instead of the app — never a flash of locked UI, never a
 // redirect loop.
+//
+// Posture-coupled gate (#1822): a LAN-bound box with an admin key refuses
+// ADMIN-class requests — reads included — from off-box callers while
+// `auth_required` still reads false. Whether that applies depends on this
+// caller's own peer, which only the server can see, so GET /api/auth/status
+// reports it as `admin_sign_in_required`. The shell treats it as a front-door
+// login too (most of the dashboard is ADMIN-class and would render empty),
+// with a read-only escape because OPEN/CLIENT reads genuinely still work.
 
 // Tiers the backend's GET /api/auth/status reports as "already authenticated
 // enough to use the app". The browser session cookie always resolves to
@@ -17,27 +25,67 @@ const AUTHED_TIERS = new Set(['admin', 'client'])
 /**
  * Decide what the app shell should render.
  *
- * @param {{ data?: {auth_required?: boolean, tier?: string, has_admin_key?: boolean}, isPending?: boolean, isError?: boolean }} q
+ * @param {{ data?: {auth_required?: boolean, admin_sign_in_required?: boolean, tier?: string, has_admin_key?: boolean}, isPending?: boolean, isError?: boolean }} q
  *   The useAuthStatus() query result (subset).
+ * @param {{ readOnly?: boolean }} [opts]
+ *   `readOnly` — the operator dismissed the login screen to look around
+ *   without signing in. Honoured only for the posture-coupled gate.
  * @returns {'loading'|'login'|'app'}
  *   - 'loading' — first probe in flight, nothing decided yet (render a neutral
  *     splash, NOT the app, to avoid flashing locked UI).
- *   - 'login'   — auth is required and this session is anonymous.
- *   - 'app'     — render the dashboard (auth off, already authed, or the probe
- *     failed → fail-open, since /api/auth/status is an OPEN route and a blip
- *     must not brick an open box).
+ *   - 'login'   — this session is anonymous and either enforcement is on, or
+ *     the posture-coupled gate refuses this caller's ADMIN requests.
+ *   - 'app'     — render the dashboard (nothing gated, already authed, viewing
+ *     read-only, or the probe failed → fail-open, since /api/auth/status is an
+ *     OPEN route and a blip must not brick an open box).
  */
-export function authGateView(q) {
+export function authGateView(q, opts) {
   const { data, isPending, isError } = q || {}
+  const { readOnly = false } = opts || {}
   // Fail-open the moment we can't determine posture: an errored probe (or a
   // box that simply doesn't answer) renders the app rather than trapping the
   // operator behind a login they may not even need.
   if (isError) return 'app'
   if (!data) return isPending ? 'loading' : 'app'
-  if (!data.auth_required) return 'app'
   const tier = data.tier || 'anon'
   if (AUTHED_TIERS.has(tier)) return 'app'
-  return 'login'
+  // Enforcement on: every data route is gated, so read-only has nothing to show.
+  if (data.auth_required) return 'login'
+  if (data.admin_sign_in_required) return readOnly ? 'app' : 'login'
+  return 'app'
+}
+
+/**
+ * Can this caller usefully skip the login screen? True only for the
+ * posture-coupled gate: enforcement is off, so the OPEN/CLIENT reads (slots,
+ * models, hardware, stats) still answer and a read-only dashboard has content.
+ *
+ * @param {{auth_required?: boolean, admin_sign_in_required?: boolean}} [status]
+ * @returns {boolean}
+ */
+export function canViewReadOnly(status) {
+  return !!status && !status.auth_required && !!status.admin_sign_in_required
+}
+
+/**
+ * What the top-bar session chip shows.
+ *
+ * @param {{auth_required?: boolean, admin_sign_in_required?: boolean, has_admin_key?: boolean, lan_exposed?: boolean, tier?: string}} [status]
+ * @returns {'hidden'|'signin'|'admin'}
+ *   - 'signin' — this caller's ADMIN requests are refused; offer the login.
+ *   - 'admin'  — signed in on a box where the session is what grants access
+ *     (so "log out" means something).
+ *   - 'hidden' — nothing is gated for this caller. That includes a keyless
+ *     box whose browser happens to hold an agent-chat session cookie (the
+ *     same cookie resolves to the admin tier): nothing to sign in to or out of.
+ */
+export function sessionChipState(status) {
+  if (!status) return 'hidden'
+  if (status.tier === 'admin') {
+    const sessionMatters = !!status.has_admin_key && (!!status.auth_required || !!status.lan_exposed)
+    return sessionMatters ? 'admin' : 'hidden'
+  }
+  return status.admin_sign_in_required ? 'signin' : 'hidden'
 }
 
 /**

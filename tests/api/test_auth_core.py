@@ -442,6 +442,7 @@ def test_status_route_reports_posture(auth_client) -> None:
         "auth_required": False,
         "has_admin_key": False,
         "lan_exposed": False,
+        "admin_sign_in_required": False,
         "tier": "anon",
     }
 
@@ -451,6 +452,130 @@ def test_status_route_reports_lan_exposed(auth_client, monkeypatch: pytest.Monke
     resp = auth_client.get("/api/auth/status")
     assert resp.status_code == 200
     assert resp.json()["lan_exposed"] is True
+
+
+# ``admin_sign_in_required`` is the dashboard's single front-door signal: would an
+# ADMIN-class request from THIS caller be refused right now? It must agree with
+# the enforcement middleware in every posture, so each case below pairs the
+# status read with a real ADMIN route hit from the same client.
+
+
+def _status_and_admin_read(client) -> tuple[bool, int]:
+    status = client.get("/api/auth/status").json()["admin_sign_in_required"]
+    return status, client.get("/api/settings").status_code
+
+
+def test_status_sign_in_required_for_lan_peer_on_keyed_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enforcement reads OFF, yet the posture gate refuses this caller's ADMIN
+    requests -- status must say so, or the dashboard renders a half-dead app."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        body = c.get("/api/auth/status").json()
+        required, admin_status = _status_and_admin_read(c)
+    assert body["auth_required"] is False
+    assert required is True
+    assert admin_status == 401
+
+
+def test_status_sign_in_not_required_after_login(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        assert c.post("/api/auth/login", json={"key": "the-real-key"}).status_code == 200
+        required, admin_status = _status_and_admin_read(c)
+    assert required is False
+    assert admin_status not in (401, 403)
+
+
+def test_status_sign_in_not_required_for_loopback_peer_on_keyed_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator at the console is never gated, so never asked to sign in."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        required, admin_status = _status_and_admin_read(c)
+    assert required is False
+    assert admin_status not in (401, 403)
+
+
+def test_status_sign_in_not_required_without_admin_key_on_lan_bind(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keyless box: nothing to sign in with, and nothing is gated."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        required, admin_status = _status_and_admin_read(c)
+    assert required is False
+    assert admin_status not in (401, 403)
+
+
+def test_status_sign_in_not_required_on_loopback_bind_with_key(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyed box that is not LAN-bound gates nothing while enforcement is off."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.delenv("HAL0_BIND_HOST", raising=False)  # defaults to 127.0.0.1
+    app = auth_app_factory()
+    with TestClient(app, client=("203.0.113.5", 51000)) as c:
+        required, admin_status = _status_and_admin_read(c)
+    assert required is False
+    assert admin_status not in (401, 403)
+
+
+def test_status_sign_in_required_for_client_key_on_gated_box(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client key is a credential, but not one that opens ADMIN routes: the
+    caller is still told an admin sign-in is needed (the route itself 403s)."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "the-client-key")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    app = auth_app_factory()
+    headers = {"Authorization": "Bearer the-client-key"}
+    with TestClient(app, client=("203.0.113.5", 51000), headers=headers) as c:
+        body = c.get("/api/auth/status").json()
+        admin_status = c.get("/api/settings").status_code
+    assert body["tier"] == "client"
+    assert body["admin_sign_in_required"] is True
+    assert admin_status == 403
+
+
+def test_status_sign_in_required_when_enforcement_on_and_anonymous(
+    auth_app_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit enforcement: required for every anonymous caller, loopback too."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "the-real-key")
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    app = auth_app_factory()
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        required, admin_status = _status_and_admin_read(c)
+    assert required is True
+    assert admin_status == 401
 
 
 def test_status_route_never_leaks_the_key(auth_client, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -152,6 +152,29 @@ applying. Add those subsections to a version's section to surface them; see
   that cite these files describe history and are left as written. No
   behavior change.
 
+### Fixed
+
+- **A LAN-bound box with an admin key no longer leaves the dashboard half
+  signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
+  off-box callers even with "Require authentication" off — and that rule is
+  per route class, so it covers ADMIN reads (settings, memory, logs, the
+  activity stream, approvals, services), not only changes. The dashboard only
+  handled a refused *change*: pages rendered empty while their reads 401'd
+  every poll, the top bar gave no hint of a session, and the admin-key drawer
+  appeared only if you happened to try a mutation. Now `GET /api/auth/status`
+  reports `admin_sign_in_required` — whether this caller's ADMIN requests
+  would be refused, computed by the same predicates the enforcement
+  middleware runs — and the dashboard keys on it: the login screen appears at
+  load (worded for this posture, with a **View read-only** way past it), a
+  top-bar chip shows **Sign in** or **Admin · Log out**, a session that
+  lapses mid-use brings the login screen back instead of silent 401s, and
+  signing in refetches every panel rather than only the retried action.
+  Logging out now also discards everything the dashboard fetched under the
+  session, so the next person at that browser cannot read the previous
+  admin's cached pages through **View read-only**. The Security page no
+  longer claims that reads stay open in this posture. Boxes with no admin
+  key, and browsers on the box itself, see no change.
+
 ## [1.3.0] — 2026-09-16
 
 ### Highlights

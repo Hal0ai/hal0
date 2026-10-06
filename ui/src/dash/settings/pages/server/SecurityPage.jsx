@@ -152,7 +152,7 @@ export function SecurityPage() {
               {authArmed
                 ? 'Every route requires the admin key (or a logged-in session). Applies live — no restart.'
                 : s?.lan_exposed
-                  ? 'Auth is off, but this box is reachable from your network — changes (model pulls, slot edits, config writes) already ask for the admin key automatically from other devices; reads and inference stay open. Enable to require a login for everything, including reads.'
+                  ? 'Auth is off, but this box is reachable from your network and has an admin key — so other devices are already asked to sign in for settings, memory, logs, approvals and every change (model pulls, slot edits, config writes). Inference and the basic status reads (slots, models, hardware) stay open. Enable to require a login for those too.'
                   : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.'}
             </div>
           </div>
