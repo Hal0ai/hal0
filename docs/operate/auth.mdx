@@ -19,9 +19,9 @@ enforcement off, so it is trusted-LAN-open — every route responds to any
 caller that can reach the port — until an operator configures an admin key
 or explicitly enables enforcement (see the Enabling auth section below).
 Since v1.3.0, configuring an admin key on a LAN-bound box is enough to gate
-the ADMIN-class routes — every mutation, plus the reads that can expose
-configuration or box activity — for off-box callers even with enforcement
-off — see the ADMIN routes on a LAN-bound box section below. Leaving
+the ADMIN-class routes — the control plane: changes to the box, plus the
+reads that can expose configuration or box activity — for off-box callers
+even with enforcement off — see the ADMIN routes on a LAN-bound box section below. Leaving
 enforcement off by default is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
@@ -110,11 +110,16 @@ the keyless default stays open to the LAN. `hal0 doctor all` reports both
 LAN-reachable, auth-off postures as a warning on its `auth` row rather than a
 pass.
 
-The rule is per route **class**, not per HTTP method. ADMIN covers every
-mutation, and also the reads that can expose configuration or box activity:
-settings, secrets, memory, logs, the activity and event streams, approvals,
-services and updates. So an off-box browser with no session can list slots,
-models and hardware, but most dashboard pages have nothing to show it.
+The rule is per route **class**, not per HTTP method. ADMIN is the control
+plane: changes to the box (model pulls, slot and profile edits, settings and
+secrets writes, approvals, updates), and also the reads that can expose
+configuration or box activity — settings, secrets, memory, logs, the activity
+and event streams, approvals, services and updates. It is **not** every
+state-changing request: the `/v1` inference surface and the `/mcp/memory`
+tool mount are CLIENT for all methods, so with enforcement off they stay open
+to the LAN in this posture. An off-box browser with no session can therefore
+list slots, models and hardware, but most dashboard pages have nothing to
+show it.
 
 The dashboard therefore asks for the admin key at the front door in this
 posture: a browser whose ADMIN requests would be refused gets the login screen

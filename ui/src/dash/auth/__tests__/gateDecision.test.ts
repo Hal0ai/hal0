@@ -8,7 +8,7 @@
 // error copy — stay in gateDecision.test.mjs.)
 
 import { describe, expect, it } from 'vitest'
-import { authGateView, canViewReadOnly, sessionChipState } from '../gateDecision.js'
+import { authGateView, canViewReadOnly, enforcementPosture, sessionChipState } from '../gateDecision.js'
 
 const POSTURE_GATED = {
   auth_required: false,
@@ -95,5 +95,25 @@ describe('sessionChipState', () => {
       tier: 'admin',
     }
     expect(sessionChipState(loopbackWithCookie)).toBe('hidden')
+  })
+})
+
+describe('enforcementPosture — what the Security page says "off" means', () => {
+  it('is "armed" when enforcement is on', () => {
+    expect(enforcementPosture(ENFORCED_ANON)).toBe('armed')
+  })
+
+  it('is "lan_gated" only when the LAN gate can actually apply: exposed AND keyed', () => {
+    expect(enforcementPosture(POSTURE_GATED)).toBe('lan_gated')
+    expect(enforcementPosture(SIGNED_IN)).toBe('lan_gated')
+  })
+
+  it('is "open" on a keyless LAN-bound box — nothing asks anyone to sign in there', () => {
+    expect(enforcementPosture(OPEN_BOX)).toBe('open')
+  })
+
+  it('is "open" on a loopback-bound box and before status loads', () => {
+    expect(enforcementPosture({ auth_required: false, has_admin_key: true, lan_exposed: false })).toBe('open')
+    expect(enforcementPosture(undefined)).toBe('open')
   })
 })

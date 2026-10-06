@@ -90,6 +90,26 @@ export function sessionChipState(status) {
 }
 
 /**
+ * Which explanation the Security page gives for the enforcement toggle.
+ *
+ * Box-wide on purpose (unlike the per-caller verdicts above): the page
+ * describes how the box treats OTHER devices, whoever is reading it.
+ *
+ * @param {{auth_required?: boolean, has_admin_key?: boolean, lan_exposed?: boolean}} [status]
+ * @returns {'armed'|'lan_gated'|'open'}
+ *   - 'armed'     — enforcement is on.
+ *   - 'lan_gated' — enforcement is off, but the box is LAN-bound AND has an
+ *     admin key, so the posture-coupled gate applies to off-box callers.
+ *   - 'open'      — nothing is enforced. A LAN-bound box with NO admin key is
+ *     here too: the gate cannot apply without a key to sign in with.
+ */
+export function enforcementPosture(status) {
+  if (status?.auth_required) return 'armed'
+  if (status?.lan_exposed && status?.has_admin_key) return 'lan_gated'
+  return 'open'
+}
+
+/**
  * Turn a login POST failure into operator-facing copy. NEVER echoes the key.
  *
  * @param {{ code?: string, status?: number, details?: Record<string, unknown> }} err
