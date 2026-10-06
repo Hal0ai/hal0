@@ -68,7 +68,7 @@ instead of returned.
 from __future__ import annotations
 
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -172,7 +172,11 @@ class FoldPlan:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     #: Bound models with no registry row — classified BEFORE the no-op and
     #: divergence checks, so they never block or hide behind them (#2180).
+    #: Outstanding work: the operator registers the model or rebinds the slot.
     missing: list[SkippedFold] = field(default_factory=list)
+    #: The same miss on slots that do not launch through llama-server: those
+    #: never read the folded tune, so this is informational, not work (#2324).
+    lane_skips: list[SkippedFold] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -354,6 +358,8 @@ def plan_slot_flags_fold(
     slots: Sequence[Mapping[str, Any]],
     profile_flags: Mapping[str, str],
     model_defaults: Mapping[str, Mapping[str, Any] | None],
+    *,
+    is_provider_lane: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> FoldPlan:
     """Compute the fold plan without touching disk or the registry.
 
@@ -366,6 +372,10 @@ def plan_slot_flags_fold(
         model_defaults: model-id -> the model's current ``defaults`` dict (or
             ``None``), one key per registered model. A slot bound to an id
             with no key is reported in :attr:`FoldPlan.missing`, not folded.
+        is_provider_lane: slot cfg -> True when the slot launches through a
+            non-llama-server provider. A registry miss on which every bound
+            slot is such a lane goes to :attr:`FoldPlan.lane_skips` instead.
+            ``None`` treats every slot as llama-server (every miss is work).
 
     Returns:
         A :class:`FoldPlan`. When two+ slots fold DIVERGENT tunes onto one
@@ -373,6 +383,7 @@ def plan_slot_flags_fold(
     """
     # 1. Compute every slot's fold, grouped by target model.
     by_model: dict[str, list[SlotRef]] = {}
+    lane_slots: set[str] = set()
     for slot_cfg in slots:
         model_tbl = slot_cfg.get("model")
         model_tbl = model_tbl if isinstance(model_tbl, Mapping) else {}
@@ -385,6 +396,8 @@ def plan_slot_flags_fold(
         profile = str(profile) if profile else None
         pflags = profile_flags.get(profile, "") if profile else ""
         folded = compute_folded_tune(slot_cfg, pflags, model_defaults.get(model_id))
+        if is_provider_lane is not None and is_provider_lane(slot_cfg):
+            lane_slots.add(slot_name)
         by_model.setdefault(model_id, []).append(
             SlotRef(slot_name=slot_name, model_id=model_id, profile=profile, folded=folded)
         )
@@ -395,7 +408,12 @@ def plan_slot_flags_fold(
     for model_id, refs in sorted(by_model.items()):
         if model_id not in model_defaults:
             names = tuple(r.slot_name for r in refs)
-            plan.missing.append(SkippedFold(model_id, names, "not in registry"))
+            if lane_slots.issuperset(names):
+                plan.lane_skips.append(
+                    SkippedFold(model_id, names, "provider-lane, no registry row")
+                )
+            else:
+                plan.missing.append(SkippedFold(model_id, names, "not in registry"))
             continue
         distinct = {r.folded for r in refs}
         existing = model_defaults.get(model_id)
@@ -429,11 +447,31 @@ def plan_slot_flags_fold(
 # ── applier (deploy-window gated, dry-run by default) ─────────────────────────
 
 
-def _skip_line(skip: SkippedFold) -> str:
-    # Lower-case "skip " on purpose: the updater's convergence probe treats
-    # those lines as nothing-to-do (updater.detect_pending_ownership_migrations),
-    # and an unregistered binding is not work this fold can ever finish.
-    return f"skip model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
+def _skip_line(skip: SkippedFold, *, pending: bool) -> str:
+    # The prefix is load-bearing: the updater's convergence probe drops lines
+    # starting "skip " as nothing-to-do (updater.detect_pending_ownership_
+    # migrations) and counts every other line as pending. An ordinary registry
+    # miss is still work (register or rebind, then re-run) → "SKIP"; a
+    # provider-lane miss can never be folded and needs none → "skip".
+    prefix = "SKIP" if pending else "skip"
+    return f"{prefix} model {skip.model_id!r} <- slots={list(skip.slot_names)}: {skip.reason}"
+
+
+def _is_provider_lane(slot_cfg: Mapping[str, Any]) -> bool:
+    """True when the slot launches through a non-llama-server provider.
+
+    Private import, deliberate (same precedent as the updater's vulkan
+    migration): this must be the exact discriminator the launch path uses,
+    which returns ``None`` only for the llama-server default — the one lane
+    that reads the folded ``model.defaults`` tune. An unresolvable runtime
+    counts as llama-server, so its miss stays visible as pending work.
+    """
+    from hal0.providers.container import _spec_provider_for
+
+    try:
+        return _spec_provider_for(dict(slot_cfg)) is not None
+    except Exception:
+        return False
 
 
 class DeployWindowRequired(RuntimeError):
@@ -505,8 +543,11 @@ def apply_fold_plan(
             + " | ".join(lines)
         )
 
+    for lane in plan.lane_skips:
+        lines.append(_skip_line(lane, pending=False))
+
     for miss in plan.missing:
-        lines.append(_skip_line(miss))
+        lines.append(_skip_line(miss, pending=True))
         if not dry_run:
             skipped.append(miss)
 
@@ -534,7 +575,7 @@ def apply_fold_plan(
             # The update raised before writing, so nothing of this fold landed.
             skip = SkippedFold(fold.model_id, fold.slot_names, "not in registry")
             skipped.append(skip)
-            lines[-1] = _skip_line(skip)
+            lines[-1] = _skip_line(skip, pending=True)
 
     if skipped:
         raise FoldPartiallyApplied(lines, skipped)
@@ -586,7 +627,9 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
     with no registry row (see :func:`apply_fold_plan`).
     """
     slots, profile_flags, model_defaults, registry = collect_inputs()
-    plan = plan_slot_flags_fold(slots, profile_flags, model_defaults)
+    plan = plan_slot_flags_fold(
+        slots, profile_flags, model_defaults, is_provider_lane=_is_provider_lane
+    )
     return apply_fold_plan(plan, registry, deploy_window=deploy_window, dry_run=dry_run)
 
 

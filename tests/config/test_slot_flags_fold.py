@@ -428,7 +428,7 @@ def test_skip_on_the_last_fold_still_signals_partial():
 
     assert [m for m, _u in reg.updates] == ["a-model", "b-ghost"]
     assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("c-model", ("three",))]
-    assert exc.value.lines[-1] == "skip model 'c-model' <- slots=['three']: not in registry"
+    assert exc.value.lines[-1] == "SKIP model 'c-model' <- slots=['three']: not in registry"
 
 
 def test_all_registered_models_fold_without_a_partial_signal():
@@ -464,7 +464,7 @@ def test_unregistered_model_with_an_empty_tune_is_named_not_noop():
     assert plan.skipped == []
 
     preview = apply_fold_plan(plan, _FakeRegistry(), dry_run=True)
-    assert "skip model 'b-ghost' <- slots=['two']: not in registry" in preview
+    assert "SKIP model 'b-ghost' <- slots=['two']: not in registry" in preview
 
     reg = _FakeRegistry()
     with pytest.raises(FoldPartiallyApplied) as exc:
@@ -492,3 +492,21 @@ def test_divergent_tunes_on_an_unregistered_model_skip_instead_of_refusing_the_r
         apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
     assert [m for m, _u in reg.updates] == ["m"]
     assert [(s.model_id, s.slot_names) for s in exc.value.skipped] == [("ghost", ("a", "b"))]
+
+
+def test_provider_lane_registry_miss_is_an_informational_skip_not_partial():
+    """A slot that does not launch through llama-server never reads the folded
+    tune, so a missing row there is not outstanding work (#2324)."""
+    tts = {**_slot("voice", "qwen3-tts", extra_args="--default_voice Ryan"), "type": "tts"}
+    plan = plan_slot_flags_fold(
+        [_slot("one", "a-model", extra_args="-fa on"), tts],
+        {"rocm": ""},
+        {"a-model": None},
+        is_provider_lane=lambda cfg: cfg.get("type") == "tts",
+    )
+    assert plan.missing == []
+
+    reg = _FakeRegistry()
+    lines = apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)  # no raise
+    assert [m for m, _u in reg.updates] == ["a-model"]
+    assert "skip model 'qwen3-tts' <- slots=['voice']: provider-lane, no registry row" in lines

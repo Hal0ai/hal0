@@ -278,7 +278,7 @@ def test_apply_skips_a_slot_whose_model_is_not_in_the_registry(
 
     out_lines = [ln.rstrip() for ln in capsys.readouterr().out.splitlines()]
     # The per-fold report line, then the summary block naming slot + model.
-    assert "  skip model 'b-ghost' <- slots=['two']: not in registry" in out_lines
+    assert "  SKIP model 'b-ghost' <- slots=['two']: not in registry" in out_lines
     assert "!  summary — 1 model(s) skipped, not in the registry:" in out_lines
     assert "  slots two → model 'b-ghost'" in out_lines
 
@@ -371,3 +371,32 @@ def test_apply_names_an_unregistered_slot_even_when_it_has_nothing_to_fold(
     assert "-fa on" in (registry.get("a-model").defaults.extra_args or "")
     out_lines = [ln.rstrip() for ln in capsys.readouterr().out.splitlines()]
     assert "  slots two → model 'b-ghost'" in out_lines
+
+
+def test_apply_does_not_report_partial_for_a_provider_lane_registry_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2324: a type=tts slot (Kokoro provider) bound outside the registry is
+    an informational skip — the run exits clean instead of 2 forever."""
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    from hal0.config import paths
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    cfg = paths.slots_config_dir()
+    _write_slot(cfg, "one", _slot_body(name="one", model="a-model", extra_args="-fa on"))
+    _write_slot(
+        cfg,
+        "tts",
+        'name = "tts"\ntype = "tts"\nport = 8095\n[model]\ndefault = "voice-x"\n'
+        '[server]\nextra_args = "--default_voice Ryan"\n',
+    )
+    registry = ModelRegistry()
+    registry.add(Model(id="a-model", path="/models/a.gguf"))
+    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
+
+    slot_migrate_flags(apply=True, yes=True, stop_services=False)  # no Exit raised
+
+    assert "-fa on" in (registry.get("a-model").defaults.extra_args or "")
+    out_lines = [ln.rstrip() for ln in capsys.readouterr().out.splitlines()]
+    assert "  skip model 'voice-x' <- slots=['tts']: provider-lane, no registry row" in out_lines

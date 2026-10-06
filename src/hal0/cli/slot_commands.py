@@ -1628,13 +1628,12 @@ def slot_migrate_flags(
         )
         for skip in partial.skipped:
             console.print(f"  slots {', '.join(skip.slot_names)} → model {skip.model_id!r}")
-        # A provider-lane model (e.g. qwen3-tts) launches from its profile
-        # flags with no registry row (slots/manager.py tolerates the miss), so
-        # "register it" is not always the remedy.
+        # Only llama-server slots land here: a provider-lane miss (e.g. the
+        # qwen3-tts slot) never reads the folded tune, so the fold reports it
+        # as an informational "skip" line and it does not make this partial.
         console.print(
-            "[dim]Register the model or rebind the slot, then re-run; models served "
-            "through a provider lane will keep reporting this skip. "
-            "(exit 2 = applied, some slots skipped)[/dim]"
+            "[dim]Register the model or rebind the slot, then re-run; already-folded "
+            "models are a no-op. (exit 2 = applied, some slots skipped)[/dim]"
         )
         raise typer.Exit(2)
 
