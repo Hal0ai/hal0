@@ -479,13 +479,23 @@ preflight_venv() {
     return 1
 }
 
+# Seams for preflight_writable, separate functions so tests can stub them
+# (EUID is read-only in bash, and [[ -w ]] is always true for root).
+_preflight_is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
+_preflight_path_writable() { [[ -w "$1" ]]; }
+
 # The install writes to several system trees; if any is read-only (overlay
 # LXC, SELinux-strict, /usr mounted ro) the install explodes halfway. Probe
 # writability of each parent up front. Pass dirs as args; defaults cover the
-# system-mode layout. Runs after the sudo re-exec, so we expect to be root.
+# system-mode layout. install.sh runs it after the sudo re-exec, as root.
+# `hal0 doctor` also reaches it (argless, via preflight_all), often from an
+# operator's own shell: there the trees are root's by design, so an
+# unwritable one is reported as INFO with the way to verify it, not a FAIL
+# (#2278). As root an unwritable tree is still a hard failure.
 # shellcheck disable=SC2120  # called with args from install.sh, argless (defaults) from preflight_all
 preflight_writable() {
     local rc=0 d parent
+    local unverified=()
     local dirs=("$@")
     if [[ ${#dirs[@]} -eq 0 ]]; then
         dirs=(/opt /usr/lib /etc/hal0 /etc/systemd/system /var/lib /usr/local/bin)
@@ -493,13 +503,21 @@ preflight_writable() {
     for d in "${dirs[@]}"; do
         parent="${d}"
         while [[ -n "${parent}" && ! -e "${parent}" ]]; do parent="$(dirname "${parent}")"; done
-        if [[ -w "${parent}" ]]; then
+        if _preflight_path_writable "${parent}"; then
+            continue
+        fi
+        if ! _preflight_is_root; then
+            unverified+=("${parent}")
             continue
         fi
         err "not writable: ${parent} (needed to create ${d})"
         rc=1
     done
-    [[ "${rc}" -eq 0 ]] && info "writable paths: ok"
+    if [[ ${#unverified[@]} -gt 0 ]]; then
+        info "writable paths: not root, cannot verify ${unverified[*]} (root-owned install trees; re-run 'sudo hal0 doctor' to check)"
+    elif [[ "${rc}" -eq 0 ]]; then
+        info "writable paths: ok"
+    fi
     return "${rc}"
 }
 
