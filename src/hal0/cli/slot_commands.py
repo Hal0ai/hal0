@@ -1534,7 +1534,7 @@ def slot_migrate_flags(
     it is never wired into any automatic boot/update path.
     """
     from hal0.config import paths
-    from hal0.config.migrations.slot_flags_fold import run_migration
+    from hal0.config.migrations.slot_flags_fold import FoldPartiallyApplied, run_migration
 
     def _report_refusal(exc: Exception) -> None:
         # apply_fold_plan raises on divergent shares for BOTH dry-run and
@@ -1607,13 +1607,35 @@ def slot_migrate_flags(
     )
     console.print(f"[green]✓[/green]  backup written to {backup_path}")
 
-    lines = run_migration(deploy_window=True, dry_run=False)
+    partial: FoldPartiallyApplied | None = None
+    try:
+        lines = run_migration(deploy_window=True, dry_run=False)
+    except FoldPartiallyApplied as exc:
+        partial, lines = exc, exc.lines
     console.print("\n[bold]Applied flags-ownership fold:[/bold]")
     if not lines:
         console.print("  [dim](nothing to fold)[/dim]")
     for line in lines:
         console.print(f"  {line}")
     console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
+    if partial is not None:
+        # #2180: the other folds landed; name what did not. Exit 2 = applied,
+        # work outstanding — the same split `hal0 update` draws against 1.
+        # The per-model "skip" lines above are the report; this is the summary.
+        console.print(
+            f"\n[yellow]![/yellow]  summary — {len(partial.skipped)} model(s) skipped, "
+            "not in the registry:"
+        )
+        for skip in partial.skipped:
+            console.print(f"  slots {', '.join(skip.slot_names)} → model {skip.model_id!r}")
+        # Only llama-server slots land here: a provider-lane miss (e.g. the
+        # qwen3-tts slot) never reads the folded tune, so the fold reports it
+        # as an informational "skip" line and it does not make this partial.
+        console.print(
+            "[dim]Register the model or rebind the slot, then re-run; already-folded "
+            "models are a no-op. (exit 2 = applied, some slots skipped)[/dim]"
+        )
+        raise typer.Exit(2)
 
 
 # ── migrate-enabled-removal (#1369 — model-presence is the activation signal) ──

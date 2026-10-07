@@ -1365,7 +1365,16 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
     here.  Device/type/provider remain as fallbacks for profile-less slots
     (e.g. a bare ``device=npu`` with no profile set yet).
     """
-    family = _profile_runtime_family(slot_cfg)
+    return _provider_for_family(slot_cfg, _profile_runtime_family(slot_cfg))
+
+
+def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | None:
+    """The dispatch half of :func:`_spec_provider_for`, given the runtime family.
+
+    Never resolves a profile itself, so a caller that must not write (the
+    flags-fold dry run — ``ProfileCatalog.resolve`` can persist a shipped seed
+    profile) supplies a family derived from already-loaded config.
+    """
     device = str(slot_cfg.get("device", ""))
     slot_type = str(slot_cfg.get("type", ""))
     provider = str(slot_cfg.get("provider", ""))
