@@ -21,6 +21,9 @@ cache the heavy work upstream.
 from __future__ import annotations
 
 import logging
+import math
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -178,12 +181,41 @@ _FLM_BROKEN_TAGS: dict[str, str] = {
 }
 
 
-# Cached result of the FLM-image-present probe (None = not yet probed).
-# The probe shells a container runtime, which the module contract
-# (``GET /api/capabilities`` must not spawn subprocesses on every load)
-# forbids doing per-GET — so we run it once and reuse it.
-# :func:`reset_flm_image_present_cache` drops it after an FLM pull.
+# FLM-image-present probe state (#1974). The probe asks the container image
+# store through a blocking seam call that can take up to its 10 s timeout when
+# podman is wedged, and ``available_backends()`` is reached from many request
+# paths, sync and async, directly and indirectly (``/api/capabilities``,
+# ``/api/backends``, ``/api/models`` via ``runs_on_for_model``, capability
+# POST validation via ``models_for_capability``). So no caller ever waits on
+# it: a cache miss starts ONE background probe thread and answers from what is
+# already known; the probe's result serves the next call.
+#
+# A definitive ``True``/``False`` is kept until
+# :func:`reset_flm_image_present_cache` (called after an FLM pull). An
+# unanswerable probe (seam denied, podman broken, no runtime) is NOT an answer:
+# it is held only for :data:`_FLM_PROBE_RETRY_S` and then re-asked — caching it
+# as ``False`` dropped NPU from the picker until restart. A definitive "absent"
+# still sticks until restart or an FLM pull through hal0: an image pulled by
+# hand outside hal0 does not surface NPU before then.
 _flm_image_present_cache: bool | None = None
+_flm_image_unknown_at: float | None = None
+#: Last definitive answer, kept across a reset so an FLM pull does not flicker
+#: NPU off while the re-probe runs. Answered while there is no current one.
+_flm_last_definitive: bool | None = None
+#: Guards every field above and below. Held only for bookkeeping, never across
+#: the probe, so no caller (and not the event loop, via the reset hook) blocks.
+_flm_probe_lock = threading.Lock()
+#: Bumped by every reset; a probe started under an older generation drops its
+#: answer instead of caching one that may predate the FLM pull.
+_flm_probe_generation = 0
+_flm_probe_thread: threading.Thread | None = None
+_flm_probe_thread_generation = -1
+
+#: How long an unanswerable FLM-image probe is held before the next call
+#: re-probes. Long enough that a broken seam doesn't cost a sudo round-trip
+#: per ``available_backends`` call, short enough that a recovered podman
+#: brings NPU back without a restart.
+_FLM_PROBE_RETRY_S = 30.0
 
 
 def reset_flm_image_present_cache() -> None:
@@ -192,14 +224,156 @@ def reset_flm_image_present_cache() -> None:
     Invalidated alongside the FLM catalog cache after a successful FLM
     pull (see :func:`hal0.registry.pull.run_flm_pull`) so a freshly-pulled
     toolbox image flips the NPU backend on without a process restart.
+    Never waits on an in-flight probe; that probe's answer is discarded.
     Also exposed for tests.
     """
-    global _flm_image_present_cache
-    _flm_image_present_cache = None
+    global _flm_image_present_cache, _flm_image_unknown_at, _flm_probe_generation
+    with _flm_probe_lock:
+        _flm_probe_generation += 1
+        _flm_image_present_cache = None
+        _flm_image_unknown_at = None
+
+
+def _flm_probe_due_locked() -> bool:
+    """No current answer and no unanswerable result inside its retry window."""
+    if _flm_image_present_cache is not None:
+        return False
+    return (
+        _flm_image_unknown_at is None
+        or time.monotonic() - _flm_image_unknown_at >= _FLM_PROBE_RETRY_S
+    )
+
+
+def _start_flm_probe_locked() -> threading.Thread:
+    """Start the background probe for this generation unless one is running."""
+    global _flm_probe_thread, _flm_probe_thread_generation
+    thread = _flm_probe_thread
+    if (
+        thread is not None
+        and thread.is_alive()
+        and _flm_probe_thread_generation == _flm_probe_generation
+    ):
+        return thread
+    thread = threading.Thread(
+        target=_run_flm_probe,
+        args=(_flm_probe_generation,),
+        name="hal0-flm-image-probe",
+        daemon=True,
+    )
+    _flm_probe_thread, _flm_probe_thread_generation = thread, _flm_probe_generation
+    thread.start()
+    return thread
+
+
+def _run_flm_probe(generation: int) -> None:
+    """Background body: ask the image store once and record the answer.
+
+    #1974: asked through
+    :meth:`hal0.providers.container.ContainerProvider.image_present` — the
+    same probe ``image_status`` uses — so it reads ROOT's store via the
+    ``hal0-podman-ro`` seam on a provisioned box (a bare ``podman image
+    inspect`` from hal0-api reads its own rootless store, #1889) and only
+    falls back to the local store on a dev box. Its tri-state answer is kept
+    apart: ``None`` ("nobody could look") is held for
+    :data:`_FLM_PROBE_RETRY_S`, never remembered as "absent".
+    """
+    global _flm_image_present_cache, _flm_image_unknown_at, _flm_last_definitive
+    answer: bool | None
+    try:
+        from hal0.providers.container import container_provider
+
+        answer = container_provider().image_present(_FLM_TOOLBOX_IMAGE)
+    except Exception:
+        log.warning("capabilities.flm_image_probe_failed", exc_info=True)
+        answer = None
+    with _flm_probe_lock:
+        if generation != _flm_probe_generation:
+            return
+        if answer is None:
+            _flm_image_unknown_at = time.monotonic()
+            return
+        _flm_image_unknown_at = None
+        _flm_image_present_cache = answer
+        _flm_last_definitive = answer
+
+
+def _host_has_npu() -> bool:
+    """Same NPU-presence test :func:`available_backends` gates the probe on."""
+    try:
+        hw = load_hardware_info()
+    except Exception:
+        return False
+    return bool(hw and hw.npu and hw.npu.present)
+
+
+def start_flm_image_probe() -> None:
+    """Start the FLM-image probe in the background if one is due. Never blocks.
+
+    Called once from hal0-api boot (``_boot_capabilities``) so the cold window,
+    during which NPU is not yet advertised, ends seconds after boot instead
+    of on the first dashboard request. No-op on a host without an NPU, where
+    :func:`available_backends` never consults the probe either.
+    """
+    if not _host_has_npu():
+        return
+    with _flm_probe_lock:
+        if _flm_probe_due_locked():
+            _start_flm_probe_locked()
+
+
+def flm_image_probe_settled() -> bool:
+    """Is the NPU entry of :func:`available_backends` final for now?
+
+    True when a definitive answer is cached for the current generation (a
+    reset clears it), or when the host has no NPU and the probe never applies.
+    False while the cache is cold, after a reset, or while only an
+    unanswerable result is held: the dashboard keeps polling until it flips
+    (``backends_settled`` in ``GET /api/capabilities``). Never blocks.
+    """
+    if not _host_has_npu():
+        return True
+    with _flm_probe_lock:
+        return _flm_image_present_cache is not None
+
+
+def flm_image_probe_retry_in_s() -> int:
+    """Whole seconds until the next FLM-image probe is due; 0 if due, running or moot.
+
+    Non-zero only while an unanswerable result is held: the rest of its
+    :data:`_FLM_PROBE_RETRY_S` window, rounded up. 0 when settled (see
+    :func:`flm_image_probe_settled`), when the cache is cold, or once the
+    window has passed and a probe is (about to be) in flight. The dashboard
+    polls at ``max(2 s, this)`` while unsettled (``backends_retry_in_s`` in
+    ``GET /api/capabilities``). Never blocks.
+    """
+    if not _host_has_npu():
+        return 0
+    with _flm_probe_lock:
+        if _flm_image_present_cache is not None or _flm_image_unknown_at is None:
+            return 0
+        remaining = _FLM_PROBE_RETRY_S - (time.monotonic() - _flm_image_unknown_at)
+    return max(0, math.ceil(remaining))
+
+
+def prime_flm_image_probe(timeout: float = 15.0) -> None:
+    """Start the FLM-image probe if one is due and wait up to ``timeout``.
+
+    For SYNC callers that need a settled answer, such as tests and one-shot
+    tools; no-op on a host without an NPU. Never call this from the event
+    loop or a request path: that is the stall #1974 removed.
+    """
+    if not _host_has_npu():
+        return
+    with _flm_probe_lock:
+        thread = _flm_probe_thread
+        if _flm_probe_due_locked():
+            thread = _start_flm_probe_locked()
+    if thread is not None:
+        thread.join(timeout)
 
 
 def _flm_image_present() -> bool:
-    """True iff the FLM toolbox image is already pulled locally.
+    """Is the FLM toolbox image known to be in the slot image store? Never blocks.
 
     Picking ``backend=npu`` rewrites the slot TOML and asks the container
     runtime to spawn the FLM container. The image is gated on ghcr.io
@@ -209,42 +383,19 @@ def _flm_image_present() -> bool:
     Advertising NPU as a backend only after we know the runtime can spawn
     the container avoids that whole class of failure.
 
-    Checked via ``<runtime> image inspect`` which returns 0 iff the image
-    id resolves locally. The runtime binary is resolved through the shared
-    :func:`hal0.providers.container._container_runtime` path (podman →
-    docker → RuntimeError) so a podman-only host probes podman rather than
-    a missing ``docker``. The result is cached at module scope (see
-    :data:`_flm_image_present_cache`) so the /api/capabilities GET doesn't
-    re-spawn the probe on every load.
+    Answers from the cache. On a miss (cold, after a reset, or an unanswerable
+    result past its retry window) it starts one background probe (see
+    :func:`_run_flm_probe`) and answers the last definitive value, or ``False``
+    if there has never been one. So the first call after boot or reset can
+    under-report NPU until the probe lands (at most the seam's 10 s timeout,
+    usually far less); the next call converges.
     """
-    global _flm_image_present_cache
-    if _flm_image_present_cache is not None:
-        return _flm_image_present_cache
-
-    import subprocess
-
-    from hal0.providers.container import _container_runtime
-
-    try:
-        runtime = _container_runtime()
-    except RuntimeError:
-        # No container runtime installed — the NPU backend can't spawn.
-        _flm_image_present_cache = False
-        return False
-
-    try:
-        proc = subprocess.run(
-            [runtime, "image", "inspect", _FLM_TOOLBOX_IMAGE],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2.0,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        # Transient probe failure — don't cache, so a later GET can retry.
-        return False
-    _flm_image_present_cache = proc.returncode == 0
-    return _flm_image_present_cache
+    with _flm_probe_lock:
+        if _flm_image_present_cache is not None:
+            return _flm_image_present_cache
+        if _flm_probe_due_locked():
+            _start_flm_probe_locked()
+        return bool(_flm_last_definitive)
 
 
 def available_backends() -> list[dict[str, Any]]:

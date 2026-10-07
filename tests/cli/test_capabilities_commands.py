@@ -259,3 +259,106 @@ def test_capability_set_passes_the_lifecycle_timeout(
         f"timeout={kwargs['timeout']} is under the server's {floor}s worst case "
         f"(the orchestrator's swap branch)"
     )
+
+
+# ── #1974: migrate and the FLM-image probe ──────────────────────────────────
+
+
+def _probe_recorder(
+    monkeypatch: pytest.MonkeyPatch, *, npu: bool, answer: bool | None
+) -> list[str]:
+    """Real catalog path; record every FLM-image probe instead of shelling podman."""
+    import types
+
+    import hal0.providers.container as container_mod
+    import hal0.providers.flm as flm_mod
+    from hal0.capabilities import catalog
+
+    calls: list[str] = []
+
+    class _Provider:
+        """Provider stand-in that records each image probe."""
+
+        def image_present(self, image: str) -> bool | None:
+            """Record the probe and return the configured answer."""
+            calls.append(image)
+            return answer
+
+    monkeypatch.setattr(container_mod, "container_provider", lambda: _Provider())
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=npu), gpus=[]),
+    )
+    monkeypatch.setattr(
+        flm_mod,
+        "flm_served_models",
+        lambda: [
+            {
+                "tag": "embed-gemma:300m",
+                "capabilities": ["embed"],
+                "installed": True,
+                "size_bytes": 300_000_000,
+                "footprint_gb": 0.6,
+                "family": "embed-gemma",
+            }
+        ],
+    )
+    monkeypatch.setattr(catalog, "_flm_last_definitive", None)
+    catalog.reset_flm_image_present_cache()
+    return calls
+
+
+def _settle_and_reset() -> None:
+    """Let any background probe finish, then clear the probe cache."""
+    from hal0.capabilities import catalog
+
+    if catalog._flm_probe_thread is not None:
+        catalog._flm_probe_thread.join(timeout=5)
+    catalog.reset_flm_image_present_cache()
+
+
+def test_migrate_on_a_non_npu_host_never_probes_the_flm_image(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """The catalog consults the FLM-image probe only behind NPU presence, and
+    ``migrate`` adds no probe of its own, so CPU/GPU-only hosts never probe."""
+    calls = _probe_recorder(monkeypatch, npu=False, answer=True)
+    stub_config(_illegal_selection())
+
+    result = runner.invoke(cc.app, ["migrate"])
+    _settle_and_reset()
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+
+
+@pytest.mark.parametrize("answer", [False, None, True])
+def test_migrate_verdict_does_not_depend_on_the_flm_image_probe(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, answer: bool | None
+) -> None:
+    """Why ``migrate`` needs no settled FLM-image answer: NPU catalog rows come
+    from ``flm list`` (``flm_served_models``), never from the image probe, so an
+    absent or unanswerable probe leaves an NPU selection legal."""
+    from hal0.capabilities import catalog
+
+    _probe_recorder(monkeypatch, npu=True, answer=answer)
+    catalog.prime_flm_image_probe(timeout=5)  # land this probe answer first
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+    verdict = cc._classify_pair("embed", "embed-gemma:300m", "npu", None)
+    _settle_and_reset()
+
+    assert result.exit_code == 0, result.output
+    assert stub_config.saved["cfg"] is None, "an NPU selection was rewritten"
+    assert verdict == ("ok", ["npu"])
+
+
+def _npu_selection() -> dict[str, dict[str, CapabilitySelection]]:
+    """One enabled NPU (FLM) embed selection."""
+    return {
+        "embed": {
+            "embed": CapabilitySelection(device="npu", provider="flm", model="embed-gemma:300m")
+        }
+    }
