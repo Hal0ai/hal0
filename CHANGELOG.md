@@ -206,7 +206,8 @@ applying. Add those subsections to a version's section to surface them; see
   then copied the install log tail verbatim, so any token the installer had
   echoed ended up in a file presented as safe to share. Now every value of a
   secret-named key (from the installer's variables, `api.env` and
-  `hal0.toml`) is masked wherever it appears in the report, along with
+  `hal0.toml`, including every line of a multi-line `"""` or `'''`
+  string) is masked wherever it appears in the report, along with
   Bearer tokens, credentials in URLs and `--token` flags. A number, short
   word or variable name logged as a value (`max_tokens=4096`,
   `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out

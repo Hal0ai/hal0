@@ -400,3 +400,103 @@ class TestHarvestOnlyPlausibleSecrets:
         assert "HF_TOKEN_FILE not readable" in body
         assert _REAL_TOKEN not in body
         assert "echo ***REDACTED***" in body
+
+
+# ── #2385: TOML multi-line strings under a sensitive key ────────────────────
+
+
+def _bash(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-c", f'set -euo pipefail\nsource "{FAILURE_REPORT}"\n{script}'],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(REPO),
+    )
+
+
+def _toml_redact_and_harvest(tmp_path: Path, toml: str) -> tuple[str, list[str]]:
+    path = tmp_path / "hal0.toml"
+    path.write_text(toml)
+    redacted = _bash(f'_hal0_report_redact_toml_stream <"{path}"')
+    harvested = _bash(f'_hal0_report_harvest_toml_file "{path}"')
+    assert redacted.returncode == 0, redacted.stderr
+    assert harvested.returncode == 0, harvested.stderr
+    return redacted.stdout, harvested.stdout.splitlines()
+
+
+_ML_A = "mlBodySecretAlpha7Kq2Wz9"
+_ML_B = "mlBodySecretBravo3Xc8Rv1"
+
+
+class TestTomlMultilineStrings:
+    @pytest.mark.parametrize("quote", ['"""', "'''"])
+    def test_a_sensitive_multiline_body_is_masked_and_harvested(
+        self, tmp_path: Path, quote: str
+    ) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path,
+            f'[upstream.x]\napi_key = {quote}\n{_ML_A}\n  {_ML_B}\n{quote}\nurl = "http://x"\n',
+        )
+        assert _ML_A not in out
+        assert _ML_B not in out
+        assert 'api_key = "***REDACTED***"' in out
+        # The string's end is found: the next key is read as a key again.
+        assert 'url = "http://x"' in out
+        assert _ML_A in harvested
+        assert _ML_B in harvested  # indentation stripped so it matches bare
+
+    @pytest.mark.parametrize("quote", ['"""', "'''"])
+    def test_a_closing_delimiter_on_a_content_line(self, tmp_path: Path, quote: str) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path,
+            f'client_secret = {quote}{_ML_A}\n{_ML_B}{quote}\npassword_hint = "x"\nport = 8080\n',
+        )
+        assert _ML_A not in out
+        assert _ML_B not in out
+        assert "port = 8080" in out
+        assert _ML_A in harvested
+        assert _ML_B in harvested
+
+    def test_a_one_line_triple_quoted_value_is_harvested(self, tmp_path: Path) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path, f'api_key = """{_ML_A}"""\nport = 8080\n'
+        )
+        assert _ML_A not in out
+        assert "port = 8080" in out
+        assert _ML_A in harvested
+
+    def test_an_escaped_quote_run_does_not_close_a_basic_string(self, tmp_path: Path) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path, f'api_key = """\nfirst \\""" still body\n{_ML_A}\n"""\nport = 8080\n'
+        )
+        assert _ML_A not in out
+        assert "still body" not in out
+        assert "port = 8080" in out
+        assert _ML_A in harvested
+
+    def test_a_non_sensitive_multiline_value_is_left_intact(self, tmp_path: Path) -> None:
+        toml = (
+            'system_prompt = """\nYou are a helpful assistant.\nAnswer briefly.\n"""\n'
+            f"notes = '''\nraw text\n'''\napi_key = \"{_ML_A}\"\n"
+        )
+        out, harvested = _toml_redact_and_harvest(tmp_path, toml)
+        assert 'system_prompt = """\nYou are a helpful assistant.\nAnswer briefly.\n"""\n' in out
+        assert "notes = '''\nraw text\n'''\n" in out
+        # The state closed again: the key after the strings is still masked.
+        assert _ML_A not in out
+        assert harvested == [_ML_A]
+
+    def test_the_report_masks_a_multiline_secret_everywhere(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        (box["etc"] / "hal0.toml").write_text(
+            f'[models]\nstore = "/srv"\n\n[upstream.openai]\napi_key = """\n{_ML_A}\n"""\n'
+        )
+        box["log"].write_text(f"upstream replied for {_ML_A}\nbenign line kept\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert _ML_A not in body
+        assert "benign line kept" in body
+        assert "upstream replied for ***REDACTED***" in body
+        assert 'store = "/srv"' in body

@@ -80,17 +80,83 @@ _hal0_report_redact_env_stream() {
     done
 }
 
+# TOML multi-line strings (#2385). A value that opens with `"""` (basic) or
+# `'''` (literal) and does not close on the same line runs over the
+# following lines, so the key-name pass and the harvest track that state:
+# under a sensitive key every body line is masked and harvested, and the
+# key after the closing delimiter is read as a key again.
+
+# _hal0_report_toml_ml_opener VALUE — print the delimiter VALUE opens with
+# (leading blanks ignored), or return 1 if it is not a multi-line string.
+_hal0_report_toml_ml_opener() {
+    local v="$1"
+    v="${v#"${v%%[![:space:]]*}"}"
+    case "$v" in
+        '"""'*) printf '%s' '"""' ;;
+        "'''"*) printf '%s' "'''" ;;
+        *) return 1 ;;
+    esac
+}
+
+# _hal0_report_toml_ml_close_at DELIM TEXT — print the offset of the first
+# delimiter in TEXT that closes the string, or return 1 if none does. In a
+# basic string a delimiter preceded by an odd run of backslashes is escaped
+# content; a literal string has no escapes.
+_hal0_report_toml_ml_close_at() {
+    local delim="$1" text="$2" i=0 j bs
+    [[ "$text" == *"$delim"* ]] || return 1
+    while ((i + 3 <= ${#text})); do
+        if [[ "${text:i:3}" == "$delim" ]]; then
+            bs=0
+            j=$((i - 1))
+            if [[ "$delim" == '"""' ]]; then
+                while ((j >= 0)) && [[ "${text:j:1}" == "\\" ]]; do
+                    bs=$((bs + 1))
+                    j=$((j - 1))
+                done
+            fi
+            if ((bs % 2 == 0)); then
+                printf '%s' "$i"
+                return 0
+            fi
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
 # Same key-name pass for TOML (`key = value`, dotted / quoted keys judged by
-# their last segment).
+# their last segment). A multi-line string under a sensitive key prints one
+# mask per body line, through the line holding the closing delimiter.
 _hal0_report_redact_toml_stream() {
-    local line key lead name sep
+    local line key lead name sep val delim="" mask_body=0
     while IFS= read -r line; do
-        if [[ "$line" =~ ^([[:space:]]*)([A-Za-z0-9_.\"\'-]+)([[:space:]]*=) ]]; then
+        if [[ -n "$delim" ]]; then
+            if ((mask_body)); then
+                printf '%s\n' "$_HAL0_REPORT_MASK"
+            else
+                printf '%s\n' "$line"
+            fi
+            if _hal0_report_toml_ml_close_at "$delim" "$line" >/dev/null; then
+                delim=""
+            fi
+            continue
+        fi
+        if [[ "$line" =~ ^([[:space:]]*)([A-Za-z0-9_.\"\'-]+)([[:space:]]*=)(.*)$ ]]; then
             lead="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" sep="${BASH_REMATCH[3]}"
+            val="${BASH_REMATCH[4]}"
             key="${name##*.}"
             key="${key//\"/}"
             key="${key//\'/}"
+            if delim="$(_hal0_report_toml_ml_opener "$val")"; then
+                val="${val#"${val%%[![:space:]]*}"}"
+                if _hal0_report_toml_ml_close_at "$delim" "${val:3}" >/dev/null; then
+                    delim=""
+                fi
+            fi
+            mask_body=0
             if _hal0_report_key_is_sensitive "$key"; then
+                mask_body=1
                 printf '%s%s%s "%s"\n' "$lead" "$name" "$sep" "$_HAL0_REPORT_MASK"
                 continue
             fi
@@ -150,17 +216,54 @@ _hal0_report_harvest_env_file() {
     done <"$file"
 }
 
-# Values of sensitive keys in a TOML file (`key = "value"` / bare value).
+# One body line of a sensitive TOML multi-line string: blanks and a
+# line-ending backslash are trimmed so the value also matches where it
+# appears bare elsewhere in the report.
+_hal0_report_emit_toml_body_line() {
+    local v="$1"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v%\\}"
+    _hal0_report_emit_secret "$v"
+}
+
+# Values of sensitive keys in a TOML file (`key = "value"` / bare value /
+# a `"""` or `'''` multi-line string, every body line harvested).
 _hal0_report_harvest_toml_file() {
-    local file="$1" line key raw
+    local file="$1" line key raw delim="" take=0 at
     [[ -r "$file" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$delim" ]]; then
+            if at="$(_hal0_report_toml_ml_close_at "$delim" "$line")"; then
+                line="${line:0:at}"
+                delim=""
+            fi
+            if ((take)); then
+                _hal0_report_emit_toml_body_line "$line"
+            fi
+            continue
+        fi
         if [[ "$line" =~ ^[[:space:]]*([A-Za-z0-9_.\"\'-]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
             key="${BASH_REMATCH[1]##*.}"
             raw="${BASH_REMATCH[2]}"
             key="${key//\"/}"
             key="${key//\'/}"
-            _hal0_report_key_is_sensitive "$key" || continue
+            take=0
+            if _hal0_report_key_is_sensitive "$key"; then
+                take=1
+            fi
+            if delim="$(_hal0_report_toml_ml_opener "$raw")"; then
+                raw="${raw:3}"
+                if at="$(_hal0_report_toml_ml_close_at "$delim" "$raw")"; then
+                    raw="${raw:0:at}"
+                    delim=""
+                fi
+                if ((take)); then
+                    _hal0_report_emit_toml_body_line "$raw"
+                fi
+                continue
+            fi
+            ((take)) || continue
             if [[ "$raw" =~ ^\"([^\"]*)\" || "$raw" =~ ^\'([^\']*)\' ]]; then
                 raw="${BASH_REMATCH[1]}"
             else
@@ -170,6 +273,7 @@ _hal0_report_harvest_toml_file() {
             _hal0_report_emit_secret "$raw"
         fi
     done <"$file"
+    return 0
 }
 
 # True if NAME=VALUE seen in free report text is worth harvesting as a
