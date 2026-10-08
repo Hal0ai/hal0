@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import tomllib
 
+import pytest
+
 from hal0.config.paths import slots_config_dir
 from hal0.updater.updater import relabel_stale_vulkan_slots
 
@@ -112,7 +114,7 @@ def test_non_amd_host_is_a_full_noop(tmp_hal0_home: str) -> None:
     (correctly) False on hardware that was never supposed to have kfd."""
     _write_slot("intel-tts", 'name = "intel-tts"\ndevice = "gpu-vulkan"\nport = 8090\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=False, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=False, rocm_lane=False) == 0
     assert _device_of("intel-tts") == "gpu-vulkan"
 
 
@@ -124,7 +126,7 @@ def test_non_amd_host_logs_nothing(tmp_hal0_home: str, monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
 
-    relabel_stale_vulkan_slots(amd_host=False, kfd_present=False)
+    relabel_stale_vulkan_slots(amd_host=False, rocm_lane=False)
     assert calls == []
 
 
@@ -134,7 +136,7 @@ def test_default_probes_real_amd_host(tmp_hal0_home: str, monkeypatch) -> None:
     _write_slot("agent", 'name = "agent"\ndevice = "gpu-vulkan"\n')
     monkeypatch.setattr("hal0.providers._gpu.host_is_amd_gpu", lambda: False)
 
-    assert relabel_stale_vulkan_slots(kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(rocm_lane=True) == 0
     assert _device_of("agent") == "gpu-vulkan"
 
 
@@ -165,7 +167,7 @@ def test_kokoro_slot_survives_untouched_kfd_present(tmp_hal0_home: str) -> None:
         'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("voice") == "gpu-vulkan"
 
 
@@ -175,7 +177,7 @@ def test_kokoro_slot_survives_untouched_kfd_absent(tmp_hal0_home: str) -> None:
         'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("voice") == "gpu-vulkan"
 
 
@@ -185,7 +187,7 @@ def test_comfyui_slot_survives_untouched_kfd_present(tmp_hal0_home: str) -> None
         'name = "imggen"\ntype = "image"\ndevice = "gpu-vulkan"\nport = 8188\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("imggen") == "gpu-vulkan"
 
 
@@ -195,7 +197,7 @@ def test_comfyui_slot_survives_untouched_kfd_absent(tmp_hal0_home: str) -> None:
         'name = "imggen"\ntype = "image"\ndevice = "gpu-vulkan"\nport = 8188\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("imggen") == "gpu-vulkan"
 
 
@@ -207,9 +209,9 @@ def test_transcription_slot_survives_untouched(tmp_hal0_home: str) -> None:
         'name = "stt"\ntype = "transcription"\ndevice = "gpu-vulkan"\nport = 8085\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("stt") == "gpu-vulkan"
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("stt") == "gpu-vulkan"
 
 
@@ -222,8 +224,8 @@ def test_non_llama_slots_log_nothing_on_either_kfd_axis(tmp_hal0_home: str, monk
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
 
-    relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
-    relabel_stale_vulkan_slots(amd_host=True, kfd_present=False)
+    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True)
+    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False)
 
     assert calls == []
 
@@ -237,7 +239,7 @@ def test_llama_slot_still_relabels_alongside_untouched_non_llama_slot(
     _write_slot("agent", 'name = "agent"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8081\n')
     _write_slot("voice", 'name = "voice"\ntype = "tts"\ndevice = "gpu-vulkan"\nport = 8087\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("agent") == "gpu-rocm"
     assert _device_of("voice") == "gpu-vulkan"
 
@@ -254,9 +256,9 @@ def test_qwen3tts_profile_slot_survives_untouched(tmp_hal0_home: str) -> None:
     )
     _write_slot("voice2", body)
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("voice2") == "gpu-vulkan"
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("voice2") == "gpu-vulkan"
 
 
@@ -286,7 +288,7 @@ def test_runtime_resolution_error_leaves_slot_untouched_and_logs(
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
 
-    result = relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
+    result = relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True)
 
     assert result == 0
     assert toml_path.read_bytes() == before  # byte-identical — no write happened
@@ -305,7 +307,7 @@ def test_runtime_resolution_error_leaves_slot_untouched_and_logs(
 def test_vulkan_slot_relabels_to_rocm_when_kfd_present(tmp_hal0_home: str) -> None:
     _write_slot("agent", 'name = "agent"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8081\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("agent") == "gpu-rocm"
 
 
@@ -315,7 +317,7 @@ def test_nested_slot_table_relabels_to_rocm_when_kfd_present(tmp_hal0_home: str)
         '[slot]\nname = "nested"\ndevice = "gpu-vulkan"\nport = 8082\n',
     )
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("nested") == "gpu-rocm"
     raw = _raw("nested")
     assert "slot" in raw and raw["slot"]["device"] == "gpu-rocm"
@@ -327,7 +329,7 @@ def test_nested_slot_table_relabels_to_rocm_when_kfd_present(tmp_hal0_home: str)
 def test_vulkan_slot_relabels_to_cpu_when_kfd_absent(tmp_hal0_home: str) -> None:
     _write_slot("brain", 'name = "brain"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8089\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 1
     assert _device_of("brain") == "cpu"
 
 
@@ -347,7 +349,7 @@ def test_cpu_fallback_logs_a_loud_warning(tmp_hal0_home: str, monkeypatch) -> No
 
     monkeypatch.setattr(updater_mod.log, "warning", _spy)
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False, job_id="job-cpu") == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False, job_id="job-cpu") == 1
 
     cpu_events = [c for c in calls if c[0] == "updater.slot_vulkan_relabeled_cpu_fallback"]
     assert len(cpu_events) == 1
@@ -369,7 +371,7 @@ def test_rocm_relabel_logs_a_distinct_breadcrumb(tmp_hal0_home: str, monkeypatch
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True, job_id="job-rocm") == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True, job_id="job-rocm") == 1
 
     rocm_events = [c for c in calls if c[0] == "updater.slot_vulkan_relabeled_rocm"]
     assert len(rocm_events) == 1
@@ -398,7 +400,7 @@ def test_other_slot_fields_are_untouched(tmp_hal0_home: str) -> None:
     )
     _write_slot("agent", body)
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
 
     raw = _raw("agent")
     assert raw["device"] == "gpu-rocm"
@@ -420,7 +422,7 @@ def test_non_vulkan_devices_are_left_alone(tmp_hal0_home: str) -> None:
     _write_slot("npu-slot", 'name = "npu-slot"\ndevice = "npu"\n')
     _write_slot("no-device-slot", 'name = "no-device-slot"\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("rocm-slot") == "gpu-rocm"
     assert _device_of("cpu-slot") == "cpu"
     assert _device_of("npu-slot") == "npu"
@@ -431,7 +433,7 @@ def test_unreadable_slot_is_skipped_not_fatal(tmp_hal0_home: str) -> None:
     _write_slot("broken", "not [ valid toml")
     _write_slot("agent", 'name = "agent"\ndevice = "gpu-vulkan"\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("agent") == "gpu-rocm"
 
 
@@ -441,19 +443,19 @@ def test_unreadable_slot_is_skipped_not_fatal(tmp_hal0_home: str) -> None:
 def test_relabel_is_idempotent(tmp_hal0_home: str) -> None:
     _write_slot("agent", 'name = "agent"\ndevice = "gpu-vulkan"\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("agent") == "gpu-rocm"
     # second run: device is now gpu-rocm, no longer matches the guard.
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("agent") == "gpu-rocm"
 
 
 def test_relabel_is_idempotent_on_cpu_fallback(tmp_hal0_home: str) -> None:
     _write_slot("brain", 'name = "brain"\ndevice = "gpu-vulkan"\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 1
     assert _device_of("brain") == "cpu"
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("brain") == "cpu"
 
 
@@ -465,26 +467,47 @@ def test_idempotent_second_run_logs_nothing_new(tmp_hal0_home: str, monkeypatch)
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: calls.append((event, kw)))
 
-    relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
+    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True)
     first_run_calls = len(calls)
     assert first_run_calls == 1
 
-    relabel_stale_vulkan_slots(amd_host=True, kfd_present=True)
+    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True)
     assert len(calls) == first_run_calls  # no new log entries on the no-op re-run
 
 
 # ── real host probes (no overrides) ──────────────────────────────────────── #
 
 
-def test_default_probes_real_kfd_present(tmp_hal0_home: str, monkeypatch) -> None:
-    """With no ``kfd_present`` override, the function calls the real
-    :func:`hal0.providers._gpu.kfd_present` probe."""
+def test_default_probes_real_rocm_lane_present(tmp_hal0_home: str, monkeypatch) -> None:
+    """With no ``rocm_lane`` override, the function calls the real
+    :func:`hal0.providers._gpu.rocm_lane_present` probe."""
     _write_slot("agent", 'name = "agent"\ndevice = "gpu-vulkan"\n')
     monkeypatch.setattr("hal0.providers._gpu.host_is_amd_gpu", lambda: True)
-    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda: True)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
 
     assert relabel_stale_vulkan_slots() == 1
     assert _device_of("agent") == "gpu-rocm"
+
+
+@pytest.mark.parametrize(
+    ("kfd", "render", "expected"),
+    [(True, False, "cpu"), (True, True, "gpu-rocm"), (False, False, "cpu")],
+)
+def test_default_probe_needs_kfd_and_a_render_node(
+    tmp_hal0_home: str, monkeypatch, kfd: bool, render: bool, expected: str
+) -> None:
+    """#2356: /dev/kfd without a ``/dev/dri/renderD*`` node is not a ROCm
+    lane. Relabelling a stale ``gpu-vulkan`` slot to ``gpu-rocm`` there would
+    move it, on upgrade, onto a device it cannot open; CPU is the fallback
+    that actually loads."""
+    _write_slot("agent", 'name = "agent"\ndevice = "gpu-vulkan"\n')
+    monkeypatch.setattr("hal0.providers._gpu.host_is_amd_gpu", lambda: True)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: kfd)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: render)
+
+    assert relabel_stale_vulkan_slots() == 1
+    assert _device_of("agent") == expected
 
 
 # ── #1948: a slot on a Vulkan-validated image is NOT migrated ───────────── #
@@ -504,7 +527,7 @@ def test_slot_pinned_to_a_vulkan_validated_image_is_left_alone(tmp_hal0_home: st
 
     _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("utility") == "gpu-vulkan"
 
 
@@ -515,7 +538,7 @@ def test_it_is_left_alone_on_a_kfd_less_box_too(tmp_hal0_home: str) -> None:
 
     _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("utility") == "gpu-vulkan"
 
 
@@ -528,7 +551,7 @@ def test_slot_pinned_to_an_unvalidated_image_is_still_rescued(tmp_hal0_home: str
     """
     _write_slot("utility", _vulkan_slot_on(UNVALIDATED_PIN))
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("utility") == "gpu-rocm"
 
 
@@ -543,7 +566,7 @@ def test_an_unresolvable_image_fails_closed_and_is_rescued(tmp_hal0_home: str, m
     monkeypatch.setattr("hal0.providers.container._resolve_image_ref", _boom)
     _write_slot("utility", 'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n')
 
-    assert updater_mod.relabel_stale_vulkan_slots(amd_host=True, kfd_present=True) == 1
+    assert updater_mod.relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
     assert _device_of("utility") == "gpu-rocm"
 
 
@@ -559,7 +582,7 @@ def test_it_never_relabels_gpu_rocm_back_to_vulkan(tmp_hal0_home: str) -> None:
     """
     _write_slot("utility", 'name = "utility"\ndevice = "gpu-rocm"\nport = 8082\n')
 
-    assert relabel_stale_vulkan_slots(amd_host=True, kfd_present=False) == 0
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("utility") == "gpu-rocm"
 
 
@@ -579,11 +602,11 @@ def test_it_never_relabels_gpu_rocm_back_to_vulkan(tmp_hal0_home: str) -> None:
 # itself before the relabel in its own docstring contract.
 
 
-def _run_both_passes(*, kfd_present: bool) -> None:
+def _run_both_passes(*, rocm_lane: bool) -> None:
     """The real post-activation sequence, in the real order."""
     from hal0.updater.updater import retag_stale_slot_images
 
-    relabel_stale_vulkan_slots(amd_host=True, kfd_present=kfd_present)
+    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=rocm_lane)
     retag_stale_slot_images()
 
 
@@ -636,7 +659,7 @@ class TestRelabelAndRetagCompose:
             'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
         )
 
-        _run_both_passes(kfd_present=False)
+        _run_both_passes(rocm_lane=False)
 
         assert _device_of("utility") == "gpu-vulkan"
 
@@ -655,7 +678,7 @@ class TestRelabelAndRetagCompose:
         _stale_set_includes_ade07ba(monkeypatch)
         _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
 
-        _run_both_passes(kfd_present=False)
+        _run_both_passes(rocm_lane=False)
 
         # The harm, precisely: the slot lost the GPU entirely, and the retag
         # then computed its replacement from the rewritten ``device = "cpu"``
@@ -686,12 +709,12 @@ class TestRelabelAndRetagCompose:
         _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
 
         retag_stale_slot_images()
-        relabel_stale_vulkan_slots(amd_host=True, kfd_present=False)
+        relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False)
         retag_first = (_device_of("utility"), _image_pin_of("utility"))
 
         # Same fixture again, real order.
         _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-        _run_both_passes(kfd_present=False)
+        _run_both_passes(rocm_lane=False)
         real_order = (_device_of("utility"), _image_pin_of("utility"))
 
         # Stated as an equivalence, with no version-specific literal: the
@@ -714,7 +737,7 @@ class TestRelabelAndRetagCompose:
         _repin_default(monkeypatch, STALE_LLAMA_IMAGE)
         _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
 
-        _run_both_passes(kfd_present=False)
+        _run_both_passes(rocm_lane=False)
 
         assert _device_of("utility") == "cpu"
 
@@ -724,6 +747,6 @@ class TestRelabelAndRetagCompose:
         _repin_default(monkeypatch, STALE_LLAMA_IMAGE)
         _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
 
-        _run_both_passes(kfd_present=True)
+        _run_both_passes(rocm_lane=True)
 
         assert _device_of("utility") == "gpu-rocm"

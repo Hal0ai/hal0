@@ -39,7 +39,7 @@ def test_stack_apply_default_device_is_host_resolved_never_vulkan(monkeypatch) -
     """
     from hal0.api.routes import stacks as stacks_mod
 
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
     assert stacks_mod._default_stack_slot_device() != "gpu-vulkan"
 
 

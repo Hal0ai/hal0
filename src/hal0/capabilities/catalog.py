@@ -31,7 +31,7 @@ from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
-from hal0.providers._gpu import host_is_amd_gpu, kfd_present
+from hal0.providers._gpu import host_is_amd_gpu, rocm_lane_present
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
 from hal0.runners import RUNNER_IMAGES
@@ -454,9 +454,11 @@ def available_backends() -> list[dict[str, Any]]:
         # probe that install.sh never installs, so a fresh container with a
         # perfectly usable /dev/kfd read False here and the badge (and every
         # ROCm-only runtime's picker row, e.g. Qwen3-TTS below) went missing.
-        # kfd_present() (device-node truth) is sufficient on its own — same
-        # ruling as hal0.install.profile_derive.derive_device's ROCm lane.
-        if primary_gpu.vendor == "amd" and (primary_gpu.compute_capable or kfd_present()):
+        # rocm_lane_present() (device-node truth: /dev/kfd AND a render node,
+        # #2313/#2354) is sufficient on its own — the same predicate as
+        # hal0.install.profile_derive.derive_device's ROCm lane, so the picker
+        # never offers a lane the seed declined.
+        if primary_gpu.vendor == "amd" and (primary_gpu.compute_capable or rocm_lane_present()):
             out.append(
                 {
                     "id": "gpu-rocm",
@@ -567,7 +569,7 @@ def _backend_variants(entry: Any) -> list[str]:
         # CPU-only ONNX wheel, ComfyUI's Vulkan-only image, …) — an
         # explicit provider still can't advertise a lane the host can't
         # actually serve.
-        if explicit in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not kfd_present():
+        if explicit in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
             # #1966 — see the identical guard on the tag-driven branch below.
             return []
         host_backends = {b["id"] for b in available_backends()}
@@ -687,7 +689,7 @@ def _backend_variants(entry: Any) -> list[str]:
             # the slot TOML would say backend=vulkan but the container
             # would still pin every op to CPU.
             host_backends = {b["id"] for b in available_backends()}
-            if low in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not kfd_present():
+            if low in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
                 # #1966: comfyui's HOST_BACKENDS entry is labelled
                 # "gpu-vulkan" — the picker's GENERIC GPU row (#1941) — but
                 # the image behind it is ROCm-only (ComfyUIProvider.
@@ -698,7 +700,11 @@ def _backend_variants(entry: Any) -> list[str]:
                 # guard (require_kfd_for_gpu_slot) refuses it by name. Drop
                 # the row rather than offer one guaranteed to fail — qwen3tts
                 # needs no separate check here, its HOST_BACKENDS entry is
-                # the correctly-gated "gpu-rocm" id itself.
+                # the correctly-gated "gpu-rocm" id itself. Gated on the
+                # whole ROCm lane, not /dev/kfd alone (#2313): the image also
+                # opens a render node, and qwen3tts's "gpu-rocm" row already
+                # asks rocm_lane_present(), so the two ROCm-only runtimes must
+                # agree about a kfd-only box.
                 continue
             for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
                 if candidate in host_backends and candidate not in out:

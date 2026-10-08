@@ -214,7 +214,7 @@ def test_amd_without_rocm_falls_back_by_whether_the_vulkan_lane_is_real(monkeypa
     be refused at load. So the ladder asks, and this test asserts both
     branches rather than a constant.
     """
-    monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: False)
 
     monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: True)
     assert recommend_primary_slot(_amd_uma_host(96, compute_capable=False))["device"] == (
@@ -225,11 +225,33 @@ def test_amd_without_rocm_falls_back_by_whether_the_vulkan_lane_is_real(monkeypa
     assert recommend_primary_slot(_amd_uma_host(96, compute_capable=False))["device"] == "cpu"
 
 
-def test_amd_without_rocm_smi_but_with_kfd_is_rocm(monkeypatch) -> None:
-    """/dev/kfd alone is enough to call the box ROCm-capable (#1888)."""
-    monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: True)
+def test_amd_without_rocm_smi_but_with_kfd_and_a_render_node_is_rocm(monkeypatch) -> None:
+    """The device nodes are enough to call the box ROCm-capable without
+    rocm-smi (#1888, #2216): /dev/kfd plus the render node every ROCm slot
+    also opens (#2355)."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
     assert rec["device"] == "gpu-rocm"
+
+
+def test_amd_with_kfd_but_no_render_node_is_not_rocm(monkeypatch) -> None:
+    """#2355: /dev/kfd alone is not a ROCm lane — the slot also opens a
+    ``/dev/dri/renderD*`` node, and an LXC that forwarded only kfd cannot run
+    one. The recommendation must not name a lane the box cannot open."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: False)
+    rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
+    assert rec["device"] == "cpu"
+
+
+def test_amd_with_neither_node_is_not_rocm(monkeypatch) -> None:
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: False)
+    rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
+    assert rec["device"] == "cpu"
 
 
 def test_seeded_slot_profile_is_a_known_seed_profile() -> None:

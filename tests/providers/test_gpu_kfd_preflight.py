@@ -30,6 +30,7 @@ from hal0.providers._gpu import (
     kfd_status,
     require_kfd_for_gpu_slot,
     resolve_kfd_target_gid,
+    rocm_lane_present,
     runtime_lane_for_provider,
 )
 
@@ -98,6 +99,41 @@ class TestKfdPresent:
             assert kfd_status(str(node), for_uid=None) == KFD_NOT_OPENABLE
         finally:
             node.chmod(0o600)
+
+
+class TestRocmLanePresent:
+    """#2313: a ROCm slot opens BOTH ``/dev/kfd`` and a ``/dev/dri/renderD*``
+    node, so the one predicate every ROCm-lane decision shares needs both.
+    The render node is a symlink to ``/dev/null`` because only a character
+    device counts as one (review N3)."""
+
+    @staticmethod
+    def _nodes(tmp_path, *, kfd: bool, render: bool) -> tuple[str, str]:
+        kfd_node = tmp_path / "kfd"
+        if kfd:
+            kfd_node.write_text("")
+        dri = tmp_path / "dri"
+        dri.mkdir()
+        if render:
+            (dri / "renderD128").symlink_to("/dev/null")
+        return str(kfd_node), str(dri)
+
+    def test_kfd_without_a_render_node_is_not_a_rocm_lane(self, tmp_path) -> None:
+        kfd_node, dri = self._nodes(tmp_path, kfd=True, render=False)
+        assert kfd_present(kfd_node) is True
+        assert rocm_lane_present(kfd_node, dri) is False
+
+    def test_kfd_and_a_render_node_together_are_a_rocm_lane(self, tmp_path) -> None:
+        kfd_node, dri = self._nodes(tmp_path, kfd=True, render=True)
+        assert rocm_lane_present(kfd_node, dri) is True
+
+    def test_neither_node_is_not_a_rocm_lane(self, tmp_path) -> None:
+        kfd_node, dri = self._nodes(tmp_path, kfd=False, render=False)
+        assert rocm_lane_present(kfd_node, dri) is False
+
+    def test_a_render_node_without_kfd_is_not_a_rocm_lane(self, tmp_path) -> None:
+        kfd_node, dri = self._nodes(tmp_path, kfd=False, render=True)
+        assert rocm_lane_present(kfd_node, dri) is False
 
 
 class TestKfdStatusIdentityRules:

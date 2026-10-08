@@ -161,6 +161,7 @@ def _catalog_with_runner(tmp_path, monkeypatch, runner="promptforge"):
 def test_profile_with_runner_sets_binary_and_device(tmp_path, monkeypatch):
     _catalog_with_runner(tmp_path, monkeypatch)
     monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
     _reconcile_device_profile(cfg, changed={"profile"})
     assert cfg["binary"] == "promptforge"
@@ -172,6 +173,24 @@ def test_profile_runner_infeasible_rocm_no_kfd_raises(tmp_path, monkeypatch):
     monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
     cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
     with pytest.raises(SlotConfigError):
+        _reconcile_device_profile(cfg, changed={"profile"})
+    assert cfg["binary"] == ""  # no partial write
+    assert cfg["device"] == "gpu-vulkan"
+
+
+@pytest.mark.parametrize(("kfd", "render"), [(True, False), (False, False)])
+def test_profile_runner_infeasible_rocm_without_both_nodes_raises(
+    tmp_path, monkeypatch, kfd, render
+):
+    """#2313: a ROCm-only runtime opens /dev/kfd AND a render node. On a box
+    with kfd forwarded but no ``/dev/dri/renderD*`` the apply must refuse
+    rather than write a ``gpu-rocm`` slot that cannot spawn — the picker
+    already hides that lane there (#2354)."""
+    _catalog_with_runner(tmp_path, monkeypatch)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: kfd)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: render)
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
+    with pytest.raises(SlotConfigError, match="render node"):
         _reconcile_device_profile(cfg, changed={"profile"})
     assert cfg["binary"] == ""  # no partial write
     assert cfg["device"] == "gpu-vulkan"

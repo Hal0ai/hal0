@@ -51,7 +51,7 @@ def test_chat_on_amd_box_without_rocm_picks_the_vulkan_lane(monkeypatch):
     only lane the box has. A box still carrying an unvalidated runner image
     gets a named refusal at slot load, not silent garbage.
     """
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
     )
@@ -65,7 +65,7 @@ def test_chat_on_amd_box_without_rocm_picks_cpu_when_the_image_cannot_serve_vulk
 ):
     """Review B2: deriving a lane the load-time gate then refuses is worse
     than deriving CPU — it turns "slow but working" into "no loadable slot"."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: False
     )
@@ -74,7 +74,7 @@ def test_chat_on_amd_box_without_rocm_picks_cpu_when_the_image_cannot_serve_vulk
 
 def test_chat_on_amd_box_with_neither_rocm_nor_vulkan_still_picks_cpu(monkeypatch):
     """The CPU fallback survives — it just needs a real reason now."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     hw = _hw(compute=False, vulkan=False)
     assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
@@ -176,8 +176,8 @@ def test_tts_is_cpu_kokoro():
 def test_strix_platform_forces_rocm_when_the_compute_node_is_there(monkeypatch):
     """platform=strix-halo is the canonical FP4 signal — but since #1888 it is
     necessary, not sufficient: /dev/kfd must actually be reachable."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
-    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
@@ -188,7 +188,7 @@ def test_strix_platform_without_kfd_derives_vulkan_not_rocm(monkeypatch):
     still hand every seeded slot a load-time refusal — the ROCm gate is
     untouched by #1948. What changed is the alternative: ``gpu-vulkan``
     rather than ``cpu``, because the box does have a usable GPU."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane", lambda: True
     )
@@ -270,15 +270,15 @@ def test_kfd_present_wins_rocm_on_a_container_lxc_platform(monkeypatch):
     ``kfd_present()`` (with the render node every ROCm slot also opens, #2313)
     must be sufficient without either.
     """
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
-    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
 
 def test_neither_kfd_nor_compute_capable_still_declines_rocm(monkeypatch):
     """The other half of #2216: no real signal must still decline ROCm."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
 
@@ -293,17 +293,24 @@ def test_kfd_without_a_render_node_does_not_derive_rocm(monkeypatch):
     CPU-only install, so seeding ``gpu-rocm`` slots would be wrong. With no
     render node the probe reads ``vulkan_capable`` False on AMD, so the
     derivation falls through to the CPU fallback."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
-    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
     hw = _hw(platform="lxc", compute=False, vulkan=False)
     assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 def test_kfd_and_a_render_node_together_derive_rocm(monkeypatch):
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
-    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
+
+
+def test_neither_kfd_nor_a_render_node_does_not_derive_rocm(monkeypatch):
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    hw = _hw(platform="lxc", compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 # ── apply_cpu_fallback (#1936, #1966) ───────────────────────────────────────────
@@ -322,7 +329,7 @@ def test_derive_device_cpu_fallback_names_a_reason(monkeypatch):
     plain 'cpu' (back-compat), routed through apply_cpu_fallback for the
     structured log — verified via the reason text a caller could recover by
     calling apply_cpu_fallback directly with the same capability."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     hw = _hw(compute=False, vulkan=False)
     assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 

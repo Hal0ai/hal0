@@ -133,18 +133,21 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
             lane = sups[0]
             if lane == "rocm":
                 # Physical feasibility gate (D4): a ROCm-only runtime on a
-                # kfd-less host can never spawn — fail the apply with a plain
-                # message instead of writing a doomed config. Vulkan-lane
-                # feasibility stays with the existing spawn-time
-                # VULKAN_CAPABLE_IMAGE_REFS gate. Checked BEFORE any mutation
-                # so an infeasible apply leaves ``scalars`` untouched (no
-                # partial write).
-                from hal0.providers._gpu import kfd_present
+                # host without the ROCm lane can never spawn — fail the apply
+                # with a plain message instead of writing a doomed config.
+                # The lane is /dev/kfd AND a render node (#2313): the picker
+                # hides ROCm-only rows on a kfd-only box (#2354), so the apply
+                # must not accept one there either. Vulkan-lane feasibility
+                # stays with the existing spawn-time VULKAN_CAPABLE_IMAGE_REFS
+                # gate. Checked BEFORE any mutation so an infeasible apply
+                # leaves ``scalars`` untouched (no partial write).
+                from hal0.providers._gpu import rocm_lane_present
 
-                if not kfd_present():
+                if not rocm_lane_present():
                     raise SlotConfigError(
                         f"profile {profile_name!r} needs the {runner.title or key} "
-                        "runtime (ROCm), but this host has no /dev/kfd — "
+                        "runtime (ROCm), but this host has no /dev/kfd with a "
+                        "/dev/dri/renderD* render node — "
                         "pick a Vulkan-capable runtime or profile",
                         details={"profile": profile_name, "runner": key, "lane": lane},
                     )

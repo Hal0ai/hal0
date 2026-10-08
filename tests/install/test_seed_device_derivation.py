@@ -52,7 +52,7 @@ def _seeded_devices(dest: Path) -> dict[str, str | None]:
 
 def _kfd_less_render_node_box(monkeypatch: pytest.MonkeyPatch) -> HardwareInfo:
     """The ct151 shape: AMD render node, no /dev/kfd, Vulkan-capable runner."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane",
         lambda *a, **k: True,
@@ -61,7 +61,7 @@ def _kfd_less_render_node_box(monkeypatch: pytest.MonkeyPatch) -> HardwareInfo:
 
 
 def _kfd_present_rocm_box(monkeypatch: pytest.MonkeyPatch) -> HardwareInfo:
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane",
         lambda *a, **k: True,
@@ -71,7 +71,7 @@ def _kfd_present_rocm_box(monkeypatch: pytest.MonkeyPatch) -> HardwareInfo:
 
 def _no_gpu_box(monkeypatch: pytest.MonkeyPatch) -> HardwareInfo:
     """The ct163 shape: privileged container, zero GPU of any kind."""
-    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
     monkeypatch.setattr(
         "hal0.install.profile_derive.default_image_serves_vulkan_lane",
         lambda *a, **k: True,
