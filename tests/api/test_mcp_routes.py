@@ -961,13 +961,58 @@ def test_test_endpoint_returns_probe_and_verdicts(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["probe"]["ok"] is True
-    # No hermes agent config present under this tmp sandbox -> classify()
-    # degrades to unknown_server rather than 500ing the preview.
-    assert body["verdicts"] == {"search_repositories": "unknown_server"}
+    # #2415: with exposure disabled the verdict comes from the record's own
+    # [tools] policy; a fresh install lists nothing, so default-deny.
+    assert body["verdicts"] == {"search_repositories": "unknown_tool"}
     # #2358: the response says why hermes/brain exposure is unavailable.
     assert body["agent_exposure"]["available"] is False
     assert body["agent_exposure"]["code"] == "mcp.exposure_policy_unenforced"
     assert "#2303" in body["agent_exposure"]["reason"]
+
+
+def test_test_endpoint_classifies_against_record_policy_while_unenforced(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2415: no installed server is in the Hermes mirror until #2303, so the
+    preview must show the record's own allow/gated/blocked verdicts."""
+    _install_github(client)
+    policy = {
+        "allow": ["search_repositories"],
+        "gated": ["create_pull_request"],
+        "blocked": ["delete_repo"],
+    }
+    assert client.patch("/api/mcp/github/tools", json=policy).status_code == 200
+
+    def fake_probe(record: Any) -> dict[str, Any]:
+        tools = ["search_repositories", "create_pull_request", "delete_repo", "fork"]
+        return {"ok": True, "tools": tools, "error": None}
+
+    monkeypatch.setattr(mcp_routes.mcp_probe, "probe_installed_server_sync", fake_probe)
+    body = client.post("/api/mcp/github/test").json()
+    assert body["verdicts"] == {
+        "search_repositories": "allow",
+        "create_pull_request": "gated",
+        "delete_repo": "blocked",
+        "fork": "unknown_tool",
+    }
+
+
+def test_test_endpoint_uses_seed_mirror_once_call_path_enforces(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once #2303 flips the flag, the verdict comes from the agent's mirror
+    again (here absent, so unknown_server), not the record's policy."""
+    _install_github(client)
+    policy = {"allow": ["search_repositories"], "gated": [], "blocked": []}
+    assert client.patch("/api/mcp/github/tools", json=policy).status_code == 200
+
+    def fake_probe(record: Any) -> dict[str, Any]:
+        return {"ok": True, "tools": ["search_repositories"], "error": None}
+
+    monkeypatch.setattr(mcp_routes.mcp_probe, "probe_installed_server_sync", fake_probe)
+    monkeypatch.setattr(mcp_routes.installed_registry, "AGENT_CALL_PATH_ENFORCED", True)
+    body = client.post("/api/mcp/github/test").json()
+    assert body["verdicts"] == {"search_repositories": "unknown_server"}
 
 
 def test_test_endpoint_stdio_returns_501(client: TestClient) -> None:

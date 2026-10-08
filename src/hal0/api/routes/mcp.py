@@ -1037,7 +1037,15 @@ async def test_server(server_id: str) -> dict[str, Any]:
     result = await asyncio.to_thread(mcp_probe.probe_installed_server_sync, record)
     verdicts: dict[str, str] = {}
     if result.get("ok"):
-        verdicts = _classify_tools(server_id, result.get("tools") or [])
+        tools = result.get("tools") or []
+        if installed_registry.AGENT_CALL_PATH_ENFORCED:
+            verdicts = _classify_tools(server_id, tools)
+        else:
+            # #2415: the join skips every installed record until #2303, so the
+            # seed mirror never lists one and would say unknown_server for
+            # every tool. Show what the record's own [tools] policy decides.
+            # Remove with #2303.
+            verdicts = _classify_against_policy(record.tool_policy, tools)
     return {
         "server_id": server_id,
         "probe": result,
@@ -1065,6 +1073,29 @@ def _classify_tools(server_id: str, tool_names: list[str]) -> dict[str, str]:
         return dict.fromkeys(tool_names, "unknown_server")
     verdicts = classify_many(client, [(server_id, name) for name in tool_names])
     return {name: verdicts[(server_id, name)] for name in tool_names}
+
+
+def _classify_against_policy(policy: Any, tool_names: list[str]) -> dict[str, str]:
+    """Classify each advertised tool against an installed record's own policy.
+
+    Same order and verdicts as
+    :meth:`hal0.agents.mcp_client.AgentMCPClient.classify` on the tool axis:
+    ``blocked`` first, then ``gated``, then ``allow``, else ``unknown_tool``
+    (default-deny). Used while no agent can reach an installed server
+    (:data:`hal0.mcp.installed.AGENT_CALL_PATH_ENFORCED` is ``False``), so
+    ``hal0 mcp test`` still previews what the policy permits. Remove with #2303.
+    """
+    verdicts: dict[str, str] = {}
+    for name in tool_names:
+        if name in policy.blocked:
+            verdicts[name] = "blocked"
+        elif name in policy.gated:
+            verdicts[name] = "gated"
+        elif name in policy.allow:
+            verdicts[name] = "allow"
+        else:
+            verdicts[name] = "unknown_tool"
+    return verdicts
 
 
 @router.patch("/{server_id}/tools")

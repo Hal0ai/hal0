@@ -266,6 +266,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **`hal0 mcp test` shows each tool's real verdict again.** While exposure
+  to Hermes and the brain profile is disabled (#2358), no installed server is
+  in the agent's policy mirror, so every tool read `unknown_server`. Until
+  #2303 the preview now classifies against the server's own `[tools]` policy
+  (`allow` / `gated` / `blocked`, else `unknown_tool`), in the same order the
+  agent client uses. (#2415)
 - **`make release-test` now asserts that slots unload.** The γ release gate
   recorded each row after load and chat, but the only `slot unload` calls were
   in the EXIT-trap cleanup, which ignored failures and wrote no row, so a

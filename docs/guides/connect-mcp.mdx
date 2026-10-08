@@ -83,11 +83,13 @@ hal0 mcp test github
 Connects to the server directly (its own `url` + resolved `env`/`secrets`
 headers — never hal0's own credentials), lists its advertised tools, and
 shows each one's verdict: `allow`, `gated`, `blocked`, `unknown_tool`, or
-`unknown_server`. Verdicts are read from the Hermes seed at
-`/etc/hal0/agents/hermes.toml`, which only carries servers that are enabled
-and exposed to Hermes — so while exposure is unavailable (see below), every
-tool reports `unknown_server`, whatever its policy, and the output ends
-with the reason exposure is refused. A `stdio` server
+`unknown_server`. While exposure to Hermes is unavailable (see below), the
+verdicts come from the server's own `[tools]` policy (`blocked`, then
+`gated`, then `allow`, else `unknown_tool`), so you can check a policy edit
+before any agent can reach the server, and the output ends with the reason
+exposure is refused. Once exposure is available again, verdicts are read
+from the Hermes seed at `/etc/hal0/agents/hermes.toml`, which only carries
+servers that are enabled and exposed to Hermes (`unknown_server` otherwise). A `stdio` server
 answers `501 mcp.supervisor_unavailable`.
 
 ### Set the tool policy
