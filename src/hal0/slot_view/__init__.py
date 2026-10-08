@@ -583,6 +583,25 @@ def image_status_for(present: bool | None) -> str:
     return "present" if present else "missing"
 
 
+def _declares_image(cfg: dict[str, Any]) -> bool:
+    """True when ``cfg`` declares an expected image for the slot view.
+
+    A profile or an ``image_pin`` declares one. So does a profile-less slot
+    whose type routes it to a fixed-family provider (bare ``type=tts`` →
+    Kokoro, bare ``type=image`` → ComfyUI): it launches that family's image
+    (#2389). Only a slot with neither that dispatches to llama-server has no
+    expected image (#1226's ``not-configured``).
+    """
+    if str(cfg.get("profile") or "") or str(cfg.get("image_pin") or "").strip():
+        return True
+    try:
+        from hal0.providers.container import _fixed_family_provider
+
+        return _fixed_family_provider(cfg, None) is not None
+    except Exception:
+        return False
+
+
 async def container_enrichment(
     configs: list[dict[str, Any]],
     *,
@@ -728,8 +747,7 @@ async def container_enrichment(
         profile_name = str(cfg.get("profile") or "")
         entry["profile"] = profile_name
         image: str | None = None
-        image_pin = str(cfg.get("image_pin") or "").strip()
-        if profile_name or image_pin:
+        if _declares_image(cfg):
             try:
                 prof = None
                 if profile_name:
@@ -744,8 +762,10 @@ async def container_enrichment(
                 # slot whose image_pin alone declares the image. Both launched
                 # a real ref while this view answered "not-configured" (#1226's
                 # no-expected-image state) — a claim about config the config
-                # contradicts. The truly-undeclared slot (no profile, no pin)
-                # still takes the else-branch below.
+                # contradicts. A profile-less, pin-less slot whose type routes
+                # it to a fixed-family provider launches that family's image
+                # too (#2389). The truly-undeclared llama slot (no profile, no
+                # pin) still takes the else-branch below.
                 from hal0.providers.container import _resolve_image_ref
 
                 image = _resolve_image_ref(cfg, prof)
@@ -847,7 +867,8 @@ async def container_enrichment(
             except TimeoutError:
                 log.warning("slot_view.container_probe_timeout slot=%s", name)
                 profile_name = str(cfg.get("profile") or "")
-                if profile_name:
+                declares_image = _declares_image(cfg)
+                if declares_image:
                     # This is the third way to reach image_status="unknown",
                     # and it needs the same reason-bearing line as the other
                     # two: the release-validation kit tells operators that
@@ -870,14 +891,15 @@ async def container_enrichment(
                     "profile": profile_name,
                     "image": None,
                     "resolved_command": None,
-                    # #1939. A PROFILELESS slot declares no image at all
-                    # (#1226) — that is knowable from ``cfg`` alone, needs no
+                    # #1939. A slot with no profile, no pin and llama dispatch
+                    # declares no image at all (#1226; #2389 for the
+                    # fixed-family case) — that is knowable from ``cfg`` alone, needs no
                     # probe, and the timeout does not make it any less true, so
                     # it stays "not-configured". A slot WITH a profile does
                     # have a declared image and we simply never got far enough
                     # to look at the store: reporting that as "not-configured"
                     # was a claim about config from a probe that read none.
-                    "image_status": "unknown" if profile_name else "not-configured",
+                    "image_status": "unknown" if declares_image else "not-configured",
                 }
 
     out: dict[str, dict[str, Any]] = {}

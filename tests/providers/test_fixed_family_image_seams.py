@@ -241,3 +241,108 @@ def test_container_spec_launches_the_resolved_image(
     cfg = make_cfg()
     provider = _spec_provider_for(cfg)
     assert provider.container_spec(cfg, {}).image == _resolve_image_ref(cfg, None)
+
+
+# #2389: a slot with neither a profile nor an ``image_pin`` still launches a
+# fixed-family image when its ``type`` routes it to one (bare ``type=tts`` →
+# Kokoro, bare ``type=image`` → ComfyUI). Pull and status must report that
+# image, while a bare llama slot keeps its "not-configured" answer (#1226).
+
+
+def _bare_tts_cfg() -> dict[str, Any]:
+    return {"name": "tts", "type": "tts", "device": "cpu", "runtime": "container", "port": 8085}
+
+
+def _bare_img_cfg() -> dict[str, Any]:
+    return {
+        "name": "img",
+        "type": "image",
+        "device": "gpu-rocm",
+        "runtime": "container",
+        "port": 8188,
+    }
+
+
+def _bare_llama_cfg() -> dict[str, Any]:
+    return {"name": "chat", "type": "llm", "device": "cpu", "runtime": "container", "port": 8081}
+
+
+_BARE_SLOTS = [
+    pytest.param(_bare_tts_cfg, "kokoro", id="bare-tts-kokoro"),
+    pytest.param(_bare_img_cfg, "comfyui", id="bare-img-comfyui"),
+]
+
+
+def _status_provider(running: str | None) -> MagicMock:
+    provider = MagicMock()
+    provider.is_active.return_value = running is not None
+    provider.health = AsyncMock(return_value={"ok": True})
+    provider.running_image.return_value = running
+    provider.image_present.return_value = True
+    return provider
+
+
+@pytest.mark.parametrize("with_default", _DEFAULTS)
+@pytest.mark.parametrize(("make_cfg", "family"), _BARE_SLOTS)
+async def test_image_pull_resolves_profileless_fixed_family_slot(
+    monkeypatch: pytest.MonkeyPatch, make_cfg: Any, family: str, with_default: bool
+) -> None:
+    from hal0.slots.image_pull import resolve_slot_image
+
+    _set_family_default(monkeypatch, family, with_default)
+    cfg = make_cfg()
+    launched = _launched_image(cfg, family, with_default)
+    sm = SimpleNamespace(iter_configs=AsyncMock(return_value=[cfg]))
+    assert await resolve_slot_image(sm, cfg["name"]) == launched
+
+
+@pytest.mark.parametrize("with_default", _DEFAULTS)
+@pytest.mark.parametrize(("make_cfg", "family"), _BARE_SLOTS)
+async def test_slot_view_reports_profileless_fixed_family_slot(
+    monkeypatch: pytest.MonkeyPatch, make_cfg: Any, family: str, with_default: bool
+) -> None:
+    from hal0.slot_view import container_enrichment
+
+    _set_family_default(monkeypatch, family, with_default)
+    cfg = make_cfg()
+    launched = _launched_image(cfg, family, with_default)
+    out = await container_enrichment([cfg], pull_jobs={}, provider=_status_provider(launched))
+    entry = out[cfg["name"]]
+    assert entry["image"] == launched
+    assert entry["image_mismatch"] is False
+    assert entry["image_status"] == "present"
+
+
+@pytest.mark.parametrize(("make_cfg", "family"), _BARE_SLOTS)
+async def test_slot_view_timeout_profileless_fixed_family_slot_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, make_cfg: Any, family: str
+) -> None:
+    """A probe timeout learned nothing about the store; the slot still declares
+    an image by its type, so the answer is ``unknown``, not ``not-configured``."""
+    from hal0 import slot_view
+
+    _set_family_default(monkeypatch, family, False)
+    cfg = make_cfg()
+    monkeypatch.setattr(slot_view, "_PROBE_TIMEOUT_S", 0.0)
+    out = await slot_view.container_enrichment([cfg], pull_jobs={}, provider=_status_provider(None))
+    assert out[cfg["name"]]["image_status"] == "unknown"
+
+
+async def test_image_pull_bare_llama_slot_resolves_nothing() -> None:
+    from hal0.slots.image_pull import resolve_slot_image
+
+    cfg = _bare_llama_cfg()
+    assert _spec_provider_for(cfg) is None
+    sm = SimpleNamespace(iter_configs=AsyncMock(return_value=[cfg]))
+    assert await resolve_slot_image(sm, cfg["name"]) is None
+
+
+async def test_slot_view_bare_llama_slot_stays_not_configured() -> None:
+    from hal0.slot_view import container_enrichment
+
+    cfg = _bare_llama_cfg()
+    out = await container_enrichment([cfg], pull_jobs={}, provider=_status_provider(None))
+    entry = out[cfg["name"]]
+    assert entry["image"] is None
+    assert entry["resolved_command"] is None
+    assert entry["image_status"] == "not-configured"

@@ -283,6 +283,15 @@ applying. Add those subsections to a version's section to surface them; see
   mismatch and the drift check flagged an image change that was not there,
   with or without a family default. (#2234)
 
+- **Pull and status now see the image of a slot with no profile.** A slot
+  with no `profile` and no `image_pin` whose type routes it to a fixed
+  runtime — a bare `type = "tts"` slot falls back to Kokoro, a bare
+  `type = "image"` slot to ComfyUI — launches that runtime's image, but
+  "pull image" found nothing to pull and `/api/slots` reported the slot as
+  `not-configured` (no expected image). Both now resolve the image the slot
+  launches. A bare llama slot with no profile or pin still reports
+  `not-configured`. (#2389)
+
 - **A LAN-bound box with an admin key no longer leaves the dashboard half
   signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
   off-box callers even with "Require authentication" off — and that rule is
