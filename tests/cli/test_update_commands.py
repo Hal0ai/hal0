@@ -1140,3 +1140,182 @@ def test_update_owui_target_posts_normalized_digest(monkeypatch: pytest.MonkeyPa
 def test_update_owui_tag_flag_no_longer_parses() -> None:
     result = runner.invoke(app, ["update", "owui", "--tag", "x"])
     assert result.exit_code == 2, result.output
+
+
+# ── post-apply restart policy for image drift (#2096) ─────────────────────────
+
+_IMG = {"key": "image", "running": "hal0-combined:0824", "rendered": "hal0-combined:0826"}
+_ARGV = {"key": "--ctx-size", "running": "4096", "rendered": "131072"}
+
+
+def _apply_with_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_api: dict,
+    slots: list[dict],
+    *,
+    args: tuple[str, ...] = (),
+    skipped_busy: tuple[str, ...] = (),
+    drift_after: list[dict] | None = None,
+) -> tuple[object, list[dict]]:
+    """Run ``hal0 update --yes`` with a stubbed slot-drift probe.
+
+    The first slot-drift GET returns ``slots``; later ones return
+    ``drift_after`` (default: whatever the restart did not clear). Returns the
+    CliRunner result and every restart-slots POST body.
+    """
+    posts: list[dict] = []
+    fetches = {"n": 0}
+    base_get = uc.api_get
+    base_post = uc.api_post
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            fetches["n"] += 1
+            cur = slots if fetches["n"] == 1 or drift_after is None else drift_after
+            return {"count": len(cur), "slots": cur}
+        return base_get(path, **kwargs)
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/restart-slots":
+            posts.append(json if isinstance(json, dict) else {})
+            asked = (json or {}).get("slots") or [s["slot"] for s in slots]
+            done = [n for n in asked if n not in skipped_busy]
+            return {
+                "restarted": done,
+                "failed": [],
+                "skipped_busy": [n for n in asked if n in skipped_busy],
+                "count": len(done),
+            }
+        return base_post(path, json=json, **kwargs)
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    if drift_after is None:
+        remaining = [s for s in slots if s["slot"] in skipped_busy]
+        argv_only = [s for s in slots if not any(d["key"] == "image" for d in s["diffs"])]
+        drift_after = [s for s in slots if s in remaining or s in argv_only]
+        # argv-only slots stay drifted unless --restart-slots covered them
+        if "--restart-slots" in args:
+            drift_after = remaining
+    fetches["n"] = 0
+    result = runner.invoke(app, ["update", "--yes", *args])
+    return result, posts
+
+
+def test_apply_restarts_image_drifted_slots_by_default(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    slots = [{"slot": "brain", "diffs": [_IMG]}, {"slot": "agent", "diffs": [_IMG]}]
+    result, posts = _apply_with_drift(monkeypatch, stub_api, slots, drift_after=[])
+    assert result.exit_code == 0, result.output
+    assert posts == [{"slots": ["brain", "agent"], "skip_busy": True}]
+    assert "restarted" in result.output
+    assert "update applied." in result.output
+
+
+def test_apply_leaves_argv_only_drift_alone(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    slots = [{"slot": "chat", "diffs": [_ARGV]}]
+    result, posts = _apply_with_drift(monkeypatch, stub_api, slots)
+    assert result.exit_code == 0, result.output
+    assert posts == []
+    assert "1 slot need restart" in result.output
+
+
+def test_apply_restarts_only_the_image_slots_of_a_mixed_drift(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    slots = [{"slot": "brain", "diffs": [_IMG, _ARGV]}, {"slot": "chat", "diffs": [_ARGV]}]
+    result, posts = _apply_with_drift(
+        monkeypatch, stub_api, slots, drift_after=[{"slot": "chat", "diffs": [_ARGV]}]
+    )
+    assert result.exit_code == 0, result.output
+    assert posts == [{"slots": ["brain"], "skip_busy": True}]
+    assert "chat" in result.output  # argv-only slot still reported as needing restart
+
+
+def test_no_restart_slots_suppresses_the_image_restart_and_exits_2(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    slots = [{"slot": "brain", "diffs": [_IMG]}]
+    result, posts = _apply_with_drift(monkeypatch, stub_api, slots, args=("--no-restart-slots",))
+    assert posts == []
+    assert result.exit_code == 2, result.output
+    assert "update applied." not in result.output
+    assert "restart" in result.output and "pending" in result.output
+
+
+def test_busy_image_slot_is_reported_not_restarted_and_exits_2(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    slots = [{"slot": "brain", "diffs": [_IMG]}, {"slot": "agent", "diffs": [_IMG]}]
+    result, posts = _apply_with_drift(monkeypatch, stub_api, slots, skipped_busy=("agent",))
+    assert posts == [{"slots": ["brain", "agent"], "skip_busy": True}]
+    assert result.exit_code == 2, result.output
+    assert "could not be restarted automatically: in use" in result.output
+    assert "update applied." not in result.output
+
+
+def test_restart_slots_flag_still_restarts_everything_drifted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    posts: list[object] = []
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        return {
+            "count": 2,
+            "slots": [{"slot": "brain", "diffs": [_IMG]}, {"slot": "chat", "diffs": [_ARGV]}],
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posts.append(json)
+        return {"restarted": ["brain", "chat"], "failed": [], "count": 2}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+    assert posts == [{"slots": ["brain", "chat"]}]
+
+
+def test_restart_slots_and_no_restart_slots_conflict() -> None:
+    result = runner.invoke(app, ["update", "--restart-slots", "--no-restart-slots"])
+    assert result.exit_code != 0
+
+
+def test_cli_banner_reports_server_side_restart_and_does_not_double_restart(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    """The server already bounced image slots at start (``auto_restart``): the
+    CLI shows them as restarted and never POSTs restart-slots for them."""
+    posts: list[dict] = []
+    base_get = uc.api_get
+    base_post = uc.api_post
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {
+                "count": 0,
+                "slots": [],
+                "auto_restart": {
+                    "restarted": ["brain"],
+                    "skipped_busy": [],
+                    "failed": [],
+                    "at": "2026-10-08T00:00:00+00:00",
+                },
+            }
+        return base_get(path, **kwargs)
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/restart-slots":
+            posts.append(json)
+        return base_post(path, json=json, **kwargs)
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert posts == []
+    assert "restarted 1 slot" in result.output and "brain" in result.output

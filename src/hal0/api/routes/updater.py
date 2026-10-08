@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 
@@ -1263,7 +1264,37 @@ async def slot_drift(request: Request) -> dict[str, Any]:
     """
     sm = _slot_manager(request)
     drifted = await _collect_slot_drift(sm)
-    return {"count": len(drifted), "slots": drifted}
+    return {
+        "count": len(drifted),
+        "slots": drifted,
+        "auto_restart": getattr(request.app.state, "post_start_image_drift_restart", None),
+    }
+
+
+async def _slots_in_flight(sm: Any, names: list[str]) -> set[str]:
+    """Names among ``names`` that llama-server reports as processing a request.
+
+    Source: the live ``/metrics`` scrape (``requests_processing``,
+    ``hal0.slots.metrics_collect.llama_metrics``). Best-effort: a slot with no
+    port, no ``--metrics`` endpoint or a failed scrape yields no reading and
+    is NOT counted busy -- there is no other reliable in-flight signal, so
+    "unknown" must not block a restart the caller asked for (#2096).
+    """
+    from hal0.slots import metrics_collect
+
+    try:
+        ports = {getattr(s, "name", None): getattr(s, "port", 0) or 0 for s in await sm.list()}
+    except Exception:  # pragma: no cover - defensive
+        return set()
+    busy: set[str] = set()
+    for name in names:
+        try:
+            reading = await metrics_collect.llama_metrics(int(ports.get(name) or 0))
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if int(reading.get("requests_processing") or 0) > 0:
+            busy.add(name)
+    return busy
 
 
 @router.post("/restart-slots")
@@ -1275,11 +1306,13 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
     that may be mid-inference: the fresh argv only takes effect once the
     operator asks for it here. Optionally restrict to a subset via
     ``{"slots": ["chat", ...]}``; an omitted / empty list means "all
-    currently-drifted slots".
+    currently-drifted slots". ``{"skip_busy": true}`` leaves any slot whose
+    llama-server reports an in-flight request alone and lists it under
+    ``skipped_busy`` (used by the post-update image-drift restart, #2096).
 
     Response::
 
-        {"restarted": ["chat"], "failed": [], "count": 1}
+        {"restarted": ["chat"], "failed": [], "skipped_busy": [], "count": 1}
 
     A per-slot restart failure is recorded in ``failed`` (never re-raised) so
     one wedged slot can't abort the rest of the sweep.
@@ -1294,9 +1327,43 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
         raw = body.get("slots")
         if isinstance(raw, list) and raw:
             only = {str(s) for s in raw}
+    skip_busy = isinstance(body, dict) and body.get("skip_busy") is True
+    return await restart_drifted(sm, only=only, skip_busy=skip_busy)
 
+
+#: One restart sweep at a time. The CLI's post-apply POST /restart-slots and
+#: the post-start pass can arrive within seconds of each other for the same
+#: slots; serialising them here (drift is re-read under the lock) means the
+#: second sees the first's restarts as no longer drifted and does nothing,
+#: instead of interleaving a second unload/load on the same slot.
+_RESTART_SWEEP_LOCK = asyncio.Lock()
+
+
+async def restart_drifted(
+    sm: Any, *, only: set[str] | None = None, skip_busy: bool = False
+) -> dict[str, Any]:
+    """Bounce the drifted slots (optionally a subset); the one restart path.
+
+    Shared by ``POST /restart-slots`` and the post-start image-drift pass
+    (#2096). Per-slot failures are recorded, never re-raised. With
+    ``skip_busy`` a slot llama-server reports as processing is left alone and
+    listed under ``skipped_busy``. Sweeps are serialised on
+    :data:`_RESTART_SWEEP_LOCK`; drift is read inside the lock.
+    """
+    async with _RESTART_SWEEP_LOCK:
+        return await _restart_drifted_locked(sm, only=only, skip_busy=skip_busy)
+
+
+async def _restart_drifted_locked(
+    sm: Any, *, only: set[str] | None, skip_busy: bool
+) -> dict[str, Any]:
     drifted = await _collect_slot_drift(sm)
     targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
+    skipped_busy: list[str] = []
+    if skip_busy and targets:
+        busy = await _slots_in_flight(sm, targets)
+        skipped_busy = [n for n in targets if n in busy]
+        targets = [n for n in targets if n not in busy]
     restarted: list[str] = []
     failed: list[dict[str, str]] = []
     for name in targets:
@@ -1308,4 +1375,56 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
             continue
         log.info("updater.slot_restarted", slot=name)
         restarted.append(name)
-    return {"restarted": restarted, "failed": failed, "count": len(restarted)}
+    return {
+        "restarted": restarted,
+        "failed": failed,
+        "skipped_busy": skipped_busy,
+        "count": len(restarted),
+    }
+
+
+#: Seconds the post-start pass waits before probing, so the app is serving and
+#: slot containers have been adopted before drift is computed.
+POST_START_SETTLE_S = 15.0
+
+
+async def post_start_image_drift_restart(
+    state: Any, *, enabled: bool = True, settle_s: float = POST_START_SETTLE_S
+) -> None:
+    """One-shot, every hal0-api start: bounce slots running a replaced image (#2096).
+
+    An image-drifted running container serves a build the installed release
+    replaced, whichever path (CLI, dashboard, manual) put the new code in
+    place. Busy slots are skipped. The outcome lands on
+    ``state.post_start_image_drift_restart`` for ``/slot-drift``; nothing is
+    stored when no slot qualified. Never raises.
+    """
+    if not enabled:
+        return
+    try:
+        if settle_s > 0:
+            await asyncio.sleep(settle_s)
+        sm = getattr(state, "slot_manager", None)
+        if sm is None:
+            return
+        drifted = await _collect_slot_drift(sm)
+        names = {
+            d["slot"]
+            for d in drifted
+            if any(isinstance(x, dict) and x.get("key") == "image" for x in d["diffs"])
+        }
+        if not names:
+            return
+        out = await restart_drifted(sm, only=names, skip_busy=True)
+        result = {
+            "restarted": out["restarted"],
+            "skipped_busy": out["skipped_busy"],
+            "failed": out["failed"],
+            "at": datetime.now(UTC).isoformat(),
+        }
+        state.post_start_image_drift_restart = result
+        log.info("updater.post_start_image_drift_restart", **result)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("updater.post_start_image_drift_restart_failed", error=str(exc))

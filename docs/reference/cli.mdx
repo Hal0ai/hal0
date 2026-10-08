@@ -80,7 +80,7 @@ hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slot
 
 ```sh
 hal0 update [--channel stable|preview|nightly] [--check] [--rollback]
-            [--target VERSION] [--yes|-y] [--restart-slots]
+            [--target VERSION] [--yes|-y] [--restart-slots|--no-restart-slots]
 hal0 update status
 hal0 update component <id> [--check]
 hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
@@ -93,7 +93,8 @@ hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 | `--rollback` | Roll back to the previous version. |
 | `--target` | Pin an exact version. |
 | `--yes` / `-y` | Skip the confirmation prompt. |
-| `--restart-slots` | Bounce only drifted slots after update. |
+| `--restart-slots` | Bounce every drifted slot (image and argv drift) and stop. |
+| `--no-restart-slots` | Skip the automatic restart of slots whose runner image changed; the CLI leaves them on the old image (the `hal0-api` start-up pass is controlled by `[updates].auto_restart_image_drift`). Cannot be combined with `--restart-slots`. |
 
 An apply that leaves any operator-facing convergence outstanding (the
 one-shot v1.0 profile-catalog reset, or a component below still `pending`)

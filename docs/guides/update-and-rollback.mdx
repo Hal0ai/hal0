@@ -168,9 +168,15 @@ Settings → Updates page shows next to the channel.
    and `/usr/local/bin/hal0-agent` PATH links from the new tree.
 
 6. **Re-render every slot's systemd unit** through the newly installed
-   code. This step never bounces a running slot — the CLI shows a
-   "N slots need restart" banner post-apply; pass `--restart-slots` to
-   bounce only the slots left running the pre-update launch command.
+   code. The re-render itself never bounces a running slot. Afterwards the
+   CLI restarts every slot whose drift includes a new runner image, because
+   a stale image keeps serving the build the release replaced; a slot that
+   is mid-request is skipped and listed as "could not be restarted
+   automatically: in use". Slots with argv-only drift are left running and
+   shown in the "N slots need restart" banner; pass `--restart-slots` to
+   bounce them. Pass `--no-restart-slots` to skip the automatic image
+   restart too. While an image restart is still pending, `hal0 update`
+   says so and exits **2** instead of reporting a clean success.
 
 7. **Record** the prior symlink target in `/var/lib/hal0/hal0.previous`
    for rollback.

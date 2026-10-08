@@ -1153,6 +1153,8 @@ class BootState:
     refresh_task: asyncio.Task[None] | None = None
     stop_refresh_task: Any = None
     stop_gpu_arbiter_idle_loop: Any = None
+    image_drift_task: asyncio.Task[None] | None = None
+    stop_image_drift_task: Any = None
     memory_reprobe_task: asyncio.Task[None] | None = None
     stop_memory_reprobe_task: Any = None
     omni_router_client: httpx.AsyncClient | None = None
@@ -1918,6 +1920,29 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
 
     ctx.stop_gpu_arbiter_idle_loop = _stop_gpu_arbiter_idle_loop
 
+    # Post-start image-drift restart (#2096): one-shot, scheduled (not awaited)
+    # so API startup never waits on a container bounce. A running container on
+    # a replaced runner image is restarted whichever path installed the release.
+    try:
+        from hal0.api.routes.updater import post_start_image_drift_restart
+
+        ctx.image_drift_task = asyncio.create_task(
+            post_start_image_drift_restart(
+                app.state,
+                enabled=ctx.hal0_config.updates.auto_restart_image_drift,
+            )
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("updater.post_start_image_drift_restart_schedule_failed", error=str(exc))
+
+    async def _stop_image_drift_task() -> None:
+        if ctx.image_drift_task is not None:
+            ctx.image_drift_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ctx.image_drift_task
+
+    ctx.stop_image_drift_task = _stop_image_drift_task
+
     # Memory provider self-heal loop (#1613). Armed only when create_app
     # wrapped a boot-degraded provider in SelfHealingMemoryProvider; polls
     # until the hindsight engine answers a probe, then the shell swaps its
@@ -2398,6 +2423,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(ctx.stop_refresh_task)
             stack.push_async_callback(ctx.stop_gpu_arbiter_idle_loop)
+            stack.push_async_callback(ctx.stop_image_drift_task)
             stack.push_async_callback(ctx.stop_memory_reprobe_task)
             ctx.metrics_service.start()
             stack.push_async_callback(ctx.metrics_service.stop)

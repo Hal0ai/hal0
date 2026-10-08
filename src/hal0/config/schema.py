@@ -2598,6 +2598,26 @@ class TelemetryConfig(BaseModel):
     )
 
 
+class UpdatesConfig(BaseModel):
+    """``[updates]`` section in hal0.toml.
+
+    ``extra="forbid"``: a leaf tunable table.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    auto_restart_image_drift: bool = Field(
+        default=True,
+        description=(
+            "At every hal0-api start, restart slots whose running container uses a "
+            "different runner image than the one a fresh render would pick (a stale "
+            "image keeps serving the build a release replaced). Slots with a request "
+            "in flight are skipped. Argv-only drift is never restarted. Consumed once "
+            "at startup, so a change needs a hal0-api restart."
+        ),
+    )
+
+
 # ── MemoryGraphConfig (ADR-0023) ──────────────────────────────────────────────
 
 
@@ -3753,6 +3773,7 @@ class Hal0Config(BaseModel):
     slots: SlotsConfig = Field(default_factory=SlotsConfig)
     dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    updates: UpdatesConfig = Field(default_factory=UpdatesConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
@@ -3837,6 +3858,7 @@ __all__ = [
     "SlotsConfig",
     "TelemetryConfig",
     "ToolPolicy",
+    "UpdatesConfig",
     "UpstreamEntry",
     "UpstreamsConfig",
     "family_flags",

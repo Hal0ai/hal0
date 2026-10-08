@@ -95,6 +95,8 @@ def test_registry_declares_three_apply_classes() -> None:
         ("memory.graph.enabled", "immediate", []),
         ("memory.graph.extraction_slot", "immediate", []),
         ("memory.graph.llm_timeout_s", "immediate", []),
+        # [updates] — read once by the post-start image-drift pass (#2096).
+        ("updates.auto_restart_image_drift", "service-restart", [SERVICE_HAL0_API]),
         # [activity] — AuditStore is constructed once at create_app.
         ("activity.enabled", "service-restart", [SERVICE_HAL0_API]),
         ("activity.retention_days", "service-restart", [SERVICE_HAL0_API]),

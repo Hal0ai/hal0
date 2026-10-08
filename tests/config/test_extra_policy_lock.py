@@ -87,6 +87,7 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "SlotsConfig": "forbid",
     "DispatcherConfig": "forbid",
     "TelemetryConfig": "forbid",
+    "UpdatesConfig": "forbid",
     "AgentAuthConfig": "forbid",
     "ToolPolicy": "forbid",
     "ActivityConfig": "forbid",
