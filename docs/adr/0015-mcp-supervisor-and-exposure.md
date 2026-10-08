@@ -5,6 +5,19 @@
 Accepted (http/sse scope). stdio supervision is designed but deferred —
 see "Deferred: stdio supervisor" below.
 
+**Join suspended for user-installed servers (#2358) until #2303.** Hermes
+and the brain profile call a joined server's `url` directly, so nothing on
+that path enforces the record's `[tools]` policy, and the policy has no
+wildcard: a tool it does not list is denied by `AgentMCPClient.classify`
+yet callable there. Until hal0's proxy mount sits on that path,
+`PATCH /api/mcp/{id}/exposure` refuses turning `hermes`/`brain` on with
+`409 mcp.exposure_policy_unenforced`, the join (Decision 2) skips every
+installed record, and `POST /api/mcp/{id}/test` reports why under
+`agent_exposure`; the exposure toggle in Decision 6, when it is built,
+renders disabled with that reason. The two built-in servers are joined
+through hal0's own `/mcp` mount and are unaffected. The switch is
+`hal0.mcp.installed.AGENT_CALL_PATH_ENFORCED`.
+
 ## Context
 
 `src/hal0/mcp/installed.py` (issue #305) already gives operators a

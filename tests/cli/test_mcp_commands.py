@@ -71,6 +71,46 @@ def test_test_cmd_reports_unreachable(api: dict[str, Any]) -> None:
     assert "connection refused" in result.output
 
 
+_EXPOSURE_UNAVAILABLE = {
+    "available": False,
+    "code": "mcp.exposure_policy_unenforced",
+    "reason": "hal0 cannot enforce this server's [tools] policy on that path (#2303)",
+}
+
+
+@pytest.mark.parametrize("probe_ok", [True, False])
+def test_test_cmd_says_why_agent_exposure_is_unavailable(
+    api: dict[str, Any], probe_ok: bool
+) -> None:
+    """#2358: the verdict table is followed by why --hermes/--brain is refused,
+    whether or not the probe reached the server."""
+    api["post_response"] = {
+        "server_id": "github",
+        "probe": {"ok": probe_ok, "tools": ["search"], "error": "connection refused"},
+        "verdicts": {"search": "unknown_server"},
+        "agent_exposure": _EXPOSURE_UNAVAILABLE,
+    }
+    result = runner.invoke(mcp_commands.app, ["test", "github"])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "hermes/brain exposure unavailable" in out
+    assert "mcp.exposure_policy_unenforced" in out
+    # Rich markup is escaped: the literal [tools] survives.
+    assert "[tools] policy" in out
+    assert "#2303" in out
+
+
+def test_test_cmd_says_nothing_when_agent_exposure_is_available(api: dict[str, Any]) -> None:
+    api["post_response"] = {
+        "probe": {"ok": True, "tools": ["search"]},
+        "verdicts": {"search": "allow"},
+        "agent_exposure": {"available": True},
+    }
+    result = runner.invoke(mcp_commands.app, ["test", "github"])
+    assert result.exit_code == 0, result.output
+    assert "exposure unavailable" not in result.output
+
+
 def test_test_cmd_json_out(api: dict[str, Any]) -> None:
     api["post_response"] = {"probe": {"ok": True, "tools": []}, "verdicts": {}}
     result = runner.invoke(mcp_commands.app, ["test", "github", "--json"])

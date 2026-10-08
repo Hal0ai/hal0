@@ -1038,7 +1038,13 @@ async def test_server(server_id: str) -> dict[str, Any]:
     verdicts: dict[str, str] = {}
     if result.get("ok"):
         verdicts = _classify_tools(server_id, result.get("tools") or [])
-    return {"server_id": server_id, "probe": result, "verdicts": verdicts}
+    return {
+        "server_id": server_id,
+        "probe": result,
+        "verdicts": verdicts,
+        # #2358: why the hermes/brain toggle is unavailable (Remove with #2303).
+        "agent_exposure": installed_registry.agent_exposure_status(),
+    }
 
 
 def _classify_tools(server_id: str, tool_names: list[str]) -> dict[str, str]:
@@ -1104,9 +1110,9 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
     intent). A ``stdio`` record has no supervisor to make it reachable, so
     ``hermes``/``brain`` reject with ``409 mcp.exposure_needs_supervisor``
     instead of accepting a flag that would never actually join anything.
-    Turning ``hermes``/``brain`` on for a record whose ``[tools]`` policy
-    has ``gated`` or ``blocked`` entries rejects with ``409
-    mcp.exposure_policy_unenforced`` (#2343).
+    Turning ``hermes``/``brain`` on for any installed record rejects with
+    ``409 mcp.exposure_policy_unenforced`` until hal0 enforces the record's
+    ``[tools]`` policy on the agent's call path (#2358, #2303).
     """
     if server_id in installed_registry.BUNDLED_SERVER_IDS:
         raise Conflict(
@@ -1137,23 +1143,20 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
             code="mcp.exposure_needs_supervisor",
             details={"server_id": server_id},
         )
-    # #2343: Hermes calls the upstream directly, so a gated or blocked tool
-    # would be callable unenforced (#2303). Refuse turning a join on; turning
-    # one off stays allowed, and the join itself skips such records. Only a
-    # false → true change counts: echoing an already-on target alongside a
-    # withdrawal is narrowing, not turning anything on.
+    # #2358 (Remove with #2303): hal0 cannot enforce any user-installed
+    # record's [tools] policy on Hermes's direct call path, so turning a join
+    # on is refused for every record; the join itself skips them all. Only a
+    # false → true change counts: turning exposure off, or echoing an
+    # already-on target alongside a withdrawal, is narrowing and stays allowed.
     previous = record.exposure
     turning_on = [
         t for t in ("hermes", "brain") if getattr(exposure, t) and not getattr(previous, t)
     ]
-    unenforced = record.unenforced_tool_policy()
-    if turning_on and unenforced:
+    if turning_on and not installed_registry.AGENT_CALL_PATH_ENFORCED:
         raise Conflict(
-            "this server's [tools] policy has gated or blocked tools, which "
-            f"nothing enforces on the {'/'.join(turning_on)} call path yet — "
-            "remove them from gated/blocked before exposing it",
-            code="mcp.exposure_policy_unenforced",
-            details={"server_id": server_id, "targets": turning_on, "tools": unenforced},
+            installed_registry.AGENT_EXPOSURE_UNENFORCED_REASON,
+            code=installed_registry.AGENT_EXPOSURE_UNENFORCED_CODE,
+            details={"server_id": server_id, "targets": turning_on, "until": "#2303"},
         )
     updated = installed_registry.patch_config(server_id, exposure=exposure)
     hermes_sync = await _sync_hermes_join(server_id)

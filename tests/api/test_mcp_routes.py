@@ -964,6 +964,10 @@ def test_test_endpoint_returns_probe_and_verdicts(
     # No hermes agent config present under this tmp sandbox -> classify()
     # degrades to unknown_server rather than 500ing the preview.
     assert body["verdicts"] == {"search_repositories": "unknown_server"}
+    # #2358: the response says why hermes/brain exposure is unavailable.
+    assert body["agent_exposure"]["available"] is False
+    assert body["agent_exposure"]["code"] == "mcp.exposure_policy_unenforced"
+    assert "#2303" in body["agent_exposure"]["reason"]
 
 
 def test_test_endpoint_stdio_returns_501(client: TestClient) -> None:
@@ -1010,34 +1014,43 @@ def test_patch_tools_bundled_rejected(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "mcp.bundled"
 
 
-def test_patch_exposure_hermes(client: TestClient) -> None:
-    _install_github(client)
-    response = client.patch("/api/mcp/github/exposure", json={"hermes": True})
-    assert response.status_code == 200, response.text
-    exposure = response.json()["server"]["exposure"]
-    assert exposure["hermes"] is True
-    assert exposure["brain"] is False
-    assert "hermes_sync" in response.json()
+# --- #2358: no user-installed server is exposed to Hermes/brain until #2303 --
+# Hermes calls a joined server's url directly, and a [tools] policy has no
+# wildcard (an unlisted tool is denied), so even an empty or allow-only policy
+# is wider on that path than hal0 enforces. Turning exposure on is refused.
+
+
+def _expose_directly(server_id: str, **flags: bool) -> None:
+    """An exposure written before the #2358 guard (an upgraded box)."""
+    from hal0.mcp import installed
+
+    installed.patch_config(server_id, exposure=installed.ExposureConfig(**flags))
 
 
 @pytest.mark.parametrize("target", ["hermes", "brain"])
-@pytest.mark.parametrize("axis", ["gated", "blocked"])
-def test_patch_exposure_refused_while_tool_policy_is_unenforced(
-    client: TestClient, target: str, axis: str
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {},
+        {"allow": ["search_repositories"]},
+        {"gated": ["delete_repo"]},
+        {"blocked": ["delete_repo"]},
+    ],
+    ids=["empty", "allow-only", "gated", "blocked"],
+)
+def test_patch_exposure_refused_for_every_user_installed_server(
+    client: TestClient, target: str, policy: dict[str, list[str]]
 ) -> None:
-    """#2343: Hermes calls the upstream directly, so nothing on its call path
-    enforces `gated`/`blocked` (#2303); exposure is refused, not accepted."""
     _install_github(client)
-    response = client.patch("/api/mcp/github/tools", json={axis: ["delete_repo"]})
-    assert response.status_code == 200, response.text
+    if policy:
+        assert client.patch("/api/mcp/github/tools", json=policy).status_code == 200
 
     response = client.patch("/api/mcp/github/exposure", json={target: True})
     assert response.status_code == 409, response.text
     error = response.json()["error"]
     assert error["code"] == "mcp.exposure_policy_unenforced"
-    assert error["details"]["server_id"] == "github"
-    assert error["details"]["targets"] == [target]
-    assert error["details"]["tools"] == ["delete_repo"]
+    assert "#2303" in error["message"]
+    assert error["details"] == {"server_id": "github", "targets": [target], "until": "#2303"}
     # Nothing was written: the record is still unexposed.
     from hal0.mcp import installed
 
@@ -1045,19 +1058,20 @@ def test_patch_exposure_refused_while_tool_policy_is_unenforced(
     assert (exposure.hermes, exposure.brain) == (False, False)
 
 
-def test_patch_exposure_allowed_with_allow_only_policy(client: TestClient) -> None:
+def test_patch_exposure_refuses_adding_a_target_to_an_exposed_record(
+    client: TestClient,
+) -> None:
     _install_github(client)
-    client.patch("/api/mcp/github/tools", json={"allow": ["search_repositories"]})
+    _expose_directly("github", hermes=True)
     response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
-    assert response.status_code == 200, response.text
-    assert response.json()["server"]["exposure"]["hermes"] is True
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["details"]["targets"] == ["brain"]
 
 
-def test_patch_exposure_can_still_turn_off_an_unenforced_record(client: TestClient) -> None:
-    """The guard refuses turning exposure on; narrowing it must keep working."""
+def test_patch_exposure_can_still_turn_off_an_exposed_record(client: TestClient) -> None:
+    """The guard refuses turning exposure on; withdrawing it must keep working."""
     _install_github(client)
-    assert client.patch("/api/mcp/github/exposure", json={"hermes": True}).status_code == 200
-    assert client.patch("/api/mcp/github/tools", json={"gated": ["create_pr"]}).status_code == 200
+    _expose_directly("github", hermes=True)
     response = client.patch("/api/mcp/github/exposure", json={"hermes": False})
     assert response.status_code == 200, response.text
     assert response.json()["server"]["exposure"]["hermes"] is False
@@ -1067,26 +1081,38 @@ def test_patch_exposure_withdrawing_one_target_resends_the_other(client: TestCli
     """A body that withdraws one target while echoing the other's current
     ``true`` (as a toggle UI sends) is narrowing, not turning anything on."""
     _install_github(client)
-    response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
-    assert response.status_code == 200, response.text
-    assert client.patch("/api/mcp/github/tools", json={"gated": ["create_pr"]}).status_code == 200
+    _expose_directly("github", hermes=True, brain=True)
     response = client.patch("/api/mcp/github/exposure", json={"hermes": False, "brain": True})
     assert response.status_code == 200, response.text
     exposure = response.json()["server"]["exposure"]
     assert (exposure["hermes"], exposure["brain"]) == (False, True)
 
 
-def test_patch_tools_gating_an_exposed_server_drops_its_join(client: TestClient) -> None:
-    """Already exposed, then a tool is blocked: the sync the PATCH runs takes
-    it out of the join rather than leaving it with Hermes unenforced."""
+def test_any_mutation_drops_a_join_written_before_the_guard(client: TestClient) -> None:
+    """Upgraded box: the next registry mutation's sync takes the join out."""
     from hal0.mcp import hermes_join
 
     _install_github(client)
-    assert client.patch("/api/mcp/github/exposure", json={"hermes": True}).status_code == 200
-    assert hermes_join._load_manifest()["hermes"] == ["github"]
-    response = client.patch("/api/mcp/github/tools", json={"blocked": ["delete_repo"]})
+    _expose_directly("github", hermes=True)
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+    response = client.patch("/api/mcp/github/tools", json={"allow": ["search_repositories"]})
     assert response.status_code == 200, response.text
     assert hermes_join._load_manifest()["hermes"] == []
+
+
+def test_patch_exposure_accepted_once_the_call_path_enforces_policy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route path #2303 restores: with the guard lifted, exposure is written."""
+    from hal0.mcp import installed
+
+    monkeypatch.setattr(installed, "AGENT_CALL_PATH_ENFORCED", True)
+    _install_github(client)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True})
+    assert response.status_code == 200, response.text
+    exposure = response.json()["server"]["exposure"]
+    assert (exposure["hermes"], exposure["brain"]) == (True, False)
+    assert "hermes_sync" in response.json()
 
 
 def test_patch_exposure_openwebui_rejected(client: TestClient) -> None:

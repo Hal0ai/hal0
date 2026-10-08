@@ -50,6 +50,7 @@ from typing import Any
 import structlog
 
 from hal0.config import paths as cfg_paths
+from hal0.mcp import installed as _installed
 from hal0.mcp.installed import InstalledServer, list_enabled_exposed
 from hal0.mcp.probe import build_headers
 
@@ -121,15 +122,35 @@ def _write_manifest(manifest: dict[str, list[str]]) -> None:
         os.chmod(path, 0o600)
 
 
+#: Record ids already logged as skipped by the #2358 guard in this process,
+#: so a sync (two targets) or a boot reconcile logs each record once rather
+#: than on every render. Remove with #2303.
+_unenforced_logged: set[str] = set()
+
+
+def _log_unenforced_once(record: InstalledServer) -> None:
+    if record.id in _unenforced_logged:
+        return
+    _unenforced_logged.add(record.id)
+    log.warning(
+        "hal0.mcp.hermes_join.policy_unenforced",
+        server_id=record.id,
+        targets=[t for t in JOIN_TARGETS if getattr(record.exposure, t)],
+        code=_installed.AGENT_EXPOSURE_UNENFORCED_CODE,
+        reason=_installed.AGENT_EXPOSURE_UNENFORCED_REASON,
+    )
+
+
 def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
     """Desired ``mcp_servers`` entries for ``target`` from the registry.
 
     Only ``streamable-http``/``sse`` records qualify — ``stdio`` has no
     supervisor yet (ADR-0015 "Deferred"), so a stdio record's
     ``exposure.hermes``/``.brain`` is rejected before it ever reaches
-    here (see ``routes/mcp.py``'s ``PATCH /exposure`` handler). A record
-    whose ``[tools]`` policy has ``gated`` or ``blocked`` entries is skipped
-    and logged: nothing on Hermes's call path would enforce them (#2343).
+    here (see ``routes/mcp.py``'s ``PATCH /exposure`` handler). Until
+    hal0 enforces a record's ``[tools]`` policy on Hermes's call path
+    (:data:`hal0.mcp.installed.AGENT_CALL_PATH_ENFORCED`, #2303), every
+    record is skipped and logged once (#2358), so the result is empty.
     """
     entries: dict[str, dict[str, Any]] = {}
     for record in list_enabled_exposed(target=target):
@@ -137,17 +158,12 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
             continue
         if not record.url:
             continue
-        # #2343: Hermes calls `record.url` itself, so nothing enforces a
-        # `gated`/`blocked` entry on its path (#2303). Never join such a
-        # record; an already-joined one is removed by this same sync.
-        if record.unenforced_tool_policy():
-            log.warning(
-                "hal0.mcp.hermes_join.policy_unenforced",
-                server_id=record.id,
-                target=target,
-                gated=sorted(record.tool_policy.gated),
-                blocked=sorted(record.tool_policy.blocked),
-            )
+        # #2358 (Remove with #2303): Hermes calls `record.url` itself, so
+        # hal0 enforces none of this record's [tools] policy there. Never
+        # join a user-installed record; an already-joined one (an upgraded
+        # box) is removed by this same sync, or by the startup reconcile.
+        if not _installed.AGENT_CALL_PATH_ENFORCED:
+            _log_unenforced_once(record)
             continue
         # #2304: a record that would send header values in clear text only
         # loads with the explicit `allow_insecure_http` opt-in — say so on

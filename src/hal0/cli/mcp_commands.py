@@ -25,6 +25,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -341,6 +342,7 @@ def test_cmd(
                 border_style="red",
             )
         )
+        _print_agent_exposure(result)
         return
 
     verdicts: dict[str, str] = result.get("verdicts", {})
@@ -357,6 +359,23 @@ def test_cmd(
     for tool in probe.get("tools", []):
         table.add_row(tool, verdict_style.get(verdicts.get(tool, ""), verdicts.get(tool, "—")))
     console.print(table)
+    _print_agent_exposure(result)
+
+
+def _print_agent_exposure(result: dict[str, Any]) -> None:
+    """Say why ``hal0 mcp expose --hermes/--brain`` is unavailable (#2358).
+
+    Remove with #2303, together with the route's ``agent_exposure`` field.
+    """
+    status = result.get("agent_exposure") or {}
+    if status.get("available", True):
+        return
+    console.print(
+        f"[yellow]![/yellow] hermes/brain exposure unavailable "
+        f"([dim]{escape(str(status.get('code', '')))}[/dim]): "
+        f"{escape(str(status.get('reason', '')))}",
+        soft_wrap=True,
+    )
 
 
 # ── `hal0 mcp allow|gate|block` (ADR-0015) ───────────────────────────────────
