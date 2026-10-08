@@ -248,6 +248,17 @@ applying. Add those subsections to a version's section to surface them; see
   also benchmarks that model, not whichever `model.gguf` the registry
   listed first (#2346).
 
+- **`make harness` no longer reports `harness OK` when it never loaded a
+  slot.** The δ harness installs with `--dev`, where `hal0 slot load` cannot
+  start a systemd slot unit, so `runtime-slot-load` is recorded `deferred`
+  and the chat round-trip is skipped — yet `scripts/harness.sh` counted only
+  `fail` rows and printed a bare `harness OK`. A deferred slot load now fails
+  the run unless it is allowed with `--allow-deferred` or
+  `HAL0_HARNESS_ALLOW_DEFERRED=1`, and an allowed run names the unverified
+  rows on its OK line. The report schema and row names are unchanged. γ
+  (`make release-test`) remains the tier that loads real slots; making
+  `--dev` slot load work is #2377. (#2349)
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was

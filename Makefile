@@ -32,7 +32,7 @@ help:
 	@echo "    make ui-build             Production UI build"
 	@echo "    make clean                Remove caches"
 	@echo ""
-	@echo "  Local harness (full install -> CLI -> slot -> uninstall)"
+	@echo "  Local harness (dev install -> CLI -> uninstall; slot load is deferred, see #2377)"
 	@echo "    make harness              Drive every public surface on this host"
 	@echo "    make harness-report       Pretty-print last harness run"
 	@echo "    make harness-clean        Drop tests/harness/reports/"

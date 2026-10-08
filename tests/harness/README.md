@@ -1,8 +1,12 @@
 # hal0 test harness — internal contributor guide
 
-End-to-end harness for hal0. Drives install → CLI → slot lifecycle →
-uninstall on the local host (and optionally on the `hal0-test` LXC via
-the existing `scripts/release-test.sh`). Emits one structured JSON
+End-to-end harness for hal0. Drives a `--dev` install → CLI → dev-prefix
+cleanup on the local host (and optionally on the `hal0-test` LXC via
+the existing `scripts/release-test.sh`). It does **not** cover the slot
+lifecycle: under `--dev` a slot cannot be loaded, so the slot-load row is
+`deferred` and the harness fails unless you allow that explicitly (§2).
+γ (`make release-test`) is the tier that loads real slots; making `--dev`
+slot load work is #2377. Emits one structured JSON
 row per scenario; a fail flags one specific surface, not the whole
 pipeline.
 
@@ -26,7 +30,11 @@ covers the developer's first-five-minutes journey**: does
 dev prefix removed. The real `uninstall.sh` has no `--dev` mode, so it is
 recorded `deferred` and only runs with `HAL0_HARNESS_PROD=1`. It also attempts a slot load → chat round-trip,
 but under `--dev` the slot unit cannot start, so that row is recorded
-`deferred` and the harness still exits 0 (#2349).
+`deferred`, the chat row is skipped, and the harness **fails** unless the
+run allows it with `--allow-deferred` or `HAL0_HARNESS_ALLOW_DEFERRED=1`
+(#2349). Even an allowed run names those rows on its `harness OK` line.
+δ does not verify the slot lifecycle; γ does (#2377 tracks `--dev` slot
+load).
 
 The δ tier is the one a contributor runs after touching `installer/`,
 `src/hal0/cli/`, or any user-facing surface. It is the fastest way to
@@ -41,8 +49,18 @@ bash scripts/harness.sh
 ```
 
 Output is a colourised table + a JSON report at
-`tests/harness/reports/harness.json`. Exit code 0 iff no row is
-`fail`.
+`tests/harness/reports/harness.json`. The exit code is 1 if any row is
+`fail`, or if the slot-lifecycle rows (`runtime-slot-load`, and the
+`runtime-chat-roundtrip` it gates) were left unverified by a `deferred`
+slot load and the run did not allow it. That is the normal outcome of a
+`--dev` run today, so a contributor checking install + CLI runs:
+
+```
+bash scripts/harness.sh --allow-deferred          # or HAL0_HARNESS_ALLOW_DEFERRED=1 make harness
+```
+
+which ends `harness OK — slot lifecycle not verified (allowed): …` rather
+than a bare `harness OK`. `scripts/harness-gate.py` makes this decision.
 
 Opt-in flags:
 
@@ -50,6 +68,7 @@ Opt-in flags:
 HAL0_HARNESS_PROD=1  bash scripts/harness.sh     # also do sudo /opt/hal0 install + uninstall
 HAL0_HARNESS_TLS=1   HAL0_HARNESS_PROD=1  bash scripts/harness.sh   # +TLS-default Caddy install (per ADR-0001)
 HAL0_HARNESS_KEEP=1  bash scripts/harness.sh     # keep tmp prefix after run for debugging
+HAL0_HARNESS_ALLOW_DEFERRED=1  bash scripts/harness.sh   # same as --allow-deferred: accept a deferred slot load
 ```
 
 Per-tier scripts are runnable standalone (useful when iterating on
@@ -80,7 +99,7 @@ is reserved for **defects in hal0**.
 | `pass`     | The thing worked. |
 | `fail`     | A real bug in hal0 — the harness exits non-zero if any row is `fail`. |
 | `skip`     | Scenario intentionally not exercised this run (e.g. TLS-default install without `HAL0_HARNESS_TLS=1`). Also for dependent rows after an upstream row already failed. |
-| `deferred` | The capability exists but can't be tested in this environment, **and that's not hal0's fault** — releases.hal0.dev DNS, disk space, toolbox image not yet public, etc. Distinct from `skip` so `FINDINGS.md` can list them separately. |
+| `deferred` | The capability exists but can't be tested in this environment, **and that's not hal0's fault** — releases.hal0.dev DNS, disk space, toolbox image not yet public, etc. Distinct from `skip` so `FINDINGS.md` can list them separately. A deferred `runtime-slot-load` fails the run unless allowed (§2); other deferred rows do not. |
 
 Rule of thumb: if a green CI machine with the right env vars would
 make this row pass, it's a `skip`. If the underlying capability isn't
@@ -94,6 +113,7 @@ ready yet at all, it's `deferred`.
 scripts/
   harness.sh              # orchestrator — runs all four tiers, merges reports, exit code
   harness-report.py       # pretty-printer for the aggregate JSON
+  harness-gate.py         # exit-code decision (fail rows + deferred slot lifecycle, #2349)
   release-test.sh         # γ tier (pre-existing) — SSH to hal0-test LXC
   release-test-report.py  # γ tier pretty-printer (pre-existing)
 
@@ -313,6 +333,7 @@ hand or re-run `installer-test.sh` first.
 | `HAL0_HARNESS_PROD=1` | Enable rows that mutate `/etc`, `/var/lib`, `/usr/lib` via real `sudo bash installer/install.sh` and `installer/uninstall.sh`. | `installer-test.sh:prod-no-start`, `harness-cleanup.sh:prod-uninstall` |
 | `HAL0_HARNESS_TLS=1` | Enable the TLS-default install (installs Caddy + renders the Caddyfile per [ADR-0001](../../docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md); renamed from `HAL0_HARNESS_AUTH` when Caddy stopped doing edge auth). Implies PROD=1. | `installer-test.sh:tls-default` |
 | `HAL0_HARNESS_KEEP=1` | When running `installer-test.sh` standalone, keep the tmp prefix after exit. No effect through the orchestrator (orchestrator always cleans). | `installer-test.sh` |
+| `HAL0_HARNESS_ALLOW_DEFERRED=1` | Accept a run whose `runtime-slot-load` row was `deferred` (always the case under `--dev`, #2377). Same as `scripts/harness.sh --allow-deferred`. The OK line still names the unverified slot-lifecycle rows. | `scripts/harness-gate.py` |
 | `HAL0_HARNESS_API_PORT=<n>` | Port `hal0 serve` binds during the install test (default 18080). | `installer-test.sh:dev-api-up` |
 | `HAL0_DOCTOR_PORTS="<p1> <p2>..."` | Space-separated TCP ports `hal0 doctor`'s port-collision check probes. Defaults to `"18080 13001"` inside `cli-test.sh` so the row doesn't trip on a co-resident prod install bound to the canonical `8080 3001`. Override to match your dev install if non-default. | `cli-test.sh:cli-doctor` |
 
