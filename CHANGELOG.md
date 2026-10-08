@@ -346,6 +346,13 @@ applying. Add those subsections to a version's section to surface them; see
   worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
   sync callers such as the CLI are unchanged.
 
+- **An FLM pull runs `flm list -j` once, not once per progress tick**
+  (#2379). While a pull's install path was unresolved, every progress tick
+  (about once a second) re-ran the uncached `flm list -j` probe, for the
+  whole download when a tag's path never resolves. The pull now keeps the
+  first non-empty `flm list` answer for its lifetime and probes again only
+  while the answer is empty.
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
