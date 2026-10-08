@@ -323,7 +323,7 @@ def _resolve_image_ref(
       2. ``[slots].default_images[<family>]`` — the per-family operator
          override (runner-image-catalogue v2), keyed by the effective
          runner's :data:`~hal0.runners.RUNNER_IMAGES` key and read live via
-         :func:`_slot_default_images`. Sits ABOVE the whole
+         :func:`hal0.providers._image.operator_default_image`. Sits ABOVE the whole
          :func:`hal0.runners.resolve_runner_image` chain (env var / manifest
          pin / baked default): a default the operator set in the UI is
          box-wide intent, only the per-slot ``image_pin`` outranks it.
@@ -350,17 +350,15 @@ def _resolve_image_ref(
             return pin  # escape hatch — honored verbatim, never re-resolved
 
     # image_default = RUNNER_IMAGES[slot.BINARY] (or the HW-gated default).
-    from hal0.runners import canonical_family, resolve_runner_image
+    from hal0.providers._image import operator_default_image
+    from hal0.runners import resolve_runner_image
 
     runner = _effective_runner(slot_cfg, profile)
-    defaults_map = _slot_default_images()
     # Exact key first (an existing ``vulkanfpx`` override keeps working
     # during deprecation), then the canonical family (runner-image-catalogue
-    # v3, task 11) — ``vulkanfpx`` shares DEFAULT_ROCMFPX_IMAGE with
-    # ``rocmfpx``, so an override set under the canonical ``rocmfpx`` key
-    # also applies when the effective runner is the ``vulkanfpx`` alias.
-    override = defaults_map.get(runner.key) or defaults_map.get(canonical_family(runner.key))
-    if isinstance(override, str) and override:
+    # v3, task 11). Shared with the non-llama providers (#2234).
+    override = operator_default_image(runner.key)
+    if override is not None:
         return override  # [slots].default_images — operator family default
     return resolve_runner_image(runner)
 
@@ -563,27 +561,6 @@ def _slot_publish_host() -> str:
     except Exception:
         log.warning("container.publish_host_load_failed", exc_info=True)
         return "127.0.0.1"
-
-
-def _slot_default_images() -> Mapping[str, str]:
-    """Live ``[slots].default_images`` — per-family operator image overrides.
-
-    Runner-image-catalogue v2: an operator can point a runner family (a
-    ``hal0.runners.RUNNER_IMAGES`` key) at a specific image ref from the
-    runner-images page; :func:`_resolve_image_ref` honors it for every slot
-    of that family that carries no ``image_pin``. Read fresh each resolve —
-    same idiom as :func:`_slot_publish_host` — so a Settings change lands on
-    the next slot (re)start without an api process bounce. Fail-soft to ``{}``:
-    a malformed/unreadable hal0.toml must never wedge a slot launch.
-    """
-    try:
-        from hal0.config.loader import load_hal0_config
-
-        overrides = load_hal0_config().slots.default_images
-        return overrides if isinstance(overrides, Mapping) else {}
-    except Exception:
-        log.warning("container.default_images_load_failed", exc_info=True)
-        return {}
 
 
 def _slot_network_mode() -> str:

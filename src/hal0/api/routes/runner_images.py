@@ -263,7 +263,7 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
     tiers WITHOUT calling it (that function only knows env → manifest →
     release; the ``[slots].default_images`` override sits ABOVE all three —
     it's what a slot actually launches with when set, same live-read idiom as
-    ``hal0.providers.container._slot_default_images``, a Settings save lands
+    ``hal0.providers._image.slot_default_images``, a Settings save lands
     on the next request):
 
       1. ``override`` — ``[slots].default_images[key]``.

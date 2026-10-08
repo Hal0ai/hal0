@@ -186,7 +186,13 @@ class ComfyUIProvider(Provider):
           2. ``slot_cfg["image"]`` — the pre-pin explicit override from
              slot TOML (still honored; the migration lane folds it into
              ``image_pin``).
-          3. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
+          3. ``[slots].default_images["comfyui"]`` — the operator family
+             default, the same middle tier
+             :func:`hal0.providers.container._resolve_image_ref` honors
+             (#2234 — previously skipped here). Below the two per-slot
+             tiers above: a box-wide default never outranks a slot's own
+             override.
+          4. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
              runner: ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var →
              ``manifest.json`` digest pin → the fallback tag
              ``ghcr.io/hal0ai/hal0-comfyui:latest``.
@@ -197,11 +203,10 @@ class ComfyUIProvider(Provider):
         into :func:`~hal0.runners.resolve_runner_image` (best-effort — a
         missing/stale manifest never breaks the provider).
         """
-        pin: Any = slot_cfg.get("image_pin")
-        if not (isinstance(pin, str) and pin):
-            nested = slot_cfg.get("slot")
-            pin = nested.get("image_pin") if isinstance(nested, dict) else None
-        if isinstance(pin, str) and pin:
+        from hal0.providers._image import resolve_family_image, slot_image_pin
+
+        pin = slot_image_pin(slot_cfg)
+        if pin is not None:
             return pin
 
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
@@ -212,9 +217,7 @@ class ComfyUIProvider(Provider):
         if isinstance(override, str) and override:
             return override
 
-        from hal0.runners import get_runner, resolve_runner_image
-
-        return resolve_runner_image(get_runner("comfyui"))
+        return resolve_family_image(slot_cfg, "comfyui")
 
     def _profile_flags(self, slot_cfg: dict[str, Any]) -> str:
         """Resolve the slot's profile to its flag bundle.

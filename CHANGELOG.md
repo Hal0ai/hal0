@@ -191,6 +191,13 @@ applying. Add those subsections to a version's section to surface them; see
   connecting an account needed `hal0 oauth`. It now lives at
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
+- **A Runner Images default for the voice, speech, NPU and image-generation
+  families now takes effect.** `[slots].default_images` accepts `comfyui`,
+  `flm`, `kokoro`, `moonshine` and `qwen3tts`, and the dashboard reported the
+  override as in effect, but only llama slots read it; those five providers
+  still launched the registry default. They now resolve their image in the
+  same order as llama slots — slot `image_pin`, then the family default, then
+  the registry default — through one shared helper. (#2234)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
