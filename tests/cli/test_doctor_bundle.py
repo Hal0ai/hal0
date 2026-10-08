@@ -216,6 +216,55 @@ def test_bundle_includes_the_latest_install_log_redacted(
     assert "logs/" in manifest["sections"]
 
 
+def test_bundle_surfaces_install_artifacts_and_copies_the_failure_report(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2307: the manifest's ``install_artifacts`` names the latest install
+    log and failure report (what a HAL0-INSTALL-* diagnosis keys off), and
+    the report itself lands in logs/, redacted once more on the way in."""
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    log = log_dir / "install-20261008-000000.log"
+    log.write_text("run\n")
+    report = log_dir / "hal0-install-report-20261008-000001.txt"
+    report.write_text("Phase: Service start\nHAL0_CLIENT_KEY=h0c_leaked_value_123\n")
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+    monkeypatch.setattr(
+        doctor_bundle,
+        "_INSTALL_REPORT_GLOBS",
+        ((str(log_dir), "hal0-install-report-*.txt"),),
+    )
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    artifacts = manifest["install_artifacts"]
+    assert artifacts["install_log"]["path"] == str(log)
+    assert artifacts["failure_report"]["path"] == str(report)
+    assert artifacts["failure_report"]["mtime_utc"].endswith("Z")
+
+    dest = out / "logs" / "install-failure-report.txt"
+    body = dest.read_text()
+    assert "Phase: Service start" in body
+    assert "h0c_leaked_value_123" not in body
+
+
+def test_bundle_install_artifacts_are_null_when_none_exist(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nowhere = str(tmp_path / "nowhere")
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((nowhere, "install-*.log"),))
+    monkeypatch.setattr(
+        doctor_bundle, "_INSTALL_REPORT_GLOBS", ((nowhere, "hal0-install-report-*.txt"),)
+    )
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert manifest["install_artifacts"] == {"install_log": None, "failure_report": None}
+    assert not (out / "logs" / "install-failure-report.txt").exists()
+
+
 def test_bundle_with_no_install_log_present_writes_nothing_for_it(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

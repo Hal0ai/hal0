@@ -18,7 +18,8 @@ Layout (see the module's :func:`build_bundle` docstring + spec-21-4-doctor.md
     │                      # best-effort GET /api/{models,slots,hardware,
     │                      # system-info,stats}
     ├── logs/              # journalctl captures (best-effort; absent on a
-    │                      # systemd-less box like this dev sandbox)
+    │                      # systemd-less box like this dev sandbox), plus the
+    │                      # latest install log and installer failure report
     └── doctor-summary.txt # the rich `doctor verify` report, as plain text
 
 No upload — the bundle is written to local disk only (§3.3). No
@@ -444,6 +445,7 @@ def _write_logs_section(out: Path, *, lines: int = 500) -> list[str]:
         _run_one(argv, dest)
         captured.append(f"logs/{unit}.log")
     captured += _write_install_log(out)
+    captured += _write_install_report(out)
     return captured
 
 
@@ -457,15 +459,68 @@ _INSTALL_LOG_GLOBS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _latest_install_log() -> Path | None:
+#: Where installer/lib/failure-report.sh writes hal0-install-report-<ts>.txt
+#: on an aborted install — next to the install log, so the same two dirs.
+_INSTALL_REPORT_GLOBS: tuple[tuple[str, str], ...] = (
+    ("/var/log/hal0", "hal0-install-report-*.txt"),
+    ("/tmp", "hal0-install-report-*.txt"),
+)
+
+
+def _latest_match(globs: tuple[tuple[str, str], ...]) -> Path | None:
     candidates: list[Path] = []
-    for directory, pattern in _INSTALL_LOG_GLOBS:
+    for directory, pattern in globs:
         d = Path(directory)
         if d.is_dir():
             candidates.extend(d.glob(pattern))
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _latest_install_log() -> Path | None:
+    return _latest_match(_INSTALL_LOG_GLOBS)
+
+
+def _install_artifacts() -> dict[str, dict[str, str] | None]:
+    """The manifest's ``install_artifacts`` surface (#2307): the newest
+    install log and installer failure report on this box, or ``None`` for
+    each that is absent. A ``HAL0-INSTALL-*`` diagnosis keys off this."""
+
+    def _describe(path: Path | None) -> dict[str, str] | None:
+        if path is None:
+            return None
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        return {"path": str(path), "mtime_utc": mtime.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    return {
+        "install_log": _describe(_latest_install_log()),
+        "failure_report": _describe(_latest_match(_INSTALL_REPORT_GLOBS)),
+    }
+
+
+def _write_install_report(out: Path) -> list[str]:
+    """Copy the newest installer failure report into the bundle.
+
+    The installer already redacts it (installer/lib/failure-report.sh); it
+    is scrubbed again here with :func:`hal0.redaction.redact_log_line` so a
+    report from an older installer cannot carry a ``*_KEY=`` value in.
+    The report is 0600 root-owned: an unreadable one is skipped, not fatal.
+    """
+    from hal0.redaction import redact_log_line
+
+    src = _latest_match(_INSTALL_REPORT_GLOBS)
+    if src is None:
+        return []
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    dest = out / "logs" / "install-failure-report.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    redacted = "\n".join(redact_log_line(line) for line in text.splitlines())
+    dest.write_text(_redact_text(redacted) + "\n")
+    return ["logs/install-failure-report.txt"]
 
 
 def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
@@ -554,6 +609,7 @@ def build_bundle(
         "redaction_policy": _REDACTION_POLICY,
         "command_count": len(tsv_rows),
         "failed_probe_count": failed,
+        "install_artifacts": _install_artifacts(),
     }
     _write_json(out / "manifest.json", manifest)
     return out, failed
