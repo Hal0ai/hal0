@@ -206,6 +206,40 @@ def test_apply_dry_run_shows_diff(tmp_hal0_home: str) -> None:
     assert row["changed"] is True
 
 
+def test_apply_dry_run_lists_running_slots_it_will_unload(app: FastAPI, tmp_hal0_home: str) -> None:
+    """#1511: apply is a declarative replace, so the preview must say what it tears down."""
+    from types import SimpleNamespace
+
+    from hal0.slots.state import SlotState
+
+    _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
+    with TestClient(app) as c:
+        c.post(
+            "/api/stacks",
+            json={
+                "slug": "coding",
+                "stack": _stack_body(slots=[{"slot": "agent", "model": "new-model"}]),
+            },
+        )
+        fake_sm = AsyncMock()
+        fake_sm.list = AsyncMock(
+            return_value=[
+                SimpleNamespace(name="agent", state=SlotState.READY, model_id="old-model"),
+                SimpleNamespace(name="coder", state=SlotState.READY, model_id="qwen"),
+                SimpleNamespace(name="img", state=SlotState.OFFLINE, model_id=None),
+            ]
+        )
+        app.state.slot_manager = fake_sm
+        app.state.capability_orchestrator = AsyncMock()
+
+        r = c.post("/api/stacks/coding/apply", params={"dry_run": "true"})
+    assert r.status_code == 200
+    assert r.json()["unloads"] == ["coder"]
+    # A preview never touches runtime.
+    fake_sm.unload.assert_not_awaited()
+    fake_sm.load.assert_not_awaited()
+
+
 # ── apply (commit + converge with injected fakes) ──────────────────────────────
 
 

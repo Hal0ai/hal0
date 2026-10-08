@@ -428,7 +428,9 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
     cfg = _config_of(resolved)
 
     if dry_run:
-        engine = StackApplyEngine()
+        # The slot manager is read-only here: it only feeds the ``unloads``
+        # preview (one list() snapshot). Nothing is created, loaded or unloaded.
+        engine = StackApplyEngine(slot_manager=getattr(request.app.state, "slot_manager", None))
         plan = engine.plan(slug, cfg)
         return {
             "stack": slug,
@@ -437,6 +439,9 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
             "changes": _diff_rows(plan),
             # Slots the stack names that don't exist yet — apply will create them.
             "creates": _missing_slot_names(cfg),
+            # Running slots the stack doesn't name — apply is a declarative
+            # replace, so converge will unload them (#1511).
+            "unloads": await engine.planned_unloads(cfg),
             # Profile/model refs that won't resolve on this host (silent divergence).
             "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
         }
