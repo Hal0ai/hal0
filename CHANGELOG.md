@@ -26,6 +26,32 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-08
+
+### Highlights
+
+- **Memory writes that were silently lost now land, or are refused
+  honestly.** Hindsight's extraction ran with its own defaults (32
+  concurrent calls, 64000 tokens) on a slot that serves one request at a
+  time, so on a slow box `POST /api/memory/add` returned 200 and nothing was
+  stored. Extraction now has operator-set limits under `[memory.graph]`
+  (Settings ▸ Memory), and a write whose extraction slot is too small for
+  the prompt is refused up front, over REST and `/mcp/memory` alike.
+  (#1834, #1903, #1930)
+- **Open WebUI works with auth on, and a lost admin key is recoverable.**
+  The installer mints a client key and Open WebUI presents it to hal0's
+  `/v1` (per connection, never to another service); `hal0 auth rotate
+  client` re-points it. `sudo hal0 auth reset-key` mints and prints a new
+  admin key, live or with the API down. (#2314)
+- **Open WebUI is fully pre-wired.** Document uploads go through RAG on
+  hal0's embeddings and the image button generates through ComfyUI as soon
+  as the matching slots are bound. (#2256)
+- **Installs leave evidence.** Every run writes an owner-only log, and a
+  failed run writes a redacted failure report you can attach to an issue.
+  (#2243, #2307)
+- **Loading a stack says what it will unload** before you confirm, and the
+  result names what was stopped. (#1511)
+
 ### Breaking
 
 - **Exposing a user-installed MCP server to Hermes or the brain profile is

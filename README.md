@@ -31,15 +31,18 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.3.0 is the current stable release.** A minor release: new
+> **v1.4.0 is the current stable release.** A minor release: new
 > functionality, no config-schema migration, and an ordinary `hal0 update`
-> from any 1.x box. It does carry breaking changes — most visibly, on a box
-> that has an admin key configured and binds past loopback, off-box callers
-> must now send that key on ADMIN-class routes. Read the v1.3.0 **Breaking**
-> notes in [CHANGELOG.md](CHANGELOG.md) before upgrading. The project has
-> followed semver proper since v1.0.0. If you are still on 0.9.8, read
-> [Upgrading from 0.9.8](#upgrading-from-098) first — that hop has three
-> specific gotchas.
+> from any 1.x box. Two changes can break a script or a setup: `hal0 update`
+> now restarts slots whose runner image changed and exits 2 while any still
+> run the old one, and exposing a user-installed MCP server to Hermes or the
+> brain profile is refused until hal0 enforces its tool policy. After
+> updating, re-run the installer once to pick up the new Hindsight limits,
+> the Open WebUI client key and the Hermes wrappers. Read the v1.4.0
+> **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
+> first. The project has followed semver proper since v1.0.0. If you are
+> still on 0.9.8, read [Upgrading from 0.9.8](#upgrading-from-098) first —
+> that hop has three specific gotchas.
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
