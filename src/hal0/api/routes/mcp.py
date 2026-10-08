@@ -1139,8 +1139,13 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
         )
     # #2343: Hermes calls the upstream directly, so a gated or blocked tool
     # would be callable unenforced (#2303). Refuse turning a join on; turning
-    # one off stays allowed, and the join itself skips such records.
-    turning_on = [t for t in ("hermes", "brain") if t in body and getattr(exposure, t)]
+    # one off stays allowed, and the join itself skips such records. Only a
+    # false → true change counts: echoing an already-on target alongside a
+    # withdrawal is narrowing, not turning anything on.
+    previous = record.exposure
+    turning_on = [
+        t for t in ("hermes", "brain") if getattr(exposure, t) and not getattr(previous, t)
+    ]
     unenforced = record.unenforced_tool_policy()
     if turning_on and unenforced:
         raise Conflict(

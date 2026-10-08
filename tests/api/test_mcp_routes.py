@@ -1063,6 +1063,19 @@ def test_patch_exposure_can_still_turn_off_an_unenforced_record(client: TestClie
     assert response.json()["server"]["exposure"]["hermes"] is False
 
 
+def test_patch_exposure_withdrawing_one_target_resends_the_other(client: TestClient) -> None:
+    """A body that withdraws one target while echoing the other's current
+    ``true`` (as a toggle UI sends) is narrowing, not turning anything on."""
+    _install_github(client)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
+    assert response.status_code == 200, response.text
+    assert client.patch("/api/mcp/github/tools", json={"gated": ["create_pr"]}).status_code == 200
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": False, "brain": True})
+    assert response.status_code == 200, response.text
+    exposure = response.json()["server"]["exposure"]
+    assert (exposure["hermes"], exposure["brain"]) == (False, True)
+
+
 def test_patch_tools_gating_an_exposed_server_drops_its_join(client: TestClient) -> None:
     """Already exposed, then a tool is blocked: the sync the PATCH runs takes
     it out of the join rather than leaving it with Hermes unenforced."""
