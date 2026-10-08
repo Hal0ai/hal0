@@ -618,8 +618,9 @@ def _apply_client_key(
     gone), a value hal0 wrote earlier falls back to the placeholder, and
     ``OPENAI_API_KEYS``, which ships no default, is dropped. A key whose base
     URL points elsewhere, or that the operator set by hand, is never touched:
-    once the URL leaves hal0, hal0 withdraws only a value that still equals
-    the client key it wrote. ``OPENAI_API_KEYS`` with more than one
+    once the URL leaves hal0, hal0 withdraws only a value it wrote itself (the
+    current client key, or the one before a rotation by its fingerprint).
+    ``OPENAI_API_KEYS`` with more than one
     connection is keyed entry by entry, see :func:`_apply_chat_keys`.
     """
     for key_var, url_var in _CLIENT_KEY_TARGETS:
@@ -637,7 +638,8 @@ def _apply_client_key(
                 # service's own key; only hal0's own value is withdrawn. The
                 # chat key ships no default, so with the client key gone the
                 # single hal0-bound connection hal0 wrote is dropped.
-                if env_vars[key_var] == client_key or points_at_hal0:
+                written = _written_by_hal0(env_vars[key_var], client_key, previous_fingerprint)
+                if written or points_at_hal0:
                     env_vars.pop(key_var)
                 managed.discard(key_var)
             else:
@@ -646,6 +648,14 @@ def _apply_client_key(
                 # plain shipped defaults again.
                 if key_var != "RAG_OPENAI_API_KEY":
                     managed.discard(key_var)
+
+
+def _written_by_hal0(value: str, client_key: str | None, previous_fingerprint: str | None) -> bool:
+    """Whether *value* is a client key hal0 wrote: the current one, or the
+    one the previous render recorded by fingerprint (so a rotation is seen)."""
+    if client_key and value == client_key:
+        return True
+    return previous_fingerprint is not None and _key_fingerprint(value) == previous_fingerprint
 
 
 def _is_chat_list(env_vars: dict[str, str]) -> bool:
@@ -681,9 +691,7 @@ def _apply_chat_keys(
     entries += [_PLACEHOLDER_KEY] * (len(urls) - len(entries))
 
     def written_by_hal0(entry: str) -> bool:
-        if client_key and entry == client_key:
-            return True
-        return previous_fingerprint is not None and _key_fingerprint(entry) == previous_fingerprint
+        return _written_by_hal0(entry, client_key, previous_fingerprint)
 
     out: list[str] = []
     for i, entry in enumerate(entries):

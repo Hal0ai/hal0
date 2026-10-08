@@ -120,6 +120,24 @@ def test_key_written_before_repoint_is_withdrawn(tmp_path: Path) -> None:
     assert "AUDIO_STT_OPENAI_API_KEY" not in env
 
 
+def test_old_key_on_url_repointed_before_rotation_is_withdrawn(tmp_path: Path) -> None:
+    """The operator re-points STT by hand, then the client key rotates before
+    hal0 renders again: the old key must not be sent to the new service."""
+    target = _with_api_env(tmp_path, "HAL0_CLIENT_KEY=old-key\n")
+    write_openwebui_env(target, preserve_existing=True)
+    _repoint(
+        target,
+        "AUDIO_STT_OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1",
+        "AUDIO_STT_OPENAI_API_BASE_URL=https://stt.example.com/v1",
+    )
+    (tmp_path / "api.env").write_text(f"HAL0_CLIENT_KEY={CLIENT_KEY}\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    env = _parse(target)
+    assert "old-key" not in target.read_text(encoding="utf-8")
+    assert "AUDIO_STT_OPENAI_API_KEY" not in env
+    assert env["AUDIO_TTS_OPENAI_API_KEY"] == CLIENT_KEY
+
+
 def test_key_removed_from_box_falls_back_to_placeholder(tmp_path: Path) -> None:
     target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
     write_openwebui_env(target, preserve_existing=True)
