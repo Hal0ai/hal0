@@ -28,6 +28,33 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **Memory extraction has limits now, and they are yours to set.** The
+  Hindsight extraction LLM runs on a shared hal0 inference slot — usually one
+  llama-server serving one request at a time — but ran with Hindsight's own
+  defaults: 32 concurrent calls, 64000 completion tokens per call, and three
+  retries at each of two layers. On a slow box one extraction that could not
+  finish inside the LLM timeout held the slot, timed out, requeued itself and
+  took the whole retain queue with it; every `POST /api/memory/add` returned
+  200 and nothing was ever stored (#1834). `[memory.graph]` gains
+  `extraction_max_concurrent` (default 1), `extraction_max_tokens` (4096),
+  `extraction_llm_retries` (1), `extraction_task_retries` (2) and
+  `extraction_retry_backoff_s` (120). They ride the same hindsight-api
+  drop-in as the extraction slot and timeout, are echoed by
+  `GET /api/memory/graph/status` as `extraction_limits`, are editable on
+  Settings ▸ Data ▸ Memory under **Extraction limits**, and the shipped
+  `hindsight-api.service` carries the same values so a fresh install is
+  capped before anything is saved. A document that still cannot be extracted
+  now ends under **Retry failed** instead of occupying the slot for hours.
+  The two task-retry knobs are Hindsight's worker-wide settings and apply to
+  every queued memory operation, not only extraction; the generic
+  `PUT /api/settings` now refuses `memory.graph.*` keys with a pointer to
+  `PUT /api/memory/graph`, the one writer that applies them; and
+  `install.sh` restarts a running hindsight-api when it replaces the unit.
+  The root-side drop-in validator (`hal0-systemctl`) learned the five
+  variables; a box updated through `hal0 update` keeps its installed wrapper
+  until `install.sh` is re-run, and until then saving a limit reports the
+  wrapper as stale rather than applying.
+
 - **"Remember me" at login.** Ticking it on the dashboard login (or the
   in-app sign-in drawer) asks for a 30-day session instead of the 8-hour
   default: `POST /api/auth/login` accepts `"remember": true` and reports the

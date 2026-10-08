@@ -41,7 +41,18 @@ class TestMemoryGraphDefaults:
     def test_legacy_route_upstream_keys_are_no_longer_emitted(self) -> None:
         """The dumped block carries only the ADR-0023 fields."""
         dumped = MemoryGraphConfig().model_dump()
-        assert set(dumped) == {"enabled", "extraction_slot", "llm_timeout_s"}
+        assert set(dumped) == {
+            "enabled",
+            "extraction_slot",
+            "llm_timeout_s",
+            # #1834 extraction limits
+            "extraction_max_concurrent",
+            "extraction_max_tokens",
+            "extraction_llm_retries",
+            "extraction_task_retries",
+            "extraction_retry_backoff_s",
+        }
+        assert "route" not in dumped and "upstream" not in dumped
 
 
 class TestExtractionSlotGrammar:

@@ -2646,6 +2646,75 @@ class MemoryGraphConfig(BaseModel):
             "extraction slot; the daemon restarts to pick it up."
         ),
     )
+    # Extraction limits (#1834). The extraction slot is a shared inference
+    # slot, usually one llama-server with --parallel 1; unbounded extraction
+    # (hindsight's own defaults: 32 concurrent LLM calls, 64000 completion
+    # tokens, 3 retries at each of two layers) saturates it and the retain
+    # queue never drains. Each knob maps 1:1 onto a hindsight-api env var in
+    # the drop-in hal0 already owns; the ranges below are also what the
+    # root-side drop-in validator (installer/wrappers/hal0-systemctl) accepts.
+    extraction_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description=(
+            "How many extraction LLM calls Hindsight may have in flight at once "
+            "against the extraction slot (HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). "
+            "1 serialises them, which is right for a single llama-server; raise it "
+            "only for a slot that genuinely serves parallel requests. Applied via "
+            "the hindsight-api drop-in; the daemon restarts to pick it up."
+        ),
+    )
+    extraction_max_tokens: int = Field(
+        default=4096,
+        ge=3072,
+        le=32768,
+        description=(
+            "Completion-token cap per extraction call "
+            "(HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS). Bounds how long one "
+            "call can run; the floor stays above Hindsight's retain chunk size "
+            "(3000), which it refuses to start without. Applied via the "
+            "hindsight-api drop-in; the daemon restarts to pick it up."
+        ),
+    )
+    extraction_llm_retries: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description=(
+            "Retries of a single extraction LLM call inside one retain attempt "
+            "(HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES). Each retry can wait the full "
+            "LLM timeout. Applied via the hindsight-api drop-in; the daemon "
+            "restarts to pick it up."
+        ),
+    )
+    extraction_task_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description=(
+            "How many times a failed queued memory task is requeued before it is "
+            "marked failed (HINDSIGHT_API_WORKER_MAX_RETRIES) and shows under "
+            "'Retry failed' on the Memory page. Bounds the total time one document "
+            "can occupy the slot. This is Hindsight's worker-wide setting: it "
+            "applies to every queued operation (retain, consolidation, "
+            "mental-model refresh), not only extraction. Applied via the "
+            "hindsight-api drop-in; the daemon restarts to pick it up."
+        ),
+    )
+    extraction_retry_backoff_s: int = Field(
+        default=120,
+        ge=10,
+        le=3600,
+        description=(
+            "Seconds a failed queued memory task waits before it is requeued "
+            "(HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS), so a retry does "
+            "not land on a slot that is still busy with the attempt that just "
+            "timed out. Worker-wide like extraction_task_retries: every queued "
+            "operation shares it. Applied via the hindsight-api drop-in; the "
+            "daemon restarts to pick it up."
+        ),
+    )
 
     @field_validator("extraction_slot")
     @classmethod

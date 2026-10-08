@@ -253,6 +253,10 @@ export interface MemoryGraphStatus {
   // Hindsight daemon LLM timeout ([memory.graph].llm_timeout_s) — echoed by
   // the status route so the settings panel can edit it in one round trip.
   llm_timeout_s?: number
+  // #1834 extraction limits ([memory.graph].extraction_*), echoed by the
+  // status route for the same reason. Keys are the ExtractionLimits names on
+  // the server; the PUT takes them as the schema's extraction_* fields.
+  extraction_limits?: MemoryExtractionLimits
   in_flight: number
   builds_ok: number
   errors: number
@@ -260,10 +264,23 @@ export interface MemoryGraphStatus {
   last_error: string | null
 }
 
+export interface MemoryExtractionLimits {
+  max_concurrent: number
+  max_tokens: number
+  llm_retries: number
+  task_retries: number
+  retry_backoff_s: number
+}
+
 export interface MemoryGraphUpdate {
   enabled?: boolean
   extraction_slot?: string
   llm_timeout_s?: number
+  extraction_max_concurrent?: number
+  extraction_max_tokens?: number
+  extraction_llm_retries?: number
+  extraction_task_retries?: number
+  extraction_retry_backoff_s?: number
 }
 
 // ADR-0023 §3: when the extraction slot changes, the PUT response carries a

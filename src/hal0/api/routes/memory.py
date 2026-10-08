@@ -31,6 +31,7 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
+from hal0.memory.extraction_env import ExtractionLimits
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
@@ -271,9 +272,12 @@ async def graph_status(request: Request) -> dict[str, Any]:
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
     status["slot_resolves"] = status.get("extraction_slot") in available
-    # llm_timeout_s lives in hal0.toml (not on the provider) — echo it so the
-    # dashboard's graph panel can edit it without a second config fetch.
-    status["llm_timeout_s"] = load_hal0_config().memory.graph.llm_timeout_s
+    # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
+    # on the provider) — echo them so the dashboard's graph panel can edit
+    # them without a second config fetch.
+    graph_cfg = load_hal0_config().memory.graph
+    status["llm_timeout_s"] = graph_cfg.llm_timeout_s
+    status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     await _augment_build_counters(request, status)
     return status
 
@@ -460,8 +464,10 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 # ── PUT /api/memory/graph ──────────────────────────────────────────────────
 
 
-async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
-    """Propagate an extraction-slot/timeout change, safe against cancellation.
+async def _propagate_shielded(
+    slot: str, timeout_s: int, limits: ExtractionLimits | None = None
+) -> dict[str, Any]:
+    """Propagate an extraction-slot/timeout/limits change, safe against cancellation.
 
     ``asyncio.to_thread`` submits :func:`~hal0.memory.extraction_env.apply_extraction_slot`
     to a real OS thread; cancelling the awaiting coroutine (client disconnect,
@@ -487,7 +493,7 @@ async def _propagate_shielded(slot: str, timeout_s: int) -> dict[str, Any]:
     from hal0.memory.extraction_env import apply_extraction_slot
 
     task = asyncio.ensure_future(
-        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s)
+        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s, limits=limits)
     )
     try:
         return await asyncio.shield(task)
@@ -503,14 +509,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     """Replace the ``[memory.graph]`` section (ADR-0023).
 
     Body shape: any subset of :class:`MemoryGraphConfig` fields
-    (``enabled``, ``extraction_slot``). The merge preserves un-set fields
+    (``enabled``, ``extraction_slot``, ``llm_timeout_s``, the
+    ``extraction_*`` limits). The merge preserves un-set fields
     (PATCH-style "flip enabled but keep the slot") because dashboards
     typically send the delta, not the whole block.
 
     When ``extraction_slot`` changes, it is validated against the live
     enabled-llm-slot set and propagated to the hindsight-api service (via a
     systemd drop-in + restart) so the engine's native extraction LLM follows
-    the operator's choice. On success persists ``hal0.toml`` atomically and
+    the operator's choice. A timeout or extraction-limit change (#1834)
+    propagates the same way: the limits are env knobs of the daemon, so
+    they only take effect through the drop-in and a restart. On success persists ``hal0.toml`` atomically and
     flips the live wrapper's reported state.
     """
     try:
@@ -543,6 +552,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
+        new_limits = ExtractionLimits.from_config(new_cfg)
+        limits_changed = new_limits != ExtractionLimits.from_config(cfg.memory.graph)
 
         # Validate an EXPLICIT slot change against the live slot set —
         # reject an unknown / non-llm slot with the valid options so the
@@ -566,11 +577,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         # (#1717 review): a bare {"enabled": false} must always be able to
         # disable, even with a stale/deleted configured slot — disabling
         # doesn't need the (unchanged) slot to be valid.
-        needs_propagation = slot_changed or timeout_changed
+        needs_propagation = slot_changed or timeout_changed or limits_changed
         if not needs_propagation and new_cfg.enabled:
             from hal0.memory.extraction_env import drop_in_matches
 
-            if not drop_in_matches(new_cfg.extraction_slot, new_cfg.llm_timeout_s):
+            if not drop_in_matches(
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, limits=new_limits
+            ):
                 # Reconciliation is inferred work we chose to do ourselves,
                 # not an explicit operator action — only do it when we can
                 # POSITIVELY confirm the unchanged slot is still valid
@@ -620,7 +633,9 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             # event loop for the engine's cold start. Shielded against
             # cancellation (see _propagate_shielded) so this lock's critical
             # section can't be exited early while the worker is still live.
-            propagation = await _propagate_shielded(new_cfg.extraction_slot, new_cfg.llm_timeout_s)
+            propagation = await _propagate_shielded(
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, new_limits
+            )
 
         out = new_cfg.model_dump(mode="json")
         # Echo the live status so the dashboard's optimistic-update path

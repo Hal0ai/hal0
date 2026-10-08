@@ -137,6 +137,11 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `enabled` | bool | `false` | informational only |
 | `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
 | `llm_timeout_s` | int | `300` | `30-3600` |
+| `extraction_max_concurrent` | int | `1` | `1-8` |
+| `extraction_max_tokens` | int | `4096` | `3072-32768` |
+| `extraction_llm_retries` | int | `1` | `0-5` |
+| `extraction_task_retries` | int | `2` | `0-10` |
+| `extraction_retry_backoff_s` | int | `120` | `10-3600` |
 
 #### `[memory.embedding]`
 
