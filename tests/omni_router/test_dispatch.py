@@ -509,14 +509,16 @@ async def test_handler_internal_exception_returns_error_envelope() -> None:
         HANDLERS["embed_text"] = original
 
 
-# ── #2191: an image tool must not leave its own caller evicted ────────────────
+# ── #2191: restoring the caller after an image round ─────────────────────────
 #
-# On a single-GPU box the img and llm slots share the exclusive GPU: dispatching
-# generate_image flips the arbiter into image mode, which unloads the caller
-# LLM, and the loop's next chat round then 503s (gpu.image_mode) with the
-# rendered image orphaned and the GPU parked for the idle window. After the
-# image round-trip the handler restores LLM mode so the caller is back before
-# the loop asks it to fold the tool_result in.
+# On a single-GPU box the img and llm slots share the exclusive GPU: an image
+# dispatch flips the arbiter into image mode, which unloads the caller LLM.
+# ``restore_caller_after_images`` is what the loop calls once per tool round
+# (router.py) to bring the caller back; these tests pin WHEN it acts and what
+# it reports. The round-level behaviour (one restore after a parallel batch,
+# the fallback completion, cancellation) lives in test_router_loop.py.
+
+from hal0.omni_router.dispatch import restore_caller_after_images  # noqa: E402
 
 
 class _FakeArbiter:
@@ -546,109 +548,72 @@ class _ArbitratedSlotManager(FakeSlotManager):
         self.arbiter = arbiter
 
 
-def _image_ctx(slots, arbiter: _FakeArbiter | None, *, caller: str = "primary") -> DispatchContext:
-    def handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"url": "x"}]})
-
+def _restore_ctx(
+    slots, arbiter: _FakeArbiter | None, *, caller: str = "primary"
+) -> DispatchContext:
     mgr = _ArbitratedSlotManager(slots, arbiter) if arbiter is not None else FakeSlotManager(slots)
     return DispatchContext(
         slot_manager=mgr,
-        http_client=make_http_client(handler),
+        http_client=make_http_client(lambda _req: httpx.Response(200, json={})),
         api_base_url="http://test",
         caller_slot_name=caller,
     )
 
 
 _IMG = make_slot("img", type="image", model="sdxl", labels=("image", "edit"))
+_GPU_CALLER = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
 
 
 @pytest.mark.asyncio
-async def test_generate_image_restores_the_caller_llm_after_an_exclusive_gpu_flip() -> None:
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
+async def test_restore_brings_an_evicted_gpu_caller_back() -> None:
     arbiter = _FakeArbiter("img")  # the image dispatch flipped the GPU
-    ctx = _image_ctx([caller, _IMG], arbiter)
-
-    result = await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
-
-    assert result == {"data": [{"url": "x"}]}
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter)) is None
     assert arbiter.restore_calls == 1
     assert arbiter.mode.value == "llm"
-
-
-@pytest.mark.asyncio
-async def test_edit_image_restores_the_caller_llm_too() -> None:
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
-    arbiter = _FakeArbiter("img")
-    ctx = _image_ctx([caller, _IMG], arbiter)
-
-    await dispatch_tool(ctx, "edit_image", {"image": "data:...", "prompt": "bluer"})
-
-    assert arbiter.restore_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_no_restore_when_the_caller_is_not_on_the_exclusive_gpu() -> None:
     """An NPU/CPU caller was never unloaded; restoring would reload LLM slots
     nobody asked for and end a deliberate image session."""
-    caller = make_slot(
+    npu_caller = make_slot(
         "primary", type="llm", model="agent-7b", labels=("tool-calling",), device="npu"
     )
     arbiter = _FakeArbiter("img")
-    ctx = _image_ctx([caller, _IMG], arbiter)
-
-    await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
-
+    assert await restore_caller_after_images(_restore_ctx([npu_caller, _IMG], arbiter)) is None
     assert arbiter.restore_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_no_restore_when_the_gpu_did_not_flip() -> None:
     """Multi-GPU or non-arbitrated image slot: mode stays llm, nothing to undo."""
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
     arbiter = _FakeArbiter("llm")
-    ctx = _image_ctx([caller, _IMG], arbiter)
-
-    await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
-
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter)) is None
     assert arbiter.restore_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_pinned_image_mode_is_reported_in_the_tool_result_not_raised() -> None:
-    """An operator pinned image mode: the restore is refused, the image is
-    still returned, and the result says the caller stays unavailable so the
-    loop's failure is explained rather than a bare 503."""
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
+async def test_pinned_image_mode_is_reported_not_raised() -> None:
     arbiter = _FakeArbiter("img", pinned=True)
-    ctx = _image_ctx([caller, _IMG], arbiter)
-
-    result = await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
-
-    assert result["data"] == [{"url": "x"}]
-    assert "pinned" in result["caller_slot_unavailable"]
+    reason = await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter))
+    assert reason is not None and "pinned" in reason
     assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "img"
 
 
 @pytest.mark.asyncio
-async def test_no_arbiter_means_no_change() -> None:
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
-    ctx = _image_ctx([caller, _IMG], None)
-    result = await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
-    assert result == {"data": [{"url": "x"}]}
-
-
-@pytest.mark.asyncio
-async def test_a_failed_restore_is_reported_and_never_loses_the_image() -> None:
+async def test_a_failed_restore_is_reported_not_raised() -> None:
     class _BrokenArbiter(_FakeArbiter):
         async def restore_llm(self, *, force: bool = False) -> None:
             self.restore_calls += 1
             raise RuntimeError("comfyui /free timed out")
 
-    caller = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
-    arbiter = _BrokenArbiter("img")
-    ctx = _image_ctx([caller, _IMG], arbiter)
+    reason = await restore_caller_after_images(
+        _restore_ctx([_GPU_CALLER, _IMG], _BrokenArbiter("img"))
+    )
+    assert reason is not None and "comfyui /free timed out" in reason
 
-    result = await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
 
-    assert result["data"] == [{"url": "x"}]
-    assert "comfyui /free timed out" in result["caller_slot_unavailable"]
+@pytest.mark.asyncio
+async def test_no_arbiter_means_nothing_to_do() -> None:
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], None)) is None

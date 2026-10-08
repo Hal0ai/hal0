@@ -321,13 +321,16 @@ applying. Add those subsections to a version's section to surface them; see
   mode, which unloads the calling LLM slot; the loop's next chat round then
   failed with `gpu.image_mode`, the rendered image was never returned, and
   the GPU stayed parked in image mode for the idle window until someone
-  switched it back by hand (#2191). After an image or image-edit tool
-  completes, hal0 now restores LLM mode before handing the result back, so
-  the caller is loaded again when the loop asks it to fold the image in. The
-  reload per image is the cost of sharing GPU memory. A caller that was never
-  evicted (NPU/CPU, or a GPU that did not flip) is left alone; a pinned image
-  mode is respected and reported in the tool result as
-  `caller_slot_unavailable` instead of a bare 503.
+  switched it back by hand (#2191). The loop now restores LLM mode once per
+  tool round, after every image in the round has rendered, so the caller is
+  loaded again when asked to fold the images in; the reload per image round
+  is the cost of sharing GPU memory. A caller that was never evicted
+  (NPU/CPU, or a GPU that did not flip) is left alone. If image mode is
+  pinned or the restore fails, the loop does not ask the unloaded model
+  again: it returns a completion that lists the rendered images and the
+  reason (`hal0.omni.caller_slot_unavailable`, with the verbatim tool
+  results alongside). A request cancelled mid-render restores LLM mode in
+  the background instead of leaving the GPU parked.
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
