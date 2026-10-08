@@ -51,7 +51,7 @@ _Rollback:_
 
 <!-- Every PR runs α (CONTRIBUTING.md "Test tiers"). γ is required only for
      high-risk PRs and per release candidate. δ is on demand — run it after
-     touching the installer or CLI; only γ runs a real slot lifecycle. -->
+     touching the installer or CLI; only γ runs a real slot load. -->
 - [ ] α  unit (`make test`)
 - [ ] γ  release-gate (`make release-test`) — required for high-risk and
       release-candidate PRs
