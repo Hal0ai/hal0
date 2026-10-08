@@ -197,7 +197,13 @@ applying. Add those subsections to a version's section to surface them; see
   override as in effect, but only llama slots read it; those five providers
   still launched the registry default. They now resolve their image in the
   same order as llama slots — slot `image_pin`, then the family default, then
-  the registry default — through one shared helper. (#2234)
+  the registry default — through one shared helper. The image pull, slot
+  status, drift check and load-time GPU preflight now resolve that same ref
+  too: for these slots (the shipped `img`, `qwen3tts`, `tts` and `flm`
+  slots included) they used to derive a llama runner image from the slot's
+  device, so the pull fetched the wrong image, status reported an image
+  mismatch and the drift check flagged an image change that was not there,
+  with or without a family default. (#2234)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented

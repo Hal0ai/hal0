@@ -341,6 +341,15 @@ def _resolve_image_ref(
     field) — the prior ``str(dict)`` overload of the shared ``image`` key can
     no longer happen.
 
+    A slot the launch dispatches to a non-llama provider (see
+    :func:`_spec_provider_for`) resolves through that provider's
+    ``image_ref`` instead of tiers 2-3 above — ``image_pin`` →
+    ``[slots].default_images[<provider family>]`` → that family's registry
+    default (:func:`hal0.providers._image.resolve_family_image`; ComfyUI also
+    honors its legacy ``slot.image`` string). This function is the single
+    entry point the pull, status, drift and load-preflight seams share, so
+    they inspect the image the Quadlet actually launches (#2234).
+
     ``model_info`` is retained for call-site compatibility but no longer read.
     """
     del model_info  # image is a slot-owned physical fact now (BINARY/image_pin)
@@ -348,6 +357,15 @@ def _resolve_image_ref(
         pin = slot_cfg.get("image_pin")
         if isinstance(pin, str) and pin:
             return pin  # escape hatch — honored verbatim, never re-resolved
+
+    # A fixed-family slot (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS) launches
+    # its PROVIDER's image, not a device-derived llama runner: hand it to the
+    # same ``image_ref`` its ``container_spec`` renders with, so the pull,
+    # status, drift and load-preflight seams that call this function all see
+    # the ref the Quadlet launches (#2234).
+    fixed = _fixed_family_provider(slot_cfg, profile)
+    if fixed is not None:
+        return str(fixed.image_ref(dict(slot_cfg) if isinstance(slot_cfg, Mapping) else {}))
 
     # image_default = RUNNER_IMAGES[slot.BINARY] (or the HW-gated default).
     from hal0.providers._image import operator_default_image
@@ -361,6 +379,21 @@ def _resolve_image_ref(
     if override is not None:
         return override  # [slots].default_images — operator family default
     return resolve_runner_image(runner)
+
+
+def _fixed_family_provider(slot_cfg: Mapping[str, Any] | None, profile: Any) -> Any | None:
+    """The non-llama provider that launches ``slot_cfg``, or None for llama.
+
+    Same dispatch the launch uses (:func:`_provider_for_family`, i.e.
+    :func:`_spec_provider_for`). A caller-supplied resolved profile's
+    ``runtime_family`` is used when it carries one; otherwise the family is
+    looked up from the slot's profile name exactly as the launch does.
+    """
+    cfg: dict[str, Any] = dict(slot_cfg) if isinstance(slot_cfg, Mapping) else {}
+    family = getattr(profile, "runtime_family", None)
+    if not isinstance(family, str):
+        family = _profile_runtime_family(cfg)
+    return _provider_for_family(cfg, family)
 
 
 def _profile_image_and_flags(
