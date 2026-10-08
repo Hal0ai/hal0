@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 from typing import Any
 
 import httpx
@@ -774,6 +775,15 @@ _FLM_CATALOG_TTL_S = 300.0
 
 _FLM_CATALOG_CACHE: list[dict[str, Any]] | None = None
 _FLM_CATALOG_CACHED_AT: float = 0.0
+#: True while the cached catalog stands in for a probe that gave no answer
+#: (#2333). The cache then holds ``[]`` for :func:`flm_served_models`, but
+#: :func:`flm_catalog` reports ``None``, so "could not ask" never reads as
+#: "FLM serves nothing" to a caller that acts on absence.
+_FLM_CATALOG_UNANSWERED: bool = False
+#: Guards the cache, its timestamp and the unanswered flag as one unit, so a
+#: reader never pairs one probe's catalog with another probe's flag. The probe
+#: itself runs outside the lock: a slow ``flm list`` must not block readers.
+_FLM_CATALOG_LOCK = threading.Lock()
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -951,6 +961,23 @@ def flm_validate() -> bool | None:
 def flm_served_models() -> list[dict[str, Any]]:
     """Return what the FLM toolbox can serve, classified into hal0 capabilities.
 
+    Same cache and shape as :func:`flm_catalog`, but a probe that gave no
+    answer reads as an empty list so the catalog still renders. Callers that
+    act on a tag's absence (``hal0 capabilities migrate``) must use
+    :func:`flm_catalog` instead, which keeps that case distinct.
+    """
+    catalog = flm_catalog()
+    return catalog if catalog is not None else []
+
+
+def flm_catalog() -> list[dict[str, Any]] | None:
+    """Return what the FLM toolbox can serve, or ``None`` if the probe gave no answer.
+
+    Tri-state per tag (#2333): a tag in the list is served, a tag missing from
+    a list is not, and ``None`` means ``flm list`` could not be asked (missing
+    binary, perms, timeout, non-zero exit, unparseable output), so nothing is
+    known either way.
+
     Each entry is a dict in hal0's shape (NOT FLM's raw JSON)::
 
         {
@@ -963,22 +990,26 @@ def flm_served_models() -> list[dict[str, Any]]:
         }
 
     Cached at module scope with a 5-minute TTL (:data:`_FLM_CATALOG_TTL_S`);
-    subsequent calls inside the window are O(1). On probe failure the result is
-    an empty list (also cached, same TTL) so the catalog still renders — call
-    :func:`reset_flm_catalog_cache` to force an immediate re-probe.
+    subsequent calls inside the window are O(1). A failed probe is cached for
+    the same TTL as "no answer" (``None`` here, ``[]`` from
+    :func:`flm_served_models`) — call :func:`reset_flm_catalog_cache` to force
+    an immediate re-probe.
     """
     import time
 
-    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT
+    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
     now = time.monotonic()
-    if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
-        return _FLM_CATALOG_CACHE
+    with _FLM_CATALOG_LOCK:
+        if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
+            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
 
     raw = _probe_flm_catalog()
     if raw is None:
-        _FLM_CATALOG_CACHE = []
-        _FLM_CATALOG_CACHED_AT = now
-        return _FLM_CATALOG_CACHE
+        with _FLM_CATALOG_LOCK:
+            _FLM_CATALOG_CACHE = []
+            _FLM_CATALOG_CACHED_AT = now
+            _FLM_CATALOG_UNANSWERED = True
+        return None
 
     out: list[dict[str, Any]] = []
     for entry in raw:
@@ -999,9 +1030,14 @@ def flm_served_models() -> list[dict[str, Any]]:
             }
         )
 
-    _FLM_CATALOG_CACHE = out
-    _FLM_CATALOG_CACHED_AT = now
-    return _FLM_CATALOG_CACHE
+    # A non-empty reply with no usable entry (e.g. ``{"models": [{}]}``) says
+    # nothing about which tags are served: keep it "no answer", not "empty".
+    unanswered = bool(raw) and not out
+    with _FLM_CATALOG_LOCK:
+        _FLM_CATALOG_CACHE = out
+        _FLM_CATALOG_CACHED_AT = now
+        _FLM_CATALOG_UNANSWERED = unanswered
+    return None if unanswered else out
 
 
 def reset_flm_catalog_cache() -> None:
@@ -1011,9 +1047,11 @@ def reset_flm_catalog_cache() -> None:
     TTL bounds staleness on its own; this forces an out-of-band refresh (e.g.
     right after a ``flm pull``).
     """
-    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT
-    _FLM_CATALOG_CACHE = None
-    _FLM_CATALOG_CACHED_AT = 0.0
+    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
+    with _FLM_CATALOG_LOCK:
+        _FLM_CATALOG_CACHE = None
+        _FLM_CATALOG_CACHED_AT = 0.0
+        _FLM_CATALOG_UNANSWERED = False
 
 
 def is_flm_tag(model_id: str) -> bool:
