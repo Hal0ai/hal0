@@ -267,6 +267,14 @@ applying. Add those subsections to a version's section to surface them; see
   Hermes's `config.yaml` and the brain profile, and hal0-api's startup
   reconcile rewrites an SSE join already on disk without it. (#2331)
 
+- **Agents saving memories over MCP get the same honest refusal as the web
+  API when the memory extraction model's window is too small.** The
+  `memory_add` tool on `/mcp/memory` (and the `memory_add` tool on
+  `/mcp/admin`) now runs the context-window check `POST /api/memory/add`
+  gained in #1903, and returns a `memory.extraction_ctx_too_small` error
+  naming the slot and both window sizes instead of reporting a write that the
+  memory engine would then drop (#1930).
+
 - **Pull and status now see the image of a slot with no profile.** A slot
   with no `profile` and no `image_pin` whose type routes it to a fixed
   runtime — a bare `type = "tts"` slot falls back to Kokoro, a bare
@@ -316,14 +324,6 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
-
-- **Agents saving memories over MCP get the same honest refusal as the web
-  API when the memory extraction model's window is too small.** The
-  `memory_add` tool on `/mcp/memory` (and the `memory_add` tool on
-  `/mcp/admin`) now runs the context-window check `POST /api/memory/add`
-  gained in #1903, and returns a `memory.extraction_ctx_too_small` error
-  naming the slot and both window sizes instead of reporting a write that the
-  memory engine would then drop (#1930).
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
