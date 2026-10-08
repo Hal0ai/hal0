@@ -316,6 +316,7 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+
 - **`hal0 agent install pi` maps the right checkout into the shared
   `coding-agent::hal0-mono` memory bank.** The seeded
   `~/.hindsight/coding-agent.json` mapped one fixed maintainer path into that

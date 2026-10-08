@@ -19,7 +19,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 THIS_FILE = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
-FORBIDDEN = re.compile(r"10\.0\.1\.|\.ssh/thin-mint|/mnt/mintdev|thinmint\.dev")
+FORBIDDEN = re.compile(r"10\.0\.1\.|\.ssh/thin-mint|/mnt/mintdev|thinmint\.dev|/home/halo/dev")
 
 #: (path, matched text) pairs that may stay. CHANGELOG history is a record of
 #: what shipped and is not rewritten; only the entry that fixed the leaked
