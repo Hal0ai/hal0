@@ -337,6 +337,15 @@ async def test_image_pull_bare_llama_slot_resolves_nothing() -> None:
     assert await resolve_slot_image(sm, cfg["name"]) is None
 
 
+async def test_image_pull_pin_only_llama_slot_pulls_its_pin() -> None:
+    """A profile-less llama slot that pins an image pulls that pin (#2389)."""
+    from hal0.slots.image_pull import resolve_slot_image
+
+    cfg = {**_bare_llama_cfg(), "image_pin": "ghcr.io/example/runner:pinned"}
+    sm = SimpleNamespace(iter_configs=AsyncMock(return_value=[cfg]))
+    assert await resolve_slot_image(sm, cfg["name"]) == "ghcr.io/example/runner:pinned"
+
+
 async def test_slot_view_bare_llama_slot_stays_not_configured() -> None:
     from hal0.slot_view import container_enrichment
 
