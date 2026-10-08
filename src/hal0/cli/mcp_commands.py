@@ -312,6 +312,12 @@ def restart_cmd(
     console.print(f"[bold yellow]restart {server_id}:[/bold yellow] {result}")
 
 
+def _print_warnings(result: dict[str, Any]) -> None:
+    """Print the advisory ``warnings`` an MCP route returned (#2330)."""
+    for warning in result.get("warnings") or []:
+        console.print(f"[yellow]![/yellow] {escape(warning)}", highlight=False)
+
+
 # ── `hal0 mcp test` (ADR-0015) ───────────────────────────────────────────────
 
 
@@ -334,6 +340,7 @@ def test_cmd(
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
         return
 
+    _print_warnings(result)
     probe = result.get("probe", {})
     if not probe.get("ok"):
         console.print(
@@ -474,6 +481,7 @@ def expose_cmd(
             border_style="green",
         )
     )
+    _print_warnings(result)
 
 
 # ── `hal0 mcp catalog list` ──────────────────────────────────────────────────

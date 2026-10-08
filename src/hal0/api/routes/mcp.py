@@ -1027,6 +1027,7 @@ async def test_server(server_id: str) -> dict[str, Any]:
     returns the same ``mcp.supervisor_unavailable`` 501 the start/stop/
     restart stub does. Bundled servers aren't installed-registry records
     at all — this route 404s for them via :func:`installed_registry.get_installed`.
+    ``warnings`` carries the same exposure advisories as ``PATCH /exposure``.
     """
     record = installed_registry.get_installed(server_id)
     if record.transport == "stdio":
@@ -1044,7 +1045,18 @@ async def test_server(server_id: str) -> dict[str, Any]:
         "verdicts": verdicts,
         # #2358: why the hermes/brain toggle is unavailable (Remove with #2303).
         "agent_exposure": installed_registry.agent_exposure_status(),
+        "warnings": _exposure_warnings(record),
     }
+
+
+def _exposure_warnings(record: InstalledServer) -> list[str]:
+    """Advisories for a record's current exposure; empty when there are none.
+
+    Today only the #2330 redirect risk: Hermes keeps every header value but
+    ``Authorization`` across a cross-origin redirect.
+    """
+    warning = record.redirect_header_warning()
+    return [warning] if warning else []
 
 
 def _classify_tools(server_id: str, tool_names: list[str]) -> dict[str, str]:
@@ -1113,6 +1125,8 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
     Turning ``hermes``/``brain`` on for any installed record rejects with
     ``409 mcp.exposure_policy_unenforced`` until hal0 enforces the record's
     ``[tools]`` policy on the agent's call path (#2358, #2303).
+    ``warnings`` lists advisories that do not block the change, such as a
+    header Hermes would re-send on a redirect (#2330).
     """
     if server_id in installed_registry.BUNDLED_SERVER_IDS:
         raise Conflict(
@@ -1160,7 +1174,11 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
         )
     updated = installed_registry.patch_config(server_id, exposure=exposure)
     hermes_sync = await _sync_hermes_join(server_id)
-    return {"server": updated.model_dump(mode="python"), "hermes_sync": hermes_sync}
+    return {
+        "server": updated.model_dump(mode="python"),
+        "hermes_sync": hermes_sync,
+        "warnings": _exposure_warnings(updated),
+    }
 
 
 # ── Action stub (start/stop/restart — supervisor follow-up) ─────────────────
