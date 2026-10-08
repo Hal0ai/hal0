@@ -216,6 +216,128 @@ def test_bundle_includes_the_latest_install_log_redacted(
     assert "logs/" in manifest["sections"]
 
 
+def test_bundle_redacts_name_value_secrets_in_the_latest_install_log(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2360: the copied install log is redacted like the failure report,
+    so a ``NAME=value`` secret in the NEWEST log does not reach the bundle."""
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    log = log_dir / "install-20261008-000000.log"
+    log.write_text(
+        "==> Step 3/16: Python environment\n"
+        "+ HF_TOKEN=hf_abc123installsecret hf auth whoami\n"
+        "export HAL0_CLIENT_KEY=h0c_install_client_key_42\n"
+        "GET https://x.invalid/v1?apiKey=apik3yinst4llval\n"
+        "benign HAL0_PORT=8080 kept\n"
+    )
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    body = (out / "logs" / "install.log").read_text()
+    for secret in ("hf_abc123installsecret", "h0c_install_client_key_42", "apik3yinst4llval"):
+        assert secret not in body, secret
+    assert "HF_TOKEN=***REDACTED***" in body
+    assert "HAL0_CLIENT_KEY=***REDACTED***" in body
+    assert "benign HAL0_PORT=8080 kept" in body
+    assert "Step 3/16: Python environment" in body
+
+
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        ("git clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55", "user:"),
+        ("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy", "Authorization: Basic "),
+        ("hf download --token flagtok_Ww12Qq34 m", "flagtok_Ww12Qq34", "--token "),
+        ("loaded hf_" + "a" * 30, "hf_" + "a" * 30, "loaded "),
+        ("Environment=HAL0_SECRET=sysd_Qq12Ww34Ee56", "sysd_Qq12Ww34Ee56", "HAL0_SECRET="),
+        # CodeRabbit on #2398: hyphenated, colon-separated and quoted JSON
+        # names, with the original quoting and separator kept.
+        ("X-Api-Key: HdrK3y_55eeff00", "HdrK3y_55eeff00", "X-Api-Key: ***REDACTED***"),
+        ('{"apiKey": "abcd1234efgh"}', "abcd1234efgh", '{"apiKey": "***REDACTED***"}'),
+        ("registry password: Colon_Secret_77aa", "Colon_Secret_77aa", "password: "),
+    ],
+)
+def test_install_text_redaction_covers_the_failure_report_shapes(
+    line: str, secret: str, kept: str
+) -> None:
+    """#2409: the bundle's install-log copy masks every shape the installer's
+    own failure report masks."""
+    out = doctor_bundle._redact_install_text(line)
+    assert secret not in out
+    assert kept in out
+
+
+def test_install_text_redaction_masks_a_learned_value_where_it_reappears() -> None:
+    """CodeRabbit on #2398: a sensitive assignment's value is masked at every
+    later literal occurrence, not only on its own line."""
+    out = doctor_bundle._redact_install_text(
+        "+ HF_TOKEN=Zq8vR2mW9xK4tL7pQ3 hf auth whoami\n"
+        '{"password": "Colon_Secret_77aa"}\n'
+        "retry https://example.invalid/hook?t=Zq8vR2mW9xK4tL7pQ3\n"
+        "reused bare: Colon_Secret_77aa end\n"
+    )
+    assert "Zq8vR2mW9xK4tL7pQ3" not in out
+    assert "Colon_Secret_77aa" not in out
+    assert "reused bare: ***REDACTED*** end" in out
+
+
+def test_install_text_redaction_leaves_lookalikes_alone() -> None:
+    text = "llama: max_tokens=4096\nlayout keyboard: us\nport 14096 budget 4096\n"
+    assert doctor_bundle._redact_install_text(text) == text.rstrip("\n")
+
+
+def test_bundle_surfaces_install_artifacts_and_copies_the_failure_report(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2307: the manifest's ``install_artifacts`` names the latest install
+    log and failure report (what a HAL0-INSTALL-* diagnosis keys off), and
+    the report itself lands in logs/, redacted once more on the way in."""
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    log = log_dir / "install-20261008-000000.log"
+    log.write_text("run\n")
+    report = log_dir / "hal0-install-report-20261008-000001.txt"
+    report.write_text("Phase: Service start\nHAL0_CLIENT_KEY=h0c_leaked_value_123\n")
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+    monkeypatch.setattr(
+        doctor_bundle,
+        "_INSTALL_REPORT_GLOBS",
+        ((str(log_dir), "hal0-install-report-*.txt"),),
+    )
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    artifacts = manifest["install_artifacts"]
+    assert artifacts["install_log"]["path"] == str(log)
+    assert artifacts["failure_report"]["path"] == str(report)
+    assert artifacts["failure_report"]["mtime_utc"].endswith("Z")
+
+    dest = out / "logs" / "install-failure-report.txt"
+    body = dest.read_text()
+    assert "Phase: Service start" in body
+    assert "h0c_leaked_value_123" not in body
+
+
+def test_bundle_install_artifacts_are_null_when_none_exist(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nowhere = str(tmp_path / "nowhere")
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((nowhere, "install-*.log"),))
+    monkeypatch.setattr(
+        doctor_bundle, "_INSTALL_REPORT_GLOBS", ((nowhere, "hal0-install-report-*.txt"),)
+    )
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert manifest["install_artifacts"] == {"install_log": None, "failure_report": None}
+    assert not (out / "logs" / "install-failure-report.txt").exists()
+
+
 def test_bundle_with_no_install_log_present_writes_nothing_for_it(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -261,3 +383,24 @@ def test_bundle_returns_nonzero_failed_count_when_probes_missing(
     _, failed = build_bundle(out, include_rocm_smi=True)
     # The forced rocminfo failure guarantees at least one failed probe.
     assert failed > 0
+
+
+def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypatch) -> None:
+    """A log deleted between glob() and stat() is skipped, not fatal."""
+    from pathlib import Path
+
+    import hal0.cli.doctor_bundle as db
+
+    keep = tmp_path / "hal0-install-a.log"
+    gone = tmp_path / "hal0-install-b.log"
+    keep.write_text("x")
+    gone.write_text("y")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *a, **k):
+        if self == gone:
+            raise FileNotFoundError(self)
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    assert db._latest_match(((str(tmp_path), "hal0-install-*.log"),)) == keep

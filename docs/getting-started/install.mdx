@@ -127,8 +127,10 @@ Every run tees its full output to `/var/log/hal0/install-<ts>.log`
 (`/tmp/hal0-install-<ts>.log` when not root) — the path is printed at the
 start and end, and `hal0 doctor bundle` includes the latest one. If the
 installer aborts, it also writes a redacted `hal0-install-report-<ts>.txt`
-next to the log (environment, port owners, unit status, hardware summary,
-log tail) and prints its path. See `installer/README.md` for the full
+next to the log (environment, failed units, Podman state, port owners, unit
+status, redacted config, hardware summary, log tail, hal0-api journal) and
+prints its path. Secret values are masked throughout the report, not only
+where their key names them. See `installer/README.md` for the full
 breakdown of what each report contains.
 
 ### `--summary-json`

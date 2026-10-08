@@ -215,6 +215,35 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The installer's failure report no longer copies secrets out of the
+  install log.** The report masked environment values by key name only and
+  then copied the install log tail verbatim, so any token the installer had
+  echoed ended up in a file presented as safe to share. Now every value of a
+  secret-named key (from the installer's variables, `api.env` and
+  `hal0.toml`, including every line of a multi-line `"""` or `'''`
+  string and every element of an array) is masked wherever it appears in the report, along with
+  Bearer tokens, a raw `Authorization:` header value, credentials in URLs
+  and `--token` flags. Run-together and
+  camelCase names such as `apikey`, `apiKey` and `accessKey` now count as
+  secret-named here and in hal0's config redaction, and a value seen as
+  `NAME: value` (a JSON field, YAML key or header) is masked wherever it
+  reappears, like one seen as `NAME=value`. A number, short
+  word or variable name logged as a value (`max_tokens=4096`,
+  `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out
+  across the rest of the report. If that pass
+  cannot run, the report keeps only the failed step. The report also gains
+  `systemctl --failed`, `podman info`/`podman images`, the redacted
+  `api.env`/`hal0.toml` and the hal0-api journal, runs every diagnostic
+  under a 10-second timeout so a hung Podman cannot stall the abort, and is
+  now readable by root only. `hal0 doctor bundle` lists the latest install
+  log and report under `install_artifacts` in `manifest.json` and includes
+  the report; both the report and the install log it copies now go through
+  the same secret masking as the installer's report, including URL
+  passwords, `--token` flags, `hf_`/`sk-` tokens and values reused
+  elsewhere in the log. The same masking now also covers `/api/logs`, the
+  MCP log tools, event messages and activity rows, which missed values such
+  as `HF_TOKEN=`, `apikey=` and `"apiKey":` (#2307).
+
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads
   `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers

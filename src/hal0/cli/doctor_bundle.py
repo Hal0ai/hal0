@@ -18,7 +18,8 @@ Layout (see the module's :func:`build_bundle` docstring + spec-21-4-doctor.md
     │                      # best-effort GET /api/{models,slots,hardware,
     │                      # system-info,stats}
     ├── logs/              # journalctl captures (best-effort; absent on a
-    │                      # systemd-less box like this dev sandbox)
+    │                      # systemd-less box like this dev sandbox), plus the
+    │                      # latest install log and installer failure report
     └── doctor-summary.txt # the rich `doctor verify` report, as plain text
 
 No upload — the bundle is written to local disk only (§3.3). No
@@ -46,7 +47,8 @@ _BEARER_RE = re.compile(r"Bearer\s+\S+")
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 _REDACTION_POLICY = (
-    "SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT "
+    "SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|"
+    "ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$ "
     "(hal0.api._redact._SENSITIVE_RE)"
 )
 
@@ -444,6 +446,7 @@ def _write_logs_section(out: Path, *, lines: int = 500) -> list[str]:
         _run_one(argv, dest)
         captured.append(f"logs/{unit}.log")
     captured += _write_install_log(out)
+    captured += _write_install_report(out)
     return captured
 
 
@@ -457,20 +460,94 @@ _INSTALL_LOG_GLOBS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _latest_install_log() -> Path | None:
-    candidates: list[Path] = []
-    for directory, pattern in _INSTALL_LOG_GLOBS:
+#: Where installer/lib/failure-report.sh writes hal0-install-report-<ts>.txt
+#: on an aborted install — next to the install log, so the same two dirs.
+_INSTALL_REPORT_GLOBS: tuple[tuple[str, str], ...] = (
+    ("/var/log/hal0", "hal0-install-report-*.txt"),
+    ("/tmp", "hal0-install-report-*.txt"),
+)
+
+
+def _latest_match(globs: tuple[tuple[str, str], ...]) -> Path | None:
+    # A candidate can vanish between glob() and stat() (e.g. /tmp cleanup):
+    # skip it rather than abort the bundle.
+    best: tuple[float, Path] | None = None
+    for directory, pattern in globs:
         d = Path(directory)
         if d.is_dir():
-            candidates.extend(d.glob(pattern))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+            for p in d.glob(pattern):
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if best is None or mtime > best[0]:
+                    best = (mtime, p)
+    return best[1] if best else None
+
+
+def _latest_install_log() -> Path | None:
+    return _latest_match(_INSTALL_LOG_GLOBS)
+
+
+def _install_artifacts() -> dict[str, dict[str, str] | None]:
+    """The manifest's ``install_artifacts`` surface (#2307): the newest
+    install log and installer failure report on this box, or ``None`` for
+    each that is absent. A ``HAL0-INSTALL-*`` diagnosis keys off this."""
+
+    def _describe(path: Path | None) -> dict[str, str] | None:
+        if path is None:
+            return None
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        except OSError:
+            return None
+        return {"path": str(path), "mtime_utc": mtime.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    return {
+        "install_log": _describe(_latest_install_log()),
+        "failure_report": _describe(_latest_match(_INSTALL_REPORT_GLOBS)),
+    }
+
+
+def _redact_install_text(text: str) -> str:
+    """Redact an installer log or failure report copied into the bundle.
+
+    :func:`hal0.redaction.redact_shareable_text` (the Python port of the
+    failure report's own text pass, #2409) masks every plausible secret
+    value seen as ``NAME=value`` / ``NAME: value`` wherever it reappears,
+    then the secret shapes on each line; :func:`hal0.redaction.redact_log_line`
+    and :func:`_redact_text` then run as on every other free-text capture.
+    """
+    from hal0.redaction import redact_log_line, redact_shareable_text
+
+    shared = redact_shareable_text(text)
+    return _redact_text("\n".join(redact_log_line(line) for line in shared.splitlines()))
+
+
+def _write_install_report(out: Path) -> list[str]:
+    """Copy the newest installer failure report into the bundle.
+
+    The installer already redacts it (installer/lib/failure-report.sh); it
+    is scrubbed again here with :func:`_redact_install_text` so a report
+    from an older installer cannot carry a ``NAME=value`` secret in.
+    The report is 0600 root-owned: an unreadable one is skipped, not fatal.
+    """
+    src = _latest_match(_INSTALL_REPORT_GLOBS)
+    if src is None:
+        return []
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    dest = out / "logs" / "install-failure-report.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(_redact_install_text(text) + "\n")
+    return ["logs/install-failure-report.txt"]
 
 
 def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
     """Copy the tail of the most recent installer log (installer/lib/logging.sh)
-    into the bundle, redacted like every other free-text capture (§3.1).
+    into the bundle, redacted like the failure report (§3.1, #2360).
 
     Best-effort: no install log on this box (a long-lived install predating
     this feature, or a box whose /tmp was cleaned) writes nothing rather
@@ -485,7 +562,7 @@ def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
         tail = src.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
     except OSError:
         return []
-    dest.write_text(_redact_text("\n".join(tail)) + "\n")
+    dest.write_text(_redact_install_text("\n".join(tail)) + "\n")
     return ["logs/install.log"]
 
 
@@ -554,6 +631,7 @@ def build_bundle(
         "redaction_policy": _REDACTION_POLICY,
         "command_count": len(tsv_rows),
         "failed_probe_count": failed,
+        "install_artifacts": _install_artifacts(),
     }
     _write_json(out / "manifest.json", manifest)
     return out, failed

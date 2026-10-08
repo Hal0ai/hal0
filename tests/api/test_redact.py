@@ -24,6 +24,7 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
+from hal0.redaction import MASK, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -367,3 +368,196 @@ class TestBareKeySuffix:
     )
     def test_non_secret_key_words_stay_clear(self, name):
         assert is_sensitive_key(name) is False
+
+
+class TestCamelAndRunTogetherKeyNames:
+    """#2384: ``apikey``, ``apiKey``, ``accessKey`` and friends are secrets
+    too; the KEY words match with or without a ``_``/``-`` separator."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "apikey",
+            "apiKey",
+            "APIKEY",
+            "api-key",
+            "x-api-key",
+            "accessKey",
+            "access_key",
+            "AWS_SECRET_ACCESS_KEY",
+            "accessToken",
+            "privateKey",
+            "encryptionKey",
+            "clientSecret",
+            "passwd",
+        ],
+    )
+    def test_run_together_secret_names_are_sensitive(self, name):
+        assert is_sensitive_key(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        ["keyboard", "monkey", "KEYBOARD_LAYOUT", "MONKEY_PATCH", "hotkey", "keys", "api_base"],
+    )
+    def test_key_lookalikes_stay_clear(self, name):
+        assert is_sensitive_key(name) is False
+
+
+# ── #2409: the shared shareable-text redactor (failure-report shape set) ────
+
+
+class TestShareableTextShapes:
+    """``redact_shareable_text`` ports installer/lib/failure-report.sh's
+    pattern pass and literal harvest; one case per shape."""
+
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("git clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55"),
+            ("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy"),
+            ("Authorization: token ghtok_Aa11Bb22Cc33", "ghtok_Aa11Bb22Cc33"),
+            ("curl -H 'Authorization: Bearer brr_Zz99Yy88Xx77'", "brr_Zz99Yy88Xx77"),
+            ("hf download --token flagtok_Ww12Qq34 m", "flagtok_Ww12Qq34"),
+            ("hf download --token=flagtok_Ee56Rr78 m", "flagtok_Ee56Rr78"),
+            ("loaded hf_" + "a" * 30, "hf_" + "a" * 30),
+            ("using sk-" + "b" * 30, "sk-" + "b" * 30),
+            ("pat ghp_" + "c" * 36, "ghp_" + "c" * 36),
+            (
+                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
+            ),
+            ("aws AKIAABCDEFGHIJKLMNOP", "AKIAABCDEFGHIJKLMNOP"),
+            ('{"token": "JsonTok_88bbccdd"}', "JsonTok_88bbccdd"),
+            ("registry login password: Colon_Secret_77aa", "Colon_Secret_77aa"),
+            ("X-Api-Key: HdrK3y_55eeff00", "HdrK3y_55eeff00"),
+            ("Environment=HAL0_SECRET=sysd_Qq12Ww34Ee56", "sysd_Qq12Ww34Ee56"),
+            ("HF_TOKEN=hf_short1", "hf_short1"),
+            ("GET https://x.invalid/v1?apikey=abcd1234efgh&q=1", "abcd1234efgh"),
+            ('{"apiKey": "abcd1234efgh"}', "abcd1234efgh"),
+            ("export HAL0_CLIENT_KEY='h0c_quoted_Kk11'", "h0c_quoted_Kk11"),
+            ("mcp client_id=abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwxyz0123"),
+        ],
+    )
+    def test_each_shape_is_masked(self, line: str, secret: str) -> None:
+        out = redact_shareable_text(line)
+        assert secret not in out, out
+        assert MASK in out
+
+    def test_a_secret_learned_on_one_line_is_masked_where_it_reappears(self) -> None:
+        text = (
+            "export UPSTREAM_TOKEN=Zq8vR2mW9xK4tL7pQ3\n"
+            '{"password": "Colon_Secret_77aa"}\n'
+            "retry https://example.invalid/hook?t=Zq8vR2mW9xK4tL7pQ3\n"
+            "later reused bare: Colon_Secret_77aa end\n"
+        )
+        out = redact_shareable_text(text)
+        assert "Zq8vR2mW9xK4tL7pQ3" not in out
+        assert "Colon_Secret_77aa" not in out
+        assert "later reused bare: ***REDACTED*** end" in out
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "llama: max_tokens=4096 ctx=8192",
+            '{"max_tokens": 4096, "tokenizer": "Qwen/Qwen2.5-7B-Instruct"}',
+            "load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+            "token_count=123456789",
+            "layout keyboard: us",
+            "zoo monkey=bananaphone99",
+            "api_key_env=HF_TOKEN_FILE",
+            "12 tests passed: 0 failed",
+            "KEY_ROTATION_DAYS=30",
+            "mcp client_id=1a2b3c4d5e6f",
+        ],
+    )
+    def test_lookalikes_survive(self, line: str) -> None:
+        assert redact_shareable_text(line) == line
+
+    def test_lookalike_values_are_not_masked_elsewhere(self) -> None:
+        text = (
+            "provider.credential_written key=OPENAI_API_KEY\n"
+            "load tokenizer=Qwen/Qwen2.5-7B-Instruct max_tokens=40960000\n"
+            "set OPENAI_API_KEY; model Qwen/Qwen2.5-7B-Instruct; budget 40960000\n"
+        )
+        out = redact_shareable_text(text)
+        assert "set OPENAI_API_KEY; model Qwen/Qwen2.5-7B-Instruct; budget 40960000" in out
+
+    def test_it_is_idempotent(self) -> None:
+        text = "HF_TOKEN=hf_" + "a" * 30 + "\ngit clone https://u:pw12345678@h/r\n"
+        once = redact_shareable_text(text)
+        assert redact_shareable_text(once) == once
+
+
+# ── #2403: redact_log_line uses the shared shape pass ──────────────────────
+
+
+class TestLogLineSharedShapes:
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("hal0.startup HF_TOKEN=hf_abcdefghijklmnop", "hf_abcdefghijklmnop"),
+            ("GET /v1?apikey=abcd1234efgh HTTP/1.1", "abcd1234efgh"),
+            ('{"event": "upstream", "apiKey": "abcd1234efgh"}', "abcd1234efgh"),
+            ('{"accessToken": "abcd1234efgh"}', "abcd1234efgh"),
+            ("db password: Colon_Secret_77aa", "Colon_Secret_77aa"),
+            ("clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55"),
+        ],
+    )
+    def test_shared_shapes_are_masked(self, line: str, secret: str) -> None:
+        out = redact_log_line(line)
+        assert secret not in out, out
+        assert MASK in out
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "llama.request max_tokens=4096 temperature=0.7",
+            "slot.load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+            '{"usage": {"total_tokens": 1234, "token_count": 99}}',
+            "ui.prefs keyboard: us",
+            "pytest: 12 passed: 0 failed",
+            "HF_TOKEN_FILE=/run/secrets/hf",
+        ],
+    )
+    def test_live_log_lookalikes_survive(self, line: str) -> None:
+        assert redact_log_line(line) == line
+
+
+# ── #2410: a scheme-less Authorization header value ────────────────────────
+
+
+class TestSchemelessAuthorization:
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Authorization: rawauth_Pl34Ok56Ij78",
+            "curl -H 'Authorization: rawauth_Pl34Ok56Ij78' https://x.invalid/",
+            '{"Authorization": "rawauth_Pl34Ok56Ij78"}',
+            "proxy-authorization: rawauth_Pl34Ok56Ij78",
+        ],
+    )
+    def test_a_raw_header_value_is_masked(self, line: str) -> None:
+        for redact in (redact_shareable_text, redact_log_line):
+            out = redact(line)
+            assert "rawauth_Pl34Ok56Ij78" not in out, out
+            assert MASK in out
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("Authorization: Bearer abcdef123456", "Authorization: Bearer ***REDACTED***"),
+            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***REDACTED***"),
+            ("authorization: denied", "authorization: denied"),
+            ("Authorization: ApiKey ak_live_Zx81Qw45", "Authorization: ApiKey ***REDACTED***"),
+            ("Authorization: Bot MTk4NjIyNDgzNDcx", "Authorization: Bot ***REDACTED***"),
+            ("Authorization: SSWS 00aBcD1234efGh", "Authorization: SSWS ***REDACTED***"),
+            ("Authorization: Negotiate YIIC4wYGKwYB", "Authorization: Negotiate ***REDACTED***"),
+            ("authorization: denied for bob", "authorization: denied for bob"),
+            ("Authorization: abcdefghijklmnop qrstuvwxyz", "Authorization: ***REDACTED***"),
+            ("authorization: required for user", "authorization: ***REDACTED***"),
+        ],
+    )
+    def test_a_scheme_is_kept_and_short_words_survive(self, line: str, expected: str) -> None:
+        assert redact_shareable_text(line) == expected
+        assert redact_log_line(line) == expected
+        assert redact_shareable_text(expected) == expected  # idempotent
