@@ -1299,7 +1299,8 @@ deferred), `0004` (bundled agents), `0005` (memory namespace grammar),
 (per-agent MCP client allow-list), `0015` (MCP process supervisor and
 Hermes exposure join), `0020` (localhost-callback-only OAuth PKCE for
 OpenRouter), `0023` (canonical LLM roles + Hindsight-native memory
-extraction), `0024` (agent credential tier — proposed). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
+extraction), `0024` (agent credential tier — proposed), `0025` (upstream llama.cpp as the
+default runner, forks frozen — proposed). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
 `0022` are gaps in this tree, not missing numbers to fill — see the next
 paragraph.
 
