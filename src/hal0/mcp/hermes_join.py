@@ -159,7 +159,10 @@ def _load_no_proxy_hosts() -> list[str] | None:
 
 
 def _converge_driver_env_no_proxy(
-    previous: list[str] | None, errors: list[str]
+    previous: list[str] | None,
+    errors: list[str],
+    *,
+    preserve: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Re-render the Hermes driver env when the exposed loopback hosts change.
 
@@ -176,10 +179,20 @@ def _converge_driver_env_no_proxy(
     where the provisioner would still write the real ``/etc/hal0``). Returns
     ``(report, hosts to record)``; the recorded hosts stay ``previous`` when
     nothing was written, so the next sync retries.
+
+    ``preserve`` keeps hosts in ``NO_PROXY`` while a join that used them is
+    still in Hermes's config because its removal failed: dropping the host
+    first would send that stale join's headers to the proxy on the agent's
+    next restart. A failed host lookup is reported in ``errors``, not raised.
     """
     from hal0.agents import hermes_provision
 
-    hosts = exposed_loopback_hosts()
+    try:
+        hosts = sorted(set(exposed_loopback_hosts()) | set(preserve or ()))
+    except Exception as exc:
+        log.warning("hal0.mcp.hermes_join.no_proxy_lookup_failed", error=str(exc))
+        errors.append(f"driver_env: {exc}")
+        return {"no_proxy_hosts": previous, "refreshed": False}, previous
     report: dict[str, Any] = {"no_proxy_hosts": hosts, "refreshed": False}
     if hosts == previous:
         return report, previous
@@ -434,8 +447,13 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
         kept = set(remove_ids) if result.get("remove_errors") else set()
         new_manifest[target] = sorted(set(desired) | kept)
 
+    # A failed removal leaves its join in Hermes's config, so the hosts the
+    # last render covered stay in NO_PROXY until the removal goes through.
+    removal_failed = any((report[t] or {}).get("remove_errors") for t in JOIN_TARGETS)
     report["driver_env"], no_proxy_hosts = _converge_driver_env_no_proxy(
-        old_no_proxy_hosts, report["errors"]
+        old_no_proxy_hosts,
+        report["errors"],
+        preserve=old_no_proxy_hosts if removal_failed else None,
     )
     if no_proxy_hosts is not None:
         new_manifest["no_proxy_hosts"] = no_proxy_hosts
