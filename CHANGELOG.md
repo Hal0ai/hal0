@@ -316,6 +316,23 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+- **An omni `generate_image` call no longer strands its own caller on a
+  single-GPU box.** The image render switches the GPU to exclusive image
+  mode, which unloads the calling LLM slot; the loop's next chat round then
+  failed with `gpu.image_mode`, the rendered image was never returned, and
+  the GPU stayed parked in image mode for the idle window until someone
+  switched it back by hand (#2191). The loop now restores LLM mode once per
+  tool round, after every image in the round has rendered and ComfyUI's
+  queue is empty (so another request's render is never cut short), so the
+  caller is loaded again when asked to fold the images in; the reload per
+  image round is the cost of sharing GPU memory. The restore itself cannot
+  be cut short by the client leaving. A caller that was never evicted
+  (NPU/CPU, or a GPU that did not flip) is left alone. If image mode is
+  pinned or the restore fails, the loop does not ask the unloaded model
+  again: it returns a completion that lists every image the request
+  rendered, with every tool result it produced, and the reason (`hal0.omni.caller_slot_unavailable`, with the
+  verbatim tool results alongside). A request cancelled mid-render restores LLM mode in
+  the background instead of leaving the GPU parked.
 
 - **A slow or hung `flm list` no longer freezes hal0-api** (#2334). The FLM
   catalog probe runs host `flm list -j` synchronously with a 30 s timeout

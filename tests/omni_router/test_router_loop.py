@@ -12,6 +12,7 @@ Covers the OpenAI tool-calling loop:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -663,3 +664,435 @@ async def test_router_loop_never_synthesises_a_reply_for_an_error_round() -> Non
     assert "error" in result
     assert "503" in result["error"]
     assert "choices" not in result
+
+
+# ── #2191: image tools on the exclusive GPU, loop-level ───────────────────────
+#
+# Dispatching generate_image flips the arbiter into image mode and unloads the
+# calling LLM. The loop restores LLM mode ONCE per tool round, after every tool
+# call in the round has finished (two image renders in one response must not
+# have the first restore pull the GPU from under the second), and if the caller
+# cannot be restored it ends the loop with a client-visible completion that
+# still carries the image instead of asking the evicted LLM one more time.
+
+
+class _Arbiter:
+    def __init__(self, *, pinned: bool = False) -> None:
+        self._mode = "llm"
+        self.pinned = pinned
+        self.restore_calls = 0
+        self.restore_seen_in_flight = 0
+
+    @property
+    def mode(self):
+        from hal0.slots.arbiter import GpuMode
+
+        return GpuMode(self._mode)
+
+    def flip_to_img(self) -> None:
+        self._mode = "img"
+
+    async def restore_llm(self, *, force: bool = False) -> None:
+        from hal0.slots.arbiter import ArbiterPinned
+
+        self.restore_calls += 1
+        if self.pinned and not force:
+            raise ArbiterPinned("GPU image mode is pinned", details={"pinned": True})
+        self._mode = "llm"
+
+    # What the omni loop must call: the queue-aware variant (#2191 review).
+    # ``gate`` lets a test hold the restore mid-flight.
+    gate: asyncio.Event | None = None
+    when_idle_calls = 0
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = 600.0
+    ) -> None:
+        self.when_idle_calls += 1
+        if self.gate is not None:
+            await self.gate.wait()
+        await self.restore_llm(force=force)
+
+
+class _ArbitratedManager(FakeSlotManager):
+    def __init__(self, slots, arbiter: _Arbiter) -> None:
+        super().__init__(slots)
+        self.arbiter = arbiter
+
+
+def _two_image_calls_then_done(arbiter: _Arbiter, *, in_flight: list[int]):
+    """A /v1 handler: first chat round asks for two images; each render flips
+    the GPU and records how many renders were in flight when a restore ran."""
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            body = json.loads(req.read())
+            if len(body.get("messages", [])) <= 1:
+                calls = [
+                    {
+                        "id": f"c{i}",
+                        "type": "function",
+                        "function": {
+                            "name": "generate_image",
+                            "arguments": json.dumps({"prompt": f"p{i}"}),
+                        },
+                    }
+                    for i in (1, 2)
+                ]
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": None, "tool_calls": calls}}
+                        ]
+                    },
+                )
+            return httpx.Response(200, json={"choices": [{"message": {"content": "two images"}}]})
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            in_flight[0] += 1
+            await asyncio.sleep(0.02)
+            if arbiter.restore_calls:
+                arbiter.restore_seen_in_flight += 1
+            in_flight[0] -= 1
+            return httpx.Response(
+                200, json={"data": [{"url": f"img-{json.loads(req.read())['prompt']}"}]}
+            )
+        return httpx.Response(404)
+
+    return handler
+
+
+def _arbitrated_router(handler, arbiter: _Arbiter) -> OmniRouter:
+    return OmniRouter(
+        slot_manager=_ArbitratedManager([_caller(), _img_slot()], arbiter),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://test"
+        ),
+        api_base_url="http://test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_image_calls_restore_the_caller_once_after_both_finish() -> None:
+    arbiter = _Arbiter()
+    in_flight = [0]
+    router = _arbitrated_router(_two_image_calls_then_done(arbiter, in_flight=in_flight), arbiter)
+
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert result["choices"][0]["message"]["content"] == "two images"
+    assert arbiter.restore_calls == 1
+    assert arbiter.restore_seen_in_flight == 0  # no render saw a restore while running
+    assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_pinned_image_mode_ends_the_loop_with_the_image_in_a_completion() -> None:
+    """The evicted LLM is never asked again; the client gets a completion that
+    carries the rendered image and says why the model could not continue."""
+    arbiter = _Arbiter(pinned=True)
+    chat_rounds = [0]
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            chat_rounds[0] += 1
+            body = json.loads(req.read())
+            if len(body.get("messages", [])) <= 1:
+                call = {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "generate_image",
+                        "arguments": json.dumps({"prompt": "cat"}),
+                    },
+                }
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [call],
+                                }
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(
+                503, json={"error": {"code": "gpu.image_mode", "message": "unavailable"}}
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            return httpx.Response(200, json={"data": [{"url": "http://img/cat.png"}]})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert chat_rounds[0] == 1  # the second chat round never went to the evicted LLM
+    assert "choices" in result and "error" not in result
+    content = result["choices"][0]["message"]["content"]
+    assert "http://img/cat.png" in content
+    assert "pinned" in content
+    extra = result["hal0"]["omni"]
+    assert "pinned" in extra["caller_slot_unavailable"]
+    assert extra["tool_results"][0]["result"]["data"] == [{"url": "http://img/cat.png"}]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_round_still_restores_the_caller_in_the_background() -> None:
+    """A client that disconnects mid-render must not leave the GPU parked in
+    image mode with the caller unloaded until the idle window expires."""
+    arbiter = _Arbiter()
+    started = asyncio.Event()
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            call = {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "cat"})},
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": None, "tool_calls": [call]}}
+                    ]
+                },
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            started.set()
+            await asyncio.sleep(10)  # a long render the client will abandon
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    task = asyncio.ensure_future(
+        router.run_loop(
+            caller_slot_name="primary",
+            body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The background restore runs on the loop once the request is gone.
+    for _ in range(50):
+        if arbiter.restore_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_the_loop_restores_through_the_queue_aware_path() -> None:
+    """Another request's render may be queued: the loop must use the variant
+    that waits for ComfyUI's queue, never the bare restore."""
+    arbiter = _Arbiter()
+    in_flight = [0]
+    router = _arbitrated_router(_two_image_calls_then_done(arbiter, in_flight=in_flight), arbiter)
+    await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert arbiter.when_idle_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_the_restore_itself_lets_the_restore_finish() -> None:
+    """Cancelled after the renders but while the restore is in progress: the
+    restore must run to completion detached, not stop half-way with ComfyUI
+    freed and the LLM set partly loaded."""
+    arbiter = _Arbiter()
+    arbiter.gate = asyncio.Event()
+    rendered = asyncio.Event()
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            call = {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "cat"})},
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": None, "tool_calls": [call]}}
+                    ]
+                },
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            rendered.set()
+            return httpx.Response(200, json={"data": [{"url": "x"}]})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    task = asyncio.ensure_future(
+        router.run_loop(
+            caller_slot_name="primary",
+            body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+        )
+    )
+    await rendered.wait()
+    # Let the loop reach the restore and block on the gate, then cancel.
+    for _ in range(50):
+        if arbiter.when_idle_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert arbiter.when_idle_calls == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert arbiter.restore_calls == 0  # still held at the gate, not aborted
+    arbiter.gate.set()
+    for _ in range(50):
+        if arbiter.restore_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_images_from_earlier_rounds_are_kept_when_a_later_round_cannot_restore() -> None:
+    """Round 1 renders an image and restores fine; round 2 renders another and
+    the restore is refused. The fallback completion must carry both images:
+    round 1's result only ever went into the private transcript."""
+    arbiter = _Arbiter()
+    rounds = [0]
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            rounds[0] += 1
+            n = len(json.loads(req.read()).get("messages", []))
+            prompt = "first" if n <= 1 else "second"
+            if n <= 3:  # user; then user+assistant+tool
+                call = {
+                    "id": f"c-{prompt}",
+                    "type": "function",
+                    "function": {
+                        "name": "generate_image",
+                        "arguments": json.dumps({"prompt": prompt}),
+                    },
+                }
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [call],
+                                }
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(
+                503, json={"error": {"code": "gpu.image_mode", "message": "unavailable"}}
+            )
+        if req.url.path == "/v1/images/generations":
+            prompt = json.loads(req.read())["prompt"]
+            arbiter.flip_to_img()
+            if prompt == "second":
+                arbiter.pinned = True  # the operator pinned image mode meanwhile
+            return httpx.Response(200, json={"data": [{"url": f"http://img/{prompt}.png"}]})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert "choices" in result and "error" not in result
+    content = result["choices"][0]["message"]["content"]
+    assert "http://img/first.png" in content and "http://img/second.png" in content
+    urls = [r["result"]["data"][0]["url"] for r in result["hal0"]["omni"]["tool_results"]]
+    assert urls == ["http://img/first.png", "http://img/second.png"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_keeps_every_tool_result_of_the_round_not_only_images() -> None:
+    """An embed_text that ran beside the image must reach the client too."""
+    arbiter = _Arbiter(pinned=True)
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            body = json.loads(req.read())
+            if len(body.get("messages", [])) <= 1:
+                calls = [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "generate_image",
+                            "arguments": json.dumps({"prompt": "cat"}),
+                        },
+                    },
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {
+                            "name": "embed_text",
+                            "arguments": json.dumps({"input": ["x"]}),
+                        },
+                    },
+                ]
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": None, "tool_calls": calls}}
+                        ]
+                    },
+                )
+            return httpx.Response(
+                503, json={"error": {"code": "gpu.image_mode", "message": "unavailable"}}
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            return httpx.Response(200, json={"data": [{"url": "http://img/cat.png"}]})
+        if req.url.path == "/v1/embeddings":
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(404)
+
+    router = OmniRouter(
+        slot_manager=_ArbitratedManager(
+            [
+                _caller(),
+                _img_slot(),
+                make_slot("embed", type="embedding", model="bge", labels=("embeddings",)),
+            ],
+            arbiter,
+        ),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://test"
+        ),
+        api_base_url="http://test",
+    )
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+    names = [r["name"] for r in result["hal0"]["omni"]["tool_results"]]
+    assert names == ["generate_image", "embed_text"]
+    content = result["choices"][0]["message"]["content"]
+    assert "http://img/cat.png" in content
+    assert "embed_text" in content

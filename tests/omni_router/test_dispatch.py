@@ -507,3 +507,120 @@ async def test_handler_internal_exception_returns_error_envelope() -> None:
         assert "RuntimeError" in result["error"]
     finally:
         HANDLERS["embed_text"] = original
+
+
+# ── #2191: restoring the caller after an image round ─────────────────────────
+#
+# On a single-GPU box the img and llm slots share the exclusive GPU: an image
+# dispatch flips the arbiter into image mode, which unloads the caller LLM.
+# ``restore_caller_after_images`` is what the loop calls once per tool round
+# (router.py) to bring the caller back; these tests pin WHEN it acts and what
+# it reports. The round-level behaviour (one restore after a parallel batch,
+# the fallback completion, cancellation) lives in test_router_loop.py.
+
+from hal0.omni_router.dispatch import restore_caller_after_images  # noqa: E402
+
+
+class _FakeArbiter:
+    def __init__(self, mode: str = "img", *, pinned: bool = False) -> None:
+        self._mode = mode
+        self.pinned = pinned
+        self.restore_calls = 0
+
+    @property
+    def mode(self):
+        from hal0.slots.arbiter import GpuMode
+
+        return GpuMode(self._mode)
+
+    async def restore_llm(self, *, force: bool = False) -> None:
+        from hal0.slots.arbiter import ArbiterPinned
+
+        self.restore_calls += 1
+        if self.pinned and not force:
+            raise ArbiterPinned("GPU image mode is pinned", details={"pinned": True})
+        self._mode = "llm"
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = 600.0
+    ) -> None:
+        await self.restore_llm(force=force)
+
+
+class _ArbitratedSlotManager(FakeSlotManager):
+    def __init__(self, slots, arbiter: _FakeArbiter) -> None:
+        super().__init__(slots)
+        self.arbiter = arbiter
+
+
+def _restore_ctx(
+    slots, arbiter: _FakeArbiter | None, *, caller: str = "primary"
+) -> DispatchContext:
+    mgr = _ArbitratedSlotManager(slots, arbiter) if arbiter is not None else FakeSlotManager(slots)
+    return DispatchContext(
+        slot_manager=mgr,
+        http_client=make_http_client(lambda _req: httpx.Response(200, json={})),
+        api_base_url="http://test",
+        caller_slot_name=caller,
+    )
+
+
+_IMG = make_slot("img", type="image", model="sdxl", labels=("image", "edit"))
+_GPU_CALLER = make_slot("primary", type="llm", model="agent-7b", labels=("tool-calling",))
+
+
+@pytest.mark.asyncio
+async def test_restore_brings_an_evicted_gpu_caller_back() -> None:
+    arbiter = _FakeArbiter("img")  # the image dispatch flipped the GPU
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter)) is None
+    assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_no_restore_when_the_caller_is_not_on_the_exclusive_gpu() -> None:
+    """An NPU/CPU caller was never unloaded; restoring would reload LLM slots
+    nobody asked for and end a deliberate image session."""
+    npu_caller = make_slot(
+        "primary", type="llm", model="agent-7b", labels=("tool-calling",), device="npu"
+    )
+    arbiter = _FakeArbiter("img")
+    assert await restore_caller_after_images(_restore_ctx([npu_caller, _IMG], arbiter)) is None
+    assert arbiter.restore_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_no_restore_when_the_gpu_did_not_flip() -> None:
+    """Multi-GPU or non-arbitrated image slot: mode stays llm, nothing to undo."""
+    arbiter = _FakeArbiter("llm")
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter)) is None
+    assert arbiter.restore_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_pinned_image_mode_is_reported_not_raised() -> None:
+    arbiter = _FakeArbiter("img", pinned=True)
+    reason = await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter))
+    assert reason is not None and "pinned" in reason
+    assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "img"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restore_is_reported_not_raised() -> None:
+    class _BrokenArbiter(_FakeArbiter):
+        async def restore_llm_when_idle(
+            self, *, force: bool = False, max_wait_s: float = 600.0
+        ) -> None:
+            self.restore_calls += 1
+            raise RuntimeError("comfyui /free timed out")
+
+    reason = await restore_caller_after_images(
+        _restore_ctx([_GPU_CALLER, _IMG], _BrokenArbiter("img"))
+    )
+    assert reason is not None and "comfyui /free timed out" in reason
+
+
+@pytest.mark.asyncio
+async def test_no_arbiter_means_nothing_to_do() -> None:
+    assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], None)) is None

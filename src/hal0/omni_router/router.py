@@ -24,14 +24,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from hal0.omni_router.dispatch import (
+    IMAGE_TOOLS,
     DispatchContext,
     dispatch_tool,
+    restore_caller_after_images,
 )
 from hal0.omni_router.filter import SlotManagerLike, active_tools_for
 from hal0.omni_router.tools import ToolDefinition
@@ -44,6 +48,62 @@ log = logging.getLogger(__name__)
 # separately; this is the per-request "give up" budget. Eight tools,
 # expected single-round usage; 8 is generous.
 _MAX_LOOP_ROUNDS = 8
+
+
+def _completion_without_caller(
+    request_body: dict[str, Any],
+    caller_slot_name: str,
+    reason: str,
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """A chat completion the loop returns when the caller LLM cannot continue (#2191).
+
+    The image tools ran; the caller slot was unloaded by that and could not be
+    restored (``reason``). Asking the evicted slot to fold the results in
+    would 503 and lose the image, so the loop answers directly: an OpenAI-shaped
+    completion whose text names each rendered image, plus an ``hal0.omni``
+    block with the verbatim tool results and the reason, for clients that
+    want the structured form.
+    """
+    lines: list[str] = []
+    for item in tool_results:
+        result = item.get("result")
+        data = result.get("data") if isinstance(result, dict) else None
+        urls = (
+            [d.get("url") for d in data if isinstance(d, dict) and d.get("url")]
+            if isinstance(data, list)
+            else []
+        )
+        if item.get("name") in IMAGE_TOOLS and urls:
+            lines.append(f"{item.get('name')}: " + ", ".join(str(u) for u in urls))
+        elif isinstance(result, dict) and result.get("error"):
+            lines.append(f"{item.get('name')} failed: {result['error']}")
+        else:
+            lines.append(f"{item.get('name')}: completed (see hal0.omni.tool_results)")
+    content = (
+        "\n".join(lines)
+        + f"\n\nThe model {caller_slot_name!r} could not continue after the image step: {reason}"
+    )
+    return {
+        "id": f"chatcmpl-omni-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": str(request_body.get("model") or caller_slot_name),
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "hal0": {
+            "omni": {
+                "caller_slot": caller_slot_name,
+                "caller_slot_unavailable": reason,
+                "tool_results": tool_results,
+            }
+        },
+    }
 
 
 class OmniRouter:
@@ -73,6 +133,8 @@ class OmniRouter:
         self._slot_manager = slot_manager
         self._http_client = http_client
         self._api_base_url = api_base_url.rstrip("/")
+        # Detached restore tasks (#2191) kept referenced until they finish.
+        self._background_restores: set[asyncio.Task[None]] = set()
 
     # ── filter surface ─────────────────────────────────────────────
 
@@ -130,17 +192,46 @@ class OmniRouter:
 
         round_count = 0
         last_response: dict[str, Any] | None = None
+        # #2191: set when an image round left the caller LLM unavailable
+        # (pinned image mode, failed restore). The next "chat round" then
+        # answers from here instead of asking the evicted slot.
+        caller_unavailable: str | None = None
+        # Every tool result this request produced, across rounds: earlier
+        # rounds' results only ever went into the private transcript, so the
+        # fallback completion must carry them all (the image ones feed its
+        # text; the rest ride along under hal0.omni.tool_results).
+        all_results: list[dict[str, Any]] = []
 
         async def _dispatch_round(
             tool_calls: list[dict[str, Any]],
         ) -> AsyncIterator[dict[str, Any]]:
-            nonlocal round_count
+            nonlocal round_count, caller_unavailable
+            image_round = any(tc["name"] in IMAGE_TOOLS for tc in tool_calls)
             # Dispatch all tool_calls in parallel — multiple tool_calls in
             # one response are a normal OpenAI shape and we don't want
             # serial latency.
-            results = await asyncio.gather(
-                *(dispatch_tool(ctx, tc["name"], tc["arguments"]) for tc in tool_calls)
+            try:
+                results = await asyncio.gather(
+                    *(dispatch_tool(ctx, tc["name"], tc["arguments"]) for tc in tool_calls)
+                )
+            except asyncio.CancelledError:
+                # The client went away mid-render. The GPU may already be in
+                # image mode with the caller unloaded; nobody else will put it
+                # back before the idle window expires, so restore from a
+                # detached task and let the cancellation through.
+                if image_round:
+                    self._restore_in_background(ctx)
+                raise
+            all_results.extend(
+                {"id": tc["id"], "name": tc["name"], "result": result}
+                for tc, result in zip(tool_calls, results, strict=True)
             )
+            if image_round:
+                # One restore per round, after every render in it finished —
+                # restoring after the first would pull the GPU from under the
+                # rest (#2191). Waits for ComfyUI's queue (other requests'
+                # renders) and survives this request's cancellation.
+                caller_unavailable = await restore_caller_after_images(ctx)
             for tc, result in zip(tool_calls, results, strict=True):
                 yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
             log.debug(
@@ -153,8 +244,18 @@ class OmniRouter:
             )
             round_count += 1
 
+        async def _llm(request_body: dict[str, Any]) -> dict[str, Any]:
+            # The caller LLM is gone (#2191): do not send it the tool results
+            # — that round would 503 and the client would lose the image.
+            # Answer with a completion that carries the results instead.
+            if caller_unavailable:
+                return _completion_without_caller(
+                    request_body, caller_slot_name, caller_unavailable, all_results
+                )
+            return await self._chat_completion(request_body)
+
         async for event in run_tool_loop(
-            self._chat_completion,
+            _llm,
             tool_schemas,
             _dispatch_round,
             body=working,
@@ -174,6 +275,21 @@ class OmniRouter:
         return last_response or {"error": "loop budget exhausted with no response"}
 
     # ── helpers ────────────────────────────────────────────────────
+
+    def _restore_in_background(self, ctx: DispatchContext) -> None:
+        """Restore the caller LLM from a detached task (cancelled request, #2191)."""
+
+        async def _run() -> None:
+            reason = await restore_caller_after_images(ctx)
+            if reason:
+                log.warning("omni_router.background_restore_incomplete", extra={"reason": reason})
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:  # pragma: no cover — no loop; nothing to schedule on
+            return
+        self._background_restores.add(task)
+        task.add_done_callback(self._background_restores.discard)
 
     def _build_context(self, caller_slot_name: str) -> DispatchContext:
         """Build a DispatchContext wired with a chat_completion callback.

@@ -153,6 +153,47 @@ async def _comfyui_queue_counts() -> tuple[int, int] | None:
     )
 
 
+class ComfyUIQueueUnknown(Exception):
+    """``GET /queue`` answered, but not with a usable queue (non-200, bad body, timeout)."""
+
+
+async def _comfyui_queue_state() -> tuple[int, int] | None:
+    """Strict ``GET /queue`` for :meth:`GpuArbiter.restore_llm_when_idle`.
+
+    ``(running, pending)`` from a good answer; ``None`` ONLY when nothing is
+    listening (connection refused — then nothing is on the GPU either);
+    :class:`ComfyUIQueueUnknown` for every other failure (HTTP error, timeout,
+    unparseable body). The looser :func:`_comfyui_queue_counts` folds all of
+    those into ``None`` because the idle loop only needs a hint; a restore
+    that frees ComfyUI's models must not take "the read failed" as "nothing
+    is rendering".
+    """
+    import httpx
+
+    timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{_comfyui_base_url()}/queue")
+    except httpx.ConnectError:
+        return None
+    except httpx.HTTPError as exc:
+        raise ComfyUIQueueUnknown(str(exc)) from exc
+    if resp.status_code != 200:
+        raise ComfyUIQueueUnknown(f"HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise ComfyUIQueueUnknown("unparseable /queue body") from exc
+    if not isinstance(data, dict):
+        raise ComfyUIQueueUnknown("unexpected /queue shape")
+    running = data.get("queue_running")
+    pending = data.get("queue_pending")
+    return (
+        len(running) if isinstance(running, list) else 0,
+        len(pending) if isinstance(pending, list) else 0,
+    )
+
+
 _DEFAULT_STATE: dict[str, Any] = {
     "mode": "llm",
     "pinned": False,
@@ -220,6 +261,22 @@ class ArbiterPinned(Hal0Error):
 
     code = "gpu.pinned"
     status = 409
+
+
+class ArbiterQueueBusy(Hal0Error):
+    """Restore not attempted — ComfyUI still had running/pending renders at the deadline."""
+
+    code = "gpu.queue_busy"
+    status = 409
+
+
+#: Poll interval while :meth:`GpuArbiter.restore_llm_when_idle` waits for the
+#: ComfyUI queue to drain.
+_QUEUE_IDLE_POLL_S = 2.0
+#: Default wait budget for that drain. A render on the shipped hardware is
+#: seconds to a few minutes; ten minutes covers a queued batch without holding
+#: a caller forever.
+_QUEUE_IDLE_MAX_WAIT_S = 600.0
 
 
 class GpuImgNotReady(Hal0Error):
@@ -585,6 +642,48 @@ class GpuArbiter:
             st["pinned"] = False
             self._persist()
             log.info("gpu_arbiter.llm_mode", extra={"restored": saved})
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = _QUEUE_IDLE_MAX_WAIT_S
+    ) -> None:
+        """:meth:`restore_llm`, but only once ComfyUI has no running or pending render.
+
+        ``restore_llm`` frees ComfyUI's models and reloads the LLM set; called
+        while a render is still active — another request's, or one a cancelled
+        caller abandoned on the queue — it would drop that render. This waits
+        for ``GET /queue`` to report nothing running or pending, then restores.
+        A refused connection counts as idle (nothing listening holds no GPU
+        memory, the same stance ``restore_llm`` takes for ``/free``); any
+        other failed read is NOT evidence the render stopped and counts as
+        busy. Raises :class:`ArbiterQueueBusy` if the queue has not drained
+        within ``max_wait_s``; nothing is freed or reloaded in that case.
+        No-op in LLM mode, like ``restore_llm``.
+
+        The omni tool loop uses this after an image round (#2191).
+        """
+        if self.mode is not GpuMode.IMG:
+            return
+        deadline = time.monotonic() + max_wait_s
+        while True:
+            try:
+                counts = await _comfyui_queue_state()
+            except ComfyUIQueueUnknown as exc:
+                counts = None
+                reason = f"ComfyUI queue could not be read ({exc})"
+            else:
+                if counts is None or sum(counts) == 0:
+                    break
+                reason = f"ComfyUI still has {counts[0]} running and {counts[1]} pending render(s)"
+            if time.monotonic() >= deadline:
+                raise ArbiterQueueBusy(
+                    f"{reason} after {max_wait_s:.0f}s; LLM mode was not restored",
+                    details={
+                        "running": counts[0] if counts else None,
+                        "pending": counts[1] if counts else None,
+                    },
+                )
+            await asyncio.sleep(_QUEUE_IDLE_POLL_S)
+        await self.restore_llm(force=force)
 
     # ── idle-restore loop (D6) ───────────────────────────────────────────────
 
