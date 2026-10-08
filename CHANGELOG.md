@@ -210,17 +210,6 @@ applying. Add those subsections to a version's section to surface them; see
   `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
   finishes the #2330 fix. (#2371)
 
-- **A stable or preview release now fails its build when `CHANGELOG.md` has
-  no section for it.** `scripts/gen_release_notes.py` used to fall back to a
-  git log when the `## [<version>]` header was missing or empty, so the
-  release still published but `release.json` carried empty highlights,
-  breaking and migrations lists and `hal0 update` showed no callout. It now
-  exits non-zero, writes nothing, and names the tag and the header to add.
-  Nightly releases still use the git log. A stable tag also no longer picks
-  up its own pre-release section (`v1.4.0` used to match `## [1.4.0-rc.1]`),
-  which would have shipped the rc's notes and slipped past that check.
-  (#2255, #2345)
-
 - **A user-installed MCP server with `gated` or `blocked` tools is no longer
   handed to Hermes or the brain profile.** Both call the server's URL
   directly, and nothing on that path enforces the `[tools]` policy yet
@@ -233,6 +222,17 @@ applying. Add those subsections to a version's section to surface them; see
   later, is left out of the join and logged, so the next sync (or
   hal0-api's startup reconcile) removes it from Hermes's config. This is an
   interim guard until hal0 sits on the agent's call path. (#2343)
+
+- **A stable or preview release now fails its build when `CHANGELOG.md` has
+  no section for it.** `scripts/gen_release_notes.py` used to fall back to a
+  git log when the `## [<version>]` header was missing or empty, so the
+  release still published but `release.json` carried empty highlights,
+  breaking and migrations lists and `hal0 update` showed no callout. It now
+  exits non-zero, writes nothing, and names the tag and the header to add.
+  Nightly releases still use the git log. A stable tag also no longer picks
+  up its own pre-release section (`v1.4.0` used to match `## [1.4.0-rc.1]`),
+  which would have shipped the rc's notes and slipped past that check.
+  (#2255, #2345)
 
 - **An installed `sse` MCP server exposed to Hermes or the brain profile is
   now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
