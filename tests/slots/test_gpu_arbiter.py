@@ -1125,3 +1125,61 @@ async def test_existing_load_raises_rollback_still_works(
     assert _read_state(state_path)["mode"] == "llm"
     assert _read_state(state_path)["saved_llm_slots"] == []
     arb.guard_dispatch("chat")
+
+
+# ── restore_llm_when_idle (#2191) ────────────────────────────────────────────
+#
+# restore_llm() frees ComfyUI's models and reloads the LLM set. Called while a
+# render is still running or queued — another request's, or one a cancelled
+# caller abandoned — it would drop that render. This variant waits for the
+# ComfyUI queue to drain first, bounded, and is what the omni loop uses.
+
+
+async def test_restore_llm_when_idle_waits_for_the_queue_then_restores(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], monkeypatch
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    assert arb.mode is GpuMode.IMG
+
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    # Scripted queue: a render running, then one pending, then idle.
+    polls = iter([(1, 0), (0, 1), (0, 0)])
+
+    async def _queue() -> tuple[int, int] | None:
+        return next(polls, (0, 0))
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_counts", _queue)
+
+    await arb.restore_llm_when_idle()
+
+    assert arb.mode is GpuMode.LLM
+    assert comfyui_http["free"] == 1  # freed exactly once, after the queue drained
+
+
+async def test_restore_llm_when_idle_gives_up_after_the_wait_budget(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], monkeypatch
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    comfyui_http["queue"] = (1, 0)  # never drains
+
+    with pytest.raises(arbiter_mod.ArbiterQueueBusy):
+        await arb.restore_llm_when_idle(max_wait_s=0.05)
+
+    assert arb.mode is GpuMode.IMG  # nothing was freed or reloaded
+    assert comfyui_http["free"] == 0
+
+
+async def test_restore_llm_when_idle_treats_an_unreachable_queue_as_idle(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    """An unreachable ComfyUI holds no GPU memory — same stance as restore_llm's /free."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    comfyui_http["queue"] = None
+
+    await arb.restore_llm_when_idle()
+
+    assert arb.mode is GpuMode.LLM

@@ -42,6 +42,7 @@ single-URL contract.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -188,6 +189,9 @@ async def _post_json(
 #: exclusive GPU into image mode (``GpuArbiter.ensure_img``).
 IMAGE_TOOLS: frozenset[str] = frozenset({"generate_image", "edit_image"})
 
+#: Restores detached from a cancelled request, kept referenced until done.
+_DETACHED_RESTORES: set[asyncio.Task[Any]] = set()
+
 
 async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
     """Bring the caller LLM back after an image round flipped the exclusive GPU.
@@ -202,9 +206,16 @@ async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
     The loop calls this ONCE per tool round, after every tool call in the
     round has finished (a round may carry several image renders dispatched
     in parallel; restoring after the first would pull the GPU from under
-    the rest). Acts only when the arbiter is in image mode AND the caller is
-    an llm-group slot — i.e. one the flip evicted. An NPU/CPU caller, a GPU
-    that did not flip, or a box with no arbiter is left alone.
+    the rest). Renders this loop cannot see — another request's, or one a
+    cancelled caller left on the queue — are covered by going through
+    :meth:`~hal0.slots.arbiter.GpuArbiter.restore_llm_when_idle`, which waits
+    for ComfyUI's queue to drain before freeing anything. The restore itself
+    is shielded from the request's cancellation: once started it runs to
+    completion detached, so a client leaving mid-restore cannot leave ComfyUI
+    freed with the LLM set half loaded. Acts only when the arbiter is in
+    image mode AND the caller is an llm-group slot — i.e. one the flip
+    evicted. An NPU/CPU caller, a GPU that did not flip, or a box with no
+    arbiter is left alone.
 
     Returns ``None`` when the caller is available again (or never was
     unavailable), else a one-line reason it still is not — a pinned image
@@ -230,8 +241,15 @@ async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
         )
         if caller_cfg is None or gpu_exclusive_group(caller_cfg) != "llm":
             return None
+        restore = asyncio.ensure_future(arbiter.restore_llm_when_idle())
+        _DETACHED_RESTORES.add(restore)
+        restore.add_done_callback(_DETACHED_RESTORES.discard)
         try:
-            await arbiter.restore_llm()
+            await asyncio.shield(restore)
+        except asyncio.CancelledError:
+            # The request is gone; the restore keeps running on its own.
+            log.info("omni.image_caller_restore_detached caller=%s", ctx.caller_slot_name)
+            raise
         except ArbiterPinned as exc:
             return (
                 f"GPU image mode is pinned, so the caller LLM slot "

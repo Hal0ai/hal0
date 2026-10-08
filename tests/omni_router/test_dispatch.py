@@ -541,6 +541,11 @@ class _FakeArbiter:
             raise ArbiterPinned("GPU image mode is pinned", details={"pinned": True})
         self._mode = "llm"
 
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = 600.0
+    ) -> None:
+        await self.restore_llm(force=force)
+
 
 class _ArbitratedSlotManager(FakeSlotManager):
     def __init__(self, slots, arbiter: _FakeArbiter) -> None:
@@ -604,7 +609,9 @@ async def test_pinned_image_mode_is_reported_not_raised() -> None:
 @pytest.mark.asyncio
 async def test_a_failed_restore_is_reported_not_raised() -> None:
     class _BrokenArbiter(_FakeArbiter):
-        async def restore_llm(self, *, force: bool = False) -> None:
+        async def restore_llm_when_idle(
+            self, *, force: bool = False, max_wait_s: float = 600.0
+        ) -> None:
             self.restore_calls += 1
             raise RuntimeError("comfyui /free timed out")
 

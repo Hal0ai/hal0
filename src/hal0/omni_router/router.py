@@ -196,12 +196,15 @@ class OmniRouter:
         # (pinned image mode, failed restore). The next "chat round" then
         # answers from here instead of asking the evicted slot.
         caller_unavailable: str | None = None
-        unavailable_results: list[dict[str, Any]] = []
+        # Every image result this request produced, across rounds: earlier
+        # rounds' images only ever went into the private transcript, so the
+        # fallback completion must carry them too.
+        image_results: list[dict[str, Any]] = []
 
         async def _dispatch_round(
             tool_calls: list[dict[str, Any]],
         ) -> AsyncIterator[dict[str, Any]]:
-            nonlocal round_count, caller_unavailable, unavailable_results
+            nonlocal round_count, caller_unavailable
             image_round = any(tc["name"] in IMAGE_TOOLS for tc in tool_calls)
             # Dispatch all tool_calls in parallel — multiple tool_calls in
             # one response are a normal OpenAI shape and we don't want
@@ -219,15 +222,16 @@ class OmniRouter:
                     self._restore_in_background(ctx)
                 raise
             if image_round:
+                image_results.extend(
+                    {"id": tc["id"], "name": tc["name"], "result": result}
+                    for tc, result in zip(tool_calls, results, strict=True)
+                    if tc["name"] in IMAGE_TOOLS
+                )
                 # One restore per round, after every render in it finished —
                 # restoring after the first would pull the GPU from under the
-                # rest (#2191).
+                # rest (#2191). Waits for ComfyUI's queue (other requests'
+                # renders) and survives this request's cancellation.
                 caller_unavailable = await restore_caller_after_images(ctx)
-                if caller_unavailable:
-                    unavailable_results = [
-                        {"id": tc["id"], "name": tc["name"], "result": result}
-                        for tc, result in zip(tool_calls, results, strict=True)
-                    ]
             for tc, result in zip(tool_calls, results, strict=True):
                 yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result}
             log.debug(
@@ -246,7 +250,7 @@ class OmniRouter:
             # Answer with a completion that carries the results instead.
             if caller_unavailable:
                 return _completion_without_caller(
-                    request_body, caller_slot_name, caller_unavailable, unavailable_results
+                    request_body, caller_slot_name, caller_unavailable, image_results
                 )
             return await self._chat_completion(request_body)
 

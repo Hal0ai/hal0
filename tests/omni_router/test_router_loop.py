@@ -700,6 +700,19 @@ class _Arbiter:
             raise ArbiterPinned("GPU image mode is pinned", details={"pinned": True})
         self._mode = "llm"
 
+    # What the omni loop must call: the queue-aware variant (#2191 review).
+    # ``gate`` lets a test hold the restore mid-flight.
+    gate: asyncio.Event | None = None
+    when_idle_calls = 0
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = 600.0
+    ) -> None:
+        self.when_idle_calls += 1
+        if self.gate is not None:
+            await self.gate.wait()
+        await self.restore_llm(force=force)
+
 
 class _ArbitratedManager(FakeSlotManager):
     def __init__(self, slots, arbiter: _Arbiter) -> None:
@@ -882,3 +895,134 @@ async def test_cancelled_image_round_still_restores_the_caller_in_the_background
         await asyncio.sleep(0.01)
     assert arbiter.restore_calls == 1
     assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_the_loop_restores_through_the_queue_aware_path() -> None:
+    """Another request's render may be queued: the loop must use the variant
+    that waits for ComfyUI's queue, never the bare restore."""
+    arbiter = _Arbiter()
+    in_flight = [0]
+    router = _arbitrated_router(_two_image_calls_then_done(arbiter, in_flight=in_flight), arbiter)
+    await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert arbiter.when_idle_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_the_restore_itself_lets_the_restore_finish() -> None:
+    """Cancelled after the renders but while the restore is in progress: the
+    restore must run to completion detached, not stop half-way with ComfyUI
+    freed and the LLM set partly loaded."""
+    arbiter = _Arbiter()
+    arbiter.gate = asyncio.Event()
+    rendered = asyncio.Event()
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            call = {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "cat"})},
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": None, "tool_calls": [call]}}
+                    ]
+                },
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            rendered.set()
+            return httpx.Response(200, json={"data": [{"url": "x"}]})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    task = asyncio.ensure_future(
+        router.run_loop(
+            caller_slot_name="primary",
+            body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+        )
+    )
+    await rendered.wait()
+    # Let the loop reach the restore and block on the gate, then cancel.
+    for _ in range(50):
+        if arbiter.when_idle_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert arbiter.when_idle_calls == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert arbiter.restore_calls == 0  # still held at the gate, not aborted
+    arbiter.gate.set()
+    for _ in range(50):
+        if arbiter.restore_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert arbiter.restore_calls == 1
+    assert arbiter.mode.value == "llm"
+
+
+@pytest.mark.asyncio
+async def test_images_from_earlier_rounds_are_kept_when_a_later_round_cannot_restore() -> None:
+    """Round 1 renders an image and restores fine; round 2 renders another and
+    the restore is refused. The fallback completion must carry both images:
+    round 1's result only ever went into the private transcript."""
+    arbiter = _Arbiter()
+    rounds = [0]
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            rounds[0] += 1
+            n = len(json.loads(req.read()).get("messages", []))
+            prompt = "first" if n <= 1 else "second"
+            if n <= 3:  # user; then user+assistant+tool
+                call = {
+                    "id": f"c-{prompt}",
+                    "type": "function",
+                    "function": {
+                        "name": "generate_image",
+                        "arguments": json.dumps({"prompt": prompt}),
+                    },
+                }
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [call],
+                                }
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(
+                503, json={"error": {"code": "gpu.image_mode", "message": "unavailable"}}
+            )
+        if req.url.path == "/v1/images/generations":
+            prompt = json.loads(req.read())["prompt"]
+            arbiter.flip_to_img()
+            if prompt == "second":
+                arbiter.pinned = True  # the operator pinned image mode meanwhile
+            return httpx.Response(200, json={"data": [{"url": f"http://img/{prompt}.png"}]})
+        return httpx.Response(404)
+
+    router = _arbitrated_router(handler, arbiter)
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert "choices" in result and "error" not in result
+    content = result["choices"][0]["message"]["content"]
+    assert "http://img/first.png" in content and "http://img/second.png" in content
+    urls = [r["result"]["data"][0]["url"] for r in result["hal0"]["omni"]["tool_results"]]
+    assert urls == ["http://img/first.png", "http://img/second.png"]

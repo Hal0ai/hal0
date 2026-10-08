@@ -222,6 +222,22 @@ class ArbiterPinned(Hal0Error):
     status = 409
 
 
+class ArbiterQueueBusy(Hal0Error):
+    """Restore not attempted — ComfyUI still had running/pending renders at the deadline."""
+
+    code = "gpu.queue_busy"
+    status = 409
+
+
+#: Poll interval while :meth:`GpuArbiter.restore_llm_when_idle` waits for the
+#: ComfyUI queue to drain.
+_QUEUE_IDLE_POLL_S = 2.0
+#: Default wait budget for that drain. A render on the shipped hardware is
+#: seconds to a few minutes; ten minutes covers a queued batch without holding
+#: a caller forever.
+_QUEUE_IDLE_MAX_WAIT_S = 600.0
+
+
 class GpuImgNotReady(Hal0Error):
     """Image slot did not become ready within the readiness timeout.
 
@@ -585,6 +601,39 @@ class GpuArbiter:
             st["pinned"] = False
             self._persist()
             log.info("gpu_arbiter.llm_mode", extra={"restored": saved})
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = _QUEUE_IDLE_MAX_WAIT_S
+    ) -> None:
+        """:meth:`restore_llm`, but only once ComfyUI has no running or pending render.
+
+        ``restore_llm`` frees ComfyUI's models and reloads the LLM set; called
+        while a render is still active — another request's, or one a cancelled
+        caller abandoned on the queue — it would drop that render. This waits
+        for ``GET /queue`` to report nothing running or pending (an unreachable
+        ComfyUI holds no GPU memory and counts as idle, the same stance
+        ``restore_llm`` takes for ``/free``), then restores. Raises
+        :class:`ArbiterQueueBusy` if the queue has not drained within
+        ``max_wait_s``; nothing is freed or reloaded in that case. No-op in LLM
+        mode, like ``restore_llm``.
+
+        The omni tool loop uses this after an image round (#2191).
+        """
+        if self.mode is not GpuMode.IMG:
+            return
+        deadline = time.monotonic() + max_wait_s
+        while True:
+            counts = await _comfyui_queue_counts()
+            if counts is None or sum(counts) == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise ArbiterQueueBusy(
+                    f"ComfyUI still has {counts[0]} running and {counts[1]} pending render(s) "
+                    f"after {max_wait_s:.0f}s; LLM mode was not restored",
+                    details={"running": counts[0], "pending": counts[1]},
+                )
+            await asyncio.sleep(_QUEUE_IDLE_POLL_S)
+        await self.restore_llm(force=force)
 
     # ── idle-restore loop (D6) ───────────────────────────────────────────────
 
