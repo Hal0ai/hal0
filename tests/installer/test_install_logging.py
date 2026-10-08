@@ -21,6 +21,16 @@ def _run(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _unwritable_even_for_root(tmp_path: Path) -> Path:
+    """A "directory" path whose mkdir fails even as root: a regular file sits
+    where the directory should be. (A made-up absolute path like
+    /nonexistent-dir is creatable by root, so a root test run never reached
+    the fallback.)"""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    return blocker
+
+
 class TestLogPath:
     def test_root_gets_a_var_log_hal0_path(self) -> None:
         script = f"""
@@ -84,14 +94,15 @@ second="$HAL0_INSTALL_LOG"
         proc = _run(script)
         assert "same" in proc.stdout, proc.stdout
 
-    def test_an_unwritable_primary_path_falls_back_to_tmp(self) -> None:
+    def test_an_unwritable_primary_path_falls_back_to_tmp(self, tmp_path: Path) -> None:
         """The FHS path (root-owned /var/log/hal0) can be unwritable even as
         root — a read-only /var, an unusual mount policy. Fall back to /tmp
         rather than aborting the install over forensics."""
+        blocker = _unwritable_even_for_root(tmp_path)
         script = f"""
 source "{LOGGING_SH}"
 id() {{ echo 0; }}
-hal0_install_log_path() {{ printf '/nonexistent-root-only-dir/install-test.log\\n'; }}
+hal0_install_log_path() {{ printf '%s/install-test.log\\n' "{blocker}"; }}
 hal0_install_log_init
 echo "rc=$?"
 echo "log=$HAL0_INSTALL_LOG"
@@ -104,3 +115,65 @@ echo "still running"
         assert fallback_path.startswith("/tmp/hal0-install-"), proc.stdout
         assert Path(fallback_path).is_file()
         Path(fallback_path).unlink(missing_ok=True)
+
+
+class TestLogMode:
+    """#2361: the log tees installer output unredacted, so it must be
+    owner-only (0600) on both the primary and the /tmp fallback path, created
+    that way (umask 077) rather than chmod'ed after a world-readable birth."""
+
+    def test_primary_log_is_owner_only(self, tmp_path: Path) -> None:
+        fake_log_dir = tmp_path / "var-log-hal0"
+        script = f"""
+umask 022
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path() {{ printf '%s/install-test.log\\n' "{fake_log_dir}"; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+echo "umask=$(umask)"
+"""
+        proc = _run(script)
+        log_line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log_path = Path(log_line.removeprefix("log="))
+        assert log_path.is_file(), proc.stdout
+        assert (log_path.stat().st_mode & 0o777) == 0o600
+        # The tighter umask is scoped to the log's creation; the rest of the
+        # install keeps the caller's umask (install.sh relies on 022).
+        assert "umask=0022" in proc.stdout, proc.stdout
+
+    def test_tmp_fallback_log_is_owner_only(self, tmp_path: Path) -> None:
+        blocker = _unwritable_even_for_root(tmp_path)
+        script = f"""
+umask 022
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path() {{ printf '%s/install-test.log\\n' "{blocker}"; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+"""
+        proc = _run(script)
+        log_line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        fallback_path = Path(log_line.removeprefix("log="))
+        try:
+            assert str(fallback_path).startswith("/tmp/hal0-install-"), proc.stdout
+            assert (fallback_path.stat().st_mode & 0o777) == 0o600
+        finally:
+            fallback_path.unlink(missing_ok=True)
+
+    def test_a_preexisting_world_readable_log_is_tightened(self, tmp_path: Path) -> None:
+        """umask only applies at creation; a same-second rerun appending to an
+        existing 0644 log must still end up 0600."""
+        fake_log_dir = tmp_path / "var-log-hal0"
+        fake_log_dir.mkdir()
+        existing = fake_log_dir / "install-test.log"
+        existing.write_text("earlier run\n")
+        existing.chmod(0o644)
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path() {{ printf '%s\\n' "{existing}"; }}
+hal0_install_log_init
+"""
+        _run(script)
+        assert (existing.stat().st_mode & 0o777) == 0o600

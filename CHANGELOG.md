@@ -215,6 +215,14 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The install log is now owner-only (0600).** `installer/lib/logging.sh`
+  created `/var/log/hal0/install-<ts>.log`, and its `/tmp` fallback, mode
+  0644 and tees installer output into it unredacted, so every local user
+  could read it. Both paths are now created under `umask 077` and pinned to
+  0600. `hal0 doctor bundle` run as a non-root user can no longer read a
+  root-owned log and leaves `logs/install.log` out of the bundle; run it with
+  `sudo` to include it. (#2361)
+
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads
   `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers

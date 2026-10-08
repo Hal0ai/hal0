@@ -227,6 +227,32 @@ def test_bundle_with_no_install_log_present_writes_nothing_for_it(
     assert not (out / "logs" / "install.log").exists()
 
 
+def test_bundle_skips_an_install_log_it_cannot_read(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2361: the install log is 0600 root-owned, so a non-root bundle can't
+    read it. That must skip the log, not fail the bundle. (Simulated with a
+    patched read: the suite may run as root, which ignores file modes.)"""
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    (log_dir / "install-20260101-000000.log").write_text("root-only\n")
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.parent == log_dir:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    out = tmp_path / "bundle"
+    _, _failed = build_bundle(out, include_rocm_smi=False)
+    assert not (out / "logs" / "install.log").exists()
+    assert (out / "manifest.json").is_file()
+
+
 def test_bundle_returns_nonzero_failed_count_when_probes_missing(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
