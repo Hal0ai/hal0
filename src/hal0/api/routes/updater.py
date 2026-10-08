@@ -1331,6 +1331,14 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
     return await restart_drifted(sm, only=only, skip_busy=skip_busy)
 
 
+#: One restart sweep at a time. The CLI's post-apply POST /restart-slots and
+#: the post-start pass can arrive within seconds of each other for the same
+#: slots; serialising them here (drift is re-read under the lock) means the
+#: second sees the first's restarts as no longer drifted and does nothing,
+#: instead of interleaving a second unload/load on the same slot.
+_RESTART_SWEEP_LOCK = asyncio.Lock()
+
+
 async def restart_drifted(
     sm: Any, *, only: set[str] | None = None, skip_busy: bool = False
 ) -> dict[str, Any]:
@@ -1339,8 +1347,16 @@ async def restart_drifted(
     Shared by ``POST /restart-slots`` and the post-start image-drift pass
     (#2096). Per-slot failures are recorded, never re-raised. With
     ``skip_busy`` a slot llama-server reports as processing is left alone and
-    listed under ``skipped_busy``.
+    listed under ``skipped_busy``. Sweeps are serialised on
+    :data:`_RESTART_SWEEP_LOCK`; drift is read inside the lock.
     """
+    async with _RESTART_SWEEP_LOCK:
+        return await _restart_drifted_locked(sm, only=only, skip_busy=skip_busy)
+
+
+async def _restart_drifted_locked(
+    sm: Any, *, only: set[str] | None, skip_busy: bool
+) -> dict[str, Any]:
     drifted = await _collect_slot_drift(sm)
     targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
     skipped_busy: list[str] = []

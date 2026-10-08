@@ -11,6 +11,7 @@ routing is exercised without a live container runtime.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -269,3 +270,51 @@ def test_slot_drift_route_exposes_auto_restart(client: TestClient) -> None:
     }
     client.app.state.post_start_image_drift_restart = stored
     assert client.get("/api/updates/slot-drift").json()["auto_restart"] == stored
+
+
+# ── #2096 review: the two restart passes must not overlap ────────────────────
+#
+# The CLI polls /slot-drift and POSTs /restart-slots as soon as hal0-api is
+# back, while the post-start pass is still settling or restarting. Both go
+# through restart_drifted(); a slot restarted by the first must not be bounced
+# again by the second, and the two must not interleave unload/load on it.
+
+
+@pytest.mark.asyncio
+async def test_restart_drifted_serialises_concurrent_callers_and_does_not_double_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.api.routes import updater as upd
+
+    drifted_names = {"brain"}
+    restarts: list[str] = []
+    in_restart = 0
+    max_overlap = 0
+
+    class _SM:
+        async def restart(self, name: str) -> None:
+            nonlocal in_restart, max_overlap
+            in_restart += 1
+            max_overlap = max(max_overlap, in_restart)
+            await asyncio.sleep(0.02)
+            restarts.append(name)
+            drifted_names.discard(name)  # the restart cleared the drift
+            in_restart -= 1
+
+    async def _drift(_sm):
+        return [
+            {"slot": n, "diffs": [{"key": "image", "running": "a", "rendered": "b"}]}
+            for n in sorted(drifted_names)
+        ]
+
+    monkeypatch.setattr(upd, "_collect_slot_drift", _drift)
+    sm = _SM()
+
+    first, second = await asyncio.gather(
+        upd.restart_drifted(sm, only={"brain"}),
+        upd.restart_drifted(sm, only={"brain"}),
+    )
+
+    assert restarts == ["brain"]  # exactly one bounce
+    assert max_overlap == 1
+    assert sorted([first["count"], second["count"]]) == [0, 1]
