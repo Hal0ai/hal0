@@ -258,6 +258,20 @@ applying. Add those subsections to a version's section to surface them; see
   Plain-HTTP installs are unchanged. (Flagged in review of #2338; the gap
   predates it, but a 30-day "remember me" session made it matter more.)
 
+- **A Runner Images default for the voice, speech, NPU and image-generation
+  families now takes effect.** `[slots].default_images` accepts `comfyui`,
+  `flm`, `kokoro`, `moonshine` and `qwen3tts`, and the dashboard reported the
+  override as in effect, but only llama slots read it; those five providers
+  still launched the registry default. They now resolve their image in the
+  same order as llama slots — slot `image_pin`, then the family default, then
+  the registry default — through one shared helper. The image pull, slot
+  status, drift check and load-time GPU preflight now resolve that same ref
+  too: for these slots (the shipped `img`, `qwen3tts`, `tts` and `flm`
+  slots included) they used to derive a llama runner image from the slot's
+  device, so the pull fetched the wrong image, status reported an image
+  mismatch and the drift check flagged an image change that was not there,
+  with or without a family default. (#2234)
+
 - **A LAN-bound box with an admin key no longer leaves the dashboard half
   signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
   off-box callers even with "Require authentication" off — and that rule is

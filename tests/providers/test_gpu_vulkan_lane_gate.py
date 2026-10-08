@@ -610,7 +610,7 @@ class TestLoadSyncThreadsTheResolvedImage:
         """Install a [slots].default_images override the REAL chain will read.
 
         Patches ``hal0.config.loader.load_hal0_config`` (what
-        ``container._slot_default_images`` calls fresh on every resolve) —
+        ``_image.slot_default_images`` reads fresh on every resolve) —
         NOT the resolution tier itself — so the test exercises the whole
         override→resolve→preflight path, not a stub of it.
         """

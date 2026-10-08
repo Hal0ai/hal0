@@ -116,27 +116,18 @@ class KokoroProvider(Provider):
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
         """Return the Kokoro toolbox image reference.
 
-        Resolution (§7.1b / ML-4): ``slot_cfg["image"]`` (top-level or
-        ``[slot]``-nested string override) → the runner registry
-        (``HAL0_TOOLBOX_IMAGE_KOKORO`` env override → the manifest digest
-        pin → the bundled default) — see
-        :func:`hal0.runners.resolve_runner_image`. Previously this was
-        env-only; :meth:`container_spec` (the actual call site — this
-        method has no live caller today) used ``profile.image`` directly
-        and never consulted this method or ``slot.image`` at all.
+        Resolution (#2234 — the same tier order as
+        :func:`hal0.providers.container._resolve_image_ref`, shared via
+        :func:`hal0.providers._image.resolve_family_image`):
+        ``slot_cfg["image_pin"]`` (top-level or ``[slot]``-nested, honored
+        verbatim) → ``[slots].default_images["kokoro"]`` (operator family
+        default) → the runner registry (``HAL0_TOOLBOX_IMAGE_KOKORO`` env
+        override → the manifest digest pin → the bundled default) — see
+        :func:`hal0.runners.resolve_runner_image`.
         """
-        override: Any = None
-        if isinstance(slot_cfg, dict):
-            override = slot_cfg.get("image_pin")
-            if not (isinstance(override, str) and override):
-                nested = slot_cfg.get("slot")
-                override = nested.get("image_pin") if isinstance(nested, dict) else None
-        if isinstance(override, str) and override:
-            return override
+        from hal0.providers._image import resolve_family_image
 
-        from hal0.runners import get_runner, resolve_runner_image
-
-        return resolve_runner_image(get_runner("kokoro"))
+        return resolve_family_image(slot_cfg, "kokoro")
 
     def container_spec(
         self,
