@@ -10,6 +10,14 @@ import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph }
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce, _advInputStyle } from '../../shared/SchemaRow.jsx'
+import {
+  EXTRACTION_LIMIT_FIELDS,
+  limitsFormAllValid,
+  limitsFormDirty,
+  limitsFormFromStatus,
+  limitsFormValidity,
+  limitsPutBody,
+} from './extractionLimits.js'
 
 export function MemoryPage() {
   // R5 data seam: one typed client supplies the merged reload-class registry.
@@ -220,19 +228,27 @@ function MemoryGraphPanel() {
   const [enabled, setEnabled] = useState(false);
   const [slot, setSlot] = useState("");
   const [timeoutS, setTimeoutS] = useState("300");
+  // #1834 extraction limits — one editable string per knob, seeded from the
+  // status echo; the pure helpers in extractionLimits.js own bounds + diffing.
+  const [limits, setLimits] = useState(() => limitsFormFromStatus(null));
+  const limitsKey = JSON.stringify(st?.extraction_limits || null);
   useEffect(() => {
     if (!st) return;
     setEnabled(!!st.enabled);
     setSlot(st.extraction_slot || "");
     if (st.llm_timeout_s != null) setTimeoutS(String(st.llm_timeout_s));
-  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s]);
+    setLimits(limitsFormFromStatus(st));
+  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s, limitsKey]);
 
   const timeoutNum = parseInt(timeoutS, 10);
   const timeoutValid = /^\d+$/.test(timeoutS.trim()) && timeoutNum >= 30 && timeoutNum <= 3600;
+  const limitsValidity = limitsFormValidity(limits);
+  const limitsValid = limitsFormAllValid(limits);
   const dirty = !!st && (
     enabled !== !!st.enabled
     || slot !== (st.extraction_slot || "")
     || (st.llm_timeout_s != null && timeoutS !== String(st.llm_timeout_s))
+    || limitsFormDirty(limits, st)
   );
   const slots = st?.available_slots || [];
   // Keep the currently-configured slot pickable even when it no longer
@@ -244,6 +260,7 @@ function MemoryGraphPanel() {
       const body = { enabled };
       if (slot) body.extraction_slot = slot;
       if (timeoutValid) body.llm_timeout_s = timeoutNum;
+      Object.assign(body, limitsPutBody(limits, st));
       const resp = await updateGraph.mutateAsync(body);
       const perr = resp?.propagation?.error;
       window.__hal0Toast && window.__hal0Toast(
@@ -315,6 +332,29 @@ function MemoryGraphPanel() {
           />
         }
       />
+      {/* #1834: caps on how hard Hindsight may drive the shared extraction
+          slot. Same PUT, same drop-in + restart as the slot and timeout. */}
+      <div className="mono" style={{fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--fg-4)", padding: "10px 12px 2px"}}>
+        Extraction limits
+        <FieldInfoIcon description="hal0.toml [memory.graph].extraction_* · bounds concurrency, output length and retries so one slow extraction cannot wedge the retain queue on a shared slot" />
+      </div>
+      {EXTRACTION_LIMIT_FIELDS.map(f => (
+        <SRow
+          key={f.key}
+          k={f.label}
+          sub={f.sub}
+          v={
+            <input
+              type="number" min={f.min} max={f.max} value={limits[f.key]} disabled={!st}
+              onChange={e => setLimits(prev => ({...prev, [f.key]: e.target.value}))}
+              placeholder={String(f.fallback)}
+              className="mono"
+              data-testid={`mem-graph-limit-${f.key}`}
+              style={{..._advInputStyle, width: 100, borderColor: limitsValidity[f.key] || !limits[f.key] ? "var(--line)" : "var(--err)"}}
+            />
+          }
+        />
+      ))}
       {st && (
         <SRow
           k="Extraction health"
@@ -346,9 +386,10 @@ function MemoryGraphPanel() {
             setEnabled(!!st?.enabled);
             setSlot(st?.extraction_slot || "");
             setTimeoutS(st?.llm_timeout_s != null ? String(st.llm_timeout_s) : "300");
+            setLimits(limitsFormFromStatus(st));
           }}>Reset</button>
         )}
-        <button className="btn sm" disabled={!dirty || !timeoutValid || updateGraph.isPending} onClick={doSave}>
+        <button className="btn sm" disabled={!dirty || !timeoutValid || !limitsValid || updateGraph.isPending} onClick={doSave} data-testid="mem-graph-save">
           {updateGraph.isPending ? "Saving…" : "Save graph settings"}
         </button>
       </div>

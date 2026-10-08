@@ -65,6 +65,18 @@ Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
 EnvironmentFile=-/etc/hal0/hindsight-llm.env
 # Generous timeout retained: covers utility-slot cold starts + long reflects.
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
+# Extraction limits (#1834). The extraction target above is a shared hal0
+# inference slot, usually one llama-server serving one request at a time;
+# hindsight-api's own defaults (32 concurrent calls, 64000 completion tokens,
+# three retries at two layers) let a single slow extraction saturate it until
+# the retain queue never drains. These mirror [memory.graph] in hal0.toml;
+# the dashboard / `hal0 memory graph` rewrite them through the
+# extraction-model.conf drop-in, which overrides these lines.
+Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1
+Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096
+Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1
+Environment=HINDSIGHT_API_WORKER_MAX_RETRIES=2
+Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120
 # Skip the blocking startup LLM verification. On a fresh box no model is loaded
 # yet, so verifying hal0/utility would hang application startup (the daemon never
 # binds :9177) until the timeout. The LLM is only needed for extraction/reflection,

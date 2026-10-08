@@ -42,14 +42,17 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from hal0.agents.anchor_window import SLOTS_DIR, AnchorWindow, resolve_anchor_window
 from hal0.system.seam import SystemCtlSeam
+
+if TYPE_CHECKING:  # pragma: no cover
+    from hal0.config.schema import MemoryGraphConfig
 
 log = structlog.get_logger(__name__)
 
@@ -87,15 +90,64 @@ DEFAULT_LLM_TIMEOUT_S = 300
 #: prompt content persisted as fact) shape this preflight exists to catch.
 EXTRACTION_MIN_CONTEXT_TOKENS = 8192
 
+
+@dataclass(frozen=True)
+class ExtractionLimits:
+    """The ``[memory.graph]`` extraction limits, as rendered into the drop-in (#1834).
+
+    Defaults mirror :class:`hal0.config.schema.MemoryGraphConfig` and are
+    deliberately conservative for the shipped shape — one shared llama-server
+    slot — rather than hindsight-api's own (32 concurrent calls, 64000
+    completion tokens, two layers of 3 retries), which on a slow slot turn one
+    stuck extraction into a queue that never drains.
+
+    * ``max_concurrent`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight
+      extraction calls against the slot. 1 serialises them.
+    * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
+      completion cap. Must exceed hindsight's retain chunk size (3000) or the
+      daemon refuses to start; the schema floor (3072) keeps that unreachable.
+    * ``llm_retries`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES``: retries of one
+      LLM call inside a retain attempt.
+    * ``task_retries`` -> ``HINDSIGHT_API_WORKER_MAX_RETRIES``: requeues of a
+      failed retain task before it is marked failed.
+    * ``retry_backoff_s`` -> ``HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS``:
+      wait before a requeue.
+    """
+
+    max_concurrent: int = 1
+    max_tokens: int = 4096
+    llm_retries: int = 1
+    task_retries: int = 2
+    retry_backoff_s: int = 120
+
+    @classmethod
+    def from_config(cls, cfg: MemoryGraphConfig) -> ExtractionLimits:
+        return cls(
+            max_concurrent=cfg.extraction_max_concurrent,
+            max_tokens=cfg.extraction_max_tokens,
+            llm_retries=cfg.extraction_llm_retries,
+            task_retries=cfg.extraction_task_retries,
+            retry_backoff_s=cfg.extraction_retry_backoff_s,
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+
 _DROP_IN_TEMPLATE = (
-    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s).\n"
-    "# Overrides HINDSIGHT_API_LLM_MODEL and HINDSIGHT_API_LLM_TIMEOUT in the base\n"
-    "# hindsight-api.service unit. Do not edit by hand; set via `hal0 memory graph\n"
-    "# enable --slot <name>` or the dashboard, which rewrites this file and\n"
-    "# restarts the service.\n"
+    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s /\n"
+    "# extraction limits, #1834). Overrides the hindsight-api LLM target, timeout\n"
+    "# and extraction limits set in the base hindsight-api.service unit. Do not\n"
+    "# edit by hand; set via `hal0 memory graph enable --slot <name>` or the\n"
+    "# dashboard, which rewrites this file and restarts the service.\n"
     "[Service]\n"
     "Environment=HINDSIGHT_API_LLM_MODEL=hal0/{slot}\n"
     "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
+    "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={max_concurrent}\n"
+    "Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS={max_tokens}\n"
+    "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"
+    "Environment=HINDSIGHT_API_WORKER_MAX_RETRIES={task_retries}\n"
+    "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
 )
 
 
@@ -137,13 +189,34 @@ def _stale_wrapper_hint(exc: BaseException) -> str:
     return ""
 
 
-def render_drop_in(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> str:
-    """Return the drop-in contents pinning extraction to ``hal0/<slot>`` + timeout."""
-    return _DROP_IN_TEMPLATE.format(slot=slot, timeout_s=int(timeout_s))
+def render_drop_in(
+    slot: str,
+    timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
+    *,
+    limits: ExtractionLimits | None = None,
+) -> str:
+    """Return the drop-in contents pinning extraction to ``hal0/<slot>``, the
+    LLM timeout and the extraction limits (``limits`` defaults to the schema
+    defaults, see :class:`ExtractionLimits`)."""
+    lim = limits if limits is not None else ExtractionLimits()
+    return _DROP_IN_TEMPLATE.format(
+        slot=slot,
+        timeout_s=int(timeout_s),
+        max_concurrent=int(lim.max_concurrent),
+        max_tokens=int(lim.max_tokens),
+        llm_retries=int(lim.llm_retries),
+        task_retries=int(lim.task_retries),
+        retry_backoff_s=int(lim.retry_backoff_s),
+    )
 
 
-def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
-    """True when the on-disk drop-in already reflects ``(slot, timeout_s)``.
+def drop_in_matches(
+    slot: str,
+    timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
+    *,
+    limits: ExtractionLimits | None = None,
+) -> bool:
+    """True when the on-disk drop-in already reflects ``(slot, timeout_s, limits)``.
 
     #1682 review: comparing only against ``hal0.toml`` is not enough to
     decide propagation is unnecessary. A host hit by the pre-seam write bug
@@ -166,7 +239,9 @@ def drop_in_matches(slot: str, timeout_s: int = DEFAULT_LLM_TIMEOUT_S) -> bool:
     repair it, instead of an otherwise-idempotent PUT 500ing.
     """
     try:
-        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(slot, timeout_s)
+        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(
+            slot, timeout_s, limits=limits
+        )
     except (OSError, UnicodeDecodeError):
         return False
 
@@ -175,6 +250,7 @@ def apply_extraction_slot(
     slot: str,
     *,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
+    limits: ExtractionLimits | None = None,
     restart: bool = True,
     seam: SystemCtlSeam | None = None,
 ) -> dict[str, Any]:
@@ -182,7 +258,7 @@ def apply_extraction_slot(
 
     Returns a status dict::
 
-        {"slot", "model", "timeout_s", "drop_in", "written",
+        {"slot", "model", "timeout_s", "limits", "drop_in", "written",
          "daemon_reloaded", "restarted", "error"}
 
     ``error`` is ``None`` on full success. The write is atomic (temp + rename) so a
@@ -195,10 +271,12 @@ def apply_extraction_slot(
     """
     seam = seam if seam is not None else SystemCtlSeam()
     model = f"hal0/{slot}"
+    lim = limits if limits is not None else ExtractionLimits()
     result: dict[str, Any] = {
         "slot": slot,
         "model": model,
         "timeout_s": int(timeout_s),
+        "limits": lim.as_dict(),
         "drop_in": str(DROP_IN_PATH),
         "written": False,
         "daemon_reloaded": False,
@@ -208,7 +286,7 @@ def apply_extraction_slot(
 
     try:
         seam.write_hindsight_dropin(
-            render_drop_in(slot, timeout_s),
+            render_drop_in(slot, timeout_s, limits=lim),
             path=DROP_IN_PATH,
             timeout=_SYSTEMCTL_TIMEOUT_S,
         )

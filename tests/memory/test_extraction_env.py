@@ -112,6 +112,96 @@ def test_render_drop_in_includes_llm_timeout():
     assert "HINDSIGHT_API_LLM_TIMEOUT=600" in render_drop_in("utility", timeout_s=600)
 
 
+# ── #1834: extraction limits ride the same drop-in ───────────────────────────
+#
+# A shared inference slot with no concurrency cap, no completion-token cap and
+# a requeueing retry ladder never drains its retain queue on a slow box. The
+# caps are hindsight-api's own env knobs; hal0 owns their values in
+# [memory.graph] and renders them into the one drop-in it already manages.
+
+
+def test_extraction_limits_defaults_are_conservative():
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    limits = ExtractionLimits()
+    assert limits.max_concurrent == 1
+    assert limits.max_tokens == 4096
+    assert limits.llm_retries == 1
+    assert limits.task_retries == 2
+    assert limits.retry_backoff_s == 120
+
+
+def test_render_drop_in_carries_the_extraction_limits():
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    out = render_drop_in("utility")
+    assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1" in out
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096" in out
+    assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1" in out
+    assert "HINDSIGHT_API_WORKER_MAX_RETRIES=2" in out
+    assert "HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120" in out
+
+    tuned = ExtractionLimits(
+        max_concurrent=2, max_tokens=8192, llm_retries=0, task_retries=5, retry_backoff_s=30
+    )
+    out = render_drop_in("utility", limits=tuned)
+    assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in out
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=8192" in out
+    assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=0" in out
+    assert "HINDSIGHT_API_WORKER_MAX_RETRIES=5" in out
+    assert "HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=30" in out
+
+
+def test_extraction_limits_from_config_mirrors_the_schema():
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    cfg = MemoryGraphConfig(
+        extraction_max_concurrent=3,
+        extraction_max_tokens=6000,
+        extraction_llm_retries=2,
+        extraction_task_retries=1,
+        extraction_retry_backoff_s=45,
+    )
+    assert ExtractionLimits.from_config(cfg) == ExtractionLimits(
+        max_concurrent=3, max_tokens=6000, llm_retries=2, task_retries=1, retry_backoff_s=45
+    )
+    assert ExtractionLimits.from_config(MemoryGraphConfig()) == ExtractionLimits()
+
+
+def test_drop_in_matches_sees_a_limits_change(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    path = tmp_path / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+    path.write_text(render_drop_in("agent", 300), encoding="utf-8")
+    assert drop_in_matches("agent", 300) is True
+    assert drop_in_matches("agent", 300, limits=ExtractionLimits(max_concurrent=2)) is False
+
+
+def test_apply_threads_limits_into_drop_in_and_status(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+
+    limits = ExtractionLimits(max_concurrent=2, max_tokens=5000)
+    result = apply_extraction_slot("agent", restart=False, limits=limits)
+    assert result["limits"] == {
+        "max_concurrent": 2,
+        "max_tokens": 5000,
+        "llm_retries": 1,
+        "task_retries": 2,
+        "retry_backoff_s": 120,
+    }
+    text = drop_in.read_text()
+    assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in text
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=5000" in text
+
+
 def test_apply_threads_timeout_into_drop_in_and_status(monkeypatch, tmp_path: Path):
     import hal0.memory.extraction_env as ee
 

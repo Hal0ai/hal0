@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
+from hal0.memory.extraction_env import ExtractionLimits
 
 
 class StubWrapper:
@@ -182,7 +183,7 @@ async def test_propagate_shielded_does_not_resolve_until_worker_finishes() -> No
     release_worker = threading.Event()
     order: list[str] = []
 
-    def _slow_apply(slot: str, *, timeout_s: int) -> dict[str, Any]:
+    def _slow_apply(slot: str, *, timeout_s: int, limits: Any = None) -> dict[str, Any]:
         worker_started.set()
         assert release_worker.wait(timeout=5), "test bug: never released"
         order.append("worker_done")
@@ -219,7 +220,7 @@ async def test_propagate_shielded_survives_a_second_cancellation() -> None:
     release_worker = threading.Event()
     order: list[str] = []
 
-    def _slow_apply(slot: str, *, timeout_s: int) -> dict[str, Any]:
+    def _slow_apply(slot: str, *, timeout_s: int, limits: Any = None) -> dict[str, Any]:
         worker_started.set()
         assert release_worker.wait(timeout=5), "test bug: never released"
         order.append("worker_done")
@@ -243,6 +244,60 @@ async def test_propagate_shielded_survives_a_second_cancellation() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert order == ["worker_done"]
+
+
+# ── #1834: extraction limits ─────────────────────────────────────────────────
+
+
+def test_graph_status_echoes_the_extraction_limits(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    body = client.get("/api/memory/graph/status").json()
+    assert body["extraction_limits"] == {
+        "max_concurrent": 1,
+        "max_tokens": 4096,
+        "llm_retries": 1,
+        "task_retries": 2,
+        "retry_backoff_s": 120,
+    }
+
+
+def test_put_limits_change_propagates_with_the_new_limits(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """Changing a limit alone (slot and timeout untouched) must still rewrite
+    the drop-in and restart the daemon, with the limits threaded through."""
+    from hal0.memory.extraction_env import ExtractionLimits
+
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        r = client.put(
+            "/api/memory/graph",
+            json={"extraction_max_concurrent": 2, "extraction_max_tokens": 6000},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_max_concurrent"] == 2
+    assert body["extraction_max_tokens"] == 6000
+    assert body["propagation"]["written"] is True
+    apply_mock.assert_called_once_with(
+        "utility",
+        timeout_s=300,
+        limits=ExtractionLimits(max_concurrent=2, max_tokens=6000),
+    )
+    # ...and persisted.
+    assert client.get("/api/memory/graph/status").json()["extraction_limits"]["max_tokens"] == 6000
+
+
+def test_put_out_of_range_limit_is_rejected_before_anything_changes(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        r = client.put("/api/memory/graph", json={"extraction_max_tokens": 1000})
+    assert r.status_code == 400, r.text
+    assert "extraction_max_tokens" in r.text
+    apply_mock.assert_not_called()
+    assert stub_wrapper.set_calls == []
 
 
 def test_put_enable_with_unknown_slot_rejected(
@@ -297,7 +352,7 @@ def test_put_reconciles_when_toml_matches_but_drop_in_does_not(
     body = r.json()
     assert body["extraction_slot"] == "utility"
     assert body["propagation"]["written"] is True
-    apply_mock.assert_called_once_with("utility", timeout_s=300)
+    apply_mock.assert_called_once_with("utility", timeout_s=300, limits=ExtractionLimits())
 
 
 def test_put_reconciliation_skipped_when_unchanged_slot_is_unavailable(

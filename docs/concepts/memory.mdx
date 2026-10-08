@@ -244,9 +244,23 @@ even on a fresh install, under `[memory.graph]`:
   Hindsight's extraction/consolidation/reflect calls are routed to.
 - `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
   daemon's LLM calls, covering cold slot starts and long reflects.
+- the extraction limits — `extraction_max_concurrent` (default `1`),
+  `extraction_max_tokens` (default `4096`), `extraction_llm_retries`
+  (default `1`), `extraction_task_retries` (default `2`) and
+  `extraction_retry_backoff_s` (default `120`). The extraction slot is a
+  shared inference slot, usually one llama-server serving one request at a
+  time; Hindsight's own defaults (32 concurrent calls, 64000 completion
+  tokens, three retries at each of two layers) let one slow extraction
+  saturate it and requeue itself until the queue never drains. These caps
+  bound that: one call in flight, a few thousand output tokens per call, and
+  a retry ladder that ends — a document that cannot be extracted lands under
+  **Retry failed** on the Memory page instead of occupying the slot for
+  hours. Raise `extraction_max_concurrent` only for a slot that genuinely
+  serves parallel requests.
 
-Both are propagated to the `hindsight-api` service as
-`HINDSIGHT_API_LLM_MODEL=hal0/<slot>` and `HINDSIGHT_API_LLM_TIMEOUT=<n>` via
+All of them are propagated to the `hindsight-api` service as
+`HINDSIGHT_API_LLM_MODEL=hal0/<slot>`, `HINDSIGHT_API_LLM_TIMEOUT=<n>` and
+the matching `HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits via
 a systemd drop-in at `/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`,
 followed by `daemon-reload` + a service restart — all routed through hal0's
 privileged-operation seam rather than hal0-api (which runs unprivileged)

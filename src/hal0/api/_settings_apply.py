@@ -208,6 +208,12 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.graph.enabled": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_slot": {"apply_class": "immediate", "services": []},
     "memory.graph.llm_timeout_s": {"apply_class": "immediate", "services": []},
+    # #1834 extraction limits: same drop-in + restart, same sole writer.
+    "memory.graph.extraction_max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_max_tokens": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_llm_retries": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_task_retries": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_retry_backoff_s": {"apply_class": "immediate", "services": []},
     # [activity] — the AuditStore is constructed once at create_app
     # (api/__init__.py); retention/max_rows/enabled land on restart.
     "activity.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
