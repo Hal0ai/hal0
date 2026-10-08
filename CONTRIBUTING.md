@@ -17,7 +17,7 @@ When the model opens up, the shape will be:
 - Run `make lint test` before pushing
 - Update the maintainer planning doc (`docs/.devdocs/PLAN.md`, local-only) if your change moves the scope
 - Slot/dispatcher/provider changes require unit tests plus a real-runtime
-  pass (`make harness` or `make release-test`; Tier-1 reliability is
+  pass on a real box (`make release-test`; Tier-1 reliability is
   non-negotiable)
 - UI changes need Playwright coverage for any new critical path
 
@@ -157,14 +157,16 @@ against mocked backends and is not the release gate).
 |---|---|---|---|---|
 | α  Unit | `pytest` over `tests/`, with mocked systemd/HTTP/runtime clients | any host, no daemons; CI `python` job (`.github/workflows/ci.yml`) | every commit / PR; required for merge | `make test` |
 | γ  Release-gate | The 7-row backend matrix in `scripts/release-test.sh` | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
-| δ  Harness | install → CLI → one real slot load → chat → unload → uninstall | the developer's own host | on demand | `make harness` |
+| δ  Harness | `--dev` install → CLI → uninstall; the slot-load row is recorded `deferred` under `--dev` and the chat row skipped | the developer's own host | on demand | `make harness` |
 
 There is no β (integration) tier. The old one — a `make test-integration`
 target and an `integration.yml` workflow running a real slot lifecycle on
 a CI runner — was retired in v0.2 and not replaced (the note above the test
-targets in the `Makefile` records this). A real slot lifecycle is exercised
-only by the δ harness and the γ gate, so run one of them when a change
-needs that coverage.
+targets in the `Makefile` records this). A real slot lifecycle is
+exercised only by the γ gate: the δ harness installs with `--dev`, where `hal0 slot load` cannot start a systemd slot
+unit, so it records that row as `deferred`, skips the chat round-trip, and
+still exits 0 (`tests/harness/runtime-test.sh`, `scripts/harness.sh`). Run
+γ when a change needs that coverage.
 
 ### α — unit (`make test`)
 
@@ -250,7 +252,7 @@ knowing what validation backs it up are the same lookup.
 |---|---|---|
 | `src/hal0/api/` | med–high | α (every PR). A new route must be classified in `src/hal0/security/exposure.py` — the deny-by-default ratchet test (`tests/security/test_exposure.py`) fails an unclassified route rather than letting it default open. |
 | `src/hal0/api/auth.py`, `src/hal0/security/`, login routes, auth middleware | high | α, plus the auth-specific suite (`tests/security/test_kb1_hardening_tail.py`, `test_upstream_auth_contract.py`, `test_secrets_protected_keys.py`). §14.1 high-risk — run γ (`make release-test`) before merge. |
-| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α. A change to slot lifecycle behaviour also needs a real load → chat → unload, which only the δ harness (`make harness`) and γ exercise. A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
+| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α. A change to slot lifecycle behaviour also needs a real load → chat → unload, which only γ (`make release-test`) exercises — the δ harness defers slot load under `--dev`. A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
 | `src/hal0/capabilities/`, `model_meta`, `model_fit` | med | α. Changes to device/profile resolution should re-run the γ matrix row for the affected backend (ROCm/Vulkan/CPU/NPU) — see [Validation matrix](docs/reference/validation-matrix.mdx). |
 | `installer/`, systemd units | high | §14.1 high-risk trigger (installer / RCE-class: shell-out, downloads, signature verification, privilege changes). `shellcheck` on every `.sh` touched is a **manual convention, not a CI gate today** — run it yourself (`bash -n` at minimum if `shellcheck` isn't installed). Changes to `installer/bootstrap.sh` specifically must stay byte-identical to the logic `scripts/check-bootstrap-parity.sh` diffs against the live one-liner (`.github/workflows/bootstrap-parity.yml`). A `rc-validate` fresh-install lane pass is expected for anything beyond a comment/log-message change. |
 | `src/hal0/updater/`, the release manifest | high | §14.1 high-risk trigger. α, plus the γ script's `updater` row (check-only by design — see `scripts/release-test.sh`) and the `rc-validate` kit's `upgrade`/`post-upgrade` lanes, which are the only place an in-place convergence (schema-version-gated resets included) is exercised end to end. |

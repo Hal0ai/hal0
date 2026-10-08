@@ -50,9 +50,9 @@ _Rollback:_
 ## Test tiers run
 
 <!-- Every PR runs α (CONTRIBUTING.md "Test tiers"). γ is required only for
-     high-risk PRs and per release candidate. δ is on demand — run it when a
-     change needs a real slot lifecycle. -->
+     high-risk PRs and per release candidate. δ is on demand — run it after
+     touching the installer or CLI; only γ runs a real slot lifecycle. -->
 - [ ] α  unit (`make test`)
 - [ ] γ  release-gate (`make release-test`) — required for high-risk and
       release-candidate PRs
-- [ ] δ  harness (`make harness`) — real install → slot → chat round-trip
+- [ ] δ  harness (`make harness`) — `--dev` install → CLI → uninstall (slot load deferred under `--dev`)
