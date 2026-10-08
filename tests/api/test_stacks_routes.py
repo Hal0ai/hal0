@@ -206,6 +206,36 @@ def test_apply_dry_run_shows_diff(tmp_hal0_home: str) -> None:
     assert row["changed"] is True
 
 
+def test_apply_dry_run_lists_no_unloads_when_commit_would_not_converge(
+    app: FastAPI, tmp_hal0_home: str
+) -> None:
+    """#1511: commit converges only with both the slot manager and the
+    capability orchestrator, so the preview reports no unloads without one."""
+    from types import SimpleNamespace
+
+    from hal0.slots.state import SlotState
+
+    _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
+    with TestClient(app) as c:
+        c.post(
+            "/api/stacks",
+            json={
+                "slug": "coding",
+                "stack": _stack_body(slots=[{"slot": "agent", "model": "new-model"}]),
+            },
+        )
+        fake_sm = AsyncMock()
+        fake_sm.list = AsyncMock(
+            return_value=[SimpleNamespace(name="coder", state=SlotState.READY, model_id="qwen")]
+        )
+        app.state.slot_manager = fake_sm
+        app.state.capability_orchestrator = None
+
+        r = c.post("/api/stacks/coding/apply", params={"dry_run": "true"})
+    assert r.status_code == 200
+    assert r.json()["unloads"] == []
+
+
 def test_apply_dry_run_lists_running_slots_it_will_unload(app: FastAPI, tmp_hal0_home: str) -> None:
     """#1511: apply is a declarative replace, so the preview must say what it tears down."""
     from types import SimpleNamespace

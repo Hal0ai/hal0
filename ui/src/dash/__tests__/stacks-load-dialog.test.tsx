@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 
 import {
+  previewFromDryRun,
   LoadDialog,
   formatSlotNames,
   loadResultToast,
@@ -131,5 +132,16 @@ describe('LoadDialog', () => {
       '1 model not found locally — those slots will fail to load until the model is pulled.',
     )
     expect(html).not.toContain('skipped unless pulled')
+  })
+})
+
+describe('previewFromDryRun (#1511)', () => {
+  it('passes an unloads array through', () => {
+    expect(previewFromDryRun({ unloads: ['coder'] })).toEqual({ status: 'ok', unloads: ['coder'] })
+  })
+
+  it('treats an answer without unloads as a failed preview, not an all-clear', () => {
+    expect(previewFromDryRun({ stack: 'coding', dry_run: true })).toEqual({ status: 'error' })
+    expect(previewFromDryRun(null)).toEqual({ status: 'error' })
   })
 })

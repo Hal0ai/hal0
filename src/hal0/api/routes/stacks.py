@@ -430,7 +430,9 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
     if dry_run:
         # The slot manager is read-only here: it only feeds the ``unloads``
         # preview (one list() snapshot). Nothing is created, loaded or unloaded.
-        engine = StackApplyEngine(slot_manager=getattr(request.app.state, "slot_manager", None))
+        slot_manager = getattr(request.app.state, "slot_manager", None)
+        orchestrator = getattr(request.app.state, "capability_orchestrator", None)
+        engine = StackApplyEngine(slot_manager=slot_manager)
         plan = engine.plan(slug, cfg)
         return {
             "stack": slug,
@@ -441,7 +443,13 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
             "creates": _missing_slot_names(cfg),
             # Running slots the stack doesn't name — apply is a declarative
             # replace, so converge will unload them (#1511).
-            "unloads": await engine.planned_unloads(cfg),
+            # Only when commit would converge: it needs both the slot manager
+            # and the capability orchestrator, so preview the same guard.
+            "unloads": (
+                await engine.planned_unloads(cfg)
+                if slot_manager is not None and orchestrator is not None
+                else []
+            ),
             # Profile/model refs that won't resolve on this host (silent divergence).
             "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
         }

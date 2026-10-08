@@ -205,6 +205,13 @@ export function missingModelsNote(n) {
  * `{ status: 'loading' }`, `{ status: 'ok', unloads: string[] }` or
  * `{ status: 'error' }`. Returns `{ tone: 'warn' | 'muted', text }`.
  */
+/** Load-dialog preview state from a dry-run answer. One without an
+ * ``unloads`` array (an older API) is not "nothing unloads": it becomes
+ * ``error`` so the dialog shows its warning, not an all-clear. */
+export function previewFromDryRun(r) {
+  return Array.isArray(r?.unloads) ? { status: 'ok', unloads: r.unloads } : { status: 'error' };
+}
+
 export function unloadNotice(preview) {
   if (!preview || preview.status === 'loading') {
     return { tone: 'muted', text: 'Checking which running slots this stack replaces…' };
@@ -784,7 +791,10 @@ function StacksView() {
     let live = true;
     setLoadPreview({ status: 'loading' });
     api(ENDPOINTS.stackApply(loadSlug) + '?dry_run=true', { method: 'POST', raw: true })
-      .then(r => { if (live) setLoadPreview({ status: 'ok', unloads: r?.unloads || [] }); })
+      .then(r => {
+        if (!live) return;
+        setLoadPreview(previewFromDryRun(r));
+      })
       .catch(() => { if (live) setLoadPreview({ status: 'error' }); });
     return () => { live = false; };
   }, [loadSlug]);
