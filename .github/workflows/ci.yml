@@ -30,9 +30,11 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
-    # Full suite runs 22-26 min; the job previously had no bound, so an infra
-    # stall (a 41-minute apt-get hang on #1915, see #1927) would have run to
-    # GitHub's 6-hour default. 45 covers the suite plus slow-runner margin.
+    # The ~13k-test suite runs across 4 xdist workers (#2341); serially it had
+    # grown to ~30 min quiet and 38-45+ min under --cov on 3.12, which hit
+    # this cap. The bound exists because an infra stall (a 41-minute apt-get
+    # hang on #1915, see #1927) would otherwise run to GitHub's 6-hour
+    # default. 45 covers the parallel suite plus slow-runner margin.
     timeout-minutes: 45
     # 3.14 is experimental until every dep ships 3.14 wheels — surface it
     # without reddening main. No-op on PRs, which run 3.12 only.
@@ -74,9 +76,13 @@ jobs:
       - name: Format check
         run: uv run ruff format --check src tests
       - name: Test
+        # -n 4: pytest-xdist workers (ubuntu-latest has 4 vCPUs); pytest-cov
+        # combines the per-worker coverage data (#2341).
         # Coverage (+ verbose) only on main pushes — it's a report, not a gate,
         # so PRs skip the instrumentation overhead and run a quiet, faster suite.
-        run: uv run pytest tests/ ${{ github.event_name == 'push' && '-v --cov=hal0 --cov-report=term-missing' || '-q' }}
+        # PRs also deselect the `podman` and `network` markers (pyproject.toml
+        # [tool.pytest.ini_options]); main pushes (which gate the nightly) run them.
+        run: uv run pytest tests/ -n 4 ${{ github.event_name == 'push' && '-v --cov=hal0 --cov-report=term-missing' || '-q -m "not podman and not network"' }}
 
   ui:
     runs-on: ubuntu-latest
