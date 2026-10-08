@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 from typing import Any
 
 import httpx
@@ -786,6 +787,10 @@ _FLM_CATALOG_CACHED_AT: float = 0.0
 #: :func:`flm_catalog` reports ``None``, so "could not ask" never reads as
 #: "FLM serves nothing" to a caller that acts on absence.
 _FLM_CATALOG_UNANSWERED: bool = False
+#: Guards the cache, its timestamp and the unanswered flag as one unit, so a
+#: reader never pairs one probe's catalog with another probe's flag. The probe
+#: itself runs outside the lock: a slow ``flm list`` must not block readers.
+_FLM_CATALOG_LOCK = threading.Lock()
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -1001,14 +1006,16 @@ def flm_catalog() -> list[dict[str, Any]] | None:
 
     global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
     now = time.monotonic()
-    if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
-        return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+    with _FLM_CATALOG_LOCK:
+        if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
+            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
 
     raw = _probe_flm_catalog()
     if raw is None:
-        _FLM_CATALOG_CACHE = []
-        _FLM_CATALOG_CACHED_AT = now
-        _FLM_CATALOG_UNANSWERED = True
+        with _FLM_CATALOG_LOCK:
+            _FLM_CATALOG_CACHE = []
+            _FLM_CATALOG_CACHED_AT = now
+            _FLM_CATALOG_UNANSWERED = True
         return None
 
     out: list[dict[str, Any]] = []
@@ -1030,12 +1037,14 @@ def flm_catalog() -> list[dict[str, Any]] | None:
             }
         )
 
-    _FLM_CATALOG_CACHE = out
-    _FLM_CATALOG_CACHED_AT = now
     # A non-empty reply with no usable entry (e.g. ``{"models": [{}]}``) says
     # nothing about which tags are served: keep it "no answer", not "empty".
-    _FLM_CATALOG_UNANSWERED = bool(raw) and not out
-    return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+    unanswered = bool(raw) and not out
+    with _FLM_CATALOG_LOCK:
+        _FLM_CATALOG_CACHE = out
+        _FLM_CATALOG_CACHED_AT = now
+        _FLM_CATALOG_UNANSWERED = unanswered
+    return None if unanswered else out
 
 
 def reset_flm_catalog_cache() -> None:
@@ -1046,9 +1055,10 @@ def reset_flm_catalog_cache() -> None:
     right after a ``flm pull``).
     """
     global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
-    _FLM_CATALOG_CACHE = None
-    _FLM_CATALOG_CACHED_AT = 0.0
-    _FLM_CATALOG_UNANSWERED = False
+    with _FLM_CATALOG_LOCK:
+        _FLM_CATALOG_CACHE = None
+        _FLM_CATALOG_CACHED_AT = 0.0
+        _FLM_CATALOG_UNANSWERED = False
 
 
 def is_flm_tag(model_id: str) -> bool:
