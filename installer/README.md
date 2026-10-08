@@ -151,7 +151,9 @@ stdout/stderr — to `/var/log/hal0/install-<ts>.log` (falling back to
 `/tmp/hal0-install-<ts>.log` when not root, e.g. `--dev`). The path is
 printed right after the banner and again at the end, and `hal0 doctor
 bundle` includes the most recent one (redacted) under `logs/install.log`.
-Implemented in `installer/lib/logging.sh`; degrades to no log (rather than
+The log is owner-only (0600) because it holds unredacted installer output,
+so run `sudo hal0 doctor bundle` to include a root install's log; a non-root
+bundle skips it. Implemented in `installer/lib/logging.sh`; degrades to no log (rather than
 aborting the install) if neither location is writable.
 
 ### Failure report

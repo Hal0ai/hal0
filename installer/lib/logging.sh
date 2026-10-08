@@ -49,18 +49,24 @@ hal0_install_log_init() {
 
     local path
     path="$(hal0_install_log_path)"
-    if ! mkdir -p "$(dirname "$path")" 2>/dev/null || ! : >"$path" 2>/dev/null; then
+    # The log tees installer output unredacted, so it is owner-only (#2361):
+    # born 0600 under `umask 077` (in a subshell, so the rest of the install
+    # keeps the caller's umask), then chmod'ed in case a same-second rerun
+    # appends to a file an older build created 0644. `hal0 doctor bundle`
+    # run as a non-root user therefore can't read it and skips it.
+    if ! mkdir -p "$(dirname "$path")" 2>/dev/null \
+        || ! (umask 077 && : >"$path") 2>/dev/null; then
         # Root's /var/log/hal0 couldn't be created/written (read-only FS,
         # unusual SELinux policy, ...) — fall back to /tmp before giving up
         # on a log entirely.
         path="/tmp/hal0-install-$(date -u +%Y%m%d-%H%M%S).log"
-        if ! : >"$path" 2>/dev/null; then
+        if ! (umask 077 && : >"$path") 2>/dev/null; then
             HAL0_INSTALL_LOG=""
             export HAL0_INSTALL_LOG
             return 1
         fi
     fi
-    chmod 0644 "$path" 2>/dev/null || true
+    chmod 0600 "$path" 2>/dev/null || true
 
     HAL0_INSTALL_LOG="$path"
     export HAL0_INSTALL_LOG
