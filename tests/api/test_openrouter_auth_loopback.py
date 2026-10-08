@@ -50,12 +50,12 @@ def test_is_loopback_host_accepts_loopback_literals(host: str) -> None:
 @pytest.mark.parametrize(
     "host",
     [
-        "10.0.1.5",
-        "10.0.1.141",
+        "10.0.0.5",
+        "10.0.0.141",
         "192.168.1.1",
         "172.16.0.5",
         "8.8.8.8",
-        "hal0.thinmint.dev",
+        "hal0.example.com",
         "127.0.0.2",  # technically loopback in /8, but strict allowlist rejects.
         "",
         " ",
@@ -130,7 +130,7 @@ def test_callback_from_non_loopback_returns_403(
                     "SSH-tunnel 127.0.0.1:8080 to your local machine."
                 ),
                 "adr": "ADR-0020",
-                "client_host": "10.0.1.5",
+                "client_host": "10.0.0.5",
             },
         )
 
@@ -145,7 +145,7 @@ def test_callback_from_non_loopback_returns_403(
     assert detail["error"] == "loopback_required"
     assert detail["adr"] == "ADR-0020"
     assert "loopback" in detail["message"].lower()
-    assert detail["client_host"] == "10.0.1.5"
+    assert detail["client_host"] == "10.0.0.5"
 
 
 def test_require_loopback_helper_raises_for_lan_request() -> None:
@@ -160,7 +160,7 @@ def test_require_loopback_helper_raises_for_lan_request() -> None:
         "method": "GET",
         "path": "/api/openrouter/auth/callback",
         "headers": [],
-        "client": ("10.0.1.5", 50000),
+        "client": ("10.0.0.5", 50000),
     }
     req = Request(scope)
     with pytest.raises(HTTPException) as exc:
@@ -170,7 +170,7 @@ def test_require_loopback_helper_raises_for_lan_request() -> None:
     assert isinstance(detail, dict)
     assert detail["error"] == "loopback_required"
     assert detail["adr"] == "ADR-0020"
-    assert detail["client_host"] == "10.0.1.5"
+    assert detail["client_host"] == "10.0.0.5"
 
 
 def test_require_loopback_helper_passes_for_loopback_request() -> None:

@@ -210,8 +210,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         RunnerSupports(mtp=True, jinja=True, mmproj=True, specialties=("promptforge",)),
         "gpu",
         "rocm",
-        # Real key as of the #1891 ct150 gate PASS (2026-08-30, report at
-        # /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md):
+        # Real key as of the #1891 ct150 gate PASS (2026-08-30, gate report
+        # 2026-08-30 (operator artefact store)):
         # manifest.json's toolbox_images.promptforge now exists and carries
         # the exact digest the gate validated, so — unlike rocmfpx, whose
         # manifest key would resolve a DIFFERENT lineage (module docstring)
@@ -242,10 +242,10 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "gpu",
         "vulkan",
         # Real key as of the 2026-08-31 §3-C gate PASS (ct150 kfd-present +
-        # ct151 kfd-absent; report in /mnt/mintdev/artifacts/): manifest.json's
-        # toolbox_images.strix was created FRESH for this image lineage (the
-        # promptforge pattern, never the rocmfpx wrong-lineage trap — module
-        # docstring) and carries the exact digest the gate validated.
+        # ct151 kfd-absent; gate report 2026-08-31 (operator artefact store)):
+        # manifest.json's toolbox_images.strix was created FRESH for this
+        # image lineage (the promptforge pattern, never the rocmfpx
+        # wrong-lineage trap — module docstring) and carries the exact digest the gate validated.
         "strix",
         # Vulkan ONLY — the promptforge single-backend rule, opposite lane:
         # the source tree's validated deployment is Vulkan + system RADV

@@ -1,7 +1,7 @@
 """Tests for converge() declarative unload sweep.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-lifecycle && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_converge_unload.py -q
+    uv run pytest tests/stacks/test_converge_unload.py -q
 """
 
 from __future__ import annotations

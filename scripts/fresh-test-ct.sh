@@ -19,12 +19,12 @@
 #                     Use this to verify the CURRENT code, e.g. an installer PR.
 #
 # Env overrides: HAL0_TEST_TEMPLATE(200), HAL0_PVE(pve ssh alias),
-#   HAL0_TEST_KEY(~/.ssh/thin-mint), HAL0_INSTALL_URL(https://hal0.dev/install.sh).
+#   HAL0_TEST_KEY(~/.ssh/id_ed25519), HAL0_INSTALL_URL(https://hal0.dev/install.sh).
 set -uo pipefail
 
 TEMPLATE="${HAL0_TEST_TEMPLATE:-200}"
 PVE_HOST="${HAL0_PVE:-pve}"
-KEY="${HAL0_TEST_KEY:-$HOME/.ssh/thin-mint}"
+KEY="${HAL0_TEST_KEY:-$HOME/.ssh/id_ed25519}"
 INSTALL_URL="${HAL0_INSTALL_URL:-https://hal0.dev/install.sh}"
 VMID=""; KEEP=0; FROM_TREE=""; WITH_MODELS=0
 

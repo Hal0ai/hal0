@@ -1,7 +1,7 @@
 """Unit tests for StackApplyEngine.apply_config() — atomic commit + rollback.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-apply && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_apply_commit.py -q
+    uv run pytest tests/stacks/test_apply_commit.py -q
 """
 
 from __future__ import annotations

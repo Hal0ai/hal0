@@ -1,7 +1,7 @@
 """Tests for snapshot-from-live: read slots + capabilities → a StackConfig.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-export && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_snapshot.py -q
+    uv run pytest tests/stacks/test_snapshot.py -q
 """
 
 from __future__ import annotations

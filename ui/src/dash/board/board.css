@@ -1,5 +1,5 @@
 /* hal0 operator board — scoped board surface, drawers, tweaks.
- * Ported from /home/halo/Development/Projects/hal0/kanban/board/board.css
+ * Ported from the kanban board prototype (board.css).
  * All rules scoped under .board  (positional fixed overlays exempt — see note).
  *
  * DRAWER CLASS RENAME MAP (prototype → this file)

@@ -191,7 +191,7 @@ def test_list_merges_real_and_synthetic(
         Upstream(
             name="haloai",
             kind="remote",
-            url="http://10.0.1.220:8080/v1",
+            url="http://192.0.2.220:8080/v1",
             auth_style="none",
         )
     )
@@ -225,7 +225,7 @@ def test_list_real_wins_on_name_collision(
         Upstream(
             name="chat",
             kind="remote",
-            url="http://10.0.1.220:8080/v1",
+            url="http://192.0.2.220:8080/v1",
             auth_style="none",
         )
     )
@@ -395,7 +395,7 @@ def test_lifespan_hydrate_keeps_explicit_hal0_upstream(
                 "[[upstream]]",
                 'name = "hal0"',
                 'kind = "remote"',
-                'url = "https://hal0.thinmint.dev/v1"',
+                'url = "https://hal0.example.com/v1"',
                 'auth_style = "none"',
                 "",
             ]
@@ -407,7 +407,7 @@ def test_lifespan_hydrate_keeps_explicit_hal0_upstream(
         upstream = app.state.upstreams.get("hal0")
         assert upstream is not None
         # Explicit URL survives — auto-register must have skipped this name.
-        assert upstream.url == "https://hal0.thinmint.dev/v1"
+        assert upstream.url == "https://hal0.example.com/v1"
         assert upstream.kind == "remote"
 
 

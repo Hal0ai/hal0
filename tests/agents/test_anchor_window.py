@@ -24,7 +24,7 @@ def _write_slot(slots_dir: Path, name: str, body: str) -> None:
     (slots_dir / f"{name}.toml").write_text(body, encoding="utf-8")
 
 
-#: Verbatim ``GET /v1/models`` off ct152 (10.0.1.152, rc.5) — the box whose
+#: Verbatim ``GET /v1/models`` off ct152 (rc.5) — the box whose
 #: agent slot is offline, so ``hal0/agent`` resolves through the routing
 #: fallback chain to the ``brain`` slot. Nothing in this list is spelled
 #: ``agent``; that absence is the whole false negative.

@@ -73,15 +73,15 @@ def test_urls_behind_proxy_without_public_url_uses_openwebui_port(client: TestCl
         resp = client.get(
             "/api/config/urls",
             headers={
-                "x-forwarded-host": "ai-dev.thinmint.dev",
+                "x-forwarded-host": "ai-dev.example.com",
                 "x-forwarded-proto": "https",
             },
         )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["openwebui"] == "http://ai-dev.thinmint.dev:3001", body
+    assert body["openwebui"] == "http://ai-dev.example.com:3001", body
     assert body["openwebui_enabled"] is False, body
-    assert body["api"] == "https://ai-dev.thinmint.dev", body
+    assert body["api"] == "https://ai-dev.example.com", body
 
 
 def test_urls_public_url_env_wins_behind_proxy(
@@ -180,22 +180,22 @@ def test_urls_comfyui_public_url_env_wins(
     """HAL0_COMFYUI_PUBLIC_URL is the canonical override.
 
     This is how a reverse-proxy deploy points the ComfyUI link at a clean
-    HTTPS hostname (e.g. ``https://comfyui.thinmint.dev``) instead of the
+    HTTPS hostname (e.g. ``https://comfyui.example.com``) instead of the
     mixed-content ``http://<host>:8188`` that a browser on an HTTPS
     dashboard would block.
     """
-    monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.thinmint.dev/")
+    monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.example.com/")
     resp = client.get(
         "/api/config/urls",
         headers={
-            "x-forwarded-host": "hal0.thinmint.dev",
+            "x-forwarded-host": "hal0.example.com",
             "x-forwarded-proto": "https",
         },
     )
     assert resp.status_code == 200
     body = resp.json()
     # Trailing slash stripped so links concat predictably.
-    assert body["comfyui"] == "https://comfyui.thinmint.dev", body
+    assert body["comfyui"] == "https://comfyui.example.com", body
 
 
 def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient) -> None:
@@ -207,10 +207,10 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
     resp = client.get(
         "/api/config/urls",
         headers={
-            "x-forwarded-host": "hal0.thinmint.dev",
+            "x-forwarded-host": "hal0.example.com",
             "x-forwarded-proto": "https",
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["comfyui"] == "http://hal0.thinmint.dev:8188", body
+    assert body["comfyui"] == "http://hal0.example.com:8188", body

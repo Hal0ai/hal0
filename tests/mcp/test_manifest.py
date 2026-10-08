@@ -147,7 +147,7 @@ async def test_resolve_blocks_localhost_url() -> None:
 async def test_resolve_blocks_private_lan_url() -> None:
     """RFC 1918 ranges (10/8, 172.16/12, 192.168/16) must reject pre-fetch."""
     for url in (
-        "http://10.0.1.142:8080/api/slots",
+        "http://192.0.2.142:8080/api/slots",
         "http://172.16.0.5/manifest.json",
         "http://192.168.1.1/manifest.json",
     ):

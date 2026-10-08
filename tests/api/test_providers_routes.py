@@ -351,12 +351,12 @@ def test_create_upstream_explicit_fields_beat_catalog(client: TestClient) -> Non
         json={
             "name": "or-proxy",
             "catalog_id": "openrouter",
-            "url": "http://10.0.1.200:4000/v1",
+            "url": "http://192.0.2.200:4000/v1",
             "auth_value_env": "LITELLM_KEY",
         },
     )
     assert response.status_code == 201, response.text
-    assert response.json()["url"] == "http://10.0.1.200:4000/v1"
+    assert response.json()["url"] == "http://192.0.2.200:4000/v1"
     assert response.json()["auth_value_env"] == "LITELLM_KEY"
 
 
@@ -471,11 +471,11 @@ def test_patch_upstream_structural_fields_on_remote(client: TestClient) -> None:
     _seed_openrouter_in_toml(client)
     response = client.patch(
         "/api/upstreams/openrouter",
-        json={"url": "http://10.0.1.200:4000/v1", "timeout_seconds": 60.0},
+        json={"url": "http://192.0.2.200:4000/v1", "timeout_seconds": 60.0},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["url"] == "http://10.0.1.200:4000/v1"
-    assert _toml_rows(client)["openrouter"]["url"] == "http://10.0.1.200:4000/v1"
+    assert response.json()["url"] == "http://192.0.2.200:4000/v1"
+    assert _toml_rows(client)["openrouter"]["url"] == "http://192.0.2.200:4000/v1"
 
 
 def test_patch_slot_upstream_structural_rejected_visibility_allowed(

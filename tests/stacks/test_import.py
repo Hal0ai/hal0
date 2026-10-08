@@ -1,7 +1,7 @@
 """Tests for stack import: parse/validate + resolve matrix + create.
 
 Targeted file run:
-    cd /home/halo/dev/wt/stacks-export && PYTHONPATH=src ~/dev/hal0/.venv/bin/python -m pytest tests/stacks/test_import.py -q
+    uv run pytest tests/stacks/test_import.py -q
 """
 
 from __future__ import annotations

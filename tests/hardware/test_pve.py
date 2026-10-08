@@ -164,7 +164,7 @@ def isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 _PAYLOAD = {
-    "host": "10.0.1.110",
+    "host": "192.0.2.110",
     "port": 8006,
     "user": "root@pam",
     "token_name": "hal0-readonly",
@@ -178,7 +178,7 @@ def test_save_pve_config_roundtrip(isolated_config: Path) -> None:
     assert isolated_config.exists()
     # On-disk shape: nested {proxmox, auth} so it's haloai-compatible.
     raw = json.loads(isolated_config.read_text())
-    assert raw["proxmox"]["host"] == "10.0.1.110"
+    assert raw["proxmox"]["host"] == "192.0.2.110"
     assert raw["proxmox"]["port"] == 8006
     assert raw["proxmox"]["verify_ssl"] is False
     assert raw["auth"]["user"] == "root@pam"
@@ -187,7 +187,7 @@ def test_save_pve_config_roundtrip(isolated_config: Path) -> None:
     # _load_pve_config flattens it back.
     loaded = pve._load_pve_config()
     assert loaded is not None
-    assert loaded["host"] == "10.0.1.110"
+    assert loaded["host"] == "192.0.2.110"
     assert loaded["token_value"] == _PAYLOAD["token_value"]
 
 

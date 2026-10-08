@@ -3,7 +3,7 @@
 > Authored by the orchestrator from the FE+BE grounding surveys + user blocker decisions.
 > This is the **interface boundary** between the Frontend team and the Backend team.
 > Neither team may change a shape here without the orchestrator (reviewer) re-freezing it.
-> Branch: `feat/dashboard-overhaul` · worktree `/home/halo/dev/hal0-dashboard`.
+> Branch: `feat/dashboard-overhaul`.
 > Scope: **main dashboard page only.** Slots/Services sub-routes are reachable but not the deliverable.
 
 ---
@@ -285,5 +285,5 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 - `create_task` may return a `warning` (no dispatcher running) — show it as a toast/banner.
 
 ## Acceptance
-- Pixel parity vs the prototype (`/home/halo/Development/Projects/hal0/kanban/board/`).
+- Pixel parity vs the kanban board prototype.
 - `npm run typecheck` + Playwright E2E green; every SPEC §5 feature covered in multiple shapes.

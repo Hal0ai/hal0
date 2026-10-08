@@ -1085,9 +1085,8 @@ DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
 #: item 4 and spec 2026-08-29).
 #:
-#: GATE PASSED: the #1891 ct150 validation ran 2026-08-30 (report at
-#: /mnt/mintdev/artifacts/hal0-promptforge-gate-report-2026-08-30.md,
-#: results on #1946) — Paris probe, HumanEval+ 0.939/0.909 with the card's
+#: GATE PASSED: the #1891 ct150 validation ran 2026-08-30 (gate report
+#: 2026-08-30 (operator artefact store), results on #1946) — Paris probe, HumanEval+ 0.939/0.909 with the card's
 #: disclosed task-130 regression reproducing exactly, MTP depth-4 at ~86%
 #: acceptance (+75% decode vs MTP-off). ``manifest.json``'s
 #: ``toolbox_images.promptforge`` now carries the gate-validated digest
@@ -1233,7 +1232,7 @@ VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
 #:
 #: ``DEFAULT_STRIX_IMAGE`` earned membership 2026-08-31 (§3-C run on ct150,
 #: kfd PRESENT, and ct151, kfd ABSENT — the renderD128-only #1888 box shape;
-#: report in /mnt/mintdev/artifacts/hal0-strix-gate-2026-08-31.md): Vulkan0
+#: gate report 2026-08-31 (operator artefact store)): Vulkan0
 #: (RADV GFX1151) offload confirmed on both boxes, temp-0 Paris probe,
 #: 256-token clean tail BYTE-IDENTICAL across the two boxes, json_schema
 #: returning grammar-constrained output with 200s across the thinking-kwarg

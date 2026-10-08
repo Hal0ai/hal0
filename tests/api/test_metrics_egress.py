@@ -56,7 +56,7 @@ def _registry(*upstreams: Upstream) -> UpstreamRegistry:
 
 OPENROUTER = Upstream(name="openrouter", kind="remote", url="https://openrouter.ai/api/v1")
 MINIMAX = Upstream(name="minimax", kind="remote", url="https://api.minimax.io/v1")
-PEER = Upstream(name="peer", kind="remote", url="http://10.0.1.150:8080/v1")
+PEER = Upstream(name="peer", kind="remote", url="http://192.0.2.150:8080/v1")
 SLOT = Upstream(name="agent", kind="slot", url="http://127.0.0.1:8087/v1", slot_name="agent")
 
 
@@ -95,7 +95,7 @@ async def test_a_genuine_hal0_peer_still_receives_the_fanout(
         _request_with(_registry(OPENROUTER, MINIMAX, PEER, SLOT)), suffix
     )
 
-    assert calls == [f"http://10.0.1.150:8080{suffix}"]
+    assert calls == [f"http://192.0.2.150:8080{suffix}"]
     assert out == {"peer": {"ok": {}}}
 
 
@@ -132,7 +132,7 @@ async def test_no_outbound_url_contains_a_doubled_api_segment(
 async def test_disabled_peer_is_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     _patch_client(monkeypatch, calls)
-    off = Upstream(name="peer", kind="remote", url="http://10.0.1.150:8080/v1", enabled=False)
+    off = Upstream(name="peer", kind="remote", url="http://192.0.2.150:8080/v1", enabled=False)
 
     await hw_mod._proxy_upstream_endpoint(_request_with(_registry(off)), "/api/slots/metrics")
 
@@ -144,7 +144,7 @@ async def test_unreachable_peer_does_not_serialise_the_fanout(
 ) -> None:
     """Peers are probed concurrently and bounded by the httpx timeout.
 
-    The fake client hangs forever on ``10.0.1.151``; the caller passes a
+    The fake client hangs forever on ``192.0.2.151``; the caller passes a
     0.2 s timeout, so the whole fan-out must finish in roughly one timeout,
     not N of them, and the reachable peer must still report.
     """
@@ -154,7 +154,9 @@ async def test_unreachable_peer_does_not_serialise_the_fanout(
         pass
 
     def _factory(*_a: object, timeout: float = 0.0, **_k: object) -> object:
-        client = _Client(calls, {"ok": {}}, delay_hosts={"10.0.1.151", "10.0.1.152", "10.0.1.153"})
+        client = _Client(
+            calls, {"ok": {}}, delay_hosts={"192.0.2.151", "192.0.2.152", "192.0.2.153"}
+        )
 
         async def _get(url: str, **kw: object) -> object:
             return await asyncio.wait_for(_RecordingClient.get(client, url, **kw), timeout=timeout)
@@ -165,7 +167,7 @@ async def test_unreachable_peer_does_not_serialise_the_fanout(
     monkeypatch.setattr(httpx, "AsyncClient", _factory)
 
     dead = [
-        Upstream(name=f"dead{i}", kind="remote", url=f"http://10.0.1.15{i}:8080/v1")
+        Upstream(name=f"dead{i}", kind="remote", url=f"http://192.0.2.15{i}:8080/v1")
         for i in (1, 2, 3)
     ]
     reg = _registry(PEER, *dead)
