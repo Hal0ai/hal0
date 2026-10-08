@@ -9,6 +9,7 @@ would have written to the real filesystem here).
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -825,3 +826,145 @@ def test_join_renders_again_once_the_call_path_enforces_policy(tmp_hal0_home: st
         tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"], blocked=["delete"]),
     )
     assert set(hermes_join._desired_entries("hermes")) == {"github"}
+
+
+# ── #2330: NO_PROXY in the Hermes driver env follows the exposed records ────
+
+
+def _sandboxed_driver_env(monkeypatch) -> Path:
+    """Point the provisioner's driver env at this sandbox and create it, as an
+    installed Hermes would have it. Writes go direct (euid 0), never via sudo."""
+    from hal0.agents import hermes_provision
+
+    path = cfg_paths.etc() / "agents" / "hermes.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("HAL0_API_URL=http://127.0.0.1:8080\n")
+    monkeypatch.setattr(hermes_provision, "DRIVER_ENV_PATH", path)
+    monkeypatch.setattr(hermes_provision.os, "geteuid", lambda: 0)
+    for name in ("NO_PROXY", "no_proxy", "HAL0_ADMIN_KEY", "HAL0_CLIENT_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    return path
+
+
+def _no_proxy(path: Path) -> list[str]:
+    for line in path.read_text().splitlines():
+        if line.startswith("NO_PROXY="):
+            return line.split("=", 1)[1].split(",")
+    raise AssertionError("no NO_PROXY line")
+
+
+def test_exposing_a_loopback_server_adds_its_host_to_hermes_no_proxy(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    path = _sandboxed_driver_env(monkeypatch)
+    _install("local", url="http://127.0.0.2:9000/mcp")
+    installed.patch_config("local", exposure=installed.ExposureConfig(hermes=True))
+
+    report = hermes_join.sync_exposure()
+
+    assert report["driver_env"] == {"no_proxy_hosts": ["127.0.0.2"], "refreshed": True}
+    assert "127.0.0.2" in _no_proxy(path)
+    assert "no_proxy=" + ",".join(_no_proxy(path)) in path.read_text()
+
+
+def test_driver_env_is_rewritten_only_when_the_loopback_hosts_change(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    from hal0.agents import hermes_provision
+
+    _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    hermes_join.sync_exposure()
+
+    calls: list[int] = []
+    real = hermes_provision.refresh_driver_env
+    monkeypatch.setattr(
+        hermes_provision, "refresh_driver_env", lambda: (calls.append(1), real())[1]
+    )
+    _install("remote", exposure=installed.ExposureConfig(hermes=True))
+    assert hermes_join.sync_exposure()["driver_env"]["refreshed"] is False
+    assert calls == []
+
+    _install("local2", url="http://[::1]:9001/mcp", exposure=installed.ExposureConfig(brain=True))
+    _install(
+        "local3", url="http://127.0.0.3:9001/mcp", exposure=installed.ExposureConfig(brain=True)
+    )
+    assert hermes_join.sync_exposure()["driver_env"] == {
+        "no_proxy_hosts": ["127.0.0.2", "127.0.0.3", "::1"],
+        "refreshed": True,
+    }
+    assert calls == [1]
+
+
+def test_sync_never_creates_a_driver_env_for_an_uninstalled_hermes(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    path = _sandboxed_driver_env(monkeypatch)
+    path.unlink()
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+
+    report = hermes_join.sync_exposure()
+
+    assert report["driver_env"]["refreshed"] is False
+    assert not path.exists()
+
+
+def test_sync_leaves_a_driver_env_outside_the_hal0_home_alone(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Under HAL0_HOME the provisioner still targets /etc/hal0 — never write it."""
+    from hal0.agents import hermes_provision
+
+    monkeypatch.setattr(
+        hermes_provision,
+        "refresh_driver_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not refresh")),
+    )
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    assert hermes_join.sync_exposure()["driver_env"]["refreshed"] is False
+
+
+def test_failed_driver_env_refresh_is_reported_and_retried(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.agents import hermes_provision
+
+    path = _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+
+    def boom() -> None:
+        raise RuntimeError("seam refused")
+
+    real = hermes_provision.refresh_driver_env
+    monkeypatch.setattr(hermes_provision, "refresh_driver_env", boom)
+    report = hermes_join.sync_exposure()
+    assert report["driver_env"]["refreshed"] is False
+    assert any("seam refused" in err for err in report["errors"])
+
+    monkeypatch.setattr(hermes_provision, "refresh_driver_env", real)
+    assert hermes_join.sync_exposure()["driver_env"]["refreshed"] is True
+    assert "127.0.0.2" in _no_proxy(path)
+
+
+def test_reconcile_adds_loopback_hosts_to_an_upgraded_boxs_driver_env(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """A box upgraded with a loopback server already exposed: the joins are
+    converged, but the driver env predates #2330. Startup fixes it."""
+    path = _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    manifest = cfg_paths.var_lib() / "mcp" / "hermes-managed.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('{"hermes": ["local"], "brain": []}')
+
+    assert hermes_join.reconcile_stale_joins() == []  # joins already converged
+
+    assert "127.0.0.2" in _no_proxy(path)
