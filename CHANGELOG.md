@@ -224,6 +224,19 @@ applying. Add those subsections to a version's section to surface them; see
   `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
   finishes the #2330 fix. (#2371)
 
+- **A user-installed MCP server with `gated` or `blocked` tools is no longer
+  handed to Hermes or the brain profile.** Both call the server's URL
+  directly, and nothing on that path enforces the `[tools]` policy yet
+  (#2303), so an agent could call the very tools the operator restricted
+  while `hal0 mcp test` reported them blocked. `PATCH
+  /api/mcp/{id}/exposure` (and `hal0 mcp expose`) now refuses turning
+  `hermes`/`brain` on for such a server with
+  `409 mcp.exposure_policy_unenforced`; withdrawing exposure still works.
+  A server already exposed, or one that gains a `gated`/`blocked` entry
+  later, is left out of the join and logged, so the next sync (or
+  hal0-api's startup reconcile) removes it from Hermes's config. This is an
+  interim guard until hal0 sits on the agent's call path. (#2343)
+
 - **A stable or preview release now fails its build when `CHANGELOG.md` has
   no section for it.** `scripts/gen_release_notes.py` used to fall back to a
   git log when the `## [<version>]` header was missing or empty, so the

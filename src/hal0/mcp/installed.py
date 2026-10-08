@@ -280,6 +280,18 @@ class InstalledServer(BaseModel):
         """Header-value keys naming ``Proxy-Authorization`` (any case); never safe."""
         return [k for k in self.header_value_keys() if k.lower() == "proxy-authorization"]
 
+    def unenforced_tool_policy(self) -> list[str]:
+        """Tool names under ``[tools]`` ``gated`` or ``blocked``, sorted.
+
+        Hermes and the brain profile call a joined server's ``url`` directly
+        (:mod:`hal0.mcp.hermes_join`), so no hal0 code sits on that call path
+        to queue a gated tool or refuse a blocked one (#2303). A non-empty
+        result means exposing this record would hand an agent tools the
+        operator restricted: the exposure route refuses it and the join
+        skips it (#2343). Remove both uses once hal0 is on the call path.
+        """
+        return sorted({*self.tool_policy.gated, *self.tool_policy.blocked})
+
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
         """``(host, header keys)`` when header values would cross a network
         in clear text, else ``None``. Ignores ``allow_insecure_http``.
