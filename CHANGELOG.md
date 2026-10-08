@@ -317,6 +317,18 @@ applying. Add those subsections to a version's section to surface them; see
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
 
+- **`hal0 slot migrate-* --apply --stop-services` no longer leaves hal0
+  down when the run refuses or fails.** The flag stopped `hal0-api` and every
+  `hal0-slot@*` unit before the run's own checks, and nothing ever started
+  them again, so a `migrate-flags` divergent-tune refusal, a declined prompt,
+  or a backup or write error took the API and every slot offline until
+  someone restarted them by hand. `migrate-flags`, `migrate-hw`,
+  `migrate-caps` and `migrate-id-keying` now stop nothing until the
+  preflight and the confirmation prompt pass, and start every unit they
+  stopped again when the run refuses, fails, is interrupted, or only
+  partly applies. A successful run still leaves them stopped for you to
+  restart, and now names them. (#2325)
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
