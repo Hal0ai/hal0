@@ -292,6 +292,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "set-updates",   label: "Updates",              route: "settings/updates",  sub: "check / install / roll back · channel · about" },
     { id: "set-advanced",  label: "Advanced",             route: "settings/advanced", sub: "slots runtime, dispatcher, memory, activity · restart hal0-api" },
     { id: "set-secrets",   label: "Secrets",              route: "settings/secrets",  sub: "HF_TOKEN, provider keys, custom env vars" },
+    { id: "set-accounts",  label: "Connected Accounts",   route: "settings/accounts", sub: "OAuth for agent skills · connect / disconnect" },
     { id: "set-agents",    label: "Agent Chat",           route: "settings/agents",   sub: "brain chat · slot routing" },
   ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings }));
 
