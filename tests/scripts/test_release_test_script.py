@@ -1,6 +1,6 @@
 """Contract tests for scripts/release-test.sh (tier gamma release gate).
 
-Two regressions are pinned here:
+Three regressions are pinned here:
 
 * #2262 — ``remote_slot_create`` appended to ``CREATED_SLOTS`` but every
   caller captured it with ``SLOT="$(remote_slot_create …)"``. Command
@@ -11,6 +11,9 @@ Two regressions are pinned here:
   The installer's FHS venv is ``/usr/lib/hal0/venv`` (installer/install.sh
   ``VENV_DIR``); the script must prefer that binary, fall back to ``PATH``,
   honour an ``HAL0_TEST_BIN`` override, and log the resolved ``--version``.
+* #2351 — the gate never asserted unload: the only ``slot unload`` calls
+  were in the EXIT-trap cleanup, failures swallowed, no row written. An
+  ``unload`` row now requires every loaded slot to unload to ``offline``.
 
 The REAL script runs against a stubbed ``ssh`` on a hermetic PATH: the stub
 records every remote command and answers just enough of the CLI surface for
@@ -60,8 +63,14 @@ if "model list --json" in cmd:
         {"id": "tts-model", "type": "tts", "installed": True},
     ]}))
     sys.exit(0)
+state_path = os.environ["STUB_STATE"]
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        slots = json.load(fh)
+except FileNotFoundError:
+    slots = {}
 if "slot list --json" in cmd:
-    print("[]")
+    print(json.dumps([{"name": n, "status": st} for n, st in slots.items()]))
     sys.exit(0)
 if cmd.startswith("echo "):
     print("http://127.0.0.1:1")
@@ -74,6 +83,16 @@ if "/v1/models" in cmd:
 fail = os.environ.get("STUB_FAIL_SUBSTR")
 if fail and fail in cmd:
     sys.exit(1)
+words = cmd.split()
+if len(words) >= 4 and words[1:3] == ["slot", "load"]:
+    slots[words[3]] = "ready"
+elif len(words) >= 4 and words[1:3] == ["slot", "unload"]:
+    if os.environ.get("STUB_UNLOAD_FAIL") and "|| true" not in cmd:
+        sys.exit(1)
+    if not os.environ.get("STUB_UNLOAD_STUCK"):
+        slots[words[3]] = "offline"
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(slots, fh)
 sys.exit(0)
 """
 
@@ -112,6 +131,7 @@ def _run(tmp_path: Path, **extra_env: str) -> tuple[subprocess.CompletedProcess[
         HAL0_TEST_PREFIX=_PREFIX,
         STUB_TARGET="tester@test-box.invalid",
         STUB_LOG=str(log),
+        STUB_STATE=str(tmp_path / "slots.json"),
         STUB_REMOTE_PATH="/usr/bin:/bin",
     )
     env.update(extra_env)
@@ -169,6 +189,88 @@ def test_cleanup_tears_down_every_created_slot(
         assert f"cleaned up {slot}" in proc.stdout
 
 
+# ── #2351: the unload row asserts every loaded slot unloads to offline ──────
+
+
+def _report(tmp_path: Path) -> dict:
+    return json.loads(
+        (tmp_path / "tree" / "tests" / "release-gate-report.json").read_text(encoding="utf-8")
+    )
+
+
+def _unload_row(tmp_path: Path) -> dict:
+    rows = [r for r in _report(tmp_path)["rows"] if r["name"] == "unload"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _loaded_slots() -> list[str]:
+    return [
+        f"{_PREFIX}-{suffix}"
+        for suffix in ("vulkan", "rocm", "moonshine", "kokoro")
+        if _manifest_has(suffix)
+    ]
+
+
+def test_unload_row_passes_when_every_loaded_slot_goes_offline(tmp_path: Path) -> None:
+    proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    row = _unload_row(tmp_path)
+    assert row["status"] == "pass", row
+    loaded = _loaded_slots()
+    assert loaded, "manifest pins no slot-creating row; the test exercises nothing"
+    for slot in loaded:
+        # The asserted unload is a bare call (no `|| true`), issued before the
+        # EXIT-trap cleanup, and followed by a `slot list --json` state read.
+        unload_at = cmds.index(f"/opt/test/hal0 slot unload {slot}")
+        assert any("slot list --json" in c for c in cmds[unload_at:])
+        assert slot in row["detail"]
+    # The cleanup safety net still runs afterwards.
+    assert "── Cleanup" in proc.stdout
+    names = [r["name"] for r in _report(tmp_path)["rows"]]
+    # After the chat/smoke rows, before updater.
+    assert names.index("unload") == names.index("kokoro") + 1
+    assert names.index("unload") < names.index("updater")
+
+
+def test_unload_row_fails_when_unload_exits_nonzero(tmp_path: Path) -> None:
+    proc, _cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_UNLOAD_FAIL="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    row = _unload_row(tmp_path)
+    assert row["status"] == "fail", row
+    assert "exited non-zero" in row["detail"]
+    for slot in _loaded_slots():
+        assert slot in row["detail"]
+
+
+def test_unload_row_fails_when_slot_is_still_loaded(tmp_path: Path) -> None:
+    proc, _cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_UNLOAD_STUCK="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    row = _unload_row(tmp_path)
+    assert row["status"] == "fail", row
+    assert "ready" in row["detail"] and "offline" in row["detail"]
+
+
+def test_unload_row_skips_when_nothing_was_loaded(tmp_path: Path) -> None:
+    # Every `slot load` fails, so no slot reached ready and there is nothing
+    # to unload: the row is a skip (the load rows already carry the failure).
+    proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_FAIL_SUBSTR="slot load")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    row = _unload_row(tmp_path)
+    assert row["status"] == "skip", row
+    assert not [c for c in cmds if c.startswith("/opt/test/hal0 slot unload ") and "||" not in c]
+
+
+def test_report_schema_is_unchanged(tmp_path: Path) -> None:
+    proc, _cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = _report(tmp_path)
+    assert report["_schema"] == "hal0.release-gate-report.v1"
+    assert set(report) == {"_schema", "generated", "host", "prefix", "summary", "rows"}
+    for row in report["rows"]:
+        assert set(row) == {"name", "status", "duration_ms", "detail"}
+
+
 def test_slot_create_is_never_captured_in_a_subshell() -> None:
     """A `$(remote_slot_create …)` capture silently re-breaks cleanup (#2262)."""
     text = _SCRIPT.read_text(encoding="utf-8")
@@ -177,6 +279,8 @@ def test_slot_create_is_never_captured_in_a_subshell() -> None:
     assert offenders == []
     # The seeded-slot tracker has the same hazard; it must stay a parent-shell append.
     assert not [ln for ln in code if "LOADED_SEEDED_SLOTS+=" in ln and "$(" in ln]
+    # So does the load helper that feeds the unload row (#2351).
+    assert not [ln for ln in code if "$(remote_slot_load" in ln]
 
 
 # ── #2263: remote binary resolution ─────────────────────────────────────────

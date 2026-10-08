@@ -215,6 +215,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **`make release-test` now asserts that slots unload.** The γ release gate
+  recorded each row after load and chat, but the only `slot unload` calls were
+  in the EXIT-trap cleanup, which ignored failures and wrote no row, so a
+  release that left slots wedged on unload still passed. A new `unload` row
+  runs after the chat rows: every slot the run loaded must exit 0 from
+  `hal0 slot unload` and then show `offline` in `slot list --json`, or the row
+  fails and names the slot; it skips when nothing was loaded. The cleanup
+  stays as a safety net and the report schema is unchanged. (#2351)
+
 - **The installer's failure report no longer copies secrets out of the
   install log.** The report masked environment values by key name only and
   then copied the install log tail verbatim, so any token the installer had
