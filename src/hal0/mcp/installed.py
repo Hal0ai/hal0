@@ -59,7 +59,8 @@ BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 # ── Agent exposure guard (#2358) ────────────────────────────────────────────
 # Remove with #2303: once hal0's proxy mount sits on the agent's call path,
 # delete this block and its readers: routes/mcp.py `patch_server_exposure`
-# and `test_server` (`agent_exposure`), hermes_join `_desired_entries`, and
+# and `test_server` (`agent_exposure`, and its `_classify_against_policy`
+# verdict fallback, #2415), hermes_join `_desired_entries`, and
 # the note `hal0 mcp test` prints.
 
 #: Whether hal0 enforces a user-installed server's ``[tools]`` policy on the
