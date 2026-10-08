@@ -47,10 +47,16 @@ class _FakeClient:
         #: bank -> [op_id, ...] failed ids the auto-retry sweep should see/retry.
         self.failed_ids: dict[str, list[str]] = {}
         self.retried: list[str] = []
-        #: bank -> {status: [row, ...]} operation rows, NEWEST FIRST like the
-        #: engine's ``ORDER BY created_at DESC`` list (#1833). When set for a
-        #: status, its length is that status's ``total``.
-        self.rows: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        #: bank -> operation rows (``task_type``/``status``/``created_at``/…),
+        #: any order. A ``type``-filtered list is answered from these exactly
+        #: as hindsight-api 0.9.2 does (#1833): ``WHERE status AND
+        #: operation_type``, ``ORDER BY created_at DESC``, ``LIMIT``/``OFFSET``,
+        #: plus the filtered ``total``.
+        self.rows: dict[str, list[dict[str, Any]]] = {}
+        #: Called before each ``type``-filtered list is answered, so a test can
+        #: land new rows between two requests.
+        self.before_list: Any = None
+        self.typed_calls: list[dict[str, Any]] = []
 
     async def retain(self, **_kwargs: Any) -> dict[str, str]:
         if self.retain_error is not None:
@@ -66,6 +72,8 @@ class _FakeClient:
         if self.request_error is not None:
             raise self.request_error
         params = params or {}
+        if method == "GET" and path.endswith("/operations") and "type" in params:
+            return self._list_typed(path, params)
         if method == "GET" and path.endswith("/operations") and params.get("limit") != 1:
             bank = path.split("/banks/", 1)[1].split("/", 1)[0]
             return {"operations": [{"id": op_id} for op_id in self.failed_ids.get(bank, [])]}
@@ -79,12 +87,22 @@ class _FakeClient:
         bank = path.split("/banks/", 1)[1].split("/", 1)[0]
         status = params.get("status")
         self.operation_calls.append((bank, status))
-        rows = self.rows.get(bank, {}).get(str(status))
-        if rows is None:
-            total = self.operations.get(bank, {}).get(str(status), 0)
-            return {"total": total, "operations": []}
+        return {"total": self.operations.get(bank, {}).get(str(status), 0), "operations": []}
+
+    def _list_typed(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        bank = path.split("/banks/", 1)[1].split("/", 1)[0]
+        self.typed_calls.append(dict(params))
+        if self.before_list is not None:
+            self.before_list(params)
+        matched = [
+            r
+            for r in self.rows.get(bank, [])
+            if r.get("status") == params.get("status") and r.get("task_type") == params["type"]
+        ]
+        matched.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
         offset = int(params.get("offset") or 0)
-        return {"total": len(rows), "operations": rows[offset : offset + 1]}
+        limit = int(params.get("limit") or 20)
+        return {"total": len(matched), "operations": matched[offset : offset + limit]}
 
 
 def _provider(client: _FakeClient) -> HindsightProvider:
@@ -235,11 +253,19 @@ async def test_a_raised_retain_wins_over_a_clean_probe() -> None:
 # logging ``[STUCK_STACK] age=603s threshold=600s``).
 
 
-def _row(op_id: str, age_s: float, *, done_s: float | None = None) -> dict[str, Any]:
+def _row(
+    op_id: str,
+    age_s: float,
+    *,
+    status: str,
+    task_type: str = "retain",
+    done_s: float | None = None,
+) -> dict[str, Any]:
     now = datetime.now(UTC)
     row: dict[str, Any] = {
         "id": op_id,
-        "task_type": "batch_retain",
+        "task_type": task_type,
+        "status": status,
         "created_at": (now - timedelta(seconds=age_s)).isoformat(),
     }
     if done_s is not None:
@@ -247,17 +273,34 @@ def _row(op_id: str, age_s: float, *, done_s: float | None = None) -> dict[str, 
     return row
 
 
-def _inflight(client: _FakeClient, *, pending: list[float], processing: list[float]) -> None:
-    """Seed in-flight rows by age (seconds); stored newest-first like the engine."""
-    client.rows["shared"] = {
-        status: [_row(f"{status}-{i}", age) for i, age in enumerate(sorted(ages))]
+def _inflight(
+    client: _FakeClient,
+    *,
+    pending: list[float],
+    processing: list[float],
+    task_type: str = "retain",
+) -> None:
+    """Seed in-flight rows of ``task_type`` by age (seconds), with matching
+    unfiltered per-status counts."""
+    client.rows["shared"] = [
+        _row(f"{status}-{i}", age, status=status, task_type=task_type)
         for status, ages in (("pending", pending), ("processing", processing))
-    }
+        for i, age in enumerate(ages)
+    ]
     client.operations["shared"] = {
         "failed": 0,
         "pending": len(pending),
         "processing": len(processing),
     }
+
+
+def _completed(
+    client: _FakeClient, age_s: float, done_s: float | None, *, task_type: str = "retain"
+) -> None:
+    rows = client.rows.setdefault("shared", [])
+    rows.append(
+        _row(f"done-{len(rows)}", age_s, status="completed", task_type=task_type, done_s=done_s)
+    )
 
 
 @pytest.mark.asyncio
@@ -278,6 +321,19 @@ async def test_an_op_stuck_in_processing_degrades_writes_with_no_failures() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_stalled_batch_retain_parent_is_seen() -> None:
+    """``POST /memories`` with ``async`` queues a ``batch_retain`` parent over
+    ``retain`` children (hindsight-api 0.9.2); both are retain work."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[700.0], processing=[], task_type="batch_retain")
+
+    out = await p.write_health()
+
+    assert out["reason"] == "retain_operations_stalled"
+
+
+@pytest.mark.asyncio
 async def test_a_stale_head_is_found_behind_a_page_of_fresh_retains() -> None:
     """The list is newest-first: a wedged queue that keeps accepting retains
     has >50 fresh rows in front of its stale head. The oldest row (offset
@@ -291,6 +347,57 @@ async def test_a_stale_head_is_found_behind_a_page_of_fresh_retains() -> None:
     assert out["degraded"] is True
     assert out["reason"] == "retain_operations_stalled"
     assert "oldest 950s" in (out["last_error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_retains_landing_between_count_and_lookup_do_not_hide_the_stale_head() -> None:
+    """Rows queued after the total is read shift every newest-first offset,
+    so the row at the stale ``total - 1`` is a fresh one. The lookup re-reads
+    the total its own response carries and retries at the new offset."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[10.0, 10.0, 10.0, 900.0], processing=[])
+    landed = []
+
+    def land_two(params: dict[str, Any]) -> None:
+        if int(params.get("offset") or 0) > 0 and not landed:
+            landed.append(True)
+            client.rows["shared"] += [_row(f"new-{i}", 0.0, status="pending") for i in range(2)]
+
+    client.before_list = land_two
+
+    out = await p.write_health()
+
+    assert landed
+    assert out["reason"] == "retain_operations_stalled"
+    assert "oldest 900s" in (out["last_error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_an_old_pending_consolidation_is_not_a_retain_stall() -> None:
+    """The operations list carries every task type; a consolidation queued
+    behind a busy worker is not the retain pipeline stalling."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[5000.0], processing=[], task_type="consolidation")
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+    assert {c["type"] for c in client.typed_calls} <= {"retain", "batch_retain"}
+
+
+@pytest.mark.asyncio
+async def test_a_recent_non_retain_completion_does_not_hide_a_retain_stall() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[], processing=[900.0])
+    _completed(client, 60.0, 5.0, task_type="consolidation")
+
+    out = await p.write_health()
+
+    assert out["reason"] == "retain_operations_stalled"
 
 
 @pytest.mark.asyncio
@@ -335,12 +442,29 @@ async def test_young_in_flight_ops_are_not_stalled() -> None:
 @pytest.mark.asyncio
 async def test_a_recent_completion_keeps_a_draining_backlog_green() -> None:
     """Evidence-based: an old op in a backlog that IS draining (an op
-    completed inside the window) is not a stall — read from the newest
-    completed row's ``updated_at``, not a count retention can prune."""
+    completed inside the window) is not a stall — read from completed rows'
+    ``updated_at``, not a count retention can prune."""
     client = _FakeClient()
     p = _provider(client)
     _inflight(client, pending=[900.0, 30.0], processing=[60.0])
-    client.rows["shared"]["completed"] = [_row("done-1", 1200.0, done_s=45.0)]
+    _completed(client, 1200.0, 45.0)
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_an_older_retain_completing_now_clears_a_stall() -> None:
+    """The list is ordered by CREATION, not completion: the newest-created
+    completed retain finished long ago, while an older-created one (a long
+    extraction) finished just now. That fresh completion is the evidence."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[], processing=[900.0])
+    _completed(client, 1000.0, 950.0)  # newest-created, completed long ago
+    _completed(client, 2000.0, 5.0)  # older-created, completed just now
 
     out = await p.write_health()
 
@@ -353,7 +477,7 @@ async def test_a_completion_older_than_the_window_does_not_clear_a_stall() -> No
     client = _FakeClient()
     p = _provider(client)
     _inflight(client, pending=[], processing=[900.0])
-    client.rows["shared"]["completed"] = [_row("done-1", 5000.0, done_s=4000.0)]
+    _completed(client, 5000.0, 4000.0)
 
     out = await p.write_health()
 
@@ -367,7 +491,7 @@ async def test_the_first_completion_clears_a_stall() -> None:
     _inflight(client, pending=[30.0], processing=[900.0])
     assert (await p.write_health())["reason"] == "retain_operations_stalled"
 
-    client.rows["shared"]["completed"] = [_row("done-1", 900.0, done_s=2.0)]
+    _completed(client, 900.0, 2.0)
     out = await p.write_health(max_age_s=0)
 
     assert out["degraded"] is False
@@ -381,10 +505,10 @@ async def test_unparseable_op_timestamps_are_not_read_as_a_stall() -> None:
     client = _FakeClient()
     p = _provider(client)
     client.operations["shared"] = {"failed": 0, "pending": 1, "processing": 1}
-    client.rows["shared"] = {
-        "processing": [{"id": "op-a", "created_at": "t1"}],
-        "pending": [{"id": "op-b"}],
-    }
+    client.rows["shared"] = [
+        {"id": "op-a", "task_type": "retain", "status": "processing", "created_at": "t1"},
+        {"id": "op-b", "task_type": "retain", "status": "pending"},
+    ]
 
     out = await p.write_health()
 
@@ -397,11 +521,30 @@ async def test_an_unparseable_completion_stamp_is_not_read_as_a_stall() -> None:
     client = _FakeClient()
     p = _provider(client)
     _inflight(client, pending=[], processing=[900.0])
-    client.rows["shared"]["completed"] = [{"id": "done-1", "updated_at": None}]
+    _completed(client, 1000.0, None)
 
     out = await p.write_health()
 
     assert out["degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_completion_probe_is_not_read_as_a_stall() -> None:
+    """The completed lookup raising is no data — it must not turn red."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[], processing=[900.0])
+
+    def fail_completed(params: dict[str, Any]) -> None:
+        if params.get("status") == "completed":
+            raise RuntimeError("engine hiccup")
+
+    client.before_list = fail_completed
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
 
 
 # ── auto-retry of no-chat-model dead letters (#1792) ──────────────────────
