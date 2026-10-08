@@ -221,6 +221,16 @@ applying. Add those subsections to a version's section to surface them; see
   which would have shipped the rc's notes and slipped past that check.
   (#2255, #2345)
 
+- **`hal0 memory status` no longer reports `Writes landing` while retains are
+  stuck.** The verdict only watched the engine's `failed` counter for growth,
+  so retains wedged in `pending`/`processing` — which never fail — read green
+  on a store that had never held a fact, and a brief failure spike went green
+  again when its 600-second hold ran out with nothing recovered. Writes now
+  report `FAILING — retain_operations_stalled` when an operation has been in
+  flight for over 600 seconds (the threshold the memory engine's own worker
+  logs as stuck) and none has completed in that time; the first completed
+  operation clears it (#1833).
+
 - **An installed `sse` MCP server exposed to Hermes or the brain profile is
   now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
   picks its MCP client by `transport` and reads no `type` key, so every
@@ -247,16 +257,6 @@ applying. Add those subsections to a version's section to surface them; see
   re-pointed at a new file under the same id, still shows as one row (#1825). Queuing such a row with "+"
   also benchmarks that model, not whichever `model.gguf` the registry
   listed first (#2346).
-
-- **`hal0 memory status` no longer reports `Writes landing` while retains are
-  stuck.** The verdict only watched the engine's `failed` counter for growth,
-  so retains wedged in `pending`/`processing` — which never fail — read green
-  on a store that had never held a fact, and a brief failure spike went green
-  again when its 600-second hold ran out with nothing recovered. Writes now
-  report `FAILING — retain_operations_stalled` when an operation has been in
-  flight for over 600 seconds (the threshold the memory engine's own worker
-  logs as stuck) and none has completed in that time; the first completed
-  operation clears it (#1833).
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
