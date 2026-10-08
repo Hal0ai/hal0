@@ -55,4 +55,4 @@ _Rollback:_
 - [ ] α  unit (`make test`)
 - [ ] γ  release-gate (`make release-test`) — required for high-risk and
       release-candidate PRs
-- [ ] δ  harness (`make harness`) — `--dev` install → CLI → uninstall (slot load deferred under `--dev`)
+- [ ] δ  harness (`make harness`) — `--dev` install → CLI → prefix cleanup (slot load and `uninstall.sh` deferred under `--dev`)

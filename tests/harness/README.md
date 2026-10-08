@@ -18,12 +18,13 @@ see [`FINDINGS.md`](FINDINGS.md).
 |------|---------------------------------------|--------------------------------|-------------|
 | α    | `make test` (`pytest tests/`, unfiltered) | unit, mocked HTTP + systemd; host-dependent tests (e.g. the OpenWebUI prewire smoke's real `docker pull`/`run`) also run when their daemon is reachable | yes |
 | γ    | `scripts/release-test.sh` over SSH    | NPU + ROCm + Vulkan matrix on `hal0-test` LXC | release ritual |
-| **δ** (new) | **`scripts/harness.sh`** | **`--dev` install + CLI + uninstall on the dev host (slot load recorded `deferred` under `--dev`, #2349)** | **on demand** |
+| **δ** (new) | **`scripts/harness.sh`** | **`--dev` install + CLI + dev-prefix cleanup on the dev host (slot load and `uninstall.sh` recorded `deferred` under `--dev`, #2349)** | **on demand** |
 
 α covers code paths. γ covers the provider matrix on real hardware. **δ
 covers the developer's first-five-minutes journey**: does
-`install.sh --dev` work, do all 35 CLI subcommands return 0, does the
-uninstaller clean up. It also attempts a slot load → chat round-trip,
+`install.sh --dev` work, do all 35 CLI subcommands return 0, is the
+dev prefix removed. The real `uninstall.sh` has no `--dev` mode, so it is
+recorded `deferred` and only runs with `HAL0_HARNESS_PROD=1`. It also attempts a slot load → chat round-trip,
 but under `--dev` the slot unit cannot start, so that row is recorded
 `deferred` and the harness still exits 0 (#2349).
 
