@@ -525,33 +525,104 @@ def _remaining_drift_state(names: list[str]) -> str | None:
     return f"{len(remaining)}/{len(names)} still drifted"
 
 
-def _print_drift_banner(drift: dict) -> None:
-    """Post-update ``N slots need restart`` banner (or a clean all-good line).
+def _has_image_drift(slot: object) -> bool:
+    """True when a slot-drift entry carries an ``image`` diff (#2096).
 
-    ``rerender_slot_units`` refreshed each unit file on disk but never bounced
-    the running process, so drifted slots are still serving the pre-update
-    launch command. We surface that prominently and point at
-    ``hal0 update --restart-slots`` — we never bounce automatically, because a
-    slot may be mid-inference.
+    THE restart policy predicate: image drift is a different build of the
+    runner, not stale flags, so it is restarted automatically after an apply;
+    argv-only drift stays opt-in (``--restart-slots``).
     """
+    if not isinstance(slot, dict):
+        return False
+    return any(isinstance(d, dict) and d.get("key") == "image" for d in slot.get("diffs") or [])
+
+
+def _slot_names(slots: list) -> list[str]:
+    return [str(s.get("slot")) for s in slots if isinstance(s, dict) and s.get("slot")]
+
+
+def _print_drift_banner(
+    drift: dict,
+    *,
+    restarted: list[str] | None = None,
+    skipped_busy: list[str] | None = None,
+    failed: list[dict] | None = None,
+) -> None:
+    """Post-update slot banner: what was restarted, what still needs a restart.
+
+    ``rerender_slot_units`` refreshes each unit file on disk but never bounces
+    the running process. Slots whose drift includes an image change are
+    restarted automatically after an apply (#2096), so ``restarted`` lists
+    those; whatever is still in ``drift`` "needs restart" -- argv-only drift
+    (opt in with ``hal0 update --restart-slots``) plus any image slot that
+    could not be bounced (``skipped_busy`` / ``failed``).
+    """
+    restarted = restarted or []
+    skipped_busy = skipped_busy or []
+    failed = failed or []
+    if restarted:
+        console.print(
+            Panel(
+                f"[green]restarted {len(restarted)} slot(s) onto the new runner image:[/green] "
+                f"{', '.join(restarted)}",
+                border_style="green",
+            )
+        )
     count = int(drift.get("count") or 0)
     if count == 0:
         console.print("[dim]no slots need restart.[/dim]")
         return
     slots = drift.get("slots") or []
-    names = ", ".join(str(s.get("slot")) for s in slots if isinstance(s, dict) and s.get("slot"))
+    names = ", ".join(_slot_names(slots))
     plural = "s" if count != 1 else ""
-    console.print(
-        Panel(
-            f"[bold yellow]{count} slot{plural} need restart[/bold yellow]\n"
-            f"[dim]{names}[/dim]\n\n"
-            "These slots are still running the pre-update launch command. Run "
-            "[bold]hal0 update --restart-slots[/bold] to bounce only the drifted "
-            "slots (this briefly interrupts any in-flight request on them).",
-            title="Slots need restart",
-            border_style="yellow",
+    lines = [f"[bold yellow]{count} slot{plural} need restart[/bold yellow]", f"[dim]{names}[/dim]"]
+    if skipped_busy:
+        lines.append(
+            "could not be restarted automatically: in use \u2014 "
+            f"{', '.join(skipped_busy)} (still serving the old runner image)"
         )
+    for f in failed:
+        if isinstance(f, dict):
+            lines.append(
+                f"could not be restarted automatically: {f.get('slot')} \u2014 {f.get('error')}"
+            )
+    lines.append(
+        "\nThese slots are still running the pre-update launch command or image. Run "
+        "[bold]hal0 update --restart-slots[/bold] to bounce the drifted slots "
+        "(this briefly interrupts any in-flight request on them)."
     )
+    console.print(Panel("\n".join(lines), title="Slots need restart", border_style="yellow"))
+
+
+def _auto_restart_image_drift(drift: dict) -> dict:
+    """Restart the slots in ``drift`` that carry an image diff; skip busy ones.
+
+    Returns the /api/updates/restart-slots body (``restarted`` / ``failed`` /
+    ``skipped_busy``), or ``{}`` when nothing qualified or the call failed --
+    best-effort like the rest of the banner: a failed side-restart must not
+    turn an applied update into a hard error (the slot then still shows as
+    drifted and the verdict says restarts are pending).
+    """
+    names = _slot_names([s for s in drift.get("slots") or [] if _has_image_drift(s)])
+    if not names:
+        return {}
+    timeout_s = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=len(names))
+    try:
+        body = run_with_progress(
+            lambda: api_post(
+                "/api/updates/restart-slots",
+                json={"slots": names, "skip_busy": True},
+                timeout=timeout_s,
+            ),
+            console=console,
+            label=f"Restarting {len(names)} slot(s) on a new runner image",
+            timeout_s=timeout_s,
+            poll_state=lambda: _remaining_drift_state(names),
+        )
+    except (CliApiError, CliApiTimeout) as exc:
+        console.print(f"[yellow]automatic slot restart did not complete:[/yellow] {exc}")
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _restart_drifted_slots() -> None:
@@ -730,7 +801,16 @@ def update(
         "--restart-slots",
         help=(
             "Restart only the slots still running the pre-update launch command "
-            "(post-update drift). Never bounces a slot unless you pass this flag."
+            "(post-update drift), including argv-only drift. Without this flag an "
+            "update still restarts slots whose runner image changed."
+        ),
+    ),
+    no_restart_slots: bool = typer.Option(
+        False,
+        "--no-restart-slots",
+        help=(
+            "Do not automatically restart slots whose runner image changed; "
+            "leave them running the old image until restarted."
         ),
     ),
 ) -> None:
@@ -760,6 +840,9 @@ def update(
     # Standalone action: bounce drifted slots on demand, then stop. Kept
     # separate from the check/apply flow so an operator can clear post-update
     # drift at any later time (e.g. once in-flight requests have drained).
+    if restart_slots and no_restart_slots:
+        die("--restart-slots and --no-restart-slots are mutually exclusive")
+        return
     if restart_slots:
         _restart_drifted_slots()
         return
@@ -876,7 +959,21 @@ def update(
         # The unit files were re-rendered but slots were NOT bounced (a restart
         # could kill a mid-inference request). Surface which slots are still
         # running the pre-update command so the operator can opt into a restart.
-        _print_drift_banner(_fetch_slot_drift())
+        drift = _fetch_slot_drift()
+        outcome: dict = {} if no_restart_slots else _auto_restart_image_drift(drift)
+        if outcome:
+            drift = _fetch_slot_drift()
+        _print_drift_banner(
+            drift,
+            restarted=outcome.get("restarted") or [],
+            skipped_busy=outcome.get("skipped_busy") or [],
+            failed=outcome.get("failed") or [],
+        )
+        # An image diff still outstanding means a slot serves the build this
+        # release replaced -- the update is not "fully successful" (#2096).
+        image_pending = [
+            n for n in _slot_names([x for x in drift.get("slots") or [] if _has_image_drift(x)])
+        ]
         converged = _print_convergence(final.get("convergence"))
         # hal0-api is mid-self-restart right after commit applies (the unit
         # files were just re-rendered), so a strict _component_rows() fetch
@@ -893,9 +990,20 @@ def update(
             components_ok = True
         else:
             components_ok = _print_component_table(component_rows)
-        if converged and components_ok:
+        if converged and components_ok and not image_pending:
             console.print(Panel("[green]update applied.[/green]", border_style="green"))
             return
+        if image_pending and converged and components_ok:
+            console.print(
+                Panel(
+                    "[yellow]update applied, but restarts are pending:[/yellow] "
+                    f"{', '.join(image_pending)} still run the old runner image.\n"
+                    "[dim]Run `hal0 update --restart-slots` once the slot is idle. "
+                    "(exit 2 = applied, convergence outstanding)[/dim]",
+                    border_style="yellow",
+                )
+            )
+            raise typer.Exit(2)
         # Refuse to report a clean success while the old on-disk shape survives:
         # the tree swapped, but the box is not the thing v1.0 promises. Exit 2 is
         # distinct from a failed update (die() → 1) so a wrapper can tell

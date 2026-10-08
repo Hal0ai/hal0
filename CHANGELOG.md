@@ -132,6 +132,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **`hal0 update` now restarts slots whose runner image changed.** A release
+  that rolls the runner image used to leave running slots on the old build
+  until someone ran `--restart-slots`, so a box reported the new version
+  while still serving the build the release replaced (#2096). Slots with an
+  image diff are restarted automatically after an apply; a slot with a
+  request in flight is skipped and reported as "could not be restarted
+  automatically: in use". The summary no longer reads "update applied"
+  while an image restart is pending and the command exits 2. Argv-only drift
+  is unchanged (banner, opt-in `--restart-slots`); `--no-restart-slots`
+  opts out of the automatic restart.
+
 - **The dashboard login is asked for on every page, and "View read-only"
   now applies to one page at a time.** On a LAN-bound box with an admin key
   and enforcement off, dismissing the login would have switched the whole

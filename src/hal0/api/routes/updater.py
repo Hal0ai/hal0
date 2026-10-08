@@ -1266,6 +1266,32 @@ async def slot_drift(request: Request) -> dict[str, Any]:
     return {"count": len(drifted), "slots": drifted}
 
 
+async def _slots_in_flight(sm: Any, names: list[str]) -> set[str]:
+    """Names among ``names`` that llama-server reports as processing a request.
+
+    Source: the live ``/metrics`` scrape (``requests_processing``,
+    ``hal0.slots.metrics_collect.llama_metrics``). Best-effort: a slot with no
+    port, no ``--metrics`` endpoint or a failed scrape yields no reading and
+    is NOT counted busy -- there is no other reliable in-flight signal, so
+    "unknown" must not block a restart the caller asked for (#2096).
+    """
+    from hal0.slots import metrics_collect
+
+    try:
+        ports = {getattr(s, "name", None): getattr(s, "port", 0) or 0 for s in await sm.list()}
+    except Exception:  # pragma: no cover - defensive
+        return set()
+    busy: set[str] = set()
+    for name in names:
+        try:
+            reading = await metrics_collect.llama_metrics(int(ports.get(name) or 0))
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if int(reading.get("requests_processing") or 0) > 0:
+            busy.add(name)
+    return busy
+
+
 @router.post("/restart-slots")
 async def restart_drifted_slots(request: Request) -> dict[str, Any]:
     """Bounce ONLY the drifted slots — the explicit opt-in behind
@@ -1275,11 +1301,13 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
     that may be mid-inference: the fresh argv only takes effect once the
     operator asks for it here. Optionally restrict to a subset via
     ``{"slots": ["chat", ...]}``; an omitted / empty list means "all
-    currently-drifted slots".
+    currently-drifted slots". ``{"skip_busy": true}`` leaves any slot whose
+    llama-server reports an in-flight request alone and lists it under
+    ``skipped_busy`` (used by the post-update image-drift restart, #2096).
 
     Response::
 
-        {"restarted": ["chat"], "failed": [], "count": 1}
+        {"restarted": ["chat"], "failed": [], "skipped_busy": [], "count": 1}
 
     A per-slot restart failure is recorded in ``failed`` (never re-raised) so
     one wedged slot can't abort the rest of the sweep.
@@ -1294,9 +1322,15 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
         raw = body.get("slots")
         if isinstance(raw, list) and raw:
             only = {str(s) for s in raw}
+    skip_busy = isinstance(body, dict) and body.get("skip_busy") is True
 
     drifted = await _collect_slot_drift(sm)
     targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
+    skipped_busy: list[str] = []
+    if skip_busy and targets:
+        busy = await _slots_in_flight(sm, targets)
+        skipped_busy = [n for n in targets if n in busy]
+        targets = [n for n in targets if n not in busy]
     restarted: list[str] = []
     failed: list[dict[str, str]] = []
     for name in targets:
@@ -1308,4 +1342,9 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
             continue
         log.info("updater.slot_restarted", slot=name)
         restarted.append(name)
-    return {"restarted": restarted, "failed": failed, "count": len(restarted)}
+    return {
+        "restarted": restarted,
+        "failed": failed,
+        "skipped_busy": skipped_busy,
+        "count": len(restarted),
+    }

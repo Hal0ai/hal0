@@ -38,7 +38,7 @@ class _StubSlotManager:
         self.restarted: list[str] = []
 
     async def list(self) -> list[Any]:
-        return [SimpleNamespace(name=name) for name in self._drift]
+        return [SimpleNamespace(name=name, port=i + 1) for i, name in enumerate(self._drift)]
 
     async def compute_config_drift(self, name: str, **_: Any) -> dict[str, Any] | None:
         return self._drift.get(name)
@@ -138,3 +138,42 @@ def test_restart_slots_records_per_slot_failure(client: TestClient) -> None:
     assert body["restarted"] == ["code"]
     assert body["failed"] == [{"slot": "chat", "error": "boom"}]
     assert body["count"] == 1
+
+
+def test_restart_slots_skip_busy_leaves_in_flight_slot_alone(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``skip_busy`` (#2096): a slot llama-server reports as processing is not bounced."""
+    sm = _StubSlotManager(
+        {
+            "brain": {"drifted": True, "diffs": [{"key": "image"}]},
+            "agent": {"drifted": True, "diffs": [{"key": "image"}]},
+        }
+    )
+    _install_sm(client, sm)
+
+    async def fake_llama_metrics(port: int) -> dict[str, Any]:
+        return {"requests_processing": 1 if port == 2 else 0}
+
+    monkeypatch.setattr("hal0.slots.metrics_collect.llama_metrics", fake_llama_metrics)
+    r = client.post("/api/updates/restart-slots", json={"skip_busy": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["restarted"] == ["brain"]
+    assert body["skipped_busy"] == ["agent"]
+    assert sm.restarted == ["brain"]
+
+
+def test_restart_slots_without_skip_busy_restarts_busy_slots(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sm = _StubSlotManager({"agent": {"drifted": True, "diffs": [{"key": "image"}]}})
+    _install_sm(client, sm)
+
+    async def fake_llama_metrics(port: int) -> dict[str, Any]:
+        return {"requests_processing": 3}
+
+    monkeypatch.setattr("hal0.slots.metrics_collect.llama_metrics", fake_llama_metrics)
+    r = client.post("/api/updates/restart-slots", json={})
+    assert r.json()["restarted"] == ["agent"]
+    assert r.json()["skipped_busy"] == []
