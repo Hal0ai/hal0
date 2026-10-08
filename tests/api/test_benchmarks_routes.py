@@ -149,3 +149,60 @@ def test_roster_v1_path_id_still_matches_registry_by_unique_basename(
     models = isolated_client.get("/api/benchmarks/roster").json()["models"]
     assert [m["id"] for m in models] == ["chat/Qwen3-8B-Q4_K_M.gguf"]
     assert (models[0]["name"], models[0]["runs"]) == ("Qwen3 8B", 1)
+
+
+def _stub_registry(monkeypatch, registry: list[dict]) -> None:
+    from hal0.api.routes import benchmarks as routes
+
+    monkeypatch.setattr(routes, "fetch_registry_models", lambda api: registry)
+    monkeypatch.setattr(routes, "_is_tier_a_incompatible", lambda m: False)
+    monkeypatch.setattr(routes, "_model_caps", lambda m: {"chat"})
+
+
+def test_roster_relative_v1_path_joins_its_absolute_registry_path_under_a_collision(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """A legacy relative ``A/model.gguf`` names /m/A/model.gguf even though the
+    basename is shared with /m/B/model.gguf: it gets A's metadata, and A is not
+    re-added as an unmeasured row."""
+    store = Store()
+    store.append_record(_model_rec("2026-10-01T00:00:00Z-v1", "A/model.gguf", "A/model.gguf", 30.0))
+    _stub_registry(
+        monkeypatch,
+        [
+            {"id": "a", "name": "Model A", "path": "/m/A/model.gguf", "installed": True},
+            {"id": "b", "name": "Model B", "path": "/m/B/model.gguf", "installed": True},
+        ],
+    )
+
+    by_id = {m["id"]: m for m in isolated_client.get("/api/benchmarks/roster").json()["models"]}
+    assert set(by_id) == {"A/model.gguf", "b"}
+    assert by_id["A/model.gguf"]["name"] == "Model A"
+    assert by_id["b"]["measured"] is False
+
+
+def test_roster_basename_fallback_requires_a_unique_basename_in_the_store(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """B has left the registry; A is still there. B's row must not borrow A's
+    name/hf_repo just because ``model.gguf`` is now unique in the registry."""
+    store = Store()
+    store.append_record(_model_rec("2026-10-01T00:00:00Z-a", "a", "/m/A/model.gguf", 30.0))
+    store.append_record(_model_rec("2026-10-01T00:00:01Z-b", "b", "/m/B/model.gguf", 40.0))
+    _stub_registry(
+        monkeypatch,
+        [
+            {
+                "id": "a",
+                "name": "Model A",
+                "hf_repo": "org/a",
+                "path": "/m/A/model.gguf",
+                "installed": True,
+            }
+        ],
+    )
+
+    by_id = {m["id"]: m for m in isolated_client.get("/api/benchmarks/roster").json()["models"]}
+    assert set(by_id) == {"a", "b"}
+    assert (by_id["a"]["name"], by_id["a"]["hf_repo"]) == ("Model A", "org/a")
+    assert (by_id["b"]["name"], by_id["b"]["hf_repo"]) == (None, None)

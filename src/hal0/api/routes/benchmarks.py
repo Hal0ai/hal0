@@ -38,7 +38,7 @@ from hal0.bench.planner import (
     fetch_registry_models,
     plan,
 )
-from hal0.bench.publish import build_roster, store_model_keyer
+from hal0.bench.publish import build_roster, store_physical_models
 from hal0.bench.store import Store
 from hal0.bench.suites import load_suites, suite_dir
 
@@ -102,17 +102,17 @@ def get_roster() -> dict[str, Any]:
     store = _store()
     roster = build_roster(store)
 
-    # Count runs + newest run per PHYSICAL model, with the same key build_roster
-    # collapses the board on (gguf basename, or full path where basenames
-    # collide — #1825), so a model with records under both a registry id and a
-    # v1 path-like id tallies together, and two models that both store a
-    # ``<dir>/model.gguf`` do not.
-    _canon = store_model_keyer(store)
+    # One physical-model resolver for the whole board (#1825): run counts,
+    # the registry join and the unmeasured-row dedupe all use the identity
+    # build_roster collapsed the rows on — so a model recorded under both a
+    # registry id and a v1 path-like id tallies together, and two models that
+    # both store a ``<dir>/model.gguf`` do not.
+    physical = store_physical_models(store)
 
     counts: dict[str, int] = {}
     last: dict[str, str] = {}
     for rec in store.iter_records():
-        canon = _canon((rec.get("identity") or {}).get("model") or {})
+        canon = physical.key((rec.get("identity") or {}).get("model") or {})
         if not canon:
             continue
         counts[canon] = counts.get(canon, 0) + 1
@@ -120,59 +120,38 @@ def get_roster() -> dict[str, Any]:
         if rid > last.get(canon, ""):
             last[canon] = rid
 
-    # Index the registry by id AND by gguf path: v1-imported roster ids are
-    # path-like and don't match registry ids, but their gguf DOES. The basename
-    # is a fallback only where it names ONE registry file — per-model
-    # directories make ``model.gguf`` the basename of many (#1825).
-    reg_by_id: dict[str, Any] = {}
-    reg_by_file: dict[str, Any] = {}
-    reg_by_base: dict[str, list[Any]] = {}
+    # The registry joins through the same resolver: v1-imported roster ids are
+    # path-like and don't match registry ids, but their gguf names the file.
     try:
-        for m in fetch_registry_models(api):
-            if m.get("id"):
-                reg_by_id[m["id"]] = m
-            path = m.get("path") or ""
-            if path:
-                reg_by_file[path] = m
-                reg_by_base.setdefault(path.rsplit("/", 1)[-1], []).append(m)
+        registry = list(fetch_registry_models(api))
     except (URLError, OSError, ValueError):
-        pass
-    for base, ms in reg_by_base.items():
-        if len(ms) == 1:
-            reg_by_file.setdefault(base, ms[0])
+        registry = []
+    reg_by_canon = physical.match_registry(registry)
 
+    shown: set[str] = set()
     for m in roster["models"]:
-        gguf = m.get("gguf") or ""
-        canon = _canon(m)
-        base = gguf.rsplit("/", 1)[-1]
-        r = reg_by_id.get(m["id"]) or reg_by_file.get(gguf) or reg_by_file.get(base) or {}
+        canon = physical.key(m)
+        shown.add(canon)
+        r = reg_by_canon.get(canon) or {}
         m["name"] = r.get("name")
         m["hf_repo"] = r.get("hf_repo")
         m["runs"] = counts.get(canon, 0)
         m["last_run"] = (last.get(canon) or "")[:10] or (m.get("detail") or {}).get("measured")
         m["measured"] = True
 
-    # A registry model already on the board (by id, path, or unambiguous
-    # basename) must not be appended again as an "unmeasured" row.
-    present: set[str] = set()
-    for m in roster["models"]:
-        gguf = m.get("gguf") or ""
-        present.update({m["id"], gguf})
-        base = gguf.rsplit("/", 1)[-1]
-        if len(reg_by_base.get(base, ())) <= 1:
-            present.add(base)
-    present.discard("")  # a path-less registry entry must not match "no gguf"
-    for reg_model in reg_by_id.values():
-        if not reg_model.get("installed"):
+    # A registry model the resolver puts on a board row must not be appended
+    # again as an "unmeasured" row.
+    appended: set[str] = set()
+    on_board = {id(r) for r in physical.on_keys(registry, shown)}
+    for reg_model in registry:
+        if not reg_model.get("id") or not reg_model.get("installed"):
             continue
         if _is_tier_a_incompatible(reg_model):  # non-gguf / embed / rerank
             continue
-        path = reg_model.get("path") or ""
-        base = path.rsplit("/", 1)[-1]
-        unique_base = len(reg_by_base.get(base, ())) <= 1
-        if path in present or reg_model["id"] in present or (unique_base and base in present):
+        if id(reg_model) in on_board or reg_model["id"] in appended:
             continue
-        present.update({path, reg_model["id"]} - {""})
+        appended.add(reg_model["id"])
+        path = reg_model.get("path") or ""
         sz = int(reg_model.get("size_bytes", 0) or 0)
         roster["models"].append(
             {

@@ -121,3 +121,20 @@ def test_keyer_folds_relative_v1_paths_within_a_real_collision() -> None:
     assert key({"id": "a-v1", "gguf": "a/model.gguf"}) == "/m/a/model.gguf"
     assert key({"id": "a", "gguf": "/m/a/model.gguf"}) == "/m/a/model.gguf"
     assert key({"id": "b", "gguf": "/m/b/model.gguf"}) == "/m/b/model.gguf"
+
+
+def test_registry_path_change_under_one_id_stays_one_row(tmp_path) -> None:
+    """A registry ``update`` can move an entry from /old/model.gguf to
+    /new/model.gguf and keep its id. Records from before and after are one
+    model: two rows with the same ``id`` would break every id-keyed consumer
+    on the dashboard (React key, cache, detail filter, queue reference)."""
+    store = Store(tmp_path)
+    store.append_record(_rec("2026-09-01T00:00:00Z-a", "x", "/old/x/model.gguf", 20.0))
+    store.append_record(_rec("2026-10-01T00:00:00Z-b", "x", "/new/x/model.gguf", 25.0))
+    store.append_record(_rec("2026-10-01T00:00:01Z-c", "y", "/m/y/model.gguf", 60.0))
+
+    models = build_roster(store, host={})["models"]
+    ids = [m["id"] for m in models]
+    assert sorted(ids) == ["x", "y"]
+    x = next(m for m in models if m["id"] == "x")
+    assert (x["gguf"], x["decode_ts"]) == ("/new/x/model.gguf", 25.0)

@@ -60,62 +60,156 @@ def _basename(gguf: str) -> str:
     return gguf.rsplit("/", 1)[-1]
 
 
-def physical_model_keyer(models: Iterable[dict[str, Any]]) -> Callable[[dict[str, Any]], str]:
-    """Return a function mapping an ``identity.model`` dict to the key of the
-    PHYSICAL model file it measured — the roster's one-row-per-file identity.
+class PhysicalModels:
+    """One identity resolver for "which physical model file did this record
+    measure", shared by ``build_roster`` and the dashboard roster route so the
+    board's rows, run counts, registry metadata and unmeasured-row dedupe all
+    apply the SAME rules (#1825).
 
-    The key is the gguf basename when that basename names one file across
-    ``models``, and the full gguf path when several distinct paths share it
-    (#1825: per-model directories store every pull as ``<dir>/model.gguf``, so
-    the basename alone folded unrelated models into one row). A record with no
-    gguf falls back to its id.
+    Two records are the same physical model when any of these hold (union-find
+    over gguf paths and model ids, built from every record that has a gguf):
 
-    Why not always the full path: the basename collapse exists to fold one file
-    recorded under both a clean registry id and a v1 path-like id. Keeping the
-    basename wherever it is already unambiguous leaves that fold exactly as it
-    was for every existing store; only genuinely colliding basenames change
-    key. A relative v1 path that is a path-boundary suffix of exactly one
-    longer path counts as that same file, so it neither makes a basename
-    ambiguous nor gets a row of its own.
+    * they share a gguf path;
+    * one path is a path-boundary suffix of exactly one longer path with the
+      same basename — a v1 record's relative ``chat/Foo.gguf`` names
+      ``/m/chat/Foo.gguf``;
+    * they share a model ``id`` — the registry ``update`` path can move an entry
+      to a new file and keep its immutable id, and the dashboard keys rows,
+      caches, detail filters and queue references on that id.
+
+    A group's key is the basename of its longest path when no other group has
+    a file of that name — exactly the key the board always used, so a store
+    with no collisions renders identically — and that full path otherwise
+    (per-model directories store every pull as ``<dir>/model.gguf``).
     """
-    paths_by_base: dict[str, set[str]] = {}
-    for model in models:
-        gguf = model.get("gguf") or ""
-        if gguf:
+
+    def __init__(self, models: Iterable[dict[str, Any]]) -> None:
+        self._parent: dict[str, str] = {}
+        paths_by_base: dict[str, set[str]] = {}
+        for model in models:
+            gguf = model.get("gguf") or ""
+            if not gguf:
+                continue
             paths_by_base.setdefault(_basename(gguf), set()).add(gguf)
+            self._union(_P + gguf, _P + gguf)
+            if model.get("id"):
+                self._union(_P + gguf, _I + model["id"])
+        for paths in paths_by_base.values():
+            roots: list[str] = []
+            for path in sorted(paths, key=len, reverse=True):
+                owners = [r for r in roots if r.endswith("/" + path)]
+                if len(owners) == 1:
+                    self._union(_P + path, _P + owners[0])
+                else:
+                    roots.append(path)
 
-    # Fold a path into a longer one it is a path-boundary suffix of: a v1
-    # record's relative ``chat/Foo.gguf`` and a later ``/m/chat/Foo.gguf``
-    # name the same file. Only an unambiguous suffix folds; a path that is a
-    # suffix of several longer ones stays its own file.
-    canonical: dict[str, str] = {}
-    ambiguous: set[str] = set()
-    for base, paths in paths_by_base.items():
-        roots: list[str] = []
-        for path in sorted(paths, key=len, reverse=True):
-            owners = [r for r in roots if r.endswith("/" + path)]
-            if len(owners) == 1:
-                canonical[path] = owners[0]
+        group_paths: dict[str, list[str]] = {}
+        self._group_ids: dict[str, set[str]] = {}
+        for node in self._parent:
+            root = self._find(node)
+            if node.startswith(_P):
+                group_paths.setdefault(root, []).append(node[len(_P) :])
             else:
-                roots.append(path)
-                canonical[path] = path
-        if len(roots) > 1:
-            ambiguous.add(base)
+                self._group_ids.setdefault(root, set()).add(node[len(_I) :])
+        main_path = {r: min(ps, key=lambda p: (-len(p), p)) for r, ps in group_paths.items()}
+        groups_by_base: dict[str, set[str]] = {}
+        for root, ps in group_paths.items():
+            for path in ps:
+                groups_by_base.setdefault(_basename(path), set()).add(root)
+        self._groups_by_base = groups_by_base
+        self._key: dict[str, str] = {}
+        for root, path in main_path.items():
+            base = _basename(path)
+            self._key[root] = base if len(groups_by_base[base]) == 1 else path
+        self._paths = {p for ps in group_paths.values() for p in ps}
 
-    def key(model: dict[str, Any]) -> str:
+    def _find(self, node: str) -> str:
+        parent = self._parent.setdefault(node, node)
+        if parent != node:
+            parent = self._parent[node] = self._find(parent)
+        return parent
+
+    def _union(self, a: str, b: str) -> None:
+        ra, rb = self._find(a), self._find(b)
+        if ra != rb:
+            self._parent[max(ra, rb)] = min(ra, rb)
+
+    def _root_of(self, model: dict[str, Any]) -> str | None:
         gguf = model.get("gguf") or ""
-        base = _basename(gguf)
-        if base in ambiguous:
-            return canonical.get(gguf, gguf)
-        return base or model.get("id") or ""
+        if gguf and _P + gguf in self._parent:
+            return self._find(_P + gguf)
+        mid = model.get("id") or ""
+        if mid and _I + mid in self._parent:
+            return self._find(_I + mid)
+        return None
 
-    return key
+    def key(self, model: dict[str, Any]) -> str:
+        """The physical-model key for an ``identity.model`` (or roster row)
+        dict. A model the store never saw with a gguf keys on its id."""
+        root = self._root_of(model)
+        if root is not None:
+            return self._key[root]
+        return model.get("id") or ""
+
+    def _candidates(
+        self, registry: Iterable[dict[str, Any]]
+    ) -> list[tuple[str, int, dict[str, Any]]]:
+        """Every (group root, rule rank, registry model) the join rules allow;
+        lower rank is more specific."""
+        regs = [r for r in registry if r.get("id") or r.get("path")]
+        reg_by_base: dict[str, list[dict[str, Any]]] = {}
+        for r in regs:
+            if r.get("path"):
+                reg_by_base.setdefault(_basename(r["path"]), []).append(r)
+
+        out: list[tuple[str, int, dict[str, Any]]] = []
+        offer = lambda root, rank, reg: out.append((root, rank, reg))  # noqa: E731
+
+        for r in regs:
+            rid, path = r.get("id") or "", r.get("path") or ""
+            if rid and _I + rid in self._parent:
+                offer(self._find(_I + rid), 0, r)
+            if path and path in self._paths:
+                offer(self._find(_P + path), 1, r)
+        for p in self._paths:
+            owners = [r for r in reg_by_base.get(_basename(p), []) if r["path"].endswith("/" + p)]
+            if len(owners) == 1:
+                offer(self._find(_P + p), 2, owners[0])
+        for base, rs in reg_by_base.items():
+            roots = self._groups_by_base.get(base, set())
+            if len(rs) == 1 and len(roots) == 1:
+                offer(next(iter(roots)), 3, rs[0])
+        return out
+
+    def match_registry(self, registry: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Map physical-model key -> the registry model it is, most specific
+        rule first: exact id, exact path, a store path that is a path-boundary
+        suffix of exactly one registry path, then the basename — only when it
+        names ONE registry model AND one physical model in the store."""
+        best: dict[str, tuple[int, dict[str, Any]]] = {}
+        for root, rank, reg in self._candidates(registry):
+            if root not in best or rank < best[root][0]:
+                best[root] = (rank, reg)
+        return {self._key[root]: reg for root, (_, reg) in best.items()}
+
+    def on_keys(self, registry: Iterable[dict[str, Any]], keys: set[str]) -> list[dict[str, Any]]:
+        """The registry models any join rule ties to one of ``keys`` — the
+        ones already on the board, which must not get an unmeasured row."""
+        return [reg for root, _, reg in self._candidates(registry) if self._key[root] in keys]
 
 
-def store_model_keyer(store: Store) -> Callable[[dict[str, Any]], str]:
-    """``physical_model_keyer`` over every model in ``store``'s records, so the
-    roster rows and the dashboard's per-row run counts agree on one key."""
-    return physical_model_keyer(
+_P, _I = "p:", "i:"  # union-find node namespaces: gguf path / model id
+
+
+def physical_model_keyer(models: Iterable[dict[str, Any]]) -> Callable[[dict[str, Any]], str]:
+    """``PhysicalModels(models).key`` — see :class:`PhysicalModels`."""
+    return PhysicalModels(models).key
+
+
+def store_physical_models(store: Store) -> PhysicalModels:
+    """:class:`PhysicalModels` over every record in ``store``, so the roster
+    rows and the dashboard's run counts and registry join agree."""
+    return PhysicalModels(
         (rec.get("identity") or {}).get("model") or {} for rec in store.iter_records()
     )
 
@@ -133,9 +227,9 @@ def build_roster(store: Store, host: dict[str, Any] | None = None) -> dict[str, 
     # same file can carry a clean registry id (from a fresh run) AND a path-like
     # id (from a v1 import) — grouping by id would show it twice. The key is the
     # gguf basename, or the full path where basenames collide (#1825; see
-    # physical_model_keyer). The representative is the newest tg/decode record
+    # PhysicalModels). The representative is the newest tg/decode record
     # in the group (decode_ts is the headline; newest wins the id/provenance).
-    _canon = store_model_keyer(store)
+    _canon = store_physical_models(store).key
 
     def _rank(rec: dict[str, Any]) -> tuple[int, str]:
         kind = ((rec.get("identity") or {}).get("workload") or {}).get("kind")
