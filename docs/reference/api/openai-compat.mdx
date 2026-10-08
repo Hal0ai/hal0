@@ -56,6 +56,12 @@ behaviors:
 
 - **`"omni": true`** — opts into hal0's OmniRouter tool-calling loop. Stripped from
   the body before forwarding upstream (strict-mode backends reject unknown fields).
+  On a single-GPU box the image tools (`generate_image`, `edit_image`) share the exclusive GPU with the calling
+  LLM: the image render switches the GPU to image mode, which unloads the
+  caller, and hal0 restores LLM mode once the image is back so the loop can
+  continue. Expect the extra model reload per image. If image mode is pinned
+  (`POST /api/comfyui/switchover` with `pin`), the caller is not restored and
+  the tool result carries `caller_slot_unavailable` explaining why.
 - **`model` may be a chat-slot alias** — `agent`, `utility`, any enabled LLM slot name,
   or the legacy `agent-hermes` — rewritten to the slot's configured model id before
   dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized

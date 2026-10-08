@@ -182,6 +182,72 @@ async def _post_json(
         }
 
 
+# ── single-GPU self-eviction guard (#2191) ───────────────────────────
+
+
+async def _restore_caller_after_image(
+    ctx: DispatchContext, result: dict[str, Any]
+) -> dict[str, Any]:
+    """Bring the caller LLM back after an image tool flipped the exclusive GPU.
+
+    On a single-GPU box the img and llm slots share the GPU: dispatching
+    ``/v1/images/generations`` makes :class:`~hal0.slots.arbiter.GpuArbiter`
+    enter image mode, which unloads the llm group — including the very slot
+    whose tool_call we are serving. The loop's next chat round then 503s
+    (``gpu.image_mode``), the rendered image is orphaned, and the GPU stays
+    parked in image mode for the idle-restore window. So once the image
+    round-trip is done, and only when the caller is an llm-group slot that
+    the flip evicted, restore LLM mode before handing the tool_result back.
+    The reload is the price of an image on shared GPU memory; it is paid
+    here, inside the same request, instead of surfacing as a dead end.
+
+    Callers that were never evicted (NPU/CPU, or a GPU that did not flip)
+    are left alone, as is a box with no arbiter. A pinned image mode is an
+    operator's explicit choice: the restore is refused, the image is still
+    returned, and the result says why the caller stays unavailable.
+    """
+    arbiter = getattr(ctx.slot_manager, "arbiter", None)
+    if arbiter is None:
+        return result
+    try:
+        from hal0.slots.arbiter import ArbiterPinned, GpuMode, gpu_exclusive_group
+
+        if arbiter.mode != GpuMode.IMG:
+            return result
+        caller_cfg = next(
+            (
+                c
+                for c in await ctx.slot_manager.iter_configs()
+                if str(c.get("name") or "") == ctx.caller_slot_name
+            ),
+            None,
+        )
+        if caller_cfg is None or gpu_exclusive_group(caller_cfg) != "llm":
+            return result
+        try:
+            await arbiter.restore_llm()
+        except ArbiterPinned as exc:
+            return {
+                **result,
+                "caller_slot_unavailable": (
+                    f"GPU image mode is pinned, so the caller LLM slot "
+                    f"{ctx.caller_slot_name!r} was not restored: {exc}"
+                ),
+            }
+    except Exception as exc:  # never lose the rendered image over the restore
+        log.warning(
+            "omni.image_caller_restore_failed caller=%s error=%s", ctx.caller_slot_name, exc
+        )
+        return {
+            **result,
+            "caller_slot_unavailable": (
+                f"the caller LLM slot {ctx.caller_slot_name!r} could not be restored "
+                f"after image generation: {exc}"
+            ),
+        }
+    return result
+
+
 # ── handlers ────────────────────────────────────────────────────────
 
 
@@ -200,7 +266,8 @@ async def handle_generate_image(ctx: DispatchContext, args: Mapping[str, Any]) -
         body["size"] = args["size"]
     if "n" in args and args["n"] is not None:
         body["n"] = args["n"]
-    return await _post_json(ctx, "/v1/images/generations", body)
+    result = await _post_json(ctx, "/v1/images/generations", body)
+    return await _restore_caller_after_image(ctx, result)
 
 
 async def handle_edit_image(ctx: DispatchContext, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -217,7 +284,8 @@ async def handle_edit_image(ctx: DispatchContext, args: Mapping[str, Any]) -> di
     }
     if args.get("size"):
         body["size"] = args["size"]
-    return await _post_json(ctx, "/v1/images/edits", body)
+    result = await _post_json(ctx, "/v1/images/edits", body)
+    return await _restore_caller_after_image(ctx, result)
 
 
 async def handle_text_to_speech(ctx: DispatchContext, args: Mapping[str, Any]) -> dict[str, Any]:

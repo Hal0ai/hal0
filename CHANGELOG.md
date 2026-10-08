@@ -316,6 +316,18 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+- **An omni `generate_image` call no longer strands its own caller on a
+  single-GPU box.** The image render switches the GPU to exclusive image
+  mode, which unloads the calling LLM slot; the loop's next chat round then
+  failed with `gpu.image_mode`, the rendered image was never returned, and
+  the GPU stayed parked in image mode for the idle window until someone
+  switched it back by hand (#2191). After an image or image-edit tool
+  completes, hal0 now restores LLM mode before handing the result back, so
+  the caller is loaded again when the loop asks it to fold the image in. The
+  reload per image is the cost of sharing GPU memory. A caller that was never
+  evicted (NPU/CPU, or a GPU that did not flip) is left alone; a pinned image
+  mode is respected and reported in the tool result as
+  `caller_slot_unavailable` instead of a bare 503.
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
