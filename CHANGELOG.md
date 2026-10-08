@@ -3,9 +3,13 @@
 All notable changes to hal0 are recorded here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-From **v1.0.0** the project follows semver proper: breaking changes land
-only in a major release, minor releases add functionality compatibly, and
-patch releases fix bugs. Tags before v1.0.0 carried the pre-1.0 caveat —
+From **v1.0.0** the project follows semver: removed or renamed config keys,
+endpoints and CLI commands land only in a major release, minor releases add
+functionality, and patch releases fix bugs. A minor release can still carry
+a `### Breaking` entry for an operator-facing behaviour change — a changed
+default, a security fix that disables an unsafe path, or a new exit code —
+and its release notes call each one out so `hal0 update` shows it before
+applying. Tags before v1.0.0 carried the pre-1.0 caveat —
 a minor bump (v0.1 → v0.2) could break, a patch bump (v0.2.0 → v0.2.1)
 could not.
 

@@ -40,9 +40,11 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > updating, re-run the installer once to pick up the new Hindsight limits,
 > the Open WebUI client key and the Hermes wrappers. Read the v1.4.0
 > **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
-> first. The project has followed semver proper since v1.0.0. If you are
-> still on 0.9.8, read [Upgrading from 0.9.8](#upgrading-from-098) first —
-> that hop has three specific gotchas.
+> first. The project has followed semver since v1.0.0; a minor release's
+> **Breaking** notes flag behaviour changes an operator or a script may
+> notice. If you are still on 0.9.8, read
+> [Upgrading from 0.9.8](#upgrading-from-098) first — that hop has three
+> specific gotchas.
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
