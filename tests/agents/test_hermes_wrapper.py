@@ -1104,3 +1104,15 @@ def test_wrapper_keeps_wildcard_no_proxy(wrapper: Path, var: str, tmp_path: Path
     loopback only"."""
     seen = _run_wrapper_env(wrapper, tmp_path, {var: "*"})
     assert seen[var] == "*"
+
+
+@_WRAPPERS
+@pytest.mark.parametrize(("set_var", "other"), [("NO_PROXY", "no_proxy"), ("no_proxy", "NO_PROXY")])
+def test_wrapper_seeds_unset_spelling_from_the_set_one(
+    wrapper: Path, set_var: str, other: str, tmp_path: Path
+) -> None:
+    """Only one spelling set → the other starts from it, so a lowercase
+    no_proxy (which urllib prefers) never drops the operator's exclusions."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {set_var: "corp.example"})
+    assert seen[set_var] == "corp.example,localhost,127.0.0.1,::1"
+    assert seen[other] == "corp.example,localhost,127.0.0.1,::1"

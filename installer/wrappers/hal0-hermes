@@ -68,8 +68,13 @@ _hal0_no_proxy_merge() {
     fi
     printf '%s' "$_np"
 }
-NO_PROXY="$(_hal0_no_proxy_merge "${NO_PROXY:-}")"
-no_proxy="$(_hal0_no_proxy_merge "${no_proxy:-}")"
+# A spelling that is unset starts from the other one: urllib/httpx let a set
+# lowercase no_proxy win over NO_PROXY, so creating a loopback-only no_proxy
+# would silently drop exclusions an operator listed only in NO_PROXY.
+_hal0_np_upper="${NO_PROXY-${no_proxy-}}"
+_hal0_np_lower="${no_proxy-${NO_PROXY-}}"
+NO_PROXY="$(_hal0_no_proxy_merge "$_hal0_np_upper")"
+no_proxy="$(_hal0_no_proxy_merge "$_hal0_np_lower")"
 export NO_PROXY no_proxy
 
 case "${1:-}" in
