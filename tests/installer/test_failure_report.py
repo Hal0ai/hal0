@@ -633,3 +633,32 @@ class TestColonFormsAreHarvested:
         assert "budget 40960000; model Qwen/Qwen2.5-7B-Instruct; set OPENAI_API_KEY" in body
         assert "port 14096; kbd us-intl-altgr" in body
         assert "keyboard: us-intl-altgr" in body
+
+
+# ── #2410: a scheme-less Authorization header value ────────────────────────
+
+
+class TestSchemelessAuthorization:
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("Authorization: rawauth_Pl34Ok56Ij78", "Authorization: ***REDACTED***"),
+            (
+                "curl -H 'Authorization: rawauth_Pl34Ok56Ij78' https://x.invalid/",
+                "curl -H 'Authorization: ***REDACTED***' https://x.invalid/",
+            ),
+            ('{"Authorization": "rawauth_Pl34Ok56Ij78"}', '{"Authorization": "***REDACTED***"}'),
+            ("Authorization: Bearer abcdef123456", "Authorization: Bearer ***REDACTED***"),
+            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***REDACTED***"),
+            ("authorization: denied", "authorization: denied"),
+        ],
+    )
+    def test_the_pattern_pass_masks_a_raw_header_value(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_the_report_does_not_carry_a_raw_header_value(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text("Authorization: rawauth_Pl34Ok56Ij78\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        assert "rawauth_Pl34Ok56Ij78" not in report.read_text()

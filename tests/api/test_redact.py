@@ -521,3 +521,34 @@ class TestLogLineSharedShapes:
     )
     def test_live_log_lookalikes_survive(self, line: str) -> None:
         assert redact_log_line(line) == line
+
+
+# ── #2410: a scheme-less Authorization header value ────────────────────────
+
+
+class TestSchemelessAuthorization:
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Authorization: rawauth_Pl34Ok56Ij78",
+            "curl -H 'Authorization: rawauth_Pl34Ok56Ij78' https://x.invalid/",
+            '{"Authorization": "rawauth_Pl34Ok56Ij78"}',
+            "proxy-authorization: rawauth_Pl34Ok56Ij78",
+        ],
+    )
+    def test_a_raw_header_value_is_masked(self, line: str) -> None:
+        for redact in (redact_shareable_text, redact_log_line):
+            out = redact(line)
+            assert "rawauth_Pl34Ok56Ij78" not in out, out
+            assert MASK in out
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("Authorization: Bearer abcdef123456", "Authorization: Bearer ***REDACTED***"),
+            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***REDACTED***"),
+            ("authorization: denied", "authorization: denied"),
+        ],
+    )
+    def test_a_scheme_is_kept_and_short_words_survive(self, line: str, expected: str) -> None:
+        assert redact_shareable_text(line) == expected

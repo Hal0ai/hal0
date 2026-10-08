@@ -159,12 +159,25 @@ _NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-# Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns.
+# Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns:
+# these run before the NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
 _SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"(authorization:\s*(?:basic|token)\s+)[^\s'\"]+", re.I), rf"\g<1>{MASK}"),
     (re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
+    # A scheme-less ``Authorization: <value>`` (an API key sent raw, #2410);
+    # 8+ characters so a word such as ``denied`` is left alone.
+    (
+        re.compile(
+            r"(authorization[\"']?\s*:\s*[\"']?)"
+            r"(?!(?:bearer|basic|token|digest|negotiate)(?:\s|$))[^\s\"',]{8,}",
+            re.I,
+        ),
+        rf"\g<1>{MASK}",
+    ),
     (re.compile(r"([a-z][a-z0-9+.-]*://[^/@\s:]*):[^/@\s]+@", re.I), rf"\g<1>:{MASK}@"),
     (re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s:]{16,}@", re.I), rf"\g<1>{MASK}@"),
+)
+_SHAPE_RULES_AFTER: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (
         re.compile(
             r"(--[A-Za-z0-9-]*(?:secret|token|password|pass|api-key|apikey|private-key)"
@@ -201,10 +214,10 @@ def redact_secret_shapes(line: str) -> str:
     """Mask secret SHAPES in one line of free text (no literal known in
     advance). Keeps each key's name, quoting and separator so a reader still
     sees a secret WAS present. Idempotent."""
-    for pattern, repl in _SHAPE_RULES[:4]:
+    for pattern, repl in _SHAPE_RULES:
         line = pattern.sub(repl, line)
     line = _NAME_VALUE_SHAPE_RE.sub(_mask_name_value, line)
-    for pattern, repl in _SHAPE_RULES[4:]:
+    for pattern, repl in _SHAPE_RULES_AFTER:
         line = pattern.sub(repl, line)
     return line
 
