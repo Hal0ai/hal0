@@ -20,6 +20,7 @@ that drifts.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,51 @@ def _detail_from_record(rec: dict[str, Any], history: list[dict[str, Any]]) -> d
     }
 
 
+def _basename(gguf: str) -> str:
+    return gguf.rsplit("/", 1)[-1]
+
+
+def physical_model_keyer(models: Iterable[dict[str, Any]]) -> Callable[[dict[str, Any]], str]:
+    """Return a function mapping an ``identity.model`` dict to the key of the
+    PHYSICAL model file it measured — the roster's one-row-per-file identity.
+
+    The key is the gguf basename when that basename names one file across
+    ``models``, and the full gguf path when several distinct paths share it
+    (#1825: per-model directories store every pull as ``<dir>/model.gguf``, so
+    the basename alone folded unrelated models into one row). A record with no
+    gguf falls back to its id.
+
+    Why not always the full path: the basename collapse exists to fold one file
+    recorded under both a clean registry id and a v1 path-like id. Keeping the
+    basename wherever it is already unambiguous leaves that fold exactly as it
+    was for every existing store; only genuinely colliding basenames change
+    key, and the genuine duplicate pairs among those share a full path.
+    """
+    paths_by_base: dict[str, set[str]] = {}
+    for model in models:
+        gguf = model.get("gguf") or ""
+        if gguf:
+            paths_by_base.setdefault(_basename(gguf), set()).add(gguf)
+    ambiguous = {base for base, paths in paths_by_base.items() if len(paths) > 1}
+
+    def key(model: dict[str, Any]) -> str:
+        gguf = model.get("gguf") or ""
+        base = _basename(gguf)
+        if base in ambiguous:
+            return gguf
+        return base or model.get("id") or ""
+
+    return key
+
+
+def store_model_keyer(store: Store) -> Callable[[dict[str, Any]], str]:
+    """``physical_model_keyer`` over every model in ``store``'s records, so the
+    roster rows and the dashboard's per-row run counts agree on one key."""
+    return physical_model_keyer(
+        (rec.get("identity") or {}).get("model") or {} for rec in store.iter_records()
+    )
+
+
 def build_roster(store: Store, host: dict[str, Any] | None = None) -> dict[str, Any]:
     """Render the roster.json contract (DESIGN §9.1) from current cell values.
 
@@ -64,14 +110,13 @@ def build_roster(store: Store, host: dict[str, Any] | None = None) -> dict[str, 
     """
     current = store.newest_ok_by_cell()  # cell_key -> newest ok record
 
-    # Collapse to one representative record per PHYSICAL MODEL, keyed by the gguf
-    # BASENAME (not the id): the same file can carry a clean registry id (from a
-    # fresh run) AND a path-like id (from a v1 import) — grouping by id would show
-    # it twice. The representative is the newest tg/decode record in the group
-    # (decode_ts is the headline; newest wins the id/provenance shown).
-    def _canon(model: dict[str, Any]) -> str:
-        gguf = model.get("gguf") or ""
-        return gguf.rsplit("/", 1)[-1] or model.get("id") or ""
+    # Collapse to one representative record per PHYSICAL MODEL (not per id): the
+    # same file can carry a clean registry id (from a fresh run) AND a path-like
+    # id (from a v1 import) — grouping by id would show it twice. The key is the
+    # gguf basename, or the full path where basenames collide (#1825; see
+    # physical_model_keyer). The representative is the newest tg/decode record
+    # in the group (decode_ts is the headline; newest wins the id/provenance).
+    _canon = store_model_keyer(store)
 
     def _rank(rec: dict[str, Any]) -> tuple[int, str]:
         kind = ((rec.get("identity") or {}).get("workload") or {}).get("kind")
@@ -102,7 +147,9 @@ def build_roster(store: Store, host: dict[str, Any] | None = None) -> dict[str, 
             by_canon[canon] = rec
 
     models: list[dict[str, Any]] = []
-    for canon, rec in sorted(by_canon.items()):
+    # Order by basename first so a store with no collisions renders in exactly
+    # the order it always did; colliding files then sort by full path.
+    for canon, rec in sorted(by_canon.items(), key=lambda kv: (_basename(kv[0]), kv[0])):
         identity = rec.get("identity", {})
         model = identity.get("model", {})
         mid = model.get("id")

@@ -191,6 +191,14 @@ applying. Add those subsections to a version's section to surface them; see
   connecting an account needed `hal0 oauth`. It now lives at
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
+- **The benchmark roster shows every model stored as `<dir>/model.gguf`.**
+  The roster grouped benchmark records by the gguf file name, so models
+  pulled into their own directory (all named `model.gguf`) collapsed into
+  one row, and that row carried the other models' run count and last-run
+  date. Where several files share a name the roster now tells them apart by
+  full path, and it only matches a registry model by file name when that
+  name is unique; a model recorded under both a registry id and an old v1
+  path-like id still shows as one row (#1825).
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented

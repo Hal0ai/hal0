@@ -38,7 +38,7 @@ from hal0.bench.planner import (
     fetch_registry_models,
     plan,
 )
-from hal0.bench.publish import build_roster
+from hal0.bench.publish import build_roster, store_model_keyer
 from hal0.bench.store import Store
 from hal0.bench.suites import load_suites, suite_dir
 
@@ -102,12 +102,12 @@ def get_roster() -> dict[str, Any]:
     store = _store()
     roster = build_roster(store)
 
-    # Count runs + newest run per PHYSICAL model (gguf basename), so a model
-    # with records under both a registry id and a v1 path-like id tallies
-    # together — matching how build_roster collapses the board (one row per file).
-    def _canon(model: dict[str, Any]) -> str:
-        gguf = model.get("gguf") or ""
-        return gguf.rsplit("/", 1)[-1] or model.get("id") or ""
+    # Count runs + newest run per PHYSICAL model, with the same key build_roster
+    # collapses the board on (gguf basename, or full path where basenames
+    # collide — #1825), so a model with records under both a registry id and a
+    # v1 path-like id tallies together, and two models that both store a
+    # ``<dir>/model.gguf`` do not.
+    _canon = store_model_keyer(store)
 
     counts: dict[str, int] = {}
     last: dict[str, str] = {}
@@ -120,10 +120,13 @@ def get_roster() -> dict[str, Any]:
         if rid > last.get(canon, ""):
             last[canon] = rid
 
-    # Index the registry by id AND by gguf path/basename: v1-imported roster
-    # ids are path-like and don't match registry ids, but their gguf DOES.
+    # Index the registry by id AND by gguf path: v1-imported roster ids are
+    # path-like and don't match registry ids, but their gguf DOES. The basename
+    # is a fallback only where it names ONE registry file — per-model
+    # directories make ``model.gguf`` the basename of many (#1825).
     reg_by_id: dict[str, Any] = {}
     reg_by_file: dict[str, Any] = {}
+    reg_by_base: dict[str, list[Any]] = {}
     try:
         for m in fetch_registry_models(api):
             if m.get("id"):
@@ -131,21 +134,34 @@ def get_roster() -> dict[str, Any]:
             path = m.get("path") or ""
             if path:
                 reg_by_file[path] = m
-                reg_by_file[path.rsplit("/", 1)[-1]] = m
+                reg_by_base.setdefault(path.rsplit("/", 1)[-1], []).append(m)
     except (URLError, OSError, ValueError):
         pass
+    for base, ms in reg_by_base.items():
+        if len(ms) == 1:
+            reg_by_file.setdefault(base, ms[0])
 
     for m in roster["models"]:
         gguf = m.get("gguf") or ""
-        canon = gguf.rsplit("/", 1)[-1] or m["id"]
-        r = reg_by_id.get(m["id"]) or reg_by_file.get(gguf) or reg_by_file.get(canon) or {}
+        canon = _canon(m)
+        base = gguf.rsplit("/", 1)[-1]
+        r = reg_by_id.get(m["id"]) or reg_by_file.get(gguf) or reg_by_file.get(base) or {}
         m["name"] = r.get("name")
         m["hf_repo"] = r.get("hf_repo")
         m["runs"] = counts.get(canon, 0)
         m["last_run"] = (last.get(canon) or "")[:10] or (m.get("detail") or {}).get("measured")
         m["measured"] = True
 
-    present = {(m.get("gguf") or m["id"]).rsplit("/", 1)[-1] for m in roster["models"]}
+    # A registry model already on the board (by id, path, or unambiguous
+    # basename) must not be appended again as an "unmeasured" row.
+    present: set[str] = set()
+    for m in roster["models"]:
+        gguf = m.get("gguf") or ""
+        present.update({m["id"], gguf})
+        base = gguf.rsplit("/", 1)[-1]
+        if len(reg_by_base.get(base, ())) <= 1:
+            present.add(base)
+    present.discard("")  # a path-less registry entry must not match "no gguf"
     for reg_model in reg_by_id.values():
         if not reg_model.get("installed"):
             continue
@@ -153,9 +169,10 @@ def get_roster() -> dict[str, Any]:
             continue
         path = reg_model.get("path") or ""
         base = path.rsplit("/", 1)[-1]
-        if base in present or reg_model["id"] in present:
+        unique_base = len(reg_by_base.get(base, ())) <= 1
+        if path in present or reg_model["id"] in present or (unique_base and base in present):
             continue
-        present.add(base)
+        present.update({path, reg_model["id"]} - {""})
         sz = int(reg_model.get("size_bytes", 0) or 0)
         roster["models"].append(
             {

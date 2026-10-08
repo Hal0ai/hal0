@@ -59,3 +59,93 @@ def test_run_summary_row_prefill_ts_med_is_none_when_absent(isolated_client: Tes
     assert resp.status_code == 200
     row = resp.json()["runs"][0]
     assert row["prefill_ts_med"] is None
+
+
+def _model_rec(run_id: str, model_id: str, gguf: str, decode: float) -> dict:
+    rec = _ok_rec(run_id, model_id, decode, None)
+    rec["cell_key"] = f"{model_id}|{gguf}|rocm|tg|2048|default"
+    rec["identity"]["model"] = {"id": model_id, "gguf": gguf}
+    return rec
+
+
+def test_roster_attributes_runs_and_registry_per_file_when_basenames_collide(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """#1825: per-model directories store every pull as ``<dir>/model.gguf``.
+    The roster must give each its own row, its own run count, its own registry
+    name — and must not hide an installed-but-unmeasured model behind a
+    measured one that merely shares the basename."""
+    from hal0.api.routes import benchmarks as routes
+
+    store = Store()
+    store.append_record(
+        _model_rec("2026-10-01T00:00:00Z-a1", "grug", "/m/Grug-12B/model.gguf", 40.0)
+    )
+    store.append_record(
+        _model_rec("2026-10-02T00:00:00Z-a2", "grug", "/m/Grug-12B/model.gguf", 41.0)
+    )
+    store.append_record(
+        _model_rec("2026-10-03T00:00:00Z-b1", "minicpm", "/m/MiniCPM5-1B/model.gguf", 90.0)
+    )
+
+    registry = [
+        {"id": "grug", "name": "Grug 12B", "path": "/m/Grug-12B/model.gguf", "installed": True},
+        {
+            "id": "minicpm",
+            "name": "MiniCPM5 1B",
+            "path": "/m/MiniCPM5-1B/model.gguf",
+            "installed": True,
+        },
+        {
+            "id": "vibe",
+            "name": "VibeThinker 3B",
+            "path": "/m/VibeThinker-3B/model.gguf",
+            "installed": True,
+        },
+    ]
+    monkeypatch.setattr(routes, "fetch_registry_models", lambda api: registry)
+    monkeypatch.setattr(routes, "_is_tier_a_incompatible", lambda m: False)
+    monkeypatch.setattr(routes, "_model_caps", lambda m: {"chat"})
+
+    resp = isolated_client.get("/api/benchmarks/roster")
+    assert resp.status_code == 200
+    by_id = {m["id"]: m for m in resp.json()["models"]}
+    assert set(by_id) == {"grug", "minicpm", "vibe"}
+    assert (by_id["grug"]["runs"], by_id["grug"]["name"]) == (2, "Grug 12B")
+    assert by_id["grug"]["last_run"] == "2026-10-02"
+    assert (by_id["minicpm"]["runs"], by_id["minicpm"]["name"]) == (1, "MiniCPM5 1B")
+    assert by_id["vibe"]["measured"] is False
+
+
+def test_roster_v1_path_id_still_matches_registry_by_unique_basename(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """The basename fallback the v1 path-like ids rely on keeps working where
+    the basename is unambiguous: no duplicate unmeasured row, registry name
+    attached, runs counted."""
+    from hal0.api.routes import benchmarks as routes
+
+    store = Store()
+    store.append_record(
+        _model_rec(
+            "2026-10-01T00:00:00Z-v1",
+            "chat/Qwen3-8B-Q4_K_M.gguf",
+            "chat/Qwen3-8B-Q4_K_M.gguf",
+            30.0,
+        )
+    )
+    registry = [
+        {
+            "id": "qwen3-8b",
+            "name": "Qwen3 8B",
+            "path": "/m/chat/Qwen3-8B-Q4_K_M.gguf",
+            "installed": True,
+        },
+    ]
+    monkeypatch.setattr(routes, "fetch_registry_models", lambda api: registry)
+    monkeypatch.setattr(routes, "_is_tier_a_incompatible", lambda m: False)
+    monkeypatch.setattr(routes, "_model_caps", lambda m: {"chat"})
+
+    models = isolated_client.get("/api/benchmarks/roster").json()["models"]
+    assert [m["id"] for m in models] == ["chat/Qwen3-8B-Q4_K_M.gguf"]
+    assert (models[0]["name"], models[0]["runs"]) == ("Qwen3 8B", 1)
