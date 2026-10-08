@@ -74,8 +74,10 @@ applying. Add those subsections to a version's section to surface them; see
   the install log, and `hal0.openwebui.env_writer` writes it into
   `OPENAI_API_KEYS` and the STT/TTS/RAG API keys, but only where the matching
   base URL still points at hal0. Those keys are recorded as hal0-managed, so
-  a key re-pointed at another service never receives hal0's, and removing the
-  client key falls back to the placeholder. Rotating the client key (`hal0
+  a key re-pointed at another service never receives hal0's (hal0 withdraws
+  only a value that still equals its key, per connection for
+  `OPENAI_API_KEYS`, so the operator's own key for that service is kept), and
+  removing the client key falls back to the placeholder. Rotating the client key (`hal0
   auth rotate client`) re-renders Open WebUI's env and restarts it only when
   the render changed. No admin key is minted, so a fresh install's auth
   posture is unchanged. (#2314)
@@ -477,6 +479,7 @@ applying. Add those subsections to a version's section to surface them; see
   SSE stream and WebSocket waited. Those paths now probe a cold cache on a
   worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
   sync callers such as the CLI are unchanged.
+
 - **`hal0 doctor all` describes the LAN admin gate correctly.** On a
   LAN-bound box with an admin key and auth off, its `auth` row said mutating
   routes need a sign-in "but reads and inference stay open". The gate works

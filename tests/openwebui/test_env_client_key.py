@@ -138,3 +138,114 @@ def test_rotation_replaces_previous_key(tmp_path: Path) -> None:
     write_openwebui_env(target, preserve_existing=True)
     assert "old-key" not in target.read_text(encoding="utf-8")
     assert _parse(target)["OPENAI_API_KEYS"] == CLIENT_KEY
+
+
+def _repoint(target: Path, old: str, new: str) -> None:
+    text = target.read_text(encoding="utf-8")
+    assert old in text, old
+    target.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def test_operator_key_on_repointed_url_survives_render(tmp_path: Path) -> None:
+    """hal0 wrote its key, then the operator re-pointed STT at another service
+    *and* set that service's key: the next render must leave their key alone,
+    because withdrawal is only for the value hal0 itself wrote."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, preserve_existing=True)
+    assert "AUDIO_STT_OPENAI_API_KEY" in _managed(target)
+    _repoint(
+        target,
+        "AUDIO_STT_OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1",
+        "AUDIO_STT_OPENAI_API_BASE_URL=https://api.openai.com/v1",
+    )
+    _repoint(
+        target,
+        f"AUDIO_STT_OPENAI_API_KEY={CLIENT_KEY}",
+        "AUDIO_STT_OPENAI_API_KEY=sk-operator-openai-key",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    env = _parse(target)
+    assert env["AUDIO_STT_OPENAI_API_BASE_URL"] == "https://api.openai.com/v1"
+    assert env["AUDIO_STT_OPENAI_API_KEY"] == "sk-operator-openai-key"
+    assert "AUDIO_STT_OPENAI_API_KEY" not in _managed(target)
+    # A further render still leaves it alone, with or without a client key.
+    write_openwebui_env(target, preserve_existing=True)
+    (tmp_path / "api.env").write_text("HAL0_BIND_HOST=0.0.0.0\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["AUDIO_STT_OPENAI_API_KEY"] == "sk-operator-openai-key"
+
+
+def test_operator_second_chat_connection_keeps_its_key(tmp_path: Path) -> None:
+    """The operator added a second Open WebUI connection: the list-form key
+    is withdrawn per entry, so the operator's entry is never deleted."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, preserve_existing=True)
+    assert "OPENAI_API_KEYS" in _managed(target)
+    _repoint(
+        target,
+        "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1",
+        "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1;https://api.openai.com/v1",
+    )
+    _repoint(
+        target,
+        f"OPENAI_API_KEYS={CLIENT_KEY}",
+        f"OPENAI_API_KEYS={CLIENT_KEY};sk-operator-openai-key",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == f"{CLIENT_KEY};sk-operator-openai-key"
+    assert "OPENAI_API_KEYS" not in _managed(target)
+    # The client key going away does not take the operator's line with it.
+    (tmp_path / "api.env").write_text("HAL0_BIND_HOST=0.0.0.0\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == f"{CLIENT_KEY};sk-operator-openai-key"
+
+
+def test_hal0_entry_on_repointed_chat_connection_is_withdrawn(tmp_path: Path) -> None:
+    """Per entry: hal0's key on a connection that no longer points at hal0 is
+    replaced with the placeholder (keeping the list aligned with its URLs),
+    while the operator's own entry stays."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, preserve_existing=True)
+    _repoint(
+        target,
+        "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1",
+        "OPENAI_API_BASE_URLS=https://other.example.com/v1;https://api.openai.com/v1",
+    )
+    _repoint(
+        target,
+        f"OPENAI_API_KEYS={CLIENT_KEY}",
+        f"OPENAI_API_KEYS={CLIENT_KEY};sk-operator-openai-key",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    value = _parse(target)["OPENAI_API_KEYS"]
+    assert value == "sk-hal0-local;sk-operator-openai-key"
+    assert "OPENAI_API_KEYS" not in _managed(target)
+
+
+@pytest.mark.parametrize(
+    ("key_var", "url_line", "new_url_line"),
+    [
+        (
+            "AUDIO_TTS_OPENAI_API_KEY",
+            "AUDIO_TTS_OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1",
+            "AUDIO_TTS_OPENAI_API_BASE_URL=https://tts.example.com/v1",
+        ),
+        (
+            "OPENAI_API_KEYS",
+            "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1",
+            "OPENAI_API_BASE_URLS=https://chat.example.com/v1",
+        ),
+    ],
+)
+def test_unchanged_hal0_key_still_withdrawn_on_repoint(
+    tmp_path: Path, key_var: str, url_line: str, new_url_line: str
+) -> None:
+    """The value-equality guard does not stop the withdrawal it exists for:
+    hal0's own, unchanged key never follows a URL away from hal0."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)[key_var] == CLIENT_KEY
+    _repoint(target, url_line, new_url_line)
+    write_openwebui_env(target, preserve_existing=True)
+    assert key_var not in _parse(target)
+    assert key_var not in _managed(target)

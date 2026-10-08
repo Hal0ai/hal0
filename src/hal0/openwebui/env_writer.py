@@ -577,7 +577,9 @@ def _apply_client_key(env_vars: dict[str, str], managed: set[str], client_key: s
     OpenWebUI keeps working once auth is enabled. Without one (or once it is
     gone), a value hal0 wrote earlier falls back to the placeholder, and
     ``OPENAI_API_KEYS``, which ships no default, is dropped. A key whose base
-    URL points elsewhere, or that the operator set by hand, is never touched.
+    URL points elsewhere, or that the operator set by hand, is never touched:
+    once the URL leaves hal0, hal0 withdraws only a value that still equals
+    the client key it wrote, and per entry for ``OPENAI_API_KEYS``.
     """
     for key_var, url_var in _CLIENT_KEY_TARGETS:
         points_at_hal0 = env_vars.get(url_var, "").rstrip("/") == _HAL0_V1_URL
@@ -586,8 +588,13 @@ def _apply_client_key(env_vars: dict[str, str], managed: set[str], client_key: s
             managed.add(key_var)
         elif key_var in managed and env_vars.get(key_var, _PLACEHOLDER_KEY) != _PLACEHOLDER_KEY:
             # A key hal0 wrote earlier is still there but no longer wanted.
-            if key_var == "OPENAI_API_KEYS" or not points_at_hal0:
-                env_vars.pop(key_var, None)
+            if key_var == "OPENAI_API_KEYS":
+                _withdraw_chat_keys(env_vars, managed, client_key, points_at_hal0)
+            elif not points_at_hal0:
+                # The operator may have re-pointed the URL *and* set that
+                # service's own key; only hal0's own value is withdrawn.
+                if env_vars[key_var] == client_key:
+                    env_vars.pop(key_var)
                 managed.discard(key_var)
             else:
                 env_vars[key_var] = _PLACEHOLDER_KEY
@@ -595,6 +602,42 @@ def _apply_client_key(env_vars: dict[str, str], managed: set[str], client_key: s
                 # plain shipped defaults again.
                 if key_var != "RAG_OPENAI_API_KEY":
                     managed.discard(key_var)
+
+
+def _withdraw_chat_keys(
+    env_vars: dict[str, str], managed: set[str], client_key: str | None, points_at_hal0: bool
+) -> None:
+    """Withdraw hal0's key from ``OPENAI_API_KEYS`` without touching the operator's.
+
+    The variable is a ``;``-list paired by position with
+    ``OPENAI_API_BASE_URLS``. An entry equal to the client key whose URL no
+    longer points at hal0 becomes the placeholder (removing it would shift
+    every later key onto the wrong URL); the line is dropped only when every
+    entry was hal0's. An operator who added a connection now owns the line,
+    so it leaves the managed record and a later render cannot delete it.
+    """
+    current = env_vars["OPENAI_API_KEYS"]
+    entries = current.split(";")
+    if not client_key:
+        # The client key is gone, so hal0 cannot tell its old value from the
+        # operator's; it drops only the single hal0-bound connection it wrote.
+        if points_at_hal0 and len(entries) == 1:
+            env_vars.pop("OPENAI_API_KEYS")
+        managed.discard("OPENAI_API_KEYS")
+        return
+    urls = env_vars.get("OPENAI_API_BASE_URLS", "").split(";")
+    withdrawn = [
+        entry == client_key and (i >= len(urls) or urls[i].strip().rstrip("/") != _HAL0_V1_URL)
+        for i, entry in enumerate(entries)
+    ]
+    if all(withdrawn):
+        env_vars.pop("OPENAI_API_KEYS")
+    elif any(withdrawn):
+        env_vars["OPENAI_API_KEYS"] = ";".join(
+            _PLACEHOLDER_KEY if gone else entry
+            for entry, gone in zip(entries, withdrawn, strict=True)
+        )
+    managed.discard("OPENAI_API_KEYS")
 
 
 def main() -> None:
