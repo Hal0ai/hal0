@@ -189,10 +189,10 @@ when Docker is unreachable.)
 ### γ — release-gate (`make release-test`)
 
 SSHes into the hal0-test LXC and walks a matrix of seven rows:
-**llamacpp-vulkan, llamacpp-rocm, flm (chat + trio asr/embed),
-whispercpp (STT), tts (TTS), sd-cpp (image), updater,
-openwebui**. Each row produces a structured record; the full report
-lands in `tests/release-gate-report.json`.
+**vulkan, rocm, flm (NPU chat), moonshine (STT), kokoro (TTS),
+updater, openwebui** (the `add_row` calls in
+`scripts/release-test.sh`). Each row produces a structured record; the
+full report lands in `tests/release-gate-report.json`.
 
 ```sh
 # Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host
