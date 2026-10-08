@@ -2146,8 +2146,8 @@ def apply_mcp_server_entries(
     the full :class:`BootstrapState` pipeline, on every MCP registry
     mutation rather than only at ``hal0 agent reprovision`` time.
 
-    ``entries`` maps server id → ``{"type", "url", "timeout", "headers":
-    {...}}`` — the identical shape the two-builtin-server loop in
+    ``entries`` maps server id → ``{"type", "transport", "url", "timeout",
+    "headers": {...}}`` — the identical shape the two-builtin-server loop in
     :func:`_build_config_overlay` already applies (``:2012-2021``); this
     function reuses the same ``hermes config set`` mechanism
     (:func:`_apply_config_set`) rather than a second one.
@@ -2200,6 +2200,8 @@ def apply_mcp_server_entries(
         for sid, spec in entries.items():
             pairs += [
                 (f"mcp_servers.{sid}.type", spec.get("type", "http")),
+                # Hermes selects its MCP client by `transport`, not `type` (#2331).
+                (f"mcp_servers.{sid}.transport", spec.get("transport", "http")),
                 (f"mcp_servers.{sid}.url", spec["url"]),
                 (f"mcp_servers.{sid}.timeout", spec.get("timeout", 60)),
             ]
@@ -2392,6 +2394,7 @@ def apply_brain_profile_mcp_entries(
             for sid, spec in entries.items():
                 servers[sid] = {
                     "type": spec.get("type", "http"),
+                    "transport": spec.get("transport", "http"),
                     "url": spec["url"],
                     "headers": dict(spec.get("headers") or {}),
                     "timeout": spec.get("timeout", 60),

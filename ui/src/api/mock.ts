@@ -108,7 +108,10 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   // bank id is captured as group 1. ORDER MATTERS: the more-specific
   // sub-paths (entities/graph, stats/timeseries) sit before the broader
   // ones (graph, stats) since `matchAllowlist` returns first match.
-  { re: /^\/api\/memory\/graph\/status$/, key: 'memoryGraphStatus' },
+  // networkFirst: the Settings ▸ Memory graph panel's specs drive the
+  // limits/timeout echo per-spec via page.route (#1834); the baked payload
+  // is for unrouted dev/preview only.
+  { re: /^\/api\/memory\/graph\/status$/, key: 'memoryGraphStatus', networkFirst: true },
   { re: /^\/api\/memory\/engine$/, key: 'memoryEngine' },
   { re: /^\/api\/memory\/banks$/, key: 'memoryBanks' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats\/timeseries$/, key: 'bankTimeseries' },

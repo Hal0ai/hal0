@@ -53,6 +53,32 @@ applying. Add those subsections to a version's section to surface them; see
     HAL0_ADMIN_KEY", and the doctor no longer claims the LAN gate leaves
     reads open: it covers admin reads (settings, memory, logs, approvals) as
     well as changes.
+- **Memory extraction has limits now, and they are yours to set.** The
+  Hindsight extraction LLM runs on a shared hal0 inference slot — usually one
+  llama-server serving one request at a time — but ran with Hindsight's own
+  defaults: 32 concurrent calls, 64000 completion tokens per call, and three
+  retries at each of two layers. On a slow box one extraction that could not
+  finish inside the LLM timeout held the slot, timed out, requeued itself and
+  took the whole retain queue with it; every `POST /api/memory/add` returned
+  200 and nothing was ever stored (#1834). `[memory.graph]` gains
+  `extraction_max_concurrent` (default 1), `extraction_max_tokens` (4096),
+  `extraction_llm_retries` (1), `extraction_task_retries` (2) and
+  `extraction_retry_backoff_s` (120). They ride the same hindsight-api
+  drop-in as the extraction slot and timeout, are echoed by
+  `GET /api/memory/graph/status` as `extraction_limits`, are editable on
+  Settings ▸ Data ▸ Memory under **Extraction limits**, and the shipped
+  `hindsight-api.service` carries the same values so a fresh install is
+  capped before anything is saved. A document that still cannot be extracted
+  now ends under **Retry failed** instead of occupying the slot for hours.
+  The two task-retry knobs are Hindsight's worker-wide settings and apply to
+  every queued memory operation, not only extraction; the generic
+  `PUT /api/settings` now refuses `memory.graph.*` keys with a pointer to
+  `PUT /api/memory/graph`, the one writer that applies them; and
+  `install.sh` restarts a running hindsight-api when it replaces the unit.
+  The root-side drop-in validator (`hal0-systemctl`) learned the five
+  variables; a box updated through `hal0 update` keeps its installed wrapper
+  until `install.sh` is re-run, and until then saving a limit reports the
+  wrapper as stale rather than applying.
 
 - **"Remember me" at login.** Ticking it on the dashboard login (or the
   in-app sign-in drawer) asks for a 30-day session instead of the 8-hour
@@ -200,6 +226,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Interactive `hermes` and the user-level gateway now bypass the proxy for
+  loopback.** Only the `hal0-agent@hermes` unit loads
+  `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers
+  passed on the caller's environment untouched: with `HTTP_PROXY` set, MCP
+  calls to loopback servers, and their `[secrets]` headers, could go through
+  the proxy. Both wrappers now add `localhost,127.0.0.1,::1` to `NO_PROXY` and
+  `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
+  finishes the #2330 fix. (#2371)
+
 - **A stable or preview release now fails its build when `CHANGELOG.md` has
   no section for it.** `scripts/gen_release_notes.py` used to fall back to a
   git log when the `## [<version>]` header was missing or empty, so the
@@ -211,12 +246,32 @@ applying. Add those subsections to a version's section to surface them; see
   which would have shipped the rc's notes and slipped past that check.
   (#2255, #2345)
 
+- **An installed `sse` MCP server exposed to Hermes or the brain profile is
+  now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
+  picks its MCP client by `transport` and reads no `type` key, so every
+  joined SSE server was driven as Streamable-HTTP and failed at connect or
+  `tools/list`. The join now writes `transport` (`sse` or `http`) to both
+  Hermes's `config.yaml` and the brain profile, and hal0-api's startup
+  reconcile rewrites an SSE join already on disk without it. (#2331)
+
 - **The OAuth "Connected accounts" panel is reachable from the dashboard.**
   v1.3.0 shipped it only inside the old Connections page, which the
   dashboard redirects to Slots ▸ Endpoints, so no menu led to it and
   connecting an account needed `hal0 oauth`. It now lives at
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
+
+- **The benchmark roster shows every model stored as `<dir>/model.gguf`.**
+  The roster grouped benchmark records by the gguf file name, so models
+  pulled into their own directory (all named `model.gguf`) collapsed into
+  one row, and that row carried the other models' run count and last-run
+  date. Where several files share a name the roster now tells them apart by
+  full path, and it only matches a registry model by file name when that
+  name is unique among both the registry's models and the benchmarked ones.
+  A model recorded under both a registry id and an old v1 path-like id, or
+  re-pointed at a new file under the same id, still shows as one row (#1825). Queuing such a row with "+"
+  also benchmarks that model, not whichever `model.gguf` the registry
+  listed first (#2346).
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
@@ -227,6 +282,20 @@ applying. Add those subsections to a version's section to surface them; see
   request itself is `https` or a proxy says so with `X-Forwarded-Proto`.
   Plain-HTTP installs are unchanged. (Flagged in review of #2338; the gap
   predates it, but a 30-day "remember me" session made it matter more.)
+
+- **A Runner Images default for the voice, speech, NPU and image-generation
+  families now takes effect.** `[slots].default_images` accepts `comfyui`,
+  `flm`, `kokoro`, `moonshine` and `qwen3tts`, and the dashboard reported the
+  override as in effect, but only llama slots read it; those five providers
+  still launched the registry default. They now resolve their image in the
+  same order as llama slots — slot `image_pin`, then the family default, then
+  the registry default — through one shared helper. The image pull, slot
+  status, drift check and load-time GPU preflight now resolve that same ref
+  too: for these slots (the shipped `img`, `qwen3tts`, `tts` and `flm`
+  slots included) they used to derive a llama runner image from the slot's
+  device, so the pull fetched the wrong image, status reported an image
+  mismatch and the drift check flagged an image change that was not there,
+  with or without a family default. (#2234)
 
 - **A LAN-bound box with an admin key no longer leaves the dashboard half
   signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
@@ -250,6 +319,14 @@ applying. Add those subsections to a version's section to surface them; see
   admin's cached pages through **View read-only**. The Security page no
   longer claims that reads stay open in this posture. Boxes with no admin
   key, and browsers on the box itself, see no change.
+
+- **The memory bank's Web view no longer greys out the whole graph when you
+  pick a tag or a fact type.** The view looked for a fact's tag and type on
+  each graph node, but the memory engine only sends those in the graph
+  response's per-fact side table, so on a real bank every dot failed the
+  filter and dots were never coloured by type. It now reads them from that
+  table, so the matching facts stay lit and each dot takes its type's
+  colour. (#1996)
 
 ## [1.3.0] — 2026-09-16
 

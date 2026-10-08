@@ -999,3 +999,120 @@ def test_stop_services_uses_the_drivers_injected_runner(
     driver.uninstall()
 
     assert len(_stop_argvs(runner)) == 2
+
+
+# ── #2371 — wrappers carry the loopback NO_PROXY set into upstream hermes ────
+#
+# Only the `hal0-agent@hermes` unit loads /etc/hal0/agents/hermes.env (via
+# `EnvironmentFile=`), so the #2330 `NO_PROXY` coverage never reached an
+# interactive `hermes` or the user-level gateway, which inherit the shell's
+# env. Both wrappers now merge `localhost,127.0.0.1,::1` into BOTH spellings
+# before exec, so a set `HTTP_PROXY` can't route loopback MCP calls (and
+# their `[secrets]` headers) through the proxy.
+
+_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def _run_wrapper_env(wrapper: Path, tmp_path: Path, extra_env: dict[str, str]) -> dict[str, str]:
+    """Exec `wrapper` against an env-dumping stub upstream binary and parse
+    the env it saw. Unguarded, non-root, no secrets file."""
+    probe = tmp_path / "probe.sh"
+    probe.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    probe.chmod(0o755)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HAL0_HERMES_BIN": str(probe),
+        "HAL0_HERMES_SECRETS": "/nonexistent/secrets.env",
+        "HAL0_GUARD_LIB": "/nonexistent/run-as-hal0.sh",
+        "HAL0_RUNAS_TEST_UID": "1000",
+        "HOME": str(tmp_path),
+    }
+    env.update(extra_env)
+    result = _subprocess.run(
+        ["/bin/sh", str(wrapper), "noop"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    seen: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            seen[key] = value
+    return seen
+
+
+_WRAPPERS = pytest.mark.parametrize(
+    "wrapper", [_HERMES_WRAPPER, _HAL0_HERMES_WRAPPER], ids=["hermes", "hal0-hermes"]
+)
+_SPELLINGS = pytest.mark.parametrize("var", ["NO_PROXY", "no_proxy"])
+
+
+@_WRAPPERS
+def test_wrapper_sets_loopback_no_proxy_when_unset(wrapper: Path, tmp_path: Path) -> None:
+    """Unset → both spellings are exactly the loopback set, no stray comma."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {})
+    assert seen["NO_PROXY"] == "localhost,127.0.0.1,::1"
+    assert seen["no_proxy"] == "localhost,127.0.0.1,::1"
+
+
+@_WRAPPERS
+@_SPELLINGS
+def test_wrapper_sets_loopback_no_proxy_when_empty(wrapper: Path, var: str, tmp_path: Path) -> None:
+    """Set-but-empty must not yield a leading comma."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {var: ""})
+    assert seen[var] == "localhost,127.0.0.1,::1"
+
+
+@_WRAPPERS
+@_SPELLINGS
+def test_wrapper_appends_loopback_to_existing_no_proxy(
+    wrapper: Path, var: str, tmp_path: Path
+) -> None:
+    """An operator value is kept, in order, with the loopback set appended."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {var: "corp.example,10.0.0.0/8"})
+    assert seen[var] == "corp.example,10.0.0.0/8,localhost,127.0.0.1,::1"
+
+
+@_WRAPPERS
+@_SPELLINGS
+def test_wrapper_does_not_duplicate_present_loopback_entries(
+    wrapper: Path, var: str, tmp_path: Path
+) -> None:
+    """Entries already present are not appended again."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {var: "127.0.0.1,corp.example,localhost"})
+    assert seen[var] == "127.0.0.1,corp.example,localhost,::1"
+    for host in _LOOPBACK:
+        assert seen[var].split(",").count(host) == 1
+
+
+@_WRAPPERS
+def test_wrapper_merges_each_spelling_independently(wrapper: Path, tmp_path: Path) -> None:
+    """The two spellings are merged from their own values, not copied."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {"NO_PROXY": "a.example", "no_proxy": "b.example"})
+    assert seen["NO_PROXY"] == "a.example,localhost,127.0.0.1,::1"
+    assert seen["no_proxy"] == "b.example,localhost,127.0.0.1,::1"
+
+
+@_WRAPPERS
+@_SPELLINGS
+def test_wrapper_keeps_wildcard_no_proxy(wrapper: Path, var: str, tmp_path: Path) -> None:
+    """`*` already bypasses every host, and Python's urllib only honours it
+    as the whole value — appending would turn "bypass all" into "bypass
+    loopback only"."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {var: "*"})
+    assert seen[var] == "*"
+
+
+@_WRAPPERS
+@pytest.mark.parametrize(("set_var", "other"), [("NO_PROXY", "no_proxy"), ("no_proxy", "NO_PROXY")])
+def test_wrapper_seeds_unset_spelling_from_the_set_one(
+    wrapper: Path, set_var: str, other: str, tmp_path: Path
+) -> None:
+    """Only one spelling set → the other starts from it, so a lowercase
+    no_proxy (which urllib prefers) never drops the operator's exclusions."""
+    seen = _run_wrapper_env(wrapper, tmp_path, {set_var: "corp.example"})
+    assert seen[set_var] == "corp.example,localhost,127.0.0.1,::1"
+    assert seen[other] == "corp.example,localhost,127.0.0.1,::1"

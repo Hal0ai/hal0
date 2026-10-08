@@ -96,7 +96,12 @@ point it at. That slot is `[memory.graph].extraction_slot` in
 extraction LLM and restarts `hindsight-api` to apply it. `[memory.graph].llm_timeout_s`
 (default `300`, 30–3600) sets how long Hindsight will wait on its own
 extraction/consolidation/reflect calls — raise it if a cold slot start
-regularly times out.
+regularly times out. The **Extraction limits** on the same panel (Settings →
+Data → Memory) cap how hard Hindsight may drive that slot: one extraction call
+in flight, 4096 completion tokens per call, and a bounded retry ladder by
+default. On a slow box they are what keeps a single stuck extraction from
+wedging the whole retain queue; see `[memory.graph]` in the config reference
+for each knob.
 
 ![Memory view showing live graph extraction status and counters](/screenshots/memory-view.png)
 *Live memory and graph-extraction dashboard in hal0.*

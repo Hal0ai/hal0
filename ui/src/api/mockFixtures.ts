@@ -1429,6 +1429,15 @@ function buildMemoryGraphStatus() {
     extraction_slot: 'utility',
     slot_resolves: true,
     available_slots: ['agent', 'utility'],
+    llm_timeout_s: 300,
+    // #1834 — [memory.graph].extraction_* defaults, as the status route echoes them.
+    extraction_limits: {
+      max_concurrent: 1,
+      max_tokens: 4096,
+      llm_retries: 1,
+      task_retries: 2,
+      retry_backoff_s: 120,
+    },
     in_flight: 0,
     builds_ok: 0,
     errors: 0,

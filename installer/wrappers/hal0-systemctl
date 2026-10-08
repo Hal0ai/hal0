@@ -118,7 +118,9 @@ GATEWAY_DROPIN_DIR="/etc/systemd/system/hermes-gateway.service.d"
 GATEWAY_DROPIN_FILE="${GATEWAY_DROPIN_DIR}/10-hal0-secrets.conf"
 
 # Fixed, literal drop-in path for the hindsight-api extraction override (#1641 /
-# ADR-0023): HINDSIGHT_API_LLM_MODEL + HINDSIGHT_API_LLM_TIMEOUT, repointed by
+# ADR-0023): HINDSIGHT_API_LLM_MODEL + HINDSIGHT_API_LLM_TIMEOUT plus the #1834
+# extraction limits (RETAIN_LLM_MAX_CONCURRENT, RETAIN_MAX_COMPLETION_TOKENS,
+# RETAIN_LLM_MAX_RETRIES, WORKER_MAX_RETRIES, WORKER_TASK_RETRY_BACKOFF_SECONDS), repointed by
 # `hal0 memory graph enable --slot <name>` and the Memory dashboard. Same posture
 # and same reason as the gateway drop-in above: hal0-api runs as the
 # unprivileged hal0 user and cannot write /etc/systemd/system itself. LITERAL —
@@ -201,6 +203,16 @@ validate_dropin_directive() {  # args: kind, "Key=Value" line
         HINDSIGHT_API_LLM_TIMEOUT)
           [[ "$evalue" =~ ^[0-9]{1,9}$ ]] \
             || die "drop-in rejected: bad HINDSIGHT_API_LLM_TIMEOUT value: $evalue"
+          ;;
+        # Extraction limits (#1834, [memory.graph].extraction_*): small
+        # non-negative integers, nothing else. The Python schema bounds the
+        # values more tightly; this arm only has to make sure nothing but a
+        # bare integer ever reaches a root-owned unit file.
+        HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT|HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS|\
+        HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES|HINDSIGHT_API_WORKER_MAX_RETRIES|\
+        HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS)
+          [[ "$evalue" =~ ^[0-9]{1,6}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue"
           ;;
         *) die "drop-in rejected: environment name not allowed here: $ename" ;;
       esac

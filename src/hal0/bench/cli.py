@@ -257,14 +257,26 @@ def _resolve_model_id(model: str, registry: list[dict]) -> str:
     """Map a queued model reference to a registry id the planner can select. The
     dashboard's per-row "+" queues the roster id, which for v1-imported models is a
     path-like ``dir/File.gguf`` that doesn't match a registry id — so also match
-    on the gguf path/basename. Returns the registry id, or the input unchanged."""
-    base = model.rsplit("/", 1)[-1]
+    on the gguf path. Returns the registry id, or the input unchanged.
+
+    Most specific first: exact id, exact path, then a path ending in the
+    reference, then the bare basename. The last two only count when they name
+    ONE registry model — per-model directories store every pull as
+    ``<dir>/model.gguf``, so a basename is shared by many (#2346)."""
     for m in registry:
         if m.get("id") == model:
             return model
-        path = m.get("path") or ""
-        if path == model or path.rsplit("/", 1)[-1] == base:
+    for m in registry:
+        if model and m.get("path") == model:
             return m.get("id") or model
+    suffix = "/" + model.lstrip("/")
+    by_suffix = [m for m in registry if (m.get("path") or "").endswith(suffix)]
+    if len(by_suffix) == 1:
+        return by_suffix[0].get("id") or model
+    base = model.rsplit("/", 1)[-1]
+    by_base = [m for m in registry if (m.get("path") or "").rsplit("/", 1)[-1] == base]
+    if base and len(by_base) == 1:
+        return by_base[0].get("id") or model
     return model
 
 

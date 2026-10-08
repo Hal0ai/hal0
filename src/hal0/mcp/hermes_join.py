@@ -147,8 +147,13 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
                 host=exposure[0],
                 header_keys=exposure[1],
             )
+        # #2331: the pinned Hermes picks its MCP client by `transport`
+        # (`config.get("transport") == "sse"`, else Streamable-HTTP) and
+        # reads no `type` key; `type` stays for older readers of this shape.
+        hermes_transport = "sse" if record.transport == "sse" else "http"
         entry: dict[str, Any] = {
-            "type": "sse" if record.transport == "sse" else "http",
+            "type": hermes_transport,
+            "transport": hermes_transport,
             "url": record.url,
             "timeout": 60,
             "headers": build_headers(record, agent_id=_AGENT_ID),
@@ -171,14 +176,18 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
 #: plus the *set of header keys*. Deliberately not header values, ``timeout``
 #: or ``type``: ``hermes config set`` coerces scalar strings (``"true"``,
 #: ``"123"``) on the way in, so comparing those would never converge and
-#: every boot would re-sync.
-_RECONCILED_FIELDS = ("url", "skip_preflight")
+#: every boot would re-sync. ``transport`` is compared because Hermes
+#: selects its client by it (#2331); an absent key reads as ``"http"``, the
+#: default Hermes itself applies, so a pre-#2331 http join is not drift.
+_RECONCILED_FIELDS = ("url", "transport", "skip_preflight")
 
 
 def _entry_drifted(desired: dict[str, Any], persisted: Any) -> bool:
     if not isinstance(persisted, dict):
         return True
     if persisted.get("url") != desired["url"]:
+        return True
+    if persisted.get("transport", "http") != desired.get("transport", "http"):
         return True
     if bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight")):
         return True

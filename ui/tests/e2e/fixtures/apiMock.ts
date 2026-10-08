@@ -100,6 +100,25 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   // list means no managed remotes, so the local-endpoint row count is unaffected.
   await page.route('**/api/upstreams', (route) => json(route, []))
   await page.route('**/api/profiles', (route) => json(route, MOCK_DATA.profiles ?? []))
+  // GET /api/memory/graph/status is networkFirst in src/api/mock.ts (#1834:
+  // the Settings ▸ Memory graph panel's spec drives the limits echo through
+  // page.route), so the default here mirrors the baked builder in
+  // src/api/mockFixtures.ts for every spec that does not route it itself.
+  await page.route('**/api/memory/graph/status', (route) =>
+    json(route, {
+      enabled: false,
+      extraction_slot: 'utility',
+      slot_resolves: true,
+      available_slots: ['agent', 'utility'],
+      llm_timeout_s: 300,
+      extraction_limits: { max_concurrent: 1, max_tokens: 4096, llm_retries: 1, task_retries: 2, retry_backoff_s: 120 },
+      in_flight: 0,
+      builds_ok: 0,
+      errors: 0,
+      last_built_at: null,
+      last_error: null,
+    }),
+  )
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )

@@ -63,6 +63,50 @@ export function capNodesBySalience(nodes, edges, linkWeight, cap = WEB_CAP) {
   return { shown: ranked, salience, capped: true }
 }
 
+// Per-node fact type + tags for the client-side filter dim (#1996).
+// `/graph` is a verbatim hindsight-api passthrough, and upstream (0.9.2
+// `MemoryEngine.get_graph_data`) emits each node as
+// {data: {id, label, text, date, context, entities, color}} — no `type`, no
+// `topic`, no `tags`. A unit's `fact_type` and `tags` only arrive in the
+// sibling `table_rows` list, keyed by the same id, so read them from there.
+// Falls back to node.data.type / node.data.topic for the mock fixture's
+// (non-wire-faithful) node shape. Pure + exported for vitest.
+export function buildNodeFacets(graph) {
+  const rows = new Map()
+  ;(graph?.table_rows || []).forEach((r) => {
+    if (r && r.id != null) rows.set(String(r.id), r)
+  })
+  const facets = new Map()
+  ;(graph?.nodes || []).forEach((n) => {
+    const d = n.data || {}
+    const row = rows.get(String(d.id))
+    const type = row?.fact_type ?? d.type
+    const tags = Array.isArray(row?.tags) ? row.tags : d.topic ? [d.topic] : []
+    facets.set(d.id, { type, tags })
+  })
+  return facets
+}
+
+// Client-side dim for every filter dimension the /graph endpoint either
+// can't take (tags; from/to — node.data.date) or that we deliberately stop
+// forwarding (type — see the graphQuery comment in WebGraph). Tags match
+// any-of, the same semantics as the hal0-side `tags` filter on /units.
+// documentId has no equivalent field on a graph node at all — a fact's
+// source document isn't part of this payload, so that one filter dimension
+// simply isn't enforceable here (documented, not silently ignored).
+export function matchesWebFilters(n, facets, filters) {
+  const d = n.data
+  const f = facets.get(d.id) || { type: d.type, tags: [] }
+  if (filters?.type) {
+    const typeSet = new Set(filters.type.split(','))
+    if (!typeSet.has(f.type)) return false
+  }
+  if (filters?.tags && filters.tags.length && !filters.tags.some((t) => f.tags.includes(t))) return false
+  if (filters?.from && d.date && new Date(d.date).getTime() < new Date(filters.from).getTime()) return false
+  if (filters?.to && d.date && new Date(d.date).getTime() > new Date(filters.to).getTime()) return false
+  return true
+}
+
 function WebGraph({ bank, sel, setSel, filters }) {
   const { FACT_COLORS, LINK_COLORS, LINK_LABEL, LINK_WEIGHT, TOPIC_COLORS } = window.MemV2
   const d3 = window.__hal0D3Force
@@ -129,25 +173,10 @@ function WebGraph({ bank, sel, setSel, filters }) {
   }, [presentTypes.join(',')])
 
   // filters.type is unitsParams' comma-joined type string (undefined when
-  // all 3 fact-type toggles are active, i.e. "no filter") — split once per
-  // render rather than per node.
-  const typeSet = filters?.type ? new Set(filters.type.split(',')) : null
-
-  // Client-side dim for every filter dimension the /graph endpoint either
-  // can't take (tags — node.data.topic; from/to — node.data.date) or that
-  // we deliberately stopped forwarding (type — see the graphQuery comment
-  // above). documentId has no equivalent field on a graph node at all — a
-  // fact's source document isn't part of this payload, so that one filter
-  // dimension simply isn't enforceable here (documented, not silently
-  // ignored).
-  const matchesFilters = (n) => {
-    const d = n.data
-    if (typeSet && !typeSet.has(d.type)) return false
-    if (filters?.tags && filters.tags.length && !filters.tags.includes(d.topic)) return false
-    if (filters?.from && d.date && new Date(d.date).getTime() < new Date(filters.from).getTime()) return false
-    if (filters?.to && d.date && new Date(d.date).getTime() > new Date(filters.to).getTime()) return false
-    return true
-  }
+  // all 3 fact-type toggles are active, i.e. "no filter").
+  const facets = buildNodeFacets(graphQuery.data)
+  const matchesFilters = (n) => matchesWebFilters(n, facets, filters)
+  const factType = (n) => facets.get(_nidWeb(n))?.type
 
   const [tf, setTf] = useStateWeb({ k: 1, x: 0, y: 0 })
   const [hover, setHover] = useStateWeb(null)
@@ -360,7 +389,7 @@ function WebGraph({ bank, sel, setSel, filters }) {
                   cx={p.x}
                   cy={p.y}
                   r={r}
-                  fill={FACT_COLORS[n.data.type] || 'var(--fg-4)'}
+                  fill={FACT_COLORS[factType(n)] || 'var(--fg-4)'}
                   fillOpacity="0.85"
                   stroke={sel === id ? 'var(--accent)' : 'var(--bg)'}
                   strokeWidth={sel === id ? 2.5 / tf.k : 1 / tf.k}
