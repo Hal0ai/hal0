@@ -55,18 +55,26 @@ already-authenticated browser can call `/api/auth/login`.
 
 ## Enabling auth
 
-A fresh install has no admin key and enforcement off. To lock it down:
+A fresh install has no admin key and enforcement off. (It does have a
+**client** key, `HAL0_CLIENT_KEY`, which on-box companions use; see the note
+below.) To lock it down:
 
 <Steps>
 
-1. **Get an admin key.** Nothing generates one automatically — set
-   `HAL0_ADMIN_KEY` in `/etc/hal0/api.env` yourself, or rotate one into
-   existence:
+1. **Get an admin key.** The installer does not create one, because on a
+   LAN-bound box an admin key on its own already makes other devices sign in
+   for ADMIN routes (see the next section). Create one on the box, which also
+   prints it once so you can store it in a password manager:
    ```sh
-   hal0 auth rotate admin
+   sudo hal0 auth reset-key
    ```
-   This writes the new key straight to `/etc/hal0/api.env` and prints a
-   fingerprint — never the key itself. Retrieve the value from that file.
+   It needs root because the key lives in the root-only `/etc/hal0/api.env`.
+   When `hal0-api` is running the key applies live; otherwise it applies on
+   the next `systemctl restart hal0-api`. Run it again if you lose the key:
+   it replaces the old one, so anything still using the old key (scripts,
+   bearer clients) stops working, while an already signed-in browser stays
+   signed in. `hal0 auth rotate admin` does the same rotation but prints only
+   a fingerprint.
 2. **Turn enforcement on:**
    ```sh
    hal0 auth require on
@@ -79,6 +87,18 @@ A fresh install has no admin key and enforcement off. To lock it down:
    Bearer token against `/api/*`.
 
 </Steps>
+
+<Aside type="note">
+On-box companions keep working with enforcement on. The installer mints a
+client key (`HAL0_CLIENT_KEY`) when `api.env` has none, and hal0 writes it into
+Open WebUI's env for every key that still points at hal0's `/v1` (chat,
+voice, document embeddings), so Open WebUI never sends a placeholder hal0
+would refuse. The memory engine reads the same client key; agents (Hermes,
+pi) read the box key from `/etc/hal0/api.env`. On a box installed before
+client keys existed, mint one with `sudo hal0 auth rotate client`: hal0
+re-renders Open WebUI's env and restarts it only if the rendered file
+changed.
+</Aside>
 
 To go back to open access: `hal0 auth require off`. On a box bound past
 loopback that still has an admin key, this does not re-open ADMIN-class
@@ -316,6 +336,7 @@ records.
 hal0 auth status               # GET  /api/auth/status
 hal0 auth rotate admin|client  # POST /api/auth/rotate (confirms unless --force)
 hal0 auth require on|off       # PUT  /api/auth/require
+sudo hal0 auth reset-key       # rotate the admin key and print it once (create or recover it)
 ```
 
 The CLI itself resolves credentials the same way: `HAL0_ADMIN_KEY` env, then

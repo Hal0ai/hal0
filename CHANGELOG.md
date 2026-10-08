@@ -28,6 +28,32 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **Open WebUI keeps working with auth on, and a lost admin key has a way
+  back.** Open WebUI used to send the placeholder `sk-hal0-local` to hal0's
+  `/v1`, which an auth-on box refuses, so its chat, voice and document
+  features answered 401.
+  - `install.sh` now mints a client key (`HAL0_CLIENT_KEY`) when `api.env`
+    has none. It never echoes it into the 0644 install log, and a re-run never
+    replaces a key. It still mints no admin key: with the posture-coupled
+    ADMIN gate (#1822) an admin key alone would make every fresh LAN install
+    ask other devices to sign in.
+  - `hal0.openwebui.env_writer` writes that key into `OPENAI_API_KEYS` and the
+    STT/TTS/RAG API keys, only where the matching base URL still points at
+    hal0. Those keys are recorded as hal0-managed: one re-pointed at another
+    service never receives hal0's key, and removing the client key falls back
+    to the placeholder.
+  - Rotating the client key (`hal0 auth rotate client`) re-renders Open
+    WebUI's env in the background and restarts it only when the render
+    changed.
+  - New `sudo hal0 auth reset-key` creates or replaces the admin key and
+    prints it once: through `hal0-api` when it is up (applies live), or
+    straight into `api.env` when it is down (applies on the next restart).
+  - `hal0 doctor all`, the Security page, the login view and the
+    `auth.no_admin_key` refusal now point at that command instead of "set
+    HAL0_ADMIN_KEY", and the doctor no longer claims the LAN gate leaves
+    reads open: it covers admin reads (settings, memory, logs, approvals) as
+    well as changes.
+
 - **"Remember me" at login.** Ticking it on the dashboard login (or the
   in-app sign-in drawer) asks for a 30-day session instead of the 8-hour
   default: `POST /api/auth/login` accepts `"remember": true` and reports the

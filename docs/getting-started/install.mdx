@@ -131,6 +131,17 @@ next to the log (environment, port owners, unit status, hardware summary,
 log tail) and prints its path. See `installer/README.md` for the full
 breakdown of what each report contains.
 
+### Keys
+
+When `/etc/hal0/api.env` has no client key, the installer mints one
+(`HAL0_CLIENT_KEY`). On-box companions such as Open WebUI and the memory
+engine present it to hal0's `/v1`, so they keep working if you turn auth on
+later. The installer does **not** create an admin key: on a LAN-bound box an
+admin key on its own makes other devices sign in for the dashboard's admin
+pages. Create one when you want that, and recover a lost one the same way,
+with `sudo hal0 auth reset-key` on the box. It prints the new key once. See
+[Authentication](/docs/operate/auth/).
+
 ### `--summary-json`
 
 ```sh

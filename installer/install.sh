@@ -1454,6 +1454,32 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
+# ── Client key ───────────────────────────────────────────────────────────────
+# On-box companions (OpenWebUI, the memory engine) present HAL0_CLIENT_KEY to
+# /v1, so they keep working once auth is enabled. Minted only when api.env has
+# none; a re-run never replaces an existing key. The client tier reaches only
+# CLIENT/OPEN routes, so minting it changes no access: no admin key is minted
+# here, which keeps a fresh LAN install out of the posture-coupled ADMIN gate
+# until an operator creates one (`sudo hal0 auth reset-key`). The value never
+# reaches stdout (the install log is tee'd to a 0644 file).
+if ! grep -qE '^HAL0_CLIENT_KEY=.+' "${API_ENV}" 2>/dev/null; then
+    new_client_key="$("${VENV_DIR}/bin/python" -c \
+        'from hal0.service_identity import generate_service_key; print(generate_service_key())' \
+        2>/dev/null || true)"
+    if [[ -n "${new_client_key}" ]]; then
+        # Terminate a last line that lacks a newline so the append starts clean.
+        if [[ -s "${API_ENV}" && -n "$(tail -c1 "${API_ENV}")" ]]; then
+            printf '\n' >> "${API_ENV}"
+        fi
+        printf 'HAL0_CLIENT_KEY=%s\n' "${new_client_key}" >> "${API_ENV}"
+        chmod 0600 "${API_ENV}"
+        info "generated HAL0_CLIENT_KEY in ${API_ENV}"
+    else
+        warn "could not generate HAL0_CLIENT_KEY — run 'sudo hal0 auth rotate client' after the install"
+    fi
+    unset new_client_key
+fi
+
 # ── avahi mDNS host-name sync (#2060) ───────────────────────────────────────
 # The HAL0_HOSTNAME choice (env / answer-file network.hostname) already
 # reaches api.env, the mDNS URL building (services/mdns.py) and the WS

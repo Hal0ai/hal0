@@ -280,3 +280,25 @@ def test_rotate_skips_hindsight_llm_env_when_absent(
     body = resp.json()
     assert body["hindsight_llm_env_refreshed"] is False
     assert "restart hindsight-api" not in body["note"]
+
+
+def test_rotate_client_reconciles_openwebui(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenWebUI presents the client key to /v1, so a client rotation must
+    re-render its env (in the background); an admin rotation must not."""
+    import hal0.components.openwebui_arm as owui_arm
+
+    calls: list[int] = []
+    monkeypatch.setattr(owui_arm, "reconcile_openwebui_env_background", lambda: calls.append(1))
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "old-client-key")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "old-admin-key")
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
+    assert resp.status_code == 200, resp.text
+    assert "OpenWebUI" in resp.json()["note"]
+    assert calls == [1]
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
+    assert resp.status_code == 200, resp.text
+    assert calls == [1]

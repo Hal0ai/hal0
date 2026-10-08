@@ -164,7 +164,7 @@ export function loginErrorMessage(err) {
   if (code === 'auth.no_admin_key') {
     return {
       kind: 'no_admin_key',
-      text: 'No admin key is configured on the server. Set HAL0_ADMIN_KEY, then log in.',
+      text: 'No admin key is configured on the server. Create one on the box with sudo hal0 auth reset-key, then log in.',
       retryAfterS: null,
     }
   }

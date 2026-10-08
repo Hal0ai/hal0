@@ -188,7 +188,7 @@ export function SecurityPage() {
             className="mono"
             style={{ fontSize: 10.5, color: 'var(--warn)', padding: '0 14px 12px', lineHeight: 1.55 }}
           >
-            ○ No admin key configured — set <span style={{ color: 'var(--fg-3)' }}>HAL0_ADMIN_KEY</span> before enabling, or you&apos;ll lock yourself out.
+            ○ No admin key configured — create one on the box with <span style={{ color: 'var(--fg-3)' }}>sudo hal0 auth reset-key</span> before enabling, or you&apos;ll lock yourself out.
           </div>
         )}
         {toggleErr && (

@@ -146,7 +146,7 @@ export function LoginView({ status, onViewReadOnly }) {
             className="mono"
             style={{ fontSize: 11, lineHeight: 1.5, color: 'var(--warn, #d9a441)' }}
           >
-            No admin key is configured on the server yet — set HAL0_ADMIN_KEY, then log in.
+            No admin key is configured on the server yet — create one on the box with sudo hal0 auth reset-key, then log in.
           </div>
         )}
 
