@@ -891,7 +891,7 @@ hal0/
 ├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
 │   ├── etc-hal0/     # curated slot seeds + operator profiles.toml
 │   └── systemd/      # hal0-agent@ template units
-├── tests/            # pytest suite (α unit, β integration, γ release-gate)
+├── tests/            # pytest suite (α unit, γ release-gate, δ harness)
 │   └── release-validation/   # versioned RC validation kit (lanes, regressions, boxes)
 ├── docs/             # user docs (mirrored to hal0.dev/docs) + docs/adr/
 ```
