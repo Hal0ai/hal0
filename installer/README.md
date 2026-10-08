@@ -157,15 +157,30 @@ aborting the install) if neither location is writable.
 ### Failure report
 
 If `install.sh` aborts (its `ERR` trap fires), it writes
-`hal0-install-report-<ts>.txt` next to the install log and prints its path
-alongside the existing step-specific recovery advice. The report bundles a
-redacted environment dump (same key-name pattern as
-`hal0.api._redact` — `SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|
-ENCRYPTION_KEY|SALT|_KEY$|^KEY$`, case-insensitive), the owner of the
-hal0-api/OpenWebUI ports (`ss -ltnp`), `systemctl status` of the hal0
-units, `/etc/hal0/hardware.json`, and the last 200 lines of the install
-log — one file to attach to a bug report instead of a re-pasted
-scrollback. Implemented in `installer/lib/failure-report.sh`.
+`hal0-install-report-<ts>.txt` (mode 0600) next to the install log and
+prints its path alongside the existing step-specific recovery advice. The
+report bundles a redacted environment dump, `systemctl --failed`,
+`podman info` / `podman images`, the owner of the hal0-api/OpenWebUI ports
+(`ss -ltnp`), `systemctl status` of the hal0 units, the redacted `api.env`
+and `hal0.toml`, `/etc/hal0/hardware.json`, the last 160 lines of the
+install log, and `journalctl -u hal0-api -n 100` — one file to attach to a
+bug report instead of a re-pasted scrollback. Every diagnostic command runs
+under `timeout 10`, so a wedged Podman or systemd cannot hang the trap; a
+timeout is recorded in the report.
+
+Redaction runs in two passes. The structured sections are masked by key
+name (same pattern as `hal0.api._redact` — `SECRET|TOKEN|PASSWORD|PASS|
+API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$`, case-insensitive).
+Then the literal value of every such key (from the installer's shell
+variables, `api.env`, `hal0.toml`, and any `NAME=value` in the report
+itself) is replaced wherever it appears in the whole report, and secret
+shapes are masked: Bearer/Basic auth, credentials in URLs, `--token`-style
+flags, and `hf_`/`sk-`/`ghp_`/JWT tokens. If that pass cannot run, or a
+known value survives it, the report keeps only the failed step and a note
+saying the body was discarded. `hal0 doctor bundle` lists the latest
+install log and report under `install_artifacts` in its `manifest.json` and
+copies the report into `logs/`. Implemented in
+`installer/lib/failure-report.sh`.
 
 ### `--summary-json=PATH`
 
