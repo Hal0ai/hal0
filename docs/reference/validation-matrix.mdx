@@ -18,7 +18,7 @@ retired in v0.2 and not replaced, so nothing automated sits between α and γ.
 
 | Tier | What it proves | Where it runs | Blocks what |
 |---|---|---|---|
-| **α — Unit** | Pure logic, mocked systemd and HTTP clients. | Any host, no daemons — `make test` | Every commit / PR. |
+| **α — Unit** | Pure logic, mocked systemd and HTTP clients. `make test` is unfiltered, so host-dependent tests (e.g. the OpenWebUI prewire smoke's real `docker pull`/`run`) also run when their daemon is reachable. | Any host — `make test` | Every commit / PR. |
 | **γ — Release-gate script** | The 7-row matrix in `scripts/release-test.sh` — `vulkan`, `rocm`, `flm` (NPU), `moonshine` (STT), `kokoro` (TTS), `openwebui`, and a check-only `updater` row — on one designated box. | `hal0-test` LXC over SSH — `make release-test` | Per release candidate, not per commit. Row status `pass\|fail\|skip\|deferred`; only `fail` blocks. |
 | **γ+ — Release-validation fleet (`rc-validate` kit)** | The product as an operator would actually use it — CLI, API, MCP, Hermes, UI, then serialized stateful lanes (slots, routing, brain, memory, capabilities, Hermes e2e), then an in-place upgrade — on real hardware, per `tests/release-validation/`. | A private real-hardware fleet (Proxmox-hosted; see [Support matrix](/docs/reference/support-matrix/)) | Release-candidate confidence. Agent-driven and exploratory, not a fixed pytest suite — findings that prove mechanical get folded back into pytest/`release-test.sh` so they stop needing an agent (`tests/release-validation/README.md`). |
 

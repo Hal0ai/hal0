@@ -16,15 +16,16 @@ see [`FINDINGS.md`](FINDINGS.md).
 
 | Tier | Driver                                | Scope                          | Per-commit? |
 |------|---------------------------------------|--------------------------------|-------------|
-| α    | `make test` (`pytest tests/`)         | unit; mocked HTTP + systemd    | yes |
+| α    | `make test` (`pytest tests/`, unfiltered) | unit, mocked HTTP + systemd; host-dependent tests (e.g. the OpenWebUI prewire smoke's real `docker pull`/`run`) also run when their daemon is reachable | yes |
 | γ    | `scripts/release-test.sh` over SSH    | NPU + ROCm + Vulkan matrix on `hal0-test` LXC | release ritual |
-| **δ** (new) | **`scripts/harness.sh`** | **install + CLI + slot + uninstall on the dev host** | **on demand** |
+| **δ** (new) | **`scripts/harness.sh`** | **`--dev` install + CLI + uninstall on the dev host (slot load recorded `deferred` under `--dev`, #2349)** | **on demand** |
 
 α covers code paths. γ covers the provider matrix on real hardware. **δ
 covers the developer's first-five-minutes journey**: does
-`install.sh --dev` work, do all 35 CLI subcommands return 0, does
-a slot create-load-chat-unload-delete round-trip pass, does the
-uninstaller clean up.
+`install.sh --dev` work, do all 35 CLI subcommands return 0, does the
+uninstaller clean up. It also attempts a slot load → chat round-trip,
+but under `--dev` the slot unit cannot start, so that row is recorded
+`deferred` and the harness still exits 0 (#2349).
 
 The δ tier is the one a contributor runs after touching `installer/`,
 `src/hal0/cli/`, or any user-facing surface. It is the fastest way to
