@@ -3665,6 +3665,11 @@ else
             if cmp -s "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service 2>/dev/null; then
                 hs_unit_changed=0
             fi
+            # Only an engine that was ALREADY running needs the bounce; on a
+            # first install `enable --now` starts it from the new unit, and a
+            # restart on top would interrupt its first boot (pg0 init).
+            hs_was_active=0
+            systemctl is-active --quiet hindsight-api 2>/dev/null && hs_was_active=1
             install -m644 "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service
             # The unit ships HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth — fine
             # while the box has no keys, but once KB-1 auth is on, every
@@ -3689,7 +3694,7 @@ else
             fi
             systemctl daemon-reload
             systemctl enable --now hindsight-api
-            if [[ "${hs_unit_changed}" -eq 1 ]] && systemctl is-active --quiet hindsight-api; then
+            if [[ "${hs_unit_changed}" -eq 1 && "${hs_was_active}" -eq 1 ]]; then
                 info "hindsight-api unit changed — restarting the running engine so it reads the new unit"
                 systemctl restart hindsight-api || warn "hindsight-api restart failed; restart it by hand to apply the new unit"
             fi
