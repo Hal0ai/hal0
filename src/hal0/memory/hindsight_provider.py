@@ -317,6 +317,21 @@ _WRITE_HEALTH_TTL_S = 30.0
 #: Operation statuses sampled from the engine's operations endpoint.
 _WRITE_OP_STATUSES = ("failed", "pending", "processing")
 
+#: Age past which an in-flight (``pending``/``processing``) retain op counts
+#: as stalled (#1833). Mirrors the threshold the Hindsight worker itself logs
+#: ``[STUCK_STACK] … threshold=600s`` at. Ops wedged in flight never touch
+#: the ``failed`` counter, so without this the verdict read "landing" on a
+#: store that had never held a fact.
+_WRITE_STALL_AGE_S = 600.0
+
+#: Completed retain rows scanned for the newest completion (#1833). The
+#: engine's list is ordered by ``created_at`` only and caps ``limit`` at 100
+#: (hindsight-api 0.9.2 ``GET …/operations``: ``limit`` is ``le=100``, no sort
+#: parameter), so the latest completion is the greatest ``updated_at`` over
+#: this bounded window of most-recently-created completed rows.
+_WRITE_STALL_DONE_PAGE = 100
+
+
 # ── auto-retry of no-chat-model dead letters (#1792) ──────────────────────
 #
 # A fresh install ships every llm slot model-less (WS-E #1107); until the
@@ -498,6 +513,9 @@ class HindsightProvider(MemoryProvider):
         self._last_write_error: str | None = None
         self._last_write_reason: str | None = None
         self._ops_sample: dict[str, int] | None = None
+        # Edge-trigger for the #1833 stall log line; the verdict itself is
+        # recomputed from engine timestamps on every sample, not held here.
+        self._write_stalled = False
         self._write_health: dict[str, Any] | None = None
         self._write_health_at: float | None = None
         # Auto-retry bookkeeping (#1792) — see the constants above.
@@ -625,6 +643,158 @@ class HindsightProvider(MemoryProvider):
             counts[status] = int(total) if isinstance(total, int) else 0
         return counts
 
+    async def _retain_ops(
+        self, bank: str, status: str, op_type: str, *, limit: int, offset: int = 0
+    ) -> tuple[int, list[dict[str, Any]]] | None:
+        """``(total, rows)`` of ``bank``'s ``status`` ops of type ``op_type``.
+
+        Uses the engine's server-side ``type`` filter (hindsight-api 0.9.2
+        ``GET /v1/default/banks/{bank}/operations?status=&type=``, matched
+        against ``operation_type``), so ``total`` and offsets count only that
+        type. The engine orders the list ``created_at DESC`` (newest first)
+        and offers no other sort. Rows are re-checked client-side, so an
+        engine that ignored the filter yields no rows rather than another
+        task type's. None when the probe fails or the reply has no integer
+        ``total`` — fail-soft like :meth:`_sample_operations`.
+        """
+        try:
+            resp = await self._client.request_json(
+                "GET",
+                f"/v1/default/banks/{bank}/operations",
+                params={"status": status, "type": op_type, "limit": limit, "offset": offset},
+            )
+        except Exception as exc:
+            log.debug("hal0.memory.operations_probe_failed", error=str(exc))
+            return None
+        if not isinstance(resp, dict):
+            return None
+        total = resp.get("total")
+        if not isinstance(total, int) or isinstance(total, bool):
+            return None
+        rows = [
+            r
+            for r in resp.get("operations") or []
+            if isinstance(r, dict) and r.get("task_type") == op_type and r.get("status") == status
+        ]
+        return total, rows
+
+    @staticmethod
+    def _row_age_s(row: dict[str, Any] | None, field: str, now: datetime) -> float | None:
+        """Seconds since ``row[field]`` (an ISO-8601 stamp), or None if absent/unparseable."""
+        raw = row.get(field) if row else None
+        if not isinstance(raw, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return (now - stamp).total_seconds()
+
+    async def _oldest_in_flight_age(
+        self, bank: str, status: str, op_type: str, now: datetime
+    ) -> float | None:
+        """Age in seconds of the oldest ``status`` op of ``op_type``, or None.
+
+        The oldest row sits at ``offset = total - 1`` of the newest-first
+        list, but ``total`` comes from an earlier request: retains queued in
+        between shift every offset and would land the lookup on a fresh row.
+        Each reply carries its own ``total``, so the lookup retries once at
+        the new offset when it moved. If it moved again, the row in hand is
+        still used: on a newest-first list every row is no older than the
+        head, so its age is a LOWER bound — it can miss a stall, never invent
+        one.
+        """
+        head = await self._retain_ops(bank, status, op_type, limit=1)
+        if head is None:
+            return None
+        total = head[0]
+        rows: list[dict[str, Any]] = []
+        for _attempt in range(2):
+            if total <= 0:
+                return None
+            page = await self._retain_ops(bank, status, op_type, limit=1, offset=total - 1)
+            if page is None:
+                return None
+            seen, rows = page
+            if seen == total:
+                break
+            total = seen
+        return self._row_age_s(rows[0] if rows else None, "created_at", now)
+
+    async def _latest_completion_age(self, bank: str, now: datetime) -> float | None:
+        """Seconds since the newest retain completion, ``inf`` if none is listed,
+        or None when there is no usable evidence (probe failed, stamps unparseable).
+
+        Completion time is the row's ``updated_at`` (set with ``completed_at``
+        when it completes), but the engine lists by ``created_at``: an older
+        retain that finishes now sits below newer ones that finished long
+        ago. So this takes the greatest ``updated_at`` over a bounded page of
+        each retain type rather than the first row's.
+        """
+        best: float | None = None
+        listed = False
+        for op_type in sorted(_RETAIN_OP_TYPES):
+            page = await self._retain_ops(bank, "completed", op_type, limit=_WRITE_STALL_DONE_PAGE)
+            if page is None:
+                return None
+            for row in page[1]:
+                listed = True
+                age = self._row_age_s(row, "updated_at", now)
+                if age is not None and (best is None or age < best):
+                    best = age
+        if best is not None:
+            return best
+        return None if listed else float("inf")
+
+    async def _stall_detail(self, bank: str, counts: dict[str, int]) -> str | None:
+        """Describe a stalled retain pipeline on ``bank``, or None if it isn't (#1833).
+
+        Stalled means the OLDEST in-flight (``pending``/``processing``) RETAIN
+        op has been in flight past :data:`_WRITE_STALL_AGE_S` AND no retain
+        has completed within that window. Only retain task types count
+        (:data:`_RETAIN_OP_TYPES`): the operations list also carries
+        consolidation, mental-model refreshes and the like, and an old
+        consolidation is not the write path stalling, nor does its completion
+        prove retains are landing. Both halves read engine timestamps, so the
+        verdict needs no hal0-side state and is right on the first sample
+        after a restart:
+
+        * the oldest in-flight op is found per status and type by
+          :meth:`_oldest_in_flight_age`, so a wedged queue that keeps
+          accepting fresh retains cannot hide its stale head;
+        * the newest completion comes from :meth:`_latest_completion_age`. A
+          completed COUNT would not do — terminal ops are pruned by retention,
+          so it can stay flat or drop while ops are completing.
+
+        A completion inside the window keeps a long-but-draining backlog
+        green and is what clears the verdict — recovery takes one completed
+        op, not a timer. Missing or unparseable timestamps, and probes that
+        fail, are no evidence either way and never produce a stall.
+        """
+        now = datetime.now(UTC)
+        oldest: float | None = None
+        for status in ("pending", "processing"):
+            # The unfiltered count gates the typed lookups: nothing in flight
+            # of any type means no retain is either, and no extra requests.
+            if (counts.get(status) or 0) <= 0:
+                continue
+            for op_type in sorted(_RETAIN_OP_TYPES):
+                age = await self._oldest_in_flight_age(bank, status, op_type, now)
+                if age is not None and (oldest is None or age > oldest):
+                    oldest = age
+        if oldest is None or oldest < _WRITE_STALL_AGE_S:
+            return None
+
+        since_done = await self._latest_completion_age(bank, now)
+        if since_done is None or since_done < _WRITE_STALL_AGE_S:
+            return None
+        return (
+            f"retain operation(s) on bank {bank} in flight for over "
+            f"{int(_WRITE_STALL_AGE_S)}s (oldest {int(oldest)}s) with none completing"
+        )
+
     async def write_health(self, *, max_age_s: float | None = None) -> dict[str, Any]:
         """Retain-pipeline health for ``/api/status`` and ``hal0 memory status``.
 
@@ -637,6 +807,10 @@ class HindsightProvider(MemoryProvider):
             The engine's ``failed`` operation counter grew between two samples
             — retains are being accepted and then dying in extraction. This is
             the #1420 shape.
+        ``retain_operations_stalled``
+            An op has sat ``pending``/``processing`` past
+            :data:`_WRITE_STALL_AGE_S` and none has completed in that window
+            (#1833). Live, not held: it clears on the first completed op.
         ``ok``
             Two clean samples, nothing failing.
         ``unknown``
@@ -659,6 +833,7 @@ class HindsightProvider(MemoryProvider):
 
         bank = namespace_to_bank(self._write_namespace(_SHARED, None))
         counts = await self._sample_operations(bank)
+        stall: str | None = None
         if counts is not None:
             previous = self._ops_sample
             self._ops_sample = counts
@@ -668,10 +843,20 @@ class HindsightProvider(MemoryProvider):
                     f"{delta} retain operation(s) failed on bank {bank} since the last check",
                     reason="retain_operations_failing",
                 )
+            stall = await self._stall_detail(bank, counts)
+        if (stall is not None) != self._write_stalled:
+            self._write_stalled = stall is not None
+            if stall is not None:
+                log.warning("hal0.memory.retain_pipeline_stalled", bank=bank, error=stall)
+            else:
+                log.info("hal0.memory.retain_pipeline_unstalled", bank=bank)
 
-        degraded = self.write_degraded
-        if degraded:
+        held = self.write_degraded
+        degraded = held or stall is not None
+        if held:
             reason = self._last_write_reason or "retain_failed"
+        elif stall is not None:
+            reason = "retain_operations_stalled"
         elif counts is None:
             reason = "unknown"
         else:
@@ -680,7 +865,7 @@ class HindsightProvider(MemoryProvider):
         out: dict[str, Any] = {
             "degraded": degraded,
             "reason": reason,
-            "last_error": self._last_write_error if degraded else None,
+            "last_error": self._last_write_error if held else stall,
             "operations": dict(counts) if counts is not None else None,
             "bank": bank,
         }
