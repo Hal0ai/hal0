@@ -237,6 +237,21 @@ applying. Add those subsections to a version's section to surface them; see
   hal0-api's startup reconcile) removes it from Hermes's config. This is an
   interim guard until hal0 sits on the agent's call path. (#2343)
 
+- **A container with `/dev/kfd` but no render node no longer gets ROCm slots
+  seeded.** Seed derivation treated `/dev/kfd` alone as proof the box can
+  run ROCm, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
+
+- **A container with `/dev/kfd` but no render node is no longer treated as
+  able to run ROCm.** Four places took `/dev/kfd` alone as proof of the ROCm
+  lane, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
+  where only kfd was forwarded, preflight reports no usable GPU and offers a
+  CPU-only install, yet every llama.cpp seed still came out `gpu-rocm` (#2313);
+  the capabilities picker offered the GPU (ROCm) row and ComfyUI (#2354);
+  the hardware recommendation said `rocm` (#2355); and `hal0 update` moved
+  stale `gpu-vulkan` slots to `gpu-rocm`, a device they cannot open, instead
+  of `cpu` (#2356). All four now ask one check that needs both nodes, as does
+  applying a profile whose runtime is ROCm-only.
+
 - **A stable or preview release now fails its build when `CHANGELOG.md` has
   no section for it.** `scripts/gen_release_notes.py` used to fall back to a
   git log when the `## [<version>]` header was missing or empty, so the
@@ -316,21 +331,6 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
-
-- **A container with `/dev/kfd` but no render node no longer gets ROCm slots
-  seeded.** Seed derivation treated `/dev/kfd` alone as proof the box can
-  run ROCm, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
-
-- **A container with `/dev/kfd` but no render node is no longer treated as
-  able to run ROCm.** Four places took `/dev/kfd` alone as proof of the ROCm
-  lane, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
-  where only kfd was forwarded, preflight reports no usable GPU and offers a
-  CPU-only install, yet every llama.cpp seed still came out `gpu-rocm` (#2313);
-  the capabilities picker offered the GPU (ROCm) row and ComfyUI (#2354);
-  the hardware recommendation said `rocm` (#2355); and `hal0 update` moved
-  stale `gpu-vulkan` slots to `gpu-rocm`, a device they cannot open, instead
-  of `cpu` (#2356). All four now ask one check that needs both nodes, as does
-  applying a profile whose runtime is ROCm-only.
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
