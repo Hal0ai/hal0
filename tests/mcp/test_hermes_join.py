@@ -978,6 +978,56 @@ def test_driver_env_writes_the_hosts_the_join_records(tmp_hal0_home: str, monkey
     assert "127.0.0.2" in _no_proxy(path)
 
 
+def test_failed_removal_keeps_its_host_in_no_proxy(tmp_hal0_home: str, monkeypatch) -> None:
+    """A join whose removal failed is still in Hermes's config: its loopback
+    host stays in NO_PROXY until the removal goes through, so a restart
+    never sends that join's headers to the proxy."""
+    from hal0.agents import hermes_provision
+
+    path = _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    hermes_join.sync_exposure()
+    assert "127.0.0.2" in _no_proxy(path)
+
+    installed.patch_config("local", exposure=installed.ExposureConfig())
+    real = hermes_provision.apply_mcp_server_entries
+
+    def refuse(*args: object, **kw: object) -> None:
+        raise RuntimeError("config locked")
+
+    monkeypatch.setattr(hermes_provision, "apply_mcp_server_entries", refuse)
+    report = hermes_join.sync_exposure()
+    assert any("config locked" in err for err in report["errors"])
+    assert "127.0.0.2" in _no_proxy(path)
+
+    assert hermes_join._load_no_proxy_hosts() == ["127.0.0.2"]
+
+    # Once the removal goes through, the host is no longer held over.
+    monkeypatch.setattr(hermes_provision, "apply_mcp_server_entries", real)
+    hermes_join.sync_exposure()
+    assert hermes_join._load_no_proxy_hosts() == []
+
+
+def test_failed_host_lookup_is_reported_not_raised(tmp_hal0_home: str, monkeypatch) -> None:
+    _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    hermes_join.sync_exposure()
+
+    def boom() -> list[str]:
+        raise RuntimeError("registry read failed")
+
+    monkeypatch.setattr(hermes_join, "exposed_loopback_hosts", boom)
+    report = hermes_join.sync_exposure()
+
+    assert report["driver_env"]["refreshed"] is False
+    assert any("registry read failed" in err for err in report["errors"])
+    assert hermes_join._load_no_proxy_hosts() == ["127.0.0.2"]
+
+
 def test_reconcile_adds_loopback_hosts_to_an_upgraded_boxs_driver_env(
     tmp_hal0_home: str, monkeypatch
 ) -> None:
