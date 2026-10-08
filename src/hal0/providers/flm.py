@@ -784,6 +784,11 @@ _FLM_CATALOG_UNANSWERED: bool = False
 #: reader never pairs one probe's catalog with another probe's flag. The probe
 #: itself runs outside the lock: a slow ``flm list`` must not block readers.
 _FLM_CATALOG_LOCK = threading.Lock()
+# Held for the whole cold-cache probe so concurrent callers share one
+# ``flm list -j`` instead of each spawning its own, and a slower probe can
+# never overwrite a newer answer (#2334). Never taken while holding
+# _FLM_CATALOG_LOCK.
+_FLM_CATALOG_PROBE_LOCK = threading.Lock()
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -995,15 +1000,26 @@ def flm_catalog() -> list[dict[str, Any]] | None:
     :func:`flm_served_models`) — call :func:`reset_flm_catalog_cache` to force
     an immediate re-probe.
     """
+    with _FLM_CATALOG_LOCK:
+        if _flm_catalog_fresh():
+            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+
+    with _FLM_CATALOG_PROBE_LOCK:
+        # Another caller may have filled the cache while this one waited.
+        with _FLM_CATALOG_LOCK:
+            if _flm_catalog_fresh():
+                return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+        return _probe_and_cache_flm_catalog()
+
+
+def _probe_and_cache_flm_catalog() -> list[dict[str, Any]] | None:
+    """Run the ``flm list -j`` probe and store the result; caller holds
+    :data:`_FLM_CATALOG_PROBE_LOCK`."""
     import time
 
     global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
-    now = time.monotonic()
-    with _FLM_CATALOG_LOCK:
-        if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
-            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
-
     raw = _probe_flm_catalog()
+    now = time.monotonic()
     if raw is None:
         with _FLM_CATALOG_LOCK:
             _FLM_CATALOG_CACHE = []

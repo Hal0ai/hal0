@@ -14,6 +14,7 @@ catalog cache, and drives one async entry point.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 import types
@@ -358,3 +359,78 @@ def test_sync_callers_still_probe_inline(slow_flm_list: _SlowFlmList) -> None:
     assert {m["tag"] for m in flm_mod.flm_served_models()} == {"embed-gemma:300m", "qwen3:0.6b"}
     assert slow_flm_list.on_loop == [False]
     assert threading.current_thread() is threading.main_thread()
+
+
+# ── one probe per cold cache ────────────────────────────────────────────────
+
+
+async def test_concurrent_cold_callers_share_one_probe(slow_flm_list: _SlowFlmList) -> None:
+    """Concurrent async callers on a cold cache wait for one ``flm list``."""
+    results = await asyncio.gather(*(flm_mod.flm_served_models_async() for _ in range(5)))
+
+    assert slow_flm_list.calls == 1
+    assert all({m["tag"] for m in r} == {"embed-gemma:300m", "qwen3:0.6b"} for r in results)
+
+
+def test_a_late_failed_probe_cannot_overwrite_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While one probe runs, a second caller waits for its answer instead of
+    starting a probe whose later "no answer" would replace it."""
+    started = threading.Event()
+    calls: list[str] = []
+
+    def probe() -> list[dict[str, Any]] | None:
+        calls.append("probe")
+        if len(calls) == 1:
+            started.set()
+            time.sleep(_PROBE_BLOCK_S)
+            return [dict(e) for e in _RAW_FLM_LIST]
+        return None  # would cache "no answer" if it ever ran
+
+    monkeypatch.setattr(flm_mod, "_probe_flm_catalog", probe)
+    flm_mod.reset_flm_catalog_cache()
+    try:
+        first = threading.Thread(target=flm_mod.flm_catalog)
+        first.start()
+        started.wait(timeout=5)
+        second = flm_mod.flm_catalog()
+        first.join(timeout=5)
+
+        assert calls == ["probe"]
+        assert second is not None
+        assert flm_mod.flm_catalog() is not None
+    finally:
+        flm_mod.reset_flm_catalog_cache()
+
+
+# ── cancellation before the subprocess starts ───────────────────────────────
+
+
+async def test_run_flm_pull_cancelled_during_setup_is_marked_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that lands during the pre-spawn setup awaits reaches the
+    cancellation handler: the job ends ``cancelled``, never stuck ``running``."""
+    from hal0.registry.pull import PullJob, run_flm_pull
+
+    entered = asyncio.Event()
+
+    async def hang() -> list[dict[str, Any]]:
+        entered.set()
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(flm_mod, "flm_pull_command", lambda tag: (["true"], str(tmp_path)))
+    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: str(tmp_path))
+    monkeypatch.setattr(flm_mod, "flm_served_models_async", hang)
+    from hal0.registry import pull as pull_mod
+
+    monkeypatch.setattr(pull_mod, "_flm_install_path", lambda *a: None)
+
+    job = PullJob(job_id="j-cancel", model_id="qwen3:0.6b")
+    task = asyncio.create_task(run_flm_pull(job, tag="qwen3:0.6b", registry=object()))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert job.state == "cancelled", job

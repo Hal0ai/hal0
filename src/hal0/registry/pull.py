@@ -1867,46 +1867,49 @@ async def run_flm_pull(
 
     argv, host_models_dir = flm_pull_command(tag)
 
-    # flm hardcodes ~/.config/flm/models and has no dir flag, so a host pull
-    # writes to that default path — NOT the (possibly relocated) store the
-    # progress poller + serving container use. Point flm's default at the store
-    # via a symlink (host analog of the container bind-mount) before we spawn,
-    # so weights land in the store, progress tracks the real bytes, and serving
-    # finds them. Off-loaded to a thread: the one-time legacy-content migration
-    # can copy multi-GB weights and must not block the event loop.
-    await asyncio.to_thread(ensure_host_flm_store_link)
-
-    # Resolve the install path + advertised total upfront so progress
-    # reporting is monotonic. _flm_install_path reads the same cached
-    # catalog flm_served_models uses; both fall back gracefully when
-    # the probe failed (host without docker / image not present).
-    #
-    # These two probes (``flm list``) can transiently return an EMPTY catalog
-    # right at pull start — observed live: the dir grew steadily on disk while
-    # the job reported ``0/0`` the whole download because ``target_dir`` was
-    # ``None`` here and never retried. So they are NOT resolved once-and-for-
-    # all: :func:`_resolve_target_dir` / :func:`_resolve_advertised_total` below
-    # re-attempt each tick until they succeed, then progress tracks growth.
-    #
-    # Both shell ``flm list -j`` (up to 30 s) on a cold cache, so every read
-    # here runs on a worker thread, never on the event loop (#2334).
-    target_dir = await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
-    advertised_total = 0
-    for entry in await flm_served_models_async():
-        if entry["tag"] == tag:
-            advertised_total = int(entry.get("size_bytes") or 0)
-            break
-    baseline_size = _dir_size(target_dir) if target_dir else 0
-    if advertised_total > baseline_size:
-        job.bytes_total = advertised_total
-        job._signal()
-
-    # uvloop (hal0-api's event loop) rejects the user/group Popen kwargs, so
-    # the drop to the hal0 user rides the argv (setpriv/runuser) instead.
-    argv, spawn_kwargs = flm_host_async_spawn(argv)
-
+    # Setup awaits run inside the try so a cancellation or error here reaches
+    # the same handlers as one during the download, and the job never stays
+    # ``running`` (#2334).
     proc: asyncio.subprocess.Process | None = None
     try:
+        # flm hardcodes ~/.config/flm/models and has no dir flag, so a host pull
+        # writes to that default path — NOT the (possibly relocated) store the
+        # progress poller + serving container use. Point flm's default at the store
+        # via a symlink (host analog of the container bind-mount) before we spawn,
+        # so weights land in the store, progress tracks the real bytes, and serving
+        # finds them. Off-loaded to a thread: the one-time legacy-content migration
+        # can copy multi-GB weights and must not block the event loop.
+        await asyncio.to_thread(ensure_host_flm_store_link)
+
+        # Resolve the install path + advertised total upfront so progress
+        # reporting is monotonic. _flm_install_path reads the same cached
+        # catalog flm_served_models uses; both fall back gracefully when
+        # the probe failed (host without docker / image not present).
+        #
+        # These two probes (``flm list``) can transiently return an EMPTY catalog
+        # right at pull start — observed live: the dir grew steadily on disk while
+        # the job reported ``0/0`` the whole download because ``target_dir`` was
+        # ``None`` here and never retried. So they are NOT resolved once-and-for-
+        # all: :func:`_resolve_target_dir` / :func:`_resolve_advertised_total` below
+        # re-attempt each tick until they succeed, then progress tracks growth.
+        #
+        # Both shell ``flm list -j`` (up to 30 s) on a cold cache, so every read
+        # here runs on a worker thread, never on the event loop (#2334).
+        target_dir = await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
+        advertised_total = 0
+        for entry in await flm_served_models_async():
+            if entry["tag"] == tag:
+                advertised_total = int(entry.get("size_bytes") or 0)
+                break
+        baseline_size = _dir_size(target_dir) if target_dir else 0
+        if advertised_total > baseline_size:
+            job.bytes_total = advertised_total
+            job._signal()
+
+        # uvloop (hal0-api's event loop) rejects the user/group Popen kwargs, so
+        # the drop to the hal0 user rides the argv (setpriv/runuser) instead.
+        argv, spawn_kwargs = flm_host_async_spawn(argv)
+
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.DEVNULL,
