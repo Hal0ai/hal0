@@ -86,9 +86,14 @@ Ship these together in v1.5. Each one alone leaves the hole open.
 - **Scoped token only (items 1 and 3), no UID split.** Cheaper, but the
   agent can still read the admin key from disk. Rejected: it looks like a
   boundary and is not one.
-- **Approval-route fix only (item 2), now.** Small, and closes self-approval
-  by Bearer key. Not enough on its own (the agent still holds full admin
-  for every other route), but it can ship ahead of the rest if v1.5 slips.
+- **Approval-route fix only (item 2), now.** Considered on 2026-10-08 and
+  not shipped: on its own it closes nothing. The agent holds the admin key,
+  so it can mint a browser session through `POST /api/auth/login` and
+  approve with the cookie; and a caller on the box itself passes the
+  loopback side of the LAN admin gate. Item 2 only holds once item 1 takes
+  the admin key away from agents and item 4 stops them reading it from
+  disk. `tests/api/test_agent_self_approval.py` pins the hole as a strict
+  xfail until then.
 
 ## Consequences
 
@@ -105,7 +110,8 @@ Ship these together in v1.5. Each one alone leaves the hole open.
 
 ## Open questions for the operator
 
-1. If v1.5 slips, ship item 2 (approval route) on its own first?
+1. ~~If v1.5 slips, ship item 2 (approval route) on its own first?~~
+   Answered 2026-10-08: no; see "Options considered".
 2. One `agent` key per agent, or one shared agent key? Per-agent is
    recommended: it makes the audit trail truthful and lets one agent be
    revoked alone.

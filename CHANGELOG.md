@@ -30,6 +30,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Changed
+
+- ADR-0024: the "approval-route fix only" option is recorded as considered and
+  not shipped (an agent holding the admin key can log in for a cookie, and an
+  on-box caller passes the LAN gate); `tests/api/test_agent_self_approval.py`
+  pins agent self-approval as a strict xfail until the v1.5 tier lands.
+
 ## [1.4.0] — 2026-10-08
 
 ### Highlights
