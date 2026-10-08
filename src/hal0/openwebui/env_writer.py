@@ -339,16 +339,20 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
 #: (leave it) — see :func:`write_openwebui_env`.
 _MANAGED_MARKER = "# hal0-managed:"
 
-#: Prefix of the header line carrying a fingerprint (a sha256 prefix, never
-#: the key) of the client key hal0 last wrote. ``OPENAI_API_KEYS`` is a
+#: Prefix of the header line carrying a fingerprint (a salted PBKDF2 digest,
+#: never the key) of the client key hal0 last wrote. ``OPENAI_API_KEYS`` is a
 #: ``;``-list that can mix hal0's entry with the operator's, so after a
 #: rotation this is how a render recognises the entry hal0 wrote under the
 #: previous key — see :func:`_apply_chat_keys`.
-_CLIENT_KEY_MARKER = "# hal0-client-key-sha256:"
+_CLIENT_KEY_MARKER = "# hal0-client-key-fingerprint:"
 
 
 def _key_fingerprint(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    """A short, salted PBKDF2 digest of *key*: enough to recognise the value
+    hal0 wrote, too slow to brute-force back to the key from the header."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", key.encode("utf-8"), b"hal0-openwebui-client-key", 100_000, dklen=8
+    ).hex()
 
 
 def _env_header(managed: Iterable[str], client_key: str | None = None) -> tuple[str, ...]:
