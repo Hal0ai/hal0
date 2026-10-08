@@ -49,9 +49,10 @@ _Rollback:_
 
 ## Test tiers run
 
-<!-- Every PR runs α + β (CONTRIBUTING.md). γ is required only for high-risk
-     PRs and per release candidate. -->
+<!-- Every PR runs α (CONTRIBUTING.md "Test tiers"). γ is required only for
+     high-risk PRs and per release candidate. δ is on demand — run it when a
+     change needs a real slot lifecycle. -->
 - [ ] α  unit (`make test`)
-- [ ] β  integration (`make test-integration`)
 - [ ] γ  release-gate (`make release-test`) — required for high-risk and
       release-candidate PRs
+- [ ] δ  harness (`make harness`) — real install → slot → chat round-trip

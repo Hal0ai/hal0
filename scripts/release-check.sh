@@ -140,8 +140,8 @@ fi
 step "1. Backend tests"
 
 if command -v uv &>/dev/null; then
-	# Unit tier only — tier β + γ run elsewhere (the integration workflow
-	# and `make release-test` respectively).
+	# Unit tier only — tier γ runs elsewhere (`make release-test`); there
+	# is no β tier (retired in v0.2, see the Makefile test-tier note).
 	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
 		info "isolated locked Python 3.12 pytest (-m 'not integration'): green"
 	else

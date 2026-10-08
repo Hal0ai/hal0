@@ -16,8 +16,9 @@ When the model opens up, the shape will be:
 - One PR per feature; small, reviewable diffs
 - Run `make lint test` before pushing
 - Update the maintainer planning doc (`docs/.devdocs/PLAN.md`, local-only) if your change moves the scope
-- Slot/dispatcher/provider changes require both unit and integration
-  tests (Tier-1 reliability is non-negotiable)
+- Slot/dispatcher/provider changes require unit tests plus a real-runtime
+  pass (`make harness` or `make release-test`; Tier-1 reliability is
+  non-negotiable)
 - UI changes need Playwright coverage for any new critical path
 
 ## Anti-scar rules
@@ -145,52 +146,45 @@ queue.
 
 ## Test tiers
 
-hal0's test strategy is three tiers, each with a different
-cadence and a different runtime ceiling. Every PR runs the unit + the
-integration tier; the release-gate tier is `hal0-test` LXC territory and
-is the last gate before a tagged release.
+Every PR runs the unit tier (α) and the UI checks in CI; the release-gate
+tier (γ) runs on a real box and is the last gate before a tagged release.
+The three checks GitHub requires before a PR to `main` can merge are the CI
+`python (3.12)` and `ui` jobs and the Playwright `γ-suite (chromium)` job
+(see [E2E tests](#e2e-tests); despite the γ in its name, that suite runs
+against mocked backends and is not the release gate).
 
 | Tier | What it does | Where it runs | When | Local cmd |
 |---|---|---|---|---|
-| α  Unit | `pytest`, mocked systemd/HTTP/Lemonade client | any host, no daemons | every commit / PR | `make test` |
-| β  Integration | Real `hal0-lemonade.service` + tiny GGUF; load → chat → swap → unload + slot state via `/v1/health` | GitHub Actions runner (`integration.yml`) **and** any host with systemd + Lemonade installed | every PR; required for merge | `make test-integration` |
-| γ  Release-gate | Full matrix — Lemonade `llamacpp` (Vulkan + ROCm + CPU), `flm:npu` trio, `whisper.cpp`, `kokoro:cpu`, `sd-cpp`, OpenWebUI proxy, updater round-trip | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
+| α  Unit | `pytest` over `tests/`, with mocked systemd/HTTP/runtime clients | any host, no daemons; CI `python` job (`.github/workflows/ci.yml`) | every commit / PR; required for merge | `make test` |
+| γ  Release-gate | The 7-row backend matrix in `scripts/release-test.sh` | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
+| δ  Harness | install → CLI → one real slot load → chat → unload → uninstall | the developer's own host | on demand | `make harness` |
+
+There is no β (integration) tier. The old one — a `make test-integration`
+target and an `integration.yml` workflow running a real slot lifecycle on
+a CI runner — was retired in v0.2 and not replaced (the note above the test
+targets in the `Makefile` records this). A real slot lifecycle is exercised
+only by the δ harness and the γ gate, so run one of them when a change
+needs that coverage.
 
 ### α — unit (`make test`)
 
 ```sh
-make test            # runs pytest with `-m "not integration"`
+make test            # runs `pytest tests/ -v`
 ```
 
-Pure pytest. No systemd, no docker, no network. ~3 s on the dev VM.
-The 425+ baseline tests live under `tests/` and shouldn't grow much
-slower than that — integration-flavoured cases must be marked
-`@pytest.mark.integration` so they're excluded by default.
-
-### β — integration (`make test-integration`)
-
-Exercises the real `hal0-lemonade.service` daemon. Needs root (units
-land in `/etc/systemd/system/`) and the Lemonade prerequisites
-(installed by `installer/install.sh`).
-
-Locally:
+Pure pytest, no daemons required. Tests that shell out to a real host
+facility carry a marker (`podman`, `systemd`, `network`, registered in
+`pyproject.toml`). CI runs the same unfiltered `pytest tests/`; to leave
+the host-dependent tests out of a local run:
 
 ```sh
-sudo bash installer/install.sh --no-start    # writes hal0-lemonade.service + config.json
-make test-integration
+pytest tests/ -m "not integration and not podman and not systemd and not network"
 ```
 
-In CI: `.github/workflows/integration.yml` does the install on the
-runner, caches `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, and runs the gated
-cases in `tests/slots/test_integration.py`:
-
-1. `test_end_to_end_load_serve_unload` — full slot register → load → unload → delete via `/v1/load` + `/v1/unload`
-2. `test_state_transitions_visible_via_stream` — slot state stream sees `starting → warming → ready` (from `/v1/health` polling + Lemonade `/logs/stream` events)
-3. `test_full_state_machine_round_trip_via_stream` — full round-trip incl. `unloading → offline`
-
-Wall-clock budget: ≤12 minutes (Integration β). Lemonade's
-embeddable tarball is layer-cached via GHA so cold-cache runs are
-~10 min, hot-cache ~4.
+(`integration` is registered by `tests/slots/conftest.py` and
+`tests/openwebui/conftest.py`; today only
+`tests/openwebui/test_prewire_smoke.py` uses it, and it skips itself
+when Docker is unreachable.)
 
 ### γ — release-gate (`make release-test`)
 
@@ -252,20 +246,14 @@ opening the PR, by the surface touched — same risk vocabulary
 (low/med/high) the template already uses, so picking a risk grade and
 knowing what validation backs it up are the same lookup.
 
-**On β:** the rows below cite α + β together because that's what this section documents as
-required. As of this writing neither `make test-integration` nor `.github/workflows/integration.yml`
-exist in the tree — both were retired in the toolbox-retirement pass and never restored (filed as
-[#2239](https://github.com/Hal0ai/hal0/issues/2239)). Until that's resolved, treat "+ β" below as
-"+ β once it's restored" and lean harder on γ / `rc-validate` for the areas it names.
-
 | Area | Risk | Required validation |
 |---|---|---|
-| `src/hal0/api/` | med–high | α + β (every PR). A new route must be classified in `src/hal0/security/exposure.py` — the deny-by-default ratchet test (`tests/security/test_exposure.py`) fails an unclassified route rather than letting it default open. |
-| `src/hal0/api/auth.py`, `src/hal0/security/`, login routes, auth middleware | high | α + β, plus the auth-specific suite (`tests/security/test_kb1_hardening_tail.py`, `test_upstream_auth_contract.py`, `test_secrets_protected_keys.py`). §14.1 high-risk — run γ (`make release-test`) before merge. |
-| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α + β — β's integration suite is meant to exercise load → chat → swap → unload against a real slot (see the #2239 note above). A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
-| `src/hal0/capabilities/`, `model_meta`, `model_fit` | med | α + β. Changes to device/profile resolution should re-run the γ matrix row for the affected backend (ROCm/Vulkan/CPU/NPU) — see [Validation matrix](docs/reference/validation-matrix.mdx). |
+| `src/hal0/api/` | med–high | α (every PR). A new route must be classified in `src/hal0/security/exposure.py` — the deny-by-default ratchet test (`tests/security/test_exposure.py`) fails an unclassified route rather than letting it default open. |
+| `src/hal0/api/auth.py`, `src/hal0/security/`, login routes, auth middleware | high | α, plus the auth-specific suite (`tests/security/test_kb1_hardening_tail.py`, `test_upstream_auth_contract.py`, `test_secrets_protected_keys.py`). §14.1 high-risk — run γ (`make release-test`) before merge. |
+| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α. A change to slot lifecycle behaviour also needs a real load → chat → unload, which only the δ harness (`make harness`) and γ exercise. A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
+| `src/hal0/capabilities/`, `model_meta`, `model_fit` | med | α. Changes to device/profile resolution should re-run the γ matrix row for the affected backend (ROCm/Vulkan/CPU/NPU) — see [Validation matrix](docs/reference/validation-matrix.mdx). |
 | `installer/`, systemd units | high | §14.1 high-risk trigger (installer / RCE-class: shell-out, downloads, signature verification, privilege changes). `shellcheck` on every `.sh` touched is a **manual convention, not a CI gate today** — run it yourself (`bash -n` at minimum if `shellcheck` isn't installed). Changes to `installer/bootstrap.sh` specifically must stay byte-identical to the logic `scripts/check-bootstrap-parity.sh` diffs against the live one-liner (`.github/workflows/bootstrap-parity.yml`). A `rc-validate` fresh-install lane pass is expected for anything beyond a comment/log-message change. |
-| `src/hal0/updater/`, the release manifest | high | §14.1 high-risk trigger. α + β, plus the γ script's `updater` row (check-only by design — see `scripts/release-test.sh`) and the `rc-validate` kit's `upgrade`/`post-upgrade` lanes, which are the only place an in-place convergence (schema-version-gated resets included) is exercised end to end. |
+| `src/hal0/updater/`, the release manifest | high | §14.1 high-risk trigger. α, plus the γ script's `updater` row (check-only by design — see `scripts/release-test.sh`) and the `rc-validate` kit's `upgrade`/`post-upgrade` lanes, which are the only place an in-place convergence (schema-version-gated resets included) is exercised end to end. |
 | `src/hal0/api/routes/board_chat.py`, `src/hal0/mcp/admin.py` | high | §14.1 high-risk trigger by name — any addition to `AUTONOMOUS_WRITE_TOOLS` (`src/hal0/mcp/admin.py`) requires the reviewer to run the full γ release-gate before merge, per the PR template. |
 | `src/hal0/config/`, pydantic models | low–high | α always. A schema-version bump needs a migration test under `tests/` for the old→new shape; a new compatibility shim needs a `HAL0-SUNSET` marker and a clean `python3 scripts/check_sunset.py` (anti-scar rule 4). |
 | `ui/src/`, Playwright specs | med | `npm run lint && npm run typecheck && npm run test:unit && npm run build`; a new critical path needs a Playwright spec under `ui/tests/e2e/specs/*-v3.spec.ts` (see `ui/tests/e2e/README.md`). |
@@ -458,7 +446,7 @@ still a backport; a cosmetic tweak is never a backport.
 ## Hardware support class
 
 hal0 classifies the hardware it can drive on a slot, separate from
-the **bench** (A/B/C) and **test tier** (α/β/γ) — both already
+the **bench** (A/B/C) and **test tier** (α/γ/δ) — both already
 overloaded. We call it **support class** and it is the verdict
 `evaluate_model_fit` in `src/hal0/model_fit.py` returns for a
 `(model, slot_type, device, profile)` tuple. The three outcomes are

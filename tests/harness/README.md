@@ -16,13 +16,11 @@ see [`FINDINGS.md`](FINDINGS.md).
 
 | Tier | Driver                                | Scope                          | Per-commit? |
 |------|---------------------------------------|--------------------------------|-------------|
-| α    | `pytest tests/ -m "not integration"`  | unit; mocked HTTP + systemd    | yes |
-| β    | `pytest tests/slots/test_integration.py -m integration` | real `hal0-slot@.service` + container | yes-ish |
+| α    | `make test` (`pytest tests/`)         | unit; mocked HTTP + systemd    | yes |
 | γ    | `scripts/release-test.sh` over SSH    | NPU + ROCm + Vulkan matrix on `hal0-test` LXC | release ritual |
 | **δ** (new) | **`scripts/harness.sh`** | **install + CLI + slot + uninstall on the dev host** | **on demand** |
 
-α covers code paths. β covers one slot lifecycle with a real
-container. γ covers the provider matrix on real hardware. **δ
+α covers code paths. γ covers the provider matrix on real hardware. **δ
 covers the developer's first-five-minutes journey**: does
 `install.sh --dev` work, do all 35 CLI subcommands return 0, does
 a slot create-load-chat-unload-delete round-trip pass, does the
