@@ -185,13 +185,6 @@ applying. Add those subsections to a version's section to surface them; see
   which would have shipped the rc's notes and slipped past that check.
   (#2255, #2345)
 
-- **The OAuth "Connected accounts" panel is reachable from the dashboard.**
-  v1.3.0 shipped it only inside the old Connections page, which the
-  dashboard redirects to Slots ▸ Endpoints, so no menu led to it and
-  connecting an account needed `hal0 oauth`. It now lives at
-  **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
-  also reachable as `#settings/oauth` and from the command palette). (#2267)
-
 - **An installed `sse` MCP server exposed to Hermes or the brain profile is
   now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
   picks its MCP client by `transport` and reads no `type` key, so every
@@ -199,6 +192,13 @@ applying. Add those subsections to a version's section to surface them; see
   `tools/list`. The join now writes `transport` (`sse` or `http`) to both
   Hermes's `config.yaml` and the brain profile, and hal0-api's startup
   reconcile rewrites an SSE join already on disk without it. (#2331)
+
+- **The OAuth "Connected accounts" panel is reachable from the dashboard.**
+  v1.3.0 shipped it only inside the old Connections page, which the
+  dashboard redirects to Slots ▸ Endpoints, so no menu led to it and
+  connecting an account needed `hal0 oauth`. It now lives at
+  **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
+  also reachable as `#settings/oauth` and from the command palette). (#2267)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
