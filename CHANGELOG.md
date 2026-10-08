@@ -215,14 +215,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
-- **A queued benchmark for a model that can't be resolved now fails visibly.**
-  When a queued model reference matched no registry model, or was a basename
-  that several models share (such as `model.gguf`), the bench worker planned
-  a suite that selected nothing and dropped the item without a trace. It now
-  takes the item off the queue with a `failed` outcome and a note
-  ("unknown model" or "ambiguous model reference"), and
-  `GET /api/benchmarks/queue` lists the recent ones under `failed`. (#2387)
-
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads
   `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers
@@ -266,6 +258,14 @@ applying. Add those subsections to a version's section to surface them; see
   worker logs as stuck) and no retain has completed in that time; the first
   completed retain clears it. Other engine work, such as consolidation, does
   not count either way (#1833).
+
+- **A queued benchmark for a model that can't be resolved now fails visibly.**
+  When a queued model reference matched no registry model, or was a basename
+  that several models share (such as `model.gguf`), the bench worker planned
+  a suite that selected nothing and dropped the item without a trace. It now
+  takes the item off the queue with a `failed` outcome and a note
+  ("unknown model" or "ambiguous model reference"), and
+  `GET /api/benchmarks/queue` lists the recent ones under `failed`. (#2387)
 
 - **An installed `sse` MCP server exposed to Hermes or the brain profile is
   now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
