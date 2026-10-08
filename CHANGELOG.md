@@ -191,6 +191,7 @@ applying. Add those subsections to a version's section to surface them; see
   connecting an account needed `hal0 oauth`. It now lives at
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
+
 - **A Runner Images default for the voice, speech, NPU and image-generation
   families now takes effect.** `[slots].default_images` accepts `comfyui`,
   `flm`, `kokoro`, `moonshine` and `qwen3tts`, and the dashboard reported the

@@ -346,7 +346,7 @@ def _resolve_image_ref(
     ``image_ref`` instead of tiers 2-3 above — ``image_pin`` →
     ``[slots].default_images[<provider family>]`` → that family's registry
     default (:func:`hal0.providers._image.resolve_family_image`; ComfyUI also
-    honors its legacy ``slot.image`` string). This function is the single
+    honors its older top-level ``slot.image`` string). This function is the single
     entry point the pull, status, drift and load-preflight seams share, so
     they inspect the image the Quadlet actually launches (#2234).
 
