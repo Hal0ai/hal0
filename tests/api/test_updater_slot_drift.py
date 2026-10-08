@@ -88,7 +88,7 @@ def test_slot_drift_clean_when_nothing_drifted(client: TestClient) -> None:
     _install_sm(client, sm)
     r = client.get("/api/updates/slot-drift")
     assert r.status_code == 200, r.text
-    assert r.json() == {"count": 0, "slots": []}
+    assert r.json() == {"count": 0, "slots": [], "auto_restart": None}
 
 
 def test_restart_slots_bounces_only_drifted(client: TestClient) -> None:
@@ -177,3 +177,95 @@ def test_restart_slots_without_skip_busy_restarts_busy_slots(
     r = client.post("/api/updates/restart-slots", json={})
     assert r.json()["restarted"] == ["agent"]
     assert r.json()["skipped_busy"] == []
+
+
+# ── server-side image-drift restart (#2096) ───────────────────────────────────
+
+from hal0.api.routes import updater as updater_routes  # noqa: E402
+
+_IMG = {"key": "image", "running": "x:0824", "rendered": "x:0826"}
+_ARGV = {"key": "--ctx-size", "running": "4096", "rendered": "131072"}
+
+
+def _no_busy(monkeypatch: pytest.MonkeyPatch, busy_ports: set[int] | None = None) -> None:
+    busy_ports = busy_ports or set()
+
+    async def fake(port: int) -> dict[str, Any]:
+        return {"requests_processing": 1 if port in busy_ports else 0}
+
+    monkeypatch.setattr("hal0.slots.metrics_collect.llama_metrics", fake)
+
+
+@pytest.mark.asyncio
+async def test_shared_restart_function_matches_route_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch, {2})
+    sm = _StubSlotManager(
+        {
+            "a": {"drifted": True, "diffs": [_IMG]},
+            "b": {"drifted": True, "diffs": [_IMG]},
+        },
+        restart_error={},
+    )
+    out = await updater_routes.restart_drifted(sm, only={"a", "b"}, skip_busy=True)
+    assert out == {"restarted": ["a"], "failed": [], "skipped_busy": ["b"], "count": 1}
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_only_image_drift_and_stores_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch, {3})
+    sm = _StubSlotManager(
+        {
+            "img": {"drifted": True, "diffs": [_IMG]},
+            "argv": {"drifted": True, "diffs": [_ARGV]},
+            "busy": {"drifted": True, "diffs": [_IMG]},
+        }
+    )
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == ["img"]
+    res = state.post_start_image_drift_restart
+    assert res["restarted"] == ["img"]
+    assert res["skipped_busy"] == ["busy"]
+    assert res["failed"] == []
+    assert res["at"]
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_disabled_by_config_does_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch)
+    sm = _StubSlotManager({"img": {"drifted": True, "diffs": [_IMG]}})
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=False, settle_s=0)
+    assert sm.restarted == []
+    assert getattr(state, "post_start_image_drift_restart", None) is None
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_nothing_qualifies_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch)
+    sm = _StubSlotManager({"argv": {"drifted": True, "diffs": [_ARGV]}})
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == []
+    assert getattr(state, "post_start_image_drift_restart", None) is None
+
+
+def test_slot_drift_route_exposes_auto_restart(client: TestClient) -> None:
+    _install_sm(client, _StubSlotManager({}))
+    assert client.get("/api/updates/slot-drift").json()["auto_restart"] is None
+    stored = {
+        "restarted": ["brain"],
+        "skipped_busy": [],
+        "failed": [],
+        "at": "2026-10-08T00:00:00+00:00",
+    }
+    client.app.state.post_start_image_drift_restart = stored
+    assert client.get("/api/updates/slot-drift").json()["auto_restart"] == stored

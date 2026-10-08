@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 
@@ -1263,7 +1264,11 @@ async def slot_drift(request: Request) -> dict[str, Any]:
     """
     sm = _slot_manager(request)
     drifted = await _collect_slot_drift(sm)
-    return {"count": len(drifted), "slots": drifted}
+    return {
+        "count": len(drifted),
+        "slots": drifted,
+        "auto_restart": getattr(request.app.state, "post_start_image_drift_restart", None),
+    }
 
 
 async def _slots_in_flight(sm: Any, names: list[str]) -> set[str]:
@@ -1323,7 +1328,19 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
         if isinstance(raw, list) and raw:
             only = {str(s) for s in raw}
     skip_busy = isinstance(body, dict) and body.get("skip_busy") is True
+    return await restart_drifted(sm, only=only, skip_busy=skip_busy)
 
+
+async def restart_drifted(
+    sm: Any, *, only: set[str] | None = None, skip_busy: bool = False
+) -> dict[str, Any]:
+    """Bounce the drifted slots (optionally a subset); the one restart path.
+
+    Shared by ``POST /restart-slots`` and the post-start image-drift pass
+    (#2096). Per-slot failures are recorded, never re-raised. With
+    ``skip_busy`` a slot llama-server reports as processing is left alone and
+    listed under ``skipped_busy``.
+    """
     drifted = await _collect_slot_drift(sm)
     targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
     skipped_busy: list[str] = []
@@ -1348,3 +1365,50 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
         "skipped_busy": skipped_busy,
         "count": len(restarted),
     }
+
+
+#: Seconds the post-start pass waits before probing, so the app is serving and
+#: slot containers have been adopted before drift is computed.
+POST_START_SETTLE_S = 15.0
+
+
+async def post_start_image_drift_restart(
+    state: Any, *, enabled: bool = True, settle_s: float = POST_START_SETTLE_S
+) -> None:
+    """One-shot, every hal0-api start: bounce slots running a replaced image (#2096).
+
+    An image-drifted running container serves a build the installed release
+    replaced, whichever path (CLI, dashboard, manual) put the new code in
+    place. Busy slots are skipped. The outcome lands on
+    ``state.post_start_image_drift_restart`` for ``/slot-drift``; nothing is
+    stored when no slot qualified. Never raises.
+    """
+    if not enabled:
+        return
+    try:
+        if settle_s > 0:
+            await asyncio.sleep(settle_s)
+        sm = getattr(state, "slot_manager", None)
+        if sm is None:
+            return
+        drifted = await _collect_slot_drift(sm)
+        names = {
+            d["slot"]
+            for d in drifted
+            if any(isinstance(x, dict) and x.get("key") == "image" for x in d["diffs"])
+        }
+        if not names:
+            return
+        out = await restart_drifted(sm, only=names, skip_busy=True)
+        result = {
+            "restarted": out["restarted"],
+            "skipped_busy": out["skipped_busy"],
+            "failed": out["failed"],
+            "at": datetime.now(UTC).isoformat(),
+        }
+        state.post_start_image_drift_restart = result
+        log.info("updater.post_start_image_drift_restart", **result)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("updater.post_start_image_drift_restart_failed", error=str(exc))

@@ -24,7 +24,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 
 | File | Format | Purpose |
 |---|---|---|
-| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
+| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
 | `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
 | `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
@@ -148,6 +148,18 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+### `[updates]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `auto_restart_image_drift` | bool | `true` | read once at start; a change needs a `hal0-api` restart |
+
+At every `hal0-api` start, slots whose running container uses a different
+runner image than a fresh render would pick are restarted (busy slots are
+skipped). Argv-only drift is never restarted.
 
 ### `[activity]`
 

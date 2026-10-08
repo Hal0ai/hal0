@@ -1283,3 +1283,39 @@ def test_restart_slots_flag_still_restarts_everything_drifted(
 def test_restart_slots_and_no_restart_slots_conflict() -> None:
     result = runner.invoke(app, ["update", "--restart-slots", "--no-restart-slots"])
     assert result.exit_code != 0
+
+
+def test_cli_banner_reports_server_side_restart_and_does_not_double_restart(
+    monkeypatch: pytest.MonkeyPatch, stub_api: dict
+) -> None:
+    """The server already bounced image slots at start (``auto_restart``): the
+    CLI shows them as restarted and never POSTs restart-slots for them."""
+    posts: list[dict] = []
+    base_get = uc.api_get
+    base_post = uc.api_post
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {
+                "count": 0,
+                "slots": [],
+                "auto_restart": {
+                    "restarted": ["brain"],
+                    "skipped_busy": [],
+                    "failed": [],
+                    "at": "2026-10-08T00:00:00+00:00",
+                },
+            }
+        return base_get(path, **kwargs)
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/restart-slots":
+            posts.append(json)
+        return base_post(path, json=json, **kwargs)
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert posts == []
+    assert "restarted 1 slot" in result.output and "brain" in result.output

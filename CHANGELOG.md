@@ -141,7 +141,10 @@ applying. Add those subsections to a version's section to surface them; see
   automatically: in use". The summary no longer reads "update applied"
   while an image restart is pending and the command exits 2. Argv-only drift
   is unchanged (banner, opt-in `--restart-slots`); `--no-restart-slots`
-  opts out of the automatic restart.
+  opts out of the CLI's restart. `hal0-api` also does this once at every
+  start, so a dashboard "Update now" is covered too; set
+  `[updates].auto_restart_image_drift = false` to turn that pass off. The
+  outcome is reported as `auto_restart` on `GET /api/updates/slot-drift`.
 
 - **The dashboard login is asked for on every page, and "View read-only"
   now applies to one page at a time.** On a LAN-bound box with an admin key

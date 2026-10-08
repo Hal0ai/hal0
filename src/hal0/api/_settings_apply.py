@@ -146,6 +146,11 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [telemetry]
     "telemetry.enabled": {"apply_class": "immediate", "services": []},
     "telemetry.channel": {"apply_class": "immediate", "services": []},
+    # [updates] — read once by the post-start image-drift pass (#2096).
+    "updates.auto_restart_image_drift": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [dispatcher] — both knobs are threaded into the Dispatcher at
     # create_app time (timeout bounds the fanout, parallel_cap bounds its
     # concurrency), so a change lands on the next hal0-api restart.

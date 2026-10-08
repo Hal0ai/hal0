@@ -94,7 +94,7 @@ hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 | `--target` | Pin an exact version. |
 | `--yes` / `-y` | Skip the confirmation prompt. |
 | `--restart-slots` | Bounce every drifted slot (image and argv drift) and stop. |
-| `--no-restart-slots` | Skip the automatic restart of slots whose runner image changed; they keep the old image until restarted. Cannot be combined with `--restart-slots`. |
+| `--no-restart-slots` | Skip the automatic restart of slots whose runner image changed; the CLI leaves them on the old image (the `hal0-api` start-up pass is controlled by `[updates].auto_restart_image_drift`). Cannot be combined with `--restart-slots`. |
 
 An apply that leaves any operator-facing convergence outstanding (the
 one-shot v1.0 profile-catalog reset, or a component below still `pending`)

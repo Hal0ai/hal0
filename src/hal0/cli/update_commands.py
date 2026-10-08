@@ -960,14 +960,24 @@ def update(
         # could kill a mid-inference request). Surface which slots are still
         # running the pre-update command so the operator can opt into a restart.
         drift = _fetch_slot_drift()
+        # hal0-api's own post-start pass may already have bounced the image
+        # slots (``auto_restart``); report those and only restart what is
+        # STILL image-drifted, so the two paths never double-restart.
+        server_side = drift.get("auto_restart") or {}
         outcome: dict = {} if no_restart_slots else _auto_restart_image_drift(drift)
         if outcome:
             drift = _fetch_slot_drift()
         _print_drift_banner(
             drift,
-            restarted=outcome.get("restarted") or [],
-            skipped_busy=outcome.get("skipped_busy") or [],
-            failed=outcome.get("failed") or [],
+            restarted=list(server_side.get("restarted") or [])
+            + list(outcome.get("restarted") or []),
+            skipped_busy=list(
+                dict.fromkeys(
+                    list(server_side.get("skipped_busy") or [])
+                    + list(outcome.get("skipped_busy") or [])
+                )
+            ),
+            failed=list(server_side.get("failed") or []) + list(outcome.get("failed") or []),
         )
         # An image diff still outstanding means a slot serves the build this
         # release replaced -- the update is not "fully successful" (#2096).
