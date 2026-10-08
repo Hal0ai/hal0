@@ -276,6 +276,15 @@ applying. Add those subsections to a version's section to surface them; see
   launches. A bare llama slot with no profile or pin still reports
   `not-configured`. (#2389)
 
+- **`hal0 agent install pi` maps the right checkout into the shared
+  `coding-agent::hal0-mono` memory bank.** The seeded
+  `~/.hindsight/coding-agent.json` mapped one fixed maintainer path into that
+  bank, so on every other install the mapping never matched and the hal0 repo's
+  coding memory silently landed in a per-project bank instead. The driver now
+  maps the hal0 git checkout it is running from, and seeds no mapping on a
+  packaged install that has no checkout. An existing `coding-agent.json` is
+  still never overwritten. (#2315)
+
 - **The OAuth "Connected accounts" panel is reachable from the dashboard.**
   v1.3.0 shipped it only inside the old Connections page, which the
   dashboard redirects to Slots ▸ Endpoints, so no menu led to it and
@@ -316,15 +325,6 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
-
-- **`hal0 agent install pi` maps the right checkout into the shared
-  `coding-agent::hal0-mono` memory bank.** The seeded
-  `~/.hindsight/coding-agent.json` mapped one fixed maintainer path into that
-  bank, so on every other install the mapping never matched and the hal0 repo's
-  coding memory silently landed in a per-project bank instead. The driver now
-  maps the hal0 git checkout it is running from, and seeds no mapping on a
-  packaged install that has no checkout. An existing `coding-agent.json` is
-  still never overwritten. (#2315)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
