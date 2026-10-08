@@ -85,18 +85,22 @@ def check_auth_posture(auth: dict[str, Any] | None) -> Check:
                     _WARN,
                     "reachable from your network with auth off and no admin key set — every "
                     "route, including model pulls, slot deletes and config writes, is "
-                    "unauthenticated from any LAN device. Set an admin key "
-                    "(`hal0 auth rotate admin`) or bind loopback (HAL0_BIND_HOST=127.0.0.1) "
-                    "to close this.",
+                    "unauthenticated from any LAN device. Mint an admin key with "
+                    "`sudo hal0 auth reset-key` (other devices then need it for admin routes), "
+                    "then `hal0 auth require on` to require a key everywhere, or bind "
+                    "loopback (HAL0_BIND_HOST=127.0.0.1) to close this.",
                 )
             return Check(
                 "auth",
                 "Auth posture",
                 _WARN,
-                "reachable from your network with auth off — mutating routes already require "
-                "an admin sign-in automatically for off-box callers, but reads and inference "
-                "stay open. `hal0 auth require on` or binding loopback "
-                "(HAL0_BIND_HOST=127.0.0.1) protects everything, including reads.",
+                "reachable from your network with auth off — other devices must sign in "
+                "with the admin key for admin routes (settings, memory, logs, approvals, "
+                "model pulls, slot and config changes), but inference (/v1), the memory "
+                "tool mount (/mcp/memory) and the slot, model and hardware lists "
+                "stay open to any LAN device. `hal0 auth require on` requires a key for "
+                "those too; binding loopback (HAL0_BIND_HOST=127.0.0.1) takes the box off "
+                "the LAN.",
             )
         return Check("auth", "Auth posture", _PASS, "open (auth not required — dev/loopback)")
     if not has_key:
@@ -104,7 +108,8 @@ def check_auth_posture(auth: dict[str, Any] | None) -> Check:
             "auth",
             "Auth posture",
             _WARN,
-            "auth required but no admin key set — set HAL0_ADMIN_KEY so an operator can log in",
+            "auth required but no admin key set — mint one (HAL0_ADMIN_KEY) with "
+            "`sudo hal0 auth reset-key` so an operator can log in",
         )
     return Check("auth", "Auth posture", _PASS, "auth required, admin key configured")
 

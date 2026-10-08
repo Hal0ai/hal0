@@ -477,6 +477,15 @@ applying. Add those subsections to a version's section to surface them; see
   SSE stream and WebSocket waited. Those paths now probe a cold cache on a
   worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
   sync callers such as the CLI are unchanged.
+- **`hal0 doctor all` describes the LAN admin gate correctly.** On a
+  LAN-bound box with an admin key and auth off, its `auth` row said mutating
+  routes need a sign-in "but reads and inference stay open". The gate works
+  per route class: ADMIN reads (settings, memory, logs, approvals) are gated
+  too, and CLIENT routes (`/v1` inference, `/mcp/memory`) stay open, writes
+  included. The row now says that. With no admin key, it and the Settings ▸
+  Security page now say every route is open to the LAN and point at `sudo
+  hal0 auth reset-key` to mint one, instead of `hal0 auth rotate admin`,
+  which never prints the key. (#2314)
 
 - **Loading a stack now tells you which running slots it will unload.**
   Applying a stack replaces the running lineup: every running slot the stack
