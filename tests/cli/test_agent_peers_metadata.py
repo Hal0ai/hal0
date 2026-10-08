@@ -14,6 +14,7 @@ import urllib.request
 from typing import Any
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from hal0.cli import agent_commands
@@ -69,9 +70,16 @@ def test_peers_renders_json_string_metadata(peers_response: Any) -> None:
     assert "2026-08-15" in result.output
 
 
-def test_peers_renders_hindsight_repr_metadata(peers_response: Any) -> None:
+def test_peers_renders_hindsight_repr_metadata(
+    peers_response: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The producer format: ``HindsightProvider.add`` stores metadata values
     as ``str(v)``, so nested dicts arrive as Python reprs, not JSON."""
+    # Pin the table width on the module console itself. Rich fixes a
+    # Console's width from COLUMNS at construction (module import), so a
+    # COLUMNS set at invoke time does not reach it, and an xdist worker
+    # imports with COLUMNS=80, which truncates the endpoint cell (#2341).
+    monkeypatch.setattr(agent_commands, "console", Console(width=200))
     peers_response(
         {
             "items": [
@@ -89,7 +97,7 @@ def test_peers_renders_hindsight_repr_metadata(peers_response: Any) -> None:
         }
     )
 
-    result = runner.invoke(agent_commands.app, ["peers"], env={"COLUMNS": "200"})
+    result = runner.invoke(agent_commands.app, ["peers"])
 
     assert result.exit_code == 0, result.output
     assert "192.0.2.142" in result.output

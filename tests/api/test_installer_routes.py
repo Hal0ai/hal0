@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -166,10 +167,23 @@ def test_install_complete_idempotent_when_sentinel_present(
 
 
 def test_install_apply_idempotent_when_sentinel_present(
-    isolated_client: TestClient, tmp_hal0_home: str
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """/apply is idempotent — re-running provisions normally."""
     _write_sentinel(tmp_hal0_home)
+
+    # TestClient runs BackgroundTasks synchronously, so without this stub the
+    # tier's model pull really downloads from HuggingFace (~64 s per CI run,
+    # and a failure whenever the network does, #2341). Same seam as
+    # tests/api/test_install_apply.py: run_pull_and_activate imports run_pull
+    # lazily from hal0.registry.pull.
+    pulled: list[str] = []
+
+    async def _fake_run_pull(job: Any, **kw: Any) -> None:
+        pulled.append(job.model_id)
+        job.state = "completed"
+
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
 
     r = isolated_client.post(
         "/api/install/apply",
@@ -179,6 +193,8 @@ def test_install_apply_idempotent_when_sentinel_present(
     body = r.json()
     assert "model_ids" in body
     assert "slots" in body
+    # The stub, not the network, served every planned pull.
+    assert pulled, "expected /apply to schedule at least one model pull"
 
 
 def test_install_apply_selections_idempotent_when_sentinel_present(
