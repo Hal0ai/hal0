@@ -17,11 +17,35 @@
 #   HAL0_HARNESS_TLS=1      enable the tls-default install row (needs PROD=1
 #                           and installs Caddy via apt/pacman)
 #   HAL0_HARNESS_SKIP_LXC=1 skip the optional release-test SSH leg
+#   HAL0_HARNESS_ALLOW_DEFERRED=1
+#                           same as --allow-deferred (below)
 #
-# Exit 0 if no FAIL rows in any tier (skip/deferred ok), 1 otherwise.
+# Flags:
+#   --allow-deferred        accept a run whose slot lifecycle was deferred
+#
+# Exit 1 if any row FAILs, or if the slot-lifecycle rows were deferred
+# (runtime-slot-load can't start a systemd unit under --dev, so the chat
+# round-trip is skipped) without --allow-deferred / HAL0_HARNESS_ALLOW_DEFERRED=1.
+# An allowed run names those rows on its OK line. scripts/harness-gate.py
+# decides; γ (`make release-test`) is the tier that loads real slots (#2349,
+# #2377). Exit 0 otherwise; other skip/deferred rows are tolerated.
 
 set -euo pipefail
 IFS=$'\n\t'
+
+usage() {
+    printf 'usage: %s [--allow-deferred]\n' "$(basename "$0")"
+    printf '  --allow-deferred  accept deferred slot-lifecycle rows (also HAL0_HARNESS_ALLOW_DEFERRED=1)\n'
+}
+
+GATE_ARGS=()
+for arg in "$@"; do
+    case "${arg}" in
+        --allow-deferred) GATE_ARGS+=(--allow-deferred) ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'harness.sh: unknown argument: %s\n' "${arg}" >&2; usage >&2; exit 2 ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -30,9 +54,9 @@ REPORTS_DIR="${HARNESS_DIR}/reports"
 
 # Colours.
 if [[ -t 1 ]]; then
-    BOLD=$'\033[1m'; GRN=$'\033[0;32m'; RED=$'\033[0;31m'; RST=$'\033[0m'
+    BOLD=$'\033[1m'; RST=$'\033[0m'
 else
-    BOLD=; GRN=; RED=; RST=
+    BOLD=; RST=
 fi
 
 mkdir -p "${REPORTS_DIR}"
@@ -130,16 +154,6 @@ PY
 # Pretty-print.
 python3 "${SCRIPT_DIR}/harness-report.py" "${AGGREGATE}" || true
 
-# Exit code: any FAIL row → 1.
-FAILS="$(python3 -c "
-import json
-d = json.load(open('${AGGREGATE}'))
-print(d['summary'].get('fail', 0))
-")"
-
-if [[ "${FAILS}" -gt 0 ]]; then
-    printf '\n%s%sharness FAILED%s — %d row(s) failed.\n' "${RED}" "${BOLD}" "${RST}" "${FAILS}" >&2
-    exit 1
-fi
-printf '\n%s%sharness OK%s\n' "${GRN}" "${BOLD}" "${RST}"
-exit 0
+# Exit code: any FAIL row, or a deferred slot lifecycle that wasn't
+# explicitly allowed, → 1 (scripts/harness-gate.py, #2349).
+exec python3 "${SCRIPT_DIR}/harness-gate.py" "${AGGREGATE}" ${GATE_ARGS[@]+"${GATE_ARGS[@]}"}
