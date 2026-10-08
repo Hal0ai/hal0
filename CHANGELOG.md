@@ -330,7 +330,7 @@ applying. Add those subsections to a version's section to surface them; see
   (NPU/CPU, or a GPU that did not flip) is left alone. If image mode is
   pinned or the restore fails, the loop does not ask the unloaded model
   again: it returns a completion that lists every image the request
-  rendered and the reason (`hal0.omni.caller_slot_unavailable`, with the
+  rendered, with every tool result it produced, and the reason (`hal0.omni.caller_slot_unavailable`, with the
   verbatim tool results alongside). A request cancelled mid-render restores LLM mode in
   the background instead of leaving the GPU parked.
 

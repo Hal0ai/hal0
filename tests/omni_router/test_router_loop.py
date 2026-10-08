@@ -1026,3 +1026,73 @@ async def test_images_from_earlier_rounds_are_kept_when_a_later_round_cannot_res
     assert "http://img/first.png" in content and "http://img/second.png" in content
     urls = [r["result"]["data"][0]["url"] for r in result["hal0"]["omni"]["tool_results"]]
     assert urls == ["http://img/first.png", "http://img/second.png"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_keeps_every_tool_result_of_the_round_not_only_images() -> None:
+    """An embed_text that ran beside the image must reach the client too."""
+    arbiter = _Arbiter(pinned=True)
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/chat/completions":
+            body = json.loads(req.read())
+            if len(body.get("messages", [])) <= 1:
+                calls = [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "generate_image",
+                            "arguments": json.dumps({"prompt": "cat"}),
+                        },
+                    },
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {
+                            "name": "embed_text",
+                            "arguments": json.dumps({"input": ["x"]}),
+                        },
+                    },
+                ]
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": None, "tool_calls": calls}}
+                        ]
+                    },
+                )
+            return httpx.Response(
+                503, json={"error": {"code": "gpu.image_mode", "message": "unavailable"}}
+            )
+        if req.url.path == "/v1/images/generations":
+            arbiter.flip_to_img()
+            return httpx.Response(200, json={"data": [{"url": "http://img/cat.png"}]})
+        if req.url.path == "/v1/embeddings":
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(404)
+
+    router = OmniRouter(
+        slot_manager=_ArbitratedManager(
+            [
+                _caller(),
+                _img_slot(),
+                make_slot("embed", type="embedding", model="bge", labels=("embeddings",)),
+            ],
+            arbiter,
+        ),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://test"
+        ),
+        api_base_url="http://test",
+    )
+    result = await router.run_loop(
+        caller_slot_name="primary",
+        body={"model": "agent", "messages": [{"role": "user", "content": "x"}]},
+    )
+    names = [r["name"] for r in result["hal0"]["omni"]["tool_results"]]
+    assert names == ["generate_image", "embed_text"]
+    content = result["choices"][0]["message"]["content"]
+    assert "http://img/cat.png" in content
+    assert "embed_text" in content

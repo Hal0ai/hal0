@@ -74,7 +74,7 @@ def _completion_without_caller(
             if isinstance(data, list)
             else []
         )
-        if urls:
+        if item.get("name") in IMAGE_TOOLS and urls:
             lines.append(f"{item.get('name')}: " + ", ".join(str(u) for u in urls))
         elif isinstance(result, dict) and result.get("error"):
             lines.append(f"{item.get('name')} failed: {result['error']}")
@@ -196,10 +196,11 @@ class OmniRouter:
         # (pinned image mode, failed restore). The next "chat round" then
         # answers from here instead of asking the evicted slot.
         caller_unavailable: str | None = None
-        # Every image result this request produced, across rounds: earlier
-        # rounds' images only ever went into the private transcript, so the
-        # fallback completion must carry them too.
-        image_results: list[dict[str, Any]] = []
+        # Every tool result this request produced, across rounds: earlier
+        # rounds' results only ever went into the private transcript, so the
+        # fallback completion must carry them all (the image ones feed its
+        # text; the rest ride along under hal0.omni.tool_results).
+        all_results: list[dict[str, Any]] = []
 
         async def _dispatch_round(
             tool_calls: list[dict[str, Any]],
@@ -221,12 +222,11 @@ class OmniRouter:
                 if image_round:
                     self._restore_in_background(ctx)
                 raise
+            all_results.extend(
+                {"id": tc["id"], "name": tc["name"], "result": result}
+                for tc, result in zip(tool_calls, results, strict=True)
+            )
             if image_round:
-                image_results.extend(
-                    {"id": tc["id"], "name": tc["name"], "result": result}
-                    for tc, result in zip(tool_calls, results, strict=True)
-                    if tc["name"] in IMAGE_TOOLS
-                )
                 # One restore per round, after every render in it finished —
                 # restoring after the first would pull the GPU from under the
                 # rest (#2191). Waits for ComfyUI's queue (other requests'
@@ -250,7 +250,7 @@ class OmniRouter:
             # Answer with a completion that carries the results instead.
             if caller_unavailable:
                 return _completion_without_caller(
-                    request_body, caller_slot_name, caller_unavailable, image_results
+                    request_body, caller_slot_name, caller_unavailable, all_results
                 )
             return await self._chat_completion(request_body)
 

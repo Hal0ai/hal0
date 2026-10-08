@@ -1149,12 +1149,32 @@ async def test_restore_llm_when_idle_waits_for_the_queue_then_restores(
     async def _queue() -> tuple[int, int] | None:
         return next(polls, (0, 0))
 
-    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_counts", _queue)
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
 
     await arb.restore_llm_when_idle()
 
     assert arb.mode is GpuMode.LLM
     assert comfyui_http["free"] == 1  # freed exactly once, after the queue drained
+
+
+async def test_restore_llm_when_idle_treats_a_failed_queue_read_as_busy(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], monkeypatch
+) -> None:
+    """A 500 or a garbled /queue body is not evidence the render stopped —
+    only a refused connection (nothing listening, nothing on the GPU) is."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+
+    async def _queue() -> tuple[int, int] | None:
+        raise arbiter_mod.ComfyUIQueueUnknown("HTTP 500")
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
+
+    with pytest.raises(arbiter_mod.ArbiterQueueBusy):
+        await arb.restore_llm_when_idle(max_wait_s=0.05)
+    assert arb.mode is GpuMode.IMG
+    assert comfyui_http["free"] == 0
 
 
 async def test_restore_llm_when_idle_gives_up_after_the_wait_budget(
@@ -1163,7 +1183,11 @@ async def test_restore_llm_when_idle_gives_up_after_the_wait_budget(
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     await arb.ensure_img()
     monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
-    comfyui_http["queue"] = (1, 0)  # never drains
+
+    async def _queue() -> tuple[int, int] | None:
+        return (1, 0)  # never drains
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
 
     with pytest.raises(arbiter_mod.ArbiterQueueBusy):
         await arb.restore_llm_when_idle(max_wait_s=0.05)
@@ -1173,12 +1197,17 @@ async def test_restore_llm_when_idle_gives_up_after_the_wait_budget(
 
 
 async def test_restore_llm_when_idle_treats_an_unreachable_queue_as_idle(
-    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], monkeypatch
 ) -> None:
-    """An unreachable ComfyUI holds no GPU memory — same stance as restore_llm's /free."""
+    """A refused connection means nothing is listening and nothing is on the
+    GPU — same stance as restore_llm's /free."""
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     await arb.ensure_img()
-    comfyui_http["queue"] = None
+
+    async def _queue() -> tuple[int, int] | None:
+        return None  # unreachable
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
 
     await arb.restore_llm_when_idle()
 

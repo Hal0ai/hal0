@@ -68,9 +68,11 @@ behaviors:
   does not ask the unloaded model again: it returns a completion whose text
   lists the rendered image URLs and the reason, with the verbatim tool results
   under `hal0.omni.tool_results` and the reason under
-  `hal0.omni.caller_slot_unavailable`, and lists every image this request
-  rendered across rounds. A request cancelled mid-render or mid-restore still
-  restores LLM mode in the background, once the queue is empty.
+  `hal0.omni.caller_slot_unavailable`, and lists every tool result this
+  request produced across rounds. A request cancelled mid-render or
+  mid-restore starts the same queue-aware restore in the background; a pinned
+  image mode or a queue still busy past the budget leaves the caller
+  unavailable until the idle window or a manual switchover.
 - **`model` may be a chat-slot alias** — `agent`, `utility`, any enabled LLM slot name,
   or the legacy `agent-hermes` — rewritten to the slot's configured model id before
   dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized
