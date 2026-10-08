@@ -17,6 +17,7 @@ These tests pin both halves of that contract.
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -757,3 +758,60 @@ def test_parse_flm_progress_non_matching_line_is_none() -> None:
     import hal0.providers.flm as flm
 
     assert flm.parse_flm_progress("[FLM] verifying checksum") is None
+
+
+# ─── #2333: a failed catalog probe is "no answer", not "serves nothing" ────────
+
+
+def test_flm_catalog_is_none_when_the_probe_gives_no_answer() -> None:
+    """A failed ``flm list`` reads as unknown via flm_catalog() and stays unknown
+    on the cached path, while flm_served_models() still renders an empty list."""
+    import hal0.providers.flm as flm
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise FileNotFoundError
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch("subprocess.run", _boom):
+            assert flm.flm_catalog() is None
+            assert flm.flm_catalog() is None  # cache hit keeps "no answer"
+            assert flm.flm_served_models() == []
+    finally:
+        flm.reset_flm_catalog_cache()
+
+
+def test_flm_catalog_empty_answer_is_a_definitive_empty_list() -> None:
+    """``flm list`` answering with no models is a real "serves nothing"."""
+    import hal0.providers.flm as flm
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch(
+            "subprocess.run", lambda *a, **k: MagicMock(returncode=0, stdout=b'{"models": []}')
+        ):
+            assert flm.flm_catalog() == []
+            assert flm.flm_served_models() == []
+    finally:
+        flm.reset_flm_catalog_cache()
+
+
+def test_flm_catalog_answer_after_reset_replaces_a_failed_probe() -> None:
+    """A reset after a failed probe lets the next answer through as definitive."""
+    import hal0.providers.flm as flm
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd="flm", timeout=30)
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch("subprocess.run", _boom):
+            assert flm.flm_catalog() is None
+        flm.reset_flm_catalog_cache()
+        ok = b'{"models": [{"model": "qwen3:0.6b", "installed": true}]}'
+        with patch("subprocess.run", lambda *a, **k: MagicMock(returncode=0, stdout=ok)):
+            catalog = flm.flm_catalog()
+        assert catalog is not None
+        assert [m["tag"] for m in catalog] == ["qwen3:0.6b"]
+    finally:
+        flm.reset_flm_catalog_cache()

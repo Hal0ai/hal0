@@ -223,6 +223,11 @@ def _classify_pair(
     return "illegal_backend", legal
 
 
+def _is_flm_backed(sel: CapabilitySelection) -> bool:
+    """True when the selection's catalog row can only come from ``flm list``."""
+    return sel.device == "npu" or sel.provider == "flm"
+
+
 @app.command()
 def migrate(
     apply: bool = typer.Option(
@@ -250,6 +255,11 @@ def migrate(
     write, matching ``hal0 migrate model-layout --apply``'s contract.
     Idempotent — running ``--apply`` twice is a no-op once everything is
     legal.
+
+    NPU (FLM) selections are judged against host ``flm list``. When that
+    probe gives no answer (#2333), they are left alone and listed as
+    skipped: a failed probe says nothing about whether the model is still
+    served, so clearing them would lose the operator's bindings.
     """
     del dry_run  # deprecated hidden flag — dry-run is the unconditional default now
     # SC-10: the load → diff → save is one read-modify-write. Hold the same
@@ -264,6 +274,8 @@ def migrate(
         registry = ModelRegistry()
 
         changes: list[dict[str, str]] = []
+        skipped: list[str] = []
+        flm_answered: bool | None = None  # probed lazily, once, for FLM selections
         for slot, children in cfg.selections.items():
             for child, sel in children.items():
                 capability = _CHILD_TO_CAPABILITY.get((slot, child))
@@ -272,6 +284,16 @@ def migrate(
                 verdict, legal = _classify_pair(capability, sel.model, sel.device, registry)
                 if verdict in {"empty", "ok"}:
                     continue
+                if _is_flm_backed(sel):
+                    if flm_answered is None:
+                        # Local import: keeps the provider module (and httpx)
+                        # off the CLI's import path, as catalog.py does.
+                        from hal0.providers.flm import flm_catalog
+
+                        flm_answered = flm_catalog() is not None
+                    if not flm_answered:
+                        skipped.append(f"{slot}/{child} ({sel.model})")
+                        continue
                 if verdict == "illegal_backend":
                     new_backend = legal[0] if legal else ""
                     # Re-resolve provider against the matching row so the
@@ -322,7 +344,16 @@ def migrate(
                             enabled=False,
                         )
 
+        if skipped:
+            console.print(
+                "[yellow]skipped[/yellow] — `flm list` gave no answer, so these NPU "
+                f"selection(s) cannot be checked and are left as they are: {', '.join(skipped)}. "
+                "Re-run once `flm list -j` works for this user."
+            )
+
         if not changes:
+            if skipped:
+                raise typer.Exit(0)
             console.print(
                 f"[green]nothing to migrate[/green] — every selection in "
                 f"{capabilities_toml_path()} is legal against the current catalog."

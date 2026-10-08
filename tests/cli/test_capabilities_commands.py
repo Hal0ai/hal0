@@ -362,3 +362,123 @@ def _npu_selection() -> dict[str, dict[str, CapabilitySelection]]:
             "embed": CapabilitySelection(device="npu", provider="flm", model="embed-gemma:300m")
         }
     }
+
+
+# ── #2333: migrate must not act on an FLM catalog probe that gave no answer ──
+
+
+def _flm_list_answers(monkeypatch: pytest.MonkeyPatch, raw: list[dict[str, Any]] | None) -> None:
+    """Make host ``flm list -j`` answer ``raw`` (``None`` = the probe failed).
+
+    Patches only ``_probe_flm_catalog``, so the real cache, ``flm_catalog`` /
+    ``flm_served_models`` split and catalog projection run. The host is
+    reported without an NPU so the FLM-image probe never starts; migrate's
+    verdict does not depend on it (see the #1974 tests above).
+    """
+    import types
+
+    import hal0.providers.flm as flm_mod
+    from hal0.capabilities import catalog
+
+    monkeypatch.setattr(
+        catalog,
+        "load_hardware_info",
+        lambda: types.SimpleNamespace(npu=types.SimpleNamespace(present=False), gpus=[]),
+    )
+    monkeypatch.setattr(flm_mod, "_probe_flm_catalog", lambda: raw)
+    flm_mod.reset_flm_catalog_cache()
+
+
+@pytest.fixture
+def _clean_flm_cache():
+    """Drop the module-level FLM catalog cache after the test."""
+    yield
+    import hal0.providers.flm as flm_mod
+
+    flm_mod.reset_flm_catalog_cache()
+
+
+def test_migrate_apply_leaves_npu_selection_when_flm_list_fails(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, _clean_flm_cache: None
+) -> None:
+    """A failed ``flm list`` is no answer: --apply must not clear an FLM selection."""
+    _flm_list_answers(monkeypatch, None)
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert stub_config.saved["cfg"] is None, "an NPU selection was rewritten"
+    assert "(cleared)" not in result.output
+    assert "embed-gemma:300m" in result.output  # the skipped selection is named
+
+
+def test_migrate_dry_run_does_not_preview_clearing_when_flm_list_fails(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, _clean_flm_cache: None
+) -> None:
+    """The preview must not promise to clear what --apply would leave alone."""
+    _flm_list_answers(monkeypatch, None)
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert "(cleared)" not in result.output
+
+
+def test_migrate_apply_still_clears_npu_model_flm_definitively_lacks(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, _clean_flm_cache: None
+) -> None:
+    """``flm list`` answering without the tag is a real "not in catalog"."""
+    _flm_list_answers(monkeypatch, [])
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    sel = stub_config.saved["cfg"].selections["embed"]["embed"]
+    assert (sel.device, sel.model, sel.enabled) == ("npu", "", False)
+
+
+def test_migrate_apply_keeps_npu_selection_flm_serves(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, _clean_flm_cache: None
+) -> None:
+    """Control: when ``flm list`` answers with the tag, nothing is rewritten."""
+    _flm_list_answers(
+        monkeypatch,
+        [
+            {
+                "model": "embed-gemma:300m",
+                "label": ["embeddings"],
+                "installed": True,
+                "size": 300_000_000,
+                "footprint": 0.6,
+            }
+        ],
+    )
+    stub_config(_npu_selection())
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert stub_config.saved["cfg"] is None
+
+
+def test_migrate_apply_still_fixes_non_flm_selections_when_flm_list_fails(
+    stub_config, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, _clean_flm_cache: None
+) -> None:
+    """Only FLM-backed selections depend on ``flm list``; others still migrate."""
+    _flm_list_answers(monkeypatch, None)
+    selections = _npu_selection()
+    selections["embed"]["embed"] = CapabilitySelection(device="npu", provider="flm", model="x:1b")
+    selections["embed"]["rerank"] = CapabilitySelection(device="cpu", provider="", model="ghost")
+    stub_config(selections)
+
+    result = runner.invoke(cc.app, ["migrate", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    saved = stub_config.saved["cfg"]
+    assert saved is not None
+    npu = saved.selections["embed"]["embed"]
+    assert (npu.device, npu.model) == ("npu", "x:1b")
+    assert saved.selections["embed"]["rerank"].model == ""
