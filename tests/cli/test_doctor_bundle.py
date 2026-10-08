@@ -216,6 +216,35 @@ def test_bundle_includes_the_latest_install_log_redacted(
     assert "logs/" in manifest["sections"]
 
 
+def test_bundle_redacts_name_value_secrets_in_the_latest_install_log(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2360: the copied install log is redacted like the failure report,
+    so a ``NAME=value`` secret in the NEWEST log does not reach the bundle."""
+    log_dir = tmp_path / "var-log-hal0"
+    log_dir.mkdir()
+    log = log_dir / "install-20261008-000000.log"
+    log.write_text(
+        "==> Step 3/16: Python environment\n"
+        "+ HF_TOKEN=hf_abc123installsecret hf auth whoami\n"
+        "export HAL0_CLIENT_KEY=h0c_install_client_key_42\n"
+        "GET https://x.invalid/v1?apiKey=apik3yinst4llval\n"
+        "benign HAL0_PORT=8080 kept\n"
+    )
+    monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    body = (out / "logs" / "install.log").read_text()
+    for secret in ("hf_abc123installsecret", "h0c_install_client_key_42", "apik3yinst4llval"):
+        assert secret not in body, secret
+    assert "HF_TOKEN=***REDACTED***" in body
+    assert "HAL0_CLIENT_KEY=***REDACTED***" in body
+    assert "benign HAL0_PORT=8080 kept" in body
+    assert "Step 3/16: Python environment" in body
+
+
 def test_bundle_surfaces_install_artifacts_and_copies_the_failure_report(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

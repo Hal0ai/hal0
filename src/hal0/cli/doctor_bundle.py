@@ -509,16 +509,43 @@ def _install_artifacts() -> dict[str, dict[str, str] | None]:
     }
 
 
+# ``NAME=value`` in free text, value bare or quoted. The name is judged by
+# hal0.api._redact.is_sensitive_key; only the value is replaced.
+_NAME_VALUE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|[^\s\"',}&]+)"
+)
+
+
+def _redact_install_text(text: str) -> str:
+    """Redact an installer log or failure report copied into the bundle.
+
+    :func:`hal0.redaction.redact_log_line` masks Bearer, ``client_id=`` and
+    ``*_KEY=`` values; ``NAME=value`` for every other secret-named NAME
+    (``HF_TOKEN=``, ``DB_PASSWORD=``, ``apiKey=``) is masked here by key
+    name, then :func:`_redact_text` scrubs JWTs.
+    """
+    from hal0.api._redact import is_sensitive_key
+    from hal0.redaction import MASK, redact_log_line
+
+    def _mask(match: re.Match[str]) -> str:
+        name, value = match.group("name"), match.group("value")
+        if not is_sensitive_key(name):
+            return match.group(0)
+        quote = value[0] if value[0] in "\"'" else ""
+        return f"{name}={quote}{MASK}{quote}"
+
+    lines = (_NAME_VALUE_RE.sub(_mask, redact_log_line(line)) for line in text.splitlines())
+    return _redact_text("\n".join(lines))
+
+
 def _write_install_report(out: Path) -> list[str]:
     """Copy the newest installer failure report into the bundle.
 
     The installer already redacts it (installer/lib/failure-report.sh); it
-    is scrubbed again here with :func:`hal0.redaction.redact_log_line` so a
-    report from an older installer cannot carry a ``*_KEY=`` value in.
+    is scrubbed again here with :func:`_redact_install_text` so a report
+    from an older installer cannot carry a ``NAME=value`` secret in.
     The report is 0600 root-owned: an unreadable one is skipped, not fatal.
     """
-    from hal0.redaction import redact_log_line
-
     src = _latest_match(_INSTALL_REPORT_GLOBS)
     if src is None:
         return []
@@ -528,14 +555,13 @@ def _write_install_report(out: Path) -> list[str]:
         return []
     dest = out / "logs" / "install-failure-report.txt"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    redacted = "\n".join(redact_log_line(line) for line in text.splitlines())
-    dest.write_text(_redact_text(redacted) + "\n")
+    dest.write_text(_redact_install_text(text) + "\n")
     return ["logs/install-failure-report.txt"]
 
 
 def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
     """Copy the tail of the most recent installer log (installer/lib/logging.sh)
-    into the bundle, redacted like every other free-text capture (§3.1).
+    into the bundle, redacted like the failure report (§3.1, #2360).
 
     Best-effort: no install log on this box (a long-lived install predating
     this feature, or a box whose /tmp was cleaned) writes nothing rather
@@ -550,7 +576,7 @@ def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
         tail = src.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
     except OSError:
         return []
-    dest.write_text(_redact_text("\n".join(tail)) + "\n")
+    dest.write_text(_redact_install_text("\n".join(tail)) + "\n")
     return ["logs/install.log"]
 
 

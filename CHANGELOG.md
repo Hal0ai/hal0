@@ -220,7 +220,8 @@ applying. Add those subsections to a version's section to surface them; see
   under a 10-second timeout so a hung Podman cannot stall the abort, and is
   now readable by root only. `hal0 doctor bundle` lists the latest install
   log and report under `install_artifacts` in `manifest.json` and includes
-  the report (#2307).
+  the report; both the report and the install log it copies have
+  secret-named `NAME=value` values (such as `HF_TOKEN=`) masked (#2307).
 
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads
