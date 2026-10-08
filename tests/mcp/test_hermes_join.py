@@ -881,7 +881,7 @@ def test_driver_env_is_rewritten_only_when_the_loopback_hosts_change(
     calls: list[int] = []
     real = hermes_provision.refresh_driver_env
     monkeypatch.setattr(
-        hermes_provision, "refresh_driver_env", lambda: (calls.append(1), real())[1]
+        hermes_provision, "refresh_driver_env", lambda **kw: (calls.append(1), real(**kw))[1]
     )
     _install("remote", exposure=installed.ExposureConfig(hermes=True))
     assert hermes_join.sync_exposure()["driver_env"]["refreshed"] is False
@@ -922,7 +922,7 @@ def test_sync_leaves_a_driver_env_outside_the_hal0_home_alone(
     monkeypatch.setattr(
         hermes_provision,
         "refresh_driver_env",
-        lambda: (_ for _ in ()).throw(AssertionError("must not refresh")),
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not refresh")),
     )
     _install(
         "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
@@ -938,7 +938,7 @@ def test_failed_driver_env_refresh_is_reported_and_retried(tmp_hal0_home: str, m
         "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
     )
 
-    def boom() -> None:
+    def boom(**kw: object) -> None:
         raise RuntimeError("seam refused")
 
     real = hermes_provision.refresh_driver_env
@@ -949,6 +949,32 @@ def test_failed_driver_env_refresh_is_reported_and_retried(tmp_hal0_home: str, m
 
     monkeypatch.setattr(hermes_provision, "refresh_driver_env", real)
     assert hermes_join.sync_exposure()["driver_env"]["refreshed"] is True
+    assert "127.0.0.2" in _no_proxy(path)
+
+
+def test_driver_env_writes_the_hosts_the_join_records(tmp_hal0_home: str, monkeypatch) -> None:
+    """The write uses the host list the join looked up and records: a second
+    lookup inside the writer that failed would write an incomplete NO_PROXY
+    while the join recorded the full set as done."""
+    path = _sandboxed_driver_env(monkeypatch)
+    _install(
+        "local", url="http://127.0.0.2:9000/mcp", exposure=installed.ExposureConfig(hermes=True)
+    )
+    real_lookup = installed.exposed_loopback_hosts
+    lookups: list[int] = []
+
+    def flaky() -> list[str]:
+        lookups.append(1)
+        if len(lookups) > 1:
+            raise RuntimeError("registry read failed")
+        return real_lookup()
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", flaky)
+    monkeypatch.setattr(hermes_join, "exposed_loopback_hosts", flaky)
+
+    report = hermes_join.sync_exposure()
+
+    assert report["driver_env"]["refreshed"] is True
     assert "127.0.0.2" in _no_proxy(path)
 
 

@@ -187,7 +187,7 @@ def _converge_driver_env_no_proxy(
     if path != hermes_provision.DRIVER_ENV_PATH or not path.exists():
         return report, previous
     try:
-        hermes_provision.refresh_driver_env()
+        hermes_provision.refresh_driver_env(no_proxy_hosts=hosts)
     except Exception as exc:
         log.warning("hal0.mcp.hermes_join.driver_env_refresh_failed", error=str(exc))
         errors.append(f"driver_env: {exc}")
