@@ -112,6 +112,23 @@ def _api_base() -> str:
     return os.environ.get("HAL0_API_URL", _HAL0_API_BASE_DEFAULT).rstrip("/")
 
 
+def _hal0_source_checkout() -> Path | None:
+    """Root of the hal0 git checkout this module is imported from, or None.
+
+    Only a source checkout (editable install, or the git-tracked FHS
+    layout — see ``hal0.build_info.build_sha``) has one; a packaged
+    site-packages copy does not. ``.git`` may be a file (git worktree).
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (
+            (parent / ".git").exists()
+            and (parent / "pyproject.toml").is_file()
+            and (parent / "src" / "hal0").is_dir()
+        ):
+            return parent
+    return None
+
+
 def _pi_binary_on_path() -> bool:
     """Module-level seam so tests can monkeypatch the PATH probe."""
     return shutil.which("pi") is not None
@@ -495,18 +512,21 @@ class PiDriver(AgentDriver):
         """Seed ~/.hindsight/coding-agent.json iff absent — an existing
         file is operator/agent-shared state (other harnesses read it
         too) and is never overwritten. Banks: coding-agent::{gitProject};
-        the box repo checkout maps into the shared hal0-mono bank (spec
-        bank guardrail)."""
+        the hal0 checkout this driver runs from, when there is one, maps
+        into the shared hal0-mono bank (spec bank guardrail). A packaged
+        install has no checkout, so no mapping is seeded (#2315)."""
         path = self._hindsight_client_config()
         if path.exists():
             return
-        payload = {
+        payload: dict[str, Any] = {
             "serverMode": "self-hosted",
             "apiUrl": _HINDSIGHT_API_URL,
-            "mapPathToBank": {"/home/halo/dev/hal0": "coding-agent::hal0-mono"},
-            "retainTags": ["project:{gitProject}"],
-            "retainMetadata": {"repo": "{gitProject}"},
         }
+        checkout = _hal0_source_checkout()
+        if checkout is not None:
+            payload["mapPathToBank"] = {str(checkout): "coding-agent::hal0-mono"}
+        payload["retainTags"] = ["project:{gitProject}"]
+        payload["retainMetadata"] = {"repo": "{gitProject}"}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
