@@ -173,6 +173,38 @@ def test_allow_unknown_server_dies(api: dict[str, Any]) -> None:
     assert not api["patches"]
 
 
+_REDIRECT_WARNING = (
+    "MCP server 'github': Hermes sends header value(s) ['X-Api-Key'] from "
+    "[secrets]/[env] on any redirect"
+)
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_test_cmd_prints_the_redirect_warning(api: dict[str, Any], ok: bool) -> None:
+    """#2330: shown whether or not the probe reached the server."""
+    api["post_response"] = {
+        "probe": {"ok": ok, "tools": [], "error": "connection refused"},
+        "verdicts": {},
+        "warnings": [_REDIRECT_WARNING],
+    }
+    result = runner.invoke(mcp_commands.app, ["test", "github"])
+    assert result.exit_code == 0, result.output
+    assert "X-Api-Key" in result.output
+    assert "[secrets]/[env]" in result.output  # printed literally, not as markup
+    assert "redirect" in result.output
+
+
+def test_expose_prints_the_redirect_warning(api: dict[str, Any]) -> None:
+    api["patch_response"] = {
+        "server": {"exposure": {"hermes": True, "brain": False}},
+        "hermes_sync": {"errors": []},
+        "warnings": [_REDIRECT_WARNING],
+    }
+    result = runner.invoke(mcp_commands.app, ["expose", "github", "--hermes"])
+    assert result.exit_code == 0, result.output
+    assert "X-Api-Key" in result.output
+
+
 # ── `hal0 mcp expose` ─────────────────────────────────────────────────────────
 
 
