@@ -147,6 +147,22 @@ def test_longer_version_not_matched_by_shorter_query():
     assert "This is v0.5.1." not in body
 
 
+def test_stable_tag_does_not_match_its_prerelease_header():
+    """v1.4.0 must NOT match ## [1.4.0-rc.1] (#2345): otherwise a stable tag
+    with only an rc section ships the rc's notes and slips past the
+    missing-section guard in gen_release_notes.py (#2255)."""
+    changelog = "## [1.4.0-rc.1] — 2026-10-01\n\n- rc entry\n"
+    assert extract_changelog_section(changelog, "v1.4.0") == ""
+
+
+def test_stable_tag_skips_prerelease_header_above_its_own():
+    changelog = (
+        "## [1.4.0-rc.2] — 2026-10-02\n\n- rc entry\n\n## [1.4.0] — 2026-10-03\n\n- stable entry\n"
+    )
+    body = extract_changelog_section(changelog, "v1.4.0")
+    assert body == "- stable entry"
+
+
 # ── Return value properties ─────────────────────────────────────────────────
 
 

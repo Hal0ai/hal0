@@ -180,7 +180,10 @@ applying. Add those subsections to a version's section to surface them; see
   release still published but `release.json` carried empty highlights,
   breaking and migrations lists and `hal0 update` showed no callout. It now
   exits non-zero, writes nothing, and names the tag and the header to add.
-  Nightly releases still use the git log. (#2255)
+  Nightly releases still use the git log. A stable tag also no longer picks
+  up its own pre-release section (`v1.4.0` used to match `## [1.4.0-rc.1]`),
+  which would have shipped the rc's notes and slipped past that check.
+  (#2255, #2345)
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
