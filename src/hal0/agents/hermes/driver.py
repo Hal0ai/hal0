@@ -2,9 +2,12 @@
 
 Hermes is user-owned upstream — and crucially, the user cannot PR
 upstream NousResearch/hermes-agent. So hal0-awareness lives on the
-hal0 side, in a hal0-owned wrapper script (``hal0-hermes``) that
-sources ``/etc/hal0/agents/hermes.env`` and ``exec``s the upstream
-``hermes`` binary.
+hal0 side: hal0-owned wrapper scripts (``hermes``, and the back-compat
+``hal0-hermes``) set the hal0 env, source the outbound-credentials file
+``/var/lib/hal0/secrets/agents/hermes.env`` when present, and ``exec``
+the upstream ``hermes`` binary. The driver env file
+``/etc/hal0/agents/hermes.env`` is NOT sourced by the wrappers; only the
+``hal0-agent@hermes`` unit loads it (``EnvironmentFile=``).
 
 This driver's responsibilities:
 
@@ -13,10 +16,10 @@ This driver's responsibilities:
    wrapper is installed and functional (``--hal0-ready`` returns 0).
 2. On the API/dashboard install path, register an already-provisioned
    agent by writing the canonical env file at
-   ``/etc/hal0/agents/hermes.env`` that the wrapper sources on every
-   hermes invocation. Provisioning itself (venv create + pip install
-   hermes-agent + ``/usr/local/bin/hermes`` shim) lives in the
-   bootstrap pipeline (:mod:`hal0.agents.hermes_provision`), run in
+   ``/etc/hal0/agents/hermes.env`` that the ``hal0-agent@hermes`` unit
+   loads via ``EnvironmentFile=``. Provisioning itself (venv create +
+   pip install hermes-agent + ``/usr/local/bin/hermes`` shim) lives in
+   the bootstrap pipeline (:mod:`hal0.agents.hermes_provision`), run in
    the foreground by ``hal0 agent install hermes``.
 
 The pre-install gate shifted (see :func:`_probe_hermes_provisioned`):
