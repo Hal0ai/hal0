@@ -238,7 +238,7 @@ jobs:
 
       # ── 1. Build the UI bundle so the tarball includes ui/dist/ ─────────────
       - name: Setup Node 22
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -311,8 +311,8 @@ jobs:
       # extracted (cosign-verified) tree to show notes before commit
       # (src/hal0/updater/updater.py::_read_release_notes). These must be inside
       # the tarball root, so generate them here — before the tarball is built.
-      # Notes are optional: an un-noted release degrades to a one-liner + empty
-      # structured lists, which the CLI renders as no callouts.
+      # Stable/preview tags must have a non-empty `## [<version>]` section in
+      # CHANGELOG.md or this step fails (#2255); nightly uses the git log.
       - name: Stage release notes
         run: |
           python3 scripts/gen_release_notes.py \

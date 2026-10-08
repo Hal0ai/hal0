@@ -38,6 +38,7 @@ export const NAV_GROUPS = [
     title: "INTEGRATIONS",
     items: [
       { id: "secrets", label: "Secrets" },
+      { id: "accounts", label: "Connected Accounts" },
       { id: "agents", label: "Agent Chat" },
       { id: "realtime", label: "Realtime" },
     ],
@@ -59,6 +60,8 @@ export const SECTION_ALIASES = {
   voice: "capabilities",
   imagegen: "capabilities",
   npu: "capabilities",
+  // OAuth connected accounts (#2267) — the panel's own API name.
+  oauth: "accounts",
 };
 
 // Flat id → item lookup + the ordered id list, derived once from NAV_GROUPS

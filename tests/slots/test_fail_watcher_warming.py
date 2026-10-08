@@ -107,8 +107,19 @@ async def test_warming_slot_tolerates_a_transient_inactive_blip(
     assert sm._current_state("chat") == SlotState.WARMING
 
 
-def _spy_recovery(sm: SlotManager, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Record calls to sm.unload / sm.load while delegating to the originals."""
+def _spy_recovery(
+    sm: SlotManager,
+    monkeypatch: pytest.MonkeyPatch,
+    load_done: asyncio.Event | None = None,
+) -> list[tuple[str, str]]:
+    """Record calls to sm.unload / sm.load while delegating to the originals.
+
+    A call is recorded on ENTRY, so its presence in the list does not mean
+    the delegated coroutine has finished. Pass *load_done* to be told when
+    the delegated ``load()`` has actually returned (or raised): the reload
+    walks STARTING → WARMING → READY across its own awaits, so observing
+    the call alone races the final state (#2002).
+    """
     calls: list[tuple[str, str]] = []
     orig_unload = sm.unload
     orig_load = sm.load
@@ -119,7 +130,11 @@ def _spy_recovery(sm: SlotManager, monkeypatch: pytest.MonkeyPatch) -> list[tupl
 
     async def spy_load(name: str, model_id: str | None = None) -> Any:
         calls.append(("load", name))
-        return await orig_load(name, model_id)
+        try:
+            return await orig_load(name, model_id)
+        finally:
+            if load_done is not None:
+                load_done.set()
 
     monkeypatch.setattr(sm, "unload", spy_unload)
     monkeypatch.setattr(sm, "load", spy_load)
@@ -159,7 +174,8 @@ async def test_warming_slot_recovers_when_stale(
     sm = SlotManager()
     await _load_into_warming(sm, container_stub)
     assert sm._key("chat") in sm._fail_watchers
-    calls = _spy_recovery(sm, monkeypatch)
+    reload_done = asyncio.Event()
+    calls = _spy_recovery(sm, monkeypatch, load_done=reload_done)
 
     # On the reload, let the model converge so recovery lands in READY.
     async def _wait_ok(port: int, timeout_s: float | None = None) -> None:
@@ -170,11 +186,13 @@ async def test_warming_slot_recovers_when_stale(
     # Age the slot past the staleness ceiling (unit stays active throughout).
     sm._states[sm._key("chat")].updated_at = time.time() - mgr_mod._WARMING_STALE_AFTER_S - 1
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if ("unload", "chat") in calls and ("load", "chat") in calls:
-            break
-        await asyncio.sleep(0.05)
+    # Wait for the watchdog's reload to RETURN, not merely to be called: the
+    # spy records the call on entry, while load() is still mid-STARTING
+    # (#2002). The bound only turns a hung recovery into a failure.
+    try:
+        await asyncio.wait_for(reload_done.wait(), timeout=5.0)
+    except TimeoutError:
+        pytest.fail(f"watchdog recovery reload never completed; calls={calls}")
 
     assert ("unload", "chat") in calls, f"watchdog never unloaded wedged slot; {calls}"
     assert ("load", "chat") in calls, f"watchdog never reloaded wedged slot; {calls}"

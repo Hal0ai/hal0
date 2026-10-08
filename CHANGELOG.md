@@ -200,6 +200,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **A stable or preview release now fails its build when `CHANGELOG.md` has
+  no section for it.** `scripts/gen_release_notes.py` used to fall back to a
+  git log when the `## [<version>]` header was missing or empty, so the
+  release still published but `release.json` carried empty highlights,
+  breaking and migrations lists and `hal0 update` showed no callout. It now
+  exits non-zero, writes nothing, and names the tag and the header to add.
+  Nightly releases still use the git log. A stable tag also no longer picks
+  up its own pre-release section (`v1.4.0` used to match `## [1.4.0-rc.1]`),
+  which would have shipped the rc's notes and slipped past that check.
+  (#2255, #2345)
+
+- **The OAuth "Connected accounts" panel is reachable from the dashboard.**
+  v1.3.0 shipped it only inside the old Connections page, which the
+  dashboard redirects to Slots ▸ Endpoints, so no menu led to it and
+  connecting an account needed `hal0 oauth`. It now lives at
+  **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
+  also reachable as `#settings/oauth` and from the command palette). (#2267)
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was

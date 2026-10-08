@@ -1,24 +1,24 @@
 ---
 title: Validation matrix
-description: "hal0's α/β/γ test tiers and the rc-validate release-validation kit mapped onto release-readiness gates, plus a 'User Green' definition for hal0 — a fresh box reaching first chat unattended."
+description: "hal0's α/γ test tiers and the rc-validate release-validation kit mapped onto release-readiness gates, plus a 'User Green' definition for hal0 — a fresh box reaching first chat unattended."
 sidebar:
   order: 56
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0 validates a change at three widening tiers before it reaches a
+hal0 validates a change at two widening tiers before it reaches a
 release, plus one exploratory layer that runs only against a release
 candidate. This page names what each layer proves, where it runs, and what
 blocks a release — see [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers)
-for the day-to-day commands.
+for the day-to-day commands. There is no β (integration) tier: it was
+retired in v0.2 and not replaced, so nothing automated sits between α and γ.
 
-## The four layers
+## The three layers
 
 | Tier | What it proves | Where it runs | Blocks what |
 |---|---|---|---|
-| **α — Unit** | Pure logic, mocked systemd and HTTP clients. | Any host, no daemons — `make test` | Every commit / PR. |
-| **β — Integration** *(documented, not currently wired)* | Real `hal0-lemonade.service` + a tiny GGUF: load → chat → swap → unload, slot state visible via `/v1/health` — per `CONTRIBUTING.md`'s description. | Neither `make test-integration` nor `.github/workflows/integration.yml` exist in the tree today — both were retired alongside the old per-modality toolboxes (`4c01f0c1`) and never restored, despite that commit's own message naming a follow-up that would. Filed as [#2239](https://github.com/Hal0ai/hal0/issues/2239). | Nothing today — there is no automated tier between α and γ right now. |
+| **α — Unit** | Pure logic, mocked systemd and HTTP clients. `make test` is unfiltered, so host-dependent tests (e.g. the OpenWebUI prewire smoke's real `docker pull`/`run`) also run when their daemon is reachable. | Any host — `make test` | Every commit / PR. |
 | **γ — Release-gate script** | The 7-row matrix in `scripts/release-test.sh` — `vulkan`, `rocm`, `flm` (NPU), `moonshine` (STT), `kokoro` (TTS), `openwebui`, and a check-only `updater` row — on one designated box. | `hal0-test` LXC over SSH — `make release-test` | Per release candidate, not per commit. Row status `pass\|fail\|skip\|deferred`; only `fail` blocks. |
 | **γ+ — Release-validation fleet (`rc-validate` kit)** | The product as an operator would actually use it — CLI, API, MCP, Hermes, UI, then serialized stateful lanes (slots, routing, brain, memory, capabilities, Hermes e2e), then an in-place upgrade — on real hardware, per `tests/release-validation/`. | A private real-hardware fleet (Proxmox-hosted; see [Support matrix](/docs/reference/support-matrix/)) | Release-candidate confidence. Agent-driven and exploratory, not a fixed pytest suite — findings that prove mechanical get folded back into pytest/`release-test.sh` so they stop needing an agent (`tests/release-validation/README.md`). |
 
@@ -72,7 +72,7 @@ Composed from the same layers as the table above:
 <Aside type="caution">
 This is a documentation mapping, not a new CI gate — hal0 has no automated job today that
 computes a single "User Green" boolean and fails a release on it. Release readiness is currently
-a human judgment call informed by the α/β/γ results plus the `rc-validate` report; this table
+a human judgment call informed by the α/γ results plus the `rc-validate` report; this table
 exists so that judgment has a name and a checklist, not a formula.
 </Aside>
 
@@ -81,4 +81,4 @@ exists so that judgment has a name and a checklist, not a formula.
 - [Support matrix](/docs/reference/support-matrix/) — the hardware/platform coverage these tiers actually exercise.
 - [Verify the install](/docs/getting-started/verify/) — the six-step checklist an operator runs by hand; steps 1, 2, 3, 4, and 6 are exactly the checks "Product Green" and "Capability Green" above cite.
 - [`tests/release-validation/README.md`](https://github.com/Hal0ai/hal0/blob/main/tests/release-validation/README.md) — the kit's own layout, phase table, and process lessons.
-- [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers) — α/β/γ commands and CI wiring.
+- [`CONTRIBUTING.md`](https://github.com/Hal0ai/hal0/blob/main/CONTRIBUTING.md#test-tiers) — α/γ commands and CI wiring.
