@@ -424,7 +424,7 @@ async def test_run_flm_pull_cancelled_during_setup_is_marked_cancelled(
     monkeypatch.setattr(flm_mod, "flm_served_models_async", hang)
     from hal0.registry import pull as pull_mod
 
-    monkeypatch.setattr(pull_mod, "_flm_install_path", lambda *a: None)
+    monkeypatch.setattr(pull_mod, "_FlmInstallPathLookup", lambda *a: lambda: None)
 
     job = PullJob(job_id="j-cancel", model_id="qwen3:0.6b")
     task = asyncio.create_task(run_flm_pull(job, tag="qwen3:0.6b", registry=object()))

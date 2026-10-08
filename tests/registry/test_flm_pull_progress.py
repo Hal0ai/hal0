@@ -72,11 +72,11 @@ async def test_progress_recovers_transient_none_target_dir(
     # would strand target_dir at None for the whole download.
     calls = {"n": 0}
 
-    def _flaky_install_path(hmd: str, tag: str) -> str | None:
+    def _flaky_install_path() -> str | None:
         calls["n"] += 1
         return None if calls["n"] <= 2 else str(target)
 
-    monkeypatch.setattr(pull_mod, "_flm_install_path", _flaky_install_path)
+    monkeypatch.setattr(pull_mod, "_FlmInstallPathLookup", lambda hmd, tag: _flaky_install_path)
 
     job = _RecordingJob()
     registry = object()  # unused: _register_flm_pulled is stubbed

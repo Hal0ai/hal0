@@ -1882,9 +1882,10 @@ async def run_flm_pull(
         await asyncio.to_thread(ensure_host_flm_store_link)
 
         # Resolve the install path + advertised total upfront so progress
-        # reporting is monotonic. _flm_install_path reads the same cached
-        # catalog flm_served_models uses; both fall back gracefully when
-        # the probe failed (host without docker / image not present).
+        # reporting is monotonic. The install-path lookup keeps the raw
+        # ``flm list -j`` answer for the whole pull (#2379); the advertised total
+        # reads the cached catalog flm_served_models uses. Both fall back
+        # gracefully when the probe failed (host without flm / image not present).
         #
         # These two probes (``flm list``) can transiently return an EMPTY catalog
         # right at pull start — observed live: the dir grew steadily on disk while
@@ -1895,13 +1896,16 @@ async def run_flm_pull(
         #
         # Both shell ``flm list -j`` (up to 30 s) on a cold cache, so every read
         # here runs on a worker thread, never on the event loop (#2334).
-        target_dir = await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
+        install_path = _FlmInstallPathLookup(host_models_dir, tag)
+        target_dir = await asyncio.to_thread(install_path)
         advertised_total = 0
         for entry in await flm_served_models_async():
             if entry["tag"] == tag:
                 advertised_total = int(entry.get("size_bytes") or 0)
                 break
-        baseline_size = _dir_size(target_dir) if target_dir else 0
+        # ``_dir_size`` walks the whole model dir: a worker thread, never the
+        # event loop, at start, per tick and after the pull (#2380).
+        baseline_size = await asyncio.to_thread(_dir_size, target_dir) if target_dir else 0
         if advertised_total > baseline_size:
             job.bytes_total = advertised_total
             job._signal()
@@ -1932,7 +1936,7 @@ async def run_flm_pull(
             nonlocal target_dir, baseline_size
             if target_dir:
                 return
-            resolved = _flm_install_path(host_models_dir, tag)
+            resolved = install_path()
             if resolved:
                 target_dir = resolved
                 baseline_size = 0
@@ -1961,7 +1965,7 @@ async def run_flm_pull(
 
             await asyncio.to_thread(_resolve)
 
-        def _tick_progress() -> None:
+        async def _tick_progress() -> None:
             """Refresh bytes_downloaded from on-disk dir size if it grew."""
             nonlocal last_emit
             if not target_dir:
@@ -1969,7 +1973,7 @@ async def run_flm_pull(
             now = time.monotonic()
             if (now - last_emit) < _SSE_MIN_INTERVAL_S:
                 return
-            current = _dir_size(target_dir) - baseline_size
+            current = await asyncio.to_thread(_dir_size, target_dir) - baseline_size
             if current > job.bytes_downloaded:
                 job.bytes_downloaded = current
                 if current > job.bytes_total:
@@ -1997,7 +2001,7 @@ async def run_flm_pull(
                 # No new line in 1s — loop back so cancellation observes
                 # promptly. Also a good cadence for the dir-size poll.
                 await _resolve_pending()
-                _tick_progress()
+                await _tick_progress()
                 continue
             if not raw:
                 break
@@ -2005,7 +2009,7 @@ async def run_flm_pull(
             # accounting any more, but the readline() drains the pipe so
             # the docker process doesn't block on a full stdout buffer.
             await _resolve_pending()
-            _tick_progress()
+            await _tick_progress()
 
         await proc.wait()
         if proc.returncode != 0:
@@ -2027,11 +2031,11 @@ async def run_flm_pull(
         # Best-effort path bookkeeping. FLM stores each tag's weights at
         # ``<host_models_dir>/<HF-repo-name>/`` — we resolve the dir from
         # the FLM model_list lookup when available, falling back to the
-        # bare host dir so a missing entry doesn't fail the job.
-        final_path = (
-            await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
-        ) or host_models_dir
-        size_bytes = _dir_size(final_path)
+        # bare host dir so a missing entry doesn't fail the job. A dir the
+        # ticks already resolved is final (the tag's ``url`` does not change
+        # across a pull), so only an unresolved one asks the lookup again.
+        final_path = target_dir or (await asyncio.to_thread(install_path)) or host_models_dir
+        size_bytes = await asyncio.to_thread(_dir_size, final_path)
         if job.bytes_total <= 0 and size_bytes > 0:
             job.bytes_total = size_bytes
         if job.bytes_downloaded < size_bytes:
@@ -2092,21 +2096,44 @@ async def run_flm_pull(
         log.exception("model.pull_flm_unexpected_error", extra={"tag": tag})
 
 
-def _flm_install_path(host_models_dir: str, tag: str) -> str | None:
-    """Look up the on-disk subdir FLM uses for ``tag``, or None if unknown.
+class _FlmInstallPathLookup:
+    """Per-pull lookup of the on-disk subdir FLM uses for ``tag`` (#2379).
 
-    Walks the toolbox image's bundled ``model_list.json`` schema (family
-    → variants → name=HF-repo). We probe it via ``flm_served_models``
-    indirectly: the cached entry exposes a ``family`` field but not the
-    HF name, so we read FLM's own JSON by shelling ``flm list -j`` and
-    matching tag → ``name``. The probe is cached, so this lookup is
-    O(1) after the first call.
+    ``run_flm_pull`` retries this every progress tick until it resolves, so it
+    must not shell ``flm list -j`` (:func:`~hal0.providers.flm._probe_flm_catalog`,
+    uncached, up to 30 s) on every call. The first non-empty catalog is kept
+    for the life of the pull; only an empty or failed answer is probed again,
+    since that is the transient the per-tick retry exists for. The cached
+    catalog in ``providers/flm.py`` cannot be reused: it keeps parsed entries
+    without the ``url`` this lookup needs.
+
+    Not thread-safe; ``run_flm_pull`` awaits each call before the next.
     """
-    from hal0.providers.flm import _probe_flm_catalog
 
-    models = _probe_flm_catalog()
-    if not models:
-        return None
+    def __init__(self, host_models_dir: str, tag: str) -> None:
+        """Bind the lookup to one pull's host models dir and tag."""
+        self.host_models_dir = host_models_dir
+        self.tag = tag
+        self._models: list[Any] | None = None
+
+    def __call__(self) -> str | None:
+        """Return the install dir for the tag, or None if it is unknown."""
+        if not self._models:
+            from hal0.providers.flm import _probe_flm_catalog
+
+            self._models = _probe_flm_catalog() or None
+        if not self._models:
+            return None
+        return _flm_install_path_from(self._models, self.host_models_dir, self.tag)
+
+
+def _flm_install_path_from(models: list[Any], host_models_dir: str, tag: str) -> str | None:
+    """Find ``tag``'s install dir in a raw ``flm list -j`` model list.
+
+    The toolbox image's bundled ``model_list.json`` maps family → variants →
+    name=HF-repo; the flat ``flm list -j`` output drops that tree but keeps
+    each entry's ``url``, so the HF repo name is read from there.
+    """
     for entry in models:
         if not isinstance(entry, dict):
             continue

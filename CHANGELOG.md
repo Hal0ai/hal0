@@ -342,6 +342,21 @@ applying. Add those subsections to a version's section to surface them; see
   answer. Other selections still migrate, and a model that `flm list`
   answers without is still cleared as before.
 
+- **An FLM pull runs `flm list -j` once, not once per progress tick**
+  (#2379). While a pull's install path was unresolved, every progress tick
+  (about once a second) re-ran the uncached `flm list -j` probe, for the
+  whole download when a tag's path never resolves. The pull now keeps the
+  first non-empty `flm list` answer for its lifetime and probes again only
+  while the answer is empty.
+
+- **An FLM pull no longer stalls hal0-api while it measures the model
+  directory** (#2380). To report progress, an FLM pull walks the model's
+  directory and sums its file sizes: once at the start, on every progress
+  tick, and once at the end. Each walk ran on the event loop, so on a large
+  or slow models directory every other request, SSE stream and WebSocket
+  waited for it, for the whole download. The walks now run on a worker
+  thread.
+
 - **The benchmark roster shows every model stored as `<dir>/model.gguf`.**
   The roster grouped benchmark records by the gguf file name, so models
   pulled into their own directory (all named `model.gguf`) collapsed into
@@ -364,6 +379,7 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+
 - **An omni `generate_image` call no longer strands its own caller on a
   single-GPU box.** The image render switches the GPU to exclusive image
   mode, which unloads the calling LLM slot; the loop's next chat round then

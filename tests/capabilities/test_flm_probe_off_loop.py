@@ -534,7 +534,9 @@ async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
     monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])
     monkeypatch.setattr(flm_mod, "reset_flm_catalog_cache", lambda: None)
     monkeypatch.setattr(pull_mod, "_register_flm_pulled", lambda *a, **k: None)
-    monkeypatch.setattr(pull_mod, "_flm_install_path", lambda hmd, tag: str(tmp_path / "Repo"))
+    monkeypatch.setattr(
+        pull_mod, "_FlmInstallPathLookup", lambda hmd, tag: lambda: str(tmp_path / "Repo")
+    )
     generation_before = catalog._flm_probe_generation
 
     job = PullJob(job_id="j1", model_id="fake:tag")
