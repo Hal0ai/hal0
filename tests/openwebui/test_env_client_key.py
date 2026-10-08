@@ -176,8 +176,9 @@ def test_operator_key_on_repointed_url_survives_render(tmp_path: Path) -> None:
 
 
 def test_operator_second_chat_connection_keeps_its_key(tmp_path: Path) -> None:
-    """The operator added a second Open WebUI connection: the list-form key
-    is withdrawn per entry, so the operator's entry is never deleted."""
+    """The operator added a second Open WebUI connection: each entry is keyed
+    by its own base URL, so hal0's entry keeps following the client key and
+    the operator's entry is never touched."""
     target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
     write_openwebui_env(target, preserve_existing=True)
     assert "OPENAI_API_KEYS" in _managed(target)
@@ -193,11 +194,97 @@ def test_operator_second_chat_connection_keeps_its_key(tmp_path: Path) -> None:
     )
     write_openwebui_env(target, preserve_existing=True)
     assert _parse(target)["OPENAI_API_KEYS"] == f"{CLIENT_KEY};sk-operator-openai-key"
-    assert "OPENAI_API_KEYS" not in _managed(target)
-    # The client key going away does not take the operator's line with it.
+    # The client key going away withdraws hal0's entry only.
     (tmp_path / "api.env").write_text("HAL0_BIND_HOST=0.0.0.0\n", encoding="utf-8")
     write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == "sk-hal0-local;sk-operator-openai-key"
+    assert CLIENT_KEY not in target.read_text(encoding="utf-8")
+
+
+_TWO_CONNECTIONS = (
+    "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1;https://api.openai.com/v1\n"
+)
+
+
+def test_fresh_render_with_two_connections_keys_the_hal0_entry(tmp_path: Path) -> None:
+    """A ``;``-list of base URLs still gets the client key on hal0's entry."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    target.write_text(
+        _TWO_CONNECTIONS + "OPENAI_API_KEYS=sk-hal0-local;sk-operator-openai-key\n",
+        encoding="utf-8",
+    )
+    write_openwebui_env(target, preserve_existing=True)
     assert _parse(target)["OPENAI_API_KEYS"] == f"{CLIENT_KEY};sk-operator-openai-key"
+
+
+def test_fresh_render_pads_short_key_list(tmp_path: Path) -> None:
+    """Keys stay aligned with their URLs: a missing entry is the placeholder."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    target.write_text(
+        "OPENAI_API_BASE_URLS=https://api.openai.com/v1;http://host.docker.internal:8080/v1\n"
+        "OPENAI_API_KEYS=sk-operator-openai-key\n",
+        encoding="utf-8",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == f"sk-operator-openai-key;{CLIENT_KEY}"
+
+
+def test_rotation_with_two_connections_moves_hal0_entry(tmp_path: Path) -> None:
+    """``hal0 auth rotate client``: hal0's entry moves to the new key, the
+    operator's is unchanged, and the old key is gone from the file."""
+    target = _with_api_env(tmp_path, "HAL0_CLIENT_KEY=old-client-key\n")
+    target.write_text(
+        _TWO_CONNECTIONS + "OPENAI_API_KEYS=sk-hal0-local;sk-operator-openai-key\n",
+        encoding="utf-8",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == "old-client-key;sk-operator-openai-key"
+    (tmp_path / "api.env").write_text(f"HAL0_CLIENT_KEY={CLIENT_KEY}\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == f"{CLIENT_KEY};sk-operator-openai-key"
+    assert "old-client-key" not in target.read_text(encoding="utf-8")
+    # The record holds a fingerprint, never the key itself.
+    header = [ln for ln in target.read_text(encoding="utf-8").splitlines() if ln.startswith("#")]
+    assert not any(CLIENT_KEY in ln for ln in header)
+
+
+def test_rotation_withdraws_old_key_from_repointed_entry(tmp_path: Path) -> None:
+    """An entry hal0 wrote under the previous key whose URL then left hal0
+    becomes the placeholder, not a stale hal0 key sent to another service."""
+    target = _with_api_env(tmp_path, "HAL0_CLIENT_KEY=old-client-key\n")
+    target.write_text(
+        _TWO_CONNECTIONS + "OPENAI_API_KEYS=sk-hal0-local;sk-operator-openai-key\n",
+        encoding="utf-8",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    _repoint(
+        target,
+        "OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1;",
+        "OPENAI_API_BASE_URLS=https://chat.example.com/v1;",
+    )
+    (tmp_path / "api.env").write_text(f"HAL0_CLIENT_KEY={CLIENT_KEY}\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == "sk-hal0-local;sk-operator-openai-key"
+
+
+def test_operator_key_on_added_hal0_connection_is_left_alone(tmp_path: Path) -> None:
+    """A second connection to hal0's /v1 carrying the operator's own key (not
+    the placeholder, not a key hal0 wrote) keeps it, across rotation too."""
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    target.write_text(
+        "OPENAI_API_BASE_URLS=https://api.openai.com/v1;http://host.docker.internal:8080/v1\n"
+        "OPENAI_API_KEYS=sk-operator-openai-key;operator-own-hal0-key\n",
+        encoding="utf-8",
+    )
+    write_openwebui_env(target, preserve_existing=True)
+    value = "sk-operator-openai-key;operator-own-hal0-key"
+    assert _parse(target)["OPENAI_API_KEYS"] == value
+    (tmp_path / "api.env").write_text("HAL0_CLIENT_KEY=rotated-key\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == value
+    (tmp_path / "api.env").write_text("HAL0_BIND_HOST=0.0.0.0\n", encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    assert _parse(target)["OPENAI_API_KEYS"] == value
 
 
 def test_hal0_entry_on_repointed_chat_connection_is_withdrawn(tmp_path: Path) -> None:

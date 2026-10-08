@@ -75,7 +75,7 @@ applying. Add those subsections to a version's section to surface them; see
   `OPENAI_API_KEYS` and the STT/TTS/RAG API keys, but only where the matching
   base URL still points at hal0. Those keys are recorded as hal0-managed, so
   a key re-pointed at another service never receives hal0's (hal0 withdraws
-  only a value that still equals its key, per connection for
+  only a value it wrote itself, per connection for
   `OPENAI_API_KEYS`, so the operator's own key for that service is kept), and
   removing the client key falls back to the placeholder. Rotating the client key (`hal0
   auth rotate client`) re-renders Open WebUI's env and restarts it only when
