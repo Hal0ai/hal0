@@ -29,7 +29,7 @@ instance into ``mount_mcp_servers(...)`` as ``memory_dispatcher=``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -57,6 +57,10 @@ class MemoryDispatcher:
         Zero-arg callable returning whether the current call opted into
         the ``private:<client_id>`` namespace. Defaults
         to False.
+    add_preflight:
+        Zero-arg extraction-window check for ``memory_add`` (#1930) — the
+        same one ``/api/memory/add`` and ``/mcp/memory`` run. ``None``
+        skips it.
 
     The instance is callable so existing call sites in
     :mod:`hal0.mcp.admin` that expect a plain ``Callable[[str, dict], Awaitable[dict]]``
@@ -70,6 +74,7 @@ class MemoryDispatcher:
         *,
         client_id_resolver: Callable[[], str] | None = None,
         private_resolver: Callable[[], bool] | None = None,
+        add_preflight: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._wrapper = wrapper
         self._client_id_resolver = client_id_resolver
@@ -81,6 +86,7 @@ class MemoryDispatcher:
             wrapper,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
+            add_preflight=add_preflight,
         )
 
     async def dispatch(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:

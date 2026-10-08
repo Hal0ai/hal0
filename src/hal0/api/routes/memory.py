@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -717,6 +718,52 @@ async def _extraction_window(request: Request, wrapper: Any) -> Any | None:
     )
 
 
+async def extraction_ctx_preflight(app: Any, wrapper: Any) -> None:
+    """Refuse a memory write the extraction slot can never process (#1903, #1930).
+
+    The ONE owner of this rule: ``POST /api/memory/add`` calls it, and so does
+    the MCP ``memory_add`` tool (via :func:`make_add_preflight`), which is the
+    path agents actually retain through. Raises
+    :class:`MemoryExtractionCtxTooSmall` when the resolved window is
+    ``below_floor``; ``unknown`` and non-slot-dispatched providers pass.
+
+    Resolves against ``app.state`` only — a header-less synthetic request is
+    handed to :func:`_extraction_window`, so no caller-supplied metadata can
+    reach the resolution (the PR #1917 finding-1 property), and the MCP side,
+    which has no HTTP request of its own, takes the identical path.
+    """
+    window = await _extraction_window(Request({"type": "http", "app": app}), wrapper)
+    if window is not None and window.verdict == "below_floor":
+        log.warning(
+            "memory.extraction_ctx_below_floor slot=%r effective=%r floor=%r",
+            window.slot,
+            window.effective,
+            window.floor,
+        )
+        raise MemoryExtractionCtxTooSmall(
+            window.message(),
+            details={
+                "slot": window.slot,
+                "effective_context": window.effective,
+                "required_context": window.floor,
+            },
+        )
+
+
+def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
+    """Bind :func:`extraction_ctx_preflight` for the MCP ``memory_add`` tool (#1930).
+
+    MCP tool handlers only receive the memory provider, never the app, so the
+    mount site binds both here and hands the zero-arg callable to
+    :func:`hal0.mcp.memory.make_dispatcher` as ``add_preflight``.
+    """
+
+    async def _preflight() -> None:
+        await extraction_ctx_preflight(app, wrapper)
+
+    return _preflight
+
+
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?, document_id?}``.
@@ -791,22 +838,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
     # a "fact"). ``unknown`` (no evidence either way) does not block: a
     # preflight that can't prove the slot is broken must not refuse writes
     # on a healthy box just because the catalog lookup came back thin.
-    window = await _extraction_window(request, wrapper)
-    if window is not None and window.verdict == "below_floor":
-        log.warning(
-            "memory.extraction_ctx_below_floor slot=%r effective=%r floor=%r",
-            window.slot,
-            window.effective,
-            window.floor,
-        )
-        raise MemoryExtractionCtxTooSmall(
-            window.message(),
-            details={
-                "slot": window.slot,
-                "effective_context": window.effective,
-                "required_context": window.floor,
-            },
-        )
+    await extraction_ctx_preflight(request.app, wrapper)
 
     return await wrapper.add(
         text=text,
