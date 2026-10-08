@@ -42,7 +42,7 @@ export const EXTRACTION_LIMIT_FIELDS = [
     min: 0,
     max: 10,
     fallback: 2,
-    sub: 'Requeues of a failed retain task before it is marked failed (0–10) and shows under "Retry failed"',
+    sub: 'Requeues of a failed queued memory task before it is marked failed (0–10) and shows under "Retry failed". Worker-wide: consolidation and mental-model refresh share it',
   },
   {
     key: 'retry_backoff_s',
@@ -51,9 +51,20 @@ export const EXTRACTION_LIMIT_FIELDS = [
     min: 10,
     max: 3600,
     fallback: 120,
-    sub: 'Seconds a failed task waits before it is requeued (10–3600), so a retry does not land on a slot still busy with the attempt that timed out',
+    sub: 'Seconds a failed queued task waits before it is requeued (10–3600), so a retry does not land on a slot still busy with the attempt that timed out. Worker-wide',
   },
 ]
+
+/**
+ * Does this status payload carry the limits at all? An API that predates
+ * them echoes nothing; the panel must then show them as unsupported rather
+ * than present the defaults as if they were in force (that older
+ * MemoryGraphConfig also silently ignores the keys on a PUT).
+ * @param {{extraction_limits?: unknown} | null | undefined} status
+ */
+export function limitsSupported(status) {
+  return !!(status && status.extraction_limits && typeof status.extraction_limits === 'object')
+}
 
 /**
  * Initial editable strings from a status payload (fallbacks for an old API).
@@ -99,15 +110,15 @@ export function limitsFormAllValid(form) {
  * @returns {Record<string, number>}
  */
 export function limitsPutBody(form, status) {
-  const current = (status && status.extraction_limits) || {}
   /** @type {Record<string, number>} */
   const body = {}
+  // Unsupported upstream: never send keys the server would silently drop.
+  if (!limitsSupported(status)) return body
+  const current = status.extraction_limits
   for (const f of EXTRACTION_LIMIT_FIELDS) {
     const raw = String(form[f.key] ?? '').trim()
     if (!/^\d+$/.test(raw)) continue // Number('') is 0 — never a change
     const n = Number(raw)
-    // An API that predates the limits echoes none: the form shows the
-    // defaults, and leaving them alone is not a change.
     const was = typeof current[f.key] === 'number' ? current[f.key] : f.fallback
     if (was !== n) body[f.putKey] = n
   }

@@ -57,11 +57,12 @@ test.describe('Memory graph extraction limits', () => {
     expect(putBody).not.toHaveProperty('extraction_retry_backoff_s')
   })
 
-  test('an older API without the limits still renders the defaults', async ({ page }) => {
+  test('an older API without the limits shows them as unsupported, read-only', async ({ page }) => {
     const { extraction_limits: _omit, ...legacy } = STATUS
     await page.route('**/api/memory/graph/status', (route) => json(route, legacy))
     await page.goto('/#settings/memory')
-    await expect(page.getByTestId('mem-graph-limit-max_tokens')).toHaveValue('4096')
+    await expect(page.getByTestId('mem-graph-limits-unsupported')).toBeVisible()
+    await expect(page.getByTestId('mem-graph-limit-max_tokens')).toBeDisabled()
     await expect(page.getByTestId('mem-graph-save')).toBeDisabled()
   })
 })

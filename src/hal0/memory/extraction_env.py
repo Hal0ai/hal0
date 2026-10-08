@@ -109,9 +109,11 @@ class ExtractionLimits:
     * ``llm_retries`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES``: retries of one
       LLM call inside a retain attempt.
     * ``task_retries`` -> ``HINDSIGHT_API_WORKER_MAX_RETRIES``: requeues of a
-      failed retain task before it is marked failed.
+      failed queued task before it is marked failed. Worker-wide in hindsight
+      (there is no retain-only task retry): consolidation and mental-model
+      refresh share it, and the schema description says so.
     * ``retry_backoff_s`` -> ``HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS``:
-      wait before a requeue.
+      wait before a requeue. Worker-wide likewise.
     """
 
     max_concurrent: int = 1

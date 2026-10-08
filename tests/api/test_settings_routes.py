@@ -259,3 +259,52 @@ async def test_update_settings_waits_for_shared_hal0_toml_lock(tmp_hal0_home: st
 
     result = await task
     assert result["telemetry"]["enabled"] is True
+
+
+# ── [memory.graph] has one writer (#1834 review) ─────────────────────────────
+#
+# The graph section's slot, timeout and extraction limits only take effect
+# through PUT /api/memory/graph, which rewrites the hindsight-api drop-in and
+# restarts the daemon. The generic settings PUT only persists hal0.toml, so
+# accepting these keys here would report a successful "immediate" apply while
+# the running daemon kept its old values. Refuse them and say where to go.
+
+
+def test_put_settings_refuses_memory_graph_keys_with_a_pointer(isolated_client: TestClient) -> None:
+    r = isolated_client.put(
+        "/api/settings", json={"memory": {"graph": {"extraction_max_tokens": 5000}}}
+    )
+    assert r.status_code == 400, r.text
+    body = r.json()["error"]
+    assert body["code"] == "settings.use_memory_graph_route"
+    assert "/api/memory/graph" in body["message"]
+    assert body["details"]["keys"] == ["memory.graph.extraction_max_tokens"]
+    # Nothing else in the body was applied either: the request is all or nothing.
+
+
+def test_put_settings_refuses_the_graph_keys_that_predate_the_limits(
+    isolated_client: TestClient,
+) -> None:
+    r = isolated_client.put(
+        "/api/settings",
+        json={"telemetry": {"enabled": True}, "memory": {"graph": {"extraction_slot": "agent"}}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["details"]["keys"] == ["memory.graph.extraction_slot"]
+    # The unrelated key in the same body was not persisted.
+    assert isolated_client.get("/api/settings").json()["telemetry"]["enabled"] is False
+
+
+def test_preview_refuses_memory_graph_keys_the_same_way(isolated_client: TestClient) -> None:
+    r = isolated_client.post(
+        "/api/settings/preview", json={"memory": {"graph": {"extraction_max_concurrent": 2}}}
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "settings.use_memory_graph_route"
+
+
+def test_put_settings_still_accepts_other_memory_keys(isolated_client: TestClient) -> None:
+    r = isolated_client.put(
+        "/api/settings", json={"memory": {"embedding": {"rerank_enabled": False}}}
+    )
+    assert r.status_code == 200, r.text

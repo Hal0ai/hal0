@@ -2694,11 +2694,13 @@ class MemoryGraphConfig(BaseModel):
         ge=0,
         le=10,
         description=(
-            "How many times a failed retain task is requeued before it is marked "
-            "failed (HINDSIGHT_API_WORKER_MAX_RETRIES) and shows under 'Retry "
-            "failed' on the Memory page. Bounds the total time one document can "
-            "occupy the slot. Applied via the hindsight-api drop-in; the daemon "
-            "restarts to pick it up."
+            "How many times a failed queued memory task is requeued before it is "
+            "marked failed (HINDSIGHT_API_WORKER_MAX_RETRIES) and shows under "
+            "'Retry failed' on the Memory page. Bounds the total time one document "
+            "can occupy the slot. This is Hindsight's worker-wide setting: it "
+            "applies to every queued operation (retain, consolidation, "
+            "mental-model refresh), not only extraction. Applied via the "
+            "hindsight-api drop-in; the daemon restarts to pick it up."
         ),
     )
     extraction_retry_backoff_s: int = Field(
@@ -2706,11 +2708,12 @@ class MemoryGraphConfig(BaseModel):
         ge=10,
         le=3600,
         description=(
-            "Seconds a failed retain task waits before it is requeued "
+            "Seconds a failed queued memory task waits before it is requeued "
             "(HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS), so a retry does "
             "not land on a slot that is still busy with the attempt that just "
-            "timed out. Applied via the hindsight-api drop-in; the daemon "
-            "restarts to pick it up."
+            "timed out. Worker-wide like extraction_task_retries: every queued "
+            "operation shares it. Applied via the hindsight-api drop-in; the "
+            "daemon restarts to pick it up."
         ),
     )
 

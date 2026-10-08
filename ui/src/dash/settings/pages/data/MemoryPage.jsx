@@ -17,6 +17,7 @@ import {
   limitsFormFromStatus,
   limitsFormValidity,
   limitsPutBody,
+  limitsSupported,
 } from './extractionLimits.js'
 
 export function MemoryPage() {
@@ -244,6 +245,9 @@ function MemoryGraphPanel() {
   const timeoutValid = /^\d+$/.test(timeoutS.trim()) && timeoutNum >= 30 && timeoutNum <= 3600;
   const limitsValidity = limitsFormValidity(limits);
   const limitsValid = limitsFormAllValid(limits);
+  // An API older than the limits echoes none: show them read-only with a
+  // note rather than as defaults in force.
+  const limitsOk = limitsSupported(st);
   const dirty = !!st && (
     enabled !== !!st.enabled
     || slot !== (st.extraction_slot || "")
@@ -338,6 +342,11 @@ function MemoryGraphPanel() {
         Extraction limits
         <FieldInfoIcon description="hal0.toml [memory.graph].extraction_* · bounds concurrency, output length and retries so one slow extraction cannot wedge the retain queue on a shared slot" />
       </div>
+      {st && !limitsOk && (
+        <div className="mono" data-testid="mem-graph-limits-unsupported" style={{fontSize: 10.5, color: "var(--warn)", padding: "2px 12px 6px"}}>
+          This hal0-api does not report extraction limits — update it to set them. Hindsight is running with its own defaults.
+        </div>
+      )}
       {EXTRACTION_LIMIT_FIELDS.map(f => (
         <SRow
           key={f.key}
@@ -345,7 +354,7 @@ function MemoryGraphPanel() {
           sub={f.sub}
           v={
             <input
-              type="number" min={f.min} max={f.max} value={limits[f.key]} disabled={!st}
+              type="number" min={f.min} max={f.max} value={limits[f.key]} disabled={!st || !limitsOk}
               onChange={e => setLimits(prev => ({...prev, [f.key]: e.target.value}))}
               placeholder={String(f.fallback)}
               className="mono"

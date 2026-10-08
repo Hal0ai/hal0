@@ -203,8 +203,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     },
     # [memory.graph] — ADR-0023: extraction_slot + llm_timeout_s propagate to
     # hindsight-api via a systemd drop-in + restart (handled in the
-    # /api/memory/graph PUT handler, which is the sole writer; the apply
-    # pipeline only needs to know the keys are valid).
+    # /api/memory/graph PUT handler, which is the sole writer; the generic
+    # PUT /api/settings REFUSES these keys with settings.use_memory_graph_route
+    # so a persist-only write can never report an apply the daemon never saw).
+    # Listed here so the schema-driven field registry still classifies them.
     "memory.graph.enabled": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_slot": {"apply_class": "immediate", "services": []},
     "memory.graph.llm_timeout_s": {"apply_class": "immediate", "services": []},

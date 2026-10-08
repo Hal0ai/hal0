@@ -3621,6 +3621,16 @@ else
         # The unit runs as hal0 with HOME=${HS_DIR}; hand it the whole tree.
         chown -R hal0:hal0 "${VAR_DIR}/memory" 2>/dev/null || true
         if [[ -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
+            # Remember whether the shipped unit differs from the installed one:
+            # `enable --now` below only STARTS a stopped unit, it never bounces
+            # a running one, so on an upgrade an already-active hindsight-api
+            # would keep its old Environment= (e.g. the #1834 extraction
+            # limits) until a reboot. Restart it after the reload when the
+            # unit changed.
+            hs_unit_changed=1
+            if cmp -s "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service 2>/dev/null; then
+                hs_unit_changed=0
+            fi
             install -m644 "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service
             # The unit ships HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth — fine
             # while the box has no keys, but once KB-1 auth is on, every
@@ -3645,6 +3655,10 @@ else
             fi
             systemctl daemon-reload
             systemctl enable --now hindsight-api
+            if [[ "${hs_unit_changed}" -eq 1 ]] && systemctl is-active --quiet hindsight-api; then
+                info "hindsight-api unit changed — restarting the running engine so it reads the new unit"
+                systemctl restart hindsight-api || warn "hindsight-api restart failed; restart it by hand to apply the new unit"
+            fi
             # First boot: embedded pg0 init + local embed/rerank model load can
             # take ~30-60s. Skip-LLM-verification means it binds without a model.
             hs_up=0

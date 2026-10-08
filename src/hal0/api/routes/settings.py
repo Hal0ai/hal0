@@ -52,7 +52,11 @@ from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
 from hal0.api._settings_apply import APPLY_CLASSES, get_registry
-from hal0.api._settings_changeset import changeset_payload, compute_settings_changeset
+from hal0.api._settings_changeset import (
+    changeset_payload,
+    compute_settings_changeset,
+    dotted_leaf_keys,
+)
 from hal0.api._settings_fields import build_settings_fields
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
@@ -77,6 +81,34 @@ class ConfigInvalidError(Hal0Error):
 
     code = "config.invalid"
     status = 400
+
+
+class MemoryGraphKeysRefused(Hal0Error):
+    """``[memory.graph]`` keys sent to the generic settings writer (#1834 review)."""
+
+    code = "settings.use_memory_graph_route"
+    status = 400
+
+
+def _refuse_memory_graph_keys(body: dict[str, Any]) -> None:
+    """Refuse a settings body that touches ``memory.graph.*``.
+
+    That section has one writer, ``PUT /api/memory/graph``: the extraction
+    slot, LLM timeout and extraction limits only take effect through the
+    hindsight-api drop-in rewrite + restart that route performs. This writer
+    only persists ``hal0.toml`` and would report an "immediate" apply while
+    the running daemon kept its old values — a silent lie. All or nothing:
+    the whole request is refused so an unrelated key in the same body is not
+    half-applied either.
+    """
+    keys = sorted(k for k in dotted_leaf_keys(body) if k.startswith("memory.graph."))
+    if keys:
+        raise MemoryGraphKeysRefused(
+            "[memory.graph] is written through PUT /api/memory/graph, which also "
+            "applies it to hindsight-api; PUT /api/settings only persists hal0.toml. "
+            "Send these keys there instead: " + ", ".join(keys),
+            details={"keys": keys, "route": "PUT /api/memory/graph"},
+        )
 
 
 def _validation_error_details(exc: ValidationError) -> dict[str, str]:
@@ -133,6 +165,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
         raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
+    _refuse_memory_graph_keys(body)
 
     # One serialized RMW path for every hal0.toml writer (#1721). The txn
     # holds the shared in-process lock AND the cross-process advisory lock,
@@ -220,6 +253,7 @@ async def preview_settings(request: Request) -> dict[str, Any]:
         raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
+    _refuse_memory_graph_keys(body)
 
     cfg = getattr(request.app.state, "hal0_config", None)
     if cfg is None:

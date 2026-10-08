@@ -8,6 +8,7 @@ import {
   limitsFormFromStatus,
   limitsFormValidity,
   limitsPutBody,
+  limitsSupported,
 } from '../extractionLimits.js'
 
 const STATUS = {
@@ -46,9 +47,16 @@ describe('extraction limits form', () => {
     expect(limitsPutBody(form, STATUS)).toEqual({ extraction_max_concurrent: 2 })
     expect(limitsFormDirty(form, STATUS)).toBe(true)
     expect(limitsFormDirty(limitsFormFromStatus(STATUS), STATUS)).toBe(false)
-    // Older API (no echo): untouched defaults are not a change; an edit is.
+  })
+
+  it('reports an older API without the limits as unsupported and never sends keys to it', () => {
+    expect(limitsSupported(STATUS)).toBe(true)
+    expect(limitsSupported({})).toBe(false)
+    expect(limitsSupported(undefined)).toBe(false)
+    // Untouched defaults are not a change, and even an edit sends nothing:
+    // that server would ignore the keys and the panel would lie about a save.
     expect(limitsFormDirty(limitsFormFromStatus({}), {})).toBe(false)
-    expect(limitsPutBody({ ...limitsFormFromStatus({}), max_tokens: '8192' }, {})).toEqual({ extraction_max_tokens: 8192 })
+    expect(limitsPutBody({ ...limitsFormFromStatus({}), max_tokens: '8192' }, {})).toEqual({})
   })
 
   it('treats an unparseable entry as not-a-change (validity blocks the save instead)', () => {
