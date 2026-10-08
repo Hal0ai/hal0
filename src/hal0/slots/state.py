@@ -296,6 +296,20 @@ class SlotConfigError(SlotError):
     status = 400
 
 
+class CudaNotSupported(SlotConfigError):
+    """The slot selects the CUDA lane, which is switched off in this release.
+
+    Raised by :func:`hal0.slots.config_write.refuse_cuda_selection` on slot
+    create / config write / load while ``hal0.model_meta.CUDA_ENABLED`` is
+    ``False``. Subclasses :class:`SlotConfigError` so every existing
+    ``except SlotConfigError`` caller (and the 400 mapping) handles it; the
+    distinct ``code`` lets the dashboard show the "use the Vulkan lane" hint.
+    """
+
+    code = "slot.cuda_not_supported"
+    status = 400
+
+
 class NpuExclusivityViolation(SlotError):
     """Two ``device=npu, type=llm, enabled=true`` slots cannot coexist.
 
@@ -455,6 +469,7 @@ __all__ = [
     "DISPATCHABLE_STATES",
     "LEGAL_TRANSITIONS",
     "SELF_MANAGED_PROVIDERS",
+    "CudaNotSupported",
     "IllegalSlotTransition",
     "NpuExclusivityViolation",
     "SlotConfigError",

@@ -36,7 +36,7 @@ memory extraction.
 
 hal0 is first-class on AMD Strix Halo — the Ryzen AI Max+ 395 (128 GB) and
 the 385 / 390 (64 GB) — with AMD RX 7000-series GPUs also supported. NVIDIA
-RTX 30/40/50 (via CDI + the NVIDIA Container Toolkit) is experimental, and
+GPUs run on the Vulkan lane (CUDA is not supported in this release), and
 CPU-only x86_64 hosts work as a fallback. There is no minimum-spec gate —
 backend selection degrades to CPU rather than refusing to run.
 
@@ -50,7 +50,7 @@ backend selection degrades to CPU rather than refusing to run.
   image, flags, port, and lifecycle, sharing only the GPU through an
   arbiter.
 - **Profiles** — bench-tuned llama-server flag bundles per backend
-  (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`, dedicated `embed`/
+  (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, dedicated `embed`/
   `rerank` lanes, and more) that a slot picks up for its image, flags,
   and MTP behavior.
 - **Stacks** — named, exportable bundles of slot + profile + model

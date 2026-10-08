@@ -37,9 +37,9 @@ A Strix Halo machine gives hal0 three places to run a model:
 </CardGrid>
 
 These map directly to four of hal0's five canonical devices: `gpu-rocm`,
-`gpu-vulkan`, `npu`, and `cpu`. (The fifth, `gpu-cuda`, exists too — see the
-note on NVIDIA below — but it has nothing to do with Strix Halo, which has no
-NVIDIA silicon.) A slot's `device` field is what picks one of these — see
+`gpu-vulkan`, `npu`, and `cpu`. (A fifth id, `gpu-cuda`, is still accepted
+when an older config is read, but CUDA is not supported in this release — see
+the note on NVIDIA below.) A slot's `device` field is what picks one of these — see
 [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for why
 that ownership lives on the slot, not the profile, as of v1.0.
 
@@ -195,13 +195,11 @@ re-run the probe yourself.
 <Aside type="caution">
 CUDA has nothing to do with Strix Halo — there's no NVIDIA silicon on this
 chip, and the hardware probe classifies an NVIDIA-equipped host as
-`bare-metal-nvidia-gpu`, never `strix-halo`. But hal0 is not exclusively a
-Strix Halo tool: it also ships an **experimental** `gpu-cuda` device for
-discrete NVIDIA GPUs on *other* hosts (the upstream
-`ghcr.io/ggml-org/llama.cpp:server-cuda` image, run via
-`nvidia-container-toolkit`/CDI; without CDI present the installer falls back
-to Vulkan on that same NVIDIA card). None of this changes the story on this
-page — hal0's reference platform, and the one every default and bench number
+`bare-metal-nvidia-gpu`, never `strix-halo`. On those *other* hosts a discrete
+NVIDIA GPU runs on the **Vulkan** lane: CUDA is not supported in this release,
+so detection never picks `gpu-cuda`, the dashboard never offers it, and a slot
+that names it is refused at create/load with a message pointing at
+`gpu-vulkan`. None of this changes the story on this page — hal0's reference platform, and the one every default and bench number
 here is tuned for, remains the AMD Strix Halo APU on Linux x86_64.
 </Aside>
 

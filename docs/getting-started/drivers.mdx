@@ -1,6 +1,6 @@
 ---
 title: GPU drivers and memory
-description: Kernel driver requirements, device-node layout, render-group gid semantics, GTT pool sizing, and experimental NVIDIA support for hal0's AMD Strix Halo iGPU and XDNA NPU.
+description: Kernel driver requirements, device-node layout, render-group gid semantics, GTT pool sizing, and how NVIDIA GPUs are served (Vulkan lane) alongside hal0's AMD Strix Halo iGPU and XDNA NPU.
 sidebar:
   order: 11
 ---
@@ -143,11 +143,11 @@ should show the params.
 
 ## NVIDIA
 
-NVIDIA support is **experimental**. hal0 targets AMD Strix Halo first,
-and RTX 30/40/50-series GPUs are supported through
-[CDI](https://github.com/cncf-tags/container-device-interface) and the
-NVIDIA Container Toolkit rather than through the AMD device-node path
-above. Install the NVIDIA Container Toolkit and generate a CDI spec on
-the host so podman/docker can request the GPU by CDI device name; hal0's
-hardware probe picks it up from there. Expect rougher edges than the
-AMD path — this tier gets less field validation.
+CUDA is **not supported in this release**. hal0 targets AMD Strix Halo
+first; an NVIDIA GPU runs on the **Vulkan** lane (`gpu-vulkan`), which
+needs only the NVIDIA proprietary driver's Vulkan ICD — no NVIDIA
+Container Toolkit or CDI spec. The hardware probe still detects the card
+(and reports its telemetry), and detection recommends Vulkan for it. A
+slot configured with `device = "gpu-cuda"` by an older release still
+parses, but loading it is refused until you move it to `gpu-vulkan`. See
+the [Support matrix](/docs/reference/support-matrix/).

@@ -27,16 +27,38 @@ describe('hostHwFlags', () => {
     expect(hostHwFlags({ gpus: [] })).toEqual({})
   })
 
-  it('gpu0 present, fully capable → all three lanes true', () => {
+  it('gpu0 present, fully capable → rocm + vulkan true, no cuda flag', () => {
     expect(
       hostHwFlags({ gpus: [{ compute_capable: true, vulkan_capable: true }] }),
-    ).toEqual({ rocm: true, vulkan: true, cuda: true })
+    ).toEqual({ rocm: true, vulkan: true })
   })
 
-  it('gpu0 present, no compute capability → rocm/cuda explicitly false, vulkan true', () => {
+  it('gpu0 present, no compute capability → rocm explicitly false, vulkan true', () => {
     expect(
       hostHwFlags({ gpus: [{ compute_capable: false, vulkan_capable: true }] }),
-    ).toEqual({ rocm: false, vulkan: true, cuda: false })
+    ).toEqual({ rocm: false, vulkan: true })
+  })
+
+  // CUDA is not supported in this release: the old `cuda: compute_capable`
+  // derivation marked the CUDA lane feasible on every ROCm-capable AMD box
+  // (compute_capable is vendor-neutral). No cuda flag is emitted at all.
+  it('AMD gpu0 with compute capability never reports a cuda lane', () => {
+    const flags = hostHwFlags({
+      gpus: [{ vendor: 'amd', compute_capable: true, vulkan_capable: true }],
+    })
+    expect(flags).toEqual({ rocm: true, vulkan: true })
+    expect('cuda' in flags).toBe(false)
+  })
+
+  // compute_capable is set from nvidia-smi presence too — that is not ROCm
+  // evidence. An NVIDIA box is served by the Vulkan lane.
+  it('NVIDIA gpu0 → rocm false, vulkan from the probe', () => {
+    expect(
+      hostHwFlags({
+        kfd_present: false,
+        gpus: [{ vendor: 'nvidia', compute_capable: true, vulkan_capable: true }],
+      }),
+    ).toEqual({ rocm: false, vulkan: true })
   })
 
   // kfd_present: FE/BE ROCm gate mismatch (host-truth fix). A box with
@@ -46,13 +68,13 @@ describe('hostHwFlags', () => {
   // hal0.providers._gpu.kfd_present) allows it, so the drawer must not
   // veto it just because the host-rocminfo-backed compute_capable is false.
 
-  it('gpu0 present, compute_capable false but top-level kfd_present true → rocm true, cuda still false', () => {
+  it('gpu0 present, compute_capable false but top-level kfd_present true → rocm true', () => {
     expect(
       hostHwFlags({
         kfd_present: true,
         gpus: [{ compute_capable: false, vulkan_capable: false }],
       }),
-    ).toEqual({ rocm: true, vulkan: false, cuda: false })
+    ).toEqual({ rocm: true, vulkan: false })
   })
 
   it('gpu0 present, compute_capable true and kfd_present false → rocm true (compute_capable alone still sufficient)', () => {
@@ -61,7 +83,7 @@ describe('hostHwFlags', () => {
         kfd_present: false,
         gpus: [{ compute_capable: true, vulkan_capable: false }],
       }),
-    ).toEqual({ rocm: true, vulkan: false, cuda: true })
+    ).toEqual({ rocm: true, vulkan: false })
   })
 
   it('no gpus[0] but top-level kfd_present true → still {} (unknown shape preserved, no veto)', () => {

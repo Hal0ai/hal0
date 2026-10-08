@@ -25,6 +25,7 @@ import os
 import shutil
 from typing import Any
 
+from hal0 import model_meta as _model_meta
 from hal0.config.schema import HardwareInfo
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE, map_backend_to_device
 from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
@@ -78,6 +79,8 @@ def nvidia_container_toolkit_present() -> bool:
         /var/run/cdi (the two standard CDI spec directories).
 
     Purely a filesystem sniff — never spawns a process, never raises.
+    Only consulted while ``hal0.model_meta.CUDA_ENABLED`` is on (it is off in
+    this release, so NVIDIA always gets the Vulkan lane).
     """
     if shutil.which("nvidia-ctk") or os.path.exists("/usr/bin/nvidia-ctk"):
         return True
@@ -185,18 +188,17 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
             "/dev/kfd, or update to a runner whose Vulkan backend is validated"
         )
 
-    # NVIDIA — the CUDA path (gpu-cuda device, upstream llama.cpp CUDA
-    # image via CDI) is preferred when the nvidia-container-toolkit is
-    # present; without CDI the container can't see the GPU, so fall back
-    # to Vulkan, which works on the NVIDIA proprietary driver with no
-    # toolkit. (Previously hard-mapped to vulkan — "CUDA deferred to
-    # Phase 2"; Phase 2 is this wave.)
+    # NVIDIA — the Vulkan lane, which works on the NVIDIA proprietary driver
+    # with no container toolkit. The CUDA path (gpu-cuda device, upstream
+    # llama.cpp CUDA image via CDI) is switched off in this release
+    # (``hal0.model_meta.CUDA_ENABLED``): detection never recommends it, even
+    # with nvidia-container-toolkit present. The CDI branch stays behind the
+    # switch so re-enabling the lane is a one-line change.
     if primary and primary.vendor == "nvidia":
-        if nvidia_container_toolkit_present():
+        if _model_meta.CUDA_ENABLED and nvidia_container_toolkit_present():
             return "cuda", "NVIDIA GPU with nvidia-container-toolkit (CDI) — llama.cpp CUDA"
         return "vulkan", (
-            "NVIDIA GPU; nvidia-container-toolkit/CDI not found — Vulkan fallback "
-            "(install nvidia-container-toolkit and run `nvidia-ctk cdi generate` for CUDA)"
+            "NVIDIA GPU — the Vulkan lane serves this box (CUDA is not supported in this release)"
         )
 
     # Intel iGPU / unknown vulkan-capable

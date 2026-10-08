@@ -61,6 +61,7 @@ from hal0.slots.config_write import (
     guard_slot_write_payload,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
+    refuse_cuda_selection,
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
@@ -1667,6 +1668,11 @@ class SlotManager:
         self._ensure_known(slot_name)
         async with self._lock(slot_name):
             cfg = await self._load_slot_config(slot_name)
+            # CUDA release gate (hal0.model_meta.CUDA_ENABLED is off): an
+            # existing gpu-cuda / cuda-runner config still PARSES, but it is
+            # refused here with the "use the Vulkan lane" message rather than
+            # launching a lane this release does not support.
+            refuse_cuda_selection(cfg)
             resolved_model = model_id or _model_default(cfg)
 
             current = self._current_state(slot_name)

@@ -89,16 +89,17 @@ function bk(name, meta) { return meta[name] || meta.cpu; }
 // system-info's `backends` rows), so the profile drawer, the profile card and
 // the slot drawer name a runtime the same way.
 
-const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cuda: 'CUDA', cpu: 'CPU' };
+// No `cuda` lane: CUDA is not supported in this release (NVIDIA GPUs run on
+// the Vulkan lane) and system-info never offers the cuda runtime.
+const LANE_TITLE = { rocm: 'ROCm', vulkan: 'Vulkan', cpu: 'CPU' };
 // One hue per backend lane (dashboard.css --dev-*), so a lane reads the same
 // colour in a chip here as it does on a slot card or a chart legend.
 const LANE_HUE = {
-  rocm: 'var(--dev-rocm)', vulkan: 'var(--dev-vulkan)',
-  cuda: 'var(--dev-cuda)', cpu: 'var(--dev-cpu)',
+  rocm: 'var(--dev-rocm)', vulkan: 'var(--dev-vulkan)', cpu: 'var(--dev-cpu)',
 };
 // Lane token → the host capability flag gating it (mirrors hw-cascade.js's
 // LANE_HW). A lane with no entry is never hardware-vetoed.
-const LANE_HW = { rocm: 'rocm', vulkan: 'vulkan', cuda: 'cuda' };
+const LANE_HW = { rocm: 'rocm', vulkan: 'vulkan' };
 
 // The backends a runtime can actually run on: the §4 fit-check list, falling
 // back to its single declared `backend` on an older system-info payload.

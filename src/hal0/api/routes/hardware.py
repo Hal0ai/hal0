@@ -884,7 +884,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     means neither context could reach podman at all.
     """
     from hal0.api.routes.health import list_features
-    from hal0.runners import RUNNER_IMAGES, canonical_family, resolve_runner_image
+    from hal0.runners import canonical_family, offered_runner_images, resolve_runner_image
 
     hardware = await get_hardware(request)
     features = await list_features(request)
@@ -910,7 +910,9 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
         log.warning("system_info.provenance_context_failed", exc_info=True)
 
     backends: dict[str, Any] = {}
-    for key, runner in RUNNER_IMAGES.items():
+    # offered_runner_images(): the CUDA runner is hidden while the CUDA lane
+    # is switched off (hal0.model_meta.CUDA_ENABLED) — never offered.
+    for key, runner in offered_runner_images().items():
         try:
             image = resolve_runner_image(runner)
         except Exception:

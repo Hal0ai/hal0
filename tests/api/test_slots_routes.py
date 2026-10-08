@@ -641,6 +641,23 @@ def test_create_slot_rejects_model_owned_keys(
     assert not (slot_root / "owned.toml").exists()
 
 
+def test_create_slot_refuses_gpu_cuda_with_vulkan_hint(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """CUDA is switched off in this release (hal0.model_meta.CUDA_ENABLED):
+    POST /api/slots refuses a gpu-cuda slot with a typed 400 naming the
+    Vulkan lane, and nothing lands on disk."""
+    body = {"name": "nv", "model": "qwen3-4b-q4_k_m", "device": "gpu-cuda"}
+    r = isolated_client.post("/api/slots", json=body)
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.cuda_not_supported", err
+    assert "Vulkan lane" in err["message"]
+    assert not (slot_root / "nv.toml").exists()
+
+
 def test_create_slot_without_autoload_persists_explicit_false(
     slot_root: Path,
     container_stub: dict[str, Any],

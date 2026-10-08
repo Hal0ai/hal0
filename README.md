@@ -53,7 +53,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 |---|---|
 | **What it is** | One control plane, `hal0-api` on `:8080`, turning a Linux box into an OpenAI-compatible inference appliance — chat, embeddings, rerank, transcription, speech and image generation, each capability in its own podman container. |
 | **Install** | One `curl \| sudo bash` line. The installer probes hardware, seeds every capability slot, and starts the API — there is no separate setup wizard to run afterward. |
-| **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan and CPU fallbacks everywhere else, plus experimental CUDA. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
+| **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU via FLM); Vulkan and CPU lanes everywhere else, including NVIDIA GPUs (Vulkan lane). CUDA is not supported in this release. See [Support matrix](docs/reference/support-matrix.mdx) and [Hardware matrix](docs/reference/hardware-matrix.mdx). |
 | **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
 | **Auth** | Enforcement is off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. Once an admin key is configured, a LAN-bound box also gates mutating routes for off-box callers, even with enforcement off (v1.3.0). No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
 | **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. |
@@ -64,7 +64,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 | You already know | hal0 adds |
 |---|---|
 | **Ollama** — pull a model, run it, hit one local API. | A dedicated slot per capability (chat, embed, rerank, STT, TTS, image) — each its own podman container with its own hardware backend, typed lifecycle, and per-slot logs, instead of one shared runtime doing everything. |
-| **llama.cpp** / `llama-server` — the inference engine itself. | hal0 runs llama.cpp *inside* systemd-supervised slots, with a state machine (`starting → warming → ready → …`), a model registry, automatic hardware-backend selection (ROCm/Vulkan/CUDA/CPU/NPU), and a benchmarking pipeline (`hal0 bench`) on top of it. |
+| **llama.cpp** / `llama-server` — the inference engine itself. | hal0 runs llama.cpp *inside* systemd-supervised slots, with a state machine (`starting → warming → ready → …`), a model registry, automatic hardware-backend selection (ROCm/Vulkan/CPU/NPU), and a benchmarking pipeline (`hal0 bench`) on top of it. |
 | **Open WebUI** — the chat frontend. | hal0 prewires OpenWebUI as the chat surface *and* is the backend it talks to — hardware probing, slot/model management, and a separate operator dashboard sit underneath, not just the chat window. |
 | **LocalAI** — an OpenAI-compatible gateway over multiple backends. | hal0 adds a live operator dashboard, a hardware probe that drives backend selection automatically, systemd-managed container lifecycle per slot, and a signed self-update path with rollback. |
 
@@ -384,7 +384,7 @@ content-addressed, host-redacted archive you can attach anywhere, and
   `http://localhost:8080/v1` and go.
 - **Slots** — each named target carries a `type`
   (`llm | embedding | reranking | transcription | tts | image`), a `device`
-  (`gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu`), a `model`, plus
+  (`gpu-rocm | gpu-vulkan | cpu | npu`), a `model`, plus
   `autoload`, an eviction `priority` and an optional `default`. Ten curated
   slots (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `qwen3tts`,
   `rerank`, `tts`, `utility`) are seeded into `/etc/hal0/slots/<name>.toml`
@@ -496,7 +496,6 @@ Profiles are device-agnostic tune templates; they no longer carry an image.
 | Capability | Runner (binary) | Device | Profile |
 |---|---|---|---|
 | chat | `rocmfpx`, `vulkanfpx` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `chat`, `chat-long-context`, `dense`, `moe`, `thinking`, `coding`, `brain` |
-| chat (NVIDIA, experimental) | `cuda` (`llama-server`) | `gpu-cuda` | `chat` |
 | chat (fallback) | `cpu` (`llama-server`) | `cpu` | `cpu-chat` |
 | embeddings / rerank | `rocmfpx`, `vulkanfpx` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `embedding`, `reranking` |
 | chat + STT + embed (NPU) | `flm` | `npu` | `flm` |
@@ -505,7 +504,7 @@ Profiles are device-agnostic tune templates; they no longer carry an image.
 | image | `comfyui` | `gpu-rocm` | `comfyui` |
 
 A device also has a *default* profile it resolves to when a slot names none —
-`gpu-rocm`, `gpu-vulkan` and `gpu-cuda` resolve to `chat`, `cpu` to
+`gpu-rocm` and `gpu-vulkan` resolve to `chat`, `cpu` to
 `cpu-chat`, `npu` to `flm`. The seeded slots override that where it matters:
 `agent` ships on `chadrock-moe`, `coder` on `coding`, `brain` on `brain`,
 `utility` on `chat`.
@@ -550,9 +549,10 @@ Linux + systemd is the only hard requirement
 |-----------------|---------------------------------------------------------------------------|--------|
 | **First-class** | AMD Ryzen AI Max+ 395 ("Strix Halo") with iGPU + XDNA NPU + 128 GB unified | Reference deployment. All published perf numbers come from this box. |
 | **First-class** | AMD Ryzen AI Max 385 / 390 with 64 GB unified                              | Same path; small + mid tiers fit, 70B Q4 with shorter context. |
-| **Experimental** | NVIDIA RTX 30/40/50 (10–32 GB)                                           | Dedicated `cuda` runner — upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` via CDI (`nvidia-container-toolkit`), with multi-GPU `gpu_index` pinning on the `gpu-cuda` device. Auto-falls back to the Vulkan runner when CDI isn't present. `/api/backends` doesn't yet auto-advertise `gpu-cuda`. |
 | **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm or Vulkan runner images; same `hal0-slot@<name>` lifecycle. |
 | **Fallback**    | CPU-only x86_64                                                            | `cpu` runner + `cpu-chat` profile — the Vulkan toolbox image run CPU-only (no GPU passed to the container). Usable for tiny models / smoke tests, not the headline experience. |
+| **Vulkan lane** | NVIDIA GPUs                                                                | Served by the Vulkan lane on the NVIDIA proprietary driver. **CUDA is not supported in this release** — a `gpu-cuda` slot from an older config still parses but is refused at load. |
+| **Planned**     | ONNX models on the XDNA NPU                                                | Blocked upstream (RyzenAI/VitisAI is Windows-only and excludes Strix Halo) — see [ADR-0003](docs/adr/0003-onnx-text-generation-npu.md). FLM is the NPU lane; Kokoro/Moonshine ONNX run on CPU. |
 
 ## Day-2 operation
 

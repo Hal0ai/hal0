@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.errors import BadRequest
+from hal0.model_meta import CUDA_UNSUPPORTED_MESSAGE, cuda_blocked
 from hal0.profiles import (
     ProfileCatalog,
     ProfilePatch,
@@ -171,6 +172,34 @@ class ProfileUpdateBody(BaseModel):
 # ── routes ────────────────────────────────────────────────────────────────────
 
 
+def _refuse_new_cuda_hint(
+    backend: str | None,
+    runner: str | None,
+    *,
+    stored_backend: str | None = None,
+    stored_runner: str | None = None,
+) -> None:
+    """400 when a write NEWLY points a profile at the CUDA lane (switched off).
+
+    ``backend="cuda"`` / ``runner="cuda"`` stay schema-valid so a profile
+    stored by an earlier release still loads and stays editable — re-sending
+    the profile's OWN stored value is grandfathered (the drawer re-sends every
+    field on save). Only a change TO cuda is refused, with the same message the
+    slot write/load paths use (``hal0.model_meta.CUDA_UNSUPPORTED_MESSAGE``).
+    """
+    hits: dict[str, str] = {}
+    if cuda_blocked(backend) and backend != stored_backend:
+        hits["backend"] = str(backend)
+    if cuda_blocked(runner) and runner != stored_runner:
+        hits["runner"] = str(runner)
+    if hits:
+        raise BadRequest(
+            CUDA_UNSUPPORTED_MESSAGE,
+            code="profiles.cuda_not_supported",
+            details={"selected": hits, "use_backend": "vulkan"},
+        )
+
+
 @router.get("")
 def list_profiles() -> list[dict[str, Any]]:
     """Return every profile in the catalog as a JSON array.
@@ -223,7 +252,10 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         422: pydantic validation failure (bad name, …).
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
+        400 profiles.cuda_not_supported: backend/runner names the CUDA lane,
+            which is switched off in this release.
     """
+    _refuse_new_cuda_hint(body.backend, body.runner)
     # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
     # before persisting. A create has no stored baseline, so no grandfathering.
     screen_profile_flags(body.flags)
@@ -511,12 +543,21 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
             hardware flag. Ones the profile already stores are grandfathered
             (#1411) — see :func:`hal0.profiles.screen_profile_flags`.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
+        400 profiles.cuda_not_supported: backend/runner CHANGES to the CUDA
+            lane (switched off in this release); a stored cuda value is
+            grandfathered so the profile stays editable.
     """
     catalog = ProfileCatalog()
     before = None
     existing = next((p for p in catalog.list() if p.name == name), None)
     if existing is not None:
         before = existing.to_dict()
+    _refuse_new_cuda_hint(
+        body.backend,
+        body.runner,
+        stored_backend=getattr(existing, "backend", None),
+        stored_runner=getattr(existing, "runner", None),
+    )
     # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
     # before persisting. Screened AFTER the read (#1411) so the profile's own
     # stored flags are the grandfather baseline — a pre-guard profile has to stay

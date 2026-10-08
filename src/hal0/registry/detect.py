@@ -9,8 +9,9 @@ Detection strategy, cheapest first:
 
 1. ``.gguf`` files → :func:`hal0.registry.gguf_header.read_gguf_header`
    to pull arch + context_length + pooling_type + tags + attention.causal.
-   The four GGUF backends are seeded: ``vulkan``, ``rocm``, ``cuda``,
-   ``cpu``. Capability is derived, cheapest/strongest signal first:
+   The GGUF backends are seeded: ``vulkan``, ``rocm``, ``cpu`` (plus
+   ``cuda`` only while ``hal0.model_meta.CUDA_ENABLED`` is on — it is off
+   in this release). Capability is derived, cheapest/strongest signal first:
 
    a. ``pooling_type`` present → ``rerank`` (RANK=4), ``embed``
       (MEAN/CLS/LAST, i.e. any other non-zero value), else ``chat``.
@@ -57,6 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from hal0 import model_meta as _model_meta
 from hal0.model_meta import capability_from_filename
 from hal0.registry.gguf_header import read_gguf_header
 
@@ -66,7 +68,21 @@ Confidence = Literal["high", "medium", "low"]
 
 # Backends llama-server can target for any GGUF file. The slot config
 # picks one based on hardware probe; detection just lists what's *compatible*.
-_GGUF_BACKENDS: list[str] = ["vulkan", "rocm", "cuda", "cpu"]
+# ``cuda`` is only seeded while ``hal0.model_meta.CUDA_ENABLED`` is on (off in
+# this release) — a new registration must not advertise a lane the slot
+# write/load paths refuse. Rows seeded with ``cuda`` by an earlier release
+# keep loading (``cuda`` stays a valid ``model.backends`` value).
+_ALL_GGUF_BACKENDS: tuple[str, ...] = ("vulkan", "rocm", "cuda", "cpu")
+
+
+def _gguf_backends() -> list[str]:
+    """The GGUF compatibility seed, honouring the CUDA release switch."""
+    return [b for b in _ALL_GGUF_BACKENDS if not _model_meta.cuda_blocked(b)]
+
+
+#: Import-time snapshot kept for existing importers; call sites use
+#: :func:`_gguf_backends` so the switch is read live.
+_GGUF_BACKENDS: list[str] = _gguf_backends()
 
 
 # ── quantisation extraction (WS-13) ────────────────────────────────────────
@@ -242,7 +258,7 @@ class DetectionResult:
     ``kind`` is the runtime family the file belongs to; the UI uses it to
     gate which backends + capabilities are even offered. Mapping:
 
-      llama     → GGUF, backends ∈ {vulkan, rocm, cuda, cpu}, caps {chat, embed, rerank, vision}
+      llama     → GGUF, backends ∈ {vulkan, rocm, cpu} (+cuda if enabled), caps {chat, embed, rerank, vision}
       moonshine → ASR provider, backend=moonshine, caps={asr}
       kokoro    → TTS provider, backend=kokoro, caps={tts}
       flm       → AMD NPU, backend=flm, caps={chat, embed}
@@ -350,7 +366,7 @@ def _heuristic_only(path: Path, *, filename_hint: str | None = None) -> Detectio
         # blob even though the operator's own filename (the hint) is
         # unmistakably "*.gguf" — either one claiming .gguf is enough to
         # seed the GGUF backends instead of leaving the row unclassified.
-        backends = list(_GGUF_BACKENDS)
+        backends = _gguf_backends()
         caps = ["chat"]
         kind = "llama"
     # else: leave kind=unknown, empty backends/caps
@@ -543,7 +559,7 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
         )
 
         return DetectionResult(
-            suggested_backends=list(_GGUF_BACKENDS),
+            suggested_backends=_gguf_backends(),
             suggested_capabilities=caps,
             context_length=ctx_len_int,
             confidence=confidence,

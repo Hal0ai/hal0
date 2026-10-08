@@ -248,3 +248,48 @@ def test_seeded_slot_validates_as_slotconfig() -> None:
     slot = SlotConfig.model_validate(rec)
     assert slot.profile == "chat"
     assert slot.runtime == "container"
+
+
+# ── CUDA release gate: NVIDIA always lands on the Vulkan lane ────────────────
+
+
+def _nvidia_host() -> HardwareInfo:
+    mb = 64 * 1024
+    return HardwareInfo(
+        ram_mb=mb,
+        ram_available_mb=mb,
+        unified_memory_mb=0,
+        gpus=[
+            GPUInfo(
+                vendor="nvidia",
+                name="GeForce RTX 4090",
+                vram_mb=24 * 1024,
+                vulkan_capable=True,
+                compute_capable=True,
+            )
+        ],
+    )
+
+
+def test_nvidia_with_cdi_recommends_vulkan_not_cuda(monkeypatch) -> None:
+    """CUDA is switched off (hal0.model_meta.CUDA_ENABLED): even with the
+    nvidia-container-toolkit / CDI present, detection never picks cuda."""
+    monkeypatch.setattr("hal0.hardware.recommend.nvidia_container_toolkit_present", lambda: True)
+    rec = recommend_primary_slot(_nvidia_host())
+    assert rec["device"] == "gpu-vulkan"
+    assert rec["backend"] == "vulkan"
+    assert "cuda" not in rec["device"]
+
+
+def test_nvidia_without_cdi_recommends_vulkan(monkeypatch) -> None:
+    monkeypatch.setattr("hal0.hardware.recommend.nvidia_container_toolkit_present", lambda: False)
+    assert recommend_primary_slot(_nvidia_host())["device"] == "gpu-vulkan"
+
+
+def test_cuda_switch_on_restores_cdi_branch(monkeypatch) -> None:
+    """The CDI branch is kept behind the one switch (reversible)."""
+    from hal0 import model_meta
+
+    monkeypatch.setattr(model_meta, "CUDA_ENABLED", True)
+    monkeypatch.setattr("hal0.hardware.recommend.nvidia_container_toolkit_present", lambda: True)
+    assert recommend_primary_slot(_nvidia_host())["device"] == "gpu-cuda"

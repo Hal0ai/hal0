@@ -25,7 +25,7 @@ class TestGgufChat:
         r = detect(p)
         assert r.confidence == "high"
         assert r.suggested_capabilities == ["chat"]
-        assert set(r.suggested_backends) == {"vulkan", "rocm", "cuda", "cpu"}
+        assert set(r.suggested_backends) == {"vulkan", "rocm", "cpu"}
         assert r.context_length == 8192
         assert r.raw_hints["source"] == "gguf_header"
         assert r.raw_hints["architecture"] == "llama"
@@ -230,7 +230,7 @@ class TestGgufUnreadable:
         # .gguf extension → still seed backends, but low confidence.
         assert r.confidence == "low"
         assert r.suggested_capabilities == ["chat"]
-        assert set(r.suggested_backends) == {"vulkan", "rocm", "cuda", "cpu"}
+        assert set(r.suggested_backends) == {"vulkan", "rocm", "cpu"}
         assert r.raw_hints["source"] == "filename"
         assert r.raw_hints.get("gguf_header_read") == "failed"
 
@@ -325,7 +325,7 @@ class TestMissingFile:
         p = tmp_path / "ghost-qwen3.gguf"
         r = detect(p)
         assert r.confidence == "low"
-        assert set(r.suggested_backends) == {"vulkan", "rocm", "cuda", "cpu"}
+        assert set(r.suggested_backends) == {"vulkan", "rocm", "cpu"}
         assert r.suggested_capabilities == ["chat"]
 
 
@@ -402,3 +402,18 @@ class TestDetectedArchitecture:
 
         p = _write_fixture(tmp_path, "not-gguf.gguf", b"NOPE" + b"\x00" * 64)
         assert detected_architecture(detect(p)) is None
+
+
+class TestCudaSeedGate:
+    """``cuda`` is seeded only while ``hal0.model_meta.CUDA_ENABLED`` is on."""
+
+    def test_new_gguf_registration_does_not_seed_cuda(self, tmp_path: Path) -> None:
+        r = detect(tmp_path / "ghost-qwen3.gguf")
+        assert "cuda" not in r.suggested_backends
+
+    def test_switch_on_restores_cuda_seed(self, tmp_path: Path, monkeypatch) -> None:
+        from hal0 import model_meta
+
+        monkeypatch.setattr(model_meta, "CUDA_ENABLED", True)
+        r = detect(tmp_path / "ghost-qwen3.gguf")
+        assert r.suggested_backends == ["vulkan", "rocm", "cuda", "cpu"]

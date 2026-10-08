@@ -16,10 +16,12 @@
 
 // backend token → the device it drives (map_backend_to_device's FE mirror,
 // same table slot-modals.jsx keeps for the cross-device profile picker).
+// No `cuda` entry: CUDA is not supported in this release
+// (hal0.model_meta.CUDA_ENABLED is off — NVIDIA GPUs run on the Vulkan lane),
+// so the drawer never derives a gpu-cuda device.
 const BACKEND_DEVICE = {
 	rocm: "gpu-rocm",
 	vulkan: "gpu-vulkan",
-	cuda: "gpu-cuda",
 	cpu: "cpu",
 };
 
@@ -46,7 +48,7 @@ function deviceClassOf(device) {
 // Lane token → the hw capability flag that gates it (systemInfo.hardware's
 // computeCapable/vulkanCapable, threaded through as `hw`). A lane with no
 // entry here (e.g. cpu) is never hardware-vetoed.
-const LANE_HW = { rocm: "rocm", vulkan: "vulkan", cuda: "cuda" };
+const LANE_HW = { rocm: "rocm", vulkan: "vulkan" };
 
 // Host capability flags for the `hw` filter below, from the RAW
 // /api/system-info `hardware` payload (snake_case, nested under gpus[]) —
@@ -69,8 +71,8 @@ const LANE_HW = { rocm: "rocm", vulkan: "vulkan", cuda: "cuda" };
 // Two "we don't know" shapes exist and both return `{}`: no `hardware` at all
 // (still loading) and `hardware` present but no `gpus[0]` (a degraded probe,
 // a partial payload, or a probe that came back empty) — the latter used to
-// fall through the `!!gpu0?.…` coercion into `{rocm:false, vulkan:false,
-// cuda:false}`, an explicit-looking veto for a box that was never actually
+// fall through the `!!gpu0?.…` coercion into `{rocm:false, vulkan:false}`,
+// an explicit-looking veto for a box that was never actually
 // asked, which hid every GPU runtime from the Runtime select (caught by the
 // Task 12 e2e mocks in slot-edit-controls-v3 and slot-drawer-profile-v3).
 export function hostHwFlags(rawHardware) {
@@ -83,9 +85,16 @@ export function hostHwFlags(rawHardware) {
 		// their own ROCm userland) actively runs ROCm slots, so this must
 		// match the backend's own gate (config_write._reconcile_device_profile
 		// via hal0.providers._gpu.kfd_present), not just the host probe.
-		rocm: !!(gpu0.compute_capable || rawHardware?.kfd_present),
+		//
+		// `compute_capable` is vendor-neutral (the probe sets it for nvidia-smi
+		// presence too), so it is NOT ROCm evidence on an NVIDIA GPU — that box
+		// is served by the Vulkan lane. There is no `cuda` flag: CUDA is not
+		// supported in this release, and deriving it from `compute_capable`
+		// marked the CUDA lane feasible on every ROCm-capable AMD box.
+		rocm:
+			gpu0.vendor !== "nvidia" &&
+			!!(gpu0.compute_capable || rawHardware?.kfd_present),
 		vulkan: !!gpu0.vulkan_capable,
-		cuda: !!gpu0.compute_capable,
 	};
 }
 
@@ -99,7 +108,7 @@ export function hostHwFlags(rawHardware) {
  * @param backends system-info `backends` map (key → row; Task 2 shape)
  * @param device   the slot's (pending) device enum, e.g. "gpu-rocm"
  * @param slotType slot.type — gates runner families via FAMILY_SLOT_TYPES
- * @param hw       host capability flags, e.g. { rocm, vulkan, cuda } — from
+ * @param hw       host capability flags, e.g. { rocm, vulkan } — from
  *                 systemInfo.hardware (computeCapable/vulkanCapable). Missing
  *                 flags never veto (unknown hw applies no filter).
  *

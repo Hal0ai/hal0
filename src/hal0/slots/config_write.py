@@ -24,7 +24,7 @@ from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
-from hal0.slots.state import NpuExclusivityViolation, SlotConfigError
+from hal0.slots.state import CudaNotSupported, NpuExclusivityViolation, SlotConfigError
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -88,7 +88,82 @@ def _base_profile_for_backend(catalog: Any, backend: str) -> str:
     return backend
 
 
+#: Slot keys that select a hardware lane — a write touching any of them is
+#: re-checked against the CUDA release switch (:func:`refuse_cuda_selection`).
+_LANE_KEYS: frozenset[str] = frozenset({"device", "backend", "binary", "profile"})
+
+
+def refuse_cuda_selection(cfg_dict: Any, changed: set[str] | None = None) -> None:
+    """Refuse a slot config that selects the CUDA lane while it is switched off.
+
+    ``hal0.model_meta.CUDA_ENABLED`` is ``False`` in this release: NVIDIA
+    GPUs run on the Vulkan lane. A config selects CUDA when its ``device`` is
+    ``gpu-cuda``, its v0.1 ``backend`` value is ``cuda``, its ``binary`` (runner)
+    is the ``cuda`` runner, or — only where the slot leaves that field unset —
+    its profile's ``backend`` / ``runner`` is ``cuda``.
+
+    ``changed`` scopes the write-path check: a write is refused only when it
+    touches a lane key (:data:`_LANE_KEYS`) and the projected result still
+    selects CUDA, so a write that MOVES a slot off CUDA always succeeds.
+    ``None`` (the load path) refuses unconditionally. The value itself stays
+    schema-valid, so an existing ``gpu-cuda`` config still parses — it just
+    cannot be created, re-pointed at CUDA, or loaded.
+
+    Raises:
+        CudaNotSupported: with :data:`hal0.model_meta.CUDA_UNSUPPORTED_MESSAGE`.
+    """
+    from hal0 import model_meta
+
+    if model_meta.CUDA_ENABLED:
+        return
+    if changed is not None and not (set(changed) & _LANE_KEYS):
+        return
+    from hal0.slot_config import slot_scalar_table
+
+    scalars = slot_scalar_table(_cfg_to_dict(cfg_dict))
+    hits: dict[str, str] = {}
+    device = scalars.get("device")
+    binary = scalars.get("binary")
+    for key in ("device", "backend", "binary"):
+        val = scalars.get(key)
+        if model_meta.cuda_blocked(val):
+            hits[key] = str(val)
+    profile_name = scalars.get("profile")
+    if isinstance(profile_name, str) and profile_name and (not device or not binary):
+        try:
+            from hal0.config.loader import load_profiles_config
+
+            prof = load_profiles_config().profile.get(profile_name)
+        except Exception:
+            prof = None
+        if prof is not None:
+            prof_backend = getattr(prof, "backend", None)
+            prof_runner = getattr(prof, "runner", None)
+            if not device and model_meta.cuda_blocked(prof_backend):
+                hits["profile.backend"] = str(prof_backend)
+            if not binary and model_meta.cuda_blocked(prof_runner):
+                hits["profile.runner"] = str(prof_runner)
+    if hits:
+        raise CudaNotSupported(
+            model_meta.CUDA_UNSUPPORTED_MESSAGE,
+            details={"selected": hits, "use_device": "gpu-vulkan"},
+        )
+
+
 def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> None:
+    """Reconcile device/profile coherence, then apply the CUDA release gate.
+
+    The coherence rules live in :func:`_reconcile_device_profile_lanes`; the
+    CUDA gate (:func:`refuse_cuda_selection`) runs on the RECONCILED result so
+    a profile/runner whose adoption would flip the slot onto ``gpu-cuda`` is
+    refused too — on every writer (create, update_config, stacks apply,
+    swap-time profile adoption) that shares this pipeline.
+    """
+    _reconcile_device_profile_lanes(cfg_dict, changed)
+    refuse_cuda_selection(cfg_dict, changed)
+
+
+def _reconcile_device_profile_lanes(cfg_dict: dict[str, Any], changed: set[str]) -> None:
     """Keep a GPU slot's ``device`` and ``profile.backend`` coherent in place.
 
     A GPU slot implies its backend twice: ``device`` (``gpu-rocm`` /
@@ -500,4 +575,5 @@ __all__ = [
     "guard_slot_write_payload",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
+    "refuse_cuda_selection",
 ]

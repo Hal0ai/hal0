@@ -23,7 +23,7 @@ atomic TOML file per model under `/var/lib/hal0/registry/`.
 | `license` | — |
 | `capabilities` | Freeform tags, normalized to a fixed modality set: `chat, embed, rerank, vision, asr, tts`. |
 | `hf_repo` / `hf_filename` | — |
-| `backends` | Which slot backends can run this model: GGUF → `vulkan, rocm, cuda, cpu`; moonshine → `moonshine`; kokoro → `kokoro`. |
+| `backends` | Which slot backends can run this model: GGUF → `vulkan, rocm, cpu` (rows registered by an older release may also list `cuda`, which is not supported in this release); moonshine → `moonshine`; kokoro → `kokoro`. |
 | `mmproj` | Optional vision-projector sidecar path. |
 | `defaults` | Tri-state launcher knobs the **model** now owns: `context_size`, `extra_args`, `chat_template`, `profile`, `mtp`, `jinja`, `enable_thinking`, `vision`. |
 | `default` | Per-dispatch-type default marker. |
@@ -97,7 +97,7 @@ architecture-max window (their KV cache is tiny relative to a hybrid model); den
 models are capped at 32768 tokens; if neither applies, the fallback is 8192.
 
 See [Hardware matrix](/docs/reference/hardware-matrix/) for the backend (ROCm/Vulkan/
-CUDA/CPU) selection logic this recommendation composes with.
+CPU) selection logic this recommendation composes with.
 
 ## Benchmarks
 

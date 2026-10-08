@@ -137,7 +137,7 @@ precisely, since a plausible-but-wrong reading — "profiles are entirely
 inert" — undersells one real nuance below.
 
 A slot carries its own **device** field — `gpu-rocm`, `gpu-vulkan`,
-`gpu-cuda`, `cpu`, or `npu` — plus `gpu_index`, `n_gpu_layers`, `threads`, and
+`cpu`, or `npu` — plus `gpu_index`, `n_gpu_layers`, `threads`, and
 `binary` (a `RUNNER_IMAGES` registry key — the dashboard calls this the
 slot's **Runtime**; `image_pin` is a debug-only escape hatch for a full
 image override, not a normal way to reach a shipped runtime). This "hardware
@@ -187,7 +187,6 @@ a shipping shape (ADR-0006).
 | Standard | `rocmfpx` | ROCm + Vulkan | The default. Runs every model type, including FPX quants — the only runtime allowed both lanes. |
 | PromptForge | `promptforge` | ROCm | Optional. Accelerated PromptForge model distributions. |
 | Strix | `strix` | Vulkan | Optional. `qwen4exp`-class models with MTP speculative decode; no FPX quants. |
-| CUDA | `cuda` | CUDA | NVIDIA GPUs. |
 | CPU | `cpu` | — | Runs on the host CPU, no GPU required. |
 
 (The non-llama-server runtimes — FastFlowLM, Kokoro, Moonshine, Qwen3-TTS,

@@ -284,7 +284,7 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
     """
     import os
 
-    from hal0.runners import RUNNER_IMAGES, canonical_family
+    from hal0.runners import canonical_family, offered_runner_images
 
     overrides: Mapping[str, str] = {}
     try:
@@ -315,7 +315,10 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
     overrides = folded
 
     out: dict[str, tuple[str, str]] = {}
-    for key, runner in RUNNER_IMAGES.items():
+    # offered_runner_images(): a family hidden by a release switch (the CUDA
+    # runner while hal0.model_meta.CUDA_ENABLED is off) gets no defaults
+    # entry, so it never surfaces as a families row or a default badge.
+    for key, runner in offered_runner_images().items():
         if canonical_family(key) != key:
             continue  # alias family — folded into its canonical entry above
         ref = overrides.get(key)

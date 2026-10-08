@@ -141,7 +141,7 @@ Whether a round can carry OpenAI-style `tools` at all depends on the
 comparing the image to one known-good tag. An older gate asked "is this
 exactly the current default ROCmFPX image?", which answered "no" for every
 runner that simply wasn't that one release — including the plain upstream
-llama.cpp toolboxes a CPU-only or CUDA box resolves to by default, which
+llama.cpp toolboxes a CPU-only box resolves to by default, which
 parse `tools` perfectly well. That false negative silently stripped tools
 from every brain round on those boxes, and the steward answered platform
 questions from imagination instead of admitting it couldn't look.

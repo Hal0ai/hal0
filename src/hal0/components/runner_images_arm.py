@@ -23,11 +23,11 @@ def converge_runner_images(
     apply: bool = True,
     retag: Callable[..., int] | None = None,
 ) -> dict[str, Any]:
-    from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+    from hal0.runners import offered_runner_images, resolve_runner_image
 
     detail = [
         {"key": key, "image": resolve_runner_image(runner)}
-        for key, runner in sorted(RUNNER_IMAGES.items())
+        for key, runner in sorted(offered_runner_images().items())
     ]
     result: dict[str, Any] = {"detail": detail}
     if not apply:

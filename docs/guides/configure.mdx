@@ -23,7 +23,7 @@ running daemon; most subcommands are simple wrappers over
 | `providers.toml` | Provider credential *references* — env-var **names**, never plaintext secrets. |
 | `profiles.toml` | Optional reusable backend/flag templates. Built-in seed profiles are always overlaid from code on load and never written back here, even if the file exists. |
 | `stacks.toml` | The stack catalogue — bundles of slot configs you can apply as one unit. Managed via the dashboard/`/api/stacks`, not `config show`/`edit`. |
-| `slots/<name>.toml` | One file per slot — port, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), the slot's hardware grid (`n_gpu_layers`, `threads`, `binary`, `image_pin`), `profile` reference, `[model]`, `[server]`, `[npu]`, and (on the `img` slot) `[image]`. |
+| `slots/<name>.toml` | One file per slot — port, `device` (`gpu-rocm`\|`gpu-vulkan`\|`cpu`\|`npu`), the slot's hardware grid (`n_gpu_layers`, `threads`, `binary`, `image_pin`), `profile` reference, `[model]`, `[server]`, `[npu]`, and (on the `img` slot) `[image]`. |
 | `mcp-servers/<id>.toml` | One file per MCP server you've installed with `hal0 mcp install`. Mode `0600` — secrets live in its `env` block. |
 
 Other files the runtime drops here: `hardware.json` (cached hardware

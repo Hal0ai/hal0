@@ -474,7 +474,9 @@ def runner_for_backend(backend: str | None, device_class: str | None = None) -> 
     logic one-for-one (that function is now a thin shim over
     ``resolve_runner_image(runner_for_backend(...))``):
 
-      * ``backend == "cuda"`` → the ``cuda`` runner.
+      * ``backend == "cuda"`` → the ``cuda`` runner (unreachable while
+        ``hal0.model_meta.CUDA_ENABLED`` is off — the slot write/load paths
+        refuse a CUDA selection before any image is resolved).
       * ``device_class == "cpu"`` or ``backend == "cpu"`` → the ``cpu`` runner.
       * ``backend == "rocm"``, ``backend == "vulkan"``, or unspecified GPU →
         the ``rocmfpx`` runner (one Vulkan-portable image serves both GPU
@@ -550,6 +552,27 @@ def canonical_family(key: str) -> str:
     return canonical_runner_key(key)
 
 
+def runner_offered(key: str, runner: Runner | None = None) -> bool:
+    """False for the CUDA runner while ``hal0.model_meta.CUDA_ENABLED`` is off.
+
+    The ``cuda`` entry stays in :data:`RUNNER_IMAGES` so an existing slot or
+    profile naming it still resolves (and is then refused at load with
+    :data:`hal0.model_meta.CUDA_UNSUPPORTED_MESSAGE`); listing surfaces
+    (system-info backends, the runner-image catalogue's families/defaults)
+    filter through this so the lane is never offered.
+    """
+    from hal0.model_meta import cuda_blocked
+
+    if cuda_blocked(canonical_runner_key(key)):
+        return False
+    return not (runner is not None and cuda_blocked(runner.backend))
+
+
+def offered_runner_images() -> dict[str, Runner]:
+    """:data:`RUNNER_IMAGES` minus runners hidden by a release switch (CUDA)."""
+    return {k: r for k, r in RUNNER_IMAGES.items() if runner_offered(k, r)}
+
+
 def runner_matches(runner: Runner, *, device_class: str | None, backend: str | None) -> bool:
     """True when ``runner`` is a valid choice for a given device/backend lane.
 
@@ -584,8 +607,10 @@ __all__ = [
     "canonical_runner_key",
     "cpu_lane_has_runner_image",
     "get_runner",
+    "offered_runner_images",
     "resolve_runner_image",
     "runner_for_backend",
     "runner_matches",
+    "runner_offered",
     "runner_supports_arch",
 ]

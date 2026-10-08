@@ -125,7 +125,7 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
     transcription: 'asr',
     stt: 'asr',
   },
-  model_backends: ['rocm', 'vulkan', 'cpu', 'cuda', 'flm', 'moonshine', 'kokoro'],
+  model_backends: ['rocm', 'vulkan', 'cpu', 'flm', 'moonshine', 'kokoro'],
   // Curated Model.tags vocabulary — kept in step with
   // src/hal0/model_meta CURATED_MODEL_TAGS (type tags first, then
   // provenance, then the curated-catalogue descriptors).

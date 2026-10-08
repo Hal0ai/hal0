@@ -56,12 +56,23 @@ model capability          Canonical registry ``model.capabilities`` spellings:
                           the tolerated synonyms in
                           :data:`CAPABILITY_ALIASES`).
 model backend             Valid ``model.backends`` values in the registry:
-                          GGUF seeds vulkan/rocm/cuda/cpu (registry/detect
-                          already lists cuda as *compatible* — slot configs
-                          can't select it yet), plus the dedicated providers
+                          GGUF seeds vulkan/rocm/cpu (plus cuda only when
+                          :data:`CUDA_ENABLED`), plus the dedicated providers
                           flm/moonshine/kokoro/comfyui
                           (:data:`MODEL_BACKENDS`).
 ========================  ====================================================
+
+CUDA release switch: :data:`CUDA_ENABLED` is the ONE switch for the NVIDIA
+CUDA lane. It is ``False`` in this release — CUDA is not a supported lane;
+NVIDIA GPUs run on the Vulkan lane. The ``gpu-cuda`` / ``cuda`` tokens stay
+in the *validation* vocabularies above (:data:`VALID_DEVICES`,
+:data:`LEGACY_BACKENDS`, :data:`MODEL_BACKENDS`, :data:`BACKEND_TO_DEVICE`)
+so an existing config that names them still parses; the *offered*
+vocabularies (:func:`offered_devices`, :func:`offered_legacy_backends`,
+:func:`offered_model_backends`, :func:`offered_backend_to_device`) drop them,
+and the slot write/load paths refuse them with
+:data:`CUDA_UNSUPPORTED_MESSAGE` (``hal0.slots.config_write.refuse_cuda_selection``).
+Flipping the switch back on restores the lane with no config migration.
 
 Unknown-value policy — ONE documented rule per translation direction
 (previously three sites disagreed silently):
@@ -107,8 +118,8 @@ class DeviceMeta:
 #: The canonical devices (gpu-cuda added by the GPU
 #: generalization wave), with per-device metadata.
 #: Ordering is presentation order for pickers: recommended first, then the
-#: fallbacks (Vulkan, then the experimental CUDA path), then the non-GPU
-#: devices. Per ARCHITECTURE.md (spike data): ``gpu-rocm`` is the recommended
+#: fallbacks (Vulkan, then the CUDA path — hidden while :data:`CUDA_ENABLED`
+#: is False, see :func:`offered_devices`), then the non-GPU devices. Per ARCHITECTURE.md (spike data): ``gpu-rocm`` is the recommended
 #: default on Strix Halo; ``gpu-vulkan`` is the slower fallback.
 CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
     DeviceMeta(
@@ -136,7 +147,7 @@ CANONICAL_DEVICES: tuple[DeviceMeta, ...] = (
         default_profile="chat",
         legacy_backend="cuda",
         recommended=False,
-        description="NVIDIA GPUs via llama.cpp CUDA — experimental on hal0.",
+        description="NVIDIA GPUs via llama.cpp CUDA — not supported in this release.",
     ),
     DeviceMeta(
         id="cpu",
@@ -171,6 +182,40 @@ DEFAULT_DEVICE: str = "gpu-rocm"
 #: device round-trips through the one-release ``backend`` write-back the
 #: same way every other device does.
 LEGACY_BACKENDS: tuple[str, ...] = ("rocm", "vulkan", "cuda", "cpu", "flm", "moonshine", "kokoro")
+
+# ── CUDA release switch ──────────────────────────────────────────────────────
+
+#: The ONE switch for the NVIDIA CUDA lane. ``False`` in this release: CUDA is
+#: never recommended (hardware.recommend), never offered (/api/meta/enums, the
+#: runner-image listings, new registry seeds) and refused at slot
+#: create/update/load (``hal0.slots.config_write.refuse_cuda_selection``).
+#: NVIDIA GPUs run on the Vulkan lane. The ``gpu-cuda``/``cuda`` tokens stay
+#: VALID so existing configs still parse — set this to ``True`` to restore
+#: the lane with no config migration.
+CUDA_ENABLED: bool = False
+
+#: The device id / lane token the switch governs.
+CUDA_DEVICE: str = "gpu-cuda"
+CUDA_BACKEND: str = "cuda"
+
+#: Operator-facing refusal text for any CUDA selection while the switch is off.
+CUDA_UNSUPPORTED_MESSAGE: str = (
+    "CUDA is not supported in this release; NVIDIA GPUs run on the Vulkan lane. "
+    'Set the slot\'s device to "gpu-vulkan" (and pick a non-CUDA profile/runtime).'
+)
+
+
+def is_cuda_token(value: object) -> bool:
+    """True when ``value`` names the CUDA lane (``gpu-cuda`` device or ``cuda`` backend/runner)."""
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in (CUDA_DEVICE, CUDA_BACKEND)
+
+
+def cuda_blocked(value: object) -> bool:
+    """True when ``value`` names the CUDA lane AND the lane is switched off."""
+    return not CUDA_ENABLED and is_cuda_token(value)
+
 
 #: Tokens POST /api/slots/{name}/backend accepts (``auto`` clears the device
 #: so the load path falls back to its default). flm/npu are deliberately not
@@ -273,6 +318,29 @@ def map_backend_to_device(backend: str | None) -> str:
     return "cpu"
 
 
+# ── offered (picker-facing) vocabularies — CUDA-switch aware ─────────────────
+
+
+def offered_devices() -> tuple[DeviceMeta, ...]:
+    """:data:`CANONICAL_DEVICES` minus ``gpu-cuda`` while :data:`CUDA_ENABLED` is off."""
+    return tuple(d for d in CANONICAL_DEVICES if not cuda_blocked(d.id))
+
+
+def offered_legacy_backends() -> tuple[str, ...]:
+    """:data:`LEGACY_BACKENDS` minus ``cuda`` while :data:`CUDA_ENABLED` is off."""
+    return tuple(b for b in LEGACY_BACKENDS if not cuda_blocked(b))
+
+
+def offered_backend_to_device() -> dict[str, str]:
+    """:data:`BACKEND_TO_DEVICE` minus the CUDA entries while :data:`CUDA_ENABLED` is off."""
+    return {k: v for k, v in BACKEND_TO_DEVICE.items() if not (cuda_blocked(k) or cuda_blocked(v))}
+
+
+def offered_device_default_profiles() -> dict[str, str]:
+    """:data:`DEVICE_TO_DEFAULT_PROFILE` minus ``gpu-cuda`` while :data:`CUDA_ENABLED` is off."""
+    return {k: v for k, v in DEVICE_TO_DEFAULT_PROFILE.items() if not cuda_blocked(k)}
+
+
 # ── canonical model vocabulary ───────────────────────────────────────────────
 
 #: Dispatcher slot ``type`` vocabulary (plan §4.1). Single source for
@@ -294,10 +362,11 @@ MODEL_CAPABILITIES: tuple[str, ...] = tuple(m.value for m in Modality)
 CAPABILITY_ALIASES: dict[str, str] = dict(MODALITY_ALIASES)
 
 #: Valid ``model.backends`` values in the registry. The GGUF compatibility
-#: seed is registry/detect._GGUF_BACKENDS (vulkan/rocm/cuda/cpu — ``cuda`` is
-#: already listed there as *compatible*, though no slot config can select it
-#: until Wave 3 lands CUDA support); the rest are the dedicated providers
-#: detect assigns by filename/tree (moonshine, kokoro, comfyui) plus flm.
+#: seed is registry/detect._GGUF_BACKENDS (vulkan/rocm/cpu, plus ``cuda`` only
+#: when :data:`CUDA_ENABLED`); the rest are the dedicated providers detect
+#: assigns by filename/tree (moonshine, kokoro, comfyui) plus flm. ``cuda``
+#: stays VALID here so registry rows seeded by an earlier release still load;
+#: :func:`offered_model_backends` is the picker-facing list.
 MODEL_BACKENDS: tuple[str, ...] = (
     "vulkan",
     "rocm",
@@ -308,6 +377,12 @@ MODEL_BACKENDS: tuple[str, ...] = (
     "kokoro",
     "comfyui",
 )
+
+
+def offered_model_backends() -> tuple[str, ...]:
+    """:data:`MODEL_BACKENDS` minus ``cuda`` while :data:`CUDA_ENABLED` is off."""
+    return tuple(b for b in MODEL_BACKENDS if not cuda_blocked(b))
+
 
 #: Curated ``model.tags`` vocabulary served on /api/meta/enums (WS-13) so the
 #: dashboard's tag chips stop hardcoding their own copies. Ordering is
@@ -683,6 +758,10 @@ __all__ = [
     "BACKEND_TO_DEVICE",
     "CANONICAL_DEVICES",
     "CAPABILITY_ALIASES",
+    "CUDA_BACKEND",
+    "CUDA_DEVICE",
+    "CUDA_ENABLED",
+    "CUDA_UNSUPPORTED_MESSAGE",
     "CURATED_MODEL_TAGS",
     "DEFAULT_DEVICE",
     "DEVICE_CLASSES",
@@ -698,11 +777,18 @@ __all__ = [
     "canonical_device",
     "capability_from_filename",
     "classify",
+    "cuda_blocked",
     "derive_model_provider",
     "device_to_backend",
+    "is_cuda_token",
     "is_resolvable",
     "labels_of",
     "map_backend_to_device",
     "model_capabilities_of",
     "model_is_mtp_eligible",
+    "offered_backend_to_device",
+    "offered_device_default_profiles",
+    "offered_devices",
+    "offered_legacy_backends",
+    "offered_model_backends",
 ]

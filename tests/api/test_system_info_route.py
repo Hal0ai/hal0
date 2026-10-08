@@ -34,10 +34,12 @@ def test_system_info_route_folds_hardware_features_backends(
     assert isinstance(body["features"], dict)
     assert isinstance(body["backends"], dict)
     assert body["podman_context"] in ("rootful", "rootless", "unavailable")
-    # every RUNNER_IMAGES key is present with the expected shape.
-    from hal0.runners import RUNNER_IMAGES
+    # every OFFERED RUNNER_IMAGES key is present with the expected shape —
+    # the cuda runner is hidden while the CUDA lane is switched off.
+    from hal0.runners import RUNNER_IMAGES, offered_runner_images
 
-    assert set(body["backends"]) == set(RUNNER_IMAGES)
+    assert set(body["backends"]) == set(offered_runner_images())
+    assert "cuda" not in body["backends"]
     for key, entry in body["backends"].items():
         assert entry["state"] in ("installed", "installable", "unavailable")
         assert entry["image"]
@@ -205,3 +207,17 @@ def test_system_info_is_classified_client_not_admin_fallback() -> None:
     # /api/system-stats classification); this test pins it so a future edit
     # can't silently widen/narrow it without the assertion failing.
     assert classify("GET", "/api/system-info") is AuthClass.CLIENT
+
+
+def test_system_info_hides_cuda_runner_while_switched_off(
+    isolated_client: TestClient,
+) -> None:
+    """CUDA is not supported in this release (hal0.model_meta.CUDA_ENABLED):
+    the runner stays in RUNNER_IMAGES (so existing configs resolve and get the
+    refusal message) but is never offered on the backends surface."""
+    from hal0.runners import RUNNER_IMAGES
+
+    assert "cuda" in RUNNER_IMAGES
+    backends = isolated_client.get("/api/system-info").json()["backends"]
+    assert "cuda" not in backends
+    assert all("cuda" not in entry["supported_backends"] for entry in backends.values())

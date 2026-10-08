@@ -10,7 +10,9 @@ from hal0.runners import RUNNER_IMAGES
 
 def test_detail_covers_every_runner() -> None:
     res = runner_images_arm.converge_runner_images(retag=MagicMock(return_value=0))
-    assert {d["key"] for d in res["detail"]} == set(RUNNER_IMAGES)
+    # Every OFFERED runner: the cuda runner is hidden while the CUDA lane is
+    # switched off (hal0.model_meta.CUDA_ENABLED).
+    assert {d["key"] for d in res["detail"]} == set(RUNNER_IMAGES) - {"cuda"}
     assert all(d["image"] for d in res["detail"])
 
 

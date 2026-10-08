@@ -60,7 +60,7 @@ def test_add_from_path_registers_gguf(
     assert body["size_bytes"] == 256
     # detect() can't parse a fake GGUF header here, so it falls back to
     # filename + extension only: capability == "chat", backends from the
-    # GGUF backend seed (vulkan/rocm/cuda/cpu).
+    # GGUF backend seed (vulkan/rocm/cpu; cuda only when CUDA_ENABLED).
     assert "chat" in body["capabilities"]
     assert "vulkan" in body["backends"]
     # #1838 part B: a file with a .gguf extension but no valid GGUF magic
@@ -333,7 +333,7 @@ def test_add_from_path_accepts_gguf_symlink_into_extensionless_blob(
     # only recognised "claims .gguf" off the resolved path's suffix, so
     # this exact HF hub-cache shape silently fell through to "unknown, no
     # backends, no warning" instead of the deliberate failed-header path.
-    assert set(body["backends"]) == {"vulkan", "rocm", "cuda", "cpu"}
+    assert set(body["backends"]) == {"vulkan", "rocm", "cpu"}
     assert "no valid GGUF header" in body["metadata"]["detection_warning"]
 
 

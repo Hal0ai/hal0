@@ -143,10 +143,11 @@ function deviceClassOf(device) {
 // (map_backend_to_device's FE mirror). Module-level so the cross-device
 // picker (#1636) and its Codex-flagged fixes share one source of truth
 // instead of three independently-drifting inline copies.
+// No `cuda` entry: CUDA is not supported in this release, so a profile with
+// a cuda backend hint is never offered as a cross-device switch target.
 const BACKEND_DEVICE = {
 	rocm: "gpu-rocm",
 	vulkan: "gpu-vulkan",
-	cuda: "gpu-cuda",
 	cpu: "cpu",
 };
 

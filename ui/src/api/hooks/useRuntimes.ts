@@ -123,7 +123,7 @@ function parseImageRef(ref: string): { repo: string; tag: string | null; digest:
  * degrades to "unavailable" (the dev/no-podman box) — the page shows the
  * shipped registry and disables pull actions with that reason.
  */
-/** Normalize a slot `device` enum (gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu)
+/** Normalize a slot `device` enum (gpu-rocm | gpu-vulkan | cpu | npu)
  *  to its bare backend token — the value fit-checked against a runner's
  *  supported_backends. Strips the `gpu-` prefix; passes cpu/npu through. */
 export function deviceBackend(device?: string | null): string {

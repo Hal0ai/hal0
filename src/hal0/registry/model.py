@@ -241,7 +241,8 @@ class Model(BaseModel):
         default_factory=list,
         description=(
             "Slot backend names this model can run under. "
-            "GGUF → ['vulkan','rocm','cuda','cpu']; moonshine → ['moonshine']; "
+            "GGUF → ['vulkan','rocm','cpu'] (+'cuda' when the CUDA lane is enabled); "
+            "moonshine → ['moonshine']; "
             "kokoro → ['kokoro']. Empty = unknown / not yet detected."
         ),
     )

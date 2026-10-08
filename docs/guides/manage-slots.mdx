@@ -133,7 +133,7 @@ hal0 slot create embed \
    `hal0 slot edit <name> --profile <profile>` or the slot drawer.
 
    A profile can also pin a **runtime** — one of hal0's runner-registry
-   entries (Standard, PromptForge, Strix, CUDA, CPU) — instead of just flags.
+   entries (Standard, PromptForge, Strix, CPU) — instead of just flags.
    Naming such a profile at create time sets the new slot's `binary` (and, for
    a single-backend runtime, its `device`) to match, so the profile decides
    the runtime and not only the tune. A ROCm-only runtime profile on a host
@@ -410,7 +410,7 @@ the runtime you pick rather than an independently editable value:
   underneath. The registry as of this release: **Standard** (the ROCm+Vulkan
   default — "Runs every model type, including FPX quants."), **PromptForge**
   (ROCm only), **Strix** (Vulkan only — qwen4exp support plus MTP speculative
-  decode, no FPX quants), **CUDA**, and **CPU** — plus the singleton engines
+  decode, no FPX quants), and **CPU** — plus the singleton engines
   (FastFlowLM, Kokoro, Moonshine, Qwen3-TTS, ComfyUI) for their own slot
   types. A persisted `binary` this box no longer offers for the slot (older
   release, hand-edited TOML) stays selectable as its own "‹binary› · not in
@@ -419,7 +419,7 @@ the runtime you pick rather than an independently editable value:
   restart it.
 - **Lane** — Auto / ROCm / Vulkan pills — only appears when the picked
   runtime actually offers more than one backend. Today that's Standard
-  alone; every optional runtime (PromptForge, Strix, CUDA) declares exactly
+  alone; every optional runtime (PromptForge, Strix) declares exactly
   one backend, so it has nothing to pick between.
 
 **Threads** is the CPU thread count (`0` = runtime default); **NGL** is GPU
