@@ -183,3 +183,31 @@ async def test_rest_and_mcp_share_one_preflight(monkeypatch: pytest.MonkeyPatch)
     await built["add_preflight"]()
 
     assert seen == [wrapper]
+
+
+@pytest.mark.asyncio
+async def test_boot_memory_dispatch_preflights_memory_add(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boot-time in-process memory_add (brain-lane publishes) runs the
+    same preflight, so a below-floor box never reports a doomed write."""
+    from hal0.api import _boot_memory_dispatch
+
+    wrapper = StubHindsightWrapper()
+    app = FastAPI()
+    app.state.memory_provider = wrapper
+
+    def _refusing(_app: Any, _wrapper: Any) -> Any:
+        async def _preflight() -> None:
+            raise _below_floor()
+
+        return _preflight
+
+    monkeypatch.setattr(memory_routes, "make_add_preflight", _refusing)
+    out = await _boot_memory_dispatch(
+        app,
+        "tools/call",
+        {"name": "memory_add", "arguments": {"text": "hello"}},
+        agent_id="hermes",
+    )
+
+    assert out["ok"] is False
+    assert wrapper.add_calls == []

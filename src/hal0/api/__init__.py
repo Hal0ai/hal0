@@ -2078,12 +2078,15 @@ async def _boot_memory_dispatch(
         # when hal0-memory is unreachable.
         return {"ok": False, "error": "memory provider not configured"}
 
+    from hal0.api.routes.memory import make_add_preflight
     from hal0.mcp.memory import make_dispatcher
 
     dispatcher = make_dispatcher(
         memory_provider,
         client_id_resolver=lambda: agent_id,
         private_resolver=lambda: private,
+        # Boot-time brain-lane publishes are memory_add too (#1930).
+        add_preflight=make_add_preflight(app, memory_provider),
     )
     try:
         result = await dispatcher(tool, arguments)
