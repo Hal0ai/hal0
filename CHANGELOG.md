@@ -267,6 +267,15 @@ applying. Add those subsections to a version's section to surface them; see
   Hermes's `config.yaml` and the brain profile, and hal0-api's startup
   reconcile rewrites an SSE join already on disk without it. (#2331)
 
+- **Pull and status now see the image of a slot with no profile.** A slot
+  with no `profile` and no `image_pin` whose type routes it to a fixed
+  runtime — a bare `type = "tts"` slot falls back to Kokoro, a bare
+  `type = "image"` slot to ComfyUI — launches that runtime's image, but
+  "pull image" found nothing to pull and `/api/slots` reported the slot as
+  `not-configured` (no expected image). Both now resolve the image the slot
+  launches. A bare llama slot with no profile or pin still reports
+  `not-configured`. (#2389)
+
 - **The OAuth "Connected accounts" panel is reachable from the dashboard.**
   v1.3.0 shipped it only inside the old Connections page, which the
   dashboard redirects to Slots ▸ Endpoints, so no menu led to it and

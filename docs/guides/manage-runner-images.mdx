@@ -86,12 +86,10 @@ follow the same order, keyed by their runtime's family (`comfyui`, `flm`,
 or `[slot]`-nested), then `[slots].default_images[<family>]`, then that
 family's release-baked default. The `img` (ComfyUI) slot also honors a legacy
 `image` string between `image_pin` and the family default — see
-[Generate images](/docs/guides/generate-images). For a slot with a profile or
-an `image_pin`, the image pull, slot status, drift check and load-time GPU
-preflight all resolve the same ref the slot launches. A slot with neither (for
-example a bare `type = "tts"` slot that falls back to Kokoro) still launches
-its family image, but the pull and status views report no expected image for
-it.
+[Generate images](/docs/guides/generate-images). The image pull, slot status,
+drift check and load-time GPU preflight all resolve the same ref the slot
+launches, including for a slot with no profile or `image_pin` (for example a
+bare `type = "tts"` slot that falls back to Kokoro).
 
 ## The Runner Images page
 

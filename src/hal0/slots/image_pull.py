@@ -101,15 +101,23 @@ async def resolve_slot_image(sm: Any, name: str) -> str | None:
         configs = await sm.iter_configs()
         for cfg in configs:
             if str(cfg.get("name", "")) == name:
+                from hal0.providers._image import slot_image_pin
+                from hal0.providers.container import _fixed_family_provider, _resolve_image_ref
+
                 profile_name = str(cfg.get("profile") or "")
                 if profile_name:
                     from hal0.config.loader import load_profiles_config
-                    from hal0.providers.container import _resolve_image_ref
 
                     catalog = load_profiles_config()
                     prof = catalog.profile.get(profile_name)
                     if prof:
                         image = _resolve_image_ref(cfg, prof)
+                elif slot_image_pin(cfg) or _fixed_family_provider(cfg, None) is not None:
+                    # #2389: a profile-less slot still launches an image when
+                    # it pins one, or when its type routes it to a fixed-family
+                    # provider (bare type=tts → Kokoro, bare type=image →
+                    # ComfyUI), so the pull must fetch it too.
+                    image = _resolve_image_ref(cfg, None)
                 break
     except Exception:
         pass
