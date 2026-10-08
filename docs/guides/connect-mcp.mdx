@@ -85,8 +85,9 @@ headers — never hal0's own credentials), lists its advertised tools, and
 shows each one's verdict: `allow`, `gated`, `blocked`, `unknown_tool`, or
 `unknown_server`. Verdicts are read from the Hermes seed at
 `/etc/hal0/agents/hermes.toml`, which only carries servers that are enabled
-and exposed to Hermes — so until you run `hal0 mcp expose <id> --hermes`,
-every tool reports `unknown_server`, whatever its policy. A `stdio` server
+and exposed to Hermes — so while exposure is unavailable (see below), every
+tool reports `unknown_server`, whatever its policy, and the output ends
+with the reason exposure is refused. A `stdio` server
 answers `501 mcp.supervisor_unavailable`.
 
 ### Set the tool policy
@@ -103,19 +104,21 @@ hal0 mcp block github delete_repository      # hard-rejected at the client
 
 A tool moves between tiers, never sits on two at once — `hal0 mcp allow`
 on a currently-gated tool promotes it and drops the gated entry
-automatically. Once the server is exposed to Hermes, re-run
+automatically. Once the server can be exposed to Hermes again, re-run
 `hal0 mcp test <id>` to confirm a verdict changed.
 
 <Aside type="caution">
-For now, a server with any `gated` or `blocked` tool cannot be exposed to
-an agent. Hermes and the hal0-brain profile call the server's `url`
-directly, and nothing on that path queues a gated call or refuses a
-blocked one yet, so exposing it would hand the agent the tools you
-restricted. `hal0 mcp expose` on such a server returns
-`409 mcp.exposure_policy_unenforced`, and gating or blocking a tool on a
-server that is already exposed removes it from the agent's config at the
-same time. Only `allow` entries are compatible with exposure until hal0
-sits on the agent's call path.
+For now, no server you install can be exposed to an agent. Hermes and the
+hal0-brain profile call the server's `url` directly, and nothing on that
+path applies the tool policy: a gated call is not queued, a blocked one is
+not refused, and a tool you never listed (which the policy denies) is
+callable too. That holds even for an allow-only or empty policy.
+`hal0 mcp expose <id> --hermes` or `--brain` returns
+`409 mcp.exposure_policy_unenforced`, `hal0 mcp test <id>` says the same,
+and a server exposed before this release is removed from the agent's
+config at the next hal0-api start or MCP change. Exposure comes back once
+hal0's proxy mount sits on the agent's call path (#2303). hal0's own
+bundled servers are not affected.
 </Aside>
 
 ### Expose to an agent
@@ -138,10 +141,9 @@ reserved flags with no join yet — setting either returns
 `501 mcp.exposure_unsupported`. A `stdio`-transport server (most
 npm/uvx packages) has no supervisor yet either — `--hermes`/`--brain` on
 one of those returns `409 mcp.exposure_needs_supervisor` until that
-follow-up ships; `streamable-http`/`sse` servers work today. A server whose
-tool policy has a `gated` or `blocked` entry returns
-`409 mcp.exposure_policy_unenforced` (see above); withdrawing exposure
-always works.
+follow-up ships. Until the proxy mount (#2303), every installed server
+returns `409 mcp.exposure_policy_unenforced` (see above); withdrawing
+exposure always works.
 
 <Aside type="note">
 Uninstalling, disabling (`PATCH /api/mcp/{id}/config` `enabled: false`),
