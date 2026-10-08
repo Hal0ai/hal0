@@ -1,7 +1,7 @@
 #!/bin/sh
 # hal0-hermes — env-injecting wrapper around the hal0-managed Hermes venv.
 #
-# Post-ADR-0012 (no Bearer auth), the wrapper's sole job is to set:
+# Post-ADR-0012 (no Bearer auth), the wrapper's job is to set:
 #
 #   HERMES_HOME    — pins Hermes's state dir under hal0's tree so a
 #                    `hermes reset` or upstream config-rewrite stays
@@ -11,6 +11,8 @@
 #                    namespace. The hal0 MCP mount resolves the caller's
 #                    identity + `--private` toggle straight off the live
 #                    MCP request headers (see `hal0.api.mcp_mount`).
+#   NO_PROXY / no_proxy — the loopback set `localhost,127.0.0.1,::1`
+#                    merged into any existing value (#2371).
 #
 # It then execs the hal0-managed venv's `hermes` binary. The venv
 # lives at /var/lib/hal0/venvs/hermes/ (hard-pinned in
@@ -44,6 +46,36 @@ if [ -r "$HAL0_HERMES_SECRETS" ]; then
     . "$HAL0_HERMES_SECRETS"
     set +a
 fi
+
+# Loopback proxy bypass (#2371, second half of #2330). Only the
+# hal0-agent@hermes unit loads /etc/hal0/agents/hermes.env (EnvironmentFile=,
+# mode 0600 root, so this wrapper can't source it), and an interactive run or
+# the user-level gateway inherits the caller's env. Merge the loopback set into
+# both spellings so a set HTTP_PROXY can't carry loopback MCP calls (and their
+# [secrets] headers) through the proxy. Present entries aren't repeated, an
+# unset/empty value gets no stray comma, and a bare `*` (bypass everything,
+# honoured by urllib only as the whole value) is left alone. Runs after the
+# secrets file so a value set there is merged, not lost.
+_hal0_no_proxy_merge() {
+    _np="$1"
+    if [ "$_np" != "*" ]; then
+        for _h in localhost 127.0.0.1 ::1; do
+            case ",$_np," in
+                *",$_h,"*) ;;
+                *) _np="${_np:+$_np,}$_h" ;;
+            esac
+        done
+    fi
+    printf '%s' "$_np"
+}
+# A spelling that is unset starts from the other one: urllib/httpx let a set
+# lowercase no_proxy win over NO_PROXY, so creating a loopback-only no_proxy
+# would silently drop exclusions an operator listed only in NO_PROXY.
+_hal0_np_upper="${NO_PROXY-${no_proxy-}}"
+_hal0_np_lower="${no_proxy-${NO_PROXY-}}"
+NO_PROXY="$(_hal0_no_proxy_merge "$_hal0_np_upper")"
+no_proxy="$(_hal0_no_proxy_merge "$_hal0_np_lower")"
+export NO_PROXY no_proxy
 
 case "${1:-}" in
     --hal0-ready) exit 0 ;;

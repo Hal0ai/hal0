@@ -201,6 +201,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Interactive `hermes` and the user-level gateway now bypass the proxy for
+  loopback.** Only the `hal0-agent@hermes` unit loads
+  `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers
+  passed on the caller's environment untouched: with `HTTP_PROXY` set, MCP
+  calls to loopback servers, and their `[secrets]` headers, could go through
+  the proxy. Both wrappers now add `localhost,127.0.0.1,::1` to `NO_PROXY` and
+  `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
+  finishes the #2330 fix. (#2371)
+
 - **A stable or preview release now fails its build when `CHANGELOG.md` has
   no section for it.** `scripts/gen_release_notes.py` used to fall back to a
   git log when the `## [<version>]` header was missing or empty, so the
