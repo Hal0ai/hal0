@@ -96,6 +96,13 @@ def test_rotated_key_file_is_owner_only(tmp_path: Path, monkeypatch: pytest.Monk
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("HAL0_LOG_LEVEL=info\n", encoding="utf-8")
     os.chmod(target, 0o644)
+    # rotate_api_env_key live-swaps the key by writing os.environ directly
+    # (service_identity.py), which monkeypatch cannot see. Registering the
+    # variable with monkeypatch first makes teardown restore its prior state,
+    # so the rotated key does not leak into later tests on this worker
+    # (#2368). setenv, not delenv(raising=False): when the variable is unset,
+    # delenv records nothing and teardown would leave the rotated key behind.
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "pre-rotation-admin-key")
 
     service_identity.rotate_api_env_key("admin")
     assert (target.stat().st_mode & 0o777) == paths.API_ENV_MODE
