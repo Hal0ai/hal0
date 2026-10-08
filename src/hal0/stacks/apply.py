@@ -114,6 +114,36 @@ _CHILD_TO_SLOT_NAME: dict[str, str] = {
 }
 
 
+def _stack_touched_slots(stack: StackConfig) -> set[str]:
+    """Slot names converge keeps running for ``stack`` (passes 1-2 of converge).
+
+    Primary entries carrying a model, plus the system slot of every enabled,
+    known capability row. Retired/unknown children map to no slot. This is the
+    set the unload sweep spares; the dry-run preview uses it too (#1511), so
+    KEEP IN SYNC with ``_converge_primary`` / ``_converge_capabilities``.
+    """
+    touched = {entry.slot for entry in stack.slots if entry.model}
+    for entry in stack.slots:
+        for row in entry.capabilities:
+            if not row.enabled:
+                continue
+            if _CHILD_TO_GROUP.get(row.child) is None:
+                continue
+            slot_name = _CHILD_TO_SLOT_NAME.get(row.child)
+            if slot_name is not None:
+                touched.add(slot_name)
+    return touched
+
+
+def _unload_targets(snapshots: dict[str, Any], touched: set[str]) -> list[str]:
+    """Dispatchable slots in a pre-converge snapshot that the sweep will unload."""
+    return [
+        name
+        for name, snap in snapshots.items()
+        if name not in touched and snap.state in _DISPATCHABLE
+    ]
+
+
 @dataclass
 class ConvergeReport:
     """What converge() did, per slot. Failures are recorded, not raised."""
@@ -462,6 +492,21 @@ class StackApplyEngine:
 
         return report
 
+    async def planned_unloads(self, stack: StackConfig) -> list[str]:
+        """Running slots a commit of ``stack`` would unload right now (#1511).
+
+        Stack apply is a declarative replace: converge's pass 3 unloads every
+        dispatchable slot the stack does not touch. The dry-run preview reports
+        this list so the confirm dialog can disclose the teardown before the
+        operator commits. Reads one ``SlotManager.list()`` snapshot and changes
+        nothing; returns ``[]`` when no slot manager is wired (degraded), since
+        converge does not run then either.
+        """
+        if self._slot_manager is None:
+            return []
+        snapshots = {s.name: s for s in await self._slot_manager.list()}
+        return _unload_targets(snapshots, _stack_touched_slots(stack))
+
     async def _converge_primary(
         self,
         entry: StackSlotEntry,
@@ -545,9 +590,7 @@ class StackApplyEngine:
         loaded/swapped in passes 1-2 are in ``touched`` and never swept.
         Offline/transitional slots are left alone.
         """
-        for name, snap in snapshots.items():
-            if name in touched or snap.state not in _DISPATCHABLE:
-                continue
+        for name in _unload_targets(snapshots, touched):
             try:
                 await self._slot_manager.unload(name)
                 report.unloaded.append(name)

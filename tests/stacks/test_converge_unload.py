@@ -72,3 +72,64 @@ class TestUnloadSweep:
         report = await _engine(sm).converge(stack)
         assert report.errors == [("img", "stop failed")]
         assert report.unloaded == []
+
+
+class TestPlannedUnloads:
+    """#1511: the dry-run preview names exactly the slots converge will sweep."""
+
+    async def test_lists_running_slots_the_stack_does_not_name(self) -> None:
+        sm = RecordingSlotManager(
+            [
+                FakeSnap("agent", SlotState.READY, "ace-saber"),
+                FakeSnap("img", SlotState.READY, "flux"),
+                FakeSnap("coder", SlotState.READY, "qwen"),
+                FakeSnap("utility", SlotState.OFFLINE, None),
+            ]
+        )
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="ace-saber")])
+        assert await _engine(sm).planned_unloads(stack) == ["img", "coder"]
+
+    async def test_preview_matches_what_converge_unloads(self) -> None:
+        snaps = [
+            FakeSnap("agent", SlotState.READY, "ace-saber"),
+            FakeSnap("embed", SlotState.READY, "bge-m3"),
+            FakeSnap("img", SlotState.READY, "flux"),
+            FakeSnap("stt", SlotState.READY, "whisper"),
+            FakeSnap("tts", SlotState.STARTING, "kokoro"),
+            FakeSnap("utility", SlotState.OFFLINE, None),
+        ]
+        stack = StackConfig(
+            name="S",
+            slots=[
+                StackSlotEntry(slot="agent", model="ace-saber"),
+                StackSlotEntry(
+                    slot="embed",
+                    capabilities=[
+                        StackCapabilityRow(
+                            child="embed", device="npu", provider="flm", model="bge-m3"
+                        ),
+                        # Disabled rows are not kept running — the sweep takes them.
+                        StackCapabilityRow(
+                            child="stt",
+                            device="npu",
+                            provider="flm",
+                            model="whisper",
+                            enabled=False,
+                        ),
+                    ],
+                ),
+            ],
+        )
+        preview = await _engine(RecordingSlotManager(snaps)).planned_unloads(stack)
+        report = await _engine(RecordingSlotManager(snaps)).converge(stack)
+        assert preview == report.unloaded == ["img", "stt"]
+
+    async def test_no_slot_manager_previews_nothing(self) -> None:
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="ace-saber")])
+        assert await StackApplyEngine().planned_unloads(stack) == []
+
+    async def test_preview_never_unloads_anything(self) -> None:
+        sm = RecordingSlotManager([FakeSnap("img", SlotState.READY, "flux")])
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="ace-saber")])
+        await _engine(sm).planned_unloads(stack)
+        assert [c[0] for c in sm.calls] == ["list"]

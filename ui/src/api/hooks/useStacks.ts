@@ -95,6 +95,8 @@ export interface StackApplyResult {
   changes: StackDiffRow[]
   /** Dry-run: slot names the stack will create (don't exist yet). */
   creates?: string[]
+  /** Dry-run: running slots the stack doesn't name — apply will unload them (#1511). */
+  unloads?: string[]
   /** Commit: slot names that were created during apply. */
   created?: string[]
   converged?: StackConvergeReport
