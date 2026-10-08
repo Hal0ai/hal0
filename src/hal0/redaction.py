@@ -159,21 +159,35 @@ _NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
+# HTTP auth schemes whose name is kept when an ``Authorization`` value is
+# masked; mirrors _HAL0_REPORT_AUTH_SCHEMES in installer/lib/failure-report.sh.
+_AUTH_SCHEMES: Final[str] = (
+    r"(?:basic|bearer|token|apikey|api-key|key|bot|ssws|negotiate|digest|ntlm"
+    r"|oauth|hawk|dpop|aws4-hmac-sha256)"
+)
+
 # Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns:
 # these run before the NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
 _SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"(authorization:\s*(?:basic|token)\s+)[^\s'\"]+", re.I), rf"\g<1>{MASK}"),
     (re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
-    # An ``Authorization: <value>`` the rules above don't cover: an API key
-    # sent raw (#2410) or after a short custom scheme (``ApiKey``, ``Bot``,
-    # ``SSWS``, ``Negotiate``). The optional scheme is letters only, so a raw
-    # key (which carries digits) is never taken for one; 8+ characters so a
-    # word such as ``denied`` is left alone. Already-masked values re-mask
-    # to the same text.
+    # Any other ``Authorization`` value (#2410). A known scheme is kept and
+    # the credential after it masked. Anything else of 8+ characters is
+    # treated as a raw credential and masked to the end of the header value,
+    # so a raw key followed by more words is never taken for a scheme; a
+    # short word such as ``denied`` is left alone. Already-masked values
+    # re-mask to the same text.
     (
         re.compile(
-            r"(authorization[\"']?\s*:\s*[\"']?(?:[A-Za-z][A-Za-z-]{0,19}\s+)?)"
-            r"[^\s\"',]{8,}",
+            r"(authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+)[^\s\"',]+",
+            re.I,
+        ),
+        rf"\g<1>{MASK}",
+    ),
+    (
+        re.compile(
+            r"(authorization[\"']?\s*:\s*[\"']?)"
+            r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8,})[^\"',\n]*[^\s\"',]",
             re.I,
         ),
         rf"\g<1>{MASK}",

@@ -553,6 +553,8 @@ class TestSchemelessAuthorization:
             ("Authorization: SSWS 00aBcD1234efGh", "Authorization: SSWS ***REDACTED***"),
             ("Authorization: Negotiate YIIC4wYGKwYB", "Authorization: Negotiate ***REDACTED***"),
             ("authorization: denied for bob", "authorization: denied for bob"),
+            ("Authorization: abcdefghijklmnop qrstuvwxyz", "Authorization: ***REDACTED***"),
+            ("authorization: required for user", "authorization: ***REDACTED***"),
         ],
     )
     def test_a_scheme_is_kept_and_short_words_survive(self, line: str, expected: str) -> None:
