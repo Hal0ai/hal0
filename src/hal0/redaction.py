@@ -116,9 +116,143 @@ def redact_text_tree(value: Any) -> Any:
     return value
 
 
+# ── Shareable-text redaction (#2409) ────────────────────────────────────────
+#
+# The Python port of installer/lib/failure-report.sh's text pass, for text
+# that leaves the box as a file (the doctor bundle's copy of the install log
+# and failure report). Two steps, as in the shell:
+#
+#   1. literal harvest: the value of every secret-named ``NAME=value`` /
+#      ``NAME: value`` (optionally quoted name and value) that is a
+#      plausible secret is masked wherever else it appears in the text;
+#   2. shape pass, line by line (:func:`redact_secret_shapes`): auth
+#      schemes, URL userinfo, ``NAME[=:]value``, ``--token``-style flags,
+#      long ``client_id=`` values and well-known token prefixes.
+#
+# _SECRET_NAME mirrors failure-report.sh's _HAL0_REPORT_TEXT_NAME_RE: a
+# name containing a secret word (the KEY words with an optional ``_``/``-``
+# separator, #2384), ending in ``_KEY``, or the bare word ``key``. Unlike
+# the shell pass, a name whose only secret word is a benign one
+# (``max_tokens``, ``tokenizer``, ``token_count``, ``passed``) or that names
+# where a secret lives (``*_env``, ``*_file``, ``*_path``, ``*_dir``) is left
+# alone: :func:`redact_log_line` runs this on every live log line.
+_SECRET_NAME: Final[str] = (
+    r"[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY"
+    r"|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)[A-Za-z0-9_]*|(?:[A-Za-z0-9_]*_)?KEY"
+)
+_SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE)
+_BENIGN_NAME_PART_RE: Final[re.Pattern[str]] = re.compile(
+    r"tokens|tokenizer|token_?count|pass(?=[a-z])(?!w(?:or)?d|phrase)", re.IGNORECASE
+)
+_SECRET_REF_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"_(?:env|file|path|dir)$", re.IGNORECASE
+)
+
+# ``NAME`` + separator, then the value: double-quoted, single-quoted or bare.
+_NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<name>" + _SECRET_NAME + r")"
+    r"(?P<sep>[\"']?\s*[=:]\s*)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\"'\s,}&]+)",
+    re.IGNORECASE,
+)
+
+# Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns.
+_SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
+    (re.compile(r"(authorization:\s*(?:basic|token)\s+)[^\s'\"]+", re.I), rf"\g<1>{MASK}"),
+    (re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
+    (re.compile(r"([a-z][a-z0-9+.-]*://[^/@\s:]*):[^/@\s]+@", re.I), rf"\g<1>:{MASK}@"),
+    (re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s:]{16,}@", re.I), rf"\g<1>{MASK}@"),
+    (
+        re.compile(
+            r"(--[A-Za-z0-9-]*(?:secret|token|password|pass|api-key|apikey|private-key)"
+            r"[A-Za-z0-9-]*(?:=|\s+))[^-\s]\S*",
+            re.I,
+        ),
+        rf"\g<1>{MASK}",
+    ),
+    (re.compile(r"(client_id=)[A-Za-z0-9_.-]{16,}", re.I), rf"\g<1>{MASK}"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), MASK),
+    (re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
+)
+
+
+def _is_secret_name(name: str) -> bool:
+    """True if ``name`` (as matched by ``_SECRET_NAME``) names a secret value
+    rather than a count, a tokenizer, or where a secret is stored."""
+    name = name.lstrip("-")
+    if _SECRET_REF_SUFFIX_RE.search(name):
+        return False
+    return bool(_SECRET_NAME_RE.fullmatch(_BENIGN_NAME_PART_RE.sub("", name)))
+
+
+def _mask_name_value(match: re.Match[str]) -> str:
+    if not _is_secret_name(match.group("name")):
+        return match.group(0)
+    value = match.group("value")
+    quote = value[0] if value[0] in "\"'" else ""
+    return f"{match.group('name')}{match.group('sep')}{quote}{MASK}{quote}"
+
+
+def redact_secret_shapes(line: str) -> str:
+    """Mask secret SHAPES in one line of free text (no literal known in
+    advance). Keeps each key's name, quoting and separator so a reader still
+    sees a secret WAS present. Idempotent."""
+    for pattern, repl in _SHAPE_RULES[:4]:
+        line = pattern.sub(repl, line)
+    line = _NAME_VALUE_SHAPE_RE.sub(_mask_name_value, line)
+    for pattern, repl in _SHAPE_RULES[4:]:
+        line = pattern.sub(repl, line)
+    return line
+
+
+_ENV_NAME_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+_NOT_SECRET_WORDS: Final[frozenset[str]] = frozenset({"true", "false", "none", "null", "unset"})
+
+
+def _harvest_secret_literals(text: str) -> list[str]:
+    """Plausible secret values of ``NAME[=:]value`` in ``text``, longest
+    first. Same filter as failure-report.sh's
+    _hal0_report_text_value_is_secret: at least 8 characters, not purely
+    numeric, not an env-var name, and not under the bare field name ``key``
+    (in log text it names a setting, not a credential)."""
+    found: set[str] = set()
+    for match in _NAME_VALUE_SHAPE_RE.finditer(text):
+        name = match.group("name").lstrip("-")
+        if name.lower() == "key" or not _is_secret_name(name):
+            continue
+        value = match.group("value").strip("\"'").strip()
+        if (
+            len(value) < 8
+            or value.isdigit()
+            or _ENV_NAME_VALUE_RE.fullmatch(value)
+            or value.lower() in _NOT_SECRET_WORDS
+            or value in MASK
+        ):
+            continue
+        found.add(value)
+    return sorted(found, key=len, reverse=True)
+
+
+def redact_shareable_text(text: str) -> str:
+    """Redact free text that is about to be written to a shareable file.
+
+    Every plausible secret value seen as ``NAME=value`` / ``NAME: value`` is
+    masked wherever it appears (longest first, so a secret containing
+    another is masked whole), then :func:`redact_secret_shapes` runs on each
+    line. The Python counterpart of installer/lib/failure-report.sh's text
+    pass. Idempotent.
+    """
+    for literal in _harvest_secret_literals(text):
+        text = text.replace(literal, MASK)
+    return "\n".join(redact_secret_shapes(line) for line in text.split("\n"))
+
+
 __all__ = [
     "LOG_SECRET_RE",
     "MASK",
     "redact_log_line",
+    "redact_secret_shapes",
+    "redact_shareable_text",
     "redact_text_tree",
 ]

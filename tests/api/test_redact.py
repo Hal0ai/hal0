@@ -24,6 +24,7 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
+from hal0.redaction import MASK, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -400,3 +401,88 @@ class TestCamelAndRunTogetherKeyNames:
     )
     def test_key_lookalikes_stay_clear(self, name):
         assert is_sensitive_key(name) is False
+
+
+# ── #2409: the shared shareable-text redactor (failure-report shape set) ────
+
+
+class TestShareableTextShapes:
+    """``redact_shareable_text`` ports installer/lib/failure-report.sh's
+    pattern pass and literal harvest; one case per shape."""
+
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("git clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55"),
+            ("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy"),
+            ("Authorization: token ghtok_Aa11Bb22Cc33", "ghtok_Aa11Bb22Cc33"),
+            ("curl -H 'Authorization: Bearer brr_Zz99Yy88Xx77'", "brr_Zz99Yy88Xx77"),
+            ("hf download --token flagtok_Ww12Qq34 m", "flagtok_Ww12Qq34"),
+            ("hf download --token=flagtok_Ee56Rr78 m", "flagtok_Ee56Rr78"),
+            ("loaded hf_" + "a" * 30, "hf_" + "a" * 30),
+            ("using sk-" + "b" * 30, "sk-" + "b" * 30),
+            ("pat ghp_" + "c" * 36, "ghp_" + "c" * 36),
+            (
+                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
+            ),
+            ("aws AKIAABCDEFGHIJKLMNOP", "AKIAABCDEFGHIJKLMNOP"),
+            ('{"token": "JsonTok_88bbccdd"}', "JsonTok_88bbccdd"),
+            ("registry login password: Colon_Secret_77aa", "Colon_Secret_77aa"),
+            ("X-Api-Key: HdrK3y_55eeff00", "HdrK3y_55eeff00"),
+            ("Environment=HAL0_SECRET=sysd_Qq12Ww34Ee56", "sysd_Qq12Ww34Ee56"),
+            ("HF_TOKEN=hf_short1", "hf_short1"),
+            ("GET https://x.invalid/v1?apikey=abcd1234efgh&q=1", "abcd1234efgh"),
+            ('{"apiKey": "abcd1234efgh"}', "abcd1234efgh"),
+            ("export HAL0_CLIENT_KEY='h0c_quoted_Kk11'", "h0c_quoted_Kk11"),
+            ("mcp client_id=abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwxyz0123"),
+        ],
+    )
+    def test_each_shape_is_masked(self, line: str, secret: str) -> None:
+        out = redact_shareable_text(line)
+        assert secret not in out, out
+        assert MASK in out
+
+    def test_a_secret_learned_on_one_line_is_masked_where_it_reappears(self) -> None:
+        text = (
+            "export UPSTREAM_TOKEN=Zq8vR2mW9xK4tL7pQ3\n"
+            '{"password": "Colon_Secret_77aa"}\n'
+            "retry https://example.invalid/hook?t=Zq8vR2mW9xK4tL7pQ3\n"
+            "later reused bare: Colon_Secret_77aa end\n"
+        )
+        out = redact_shareable_text(text)
+        assert "Zq8vR2mW9xK4tL7pQ3" not in out
+        assert "Colon_Secret_77aa" not in out
+        assert "later reused bare: ***REDACTED*** end" in out
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "llama: max_tokens=4096 ctx=8192",
+            '{"max_tokens": 4096, "tokenizer": "Qwen/Qwen2.5-7B-Instruct"}',
+            "load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+            "token_count=123456789",
+            "layout keyboard: us",
+            "zoo monkey=bananaphone99",
+            "api_key_env=HF_TOKEN_FILE",
+            "12 tests passed: 0 failed",
+            "KEY_ROTATION_DAYS=30",
+            "mcp client_id=1a2b3c4d5e6f",
+        ],
+    )
+    def test_lookalikes_survive(self, line: str) -> None:
+        assert redact_shareable_text(line) == line
+
+    def test_lookalike_values_are_not_masked_elsewhere(self) -> None:
+        text = (
+            "provider.credential_written key=OPENAI_API_KEY\n"
+            "load tokenizer=Qwen/Qwen2.5-7B-Instruct max_tokens=40960000\n"
+            "set OPENAI_API_KEY; model Qwen/Qwen2.5-7B-Instruct; budget 40960000\n"
+        )
+        out = redact_shareable_text(text)
+        assert "set OPENAI_API_KEY; model Qwen/Qwen2.5-7B-Instruct; budget 40960000" in out
+
+    def test_it_is_idempotent(self) -> None:
+        text = "HF_TOKEN=hf_" + "a" * 30 + "\ngit clone https://u:pw12345678@h/r\n"
+        once = redact_shareable_text(text)
+        assert redact_shareable_text(once) == once

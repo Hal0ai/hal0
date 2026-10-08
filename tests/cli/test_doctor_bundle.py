@@ -245,6 +245,50 @@ def test_bundle_redacts_name_value_secrets_in_the_latest_install_log(
     assert "Step 3/16: Python environment" in body
 
 
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        ("git clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55", "user:"),
+        ("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy", "Authorization: Basic "),
+        ("hf download --token flagtok_Ww12Qq34 m", "flagtok_Ww12Qq34", "--token "),
+        ("loaded hf_" + "a" * 30, "hf_" + "a" * 30, "loaded "),
+        ("Environment=HAL0_SECRET=sysd_Qq12Ww34Ee56", "sysd_Qq12Ww34Ee56", "HAL0_SECRET="),
+        # CodeRabbit on #2398: hyphenated, colon-separated and quoted JSON
+        # names, with the original quoting and separator kept.
+        ("X-Api-Key: HdrK3y_55eeff00", "HdrK3y_55eeff00", "X-Api-Key: ***REDACTED***"),
+        ('{"apiKey": "abcd1234efgh"}', "abcd1234efgh", '{"apiKey": "***REDACTED***"}'),
+        ("registry password: Colon_Secret_77aa", "Colon_Secret_77aa", "password: "),
+    ],
+)
+def test_install_text_redaction_covers_the_failure_report_shapes(
+    line: str, secret: str, kept: str
+) -> None:
+    """#2409: the bundle's install-log copy masks every shape the installer's
+    own failure report masks."""
+    out = doctor_bundle._redact_install_text(line)
+    assert secret not in out
+    assert kept in out
+
+
+def test_install_text_redaction_masks_a_learned_value_where_it_reappears() -> None:
+    """CodeRabbit on #2398: a sensitive assignment's value is masked at every
+    later literal occurrence, not only on its own line."""
+    out = doctor_bundle._redact_install_text(
+        "+ HF_TOKEN=Zq8vR2mW9xK4tL7pQ3 hf auth whoami\n"
+        '{"password": "Colon_Secret_77aa"}\n'
+        "retry https://example.invalid/hook?t=Zq8vR2mW9xK4tL7pQ3\n"
+        "reused bare: Colon_Secret_77aa end\n"
+    )
+    assert "Zq8vR2mW9xK4tL7pQ3" not in out
+    assert "Colon_Secret_77aa" not in out
+    assert "reused bare: ***REDACTED*** end" in out
+
+
+def test_install_text_redaction_leaves_lookalikes_alone() -> None:
+    text = "llama: max_tokens=4096\nlayout keyboard: us\nport 14096 budget 4096\n"
+    assert doctor_bundle._redact_install_text(text) == text.rstrip("\n")
+
+
 def test_bundle_surfaces_install_artifacts_and_copies_the_failure_report(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

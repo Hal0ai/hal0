@@ -509,33 +509,19 @@ def _install_artifacts() -> dict[str, dict[str, str] | None]:
     }
 
 
-# ``NAME=value`` in free text, value bare or quoted. The name is judged by
-# hal0.api._redact.is_sensitive_key; only the value is replaced.
-_NAME_VALUE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|[^\s\"',}&]+)"
-)
-
-
 def _redact_install_text(text: str) -> str:
     """Redact an installer log or failure report copied into the bundle.
 
-    :func:`hal0.redaction.redact_log_line` masks Bearer, ``client_id=`` and
-    ``*_KEY=`` values; ``NAME=value`` for every other secret-named NAME
-    (``HF_TOKEN=``, ``DB_PASSWORD=``, ``apiKey=``) is masked here by key
-    name, then :func:`_redact_text` scrubs JWTs.
+    :func:`hal0.redaction.redact_shareable_text` (the Python port of the
+    failure report's own text pass, #2409) masks every plausible secret
+    value seen as ``NAME=value`` / ``NAME: value`` wherever it reappears,
+    then the secret shapes on each line; :func:`hal0.redaction.redact_log_line`
+    and :func:`_redact_text` then run as on every other free-text capture.
     """
-    from hal0.api._redact import is_sensitive_key
-    from hal0.redaction import MASK, redact_log_line
+    from hal0.redaction import redact_log_line, redact_shareable_text
 
-    def _mask(match: re.Match[str]) -> str:
-        name, value = match.group("name"), match.group("value")
-        if not is_sensitive_key(name):
-            return match.group(0)
-        quote = value[0] if value[0] in "\"'" else ""
-        return f"{name}={quote}{MASK}{quote}"
-
-    lines = (_NAME_VALUE_RE.sub(_mask, redact_log_line(line)) for line in text.splitlines())
-    return _redact_text("\n".join(lines))
+    shared = redact_shareable_text(text)
+    return _redact_text("\n".join(redact_log_line(line) for line in shared.splitlines()))
 
 
 def _write_install_report(out: Path) -> list[str]:
