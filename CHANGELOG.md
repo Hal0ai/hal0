@@ -192,6 +192,14 @@ applying. Add those subsections to a version's section to surface them; see
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
 
+- **An installed `sse` MCP server exposed to Hermes or the brain profile is
+  now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
+  picks its MCP client by `transport` and reads no `type` key, so every
+  joined SSE server was driven as Streamable-HTTP and failed at connect or
+  `tools/list`. The join now writes `transport` (`sse` or `http`) to both
+  Hermes's `config.yaml` and the brain profile, and hal0-api's startup
+  reconcile rewrites an SSE join already on disk without it. (#2331)
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
