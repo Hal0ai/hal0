@@ -8,11 +8,12 @@ nonsensical (see that command's docstring).
 
 from __future__ import annotations
 
+import contextlib
 import json as jsonlib
 import subprocess
 import tarfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -1074,6 +1075,85 @@ def active_hal0_units(
     return active
 
 
+def _refuse_if_live(active: list[str], *, stop_services: bool, refusal: str) -> None:
+    """Refuse a deploy-window ``--apply`` while hal0 units run, unless they may be stopped.
+
+    Only prints and exits; it never stops anything. Callers run it, then every
+    other check that can refuse (preflight, confirm prompt), and only then
+    open :func:`_stopped_units` (#2325).
+    """
+    if not active:
+        return
+    console.print(
+        "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
+    )
+    if not stop_services:
+        console.print(refusal)
+        raise typer.Exit(1)
+
+
+class _StoppedUnits:
+    """The units a ``--stop-services`` window stopped, in stop order."""
+
+    def __init__(self) -> None:
+        self.units: list[str] = []
+        self.restart = True
+
+    def keep_stopped(self) -> None:
+        """Mark the run as succeeded: leave the units stopped when the window closes."""
+        self.restart = False
+
+
+@contextlib.contextmanager
+def _stopped_units(active: list[str], *, refusal: str) -> Iterator[_StoppedUnits]:
+    """Stop ``active`` for a deploy-window migration; start them again unless it succeeded (#2325).
+
+    Every unit this window stopped is started again when the block exits
+    without a success: ``typer.Exit``, Ctrl-C, or an exception from the backup
+    or the migration. A unit that is still active after the stop refuses the
+    run, and the units that did stop are started again. The caller marks a
+    successful run with :meth:`_StoppedUnits.keep_stopped` just before the
+    block ends; the units then stay stopped and are named, because whether a
+    successful run restarts them is a separate decision (#2325 triage). A
+    start failure is reported with the manual command and never replaces the
+    exception that is already propagating.
+    """
+    window = _StoppedUnits()
+    try:
+        if active:
+            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
+            for unit in active:
+                subprocess.run(["systemctl", "stop", unit], check=False)
+                window.units.append(unit)
+            if active_hal0_units():
+                console.print(refusal)
+                raise typer.Exit(1)
+        yield window
+    finally:
+        if window.units and window.restart:
+            _start_units(reversed(window.units))
+        elif window.units:
+            console.print(
+                "[yellow]![/yellow]  still stopped by --stop-services (restart them when "
+                "ready): " + ", ".join(window.units)
+            )
+
+
+def _start_units(units: Iterable[str]) -> None:
+    """Best-effort ``systemctl start`` of each unit, naming any that fail."""
+    console.print("[dim]Starting the units --stop-services stopped...[/dim]")
+    for unit in units:
+        try:
+            result = subprocess.run(["systemctl", "start", unit], check=False)
+            ok = result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            console.print(
+                f"[red]✗[/red]  could not start {unit}; start it by hand: systemctl start {unit}"
+            )
+
+
 def _backup_slot_state(
     *, config_dir: Path, data_dir: Path, db_file: Path, backup_root: Path
 ) -> Path:
@@ -1161,8 +1241,10 @@ def slot_migrate_id_keying(
         "--stop-services",
         help=(
             "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. Without this flag --apply only WARNS and refuses to run "
-            "while any of those units is active."
+            "then proceed. They are started again if the run refuses or fails; after a "
+            "successful run they stay stopped until you daemon-reload and restart hal0. "
+            "Without this flag --apply only WARNS and refuses to run while any of those "
+            "units is active."
         ),
     ),
     dry_run: bool = typer.Option(
@@ -1218,24 +1300,14 @@ def slot_migrate_id_keying(
         console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
         return
 
+    refusal = (
+        "[red]✗[/red]  refusing to migrate while hal0 is live — flipping artefact "
+        "names under a running runtime split-brains it (the halo143 lesson).\n"
+        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+        "--stop-services."
+    )
     active = active_hal0_units()
-    if active:
-        console.print(
-            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
-        )
-        if stop_services:
-            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
-            for unit in active:
-                subprocess.run(["systemctl", "stop", unit], check=False)
-            active = active_hal0_units()
-        if active:
-            console.print(
-                "[red]✗[/red]  refusing to migrate while hal0 is live — flipping artefact "
-                "names under a running runtime split-brains it (the halo143 lesson).\n"
-                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-                "--stop-services."
-            )
-            raise typer.Exit(1)
+    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
 
     if not yes:
         typer.confirm(
@@ -1245,22 +1317,24 @@ def slot_migrate_id_keying(
             abort=True,
         )
 
-    backup_path = _backup_slot_state(
-        config_dir=config_dir,
-        data_dir=data_dir,
-        db_file=db_file,
-        backup_root=paths.var_lib() / "backups",
-    )
-    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+    with _stopped_units(active, refusal=refusal) as window:
+        backup_path = _backup_slot_state(
+            config_dir=config_dir,
+            data_dir=data_dir,
+            db_file=db_file,
+            backup_root=paths.var_lib() / "backups",
+        )
+        console.print(f"[green]✓[/green]  backup written to {backup_path}")
 
-    identity = SlotIdentityStore(db_path=db_file)
-    ops = SubprocessSlotArtifactOps()
-    report = migrate_slot_id_keying(
-        identity=identity,
-        config_dir=config_dir,
-        data_dir=data_dir,
-        ops=ops,
-    )
+        identity = SlotIdentityStore(db_path=db_file)
+        ops = SubprocessSlotArtifactOps()
+        report = migrate_slot_id_keying(
+            identity=identity,
+            config_dir=config_dir,
+            data_dir=data_dir,
+            ops=ops,
+        )
+        window.keep_stopped()
 
     if not report.migrations and not report.skipped_ids:
         console.print("[dim]No slot TOMLs found — nothing to migrate.[/dim]")
@@ -1301,8 +1375,9 @@ def slot_migrate_hw(
         "--stop-services",
         help=(
             "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. Without this flag --apply only WARNS and refuses to run "
-            "while any of those units is active."
+            "then proceed. They are started again if the run refuses or fails; after a "
+            "successful run they stay stopped until you restart hal0. Without this flag "
+            "--apply only WARNS and refuses to run while any of those units is active."
         ),
     ),
 ) -> None:
@@ -1335,24 +1410,14 @@ def slot_migrate_hw(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites slot TOMLs the running process still resolves.
+    refusal = (
+        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
+        "under a running runtime split-brains it.\n"
+        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+        "--stop-services."
+    )
     active = active_hal0_units()
-    if active:
-        console.print(
-            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
-        )
-        if stop_services:
-            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
-            for unit in active:
-                subprocess.run(["systemctl", "stop", unit], check=False)
-            active = active_hal0_units()
-        if active:
-            console.print(
-                "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
-                "under a running runtime split-brains it.\n"
-                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-                "--stop-services."
-            )
-            raise typer.Exit(1)
+    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
 
     if not yes:
         typer.confirm(
@@ -1361,23 +1426,25 @@ def slot_migrate_hw(
             abort=True,
         )
 
-    backup_path = _backup_slot_state(
-        config_dir=paths.slots_config_dir(),
-        data_dir=paths.var_lib() / "slots",
-        db_file=paths.db_path(),
-        backup_root=paths.var_lib() / "backups",
-    )
-    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+    with _stopped_units(active, refusal=refusal) as window:
+        backup_path = _backup_slot_state(
+            config_dir=paths.slots_config_dir(),
+            data_dir=paths.var_lib() / "slots",
+            db_file=paths.db_path(),
+            backup_root=paths.var_lib() / "backups",
+        )
+        console.print(f"[green]✓[/green]  backup written to {backup_path}")
 
-    lines = run_migration(deploy_window=True, dry_run=False)
-    console.print("\n[bold]Applied hardware-ownership fold:[/bold]")
-    if not lines:
-        console.print("  [dim](nothing to fold)[/dim]")
-    for line in lines:
-        console.print(f"  {line}")
-    console.print(
-        "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the slot HW grid.[/yellow]"
-    )
+        lines = run_migration(deploy_window=True, dry_run=False)
+        console.print("\n[bold]Applied hardware-ownership fold:[/bold]")
+        if not lines:
+            console.print("  [dim](nothing to fold)[/dim]")
+        for line in lines:
+            console.print(f"  {line}")
+        console.print(
+            "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the slot HW grid.[/yellow]"
+        )
+        window.keep_stopped()
 
 
 # ── migrate-caps (spec-hw-slot-ownership §1 — mtp/reasoning/vision stick to models) ──
@@ -1403,8 +1470,9 @@ def slot_migrate_caps(
         "--stop-services",
         help=(
             "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. Without this flag --apply only WARNS and refuses to run "
-            "while any of those units is active."
+            "then proceed. They are started again if the run refuses or fails; after a "
+            "successful run they stay stopped until you restart hal0. Without this flag "
+            "--apply only WARNS and refuses to run while any of those units is active."
         ),
     ),
 ) -> None:
@@ -1438,24 +1506,14 @@ def slot_migrate_caps(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites slot TOMLs the running process still resolves.
+    refusal = (
+        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
+        "under a running runtime split-brains it.\n"
+        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+        "--stop-services."
+    )
     active = active_hal0_units()
-    if active:
-        console.print(
-            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
-        )
-        if stop_services:
-            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
-            for unit in active:
-                subprocess.run(["systemctl", "stop", unit], check=False)
-            active = active_hal0_units()
-        if active:
-            console.print(
-                "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
-                "under a running runtime split-brains it.\n"
-                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-                "--stop-services."
-            )
-            raise typer.Exit(1)
+    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
 
     if not yes:
         typer.confirm(
@@ -1463,23 +1521,26 @@ def slot_migrate_caps(
             abort=True,
         )
 
-    backup_path = _backup_slot_state(
-        config_dir=paths.slots_config_dir(),
-        data_dir=paths.var_lib() / "slots",
-        db_file=paths.db_path(),
-        backup_root=paths.var_lib() / "backups",
-    )
-    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+    with _stopped_units(active, refusal=refusal) as window:
+        backup_path = _backup_slot_state(
+            config_dir=paths.slots_config_dir(),
+            data_dir=paths.var_lib() / "slots",
+            db_file=paths.db_path(),
+            backup_root=paths.var_lib() / "backups",
+        )
+        console.print(f"[green]✓[/green]  backup written to {backup_path}")
 
-    lines = run_migration(deploy_window=True, dry_run=False)
-    console.print("\n[bold]Applied model-ownership fold:[/bold]")
-    if not lines:
-        console.print("  [dim](nothing to fold)[/dim]")
-    for line in lines:
-        console.print(f"  {line}")
-    console.print(
-        "\n[yellow]Restart hal0-api to pick up the model-owned mtp/reasoning/vision defaults.[/yellow]"
-    )
+        lines = run_migration(deploy_window=True, dry_run=False)
+        console.print("\n[bold]Applied model-ownership fold:[/bold]")
+        if not lines:
+            console.print("  [dim](nothing to fold)[/dim]")
+        for line in lines:
+            console.print(f"  {line}")
+        console.print(
+            "\n[yellow]Restart hal0-api to pick up the model-owned "
+            "mtp/reasoning/vision defaults.[/yellow]"
+        )
+        window.keep_stopped()
 
 
 # ── migrate-flags (spec-flags-ownership §5 — launch flags stick to models) ────
@@ -1511,8 +1572,9 @@ def slot_migrate_flags(
         "--stop-services",
         help=(
             "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. Without this flag --apply only WARNS and refuses to run "
-            "while any of those units is active."
+            "then proceed. They are started again if the run refuses or fails; after a "
+            "successful run they stay stopped until you restart hal0. Without this flag "
+            "--apply only WARNS and refuses to run while any of those units is active."
         ),
     ),
 ) -> None:
@@ -1565,32 +1627,24 @@ def slot_migrate_flags(
 
     # --apply: a real deploy-window write. Guard against a live runtime — the
     # fold rewrites registry rows the running process still resolves.
-    active = active_hal0_units()
-    if active:
-        console.print(
-            "[yellow]![/yellow]  the following hal0 units are still active: " + ", ".join(active)
-        )
-        if stop_services:
-            console.print("[dim]Stopping active units first (--stop-services)...[/dim]")
-            for unit in active:
-                subprocess.run(["systemctl", "stop", unit], check=False)
-            active = active_hal0_units()
-        if active:
-            console.print(
-                "[red]✗[/red]  refusing to fold while hal0 is live — rewriting model "
-                "defaults under a running runtime split-brains it.\n"
-                "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-                "--stop-services."
-            )
-            raise typer.Exit(1)
-
-    # Surface a divergent-share refusal BEFORE the confirm prompt and the
-    # backup — there is nothing to confirm if the run cannot proceed.
+    # Surface a divergent-share refusal BEFORE stopping any unit, the confirm
+    # prompt and the backup — there is nothing to stop or confirm if the run
+    # cannot proceed (#2325). The planner is write-free, the same pass the
+    # bare dry-run and `hal0 update` run against a live box.
     try:
         run_migration(deploy_window=False, dry_run=True)
     except RuntimeError as exc:
         _report_refusal(exc)
         raise typer.Exit(1) from None
+
+    refusal = (
+        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting model "
+        "defaults under a running runtime split-brains it.\n"
+        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
+        "--stop-services."
+    )
+    active = active_hal0_units()
+    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
 
     if not yes:
         typer.confirm(
@@ -1599,25 +1653,28 @@ def slot_migrate_flags(
             abort=True,
         )
 
-    backup_path = _backup_slot_state(
-        config_dir=paths.slots_config_dir(),
-        data_dir=paths.var_lib() / "slots",
-        db_file=paths.db_path(),
-        backup_root=paths.var_lib() / "backups",
-    )
-    console.print(f"[green]✓[/green]  backup written to {backup_path}")
+    with _stopped_units(active, refusal=refusal) as window:
+        backup_path = _backup_slot_state(
+            config_dir=paths.slots_config_dir(),
+            data_dir=paths.var_lib() / "slots",
+            db_file=paths.db_path(),
+            backup_root=paths.var_lib() / "backups",
+        )
+        console.print(f"[green]✓[/green]  backup written to {backup_path}")
 
-    partial: FoldPartiallyApplied | None = None
-    try:
-        lines = run_migration(deploy_window=True, dry_run=False)
-    except FoldPartiallyApplied as exc:
-        partial, lines = exc, exc.lines
-    console.print("\n[bold]Applied flags-ownership fold:[/bold]")
-    if not lines:
-        console.print("  [dim](nothing to fold)[/dim]")
-    for line in lines:
-        console.print(f"  {line}")
-    console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
+        partial: FoldPartiallyApplied | None = None
+        try:
+            lines = run_migration(deploy_window=True, dry_run=False)
+        except FoldPartiallyApplied as exc:
+            partial, lines = exc, exc.lines
+        console.print("\n[bold]Applied flags-ownership fold:[/bold]")
+        if not lines:
+            console.print("  [dim](nothing to fold)[/dim]")
+        for line in lines:
+            console.print(f"  {line}")
+        console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
+        if partial is None:
+            window.keep_stopped()
     if partial is not None:
         # #2180: the other folds landed; name what did not. Exit 2 = applied,
         # work outstanding — the same split `hal0 update` draws against 1.

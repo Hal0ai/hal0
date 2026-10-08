@@ -606,7 +606,11 @@ or any `hal0-slot@*` unit is active, since rewriting slot TOML under a live
 runtime risks a split-brain config. `hal0 update` already knows whether any
 such unit is up, so the command it prints carries `--stop-services` for you
 when that's the case (stopping those units before proceeding) — copy the
-line verbatim rather than adding the flag yourself.
+line verbatim rather than adding the flag yourself. The flag stops nothing
+until the run's own checks and the confirmation prompt have passed. If the
+run then refuses or fails, it starts the units it stopped again. After a
+successful run they stay stopped, and the command names them: restart hal0
+yourself (after `systemctl daemon-reload` where the command says so).
 
 `migrate-flags --apply` folds every slot it can. A slot whose default model
 has no registry row is skipped and named in the summary, the other slots
