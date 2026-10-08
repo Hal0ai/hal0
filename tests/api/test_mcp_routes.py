@@ -1020,6 +1020,62 @@ def test_patch_exposure_hermes(client: TestClient) -> None:
     assert "hermes_sync" in response.json()
 
 
+@pytest.mark.parametrize("target", ["hermes", "brain"])
+@pytest.mark.parametrize("axis", ["gated", "blocked"])
+def test_patch_exposure_refused_while_tool_policy_is_unenforced(
+    client: TestClient, target: str, axis: str
+) -> None:
+    """#2343: Hermes calls the upstream directly, so nothing on its call path
+    enforces `gated`/`blocked` (#2303); exposure is refused, not accepted."""
+    _install_github(client)
+    response = client.patch("/api/mcp/github/tools", json={axis: ["delete_repo"]})
+    assert response.status_code == 200, response.text
+
+    response = client.patch("/api/mcp/github/exposure", json={target: True})
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "mcp.exposure_policy_unenforced"
+    assert error["details"]["server_id"] == "github"
+    assert error["details"]["targets"] == [target]
+    assert error["details"]["tools"] == ["delete_repo"]
+    # Nothing was written: the record is still unexposed.
+    from hal0.mcp import installed
+
+    exposure = installed.get_installed("github").exposure
+    assert (exposure.hermes, exposure.brain) == (False, False)
+
+
+def test_patch_exposure_allowed_with_allow_only_policy(client: TestClient) -> None:
+    _install_github(client)
+    client.patch("/api/mcp/github/tools", json={"allow": ["search_repositories"]})
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["server"]["exposure"]["hermes"] is True
+
+
+def test_patch_exposure_can_still_turn_off_an_unenforced_record(client: TestClient) -> None:
+    """The guard refuses turning exposure on; narrowing it must keep working."""
+    _install_github(client)
+    assert client.patch("/api/mcp/github/exposure", json={"hermes": True}).status_code == 200
+    assert client.patch("/api/mcp/github/tools", json={"gated": ["create_pr"]}).status_code == 200
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": False})
+    assert response.status_code == 200, response.text
+    assert response.json()["server"]["exposure"]["hermes"] is False
+
+
+def test_patch_tools_gating_an_exposed_server_drops_its_join(client: TestClient) -> None:
+    """Already exposed, then a tool is blocked: the sync the PATCH runs takes
+    it out of the join rather than leaving it with Hermes unenforced."""
+    from hal0.mcp import hermes_join
+
+    _install_github(client)
+    assert client.patch("/api/mcp/github/exposure", json={"hermes": True}).status_code == 200
+    assert hermes_join._load_manifest()["hermes"] == ["github"]
+    response = client.patch("/api/mcp/github/tools", json={"blocked": ["delete_repo"]})
+    assert response.status_code == 200, response.text
+    assert hermes_join._load_manifest()["hermes"] == []
+
+
 def test_patch_exposure_openwebui_rejected(client: TestClient) -> None:
     _install_github(client)
     response = client.patch("/api/mcp/github/exposure", json={"openwebui": True})

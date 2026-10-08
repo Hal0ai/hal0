@@ -106,6 +106,18 @@ on a currently-gated tool promotes it and drops the gated entry
 automatically. Once the server is exposed to Hermes, re-run
 `hal0 mcp test <id>` to confirm a verdict changed.
 
+<Aside type="caution">
+For now, a server with any `gated` or `blocked` tool cannot be exposed to
+an agent. Hermes and the hal0-brain profile call the server's `url`
+directly, and nothing on that path queues a gated call or refuses a
+blocked one yet, so exposing it would hand the agent the tools you
+restricted. `hal0 mcp expose` on such a server returns
+`409 mcp.exposure_policy_unenforced`, and gating or blocking a tool on a
+server that is already exposed removes it from the agent's config at the
+same time. Only `allow` entries are compatible with exposure until hal0
+sits on the agent's call path.
+</Aside>
+
 ### Expose to an agent
 
 Installing and setting a tool policy is not enough on its own — a server
@@ -126,7 +138,10 @@ reserved flags with no join yet — setting either returns
 `501 mcp.exposure_unsupported`. A `stdio`-transport server (most
 npm/uvx packages) has no supervisor yet either — `--hermes`/`--brain` on
 one of those returns `409 mcp.exposure_needs_supervisor` until that
-follow-up ships; `streamable-http`/`sse` servers work today.
+follow-up ships; `streamable-http`/`sse` servers work today. A server whose
+tool policy has a `gated` or `blocked` entry returns
+`409 mcp.exposure_policy_unenforced` (see above); withdrawing exposure
+always works.
 
 <Aside type="note">
 Uninstalling, disabling (`PATCH /api/mcp/{id}/config` `enabled: false`),

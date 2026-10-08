@@ -127,13 +127,27 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
     Only ``streamable-http``/``sse`` records qualify — ``stdio`` has no
     supervisor yet (ADR-0015 "Deferred"), so a stdio record's
     ``exposure.hermes``/``.brain`` is rejected before it ever reaches
-    here (see ``routes/mcp.py``'s ``PATCH /exposure`` handler).
+    here (see ``routes/mcp.py``'s ``PATCH /exposure`` handler). A record
+    whose ``[tools]`` policy has ``gated`` or ``blocked`` entries is skipped
+    and logged: nothing on Hermes's call path would enforce them (#2343).
     """
     entries: dict[str, dict[str, Any]] = {}
     for record in list_enabled_exposed(target=target):
         if record.transport not in ("streamable-http", "sse"):
             continue
         if not record.url:
+            continue
+        # #2343: Hermes calls `record.url` itself, so nothing enforces a
+        # `gated`/`blocked` entry on its path (#2303). Never join such a
+        # record; an already-joined one is removed by this same sync.
+        if record.unenforced_tool_policy():
+            log.warning(
+                "hal0.mcp.hermes_join.policy_unenforced",
+                server_id=record.id,
+                target=target,
+                gated=sorted(record.tool_policy.gated),
+                blocked=sorted(record.tool_policy.blocked),
+            )
             continue
         # #2304: a record that would send header values in clear text only
         # loads with the explicit `allow_insecure_http` opt-in — say so on

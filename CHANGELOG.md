@@ -221,6 +221,19 @@ applying. Add those subsections to a version's section to surface them; see
   which would have shipped the rc's notes and slipped past that check.
   (#2255, #2345)
 
+- **A user-installed MCP server with `gated` or `blocked` tools is no longer
+  handed to Hermes or the brain profile.** Both call the server's URL
+  directly, and nothing on that path enforces the `[tools]` policy yet
+  (#2303), so an agent could call the very tools the operator restricted
+  while `hal0 mcp test` reported them blocked. `PATCH
+  /api/mcp/{id}/exposure` (and `hal0 mcp expose`) now refuses turning
+  `hermes`/`brain` on for such a server with
+  `409 mcp.exposure_policy_unenforced`; withdrawing exposure still works.
+  A server already exposed, or one that gains a `gated`/`blocked` entry
+  later, is left out of the join and logged, so the next sync (or
+  hal0-api's startup reconcile) removes it from Hermes's config. This is an
+  interim guard until hal0 sits on the agent's call path. (#2343)
+
 - **An installed `sse` MCP server exposed to Hermes or the brain profile is
   now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
   picks its MCP client by `transport` and reads no `type` key, so every

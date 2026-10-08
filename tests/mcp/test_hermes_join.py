@@ -55,7 +55,9 @@ def test_sync_exposure_mirrors_tools_into_seed_toml(tmp_hal0_home: str) -> None:
     _install(
         "github",
         exposure=installed.ExposureConfig(hermes=True),
-        tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"]),
+        # Allow-only: a gated/blocked entry keeps the record out of the join
+        # altogether (#2343, see the tests at the end of this file).
+        tool_policy=ToolPolicy(allow=["search", "list_issues"]),
     )
     hermes_join.sync_exposure()
     seed_path = cfg_paths.etc() / "agents" / "hermes.toml"
@@ -65,8 +67,8 @@ def test_sync_exposure_mirrors_tools_into_seed_toml(tmp_hal0_home: str) -> None:
     data = tomllib.loads(seed_path.read_text())
     github_entry = data["mcp"]["servers"]["github"]
     assert github_entry["builtin"] is False
-    assert github_entry["tools"]["allow"] == ["search"]
-    assert github_entry["tools"]["gated"] == ["create_pr"]
+    assert github_entry["tools"]["allow"] == ["search", "list_issues"]
+    assert github_entry["tools"]["gated"] == []
 
 
 def test_sync_exposure_preserves_operator_seed_blocks(tmp_hal0_home: str) -> None:
@@ -676,3 +678,105 @@ def test_reconcile_treats_a_missing_transport_as_http(tmp_hal0_home: str, monkey
 
     monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
     assert hermes_join.reconcile_stale_joins() == []
+
+
+# --- #2343: a [tools] policy Hermes's direct path cannot enforce ------------
+# Hermes calls the upstream URL itself (`_desired_entries` hands it url +
+# headers), so `gated`/`blocked` entries are not enforced on its call path
+# (#2303). Until hal0 sits on that path, such a record is never joined.
+
+
+def test_unenforced_tool_policy_lists_gated_and_blocked_tools(tmp_hal0_home: str) -> None:
+    rec = _install(
+        "github",
+        tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"], blocked=["delete_repo"]),
+    )
+    assert rec.unenforced_tool_policy() == ["create_pr", "delete_repo"]
+    assert (
+        _install("plain", tool_policy=ToolPolicy(allow=["search"])).unenforced_tool_policy() == []
+    )
+    assert _install("empty").unenforced_tool_policy() == []
+
+
+def test_desired_entries_skip_and_log_a_record_with_gated_or_blocked_tools(
+    tmp_hal0_home: str,
+) -> None:
+    from structlog.testing import capture_logs
+
+    both = installed.ExposureConfig(hermes=True, brain=True)
+    _install("gated", exposure=both, tool_policy=ToolPolicy(gated=["create_pr"]))
+    _install("blocked", exposure=both, tool_policy=ToolPolicy(blocked=["delete_repo"]))
+    _install("allowonly", exposure=both, tool_policy=ToolPolicy(allow=["search"]))
+
+    for target in hermes_join.JOIN_TARGETS:
+        with capture_logs() as logs:
+            entries = hermes_join._desired_entries(target)
+        assert set(entries) == {"allowonly"}, target
+        skipped = {
+            e["server_id"]: e
+            for e in logs
+            if e["event"] == "hal0.mcp.hermes_join.policy_unenforced"
+        }
+        assert set(skipped) == {"gated", "blocked"}, target
+        assert skipped["gated"]["target"] == target
+        assert skipped["gated"]["gated"] == ["create_pr"]
+        assert skipped["blocked"]["blocked"] == ["delete_repo"]
+        assert skipped["gated"]["log_level"] == "warning"
+
+
+def test_already_exposed_record_is_removed_once_a_tool_is_blocked(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Exposed before the operator blocked a tool: the next sync takes it out
+    of Hermes's config, the brain profile, the manifest and the seed mirror."""
+    import tomllib
+
+    import yaml
+
+    _fake_hermes(monkeypatch)
+    brain_cfg = cfg_paths.var_lib() / ".hermes" / "profiles" / "hal0-brain" / "config.yaml"
+    brain_cfg.parent.mkdir(parents=True, exist_ok=True)
+    brain_cfg.write_text("mcp_servers: {}\n", encoding="utf-8")
+    _install("github", exposure=installed.ExposureConfig(hermes=True, brain=True))
+    hermes_join.sync_exposure()
+    assert hermes_join._load_manifest() == {"hermes": ["github"], "brain": ["github"]}
+    _write_hermes_config(
+        {
+            "github": {"url": "https://github.example.com/mcp"},
+            "operator-added": {"url": "https://op.example.com/mcp"},
+        }
+    )
+
+    installed.patch_config("github", tool_policy=ToolPolicy(blocked=["delete_repo"]))
+    hermes_join.sync_exposure(only_server_id="github")
+
+    assert hermes_join._load_manifest() == {"hermes": [], "brain": []}
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    servers = yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert "github" not in servers
+    assert "operator-added" in servers
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
+    assert "github" not in (brain.get("mcp_servers") or {})
+    seed = tomllib.loads((cfg_paths.etc() / "agents" / "hermes.toml").read_text())
+    assert "github" not in seed.get("mcp", {}).get("servers", {})
+
+
+def test_reconcile_evicts_an_exposed_record_with_a_gated_tool(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Upgrade path: a join written before this guard is removed at boot."""
+    import yaml
+
+    _fake_hermes(monkeypatch)
+    _install(
+        "github",
+        exposure=installed.ExposureConfig(hermes=True),
+        tool_policy=ToolPolicy(gated=["create_pr"]),
+    )
+    _write_hermes_config({"github": {"url": "https://github.example.com/mcp"}})
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    assert hermes_join.reconcile_stale_joins() == ["github"]
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    assert "github" not in yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert hermes_join._load_manifest()["hermes"] == []
