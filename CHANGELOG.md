@@ -316,6 +316,12 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+- **A container with `/dev/kfd` but no render node no longer gets ROCm slots
+  seeded.** Seed derivation treated `/dev/kfd` alone as proof the box can
+  run ROCm, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
+  where only kfd was forwarded, preflight reports no usable GPU and offers a
+  CPU-only install, yet every llama.cpp seed still came out `gpu-rocm`. The
+  derivation now needs both nodes, and that box seeds `cpu`. (#2313)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented

@@ -177,6 +177,7 @@ def test_strix_platform_forces_rocm_when_the_compute_node_is_there(monkeypatch):
     """platform=strix-halo is the canonical FP4 signal — but since #1888 it is
     necessary, not sufficient: /dev/kfd must actually be reachable."""
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
@@ -258,7 +259,7 @@ def test_cpu_host_tts_still_derives_tts_profile():
 # ── kfd_present decides the ROCm lane, not rocm-smi (#2216) ────────────────────
 
 
-def test_kfd_present_alone_wins_rocm_on_a_container_lxc_platform(monkeypatch):
+def test_kfd_present_wins_rocm_on_a_container_lxc_platform(monkeypatch):
     """hal0's own production shape: a Proxmox LXC with /dev/kfd forwarded.
 
     ``_detect_platform`` classifies containers before it ever reaches the
@@ -266,9 +267,11 @@ def test_kfd_present_alone_wins_rocm_on_a_container_lxc_platform(monkeypatch):
     fresh container has no ``rocm-smi`` so ``compute_capable`` reads False
     too — before #2216's fix, both signals came back negative and every
     llama.cpp seed derived ``gpu-vulkan`` despite ROCm working perfectly.
-    ``kfd_present()`` alone must be sufficient.
+    ``kfd_present()`` (with the render node every ROCm slot also opens, #2313)
+    must be sufficient without either.
     """
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
@@ -278,6 +281,29 @@ def test_neither_kfd_nor_compute_capable_still_declines_rocm(monkeypatch):
     monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
+
+
+# ── the ROCm lane needs a render node too, not /dev/kfd alone (#2313) ──────────
+
+
+def test_kfd_without_a_render_node_does_not_derive_rocm(monkeypatch):
+    """An LXC with /dev/kfd forwarded but no ``/dev/dri/renderD*`` (a ``devN``
+    typo, or a dropped ``dev0`` line) cannot open the render node a ROCm slot
+    needs. Preflight reports NO_DEVICE there and the operator may opt into a
+    CPU-only install, so seeding ``gpu-rocm`` slots would be wrong. With no
+    render node the probe reads ``vulkan_capable`` False on AMD, so the
+    derivation falls through to the CPU fallback."""
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: False)
+    hw = _hw(platform="lxc", compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+
+
+def test_kfd_and_a_render_node_together_derive_rocm(monkeypatch):
+    monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.install.profile_derive.render_node_present", lambda *a, **k: True)
+    hw = _hw(platform="lxc", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
 
 # ── apply_cpu_fallback (#1936, #1966) ───────────────────────────────────────────
