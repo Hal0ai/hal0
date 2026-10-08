@@ -221,6 +221,14 @@ applying. Add those subsections to a version's section to surface them; see
   which would have shipped the rc's notes and slipped past that check.
   (#2255, #2345)
 
+- **An installed `sse` MCP server exposed to Hermes or the brain profile is
+  now opened as SSE.** The join wrote only `type: sse`, but the pinned Hermes
+  picks its MCP client by `transport` and reads no `type` key, so every
+  joined SSE server was driven as Streamable-HTTP and failed at connect or
+  `tools/list`. The join now writes `transport` (`sse` or `http`) to both
+  Hermes's `config.yaml` and the brain profile, and hal0-api's startup
+  reconcile rewrites an SSE join already on disk without it. (#2331)
+
 - **The OAuth "Connected accounts" panel is reachable from the dashboard.**
   v1.3.0 shipped it only inside the old Connections page, which the
   dashboard redirects to Slots ▸ Endpoints, so no menu led to it and

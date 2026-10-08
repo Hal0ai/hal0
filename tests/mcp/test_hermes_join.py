@@ -568,3 +568,111 @@ def test_reconcile_resyncs_when_disk_has_stale_header_keys(tmp_hal0_home: str, m
     )
     hermes_join._write_manifest({"hermes": ["github"], "brain": []})
     assert hermes_join.reconcile_stale_joins() == ["github"]
+
+
+# --- #2331: the pinned Hermes picks SSE by `transport`, not `type` ----------
+# (`tools/mcp_tool.py:2383` at the VETTED_HERMES_REFS commit:
+# `if config.get("transport") == "sse":`; its status reader defaults the key
+# to "http", `tools/mcp_tool.py:5084`.)
+
+
+def test_desired_entries_carry_the_transport_key_hermes_reads(tmp_hal0_home: str) -> None:
+    _install("feed", transport="sse", exposure=installed.ExposureConfig(hermes=True))
+    _install("github", exposure=installed.ExposureConfig(hermes=True))
+    entries = hermes_join._desired_entries("hermes")
+    assert entries["feed"]["transport"] == "sse"
+    assert entries["github"]["transport"] == "http"
+
+
+def test_sse_transport_reaches_hermes_config_and_brain_profile(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    import yaml
+
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    brain_cfg = cfg_paths.var_lib() / ".hermes" / "profiles" / "hal0-brain" / "config.yaml"
+    brain_cfg.parent.mkdir(parents=True, exist_ok=True)
+    brain_cfg.write_text("mcp_servers: {}\n", encoding="utf-8")
+    _install("feed", transport="sse", exposure=installed.ExposureConfig(hermes=True, brain=True))
+
+    hermes_join.sync_exposure()
+
+    assert [hermes_bin, "config", "set", "mcp_servers.feed.transport", "sse"] in calls
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
+    assert brain["mcp_servers"]["feed"]["transport"] == "sse"
+
+
+def test_reconcile_resyncs_an_sse_join_written_without_transport(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """Upgrade path: an SSE join written as `type: sse` alone is rewritten at boot."""
+    hermes_bin, calls = _fake_hermes(monkeypatch)
+    _install("feed", transport="sse", exposure=installed.ExposureConfig(hermes=True))
+    _write_hermes_config(
+        {
+            "feed": {
+                "type": "sse",
+                "url": "https://feed.example.com/mcp",
+                "headers": {"X-hal0-Agent": "hermes"},
+            }
+        }
+    )
+    hermes_join._write_manifest({"hermes": ["feed"], "brain": []})
+
+    assert hermes_join.reconcile_stale_joins() == ["feed"]
+    assert [hermes_bin, "config", "set", "mcp_servers.feed.transport", "sse"] in calls
+
+
+def test_reconcile_resyncs_a_brain_sse_join_written_without_transport(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    import yaml
+
+    _fake_hermes(monkeypatch)
+    brain_cfg = cfg_paths.var_lib() / ".hermes" / "profiles" / "hal0-brain" / "config.yaml"
+    brain_cfg.parent.mkdir(parents=True, exist_ok=True)
+    brain_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "feed": {
+                        "type": "sse",
+                        "url": "https://feed.example.com/mcp",
+                        "headers": {"X-hal0-Agent": "hermes"},
+                        "timeout": 60,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _install("feed", transport="sse", exposure=installed.ExposureConfig(brain=True))
+    hermes_join._write_manifest({"hermes": [], "brain": ["feed"]})
+
+    assert hermes_join.reconcile_stale_joins() == ["feed"]
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
+    assert brain["mcp_servers"]["feed"]["transport"] == "sse"
+    # Converged: the next boot does nothing.
+    assert hermes_join.reconcile_stale_joins() == []
+
+
+def test_reconcile_treats_a_missing_transport_as_http(tmp_hal0_home: str, monkeypatch) -> None:
+    """Hermes defaults an absent `transport` to HTTP, so an http join written
+    before #2331 is already correct and must not force a boot-time resync."""
+    _install("github", exposure=installed.ExposureConfig(hermes=True))
+    _write_hermes_config(
+        {
+            "github": {
+                "type": "http",
+                "url": "https://github.example.com/mcp",
+                "headers": {"X-hal0-Agent": "hermes"},
+            }
+        }
+    )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
+
+    def _no_sync(**kwargs: object) -> dict:
+        raise AssertionError("sync_exposure must not run on a converged box")
+
+    monkeypatch.setattr(hermes_join, "sync_exposure", _no_sync)
+    assert hermes_join.reconcile_stale_joins() == []
