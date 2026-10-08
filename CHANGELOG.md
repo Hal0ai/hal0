@@ -211,6 +211,7 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+
 - **A stable or preview release now fails its build when `CHANGELOG.md` has
   no section for it.** `scripts/gen_release_notes.py` used to fall back to a
   git log when the `## [<version>]` header was missing or empty, so the
