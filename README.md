@@ -33,10 +33,12 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 
 > **v1.4.0 is the current stable release.** A minor release: new
 > functionality, no config-schema migration, and an ordinary `hal0 update`
-> from any 1.x box. Two changes can break a script or a setup: `hal0 update`
+> from any 1.x box. Three changes can break a script or a setup: `hal0 update`
 > now restarts slots whose runner image changed and exits 2 while any still
-> run the old one, and exposing a user-installed MCP server to Hermes or the
-> brain profile is refused until hal0 enforces its tool policy. After
+> run the old one; exposing a user-installed MCP server to Hermes or the
+> brain profile is refused until hal0 enforces its tool policy; and an
+> installed MCP server that would send its secrets over plain `http://` to
+> another host no longer loads. After
 > updating, re-run the installer once to pick up the new Hindsight limits,
 > the Open WebUI client key and the Hermes wrappers. Read the v1.4.0
 > **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)

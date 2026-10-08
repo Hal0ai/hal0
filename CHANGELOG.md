@@ -82,7 +82,18 @@ applying. Add those subsections to a version's section to surface them; see
   non-zero exit as a failed update needs to accept 2. Because `hal0-api`
   does this at start, the upgrade to 1.4.0 itself can restart running
   slots. (#2096)
-
+- **An installed MCP server that would send its `[secrets]` or `[env]`
+  headers in clear text no longer loads.** A `streamable-http`/`sse` record
+  whose url is plain `http://` to a non-loopback host, and that carries any
+  `[secrets]` key or non-empty `[env]` value, used to send those values
+  unencrypted on every probe and Hermes call. 1.4 refuses it: on upgrade such
+  a record is skipped (`hal0.mcp.installed.bad_record` in the journal, and
+  `mcp.record_malformed` when read directly), it drops out of `hal0 mcp
+  list`, and its Hermes entry is removed at the next hal0-api start or MCP
+  change. To keep it, point the url at `https://` or a loopback host, or set
+  `allow_insecure_http = true` in its TOML under `/etc/hal0/mcp-servers/` to
+  accept the risk. A `Proxy-Authorization` header value is refused on any url
+  and belongs in the proxy environment instead. (#2304)
 ### Added
 
 - **Memory extraction has limits now, and they are yours to set.** The
