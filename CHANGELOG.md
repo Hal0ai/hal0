@@ -353,6 +353,14 @@ applying. Add those subsections to a version's section to surface them; see
   first non-empty `flm list` answer for its lifetime and probes again only
   while the answer is empty.
 
+- **An FLM pull no longer stalls hal0-api while it measures the model
+  directory** (#2380). To report progress, an FLM pull walks the model's
+  directory and sums its file sizes: once at the start, on every progress
+  tick, and once at the end. Each walk ran on the event loop, so on a large
+  or slow models directory every other request, SSE stream and WebSocket
+  waited for it, for the whole download. The walks now run on a worker
+  thread.
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was

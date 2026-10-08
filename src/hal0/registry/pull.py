@@ -1903,7 +1903,9 @@ async def run_flm_pull(
             if entry["tag"] == tag:
                 advertised_total = int(entry.get("size_bytes") or 0)
                 break
-        baseline_size = _dir_size(target_dir) if target_dir else 0
+        # ``_dir_size`` walks the whole model dir: a worker thread, never the
+        # event loop, at start, per tick and after the pull (#2380).
+        baseline_size = await asyncio.to_thread(_dir_size, target_dir) if target_dir else 0
         if advertised_total > baseline_size:
             job.bytes_total = advertised_total
             job._signal()
@@ -1963,7 +1965,7 @@ async def run_flm_pull(
 
             await asyncio.to_thread(_resolve)
 
-        def _tick_progress() -> None:
+        async def _tick_progress() -> None:
             """Refresh bytes_downloaded from on-disk dir size if it grew."""
             nonlocal last_emit
             if not target_dir:
@@ -1971,7 +1973,7 @@ async def run_flm_pull(
             now = time.monotonic()
             if (now - last_emit) < _SSE_MIN_INTERVAL_S:
                 return
-            current = _dir_size(target_dir) - baseline_size
+            current = await asyncio.to_thread(_dir_size, target_dir) - baseline_size
             if current > job.bytes_downloaded:
                 job.bytes_downloaded = current
                 if current > job.bytes_total:
@@ -1999,7 +2001,7 @@ async def run_flm_pull(
                 # No new line in 1s — loop back so cancellation observes
                 # promptly. Also a good cadence for the dir-size poll.
                 await _resolve_pending()
-                _tick_progress()
+                await _tick_progress()
                 continue
             if not raw:
                 break
@@ -2007,7 +2009,7 @@ async def run_flm_pull(
             # accounting any more, but the readline() drains the pipe so
             # the docker process doesn't block on a full stdout buffer.
             await _resolve_pending()
-            _tick_progress()
+            await _tick_progress()
 
         await proc.wait()
         if proc.returncode != 0:
@@ -2033,7 +2035,7 @@ async def run_flm_pull(
         # ticks already resolved is final (the tag's ``url`` does not change
         # across a pull), so only an unresolved one asks the lookup again.
         final_path = target_dir or (await asyncio.to_thread(install_path)) or host_models_dir
-        size_bytes = _dir_size(final_path)
+        size_bytes = await asyncio.to_thread(_dir_size, final_path)
         if job.bytes_total <= 0 and size_bytes > 0:
             job.bytes_total = size_bytes
         if job.bytes_downloaded < size_bytes:
