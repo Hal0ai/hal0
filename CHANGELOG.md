@@ -317,6 +317,18 @@ applying. Add those subsections to a version's section to surface them; see
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
 
+- **A slow or hung `flm list` no longer freezes hal0-api** (#2334). The FLM
+  catalog probe runs host `flm list -j` synchronously with a 30 s timeout
+  whenever its 5-minute cache is cold (after boot, after the TTL, after
+  every FLM pull), and async request handlers called it on the event loop:
+  `GET /api/models`, `GET /api/capabilities` and capability changes,
+  `GET /api/npu/occupancy`, hardware live stats, slot load/swap and the FLM
+  model list, `/v1` requests for an `-FLM` model id, the slot manager's FLM
+  tag resolution, and the FLM pull job. While it ran, every other request,
+  SSE stream and WebSocket waited. Those paths now probe a cold cache on a
+  worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
+  sync callers such as the CLI are unchanged.
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was

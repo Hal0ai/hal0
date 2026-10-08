@@ -352,11 +352,12 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     # requests never pay the catalog probe.
     if target.endswith("-FLM"):
         try:
-            from hal0.providers.flm import flm_id_to_tag
+            from hal0.providers.flm import flm_id_to_tag_async
         except ImportError:
-            flm_id_to_tag = None  # type: ignore[assignment]
-        if flm_id_to_tag is not None:
-            tag = flm_id_to_tag(target)
+            flm_id_to_tag_async = None  # type: ignore[assignment]
+        if flm_id_to_tag_async is not None:
+            # A cold catalog is probed off the event loop (#2334).
+            tag = await flm_id_to_tag_async(target)
             if tag:
                 target = tag
 

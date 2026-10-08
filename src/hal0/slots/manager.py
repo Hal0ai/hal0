@@ -3884,11 +3884,12 @@ class SlotManager:
         # back to the raw id when the catalog can't resolve it.
         flm_tag = model_id
         try:
-            from hal0.providers.flm import flm_id_to_tag
+            from hal0.providers.flm import flm_id_to_tag_async
         except ImportError:
-            flm_id_to_tag = None  # type: ignore[assignment]
-        if flm_id_to_tag is not None:
-            resolved_tag = flm_id_to_tag(model_id)
+            flm_id_to_tag_async = None  # type: ignore[assignment]
+        if flm_id_to_tag_async is not None:
+            # A cold catalog is probed off the event loop (#2334).
+            resolved_tag = await flm_id_to_tag_async(model_id)
             if resolved_tag:
                 flm_tag = resolved_tag
         info: dict[str, Any] = {"_model_key": model_id, "flm_tag": flm_tag}
@@ -4017,9 +4018,10 @@ class SlotManager:
                 # stores the "-FLM" id or the native tag.
                 expected_model = _model_default(cfg)
                 try:
-                    from hal0.providers.flm import flm_id_to_tag
+                    from hal0.providers.flm import flm_id_to_tag_async
 
-                    resolved_tag = flm_id_to_tag(expected_model)
+                    # A cold catalog is probed off the event loop (#2334).
+                    resolved_tag = await flm_id_to_tag_async(expected_model)
                     if resolved_tag:
                         expected_model = resolved_tag
                 except ImportError:

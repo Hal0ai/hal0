@@ -93,7 +93,9 @@ async def list_flm_models(request: Request):
     dashboard filter contract. The container-exec + host-probe fan-out lives in
     :func:`hal0.slots.flm_catalog.list_models`.
     """
-    return {"models": _flm_catalog.list_models()}
+    # Container exec + host ``flm list`` both block; keep them off the event
+    # loop (#2334).
+    return {"models": await asyncio.to_thread(_flm_catalog.list_models)}
 
 
 class NotImplementedYet(Hal0Error):
@@ -1583,7 +1585,9 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
     model_id = parsed_body.model_id or parsed_body.model
     if model_id:
         registry = getattr(request.app.state, "model_registry", None)
-        if registry is not None and not is_resolvable(model_id, registry):
+        # is_resolvable reads the FLM catalog for ``-FLM`` ids; off the event
+        # loop (#2334).
+        if registry is not None and not await asyncio.to_thread(is_resolvable, model_id, registry):
             from hal0.registry.store import ModelNotFound
 
             raise ModelNotFound(
@@ -1680,7 +1684,9 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             code="swap.missing_model",
         )
     registry = getattr(request.app.state, "model_registry", None)
-    if registry is not None and not is_resolvable(model_id, registry):
+    # is_resolvable reads the FLM catalog for ``-FLM`` ids; off the event
+    # loop (#2334).
+    if registry is not None and not await asyncio.to_thread(is_resolvable, model_id, registry):
         from hal0.registry.store import ModelNotFound
 
         raise ModelNotFound(

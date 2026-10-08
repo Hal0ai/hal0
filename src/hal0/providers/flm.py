@@ -784,6 +784,11 @@ _FLM_CATALOG_UNANSWERED: bool = False
 #: reader never pairs one probe's catalog with another probe's flag. The probe
 #: itself runs outside the lock: a slow ``flm list`` must not block readers.
 _FLM_CATALOG_LOCK = threading.Lock()
+# Held for the whole cold-cache probe so concurrent callers share one
+# ``flm list -j`` instead of each spawning its own, and a slower probe can
+# never overwrite a newer answer (#2334). Never taken while holding
+# _FLM_CATALOG_LOCK.
+_FLM_CATALOG_PROBE_LOCK = threading.Lock()
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -995,15 +1000,26 @@ def flm_catalog() -> list[dict[str, Any]] | None:
     :func:`flm_served_models`) — call :func:`reset_flm_catalog_cache` to force
     an immediate re-probe.
     """
+    with _FLM_CATALOG_LOCK:
+        if _flm_catalog_fresh():
+            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+
+    with _FLM_CATALOG_PROBE_LOCK:
+        # Another caller may have filled the cache while this one waited.
+        with _FLM_CATALOG_LOCK:
+            if _flm_catalog_fresh():
+                return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
+        return _probe_and_cache_flm_catalog()
+
+
+def _probe_and_cache_flm_catalog() -> list[dict[str, Any]] | None:
+    """Run the ``flm list -j`` probe and store the result; caller holds
+    :data:`_FLM_CATALOG_PROBE_LOCK`."""
     import time
 
     global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
-    now = time.monotonic()
-    with _FLM_CATALOG_LOCK:
-        if _FLM_CATALOG_CACHE is not None and (now - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S:
-            return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
-
     raw = _probe_flm_catalog()
+    now = time.monotonic()
     if raw is None:
         with _FLM_CATALOG_LOCK:
             _FLM_CATALOG_CACHE = []
@@ -1038,6 +1054,33 @@ def flm_catalog() -> list[dict[str, Any]] | None:
         _FLM_CATALOG_CACHED_AT = now
         _FLM_CATALOG_UNANSWERED = unanswered
     return None if unanswered else out
+
+
+def _flm_catalog_fresh() -> bool:
+    """True while a cached catalog (answer or "no answer") is inside its TTL."""
+    import time
+
+    return (
+        _FLM_CATALOG_CACHE is not None
+        and (time.monotonic() - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S
+    )
+
+
+async def flm_served_models_async() -> list[dict[str, Any]]:
+    """:func:`flm_served_models` for async callers: never probes on the event loop.
+
+    A fresh cache answers inline. A cold or expired one runs the blocking
+    ``flm list -j`` (up to its 30 s timeout) on a worker thread via
+    :func:`asyncio.to_thread`, so a slow ``flm`` slows only the caller, not
+    every other request, SSE stream and WebSocket (#2334).
+
+    Async code that reaches the catalog through a sync helper
+    (``models_for_capability``, :func:`is_flm_tag`, ``is_resolvable``) awaits
+    this first, so the helper's own read is a cache hit.
+    """
+    if _flm_catalog_fresh():
+        return flm_served_models()
+    return await asyncio.to_thread(flm_served_models)
 
 
 def reset_flm_catalog_cache() -> None:
@@ -1114,6 +1157,18 @@ def flm_id_to_tag(model_id: str) -> str | None:
         if isinstance(tag, str) and tag.replace(":", "-") + "-FLM" == model_id:
             return tag
     return None
+
+
+async def flm_id_to_tag_async(model_id: str) -> str | None:
+    """:func:`flm_id_to_tag` for async callers: the catalog read never blocks the loop.
+
+    Only a ``-FLM`` id reads the catalog; that read goes through
+    :func:`flm_served_models_async` first, so a cold cache is probed on a
+    worker thread (#2334).
+    """
+    if model_id.endswith("-FLM"):
+        await flm_served_models_async()
+    return flm_id_to_tag(model_id)
 
 
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
