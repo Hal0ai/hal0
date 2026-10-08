@@ -157,6 +157,7 @@ async def test_swap_adopts_runner_carrying_profile_flips_binary_and_device(
     # _reconcile_device_profile the drawer/update_config path uses, so all
     # three land together in the one write.
     monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     _register("pf-model", profile="pf")
     sm = SlotManager()
     cfg0 = _gpu_vulkan_cfg("g", "pf-model")

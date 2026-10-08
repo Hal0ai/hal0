@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import structlog
 
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES, HardwareInfo
-from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
+from hal0.providers._gpu import default_image_serves_vulkan_lane, rocm_lane_present
 
 log = structlog.get_logger(__name__)
 
@@ -137,8 +137,8 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
         return "npu" if (hw.npu.present and npu_opt_in) else None
     # chat / coder / embed → GPU lane. #1888: the ROCm lane is the ONLY valid
     # GPU LLM lane on AMD, and it needs the /dev/kfd compute node — so
-    # kfd_present() (device-node truth) is what decides this lane, never
-    # ``compute_capable`` alone (#2216).
+    # device-node truth (rocm_lane_present(), see #2313 below) is what decides
+    # this lane, never ``compute_capable`` alone (#2216).
     #
     # ``compute_capable`` means only "rocm-smi --showproductname exited 0" —
     # a ROCm *userspace CLI* probe, not a GPU-can-run-ROCm probe. install.sh
@@ -161,7 +161,15 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     # node (see its docstring), so its mere presence AND openability by the
     # slot-runner identity already answers "can this box run ROCm" more
     # directly than either proxy.
-    if any(g.compute_capable for g in hw.gpus) or kfd_present():
+    #
+    # But /dev/kfd is not enough on its own (#2313): a ROCm slot also opens a
+    # /dev/dri/renderD* node. An LXC with kfd forwarded and no render node (a
+    # ``devN`` typo, a dropped ``dev0`` line) fails preflight with NO_DEVICE,
+    # and an operator who then opts into CPU-only must not get gpu-rocm slots
+    # seeded. So the device-node path requires BOTH nodes, like ODS's ROCm tier
+    # check (``ods/installers/lib/detection.sh:187-204``), through the one
+    # predicate every ROCm-lane surface shares (:func:`rocm_lane_present`).
+    if any(g.compute_capable for g in hw.gpus) or rocm_lane_present():
         return "gpu-rocm"
     # Vulkan-capable GPU, any vendor — AND a runner image that can serve the
     # lane. #1923 restricted this to non-AMD because the pinned runner's Vulkan
@@ -185,8 +193,9 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     # No GPU lane this host can validly use for inference (#1936, #1966):
     # neither a ROCm compute node nor a runner-image-validated Vulkan GPU.
     return apply_cpu_fallback(
-        f"no usable GPU lane for {capability!r} on this host (no /dev/kfd, and either "
-        "no Vulkan-capable GPU or no runner image validated for the Vulkan lane)"
+        f"no usable GPU lane for {capability!r} on this host (no /dev/kfd with a render "
+        "node, and either no Vulkan-capable GPU or no runner image validated for the "
+        "Vulkan lane)"
     ).device
 
 

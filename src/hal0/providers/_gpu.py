@@ -280,6 +280,35 @@ def kfd_present(
     return kfd_status(kfd_path, for_uid=for_uid) == KFD_OK
 
 
+def rocm_lane_present(
+    kfd_path: str = KFD_DEVICE_PATH,
+    dri_dir: str = DRI_DEVICE_DIR,
+    *,
+    for_uid: int | None = SLOT_RUNNER_UID,
+) -> bool:
+    """Can the identity that runs a slot use the ROCm lane on this box?
+
+    The one owner of that answer (#2313). A ROCm slot opens BOTH nodes:
+    ``/dev/kfd`` for HIP compute (:func:`kfd_present`) and a
+    ``/dev/dri/renderD*`` node for the device itself
+    (:func:`render_node_present`). An LXC with kfd forwarded and no render node
+    (a ``devN`` typo, a dropped ``dev0`` line) passes a kfd-only check and
+    then fails when the slot starts, which is why preflight reports NO_DEVICE
+    there and ODS checks both nodes before choosing its ROCm tier.
+
+    Every "may this box run ROCm" decision asks this, not :func:`kfd_present`
+    alone: the install seed (``install.profile_derive.derive_device``), the
+    capability picker (``capabilities.catalog``), the hardware recommendation
+    (``hardware.recommend``), the profile-apply feasibility gate
+    (``slots.config_write``) and the updater's ``gpu-vulkan`` relabel. Kept in
+    one place so those surfaces cannot disagree about the same box.
+
+    ``for_uid`` is passed to both probes and follows their shared contract.
+    Cheap and total: never raises.
+    """
+    return kfd_present(kfd_path, for_uid=for_uid) and render_node_present(dri_dir, for_uid=for_uid)
+
+
 def resolve_kfd_target_gid(
     node_paths: list[str] | None = None,
 ) -> int | None:

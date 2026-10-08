@@ -227,8 +227,8 @@ class TestDerivationLaddersConsultTheImage:
 
     @pytest.fixture(autouse=True)
     def _no_kfd(self, monkeypatch):
-        monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
-        monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: False)
 
     def test_profile_derive_falls_back_to_cpu_on_a_broken_pin(self, broken_pin) -> None:
         from hal0.install.profile_derive import derive_device
@@ -337,8 +337,8 @@ class TestTheThreeLaddersAgree:
         from hal0.install.profile_derive import derive_device
 
         _pin(monkeypatch, VULKAN_FIXED_IMAGE if pin_is_fixed else ADE07BA_REF)
-        monkeypatch.setattr("hal0.install.profile_derive.kfd_present", lambda *a, **k: False)
-        monkeypatch.setattr("hal0.hardware.recommend.kfd_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: False)
 
         probe = tmp_path / "hardware.json"
         probe.write_text(

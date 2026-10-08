@@ -27,7 +27,7 @@ from typing import Any
 
 from hal0.config.schema import HardwareInfo
 from hal0.model_meta import DEVICE_TO_DEFAULT_PROFILE, map_backend_to_device
-from hal0.providers._gpu import default_image_serves_vulkan_lane, kfd_present
+from hal0.providers._gpu import default_image_serves_vulkan_lane, rocm_lane_present
 from hal0.registry.curated import get_curated
 
 # Curated chat models suitable for the primary slot, ordered from
@@ -169,20 +169,24 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
     # that population.
     if primary and primary.vendor == "amd":
         unified_gb = hw.unified_memory_mb / 1024
-        if primary.compute_capable or kfd_present():
+        # The ROCm lane needs /dev/kfd AND a render node (#2313, #2355) — the
+        # same predicate the install seed and the picker use, so this ladder
+        # cannot recommend a lane they decline.
+        if primary.compute_capable or rocm_lane_present():
             if unified_gb >= _UMA_UNIFIED_GB_MIN and primary.vram_mb <= 4096:
                 return "rocm", f"AMD UMA (Strix Halo class — {unified_gb:.0f} GB unified)"
             return "rocm", "AMD GPU with ROCm compute reachable"
         if primary.vulkan_capable and default_image_serves_vulkan_lane():
             return "vulkan", (
-                "AMD GPU with no ROCm compute (/dev/kfd absent, rocm-smi unreachable) — "
-                "the Vulkan lane serves this box"
+                "AMD GPU with no ROCm compute (no /dev/kfd with a render node, rocm-smi "
+                "unreachable) — the Vulkan lane serves this box"
             )
         return "cpu", (
-            "AMD GPU but no usable GPU lane: no ROCm compute (/dev/kfd absent, "
-            "rocm-smi unreachable), and no Vulkan lane either (no Vulkan device, or "
-            "the pinned runner image is not validated for it — see #1888). Forward "
-            "/dev/kfd, or update to a runner whose Vulkan backend is validated"
+            "AMD GPU but no usable GPU lane: no ROCm compute (no /dev/kfd with a "
+            "render node, rocm-smi unreachable), and no Vulkan lane either (no Vulkan "
+            "device, or the pinned runner image is not validated for it — see #1888). "
+            "Forward /dev/kfd and a /dev/dri/renderD* node, or update to a runner "
+            "whose Vulkan backend is validated"
         )
 
     # NVIDIA — the CUDA path (gpu-cuda device, upstream llama.cpp CUDA

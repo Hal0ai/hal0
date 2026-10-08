@@ -1,7 +1,8 @@
-"""kfd_present() decides the ROCm lane in the capability picker too (#2216
-sibling, #1966): ``available_backends``'s GPU/ROCm badge must not depend on
-``rocm-smi`` alone, and ComfyUI's picker row must not survive on a kfd-less
-AMD box when its image is ROCm-only.
+"""rocm_lane_present() decides the ROCm lane in the capability picker too
+(#2216 sibling, #1966, #2354): ``available_backends``'s GPU/ROCm badge must
+not depend on ``rocm-smi`` alone, ComfyUI's picker row must not survive on a
+kfd-less AMD box when its image is ROCm-only, and /dev/kfd without a render
+node is not a ROCm lane for either (#2313).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ def _amd_gpu_hw(*, compute_capable: bool, vulkan_capable: bool = True) -> Any:
     return types.SimpleNamespace(npu=types.SimpleNamespace(present=False), gpus=[gpu])
 
 
-# ── available_backends: kfd_present() alone is sufficient for gpu-rocm ──────
+# ── available_backends: the ROCm device nodes suffice for gpu-rocm ─────────
 
 
 def test_gpu_rocm_badge_appears_with_kfd_present_and_no_rocm_smi() -> None:
@@ -33,7 +34,7 @@ def test_gpu_rocm_badge_appears_with_kfd_present_and_no_rocm_smi() -> None:
     hw = _amd_gpu_hw(compute_capable=False)
     with (
         patch("hal0.capabilities.catalog.load_hardware_info", return_value=hw),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=True),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=True),
         patch("hal0.capabilities.catalog._flm_image_present", return_value=False),
     ):
         ids = {b["id"] for b in catalog.available_backends()}
@@ -44,7 +45,7 @@ def test_gpu_rocm_badge_absent_without_kfd_or_rocm_smi() -> None:
     hw = _amd_gpu_hw(compute_capable=False)
     with (
         patch("hal0.capabilities.catalog.load_hardware_info", return_value=hw),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=False),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=False),
         patch("hal0.capabilities.catalog._flm_image_present", return_value=False),
     ):
         ids = {b["id"] for b in catalog.available_backends()}
@@ -67,7 +68,7 @@ def test_comfyui_row_suppressed_when_kfd_absent_on_amd_host() -> None:
             return_value=[{"id": "gpu-vulkan"}, {"id": "cpu"}],
         ),
         patch("hal0.capabilities.catalog.host_is_amd_gpu", return_value=True),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=False),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=False),
     ):
         variants = catalog._backend_variants(_image_entry())
     assert variants == []
@@ -80,7 +81,7 @@ def test_comfyui_row_offered_when_kfd_present_on_amd_host() -> None:
             return_value=[{"id": "gpu-vulkan"}, {"id": "gpu-rocm"}, {"id": "cpu"}],
         ),
         patch("hal0.capabilities.catalog.host_is_amd_gpu", return_value=True),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=True),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=True),
     ):
         variants = catalog._backend_variants(_image_entry())
     assert variants == ["gpu-vulkan"]
@@ -95,7 +96,7 @@ def test_comfyui_row_unaffected_on_non_amd_host() -> None:
             return_value=[{"id": "gpu-vulkan"}, {"id": "cpu"}],
         ),
         patch("hal0.capabilities.catalog.host_is_amd_gpu", return_value=False),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=False),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=False),
     ):
         variants = catalog._backend_variants(_image_entry())
     assert variants == ["gpu-vulkan"]
@@ -111,7 +112,67 @@ def test_explicit_comfyui_provider_row_also_gated(monkeypatch: pytest.MonkeyPatc
             return_value=[{"id": "gpu-vulkan"}, {"id": "cpu"}],
         ),
         patch("hal0.capabilities.catalog.host_is_amd_gpu", return_value=True),
-        patch("hal0.capabilities.catalog.kfd_present", return_value=False),
+        patch("hal0.capabilities.catalog.rocm_lane_present", return_value=False),
     ):
         variants = catalog._backend_variants(entry)
     assert variants == []
+
+
+# ── /dev/kfd without a render node is not a ROCm lane (#2313, #2354) ────────
+#
+# These patch the two underlying probes, not ``rocm_lane_present`` itself, so
+# the picker is exercised through the real shared predicate.
+
+_NODES = {
+    "kfd_only": (True, False),
+    "both": (True, True),
+    "neither": (False, False),
+}
+
+
+def _nodes(monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
+    kfd, render = _NODES[shape]
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: kfd)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: render)
+
+
+@pytest.mark.parametrize(
+    ("shape", "offered"), [("kfd_only", False), ("both", True), ("neither", False)]
+)
+def test_gpu_rocm_badge_needs_kfd_and_a_render_node(
+    monkeypatch: pytest.MonkeyPatch, shape: str, offered: bool
+) -> None:
+    """#2354: an LXC with /dev/kfd forwarded and no ``/dev/dri/renderD*``
+    must not be offered the GPU (ROCm) row — the slot cannot open its device."""
+    _nodes(monkeypatch, shape)
+    hw = _amd_gpu_hw(compute_capable=False)
+    with (
+        patch("hal0.capabilities.catalog.load_hardware_info", return_value=hw),
+        patch("hal0.capabilities.catalog._flm_image_present", return_value=False),
+    ):
+        ids = {b["id"] for b in catalog.available_backends()}
+    assert ("gpu-rocm" in ids) is offered
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"), [("kfd_only", []), ("both", ["gpu-vulkan"]), ("neither", [])]
+)
+@pytest.mark.parametrize("entry", ["tagged", "explicit"])
+def test_comfyui_row_needs_kfd_and_a_render_node(
+    monkeypatch: pytest.MonkeyPatch, shape: str, expected: list[str], entry: str
+) -> None:
+    """ComfyUI's image is ROCm-only, so its row follows the same predicate as
+    the gpu-rocm badge (and Qwen3-TTS, which rides that badge): on a kfd-only
+    AMD box the generic GPU row is still advertised, so this gate is the only
+    thing keeping a guaranteed-to-fail row out of the picker."""
+    _nodes(monkeypatch, shape)
+    row = _image_entry() if entry == "tagged" else types.SimpleNamespace(provider="comfyui")
+    with (
+        patch(
+            "hal0.capabilities.catalog.available_backends",
+            return_value=[{"id": "gpu-vulkan"}, {"id": "cpu"}],
+        ),
+        patch("hal0.capabilities.catalog.host_is_amd_gpu", return_value=True),
+    ):
+        variants = catalog._backend_variants(row)
+    assert variants == expected

@@ -3411,7 +3411,7 @@ def _vulkan_lane_is_loadable(holder: dict) -> bool:
 def relabel_stale_vulkan_slots(
     *,
     job_id: str | None = None,
-    kfd_present: bool | None = None,
+    rocm_lane: bool | None = None,
     amd_host: bool | None = None,
 ) -> int:
     """Relabel retired ``device = "gpu-vulkan"`` slot TOMLs (upgrade migration).
@@ -3445,9 +3445,12 @@ def relabel_stale_vulkan_slots(
     :func:`clear_stale_mtp_overrides` use) that is ALSO llama.cpp-backed
     (see runtime scope below), relabel ``device`` to:
 
-    * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.kfd_present` reports
-      the ROCm compute node present and usable. This is the same target PR
-      #1923 gave the seed TOMLs, and the slot keeps running on the GPU.
+    * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.rocm_lane_present`
+      reports the ROCm lane usable: the compute node ``/dev/kfd`` AND a
+      ``/dev/dri/renderD*`` render node, both of which a ROCm slot opens
+      (#2356 — kfd alone moved slots onto a device they could not open). This
+      is the same target PR #1923 gave the seed TOMLs, and the slot keeps
+      running on the GPU.
     * ``"cpu"`` — when it is not. This is a genuine, operator-visible
       behavior change (the slot drops off the GPU entirely and gets much
       slower) — the #1867 rails require every mutation to be logged
@@ -3514,9 +3517,10 @@ def relabel_stale_vulkan_slots(
 
     Args:
         job_id: Optional breadcrumb for structured-log tracing.
-        kfd_present: Override for
-            :func:`hal0.providers._gpu.kfd_present` — test seam. ``None``
-            (the default) probes the real host's ``/dev/kfd``.
+        rocm_lane: Override for
+            :func:`hal0.providers._gpu.rocm_lane_present` — test seam.
+            ``None`` (the default) probes the real host's ``/dev/kfd`` and
+            render node.
         amd_host: Override for :func:`hal0.providers._gpu.host_is_amd_gpu` —
             test seam, same shape as
             :func:`~hal0.providers._gpu.require_kfd_for_gpu_slot`'s own
@@ -3530,7 +3534,7 @@ def relabel_stale_vulkan_slots(
     from hal0.config.loader import write_toml_atomic
     from hal0.config.paths import slots_config_dir
     from hal0.providers._gpu import host_is_amd_gpu as _probe_host_is_amd_gpu
-    from hal0.providers._gpu import kfd_present as _probe_kfd_present
+    from hal0.providers._gpu import rocm_lane_present as _probe_rocm_lane
 
     # Private import, deliberate: this must be the EXACT discriminator
     # load_sync uses to pick a provider, not a re-implementation of it — do
@@ -3544,7 +3548,7 @@ def relabel_stale_vulkan_slots(
         # gpu-vulkan slot here was never broken by it. Leave it alone.
         return 0
 
-    have_kfd = _probe_kfd_present() if kfd_present is None else kfd_present
+    have_rocm = _probe_rocm_lane() if rocm_lane is None else rocm_lane
 
     relabeled = 0
     slots_dir = slots_config_dir()
@@ -3591,7 +3595,7 @@ def relabel_stale_vulkan_slots(
                 note="gpu-vulkan slot runs a Vulkan-validated runner image — not migrated",
             )
             continue
-        new_device = "gpu-rocm" if have_kfd else "cpu"
+        new_device = "gpu-rocm" if have_rocm else "cpu"
         holder["device"] = new_device
         try:
             write_toml_atomic(toml_path, raw)
@@ -3599,7 +3603,7 @@ def relabel_stale_vulkan_slots(
             log.warning("updater.vulkan_migration_write_failed", slot=slot_name, error=str(exc))
             continue
         relabeled += 1
-        if have_kfd:
+        if have_rocm:
             log.warning(
                 "updater.slot_vulkan_relabeled_rocm",
                 job_id=job_id,
@@ -3608,8 +3612,8 @@ def relabel_stale_vulkan_slots(
                 new=new_device,
                 note=(
                     "this slot's runner image is not validated for the Vulkan lane "
-                    "(#1888); relabeled to gpu-rocm — /dev/kfd is present, slot keeps "
-                    "running on GPU"
+                    "(#1888); relabeled to gpu-rocm — /dev/kfd and a render node are "
+                    "present, slot keeps running on GPU"
                 ),
             )
         else:
@@ -3621,11 +3625,12 @@ def relabel_stale_vulkan_slots(
                 new=new_device,
                 note=(
                     "BEHAVIOR CHANGE: this slot's runner image is not validated for the "
-                    "Vulkan lane (#1888) and /dev/kfd (the ROCm compute node) is not "
-                    "present on this host — relabeled to cpu. This slot no longer runs "
-                    "on the GPU and will be significantly slower until either /dev/kfd "
-                    "is forwarded and the slot is re-pointed at gpu-rocm, or the slot "
-                    "is repinned to a Vulkan-validated runner image."
+                    "Vulkan lane (#1888) and this host has no ROCm lane (/dev/kfd, the "
+                    "ROCm compute node, together with a /dev/dri/renderD* render node) "
+                    "— relabeled to cpu. This slot no longer runs on the GPU and will "
+                    "be significantly slower until either both nodes are forwarded and "
+                    "the slot is re-pointed at gpu-rocm, or the slot is repinned to a "
+                    "Vulkan-validated runner image."
                 ),
             )
     return relabeled
