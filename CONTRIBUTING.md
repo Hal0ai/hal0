@@ -200,20 +200,23 @@ when Docker is unreachable.)
 
 ### γ — release-gate (`make release-test`)
 
-SSHes into the hal0-test LXC and walks a matrix of seven rows:
+SSHes into the hal0-test LXC and walks a matrix of eight rows:
 **vulkan, rocm, flm (NPU slot ready), moonshine (STT), kokoro (TTS),
-updater, openwebui** (the `add_row` calls in
+unload, updater, openwebui** (the `add_row` calls in
 `scripts/release-test.sh`). Each row produces a structured record; the
 full report lands in `tests/release-gate-report.json`.
 
-Two limits to know before citing γ as validation:
+Three things to know before citing γ as validation:
 
 - It tests **whatever build is installed on the test host**. It runs the
   remote `/usr/lib/hal0/venv/bin/hal0` (override with `HAL0_TEST_BIN`)
   and logs its `--version`, but never copies or installs your checkout.
   Install the build under review on the host first.
-- It asserts load (and chat or the per-row smoke), not unload: slots are
-  unloaded only by the EXIT cleanup, with failures ignored.
+- It asserts load (and chat or the per-row smoke), then unload: the
+  `unload` row requires `hal0 slot unload` to exit 0 for every slot the
+  run loaded and `slot list --json` to then show it `offline` (`skip` when
+  nothing loaded). The EXIT cleanup still unloads and deletes afterwards as
+  a safety net, with failures ignored.
 - A row whose image, model or hardware is missing is recorded `skip`, and
   the script exits 0 when no row is `fail`. A run counts as validation for
   a slot or provider change only if that change's row reads `pass` in
@@ -275,7 +278,7 @@ knowing what validation backs it up are the same lookup.
 |---|---|---|
 | `src/hal0/api/` | med–high | α (every PR). A new route must be classified in `src/hal0/security/exposure.py` — the deny-by-default ratchet test (`tests/security/test_exposure.py`) fails an unclassified route rather than letting it default open. |
 | `src/hal0/api/auth.py`, `src/hal0/security/`, login routes, auth middleware | high | α, plus the auth-specific suite (`tests/security/test_kb1_hardening_tail.py`, `test_upstream_auth_contract.py`, `test_secrets_protected_keys.py`). §14.1 high-risk — run γ (`make release-test`) before merge. |
-| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α. A change to slot lifecycle behaviour also needs a real load → chat, which only γ (`make release-test`, on a host running your build) exercises — the δ harness defers slot load under `--dev`, and no tier asserts unload. A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
+| `src/hal0/slots/`, `slot_state`, `/v1/load\|unload` | med–high | α. A change to slot lifecycle behaviour also needs a real load → chat, which only γ (`make release-test`, on a host running your build) exercises — the δ harness defers slot load under `--dev`. γ's `unload` row is the only tier that asserts unload. A change to backend selection (`hardware.recommend`) additionally needs a γ / `rc-validate` `slots` lane pass, since that logic decides which GPU lane a fresh install lands on. |
 | `src/hal0/capabilities/`, `model_meta`, `model_fit` | med | α. Changes to device/profile resolution should re-run the γ matrix row for the affected backend (ROCm/Vulkan/CPU/NPU) — see [Validation matrix](docs/reference/validation-matrix.mdx). |
 | `installer/`, systemd units | high | §14.1 high-risk trigger (installer / RCE-class: shell-out, downloads, signature verification, privilege changes). `shellcheck` on every `.sh` touched is a **manual convention, not a CI gate today** — run it yourself (`bash -n` at minimum if `shellcheck` isn't installed). Changes to `installer/bootstrap.sh` specifically must stay byte-identical to the logic `scripts/check-bootstrap-parity.sh` diffs against the live one-liner (`.github/workflows/bootstrap-parity.yml`). A `rc-validate` fresh-install lane pass is expected for anything beyond a comment/log-message change. |
 | `src/hal0/updater/`, the release manifest | high | §14.1 high-risk trigger. α, plus the γ script's `updater` row (check-only by design — see `scripts/release-test.sh`) and the `rc-validate` kit's `upgrade`/`post-upgrade` lanes, which are the only place an in-place convergence (schema-version-gated resets included) is exercised end to end. |

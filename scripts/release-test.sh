@@ -181,8 +181,11 @@ since_ms() {
 # `slot delete` needs --force: over a non-tty ssh channel the typer confirm
 # prompt cannot be answered and aborts (slot_commands.py::slot_delete).
 # Seeded slots we merely loaded (flm) are unloaded, never deleted.
+# This is a safety net only: the `unload` row is what asserts unload (#2351).
 CREATED_SLOTS=()
 LOADED_SEEDED_SLOTS=()
+# Slots whose `slot load` exited 0 this run — the `unload` row's work list.
+LOADED_SLOTS=()
 # shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup() {
     if [[ ${#CREATED_SLOTS[@]} -eq 0 && ${#LOADED_SEEDED_SLOTS[@]} -eq 0 ]]; then return; fi
@@ -221,6 +224,18 @@ remote_slot_create() {
     SLOT="${slot}"
     ssh_exec "${REMOTE_HAL0_BIN} slot create ${slot} --type ${type} --hardware ${hardware} -m '${model}'" \
         >/dev/null 2>&1 || true
+}
+
+# Load a slot; on success record it in LOADED_SLOTS for the `unload` row.
+# Like remote_slot_create, call it directly (an `if` condition is fine),
+# never inside $(...): a subshell would drop the append (#2262).
+remote_slot_load() {
+    # remote_slot_load <slot>  → exit status of `hal0 slot load`
+    if ssh_exec "${REMOTE_HAL0_BIN} slot load $1" >/dev/null 2>&1; then
+        LOADED_SLOTS+=("$1")
+        return 0
+    fi
+    return 1
 }
 
 # First installed registry model of the given dispatcher type, or empty.
@@ -267,6 +282,26 @@ for s in slots if isinstance(slots, list) else []:
 ' "$1"
 }
 
+# Lifecycle state of an existing slot (empty if absent or unparsable). The
+# /api/slots rows carry it as `status` (slot_view/__init__.py::serialize_slot);
+# `state` is read as a fallback the same way slot_commands.py::slot_list does.
+remote_slot_state() {
+    ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null" 2>/dev/null \
+        | python3 -c '
+import json, sys
+
+name = sys.argv[1]
+try:
+    slots = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for s in slots if isinstance(slots, list) else []:
+    if s.get("name") == name:
+        print(s.get("status") or s.get("state") or "")
+        break
+' "$1"
+}
+
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
@@ -280,7 +315,7 @@ else
     remote_slot_create vulkan llm vulkan "${MODEL}"
     # Auth: any /v1 call needs the admin bearer when HAL0_ADMIN_KEY is set;
     # source it from api.env the same way the unit's EnvironmentFile does.
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+    if remote_slot_load "${SLOT}" \
         && ssh_exec "[ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; \
             curl -fsS -m 60 ${REMOTE_HAL0_API}/v1/chat/completions \
             \${HAL0_ADMIN_KEY:+-H \"Authorization: Bearer \${HAL0_ADMIN_KEY}\"} \
@@ -309,7 +344,7 @@ elif [[ -z "${MODEL}" ]]; then
     add_row "rocm" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
     remote_slot_create rocm llm rocm "${MODEL}"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1; then
+    if remote_slot_load "${SLOT}"; then
         add_row "rocm" "pass" "$(since_ms "${start}")" "slot reached ready on the gpu-rocm backend serving ${MODEL} (readiness includes the #1922 output-sanity probe)"
     else
         add_row "rocm" "fail" "$(since_ms "${start}")" "rocm slot failed to reach ready — check journalctl -u hal0-slot@${SLOT}"
@@ -335,7 +370,7 @@ else
         add_row "flm" "skip" "$(since_ms "${start}")" "seeded flm slot absent or model-less (grey seed, #1369) — assign an FLM model to it first"
     else
         LOADED_SEEDED_SLOTS+=("flm")
-        if ssh_exec "${REMOTE_HAL0_BIN} slot load flm" >/dev/null 2>&1; then
+        if remote_slot_load flm; then
             add_row "flm" "pass" "$(since_ms "${start}")" "seeded flm slot (device=npu) reached ready serving ${FLM_MODEL}"
         else
             add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load; check /sys/class/accel and the xdna driver"
@@ -363,7 +398,7 @@ else
     # not validate the field, so the registry id we just bound is correct.
     # Auth header is required on any box with HAL0_ADMIN_KEY set
     # (unauthenticated is 401); sourced from api.env like an operator would.
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+    if remote_slot_load "${SLOT}" \
         && ssh_exec '
         set -e
         TMP=$(mktemp -d)
@@ -403,7 +438,7 @@ else
     # voice); response_format must be requested as wav explicitly — the
     # kokoro server's default is mp3, which would fail the RIFF check.
     remote_slot_create kokoro tts cpu "${MODEL}"
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load ${SLOT}" >/dev/null 2>&1 \
+    if remote_slot_load "${SLOT}" \
         && ssh_exec '
         set -e
         TMP=$(mktemp -d)
@@ -421,6 +456,42 @@ else
         add_row "kokoro" "pass" "$(since_ms "${start}")" "tts slot loaded (${MODEL}) and audio/speech returned a non-empty RIFF WAV (>1KiB)"
     else
         add_row "kokoro" "fail" "$(since_ms "${start}")" "slot load or audio/speech smoke failed — check journalctl -u hal0-slot@${SLOT}"
+    fi
+fi
+
+# ── ROW: unload ──────────────────────────────────────────────────────────────
+log_step "Row: unload"
+start=$(date +%s%N)
+# Every slot this run loaded must unload: `hal0 slot unload` exits 0 (it
+# blocks until the server-side state machine converges, like `slot load`)
+# and `slot list --json` then shows the slot `offline` (slots/state.py
+# SlotState.OFFLINE). The EXIT-trap cleanup still unloads/deletes afterwards
+# as a safety net, but it swallows failures and writes no row (#2351).
+if [[ ${#LOADED_SLOTS[@]} -eq 0 ]]; then
+    add_row "unload" "skip" "$(since_ms "${start}")" "no slot was loaded this run — nothing to unload"
+else
+    UNLOAD_OK=()
+    UNLOAD_BAD=()
+    for slot in "${LOADED_SLOTS[@]}"; do
+        if ! ssh_exec "${REMOTE_HAL0_BIN} slot unload ${slot}" >/dev/null 2>&1; then
+            UNLOAD_BAD+=("${slot}: slot unload exited non-zero")
+            continue
+        fi
+        SLOT_STATE="$(remote_slot_state "${slot}" || true)"
+        if [[ "${SLOT_STATE}" == "offline" ]]; then
+            UNLOAD_OK+=("${slot}")
+        else
+            UNLOAD_BAD+=("${slot}: state ${SLOT_STATE:-<absent>} after unload, want offline")
+        fi
+    done
+    if [[ ${#UNLOAD_BAD[@]} -eq 0 ]]; then
+        add_row "unload" "pass" "$(since_ms "${start}")" "slot unload exited 0 and slot list shows offline for: $(IFS=' '; echo "${UNLOAD_OK[*]}")"
+    else
+        UNLOAD_DETAIL=""
+        for reason in "${UNLOAD_BAD[@]}"; do
+            UNLOAD_DETAIL+="${UNLOAD_DETAIL:+; }${reason}"
+        done
+        add_row "unload" "fail" "$(since_ms "${start}")" "${UNLOAD_DETAIL} — check journalctl -u hal0-slot@<slot>"
     fi
 fi
 
