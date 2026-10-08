@@ -82,11 +82,22 @@ interface RunSummary {
   decode_ts_med: number | null; prefill_ts_med?: number | null; reps: number; config: string;
 }
 
+interface QueueItem {
+  id: string; label: string; suite?: string | null; model?: string | null; enqueued?: string;
+}
+
+/** A queued item the worker could not run: the queue item plus the fields
+ *  control.fail() adds (src/hal0/bench/control.py, #2387). */
+interface FailedQueueItem extends QueueItem {
+  outcome: string; note: string; failed_at: string;
+}
+
 interface QueueState {
   control: { state: string; exclusive: boolean };
   active: any;
   updated: string | null;
-  items: { id: string; label: string; suite?: string | null; model?: string | null; enqueued?: string }[];
+  items: QueueItem[];
+  failed: FailedQueueItem[];
 }
 
 /* ── helpers ── */
@@ -1700,6 +1711,31 @@ function EvalsTab() {
 
 /* ── Run Queue tab ── */
 
+/** Recent queue items the worker dropped without running (failed.json, newest
+ *  last), so a run that never started doesn't just vanish (#2387). */
+export function QueueFailures({ failed }: { failed: FailedQueueItem[] }) {
+  if (!failed.length) return null;
+  return (
+    <>
+      <h4 style={{ ...h4Style, margin: '1.1rem 0 0.5rem' }}>recent failures — {failed.length}</h4>
+      <div style={{ display: 'grid', gap: 6 }}>
+        {[...failed].reverse().map((it, i) => (
+          <div key={`${it.id}-${i}`} className="card" style={{ padding: '0.45rem 0.7rem', fontFamily: mono, fontSize: 11 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: 'var(--fg-2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {it.label || it.model || it.suite || it.id}
+              </span>
+              <span style={{ fontSize: 10, color: outcomeColor(it.outcome) }}>{it.outcome}</span>
+              <span style={{ fontSize: 9.5, color: 'var(--fg-5)' }} title={it.failed_at}>{(it.failed_at || '').slice(11, 16)}</span>
+            </div>
+            {it.note && <div style={{ fontSize: 10, color: 'var(--fg-4)', marginTop: 2 }}>{it.note}</div>}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function QueueTab({ queue, roster, refresh, onQueueModel }: {
   queue: QueueState | null;
   roster: RosterModel[];
@@ -1850,6 +1886,8 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
             </div>
           )) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic', fontFamily: mono, fontSize: 11 }}>queue is empty.</span>}
         </div>
+
+        <QueueFailures failed={queue?.failed || []} />
       </div>
 
       {/* plan */}

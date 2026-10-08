@@ -73,3 +73,30 @@ def test_concurrent_enqueue_and_dequeue_lose_nothing():
     t2.join()
     ids = [i["id"] for i in control.read_queue()]
     assert sorted(ids) == sorted(f"new-{i}" for i in range(50))
+
+
+def test_fail_moves_the_item_to_failed_with_its_outcome():
+    """#2387: a queued item the worker cannot run is dequeued AND recorded."""
+    control.enqueue({"id": "a", "model": "nope"})
+    control.enqueue({"id": "b", "model": "m2"})
+    remaining = control.fail("a", "unknown model 'nope'", "2026-10-08T00:00:00Z")
+    assert [i["id"] for i in remaining] == ["b"]
+    assert [i["id"] for i in control.read_queue()] == ["b"]
+    assert control.read_failed() == [
+        {
+            "id": "a",
+            "model": "nope",
+            "outcome": "failed",
+            "note": "unknown model 'nope'",
+            "failed_at": "2026-10-08T00:00:00Z",
+        }
+    ]
+
+
+def test_failed_list_is_bounded_newest_last():
+    for n in range(control._FAILED_KEEP + 5):
+        control.enqueue({"id": str(n)})
+        control.fail(str(n), "x", "t")
+    ids = [i["id"] for i in control.read_failed()]
+    assert len(ids) == control._FAILED_KEEP
+    assert ids[-1] == str(control._FAILED_KEEP + 4)

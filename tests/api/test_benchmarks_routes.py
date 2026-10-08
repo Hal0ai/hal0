@@ -206,3 +206,20 @@ def test_roster_basename_fallback_requires_a_unique_basename_in_the_store(
     assert set(by_id) == {"a", "b"}
     assert (by_id["a"]["name"], by_id["a"]["hf_repo"]) == ("Model A", "org/a")
     assert (by_id["b"]["name"], by_id["b"]["hf_repo"]) == (None, None)
+
+
+def test_queue_view_lists_items_the_worker_could_not_run(isolated_client: TestClient) -> None:
+    """#2387: a queued run that resolved to no model is surfaced on the queue
+    view with its failure outcome instead of vanishing."""
+    from hal0.bench import control
+
+    control.enqueue({"id": "u1", "label": "nope.gguf", "model": "nope.gguf"})
+    control.fail("u1", "unknown model 'nope.gguf'", "2026-10-08T00:00:00Z")
+
+    resp = isolated_client.get("/api/benchmarks/queue")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["items"] == []
+    assert [(f["id"], f["outcome"], f["note"]) for f in body["failed"]] == [
+        ("u1", "failed", "unknown model 'nope.gguf'")
+    ]
