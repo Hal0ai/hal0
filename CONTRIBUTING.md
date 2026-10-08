@@ -160,7 +160,7 @@ against mocked backends and is not the release gate).
 | Tier | What it does | Where it runs | When | Local cmd |
 |---|---|---|---|---|
 | α  Unit | `pytest` over `tests/`, with mocked systemd/HTTP/runtime clients | any host; host-dependent tests self-skip when their daemon is absent; CI `python` job (`.github/workflows/ci.yml`) | every commit / PR; required for merge | `make test` |
-| γ  Release-gate | The 7-row backend matrix in `scripts/release-test.sh` | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
+| γ  Release-gate | The 8-row backend matrix in `scripts/release-test.sh` | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
 | δ  Harness | `--dev` install → CLI → removal of the dev prefix; slot load and the real `uninstall.sh` are recorded `deferred` under `--dev` (uninstall runs only with `HAL0_HARNESS_PROD=1`); the deferred slot load fails the run unless `--allow-deferred` | the developer's own host | on demand | `make harness` |
 
 There is no β (integration) tier. The old one — a `make test-integration`
