@@ -61,6 +61,35 @@ def test_auth_open_lan_exposed_with_key_warns() -> None:
     assert "reachable from your network" in c.detail
 
 
+def test_auth_lan_gated_copy_matches_the_gate() -> None:
+    """The LAN admin gate (hal0.api.auth._lan_admin_gate) is per route CLASS:
+    it gates ADMIN reads (settings, memory, logs) as well as ADMIN changes,
+    and leaves CLIENT routes such as /v1 inference open, including their
+    mutations. The copy must not claim "reads stay open" or that every
+    mutating route is gated."""
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": True, "lan_exposed": True})
+    detail = " ".join(c.detail.split())
+    assert "reads and inference stay open" not in detail
+    assert "mutating routes already require" not in detail
+    assert "settings" in detail and "logs" in detail
+    assert "/v1" in detail
+    assert "hal0 auth require on" in detail
+
+
+def test_auth_lan_no_key_points_at_reset_key() -> None:
+    """With no admin key the gate cannot apply; minting one (reset-key prints
+    it, rotate does not) is what arms it."""
+    c = da.check_auth_posture({"auth_required": False, "has_admin_key": False, "lan_exposed": True})
+    detail = " ".join(c.detail.split())
+    assert "sudo hal0 auth reset-key" in detail
+    assert "hal0 auth require on" in detail
+
+
+def test_auth_required_no_key_points_at_reset_key() -> None:
+    c = da.check_auth_posture({"auth_required": True, "has_admin_key": False})
+    assert "sudo hal0 auth reset-key" in c.detail
+
+
 def test_auth_open_loopback_bind_passes_regardless_of_key() -> None:
     c = da.check_auth_posture({"auth_required": False, "has_admin_key": True, "lan_exposed": False})
     assert c.status == "pass"

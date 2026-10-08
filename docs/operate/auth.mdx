@@ -66,7 +66,9 @@ A fresh install has no admin key and enforcement off. To lock it down:
    hal0 auth rotate admin
    ```
    This writes the new key straight to `/etc/hal0/api.env` and prints a
-   fingerprint — never the key itself. Retrieve the value from that file.
+   fingerprint — never the key itself. Retrieve the value from that file,
+   or run `sudo hal0 auth reset-key` on the box instead, which mints the key
+   and prints it once (see the CLI reference below).
 2. **Turn enforcement on:**
    ```sh
    hal0 auth require on
@@ -79,6 +81,19 @@ A fresh install has no admin key and enforcement off. To lock it down:
    Bearer token against `/api/*`.
 
 </Steps>
+
+<Aside type="note">
+On-box companions keep working with enforcement on. The installer mints a
+**client** key (`HAL0_CLIENT_KEY`) when `/etc/hal0/api.env` has none, and
+hal0 writes it into Open WebUI's env for every key that still points at
+hal0's `/v1` (chat, voice, document embeddings), so Open WebUI never sends a
+placeholder hal0 would refuse. The memory engine reads the same client key;
+agents (Hermes, pi) read the box key from `/etc/hal0/api.env`. A client key
+does not turn enforcement on and does not count as an admin key for the
+LAN rule below. On a box installed before client keys existed, mint one with
+`hal0 auth rotate client`: hal0 re-renders Open WebUI's env and restarts it
+only if the rendered file changed.
+</Aside>
 
 To go back to open access: `hal0 auth require off`. On a box bound past
 loopback that still has an admin key, this does not re-open ADMIN-class
@@ -316,7 +331,18 @@ records.
 hal0 auth status               # GET  /api/auth/status
 hal0 auth rotate admin|client  # POST /api/auth/rotate (confirms unless --force)
 hal0 auth require on|off       # PUT  /api/auth/require
+sudo hal0 auth reset-key       # mint a new admin key and print it once
 ```
+
+`sudo hal0 auth reset-key` is the lost-key recovery path. It must run on the
+box as root, because the key lives in the root-only `/etc/hal0/api.env`. When
+`hal0-api` is up it rotates through `POST /api/auth/rotate`, so the new key
+applies live; when the API is down it writes `api.env` directly and the key
+applies after `sudo systemctl restart hal0-api`. Either way it prints the new
+key once. Callers still on the old key stop working; a signed-in browser
+session stays signed in. On a box with no admin key yet, this creates the
+first one, which turns on the ADMIN-route rule for a LAN-bound box described
+above.
 
 The CLI itself resolves credentials the same way: `HAL0_ADMIN_KEY` env, then
 `HAL0_CLIENT_KEY` env, then whatever's in `/etc/hal0/api.env` on disk.

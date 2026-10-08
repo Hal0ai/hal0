@@ -157,7 +157,9 @@ export function SecurityPage() {
                   'Enforcement is on. Admin routes (settings, memory, logs, changes to the box) need the admin key or a logged-in session; inference (/v1) and the basic status reads need a client or admin key; only the small open allowlist (health checks, login) answers without one. Applies live — no restart.',
                 lan_gated:
                   'Auth is off, but this box is reachable from your network and has an admin key — so other devices are already asked to sign in for settings, memory, logs, approvals and changes to the box (model pulls, slot edits, config writes). Inference (/v1) and the basic status reads (slots, models, hardware) stay open. Enable to require a login for those too.',
-                open: 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.',
+                open: s?.lan_exposed
+                  ? 'Auth is off, this box is reachable from your network, and it has no admin key — so any device on it can pull models, edit slots and change settings without a key. Minting an admin key on the box (sudo hal0 auth reset-key) makes other devices sign in for those; enable auth then to require a key for inference and the status reads too.'
+                  : 'Auth is off — hal0 runs trusted-LAN open. Enable to require a login; you’ll be asked for the admin key on the next load.',
               }[enforcementPosture(s)]}
             </div>
           </div>
@@ -188,7 +190,7 @@ export function SecurityPage() {
             className="mono"
             style={{ fontSize: 10.5, color: 'var(--warn)', padding: '0 14px 12px', lineHeight: 1.55 }}
           >
-            ○ No admin key configured — set <span style={{ color: 'var(--fg-3)' }}>HAL0_ADMIN_KEY</span> before enabling, or you&apos;ll lock yourself out.
+            ○ No admin key configured — mint one on the box with <span style={{ color: 'var(--fg-3)' }}>sudo hal0 auth reset-key</span> before enabling, or you&apos;ll lock yourself out.
           </div>
         )}
         {toggleErr && (

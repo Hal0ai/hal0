@@ -1454,6 +1454,40 @@ else
     info "refreshed network vars in ${API_ENV} (0600)"
 fi
 
+# ── Client key ───────────────────────────────────────────────────────────────
+# On-box companions (Open WebUI via hal0.openwebui.env_writer, the memory
+# engine's LLM env) present HAL0_CLIENT_KEY to hal0's /v1, so they keep
+# working once auth is enabled. Minted only when api.env has none — a re-run
+# never replaces an existing key. A client key does NOT turn auth on
+# (`[security].require_auth` decides that) and does not arm the LAN admin
+# gate, which keys off HAL0_ADMIN_KEY alone (hal0.api.auth._lan_admin_gate).
+# The admin key is deliberately NOT minted here: with that gate, one would
+# admin-gate every fresh LAN install by default.
+# The value never reaches stdout/stderr: both are tee'd into the 0644 install
+# log. Nothing in this block echoes it; only the key NAME is logged.
+_mint_api_env_key() {
+    local name="$1" value
+    grep -qE "^${name}=.+" "${API_ENV}" 2>/dev/null && return 1
+    value="$("${VENV_DIR}/bin/python" -c \
+        'from hal0.service_identity import generate_service_key; print(generate_service_key())' \
+        2>/dev/null || true)"
+    [[ -n "${value}" ]] || return 2
+    # Terminate a last line that lacks a newline so the append starts clean.
+    if [[ -s "${API_ENV}" && -n "$(tail -c1 "${API_ENV}")" ]]; then
+        printf '\n' >> "${API_ENV}"
+    fi
+    printf '%s=%s\n' "${name}" "${value}" >> "${API_ENV}"
+    chmod 0600 "${API_ENV}"
+    return 0
+}
+_mint_rc=0
+_mint_api_env_key HAL0_CLIENT_KEY || _mint_rc=$?
+case "${_mint_rc}" in
+    0) info "generated HAL0_CLIENT_KEY in ${API_ENV}" ;;
+    2) warn "could not generate HAL0_CLIENT_KEY — run 'hal0 auth rotate client' after the install" ;;
+esac
+unset _mint_rc
+
 # ── avahi mDNS host-name sync (#2060) ───────────────────────────────────────
 # The HAL0_HOSTNAME choice (env / answer-file network.hostname) already
 # reaches api.env, the mDNS URL building (services/mdns.py) and the WS

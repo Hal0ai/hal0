@@ -98,6 +98,7 @@ bound) it overwrites a hand edit to those keys, and the header says so.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import sys
@@ -231,6 +232,51 @@ def _resolved_bind_host() -> str:
     return os.environ.get("HAL0_BIND_HOST", "").strip() or DEFAULT_BIND_HOST
 
 
+#: hal0's own ``/v1`` as seen from inside the OpenWebUI container.
+_HAL0_V1_URL = "http://host.docker.internal:8080/v1"
+
+#: Placeholder key OpenWebUI sends when the box has no client key. hal0 with
+#: auth off ignores it; with auth on it is refused, which is why a real key
+#: is wired in below whenever one exists.
+_PLACEHOLDER_KEY = "sk-hal0-local"
+
+#: Each key OpenWebUI sends to an OpenAI-compatible base URL, paired with the
+#: base-URL variable it belongs to. The box client key is written only while
+#: that base URL still points at hal0, so an operator who re-pointed STT, TTS
+#: or chat at another service never has hal0's key sent there.
+_CLIENT_KEY_TARGETS: tuple[tuple[str, str], ...] = (
+    ("OPENAI_API_KEYS", "OPENAI_API_BASE_URLS"),
+    ("AUDIO_STT_OPENAI_API_KEY", "AUDIO_STT_OPENAI_API_BASE_URL"),
+    ("AUDIO_TTS_OPENAI_API_KEY", "AUDIO_TTS_OPENAI_API_BASE_URL"),
+    ("RAG_OPENAI_API_KEY", "RAG_OPENAI_API_BASE_URL"),
+)
+
+
+def _client_key(target: Path) -> str | None:
+    """The box client key OpenWebUI should present to hal0's ``/v1``.
+
+    ``HAL0_CLIENT_KEY`` from the environment (the running hal0-api, whose
+    rotation updates it live), else from the ``api.env`` beside *target*,
+    parsed inline for the same cold-import reason as :func:`_default_path`.
+    ``None`` when the box has none: OpenWebUI then keeps sending the
+    placeholder, which works while auth is off.
+    """
+    value = os.environ.get("HAL0_CLIENT_KEY", "").strip()
+    if value:
+        return value
+    api_env = target.with_name("api.env")
+    try:
+        text = api_env.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        key, sep, val = raw.strip().partition("=")
+        if sep and key.strip() == "HAL0_CLIENT_KEY":
+            val = val.strip().strip('"').strip("'")
+            return val or None
+    return None
+
+
 def _trusted_email_header() -> str:
     return os.environ.get(TRUSTED_EMAIL_HEADER_ENV, "").strip()
 
@@ -293,12 +339,28 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
 #: (leave it) — see :func:`write_openwebui_env`.
 _MANAGED_MARKER = "# hal0-managed:"
 
+#: Prefix of the header line carrying a fingerprint (a salted PBKDF2 digest,
+#: never the key) of the client key hal0 last wrote. ``OPENAI_API_KEYS`` is a
+#: ``;``-list that can mix hal0's entry with the operator's, so after a
+#: rotation this is how a render recognises the entry hal0 wrote under the
+#: previous key — see :func:`_apply_chat_keys`.
+_CLIENT_KEY_MARKER = "# hal0-client-key-fingerprint:"
 
-def _env_header(managed: Iterable[str]) -> tuple[str, ...]:
+
+def _key_fingerprint(key: str) -> str:
+    """A short, salted PBKDF2 digest of *key*: enough to recognise the value
+    hal0 wrote, too slow to brute-force back to the key from the header."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", key.encode("utf-8"), b"hal0-openwebui-client-key", 100_000, dklen=8
+    ).hex()
+
+
+def _env_header(managed: Iterable[str], client_key: str | None = None) -> tuple[str, ...]:
     """The full header: the preserve promise, its one exception, and the
-    machine-readable ``# hal0-managed:`` line for *managed* keys."""
+    machine-readable ``# hal0-managed:`` line for *managed* keys, followed by
+    the client-key fingerprint line when hal0 has a *client_key*."""
     keys = textwrap.wrap(
-        ", ".join(_DYNAMIC_ENV_KEYS),
+        ", ".join((*_DYNAMIC_ENV_KEYS, *(k for k, _ in _CLIENT_KEY_TARGETS[:3]))),
         width=74,
         initial_indent="#   ",
         subsequent_indent="#   ",
@@ -306,14 +368,15 @@ def _env_header(managed: Iterable[str]) -> tuple[str, ...]:
     return (
         *_ENV_HEADER,
         "#",
-        "# One exception: hal0 wires these keys from live capability state (an",
-        "# embed slot, an img slot, a search provider):",
+        "# One exception: hal0 wires these keys from live state (an embed slot,",
+        "# an img slot, a search provider, the box client key):",
         *keys,
         "# While hal0 has such a backend to point at, it writes them and replaces a",
         "# hand edit. When the backend goes away it removes only the keys it wrote",
         "# itself, listed on the next line; a value you set by hand while hal0 has",
         "# nothing to claim is left alone.",
         f"{_MANAGED_MARKER} {','.join(sorted(managed))}".rstrip(),
+        *((f"{_CLIENT_KEY_MARKER} {_key_fingerprint(client_key)}",) if client_key else ()),
     )
 
 
@@ -331,6 +394,20 @@ def _read_managed_keys(target: Path) -> set[str]:
             names = line[len(_MANAGED_MARKER) :].split(",")
             return {name.strip() for name in names if name.strip()}
     return set()
+
+
+def _read_client_key_fingerprint(target: Path) -> str | None:
+    """The fingerprint the previous render recorded for the client key it
+    wrote, or ``None`` when it recorded none."""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith(_CLIENT_KEY_MARKER):
+            return line[len(_CLIENT_KEY_MARKER) :].strip() or None
+    return None
 
 
 def _rag_env_block(embed_model_id: str) -> dict[str, str]:
@@ -498,9 +575,11 @@ def write_openwebui_env(
     env_vars = default_openwebui_env()
     existing: dict[str, str] = {}
     managed: set[str] = set()
+    previous_fingerprint: str | None = None
     if preserve_existing:
         existing = _read_existing_env(target)
         managed = _read_managed_keys(target)
+        previous_fingerprint = _read_client_key_fingerprint(target)
         env_vars.update(existing)
     if overrides:
         for key, value in overrides.items():
@@ -515,11 +594,127 @@ def write_openwebui_env(
             # else: the operator's own line — hal0 has nothing to say about
             # it, so it stays (#2256).
 
+    client_key = _client_key(target)
+    _apply_client_key(env_vars, managed, client_key, previous_fingerprint)
+
     # Carry the record forward across a render that doesn't mention a key (the
     # installer's override-less pass), but never list a key that isn't there.
     managed &= env_vars.keys()
-    write_env_atomic(target, env_vars, header=_env_header(managed))
+    write_env_atomic(target, env_vars, header=_env_header(managed, client_key))
     return target
+
+
+def _apply_client_key(
+    env_vars: dict[str, str],
+    managed: set[str],
+    client_key: str | None,
+    previous_fingerprint: str | None = None,
+) -> None:
+    """Point every hal0-bound OpenWebUI key at the box client key (in place).
+
+    With a client key, each ``_CLIENT_KEY_TARGETS`` pair whose base URL is
+    still hal0's ``/v1`` gets the key and is recorded as hal0-managed, so
+    OpenWebUI keeps working once auth is enabled. Without one (or once it is
+    gone), a value hal0 wrote earlier falls back to the placeholder, and
+    ``OPENAI_API_KEYS``, which ships no default, is dropped. A key whose base
+    URL points elsewhere, or that the operator set by hand, is never touched:
+    once the URL leaves hal0, hal0 withdraws only a value it wrote itself (the
+    current client key, or the one before a rotation by its fingerprint).
+    ``OPENAI_API_KEYS`` with more than one
+    connection is keyed entry by entry, see :func:`_apply_chat_keys`.
+    """
+    for key_var, url_var in _CLIENT_KEY_TARGETS:
+        if key_var == "OPENAI_API_KEYS" and _is_chat_list(env_vars):
+            _apply_chat_keys(env_vars, managed, client_key, previous_fingerprint)
+            continue
+        points_at_hal0 = env_vars.get(url_var, "").rstrip("/") == _HAL0_V1_URL
+        if client_key and points_at_hal0:
+            env_vars[key_var] = client_key
+            managed.add(key_var)
+        elif key_var in managed and env_vars.get(key_var, _PLACEHOLDER_KEY) != _PLACEHOLDER_KEY:
+            # A key hal0 wrote earlier is still there but no longer wanted.
+            if key_var == "OPENAI_API_KEYS" or not points_at_hal0:
+                # The operator may have re-pointed the URL *and* set that
+                # service's own key; only hal0's own value is withdrawn. The
+                # chat key ships no default, so with the client key gone the
+                # single hal0-bound connection hal0 wrote is dropped.
+                written = _written_by_hal0(env_vars[key_var], client_key, previous_fingerprint)
+                if written or points_at_hal0:
+                    env_vars.pop(key_var)
+                managed.discard(key_var)
+            else:
+                env_vars[key_var] = _PLACEHOLDER_KEY
+                # The RAG block owns its key's lifecycle; the audio keys are
+                # plain shipped defaults again.
+                if key_var != "RAG_OPENAI_API_KEY":
+                    managed.discard(key_var)
+
+
+def _written_by_hal0(value: str, client_key: str | None, previous_fingerprint: str | None) -> bool:
+    """Whether *value* is a client key hal0 wrote: the current one, or the
+    one the previous render recorded by fingerprint (so a rotation is seen)."""
+    if client_key and value == client_key:
+        return True
+    return previous_fingerprint is not None and _key_fingerprint(value) == previous_fingerprint
+
+
+def _is_chat_list(env_vars: dict[str, str]) -> bool:
+    """Whether Open WebUI has more than one chat connection configured."""
+    return ";" in env_vars.get("OPENAI_API_BASE_URLS", "") or ";" in env_vars.get(
+        "OPENAI_API_KEYS", ""
+    )
+
+
+def _apply_chat_keys(
+    env_vars: dict[str, str],
+    managed: set[str],
+    client_key: str | None,
+    previous_fingerprint: str | None,
+) -> None:
+    """Key each ``OPENAI_API_KEYS`` entry by its own base URL (in place).
+
+    Open WebUI pairs the two ``;``-lists by position, so hal0 decides per
+    entry. An entry is hal0's when it equals the client key or matches the
+    fingerprint of the key hal0 last wrote (so a rotation is recognised). On
+    a URL that is hal0's ``/v1``, hal0's entry or the placeholder gets the
+    client key. hal0's entry on a URL that left hal0, or once the client key
+    is gone, becomes the placeholder: removing it would shift every later key
+    onto the wrong URL. Any other entry is the operator's and is never
+    touched, whatever its URL. A missing entry is padded with the placeholder
+    so the lists stay aligned. The line is recorded as hal0-managed while it
+    carries the client key, and dropped only when every entry was hal0's and
+    none is left pointing at hal0.
+    """
+    urls = [u.strip().rstrip("/") for u in env_vars.get("OPENAI_API_BASE_URLS", "").split(";")]
+    current = env_vars.get("OPENAI_API_KEYS")
+    entries = current.split(";") if current is not None else []
+    entries += [_PLACEHOLDER_KEY] * (len(urls) - len(entries))
+
+    def written_by_hal0(entry: str) -> bool:
+        return _written_by_hal0(entry, client_key, previous_fingerprint)
+
+    out: list[str] = []
+    for i, entry in enumerate(entries):
+        at_hal0 = i < len(urls) and urls[i] == _HAL0_V1_URL
+        hal0s = written_by_hal0(entry)
+        if client_key and at_hal0 and (hal0s or entry.strip() in ("", _PLACEHOLDER_KEY)):
+            out.append(client_key)
+        elif hal0s:
+            out.append(_PLACEHOLDER_KEY)
+        else:
+            out.append(entry)
+
+    if client_key and client_key in out:
+        env_vars["OPENAI_API_KEYS"] = ";".join(out)
+        managed.add("OPENAI_API_KEYS")
+        return
+    managed.discard("OPENAI_API_KEYS")
+    if current is None:
+        return
+    if all(written_by_hal0(entry) for entry in current.split(";")):
+        env_vars.pop("OPENAI_API_KEYS")
+    elif out != entries or len(entries) != len(current.split(";")):
+        env_vars["OPENAI_API_KEYS"] = ";".join(out)
 
 
 def main() -> None:

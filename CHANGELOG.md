@@ -84,6 +84,30 @@ applying. Add those subsections to a version's section to surface them; see
   revoked one at a time: `docs/operate/auth.mdx` documents how to end all of
   them at once by deleting the signing secret.
 
+- **Open WebUI keeps working with auth on.** It used to send the placeholder
+  `sk-hal0-local` to hal0's `/v1`, which an auth-on box refuses, so its chat,
+  voice and document features answered 401. `install.sh` now mints a client
+  key (`HAL0_CLIENT_KEY`) when `api.env` has none, without ever writing it to
+  the install log, and `hal0.openwebui.env_writer` writes it into
+  `OPENAI_API_KEYS` and the STT/TTS/RAG API keys, but only where the matching
+  base URL still points at hal0. Those keys are recorded as hal0-managed, so
+  a key re-pointed at another service never receives hal0's (hal0 withdraws
+  only a value it wrote itself, per connection for
+  `OPENAI_API_KEYS`, so the operator's own key for that service is kept), and
+  removing the client key falls back to the placeholder. Rotating the client key (`hal0
+  auth rotate client`) re-renders Open WebUI's env and restarts it only when
+  the render changed. No admin key is minted, so a fresh install's auth
+  posture is unchanged. (#2314)
+
+- **`sudo hal0 auth reset-key`: a way back from a lost admin key.** It mints
+  a new admin key and prints it once. It must run on the box as root, since
+  the key lives in the root-only `/etc/hal0/api.env`. With `hal0-api` up it
+  rotates through `POST /api/auth/rotate` and applies live; with the API down
+  it writes `api.env` directly and applies on the next `hal0-api` restart.
+  On a box with no admin key yet it creates the first one, which arms the
+  v1.3.0 LAN admin gate on a LAN-bound box; the confirmation prompt says so.
+  (#2314)
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
@@ -472,6 +496,16 @@ applying. Add those subsections to a version's section to surface them; see
   SSE stream and WebSocket waited. Those paths now probe a cold cache on a
   worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
   sync callers such as the CLI are unchanged.
+
+- **`hal0 doctor all` describes the LAN admin gate correctly.** On a
+  LAN-bound box with an admin key and auth off, its `auth` row said mutating
+  routes need a sign-in "but reads and inference stay open". The gate works
+  per route class: ADMIN reads (settings, memory, logs, approvals) are gated
+  too, and CLIENT routes (`/v1` inference, `/mcp/memory`) stay open, writes
+  included. The row now says that. With no admin key, it and the Settings ▸
+  Security page now say every route is open to the LAN and point at `sudo
+  hal0 auth reset-key` to mint one, instead of `hal0 auth rotate admin`,
+  which never prints the key. (#2314)
 
 - **Loading a stack now tells you which running slots it will unload.**
   Applying a stack replaces the running lineup: every running slot the stack
