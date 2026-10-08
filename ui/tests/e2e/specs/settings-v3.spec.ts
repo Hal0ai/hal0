@@ -17,7 +17,7 @@ const SECTIONS = [
   'Overview', 'Security', 'Doctor',
   'Loaded Models', 'Model Defaults', 'AI Capabilities',
   'Hardware & Runtimes', 'Storage', 'Memory', 'Updates', 'Advanced',
-  'Secrets', 'Agent Chat', 'Realtime',
+  'Secrets', 'Connected Accounts', 'Agent Chat', 'Realtime',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
