@@ -181,10 +181,61 @@ function PullDialog({ vm, onPull, pulled, onClose }) {
 }
 
 // ── Load-stack confirm dialog ─────────────────────────────────────────────────
+//
+// Applying a stack is a declarative REPLACE (src/hal0/stacks/apply.py,
+// converge pass 3): every running slot the stack does not name is unloaded.
+// The dialog discloses that before the operator commits (#1511), from the
+// dry-run's `unloads` list, and the result toast reports what was unloaded.
 
-function LoadDialog({ vm, onLoad, onPull, busy, onClose }) {
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** "a, b, c" — or "a, b, c, d +2 more" past `max` names. */
+export function formatSlotNames(names, max = 4) {
+  const shown = names.slice(0, max).join(', ');
+  return names.length > max ? `${shown} +${names.length - max} more` : shown;
+}
+
+/** Warning for stack models missing locally (#1524 ST5: nothing skips them). */
+export function missingModelsNote(n) {
+  return `${plural(n, 'model')} not found locally — those slots will fail to load until the model is pulled.`;
+}
+
+/**
+ * The Load dialog's teardown disclosure, from the dry-run preview state:
+ * `{ status: 'loading' }`, `{ status: 'ok', unloads: string[] }` or
+ * `{ status: 'error' }`. Returns `{ tone: 'warn' | 'muted', text }`.
+ */
+export function unloadNotice(preview) {
+  if (!preview || preview.status === 'loading') {
+    return { tone: 'muted', text: 'Checking which running slots this stack replaces…' };
+  }
+  if (preview.status === 'error') {
+    return { tone: 'warn', text: 'Could not preview the change — loading a stack unloads every running slot it does not include.' };
+  }
+  const unloads = preview.unloads || [];
+  if (unloads.length === 0) {
+    return { tone: 'muted', text: 'No other running slots will be unloaded.' };
+  }
+  return {
+    tone: 'warn',
+    text: `${plural(unloads.length, 'running slot')} not in this stack will be unloaded: ${formatSlotNames(unloads)}.`,
+  };
+}
+
+/** Result toast for a committed apply: `[message, level]`. Reports unloads. */
+export function loadResultToast(name, result) {
+  const errs = result?.converged?.errors?.length || 0;
+  const unloaded = result?.converged?.unloaded || [];
+  let msg = errs ? `Loaded ${name} with ${plural(errs, 'slot error')}` : `Stack “${name}” loaded`;
+  if (unloaded.length) msg += ` — unloaded ${plural(unloaded.length, 'slot')}: ${formatSlotNames(unloaded)}`;
+  return [msg, errs ? 'warn' : 'ok'];
+}
+
+export function LoadDialog({ vm, preview, onLoad, onPull, busy, onClose }) {
   const missing = vm.slots.filter(s => !s.available);
   const hasMissing = missing.length > 0;
+  const notice = unloadNotice(preview);
+  const checking = !preview || preview.status === 'loading';
   return (
     <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
       <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Load stack" aria-busy={busy}>
@@ -200,9 +251,13 @@ function LoadDialog({ vm, onLoad, onPull, busy, onClose }) {
           {hasMissing && (
             <div className="stk-dlg-warn">
               {Icons.alert}
-              {missing.length} model{missing.length > 1 ? 's' : ''} not found locally — those slots are skipped unless pulled first.
+              {missingModelsNote(missing.length)}
             </div>
           )}
+          <div className={notice.tone === 'warn' ? 'stk-dlg-warn' : 'stk-dlg-hint'} data-testid="st-load-unloads">
+            {notice.tone === 'warn' && Icons.alert}
+            {notice.text}
+          </div>
           <div className="stk-slot-list">
             {vm.slots.map(s => (
               <div key={s.name + s.model} className={'stk-slot-row' + (!s.available ? ' miss' : '')}>
@@ -222,8 +277,8 @@ function LoadDialog({ vm, onLoad, onPull, busy, onClose }) {
               Pull missing first
             </button>
           )}
-          <button className="btn sm" onClick={() => onLoad(vm)} disabled={busy} data-testid="st-load-confirm">
-            {busy ? 'Loading…' : hasMissing ? 'Load anyway' : 'Load stack'}
+          <button className="btn sm" onClick={() => onLoad(vm)} disabled={busy || checking} data-testid="st-load-confirm">
+            {busy ? 'Loading…' : checking ? 'Checking…' : hasMissing ? 'Load anyway' : 'Load stack'}
           </button>
         </div>
       </div>
@@ -353,7 +408,7 @@ function ImportModal({ existing, onClose, onImported }) {
         )}
       </div>
       {report.unresolvable?.length > 0 && (
-        <div className="stk-dlg-warn">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — those slots import disabled.</div>
+        <div className="stk-dlg-warn">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — the slots import as-is but will fail to load until the model is available.</div>
       )}
     </>
   );
@@ -719,6 +774,20 @@ function StacksView() {
   const [pulledQ, setPulledQ] = useState([]);
   const [importing, setImporting] = useState(false);
   const [loadBusy, setLoadBusy] = useState(false);
+  const [loadPreview, setLoadPreview] = useState(null);
+
+  // Dry-run the stack whenever the Load dialog opens so it can name the
+  // running slots the apply will unload (#1511). Read-only server-side.
+  const loadSlug = loadTgt?.slug;
+  useEffect(() => {
+    if (!loadSlug) { setLoadPreview(null); return undefined; }
+    let live = true;
+    setLoadPreview({ status: 'loading' });
+    api(ENDPOINTS.stackApply(loadSlug) + '?dry_run=true', { method: 'POST', raw: true })
+      .then(r => { if (live) setLoadPreview({ status: 'ok', unloads: r?.unloads || [] }); })
+      .catch(() => { if (live) setLoadPreview({ status: 'error' }); });
+    return () => { live = false; };
+  }, [loadSlug]);
 
   const modelSet = new Set((modelsQuery.data ?? []).map(m => m.id));
   const liveByName = {};
@@ -768,8 +837,7 @@ function StacksView() {
     setLoadBusy(true);
     try {
       const r = await apply.mutateAsync({ slug: vm.slug, dryRun: false });
-      const errs = r?.converged?.errors?.length || 0;
-      toast(errs ? `Loaded ${vm.name} with ${errs} slot error(s)` : `Stack “${vm.name}” loaded`, errs ? 'warn' : 'ok');
+      toast(...loadResultToast(vm.name, r));
       setLoadTgt(null);
     } catch (err) {
       toast(err?.message || 'Load failed', 'err');
@@ -866,7 +934,7 @@ function StacksView() {
       {drawer && <StackDrawer mode={drawer.mode} source={drawer.source} existing={existing}
         onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />}
       {confirm && <DeleteConfirm vm={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />}
-      {loadTgt && <LoadDialog vm={loadTgt} busy={loadBusy} onLoad={confirmLoad} onPull={openPull} onClose={() => setLoadTgt(null)} />}
+      {loadTgt && <LoadDialog vm={loadTgt} preview={loadPreview} busy={loadBusy} onLoad={confirmLoad} onPull={openPull} onClose={() => setLoadTgt(null)} />}
       {pullTgt && <PullDialog vm={pullTgt} pulled={pulledQ} onPull={queuePull} onClose={() => setPullTgt(null)} />}
       {importing && <ImportModal existing={existing} onClose={() => setImporting(false)} onImported={() => setImporting(false)} />}
     </div>

@@ -341,6 +341,7 @@ applying. Add those subsections to a version's section to surface them; see
   rows on its OK line. The report schema and row names are unchanged. γ
   (`make release-test`) remains the tier that loads real slots; making
   `--dev` slot load work is #2377. (#2349)
+
 - **An omni `generate_image` call no longer strands its own caller on a
   single-GPU box.** The image render switches the GPU to exclusive image
   mode, which unloads the calling LLM slot; the loop's next chat round then
@@ -370,6 +371,17 @@ applying. Add those subsections to a version's section to surface them; see
   SSE stream and WebSocket waited. Those paths now probe a cold cache on a
   worker thread (`flm_served_models_async()` / `flm_id_to_tag_async()`);
   sync callers such as the CLI are unchanged.
+
+- **Loading a stack now tells you which running slots it will unload.**
+  Applying a stack replaces the running lineup: every running slot the stack
+  does not name is unloaded. The Load dialog never said so, and the result
+  toast read "loaded" even when it had just stopped several other slots. The
+  dry-run (`POST /api/stacks/{slug}/apply?dry_run=true`) now returns an
+  `unloads` list, the Load dialog shows it before you confirm, and the toast
+  names what was unloaded. The dialog also no longer claims slots with a
+  missing model are skipped, and the import dialog no longer claims they
+  import disabled: both now say those slots will fail to load until the model
+  is available. (#1511)
 
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented

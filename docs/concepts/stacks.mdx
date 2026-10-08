@@ -105,10 +105,12 @@ per-capability failure during convergence is recorded rather than raised, so
 a single runtime hiccup never unwinds the config you already committed.
 
 <Aside type="tip">
-A `dry_run=true` apply returns a diff preview without touching anything —
-the dashboard's Load dialog uses this to warn you when a stack references
-models that aren't pulled locally yet, offering "Pull missing first" or
-"Load anyway."
+A `dry_run=true` apply returns a diff preview without touching anything,
+including an `unloads` list: the running slots the stack doesn't name, which
+the apply would unload. The dashboard's Load dialog runs this preview when it
+opens and lists those slots before you confirm. It also warns when a stack
+references models that aren't pulled locally yet (those slots fail to load
+until the model is pulled), offering "Pull missing first" or "Load anyway."
 </Aside>
 
 ## Drift: is the running config still what you applied?
