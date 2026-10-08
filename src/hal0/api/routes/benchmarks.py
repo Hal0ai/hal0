@@ -38,7 +38,7 @@ from hal0.bench.planner import (
     fetch_registry_models,
     plan,
 )
-from hal0.bench.publish import build_roster
+from hal0.bench.publish import build_roster, store_physical_models
 from hal0.bench.store import Store
 from hal0.bench.suites import load_suites, suite_dir
 
@@ -102,17 +102,17 @@ def get_roster() -> dict[str, Any]:
     store = _store()
     roster = build_roster(store)
 
-    # Count runs + newest run per PHYSICAL model (gguf basename), so a model
-    # with records under both a registry id and a v1 path-like id tallies
-    # together — matching how build_roster collapses the board (one row per file).
-    def _canon(model: dict[str, Any]) -> str:
-        gguf = model.get("gguf") or ""
-        return gguf.rsplit("/", 1)[-1] or model.get("id") or ""
+    # One physical-model resolver for the whole board (#1825): run counts,
+    # the registry join and the unmeasured-row dedupe all use the identity
+    # build_roster collapsed the rows on — so a model recorded under both a
+    # registry id and a v1 path-like id tallies together, and two models that
+    # both store a ``<dir>/model.gguf`` do not.
+    physical = store_physical_models(store)
 
     counts: dict[str, int] = {}
     last: dict[str, str] = {}
     for rec in store.iter_records():
-        canon = _canon((rec.get("identity") or {}).get("model") or {})
+        canon = physical.key((rec.get("identity") or {}).get("model") or {})
         if not canon:
             continue
         counts[canon] = counts.get(canon, 0) + 1
@@ -120,42 +120,38 @@ def get_roster() -> dict[str, Any]:
         if rid > last.get(canon, ""):
             last[canon] = rid
 
-    # Index the registry by id AND by gguf path/basename: v1-imported roster
-    # ids are path-like and don't match registry ids, but their gguf DOES.
-    reg_by_id: dict[str, Any] = {}
-    reg_by_file: dict[str, Any] = {}
+    # The registry joins through the same resolver: v1-imported roster ids are
+    # path-like and don't match registry ids, but their gguf names the file.
     try:
-        for m in fetch_registry_models(api):
-            if m.get("id"):
-                reg_by_id[m["id"]] = m
-            path = m.get("path") or ""
-            if path:
-                reg_by_file[path] = m
-                reg_by_file[path.rsplit("/", 1)[-1]] = m
+        registry = list(fetch_registry_models(api))
     except (URLError, OSError, ValueError):
-        pass
+        registry = []
+    reg_by_canon = physical.match_registry(registry)
 
+    shown: set[str] = set()
     for m in roster["models"]:
-        gguf = m.get("gguf") or ""
-        canon = gguf.rsplit("/", 1)[-1] or m["id"]
-        r = reg_by_id.get(m["id"]) or reg_by_file.get(gguf) or reg_by_file.get(canon) or {}
+        canon = physical.key(m)
+        shown.add(canon)
+        r = reg_by_canon.get(canon) or {}
         m["name"] = r.get("name")
         m["hf_repo"] = r.get("hf_repo")
         m["runs"] = counts.get(canon, 0)
         m["last_run"] = (last.get(canon) or "")[:10] or (m.get("detail") or {}).get("measured")
         m["measured"] = True
 
-    present = {(m.get("gguf") or m["id"]).rsplit("/", 1)[-1] for m in roster["models"]}
-    for reg_model in reg_by_id.values():
-        if not reg_model.get("installed"):
+    # A registry model the resolver puts on a board row must not be appended
+    # again as an "unmeasured" row.
+    appended: set[str] = set()
+    on_board = {id(r) for r in physical.on_keys(registry, shown)}
+    for reg_model in registry:
+        if not reg_model.get("id") or not reg_model.get("installed"):
             continue
         if _is_tier_a_incompatible(reg_model):  # non-gguf / embed / rerank
             continue
-        path = reg_model.get("path") or ""
-        base = path.rsplit("/", 1)[-1]
-        if base in present or reg_model["id"] in present:
+        if id(reg_model) in on_board or reg_model["id"] in appended:
             continue
-        present.add(base)
+        appended.add(reg_model["id"])
+        path = reg_model.get("path") or ""
         sz = int(reg_model.get("size_bytes", 0) or 0)
         roster["models"].append(
             {
