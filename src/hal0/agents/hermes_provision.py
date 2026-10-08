@@ -6553,7 +6553,7 @@ def _no_proxy_in_env_file(body: str | None) -> list[str]:
     return out
 
 
-def _driver_env_no_proxy(existing_body: str | None) -> str:
+def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = None) -> str:
     """The ``NO_PROXY`` value for the driver env (#2330).
 
     Hermes's MCP client is an ``httpx.AsyncClient`` with the default
@@ -6568,6 +6568,10 @@ def _driver_env_no_proxy(existing_body: str | None) -> str:
     them still keeps them) and the file being replaced, when readable. Both
     spellings are merged because Python's proxy lookup prefers the lowercase
     one.
+
+    ``exposed`` is the loopback host list the caller already looked up (the
+    MCP join passes the set it is about to record, so a second lookup can't
+    fail and leave the recorded set unwritten); ``None`` looks it up here.
     """
     from hal0.config import paths as _cfg_paths
 
@@ -6579,17 +6583,20 @@ def _driver_env_no_proxy(existing_body: str | None) -> str:
         api_env = _cfg_paths.api_env().read_text(encoding="utf-8")
     operator += _no_proxy_in_env_file(api_env)
     operator += _no_proxy_in_env_file(existing_body)
-    try:
-        from hal0.mcp.installed import exposed_loopback_hosts
+    if exposed is None:
+        try:
+            from hal0.mcp.installed import exposed_loopback_hosts
 
-        exposed = exposed_loopback_hosts()
-    except Exception as exc:  # never fail the env write over the MCP registry
-        log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
-        exposed = []
+            exposed = exposed_loopback_hosts()
+        except Exception as exc:  # never fail the env write over the MCP registry
+            log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
+            exposed = []
     return ",".join(dict.fromkeys([*operator, *_NO_PROXY_BASE, *exposed]))
 
 
-def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
+def _write_driver_env(
+    state: BootstrapState | None = None, *, no_proxy_hosts: list[str] | None = None
+) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
     Mirrors ``HermesDriver._write_env_file``: the systemd unit's
@@ -6651,7 +6658,7 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
         with contextlib.suppress(OSError):
             existing = path.read_text(encoding="utf-8")
     # #2330: keep loopback MCP traffic, and its header values, off any proxy.
-    no_proxy = _driver_env_no_proxy(existing)
+    no_proxy = _driver_env_no_proxy(existing, no_proxy_hosts)
     lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"
     if path.exists():
@@ -6711,7 +6718,7 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     return path, True
 
 
-def refresh_driver_env() -> tuple[Path, bool]:
+def refresh_driver_env(*, no_proxy_hosts: list[str] | None = None) -> tuple[Path, bool]:
     """Public entry point: re-render :data:`DRIVER_ENV_PATH` on its own.
 
     For callers outside the bootstrap phase pipeline that need the driver
@@ -6720,8 +6727,10 @@ def refresh_driver_env() -> tuple[Path, bool]:
     for (or risking a side effect from) the full provision run. Idempotent
     and side-effect-scoped like :func:`_write_driver_env` itself, which does
     all the actual work; this just supplies the unused ``state`` argument.
+    ``no_proxy_hosts`` pins the exposed loopback hosts written to
+    ``NO_PROXY`` (see :func:`_driver_env_no_proxy`).
     """
-    return _write_driver_env()
+    return _write_driver_env(no_proxy_hosts=no_proxy_hosts)
 
 
 def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:
