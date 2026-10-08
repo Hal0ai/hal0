@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from hal0.cli import agent_commands
@@ -146,11 +147,13 @@ def test_status_table_surfaces_warn_phase_and_failure_count(
     read ``ok``, and the dedicated Failures column must show the count
     instead of leaving it only in the (possibly truncated) Detail JSON.
 
-    Force a wide terminal so Rich doesn't wrap the "1 failed 2 skipped" cell
-    across lines under the CliRunner's default (narrow, non-tty) width and
-    break the substring checks below.
+    Force a wide console so Rich doesn't wrap the "1 failed 2 skipped" cell
+    across lines and break the substring checks below. Pinned on the module
+    console itself: Rich fixes a Console's width from COLUMNS at
+    construction (module import), so setting COLUMNS here does not reach
+    it, and an xdist worker imports with COLUMNS=80 (#2341).
     """
-    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(agent_commands, "console", Console(width=200))
     result = runner.invoke(agent_commands.app, ["status", "hermes"])
     assert result.exit_code == 0, result.output
     assert "warn" in result.output
