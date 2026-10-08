@@ -1115,6 +1115,76 @@ def test_patch_exposure_accepted_once_the_call_path_enforces_policy(
     assert "hermes_sync" in response.json()
 
 
+@pytest.fixture
+def _call_path_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exposure is refused until #2303 (#2358); these model that call path."""
+    from hal0.mcp import installed
+
+    monkeypatch.setattr(installed, "AGENT_CALL_PATH_ENFORCED", True)
+
+
+def _give_github_secret_headers(*keys: str) -> None:
+    from hal0.mcp import installed
+
+    installed.patch_config("github", secrets=dict.fromkeys(keys, "GITHUB_MCP_TOKEN"))
+
+
+@pytest.mark.usefixtures("_call_path_enforced")
+@pytest.mark.parametrize("target", ["hermes", "brain"])
+def test_patch_exposure_warns_when_a_header_survives_a_redirect(
+    client: TestClient, target: str
+) -> None:
+    """#2330: Hermes follows redirects and strips only Authorization, so any
+    other header value would reach a redirect target. Warned, not refused."""
+    _install_github(client)
+    _give_github_secret_headers("Authorization", "X-Api-Key")
+    response = client.patch("/api/mcp/github/exposure", json={target: True})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["server"]["exposure"][target] is True
+    [warning] = body["warnings"]
+    assert "['X-Api-Key']" in warning
+    assert "redirect" in warning
+    assert "Authorization" in warning  # the remedy names the one safe header
+
+
+@pytest.mark.usefixtures("_call_path_enforced")
+def test_patch_exposure_no_warning_for_authorization_only(client: TestClient) -> None:
+    _install_github(client)
+    _give_github_secret_headers("authorization")
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["warnings"] == []
+
+
+@pytest.mark.usefixtures("_call_path_enforced")
+def test_patch_exposure_no_warning_when_withdrawn(client: TestClient) -> None:
+    _install_github(client)
+    _give_github_secret_headers("X-Api-Key")
+    assert client.patch("/api/mcp/github/exposure", json={"hermes": True}).json()["warnings"]
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": False})
+    assert response.status_code == 200, response.text
+    assert response.json()["warnings"] == []
+
+
+@pytest.mark.usefixtures("_call_path_enforced")
+def test_test_endpoint_warns_for_an_exposed_redirect_unsafe_header(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_github(client)
+    _give_github_secret_headers("X-Api-Key")
+    monkeypatch.setattr(
+        mcp_routes.mcp_probe,
+        "probe_installed_server_sync",
+        lambda record: {"ok": True, "tools": [], "error": None},
+    )
+    assert client.post("/api/mcp/github/test").json()["warnings"] == []  # not exposed yet
+
+    assert client.patch("/api/mcp/github/exposure", json={"brain": True}).status_code == 200
+    [warning] = client.post("/api/mcp/github/test").json()["warnings"]
+    assert "['X-Api-Key']" in warning
+
+
 def test_patch_exposure_openwebui_rejected(client: TestClient) -> None:
     _install_github(client)
     response = client.patch("/api/mcp/github/exposure", json={"openwebui": True})

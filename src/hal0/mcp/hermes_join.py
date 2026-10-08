@@ -2,7 +2,7 @@
 
 `src/hal0/mcp/installed.py` persists the operator's install/tool/exposure
 choices; this module is what makes an `exposure.hermes` (or `.brain`) flag
-actually reach the agent. It has three jobs, run together as
+actually reach the agent. It has four jobs, run together as
 :func:`sync_exposure` after every registry mutation that can change the
 desired set (install, uninstall, and the ``PATCH /tools``/``/exposure``/
 ``/config`` routes):
@@ -20,6 +20,9 @@ desired set (install, uninstall, and the ``PATCH /tools``/``/exposure``/
 3. Re-probe (via :mod:`hal0.mcp.probe`) exactly the servers whose desired
    membership changed, so a bad URL surfaces at the mutation that exposed
    it rather than at an agent's first turn.
+4. Keep ``NO_PROXY`` in the Hermes driver env covering every exposed
+   loopback host (#2330), so Hermes's proxy-honouring MCP client never sends
+   a local server's header values to an environment proxy.
 
 Removal ownership: an id is only ever a removal candidate for step 1 when
 it appears in the on-disk ownership manifest
@@ -51,7 +54,7 @@ import structlog
 
 from hal0.config import paths as cfg_paths
 from hal0.mcp import installed as _installed
-from hal0.mcp.installed import InstalledServer, list_enabled_exposed
+from hal0.mcp.installed import InstalledServer, exposed_loopback_hosts, list_enabled_exposed
 from hal0.mcp.probe import build_headers
 
 log = structlog.get_logger(__name__)
@@ -110,7 +113,7 @@ def _load_manifest() -> dict[str, list[str]]:
     return {t: sorted({str(x) for x in raw.get(t, [])}) for t in JOIN_TARGETS}
 
 
-def _write_manifest(manifest: dict[str, list[str]]) -> None:
+def _write_manifest(manifest: dict[str, Any]) -> None:
     path = _manifest_path()
     with contextlib.suppress(OSError):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +142,71 @@ def _log_unenforced_once(record: InstalledServer) -> None:
         code=_installed.AGENT_EXPOSURE_UNENFORCED_CODE,
         reason=_installed.AGENT_EXPOSURE_UNENFORCED_REASON,
     )
+
+
+def _load_no_proxy_hosts() -> list[str] | None:
+    """Loopback hosts the driver env's ``NO_PROXY`` last covered (#2330).
+
+    Kept in the ownership manifest under ``no_proxy_hosts``; ``None`` when
+    never recorded (a box upgraded from before #2330, or no driver env yet).
+    """
+    try:
+        raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    hosts = raw.get("no_proxy_hosts") if isinstance(raw, dict) else None
+    return sorted(str(h) for h in hosts) if isinstance(hosts, list) else None
+
+
+def _converge_driver_env_no_proxy(
+    previous: list[str] | None,
+    errors: list[str],
+    *,
+    preserve: list[str] | None = None,
+) -> tuple[dict[str, Any], list[str] | None]:
+    """Re-render the Hermes driver env when the exposed loopback hosts change.
+
+    Hermes's MCP client honours environment proxies, so a loopback host
+    missing from ``NO_PROXY`` sends that server's header values to the proxy
+    in clear text (#2330). ``hermes_provision._write_driver_env`` puts every
+    exposed loopback host in ``NO_PROXY``; this re-runs it (via the
+    ``hal0-agentenv`` seam when unprivileged) when the set differs from the
+    one last written. The running agent picks the new value up on its next
+    restart.
+
+    Skipped when no driver env exists (Hermes not installed: never create one
+    here) or when it is not the file this HAL0_HOME resolves to (a sandbox,
+    where the provisioner would still write the real ``/etc/hal0``). Returns
+    ``(report, hosts to record)``; the recorded hosts stay ``previous`` when
+    nothing was written, so the next sync retries.
+
+    ``preserve`` keeps hosts in ``NO_PROXY`` while a join that used them is
+    still in Hermes's config because its removal failed: dropping the host
+    first would send that stale join's headers to the proxy on the agent's
+    next restart. A failed host lookup is reported in ``errors``, not raised.
+    """
+    from hal0.agents import hermes_provision
+
+    try:
+        hosts = sorted(set(exposed_loopback_hosts()) | set(preserve or ()))
+    except Exception as exc:
+        log.warning("hal0.mcp.hermes_join.no_proxy_lookup_failed", error=str(exc))
+        errors.append(f"driver_env: {exc}")
+        return {"no_proxy_hosts": previous, "refreshed": False}, previous
+    report: dict[str, Any] = {"no_proxy_hosts": hosts, "refreshed": False}
+    if hosts == previous:
+        return report, previous
+    path = cfg_paths.etc() / "agents" / "hermes.env"
+    if path != hermes_provision.DRIVER_ENV_PATH or not path.exists():
+        return report, previous
+    try:
+        hermes_provision.refresh_driver_env(no_proxy_hosts=hosts)
+    except Exception as exc:
+        log.warning("hal0.mcp.hermes_join.driver_env_refresh_failed", error=str(exc))
+        errors.append(f"driver_env: {exc}")
+        return report, previous
+    report["refreshed"] = True
+    return report, hosts
 
 
 def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
@@ -295,6 +363,16 @@ def reconcile_stale_joins() -> list[str]:
             server_ids=sorted(triggered),
             errors=_report_errors(report),
         )
+    else:
+        # Joins converged, but the driver env may predate #2330 (or miss a
+        # loopback host): bring its NO_PROXY in line on its own.
+        previous = _load_no_proxy_hosts()
+        errors: list[str] = []
+        result, hosts = _converge_driver_env_no_proxy(previous, errors)
+        if hosts != previous and hosts is not None:
+            _write_manifest({**manifest, "no_proxy_hosts": hosts})
+        if errors:
+            log.warning("hal0.mcp.hermes_join.startup_driver_env", errors=errors, **result)
     return sorted(triggered)
 
 
@@ -333,7 +411,8 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
     from hal0.agents import hermes_provision
 
     old_manifest = _load_manifest()
-    new_manifest: dict[str, list[str]] = {}
+    old_no_proxy_hosts = _load_no_proxy_hosts()
+    new_manifest: dict[str, Any] = {}
     report: dict[str, Any] = {"hermes": {}, "brain": {}, "errors": []}
 
     all_records = {r.id: r for r in list_enabled_exposed(target="hermes")}
@@ -368,6 +447,16 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
         kept = set(remove_ids) if result.get("remove_errors") else set()
         new_manifest[target] = sorted(set(desired) | kept)
 
+    # A failed removal leaves its join in Hermes's config, so the hosts the
+    # last render covered stay in NO_PROXY until the removal goes through.
+    removal_failed = any((report[t] or {}).get("remove_errors") for t in JOIN_TARGETS)
+    report["driver_env"], no_proxy_hosts = _converge_driver_env_no_proxy(
+        old_no_proxy_hosts,
+        report["errors"],
+        preserve=old_no_proxy_hosts if removal_failed else None,
+    )
+    if no_proxy_hosts is not None:
+        new_manifest["no_proxy_hosts"] = no_proxy_hosts
     _write_manifest(new_manifest)
 
     # Seed TOML mirror (classify() source) always reflects hermes-exposed

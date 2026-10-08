@@ -74,6 +74,26 @@ re-run `hal0 mcp expose <id> --hermes` to push it into Hermes's config now.
 `hal0 mcp restart <id>` does not help: start/stop/restart answer
 `501 mcp.supervisor_unavailable` until the process supervisor ships.
 
+<Aside type="caution">
+Once a server is exposed, Hermes and the hal0-brain profile send these
+headers from their own MCP client, which hal0 cannot configure:
+
+- **An exposed endpoint must not redirect.** The client follows redirects,
+  and `Authorization` is the one header it drops when a redirect leads to
+  another origin. Any other header, such as an `X-Api-Key`, goes to the
+  redirect target, even over plain `http://`. Carry the credential in
+  `Authorization` where the server allows it. `hal0 mcp test` and
+  `hal0 mcp expose` print a warning for an exposed server with any other
+  header.
+- **Loopback traffic must bypass your proxy.** The client honours
+  `HTTP_PROXY`/`HTTPS_PROXY`, so hal0 sets `NO_PROXY` and `no_proxy` in
+  `/etc/hal0/agents/hermes.env` to `localhost`, `127.0.0.1`, `::1` and every
+  loopback host an exposed server uses. hal0 rewrites that file, so add your
+  own exclusions to hal0-api's environment (`/etc/hal0/api.env`); hal0
+  copies them in. A newly exposed loopback host takes effect when the agent
+  restarts: `sudo systemctl restart hal0-agent@hermes`.
+</Aside>
+
 ### Probe an installed server
 
 ```sh

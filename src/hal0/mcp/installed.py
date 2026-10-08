@@ -323,6 +323,37 @@ class InstalledServer(BaseModel):
         """Header-value keys naming ``Proxy-Authorization`` (any case); never safe."""
         return [k for k in self.header_value_keys() if k.lower() == "proxy-authorization"]
 
+    def redirect_header_keys(self) -> list[str]:
+        """Header-value keys Hermes would re-send to a redirect target (#2330).
+
+        Hermes's MCP client follows redirects and drops only
+        ``Authorization`` on a cross-origin hop (``_desired_entries``), so
+        every other key here would reach wherever the endpoint redirects.
+        """
+        return [k for k in self.header_value_keys() if k.lower() != "authorization"]
+
+    def redirect_header_warning(self) -> str | None:
+        """Operator-facing warning when an exposed record has :meth:`redirect_header_keys`.
+
+        ``None`` unless the record is exposed to Hermes or the brain over
+        http(s). A warning, not a refusal: the leak needs the endpoint to
+        redirect. Names header keys only, never a value.
+        """
+        if not (self.exposure.hermes or self.exposure.brain):
+            return None
+        if self.transport not in ("streamable-http", "sse") or not self.url:
+            return None
+        keys = self.redirect_header_keys()
+        if not keys:
+            return None
+        return (
+            f"MCP server {self.id!r}: Hermes sends header value(s) {keys} from "
+            f"[secrets]/[env] on any redirect, because its MCP client follows "
+            f"redirects and drops only Authorization when one changes origin. "
+            f"Make sure this endpoint never redirects, or carry the credential in "
+            f"Authorization instead."
+        )
+
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
         """``(host, header keys)`` when header values would cross a network
         in clear text, else ``None``. Ignores ``allow_insecure_http``.
@@ -691,6 +722,29 @@ def list_enabled_exposed(*, target: str) -> list[InstalledServer]:
     return [r for r in list_installed() if r.enabled and bool(getattr(r.exposure, target, False))]
 
 
+def exposed_loopback_hosts() -> list[str]:
+    """Loopback hosts in the url of a record exposed to Hermes or the brain.
+
+    Sorted and deduplicated. Hermes's MCP client honours environment proxies,
+    so each of these must be in its ``NO_PROXY`` or the record's header values
+    go to the proxy in clear text (#2330). Covers every enabled exposed
+    record, including one the join skips: an extra ``NO_PROXY`` entry for a
+    loopback host costs nothing.
+    """
+    hosts: set[str] = set()
+    for target in ("hermes", "brain"):
+        for record in list_enabled_exposed(target=target):
+            if record.transport not in ("streamable-http", "sse") or not record.url:
+                continue
+            try:
+                host = urlsplit(record.url).hostname or ""
+            except ValueError:
+                continue
+            if is_loopback_destination(host):
+                hosts.add(host)
+    return sorted(hosts)
+
+
 __all__ = [
     "AGENT_CALL_PATH_ENFORCED",
     "AGENT_EXPOSURE_UNENFORCED_CODE",
@@ -699,6 +753,7 @@ __all__ = [
     "ExposureConfig",
     "InstalledServer",
     "agent_exposure_status",
+    "exposed_loopback_hosts",
     "get_installed",
     "install",
     "is_loopback_destination",
