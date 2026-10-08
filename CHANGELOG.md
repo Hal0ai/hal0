@@ -237,10 +237,6 @@ applying. Add those subsections to a version's section to surface them; see
   hal0-api's startup reconcile) removes it from Hermes's config. This is an
   interim guard until hal0 sits on the agent's call path. (#2343)
 
-- **A container with `/dev/kfd` but no render node no longer gets ROCm slots
-  seeded.** Seed derivation treated `/dev/kfd` alone as proof the box can
-  run ROCm, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
-
 - **A container with `/dev/kfd` but no render node is no longer treated as
   able to run ROCm.** Four places took `/dev/kfd` alone as proof of the ROCm
   lane, but a ROCm slot also opens a `/dev/dri/renderD*` node. On an LXC
