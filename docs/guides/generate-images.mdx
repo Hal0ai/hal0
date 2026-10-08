@@ -120,10 +120,13 @@ see [Edit configuration](/docs/guides/configure).
 ### Which container image the `img` slot runs
 
 The `img` slot resolves its image in this order: `image_pin` (top-level or
-`[slot]`-nested, honored verbatim), then a legacy string `image` key, then the
+`[slot]`-nested, honored verbatim), then a legacy string `image` key, then
+`[slots].default_images.comfyui` in `hal0.toml` (the operator's family
+default, set from the Runner Images page — see
+[Manage runner images](/docs/guides/manage-runner-images)), then the
 `comfyui` runner's resolved image (`HAL0_TOOLBOX_IMAGE_COMFYUI`, then the
 release manifest digest pin, then the bundled tag). Before 1.3.0 the pin was
-ignored for this slot. `hal0 slot migrate-flags` folds an old `image` value
+ignored for this slot, and the family default was ignored until #2234. `hal0 slot migrate-flags` folds an old `image` value
 into `image_pin`, so clear `image_pin` in `/etc/hal0/slots/img.toml` if you
 want the resolved default.
 
