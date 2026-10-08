@@ -399,6 +399,102 @@ def test_preview_notes_heading_audience_present(tmp_path):
     assert "## Known issues" in notes
 
 
+# ── Missing changelog section is a hard failure off nightly (#2255) ─────────
+#
+# A stable/preview tag with no ``## [<version>]`` section used to fall through
+# to the git-log path and ship ``release.json`` with empty highlights/breaking/
+# migrations, so ``hal0 update`` showed no callout. Nightly has no changelog
+# section by design and must keep that fallback.
+
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "gen_release_notes.py"
+
+_UNRELEASED_ONLY = """\
+# Changelog
+
+## [Unreleased]
+
+### Breaking
+- something the operator must know about
+"""
+
+_EMPTY_SECTION = """\
+# Changelog
+
+## [1.4.0] — 2026-10-08
+
+## [1.3.0] — 2026-09-16
+
+### Added
+- older entry
+"""
+
+
+def _run_gen_notes(tmp_path: Path, tag: str, channel: str, changelog: Path):
+    import subprocess
+    import sys
+
+    out = tmp_path / "stage"
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--tag",
+            tag,
+            "--channel",
+            channel,
+            "--out-dir",
+            str(out),
+            "--changelog",
+            str(changelog),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    return r, out
+
+
+@pytest.mark.parametrize(
+    ("tag", "channel", "header"),
+    [
+        ("v1.4.0", "stable", "## [1.4.0]"),
+        ("v1.4.0-rc.1", "preview", "## [1.4.0-rc.1]"),
+    ],
+)
+@pytest.mark.parametrize(
+    "content",
+    [_UNRELEASED_ONLY, _EMPTY_SECTION, None],
+    ids=["unreleased-only", "empty-section", "no-changelog-file"],
+)
+def test_missing_changelog_section_fails_off_nightly(tmp_path, tag, channel, header, content):
+    changelog = tmp_path / "CHANGELOG.md"
+    if content is not None:
+        changelog.write_text(content, encoding="utf-8")
+
+    r, out = _run_gen_notes(tmp_path, tag, channel, changelog)
+
+    assert r.returncode != 0, r.stdout
+    assert tag in r.stderr
+    assert header in r.stderr
+    assert not (out / "release.json").exists()
+    assert not (out / "RELEASE_NOTES.md").exists()
+
+
+def test_nightly_still_uses_git_log_fallback_without_changelog_section(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(_UNRELEASED_ONLY, encoding="utf-8")
+
+    r, out = _run_gen_notes(tmp_path, "v1.4.0-nightly.20261008", "nightly", changelog)
+
+    assert r.returncode == 0, r.stderr
+    import json as _json
+
+    data = _json.loads((out / "release.json").read_text(encoding="utf-8"))
+    assert data["source"] == "git-log"
+    assert data["channel"] == "nightly"
+    assert data["highlights"] == data["breaking"] == data["migrations"] == []
+
+
 # ── Regression: the *shipped* CHANGELOG.md, not a fixture (#1874) ────────────
 #
 # ``extract_structured`` was only ever exercised against synthetic fixtures that
