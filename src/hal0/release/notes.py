@@ -23,11 +23,9 @@ def extract_changelog_section(changelog: str, version: str) -> str:
 
     Notes
     -----
-    The regex uses a word-boundary-like anchor after the version string so
-    that ``v0.5.1`` does **not** match ``## [v0.5.10-alpha.1]``.  A version
-    string ends at a ``]`` (or ``-``, ``+``, whitespace…) — never at another
-    digit — so requiring the next character to be ``]`` or ``-`` or ``+``
-    prevents prefix collisions.
+    The version must be followed directly by the header's closing ``]``, so
+    ``v0.5.1`` does **not** match ``## [v0.5.10-alpha.1]`` and a stable
+    ``v1.4.0`` does **not** match its pre-release ``## [1.4.0-rc.1]`` (#2345).
     """
     if not changelog or not version:
         return ""
@@ -42,11 +40,11 @@ def extract_changelog_section(changelog: str, version: str) -> str:
     escaped = re.escape(bare)
 
     # Match:  ## [  (optional v)  <version>  ]   (optional rest of header line)
-    # The (?:] is a non-capturing group that requires the character immediately
-    # following the version to be ] or - or + (i.e. not another digit/letter),
-    # preventing "v0.5.1" from matching "v0.5.10".
+    # The lookahead requires the closing ] right after the version, so neither
+    # "v0.5.10" nor a pre-release "1.4.0-rc.1" matches a query for "1.4.0" /
+    # "0.5.1" (#2345).
     header_re = re.compile(
-        r"^##\s+\[v?" + escaped + r"(?=[^\w]|\Z)",
+        r"^##[ \t]+\[v?" + escaped + r"(?=\])",
         re.MULTILINE,
     )
 

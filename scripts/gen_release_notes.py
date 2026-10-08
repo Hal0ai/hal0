@@ -12,13 +12,14 @@ URL), what an operator reviews is exactly what was signed.
 
 Source of truth: the matching ``## [<version>]`` section of CHANGELOG.md (Keep a
 Changelog). Its ``### Highlights`` / ``### Breaking`` / ``### Migrations``
-subsections populate ``release.json``. For the ``nightly`` channel (which has no
-changelog section) the markdown is a commit log since the previous nightly tag
-and the structured lists are empty. If nothing resolves, notes degrade to a
-one-liner — the updater treats notes as optional, so an un-noted release still
-installs cleanly.
+subsections populate ``release.json``. For ``stable`` and ``preview`` that
+section is required: if it is missing or empty the script exits non-zero
+without writing either file, so the release build fails instead of shipping
+empty callouts (#2255). For the ``nightly`` channel (which has no changelog
+section) the markdown is a commit log since the previous nightly tag and the
+structured lists are empty.
 
-Run from the repo root (needs full git history for the nightly / fallback ranges,
+Run from the repo root (needs full git history for the nightly commit-log range,
 i.e. an ``actions/checkout`` with ``fetch-depth: 0``).
 """
 
@@ -90,10 +91,30 @@ def main() -> int:
             section = extract_changelog_section(
                 changelog_path.read_text(encoding="utf-8"), args.tag
             )
-        if section:
-            markdown = f"# hal0 {version}\n\n{section}\n"
-            structured = extract_structured(section)
-            source = f"{args.changelog}#{version}"
+        # Only subsection headings (an emptied ``[Unreleased]`` template)
+        # count as no section: there is nothing to show or to callout.
+        has_entries = any(
+            line.strip() and not line.lstrip().startswith("#") for line in section.splitlines()
+        )
+        if not has_entries:
+            # A stable/preview release without its changelog section would
+            # otherwise fall through to the git-log path below and ship
+            # release.json with empty highlights/breaking/migrations, so
+            # `hal0 update` would show no callout (#2255). Nightly keeps that
+            # fallback: it has no changelog section by design.
+            print(
+                f"error: {args.changelog}: no non-empty '## [{version}]' section for "
+                f"{args.channel} tag {args.tag}. Rename '## [Unreleased]' to "
+                f"'## [{version}] — <date>' (with its entries) before tagging; "
+                f"release.json would otherwise ship with empty "
+                f"highlights/breaking/migrations and 'hal0 update' would show "
+                f"no callout.",
+                file=sys.stderr,
+            )
+            return 1
+        markdown = f"# hal0 {version}\n\n{section}\n"
+        structured = extract_structured(section)
+        source = f"{args.changelog}#{version}"
 
     if not markdown:
         markdown = _git_changelog(args.tag, nightly=(args.channel == "nightly"))
