@@ -284,3 +284,24 @@ def test_bundle_returns_nonzero_failed_count_when_probes_missing(
     _, failed = build_bundle(out, include_rocm_smi=True)
     # The forced rocminfo failure guarantees at least one failed probe.
     assert failed > 0
+
+
+def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypatch) -> None:
+    """A log deleted between glob() and stat() is skipped, not fatal."""
+    from pathlib import Path
+
+    import hal0.cli.doctor_bundle as db
+
+    keep = tmp_path / "hal0-install-a.log"
+    gone = tmp_path / "hal0-install-b.log"
+    keep.write_text("x")
+    gone.write_text("y")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *a, **k):
+        if self == gone:
+            raise FileNotFoundError(self)
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    assert db._latest_match(((str(tmp_path), "hal0-install-*.log"),)) == keep

@@ -468,14 +468,20 @@ _INSTALL_REPORT_GLOBS: tuple[tuple[str, str], ...] = (
 
 
 def _latest_match(globs: tuple[tuple[str, str], ...]) -> Path | None:
-    candidates: list[Path] = []
+    # A candidate can vanish between glob() and stat() (e.g. /tmp cleanup):
+    # skip it rather than abort the bundle.
+    best: tuple[float, Path] | None = None
     for directory, pattern in globs:
         d = Path(directory)
         if d.is_dir():
-            candidates.extend(d.glob(pattern))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+            for p in d.glob(pattern):
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if best is None or mtime > best[0]:
+                    best = (mtime, p)
+    return best[1] if best else None
 
 
 def _latest_install_log() -> Path | None:
@@ -490,7 +496,10 @@ def _install_artifacts() -> dict[str, dict[str, str] | None]:
     def _describe(path: Path | None) -> dict[str, str] | None:
         if path is None:
             return None
-        mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        except OSError:
+            return None
         return {"path": str(path), "mtime_utc": mtime.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     return {
