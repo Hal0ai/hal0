@@ -80,6 +80,15 @@ applying. Add those subsections to a version's section to surface them; see
   the render changed. No admin key is minted, so a fresh install's auth
   posture is unchanged. (#2314)
 
+- **`sudo hal0 auth reset-key`: a way back from a lost admin key.** It mints
+  a new admin key and prints it once. It must run on the box as root, since
+  the key lives in the root-only `/etc/hal0/api.env`. With `hal0-api` up it
+  rotates through `POST /api/auth/rotate` and applies live; with the API down
+  it writes `api.env` directly and applies on the next `hal0-api` restart.
+  On a box with no admin key yet it creates the first one, which arms the
+  v1.3.0 LAN admin gate on a LAN-bound box; the confirmation prompt says so.
+  (#2314)
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
