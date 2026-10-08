@@ -218,6 +218,7 @@ applying. Add those subsections to a version's section to surface them; see
   connecting an account needed `hal0 oauth`. It now lives at
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
+
 - **`hal0 capabilities migrate --apply` no longer clears NPU selections when
   `flm list` fails** (#2333). A failed host `flm list -j` probe (binary not
   runnable for the invoking user, a timeout, a non-zero exit, unparseable

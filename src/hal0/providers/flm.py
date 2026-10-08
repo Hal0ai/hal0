@@ -1032,8 +1032,10 @@ def flm_catalog() -> list[dict[str, Any]] | None:
 
     _FLM_CATALOG_CACHE = out
     _FLM_CATALOG_CACHED_AT = now
-    _FLM_CATALOG_UNANSWERED = False
-    return _FLM_CATALOG_CACHE
+    # A non-empty reply with no usable entry (e.g. ``{"models": [{}]}``) says
+    # nothing about which tags are served: keep it "no answer", not "empty".
+    _FLM_CATALOG_UNANSWERED = bool(raw) and not out
+    return None if _FLM_CATALOG_UNANSWERED else _FLM_CATALOG_CACHE
 
 
 def reset_flm_catalog_cache() -> None:

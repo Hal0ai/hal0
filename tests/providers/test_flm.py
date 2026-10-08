@@ -796,6 +796,22 @@ def test_flm_catalog_empty_answer_is_a_definitive_empty_list() -> None:
         flm.reset_flm_catalog_cache()
 
 
+def test_flm_catalog_reply_with_no_usable_entry_is_no_answer() -> None:
+    """``{"models": [{}]}`` names no tag, so it can't say a tag is absent (#2333)."""
+    import hal0.providers.flm as flm
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch(
+            "subprocess.run", lambda *a, **k: MagicMock(returncode=0, stdout=b'{"models": [{}]}')
+        ):
+            assert flm.flm_catalog() is None
+            assert flm.flm_catalog() is None  # cache hit keeps "no answer"
+            assert flm.flm_served_models() == []
+    finally:
+        flm.reset_flm_catalog_cache()
+
+
 def test_flm_catalog_answer_after_reset_replaces_a_failed_probe() -> None:
     """A reset after a failed probe lets the next answer through as definitive."""
     import hal0.providers.flm as flm
