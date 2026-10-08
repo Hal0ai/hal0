@@ -27,6 +27,7 @@ that was already misleading.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -46,6 +47,10 @@ class _FakeClient:
         #: bank -> [op_id, ...] failed ids the auto-retry sweep should see/retry.
         self.failed_ids: dict[str, list[str]] = {}
         self.retried: list[str] = []
+        #: bank -> {status: [row, ...]} operation rows, NEWEST FIRST like the
+        #: engine's ``ORDER BY created_at DESC`` list (#1833). When set for a
+        #: status, its length is that status's ``total``.
+        self.rows: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
     async def retain(self, **_kwargs: Any) -> dict[str, str]:
         if self.retain_error is not None:
@@ -74,7 +79,12 @@ class _FakeClient:
         bank = path.split("/banks/", 1)[1].split("/", 1)[0]
         status = params.get("status")
         self.operation_calls.append((bank, status))
-        return {"total": self.operations.get(bank, {}).get(str(status), 0)}
+        rows = self.rows.get(bank, {}).get(str(status))
+        if rows is None:
+            total = self.operations.get(bank, {}).get(str(status), 0)
+            return {"total": total, "operations": []}
+        offset = int(params.get("offset") or 0)
+        return {"total": len(rows), "operations": rows[offset : offset + 1]}
 
 
 def _provider(client: _FakeClient) -> HindsightProvider:
@@ -215,6 +225,183 @@ async def test_a_raised_retain_wins_over_a_clean_probe() -> None:
     assert out["degraded"] is True
     assert out["reason"] == "retain_failed"
     assert "refused" in (out["last_error"] or "")
+
+
+# ── stalled in-flight operations (#1833) ─────────────────────────────────────
+#
+# Retains wedged in ``pending``/``processing`` never touch the ``failed``
+# counter, so a delta-only verdict read "landing" on a store that had never
+# held a fact (ct152: facts=0, five ops processing, the engine's own worker
+# logging ``[STUCK_STACK] age=603s threshold=600s``).
+
+
+def _row(op_id: str, age_s: float, *, done_s: float | None = None) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    row: dict[str, Any] = {
+        "id": op_id,
+        "task_type": "batch_retain",
+        "created_at": (now - timedelta(seconds=age_s)).isoformat(),
+    }
+    if done_s is not None:
+        row["updated_at"] = (now - timedelta(seconds=done_s)).isoformat()
+    return row
+
+
+def _inflight(client: _FakeClient, *, pending: list[float], processing: list[float]) -> None:
+    """Seed in-flight rows by age (seconds); stored newest-first like the engine."""
+    client.rows["shared"] = {
+        status: [_row(f"{status}-{i}", age) for i, age in enumerate(sorted(ages))]
+        for status, ages in (("pending", pending), ("processing", processing))
+    }
+    client.operations["shared"] = {
+        "failed": 0,
+        "pending": len(pending),
+        "processing": len(processing),
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_op_stuck_in_processing_degrades_writes_with_no_failures() -> None:
+    """The ct152 shape: failed=0, ops in flight past the worker's own stuck
+    threshold, nothing ever completed — must not read as landing. And it is
+    right on the FIRST sample: no hal0-side history is needed."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[30.0] * 5, processing=[603.0, 400.0, 300.0, 200.0, 100.0])
+
+    out = await p.write_health()
+
+    assert out["degraded"] is True
+    assert out["reason"] == "retain_operations_stalled"
+    assert "oldest 603s" in (out["last_error"] or "")
+    assert out["operations"] == {"failed": 0, "pending": 5, "processing": 5}
+
+
+@pytest.mark.asyncio
+async def test_a_stale_head_is_found_behind_a_page_of_fresh_retains() -> None:
+    """The list is newest-first: a wedged queue that keeps accepting retains
+    has >50 fresh rows in front of its stale head. The oldest row (offset
+    total-1) must still be the one aged."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[10.0] * 60 + [900.0, 950.0], processing=[])
+
+    out = await p.write_health()
+
+    assert out["degraded"] is True
+    assert out["reason"] == "retain_operations_stalled"
+    assert "oldest 950s" in (out["last_error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_hold_window_expiry_does_not_clear_while_ops_are_still_stuck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The oscillation: failed grows, the retry ladder moves the ops back out
+    of ``failed``, and the timed hold expires with nothing recovered."""
+    import hal0.memory.hindsight_provider as hp
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(hp.time, "monotonic", lambda: fake_now[0])
+    client = _FakeClient()
+    p = _provider(client)
+
+    client.operations["shared"] = {"failed": 0, "pending": 4, "processing": 4}
+    await p.write_health()
+    client.operations["shared"] = {"failed": 4, "pending": 0, "processing": 4}
+    assert (await p.write_health(max_age_s=0))["reason"] == "retain_operations_failing"
+
+    # Retry ladder requeues them; the hold window then runs out.
+    fake_now[0] += hp._WRITE_FAILURE_HOLD_S + 1
+    _inflight(client, pending=[], processing=[700.0])
+    out = await p.write_health(max_age_s=0)
+
+    assert out["degraded"] is True
+    assert out["reason"] == "retain_operations_stalled"
+
+
+@pytest.mark.asyncio
+async def test_young_in_flight_ops_are_not_stalled() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[5.0], processing=[120.0])
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_recent_completion_keeps_a_draining_backlog_green() -> None:
+    """Evidence-based: an old op in a backlog that IS draining (an op
+    completed inside the window) is not a stall — read from the newest
+    completed row's ``updated_at``, not a count retention can prune."""
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[900.0, 30.0], processing=[60.0])
+    client.rows["shared"]["completed"] = [_row("done-1", 1200.0, done_s=45.0)]
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_completion_older_than_the_window_does_not_clear_a_stall() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[], processing=[900.0])
+    client.rows["shared"]["completed"] = [_row("done-1", 5000.0, done_s=4000.0)]
+
+    out = await p.write_health()
+
+    assert out["reason"] == "retain_operations_stalled"
+
+
+@pytest.mark.asyncio
+async def test_the_first_completion_clears_a_stall() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[30.0], processing=[900.0])
+    assert (await p.write_health())["reason"] == "retain_operations_stalled"
+
+    client.rows["shared"]["completed"] = [_row("done-1", 900.0, done_s=2.0)]
+    out = await p.write_health(max_age_s=0)
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_unparseable_op_timestamps_are_not_read_as_a_stall() -> None:
+    """No evidence of age is no evidence of a stall — fail soft to the
+    existing verdict rather than reddening a healthy box."""
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 0, "pending": 1, "processing": 1}
+    client.rows["shared"] = {
+        "processing": [{"id": "op-a", "created_at": "t1"}],
+        "pending": [{"id": "op-b"}],
+    }
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_completion_stamp_is_not_read_as_a_stall() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    _inflight(client, pending=[], processing=[900.0])
+    client.rows["shared"]["completed"] = [{"id": "done-1", "updated_at": None}]
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
 
 
 # ── auto-retry of no-chat-model dead letters (#1792) ──────────────────────

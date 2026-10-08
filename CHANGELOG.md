@@ -248,6 +248,16 @@ applying. Add those subsections to a version's section to surface them; see
   also benchmarks that model, not whichever `model.gguf` the registry
   listed first (#2346).
 
+- **`hal0 memory status` no longer reports `Writes landing` while retains are
+  stuck.** The verdict only watched the engine's `failed` counter for growth,
+  so retains wedged in `pending`/`processing` — which never fail — read green
+  on a store that had never held a fact, and a brief failure spike went green
+  again when its 600-second hold ran out with nothing recovered. Writes now
+  report `FAILING — retain_operations_stalled` when an operation has been in
+  flight for over 600 seconds (the threshold the memory engine's own worker
+  logs as stuck) and none has completed in that time; the first completed
+  operation clears it (#1833).
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
