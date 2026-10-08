@@ -290,6 +290,7 @@ def mount_mcp_servers(
     mcp_servers: dict[str, object] = {"hal0-admin": admin_server}
 
     if memory_provider is not None:
+        from hal0.api.routes.memory import make_add_preflight
         from hal0.mcp.memory import build_server as build_memory_server
 
         # The memory server is an outermost mount — no admin dispatcher
@@ -303,6 +304,9 @@ def mount_mcp_servers(
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
             approval_queue=approval_queue,
+            # #1930: the same extraction-window preflight /api/memory/add
+            # runs (#1903) — this is the path agents actually retain through.
+            add_preflight=make_add_preflight(app, memory_provider),
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()

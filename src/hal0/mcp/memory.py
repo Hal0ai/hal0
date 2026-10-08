@@ -69,11 +69,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
+from hal0.errors import Hal0Error
 from hal0.memory.namespace import (
     MemoryNamespaceError,
     resolve_read_datasets,
@@ -298,6 +300,7 @@ async def _memory_add(
     *,
     client_id: str | None,
     private: bool,
+    preflight: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
     observation_scopes?, strategy?, update_mode?, sync?)
@@ -330,6 +333,11 @@ async def _memory_add(
     ``operation_id``/``operation_ids``/``items_count`` appear whenever the
     engine reports them (Hindsight retain is async by default) — poll
     ``memory_operation_get``/``memory_operation_list`` to track completion.
+
+    ``preflight`` is the extraction-window check ``POST /api/memory/add``
+    runs (#1903, #1930), bound by the mount site. It runs after argument
+    validation and before ``wrapper.add`` so a write the extraction slot can
+    never process is refused before any document id is minted.
     """
     text = _require(args, "text", str)
     if not text.strip():
@@ -357,6 +365,8 @@ async def _memory_add(
         raise MemorySchemaError("update_mode must be 'replace' or 'append'")
     sync = _optional_bool(args, "sync", default=False)
     source = client_id or "anonymous"
+    if preflight is not None:
+        await preflight()
     result = await wrapper.add(
         text=text,
         dataset=dataset,
@@ -1170,6 +1180,7 @@ def make_dispatcher(
     client_id_resolver: Any = None,
     private_resolver: Any = None,
     approval_queue: Any = None,
+    add_preflight: Callable[[], Awaitable[None]] | None = None,
 ):
     """Return an async dispatcher closure bound to ``wrapper``.
 
@@ -1193,6 +1204,12 @@ def make_dispatcher(
     is handed to ``admin.dispatch``: admin gates first and then invokes
     the approved executor through this same callable, so a second gate
     here would re-enqueue the approved call forever.
+
+    ``add_preflight`` is the zero-arg extraction-window check the mount site
+    binds from :func:`hal0.api.routes.memory.make_add_preflight` (#1930). It
+    runs only for ``memory_add``; a :class:`~hal0.errors.Hal0Error` it raises
+    is returned with its own stable ``code`` and ``details`` rather than the
+    generic ``mcp.memory_failed``.
     """
 
     async def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -1209,8 +1226,14 @@ def make_dispatcher(
         if private_resolver is not None:
             private = bool(private_resolver())
 
+        extra: dict[str, Any] = {}
+        if tool == "memory_add" and add_preflight is not None:
+            extra["preflight"] = add_preflight
+
         async def _run(call_args: dict[str, Any]) -> dict[str, Any]:
-            payload = await handler(wrapper, call_args, client_id=client_id, private=private)
+            payload = await handler(
+                wrapper, call_args, client_id=client_id, private=private, **extra
+            )
             return {"status": "ok", **payload}
 
         try:
@@ -1237,6 +1260,15 @@ def make_dispatcher(
             return {
                 "status": "error",
                 "error": {"code": "mcp.memory_schema", "detail": str(exc)},
+            }
+        except Hal0Error as exc:
+            # A structured refusal (the #1930 extraction-window preflight):
+            # keep its stable code + details so an agent sees the same
+            # ``memory.extraction_ctx_too_small`` the REST route returns.
+            log.warning("mcp.memory.refused", tool=tool, code=exc.code, error=exc.message)
+            return {
+                "status": "error",
+                "error": {"code": exc.code, "detail": exc.message, "details": exc.details},
             }
         except Exception as exc:
             log.warning("mcp.memory.failed", tool=tool, error=str(exc))
@@ -1381,6 +1413,7 @@ def build_server(
     client_id_resolver: Any = None,
     private_resolver: Any = None,
     approval_queue: Any = None,
+    add_preflight: Callable[[], Awaitable[None]] | None = None,
 ) -> FastMCP:
     """Construct a focused memory-only FastMCP server.
 
@@ -1398,6 +1431,9 @@ def build_server(
     server is an outermost mount (nothing gates in front of it), so pass
     it — otherwise the narrow surface becomes a bypass around the admin
     surface's bulk-delete gate (#1302).
+
+    ``add_preflight`` is passed through to :func:`make_dispatcher` so
+    ``memory_add`` refuses a write the extraction slot cannot fit (#1930).
     """
     server = FastMCP(name)
     # See hal0.mcp.admin's build_admin_mcp_server for why this is stamped
@@ -1411,6 +1447,7 @@ def build_server(
         client_id_resolver=client_id_resolver,
         private_resolver=private_resolver,
         approval_queue=approval_queue,
+        add_preflight=add_preflight,
     )
 
     async def dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:

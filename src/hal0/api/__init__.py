@@ -2896,12 +2896,14 @@ def create_app() -> FastAPI:
     if memory_provider is not None:
         try:
             from hal0.api.mcp_mount import client_id_resolver, private_resolver
+            from hal0.api.routes.memory import make_add_preflight
             from hal0.dispatcher.memory_dispatcher import MemoryDispatcher
 
             memory_dispatcher = MemoryDispatcher(
                 memory_provider,
                 client_id_resolver=client_id_resolver,
                 private_resolver=private_resolver,
+                add_preflight=make_add_preflight(app, memory_provider),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("hal0.memory.dispatcher_init_failed", error=str(exc))
