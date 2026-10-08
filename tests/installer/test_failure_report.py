@@ -354,3 +354,49 @@ class TestFailClosed:
         for secret in _ALL_SECRETS:
             assert secret not in body, secret
         assert "redaction could not run" in body
+
+
+_REAL_TOKEN = "Zq8vR2mW9xK4tL7pQ3"
+
+
+class TestHarvestOnlyPlausibleSecrets:
+    """The report-text harvest masks a NAME=value's value everywhere it later
+    appears, so a value that is not a plausible secret must not be harvested:
+    it would erase unrelated numbers, words and variable names (#2307)."""
+
+    def _report(self, tmp_path: Path, log_lines: str) -> str:
+        box = _make_box(tmp_path)
+        box["log"].write_text(log_lines)
+        proc, report = _run_report(box, extra='export OPENAI_API_KEY="sk-not-shown-here"')
+        assert report is not None and report.is_file(), proc.stderr
+        return report.read_text()
+
+    def test_a_numeric_value_is_not_masked_elsewhere(self, tmp_path: Path) -> None:
+        body = self._report(
+            tmp_path,
+            f"llama: max_tokens=4096 UPSTREAM_TOKEN={_REAL_TOKEN}\n"
+            "memory 4096 MiB; port 14096\n"
+            f"retry https://example.invalid/hook?t={_REAL_TOKEN}\n",
+        )
+        assert "memory 4096 MiB; port 14096" in body
+        # The real token next to it is still harvested and masked everywhere.
+        assert _REAL_TOKEN not in body
+        assert "hook?t=***REDACTED***" in body
+
+    def test_a_variable_name_value_is_not_masked_elsewhere(self, tmp_path: Path) -> None:
+        body = self._report(
+            tmp_path,
+            "provider.credential_written key=OPENAI_API_KEY upstream=openai\n"
+            "migrate.model_caps.divergent key=vision model=qwen\n"
+            "token_env=HF_TOKEN_FILE\n"
+            f"auth: api_token={_REAL_TOKEN}\n"
+            "set OPENAI_API_KEY before enabling vision support\n"
+            "HF_TOKEN_FILE not readable\n"
+            f"echo {_REAL_TOKEN}\n",
+        )
+        assert "set OPENAI_API_KEY before enabling vision support" in body
+        # The env section still redacts by name, not the name itself.
+        assert "OPENAI_API_KEY=***REDACTED***" in body
+        assert "HF_TOKEN_FILE not readable" in body
+        assert _REAL_TOKEN not in body
+        assert "echo ***REDACTED***" in body

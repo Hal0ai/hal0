@@ -172,19 +172,41 @@ _hal0_report_harvest_toml_file() {
     done <"$file"
 }
 
+# True if NAME=VALUE seen in free report text is worth harvesting as a
+# literal. The harvested value is masked as a substring EVERYWHERE, so a
+# value that is not a plausible secret would erase unrelated text: a number
+# (`max_tokens=4096` turned "port 14096" into "port 1***REDACTED***"), a
+# short word, or an env-var name (`key=OPENAI_API_KEY` in a structlog line
+# masked that name throughout the report). The bare field name `key` is
+# skipped too: in log text it names a setting, not a credential. This is
+# deliberately narrower than _hal0_report_key_is_sensitive (which keeps
+# _redact.py's ^KEY$); the pattern pass still masks the value on its own
+# line, and the env/api.env/TOML harvests are unaffected.
+_hal0_report_text_value_is_secret() {
+    local name="$1" value="$2"
+    [[ "${name,,}" == key ]] && return 1
+    [[ ${#value} -ge 8 ]] || return 1
+    [[ "$value" =~ ^[0-9]+$ ]] && return 1
+    [[ "$value" =~ ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$ ]] && return 1
+    return 0
+}
+
 # Values of every `SENSITIVE_NAME=value` that appears anywhere in the
 # assembled report (an echoed export, a command line), so the same value is
-# also masked where it later appears bare (in a URL, a journal line).
+# also masked where it later appears bare (in a URL, a journal line). Only
+# plausible secrets are harvested (_hal0_report_text_value_is_secret).
 # Returns non-zero only if grep itself errored (rc 2) — no match is fine.
 _hal0_report_harvest_report_text() {
-    local file="$1" hits rc=0 hit
+    local file="$1" hits rc=0 hit name value
     hits="$(LC_ALL=C grep -oiE \
         '(^|[^A-Za-z0-9_])([A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT)[A-Za-z0-9_]*|([A-Za-z0-9_]*_)?KEY)["'\'']?[[:space:]]*=[[:space:]]*["'\'']?[^"'\''[:space:],}&]+' \
         "$file")" || rc=$?
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
-        [[ "$hit" =~ =[[:space:]]*[\"\']?(.*)$ ]] || continue
-        _hal0_report_emit_secret "${BASH_REMATCH[1]}"
+        [[ "$hit" =~ ([A-Za-z0-9_]+)[\"\']?[[:space:]]*=[[:space:]]*[\"\']?(.*)$ ]] || continue
+        name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        _hal0_report_text_value_is_secret "$name" "$value" || continue
+        _hal0_report_emit_secret "$value"
     done <<<"$hits"
     return 0
 }
