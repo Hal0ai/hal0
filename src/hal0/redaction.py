@@ -66,7 +66,10 @@ LOG_SECRET_RE: Final[re.Pattern[str]] = re.compile(
 
 def redact_log_line(line: str) -> str:
     """Replace Bearer / HAL0_BEARER_TOKEN / long client_id / ``*_KEY=``
-    secrets in ``line`` with :data:`MASK`.
+    secrets in ``line`` with :data:`MASK`, then run the shared shape pass
+    (:func:`redact_secret_shapes`, #2403): secret-named ``NAME=value`` and
+    ``NAME: value`` such as ``HF_TOKEN=``, ``apikey=`` and ``"apiKey":``,
+    URL userinfo, ``--token`` flags and well-known token prefixes.
 
     The prefix is preserved so an operator reading a redacted log still
     sees that an Authorization header (or client_id / ``*_KEY`` field)
@@ -87,7 +90,7 @@ def redact_log_line(line: str) -> str:
                 return f"{groups[prefix_group]}{MASK}"
         return f"{groups['prefix_bearer']}{MASK}"
 
-    return LOG_SECRET_RE.sub(_sub, line)
+    return redact_secret_shapes(LOG_SECRET_RE.sub(_sub, line))
 
 
 def redact_text_tree(value: Any) -> Any:

@@ -137,12 +137,18 @@ _SECRET_LINES = [
     "[00:01] outbound Authorization: Bearer sk-or-LEAK-1 to provider",
     "[00:02] env dump: HAL0_ADMIN_KEY=abcdef1234567890",
     "[00:03] mcp.tool.invoked client_id=abcdefghijklmnopqrstuvwxyz0123456789 tool=slot_list",
+    # #2403: shapes LOG_SECRET_RE alone missed.
+    "[00:04] hf.login HF_TOKEN=hf_logsroute2403secret",
+    '[00:05] upstream.request {"apiKey": "apikey2403jsonval"} url=/v1?apikey=apikey2403queryval',
 ]
 
 _LEAKED_SECRETS = (
     "sk-or-LEAK-1",
     "abcdef1234567890",
     "abcdefghijklmnopqrstuvwxyz0123456789",
+    "hf_logsroute2403secret",
+    "apikey2403jsonval",
+    "apikey2403queryval",
 )
 
 

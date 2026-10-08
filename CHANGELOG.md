@@ -225,7 +225,9 @@ applying. Add those subsections to a version's section to surface them; see
   the report; both the report and the install log it copies now go through
   the same secret masking as the installer's report, including URL
   passwords, `--token` flags, `hf_`/`sk-` tokens and values reused
-  elsewhere in the log (#2307).
+  elsewhere in the log. The same masking now also covers `/api/logs`, the
+  MCP log tools, event messages and activity rows, which missed values such
+  as `HF_TOKEN=`, `apikey=` and `"apiKey":` (#2307).
 
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads

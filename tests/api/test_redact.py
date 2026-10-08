@@ -486,3 +486,38 @@ class TestShareableTextShapes:
         text = "HF_TOKEN=hf_" + "a" * 30 + "\ngit clone https://u:pw12345678@h/r\n"
         once = redact_shareable_text(text)
         assert redact_shareable_text(once) == once
+
+
+# ── #2403: redact_log_line uses the shared shape pass ──────────────────────
+
+
+class TestLogLineSharedShapes:
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("hal0.startup HF_TOKEN=hf_abcdefghijklmnop", "hf_abcdefghijklmnop"),
+            ("GET /v1?apikey=abcd1234efgh HTTP/1.1", "abcd1234efgh"),
+            ('{"event": "upstream", "apiKey": "abcd1234efgh"}', "abcd1234efgh"),
+            ('{"accessToken": "abcd1234efgh"}', "abcd1234efgh"),
+            ("db password: Colon_Secret_77aa", "Colon_Secret_77aa"),
+            ("clone https://user:urlpw_Rr44Ee55@example.com/r.git", "urlpw_Rr44Ee55"),
+        ],
+    )
+    def test_shared_shapes_are_masked(self, line: str, secret: str) -> None:
+        out = redact_log_line(line)
+        assert secret not in out, out
+        assert MASK in out
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "llama.request max_tokens=4096 temperature=0.7",
+            "slot.load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+            '{"usage": {"total_tokens": 1234, "token_count": 99}}',
+            "ui.prefs keyboard: us",
+            "pytest: 12 passed: 0 failed",
+            "HF_TOKEN_FILE=/run/secrets/hf",
+        ],
+    )
+    def test_live_log_lookalikes_survive(self, line: str) -> None:
+        assert redact_log_line(line) == line
