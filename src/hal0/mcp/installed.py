@@ -56,6 +56,49 @@ log = structlog.get_logger(__name__)
 BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 
 
+# ── Agent exposure guard (#2358) ────────────────────────────────────────────
+# Remove with #2303: once hal0's proxy mount sits on the agent's call path,
+# delete this block and its readers: routes/mcp.py `patch_server_exposure`
+# and `test_server` (`agent_exposure`), hermes_join `_desired_entries`, and
+# the note `hal0 mcp test` prints.
+
+#: Whether hal0 enforces a user-installed server's ``[tools]`` policy on the
+#: call path Hermes and the brain profile use. It does not: they call the
+#: record's ``url`` directly (:mod:`hal0.mcp.hermes_join`), and the policy has
+#: no wildcard, so every advertised tool missing from ``allow``/``gated``/
+#: ``blocked`` is denied (``AgentMCPClient.classify`` → ``unknown_tool``) yet
+#: reachable there. While ``False``, ``PATCH /api/mcp/{id}/exposure`` refuses
+#: turning ``hermes``/``brain`` on and the join skips every installed record.
+#: Built-in servers are unaffected: Hermes reaches them through hal0's own
+#: ``/mcp`` mount, where the gate runs server-side. Tests that cover the join
+#: rendering itself patch this to ``True``.
+AGENT_CALL_PATH_ENFORCED = False
+
+AGENT_EXPOSURE_UNENFORCED_CODE = "mcp.exposure_policy_unenforced"
+
+AGENT_EXPOSURE_UNENFORCED_REASON = (
+    "exposing a user-installed MCP server to hermes/brain is disabled until "
+    "hal0's MCP proxy mount lands (#2303): Hermes calls the server's url "
+    "directly, so hal0 cannot enforce this server's [tools] policy on that "
+    "path, and any tool the policy does not allow would be reachable"
+)
+
+
+def agent_exposure_status() -> dict[str, Any]:
+    """Whether ``hermes``/``brain`` exposure is available for installed servers.
+
+    ``{"available": True}``, or ``available: False`` with the error ``code``
+    and operator-facing ``reason`` the exposure route refuses with.
+    """
+    if AGENT_CALL_PATH_ENFORCED:
+        return {"available": True}
+    return {
+        "available": False,
+        "code": AGENT_EXPOSURE_UNENFORCED_CODE,
+        "reason": AGENT_EXPOSURE_UNENFORCED_REASON,
+    }
+
+
 # ── Schema ──────────────────────────────────────────────────────────────────
 
 #: Grammar for a ``[secrets]`` reference — the name of a key in
@@ -279,18 +322,6 @@ class InstalledServer(BaseModel):
     def proxy_header_keys(self) -> list[str]:
         """Header-value keys naming ``Proxy-Authorization`` (any case); never safe."""
         return [k for k in self.header_value_keys() if k.lower() == "proxy-authorization"]
-
-    def unenforced_tool_policy(self) -> list[str]:
-        """Tool names under ``[tools]`` ``gated`` or ``blocked``, sorted.
-
-        Hermes and the brain profile call a joined server's ``url`` directly
-        (:mod:`hal0.mcp.hermes_join`), so no hal0 code sits on that call path
-        to queue a gated tool or refuse a blocked one (#2303). A non-empty
-        result means exposing this record would hand an agent tools the
-        operator restricted: the exposure route refuses it and the join
-        skips it (#2343). Remove both uses once hal0 is on the call path.
-        """
-        return sorted({*self.tool_policy.gated, *self.tool_policy.blocked})
 
     def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
         """``(host, header keys)`` when header values would cross a network
@@ -661,9 +692,13 @@ def list_enabled_exposed(*, target: str) -> list[InstalledServer]:
 
 
 __all__ = [
+    "AGENT_CALL_PATH_ENFORCED",
+    "AGENT_EXPOSURE_UNENFORCED_CODE",
+    "AGENT_EXPOSURE_UNENFORCED_REASON",
     "BUNDLED_SERVER_IDS",
     "ExposureConfig",
     "InstalledServer",
+    "agent_exposure_status",
     "get_installed",
     "install",
     "is_loopback_destination",

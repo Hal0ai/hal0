@@ -26,6 +26,23 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **Exposing a user-installed MCP server to Hermes or the brain profile is
+  disabled until hal0's MCP proxy mount lands (#2303).** Both call a joined
+  server's URL directly, so hal0 enforces none of its `[tools]` policy on
+  that path, and the policy has no wildcard: a tool it does not list is
+  denied, yet the agent could call it. That covered every exposed server,
+  including allow-only and empty policies, not only the `gated`/`blocked`
+  case #2343 closed. `PATCH /api/mcp/{id}/exposure` (and
+  `hal0 mcp expose --hermes/--brain`) now refuses turning either target on
+  for any installed server with `409 mcp.exposure_policy_unenforced`;
+  withdrawing exposure still works, and `hal0 mcp test` says why the toggle
+  is unavailable. A server already exposed on an upgraded box is removed
+  from Hermes's config, the brain profile and the policy mirror at the
+  next hal0-api start or MCP change. hal0's built-in servers are
+  unaffected. (#2358)
+
 ### Added
 
 - **Memory extraction has limits now, and they are yours to set.** The

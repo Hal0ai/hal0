@@ -8,9 +8,30 @@ would have written to the real filesystem here).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+import pytest
+
 from hal0.config import paths as cfg_paths
 from hal0.config.schema import ToolPolicy
 from hal0.mcp import hermes_join, installed
+
+
+@pytest.fixture(autouse=True)
+def _guard_lifted(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Most of this file covers the join's rendering, which the #2358 guard
+    turns off for every user-installed record until #2303. Lift the guard
+    here; the #2358 tests at the end of the file put it back."""
+    monkeypatch.setattr(installed, "AGENT_CALL_PATH_ENFORCED", True)
+    hermes_join._unenforced_logged.clear()
+    yield
+    hermes_join._unenforced_logged.clear()
+
+
+@pytest.fixture
+def guarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped state: hal0 does not enforce policy on Hermes's call path."""
+    monkeypatch.setattr(installed, "AGENT_CALL_PATH_ENFORCED", False)
 
 
 def _install(server_id: str, **overrides: object) -> installed.InstalledServer:
@@ -55,8 +76,6 @@ def test_sync_exposure_mirrors_tools_into_seed_toml(tmp_hal0_home: str) -> None:
     _install(
         "github",
         exposure=installed.ExposureConfig(hermes=True),
-        # Allow-only: a gated/blocked entry keeps the record out of the join
-        # altogether (#2343, see the tests at the end of this file).
         tool_policy=ToolPolicy(allow=["search", "list_issues"]),
     )
     hermes_join.sync_exposure()
@@ -680,103 +699,129 @@ def test_reconcile_treats_a_missing_transport_as_http(tmp_hal0_home: str, monkey
     assert hermes_join.reconcile_stale_joins() == []
 
 
-# --- #2343: a [tools] policy Hermes's direct path cannot enforce ------------
+# --- #2358: no user-installed record is joined until #2303 -----------------
 # Hermes calls the upstream URL itself (`_desired_entries` hands it url +
-# headers), so `gated`/`blocked` entries are not enforced on its call path
-# (#2303). Until hal0 sits on that path, such a record is never joined.
+# headers), and a [tools] policy has no wildcard: an unlisted tool is denied
+# (`AgentMCPClient.classify` -> `unknown_tool`) yet reachable on that path.
+# So every user-installed record is skipped, whatever its policy.
 
 
-def test_unenforced_tool_policy_lists_gated_and_blocked_tools(tmp_hal0_home: str) -> None:
-    rec = _install(
-        "github",
-        tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"], blocked=["delete_repo"]),
-    )
-    assert rec.unenforced_tool_policy() == ["create_pr", "delete_repo"]
-    assert (
-        _install("plain", tool_policy=ToolPolicy(allow=["search"])).unenforced_tool_policy() == []
-    )
-    assert _install("empty").unenforced_tool_policy() == []
-
-
-def test_desired_entries_skip_and_log_a_record_with_gated_or_blocked_tools(
+@pytest.mark.usefixtures("guarded")
+def test_desired_entries_skip_every_user_installed_record_and_log_once(
     tmp_hal0_home: str,
 ) -> None:
     from structlog.testing import capture_logs
 
     both = installed.ExposureConfig(hermes=True, brain=True)
-    _install("gated", exposure=both, tool_policy=ToolPolicy(gated=["create_pr"]))
-    _install("blocked", exposure=both, tool_policy=ToolPolicy(blocked=["delete_repo"]))
+    _install("empty", exposure=both)
     _install("allowonly", exposure=both, tool_policy=ToolPolicy(allow=["search"]))
+    _install("gated", exposure=both, tool_policy=ToolPolicy(gated=["create_pr"]))
+    _install("hermesonly", exposure=installed.ExposureConfig(hermes=True))
 
-    for target in hermes_join.JOIN_TARGETS:
-        with capture_logs() as logs:
-            entries = hermes_join._desired_entries(target)
-        assert set(entries) == {"allowonly"}, target
-        skipped = {
-            e["server_id"]: e
-            for e in logs
-            if e["event"] == "hal0.mcp.hermes_join.policy_unenforced"
-        }
-        assert set(skipped) == {"gated", "blocked"}, target
-        assert skipped["gated"]["target"] == target
-        assert skipped["gated"]["gated"] == ["create_pr"]
-        assert skipped["blocked"]["blocked"] == ["delete_repo"]
-        assert skipped["gated"]["log_level"] == "warning"
+    with capture_logs() as logs:
+        for _ in range(2):
+            for target in hermes_join.JOIN_TARGETS:
+                assert hermes_join._desired_entries(target) == {}, target
+    skipped = [e for e in logs if e["event"] == "hal0.mcp.hermes_join.policy_unenforced"]
+    # Once per record, not once per target or per render.
+    assert sorted(e["server_id"] for e in skipped) == [
+        "allowonly",
+        "empty",
+        "gated",
+        "hermesonly",
+    ]
+    by_id = {e["server_id"]: e for e in skipped}
+    assert by_id["empty"]["targets"] == ["hermes", "brain"]
+    assert by_id["hermesonly"]["targets"] == ["hermes"]
+    assert by_id["empty"]["code"] == "mcp.exposure_policy_unenforced"
+    assert "#2303" in by_id["empty"]["reason"]
+    assert by_id["empty"]["log_level"] == "warning"
 
 
-def test_already_exposed_record_is_removed_once_a_tool_is_blocked(
+def _write_seed_toml(servers: dict) -> None:
+    from hal0.config.loader import write_toml_atomic
+
+    path = cfg_paths.etc() / "agents" / "hermes.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_toml_atomic(path, {"mcp": {"servers": servers}}, mode=0o600)
+
+
+_BUILTIN_ENTRIES = {
+    "hal0-admin": {"type": "http", "url": "http://127.0.0.1:8080/mcp/admin/mcp"},
+    "hal0-memory": {"type": "http", "url": "http://127.0.0.1:8080/mcp/memory/mcp"},
+}
+
+
+@pytest.mark.usefixtures("guarded")
+def test_reconcile_removes_an_existing_join_and_keeps_the_builtins(
     tmp_hal0_home: str, monkeypatch
 ) -> None:
-    """Exposed before the operator blocked a tool: the next sync takes it out
-    of Hermes's config, the brain profile, the manifest and the seed mirror."""
+    """Upgrade path: an allow-only record joined before #2358 leaves Hermes's
+    config, the brain profile, the manifest and the seed mirror at boot. The
+    built-in servers, served through hal0's own /mcp mount, stay joined."""
     import tomllib
 
     import yaml
 
     _fake_hermes(monkeypatch)
+    both = installed.ExposureConfig(hermes=True, brain=True)
+    _install("github", exposure=both, tool_policy=ToolPolicy(allow=["search"]))
+    joined = {"github": {"url": "https://github.example.com/mcp"}}
+    _write_hermes_config(
+        {**_BUILTIN_ENTRIES, **joined, "operator-added": {"url": "https://op.example.com/mcp"}}
+    )
     brain_cfg = cfg_paths.var_lib() / ".hermes" / "profiles" / "hal0-brain" / "config.yaml"
     brain_cfg.parent.mkdir(parents=True, exist_ok=True)
-    brain_cfg.write_text("mcp_servers: {}\n", encoding="utf-8")
-    _install("github", exposure=installed.ExposureConfig(hermes=True, brain=True))
-    hermes_join.sync_exposure()
-    assert hermes_join._load_manifest() == {"hermes": ["github"], "brain": ["github"]}
-    _write_hermes_config(
+    brain_cfg.write_text(yaml.safe_dump({"mcp_servers": {**_BUILTIN_ENTRIES, **joined}}))
+    _write_seed_toml(
         {
-            "github": {"url": "https://github.example.com/mcp"},
-            "operator-added": {"url": "https://op.example.com/mcp"},
+            "hal0-admin": {"builtin": True, "enabled": True},
+            "hal0-memory": {"builtin": True, "enabled": True},
+            "github": {"builtin": False, "enabled": True, "tools": {"allow": ["search"]}},
         }
     )
+    hermes_join._write_manifest({"hermes": ["github"], "brain": ["github"]})
 
-    installed.patch_config("github", tool_policy=ToolPolicy(blocked=["delete_repo"]))
-    hermes_join.sync_exposure(only_server_id="github")
+    assert hermes_join.reconcile_stale_joins() == ["github"]
 
     assert hermes_join._load_manifest() == {"hermes": [], "brain": []}
     hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
     servers = yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
-    assert "github" not in servers
-    assert "operator-added" in servers
-    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))
-    assert "github" not in (brain.get("mcp_servers") or {})
+    assert set(servers) == {"hal0-admin", "hal0-memory", "operator-added"}
+    brain = yaml.safe_load(brain_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert set(brain) == {"hal0-admin", "hal0-memory"}
     seed = tomllib.loads((cfg_paths.etc() / "agents" / "hermes.toml").read_text())
-    assert "github" not in seed.get("mcp", {}).get("servers", {})
+    assert set(seed["mcp"]["servers"]) == {"hal0-admin", "hal0-memory"}
+    # Converged: the next boot does no work.
+    assert hermes_join.reconcile_stale_joins() == []
 
 
-def test_reconcile_evicts_an_exposed_record_with_a_gated_tool(
-    tmp_hal0_home: str, monkeypatch
-) -> None:
-    """Upgrade path: a join written before this guard is removed at boot."""
-    import yaml
+@pytest.mark.usefixtures("guarded")
+def test_builtin_servers_are_still_joined(tmp_hal0_home: str, monkeypatch) -> None:
+    """The guard covers installed records only; Hermes's built-in entries
+    come from hermes_provision, which never reads it."""
+    from hal0.agents import hermes_provision
+
+    names = {s["name"] for s in hermes_provision._default_mcp_servers()}
+    assert {"hal0-admin", "hal0-memory"} <= names
+    assert set(hermes_provision._builtin_mcp_seed_servers()) == {"hal0-admin", "hal0-memory"}
 
     _fake_hermes(monkeypatch)
+    _write_hermes_config(dict(_BUILTIN_ENTRIES))
+    report = hermes_join.sync_exposure()
+    assert report["errors"] == []
+    import yaml
+
+    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
+    servers = yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
+    assert set(servers) == {"hal0-admin", "hal0-memory"}
+
+
+def test_join_renders_again_once_the_call_path_enforces_policy(tmp_hal0_home: str) -> None:
+    """With the guard lifted (#2303), an exposed record of any policy joins."""
     _install(
         "github",
         exposure=installed.ExposureConfig(hermes=True),
-        tool_policy=ToolPolicy(gated=["create_pr"]),
+        tool_policy=ToolPolicy(allow=["search"], gated=["create_pr"], blocked=["delete"]),
     )
-    _write_hermes_config({"github": {"url": "https://github.example.com/mcp"}})
-    hermes_join._write_manifest({"hermes": ["github"], "brain": []})
-
-    assert hermes_join.reconcile_stale_joins() == ["github"]
-    hermes_cfg = cfg_paths.var_lib() / ".hermes" / "config.yaml"
-    assert "github" not in yaml.safe_load(hermes_cfg.read_text(encoding="utf-8"))["mcp_servers"]
-    assert hermes_join._load_manifest()["hermes"] == []
+    assert set(hermes_join._desired_entries("hermes")) == {"github"}
