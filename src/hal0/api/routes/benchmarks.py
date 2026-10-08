@@ -393,13 +393,15 @@ def list_evals() -> dict[str, Any]:
 @router.get("/queue")
 def get_queue() -> dict[str, Any]:
     """The run-queue view: worker control state, the active run
-    (worker-written), and the pending items."""
+    (worker-written), the pending items, and the recent items the worker
+    could not run (``failed``: each carries ``outcome`` and ``note``, #2387)."""
     status = control.read_status()
     return {
         "control": control.read_control(),
         "active": status.get("active"),
         "updated": status.get("updated"),
         "items": control.read_queue(),
+        "failed": control.read_failed(),
     }
 
 

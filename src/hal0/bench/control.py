@@ -9,6 +9,7 @@ state root, next to records.jsonl:
     control.json   {"state": "stopped"|"running"|"paused", "exclusive": bool}
     queue.json     {"items": [{"id", "label", "suite"|null, "model"|null, "enqueued"}]}
     status.json    {"active": {...}|null, "updated": ".."}   # the worker writes this
+    failed.json    {"items": [{...queue item, "outcome": "failed", "note", "failed_at"}]}
 
 Design choices (deliberate, safety-first):
   * ``state`` defaults to ``stopped`` — the worker does NOTHING (never touches the
@@ -36,6 +37,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .schema import Outcome
 from .store import state_lock, state_root
 
 _CONTROL_DEFAULT: dict[str, Any] = {"state": "stopped", "exclusive": True}
@@ -109,6 +111,34 @@ def dequeue(item_id: str) -> list[dict[str, Any]]:
         items = [i for i in read_queue() if i.get("id") != item_id]
         _write("queue.json", {"items": items})
     return items
+
+
+#: How many failed queue items failed.json keeps (newest last). It is a
+#: diagnosis trail for the queue view, not history; run records hold that.
+_FAILED_KEEP = 20
+
+
+def fail(item_id: str, note: str, at: str) -> list[dict[str, Any]]:
+    """Dequeue ``item_id`` and record it in failed.json with a ``failed``
+    outcome (the record ``Outcome.FAILED`` value) and a ``note`` saying why,
+    so a queued run the worker cannot start leaves a trace instead of
+    vanishing (#2387). One locked cycle, so the item is never in both lists
+    or in neither. Returns the remaining queue."""
+    with state_lock(state_root()):
+        items = read_queue()
+        hits = [i for i in items if i.get("id") == item_id]
+        items = [i for i in items if i.get("id") != item_id]
+        failed = read_failed()
+        failed += [
+            {**i, "outcome": Outcome.FAILED.value, "note": note, "failed_at": at} for i in hits
+        ]
+        _write("failed.json", {"items": failed[-_FAILED_KEEP:]})
+        _write("queue.json", {"items": items})
+    return items
+
+
+def read_failed() -> list[dict[str, Any]]:
+    return list(_read("failed.json", {"items": []}).get("items", []))
 
 
 # -- status (worker-written) ------------------------------------------------ #

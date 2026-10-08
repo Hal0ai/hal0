@@ -7,7 +7,7 @@ exact id/path match, and must only be trusted when it names one model.
 
 from __future__ import annotations
 
-from hal0.bench.cli import _resolve_model_id
+from hal0.bench.cli import _model_ref_problem, _resolve_model_id
 
 REGISTRY = [
     {"id": "a", "path": "/m/A/model.gguf"},
@@ -39,3 +39,29 @@ def test_ambiguous_basename_alone_is_left_unchanged() -> None:
 
 def test_unknown_reference_is_left_unchanged() -> None:
     assert _resolve_model_id("nope", REGISTRY) == "nope"
+
+
+# ── #2387: an unresolvable reference is reported, not silently dropped ──────
+
+
+def test_resolvable_references_report_no_problem() -> None:
+    for ref in ("b", "/m/B/model.gguf", "B/model.gguf", "Qwen3-8B-Q4_K_M.gguf"):
+        assert _model_ref_problem(ref, REGISTRY) is None, ref
+
+
+def test_unknown_reference_is_reported_as_unknown() -> None:
+    assert _model_ref_problem("nope", REGISTRY) == "unknown model 'nope'"
+
+
+def test_ambiguous_basename_is_reported_as_ambiguous() -> None:
+    problem = _model_ref_problem("model.gguf", REGISTRY)
+    assert problem == "ambiguous model reference 'model.gguf' (2 registry models match)"
+
+
+def test_ambiguous_path_suffix_is_reported_as_ambiguous() -> None:
+    registry = [
+        {"id": "x", "path": "/one/B/model.gguf"},
+        {"id": "y", "path": "/two/B/model.gguf"},
+    ]
+    problem = _model_ref_problem("B/model.gguf", registry)
+    assert problem == "ambiguous model reference 'B/model.gguf' (2 registry models match)"

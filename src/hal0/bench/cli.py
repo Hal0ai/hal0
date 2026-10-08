@@ -253,11 +253,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if result.aborted is None else 1
 
 
-def _resolve_model_id(model: str, registry: list[dict]) -> str:
+def _lookup_model_id(model: str, registry: list[dict]) -> tuple[str | None, int]:
     """Map a queued model reference to a registry id the planner can select. The
     dashboard's per-row "+" queues the roster id, which for v1-imported models is a
     path-like ``dir/File.gguf`` that doesn't match a registry id — so also match
-    on the gguf path. Returns the registry id, or the input unchanged.
+    on the gguf path. Returns ``(id, 0)``, or ``(None, n)`` when nothing names
+    exactly one model, where ``n`` is how many models the reference matched
+    ambiguously (0 when it matched none).
 
     Most specific first: exact id, exact path, then a path ending in the
     reference, then the bare basename. The last two only count when they name
@@ -265,19 +267,37 @@ def _resolve_model_id(model: str, registry: list[dict]) -> str:
     ``<dir>/model.gguf``, so a basename is shared by many (#2346)."""
     for m in registry:
         if m.get("id") == model:
-            return model
+            return model, 0
     for m in registry:
         if model and m.get("path") == model:
-            return m.get("id") or model
+            return m.get("id") or model, 0
     suffix = "/" + model.lstrip("/")
     by_suffix = [m for m in registry if (m.get("path") or "").endswith(suffix)]
     if len(by_suffix) == 1:
-        return by_suffix[0].get("id") or model
+        return by_suffix[0].get("id") or model, 0
     base = model.rsplit("/", 1)[-1]
     by_base = [m for m in registry if (m.get("path") or "").rsplit("/", 1)[-1] == base]
     if base and len(by_base) == 1:
-        return by_base[0].get("id") or model
-    return model
+        return by_base[0].get("id") or model, 0
+    return None, max(len(by_suffix), len(by_base) if base else 0)
+
+
+def _resolve_model_id(model: str, registry: list[dict]) -> str:
+    """The registry id for a queued reference, or the input unchanged when it
+    names no single model (see :func:`_lookup_model_id`)."""
+    return _lookup_model_id(model, registry)[0] or model
+
+
+def _model_ref_problem(model: str, registry: list[dict]) -> str | None:
+    """Why a queued reference can't be benchmarked, or None if it resolves.
+    The worker records this on the queue item instead of planning a suite
+    that selects nothing and dropping the item silently (#2387)."""
+    resolved, matches = _lookup_model_id(model, registry)
+    if resolved is not None:
+        return None
+    if matches > 1:
+        return f"ambiguous model reference {model!r} ({matches} registry models match)"
+    return f"unknown model {model!r}"
 
 
 def _worklist_suite(item: dict, base: Suite | None) -> Suite:
@@ -443,6 +463,12 @@ def cmd_worker(args: argparse.Namespace) -> int:
                     control.dequeue(item.get("id"))
                     continue
             elif item.get("model"):
+                problem = _model_ref_problem(item["model"], models)
+                if problem:
+                    print(f"[worker] {problem} — item {item.get('id')} failed, not run")
+                    control.fail(item.get("id"), problem, _now_stamp())
+                    control.write_status(None, _now_stamp())
+                    continue
                 resolved = _resolve_model_id(item["model"], models)
                 suite = _worklist_suite(
                     {"model": resolved, "lanes": item.get("lanes"), "configs": item.get("configs")},
