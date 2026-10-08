@@ -19,8 +19,10 @@ When the model opens up, the shape will be:
 - Slot/dispatcher/provider changes require unit tests plus a real-runtime
   pass on a real box (`make release-test` against a test host running
   your build, with the affected row reading `pass` rather than `skip` —
-  see [γ](#γ--release-gate-make-release-test); Tier-1 reliability is
-  non-negotiable)
+  see [γ](#γ--release-gate-make-release-test). γ has rows only for
+  vulkan, rocm, flm, moonshine and kokoro; for a provider it does not
+  cover (e.g. qwen3tts, comfyui, CUDA), say so in the PR and describe the
+  manual check you ran. Tier-1 reliability is non-negotiable)
 - UI changes need Playwright coverage for any new critical path
 
 ## Anti-scar rules

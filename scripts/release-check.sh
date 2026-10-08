@@ -140,8 +140,10 @@ fi
 step "1. Backend tests"
 
 if command -v uv &>/dev/null; then
-	# Unit tier only — tier γ runs elsewhere (`make release-test`); there
-	# is no β tier (retired in v0.2, see the Makefile test-tier note).
+	# The unit suite minus `integration`-marked tests — narrower than the
+	# unfiltered α run (`make test`), which also runs the Docker prewire
+	# smoke when Docker is reachable. Tier γ runs elsewhere
+	# (`make release-test`); there is no β tier (retired in v0.2).
 	if run_repo_python pytest "${REPO_ROOT}/tests/" -q -m "not integration" 2>&1; then
 		info "isolated locked Python 3.12 pytest (-m 'not integration'): green"
 	else
