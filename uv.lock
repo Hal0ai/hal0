@@ -805,7 +805,7 @@ wheels = [
 
 [[package]]
 name = "guidellm"
-version = "0.7.3"
+version = "0.7.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -832,9 +832,9 @@ dependencies = [
     { name = "uvloop" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/84/f8/9dfba6b0392ef86ca8c6e518e8361274f65c26e4e3aa4f7e19992523c1f2/guidellm-0.7.3.tar.gz", hash = "sha256:49dd35421bffefcdd1a7ef44aa81f4c667d8b5a122b8eedd608d222b9f24aba2", size = 299868, upload-time = "2026-07-31T20:08:41.174Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/b7/cfb2b1cf5e01f001ca841a1442ab5f69f31307a28cd7e897fcad9b15fcc4/guidellm-0.7.4.tar.gz", hash = "sha256:664073bbb91551256bf529d422efa5637eb7831743bcdb47237d80bd380385bd", size = 302097, upload-time = "2026-09-16T20:19:29.226Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/fb/59cdef16283fbf6648136ba45884bf3d848553c92de8068863d7e46fd252/guidellm-0.7.3-py3-none-any.whl", hash = "sha256:51f29e025093c5eb9bffd3e2ec6096d8868859f9c86b391f88d4fcd166bd369f", size = 365332, upload-time = "2026-07-31T20:08:38.647Z" },
+    { url = "https://files.pythonhosted.org/packages/08/46/f76c78d617fa318bcab89fc2c541b6cebdfc8ca668436f8e25c7d7222eb3/guidellm-0.7.4-py3-none-any.whl", hash = "sha256:a665609fc45b46bb9722427fa858af9b8eafc349ed22a5ee876efe8a3aa44af0", size = 367072, upload-time = "2026-09-16T20:19:27.045Z" },
 ]
 
 [[package]]
@@ -901,8 +901,8 @@ sentry = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.115,<0.140" },
-    { name = "guidellm", marker = "extra == 'bench-guidellm'", specifier = "==0.7.3" },
+    { name = "fastapi", specifier = ">=0.115,<0.143" },
+    { name = "guidellm", marker = "extra == 'bench-guidellm'", specifier = "==0.7.4" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
     { name = "jinja2", specifier = ">=3.1" },
