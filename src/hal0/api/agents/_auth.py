@@ -12,7 +12,9 @@ This module fixes that for the chat-proxy WebSocket routes by:
 1. Origin allowlist on every WS upgrade. Configured via
    ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
    hal0.local hostname and dev origins (``localhost:5173`` for Vite,
-   ``127.0.0.1:8080`` for the bundled SPA). The check is FREE; missing
+   ``127.0.0.1:8080`` for the bundled SPA). An Origin equal to the
+   request's own IP-literal origin (``Host`` header) also passes, so a
+   LAN IP change never strands the dashboard. The check is FREE; missing
    it leaves the rest of this scheme
    moot because any drive-by site could WebSocket into hal0-api from
    the user's own browser session.
@@ -23,7 +25,9 @@ This module fixes that for the chat-proxy WebSocket routes by:
    ``{"session_id": "<uuid>", "expires_at": <unix-ts>}``. The signature
    is ``HMAC-SHA256(<secret>, <base64url(payload)>)``. Secret comes from
    ``/var/lib/hal0/agents/secret.bin`` (chmod 0600, generated on first
-   use). The cookie is set ``HttpOnly``, ``SameSite=Lax``.
+   use). The cookie is set ``HttpOnly``, ``SameSite=Lax``, and ``Secure``
+   whenever the request arrived over TLS (directly or via a proxy's
+   ``X-Forwarded-Proto``).
 
 The cookie is the only authorisation seam — there is no Bearer header
 to spoof, and the secret never leaves the hal0 service user.
@@ -39,6 +43,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -46,6 +51,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
 from starlette.websockets import WebSocket
@@ -63,9 +69,17 @@ DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
 )
 
 # Cookie name + lifetime. 8h chosen so a workday session never expires
-# mid-conversation; renewal happens on the next dashboard load.
+# mid-conversation; the agent-chat handshake renews it on attach.
 SESSION_COOKIE_NAME: Final[str] = "hal0_session"
 SESSION_COOKIE_TTL_SECONDS: Final[int] = 8 * 60 * 60
+
+# "Remember me" lifetime (``POST /api/auth/login`` with ``remember: true``).
+# Same cookie, same signature, later ``expires_at`` -- an operator who ticks
+# it is not sent back to the login every morning. There is no server-side
+# session table, so a cookie cannot be revoked one at a time: deleting the
+# HMAC secret file (``_secret_path()``) invalidates every session at once,
+# and a fresh secret is generated on the next request.
+SESSION_COOKIE_REMEMBER_TTL_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
 # Secret file location. Lives under /var/lib/hal0 so the systemd unit's
 # ``ReadWritePaths=/var/lib/hal0`` already covers it. The path is
@@ -134,70 +148,110 @@ def allowed_origins() -> tuple[str, ...]:
     return parsed or DEFAULT_ALLOWED_ORIGINS
 
 
-def mint_session_cookie(now: float | None = None) -> str:
+def mint_session_cookie(
+    now: float | None = None, *, ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS
+) -> str:
     """Generate a fresh signed session cookie value.
 
     The payload is JSON-serialised ``{"session_id", "expires_at"}``; the
     output is ``<b64url(payload)>.<b64url(hmac)>``. Caller is responsible
     for setting it on a response via :func:`set_session_cookie`.
+
+    ``ttl_seconds`` sets how far ahead ``expires_at`` lands. The expiry is
+    inside the signed payload, so a holder cannot extend their own session.
     """
     secret = _load_or_create_secret()
     ts = int(now if now is not None else time.time())
     payload = {
         "session_id": uuid.uuid4().hex,
-        "expires_at": ts + SESSION_COOKIE_TTL_SECONDS,
+        "expires_at": ts + ttl_seconds,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
     return f"{_b64url_encode(payload_bytes)}.{_b64url_encode(sig)}"
 
 
-def verify_session_cookie(value: str, now: float | None = None) -> bool:
-    """Return ``True`` iff the cookie's signature is valid AND unexpired.
+def session_cookie_expiry(value: str, now: float | None = None) -> int | None:
+    """Return the cookie's ``expires_at`` iff its signature is valid AND unexpired.
 
+    ``None`` for anything else -- absent, unparseable, forged or expired --
+    so a caller can never act on an expiry the server did not sign.
     Constant-time compare on the signature keeps a timing oracle off the
-    table. An unparseable cookie returns ``False`` (no exception leaks).
+    table; no exception leaks.
     """
     if not value or "." not in value:
-        return False
+        return None
     try:
         payload_b64, sig_b64 = value.split(".", 1)
         payload_bytes = _b64url_decode(payload_b64)
         sig = _b64url_decode(sig_b64)
     except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
-        return False
+        return None
 
     secret = _load_or_create_secret()
     expected = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
     if not hmac.compare_digest(expected, sig):
-        return False
+        return None
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
+    except (UnicodeDecodeError, ValueError):  # JSONDecodeError is a ValueError
+        return None
+    if not isinstance(payload, dict):
+        return None
 
     expires_at = payload.get("expires_at")
-    if not isinstance(expires_at, int):
-        return False
+    # bool is an int subclass; a signed payload never carries one, but be exact.
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        return None
     ts = int(now if now is not None else time.time())
-    return ts < expires_at
+    return expires_at if ts < expires_at else None
 
 
-def set_session_cookie(response: Response, *, secure: bool | None = None) -> str:
+def verify_session_cookie(value: str, now: float | None = None) -> bool:
+    """Return ``True`` iff the cookie's signature is valid AND unexpired."""
+    return session_cookie_expiry(value, now) is not None
+
+
+def request_uses_tls(request: Request) -> bool:
+    """Did the browser reach us over TLS?
+
+    True when the request itself arrived over ``https``, or a reverse proxy
+    that terminated TLS says so with ``X-Forwarded-Proto`` (hal0-api itself
+    listens on plain HTTP; the documented deployment puts a proxy in front).
+    The header is honoured without a trust setting on purpose: it only ever
+    ADDS the ``Secure`` attribute to the sender's own cookie, so a forged
+    value can restrict nobody but the forger.
+    """
+    if request.url.scheme == "https":
+        return True
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    return forwarded.split(",", 1)[0].strip().lower() == "https"
+
+
+def set_session_cookie(
+    response: Response,
+    *,
+    secure: bool | None = None,
+    ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS,
+) -> str:
     """Mint + attach a session cookie to ``response``. Returns its value.
 
-    ``secure`` defaults to ``True`` on production-style origins and can
-    be forced for tests via the kwarg.
+    ``secure`` marks the cookie ``Secure`` so the browser never sends it in
+    cleartext; callers pass :func:`request_uses_tls` for the request being
+    answered, so a plain-HTTP install keeps a cookie it can actually use
+    while a TLS-proxied one gets the attribute. ``ttl_seconds`` sets both
+    halves of the lifetime together -- the signed ``expires_at`` the server
+    honours and the ``Max-Age`` the browser keeps the cookie for.
     """
-    value = mint_session_cookie()
+    value = mint_session_cookie(ttl_seconds=ttl_seconds)
     response.set_cookie(
         SESSION_COOKIE_NAME,
         value,
-        max_age=SESSION_COOKIE_TTL_SECONDS,
+        max_age=ttl_seconds,
         httponly=True,
         samesite="lax",
-        secure=bool(secure) if secure is not None else False,
+        secure=bool(secure),
         path="/",
     )
     return value
@@ -215,15 +269,71 @@ def require_browser_auth(request: Request) -> None:
         raise HTTPException(status_code=403, detail="session_cookie_invalid")
 
 
+def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
+    """True iff ``origin`` is this request's own origin on an IP-literal host.
+
+    This is the "box's LAN IP changed since install" case (#2277): the
+    browser typed ``http://<ip>:<port>``, so it sends that as ``Origin``
+    and ``<ip>:<port>`` as ``Host``. Strict on everything else:
+
+    * ``Host`` must be an IP literal. A DNS name can be rebound to the box
+      by an attacker page, which then sends a matching ``Origin``/``Host``
+      pair *and* can mint its own session cookie via the handshake; an IP
+      literal cannot be rebound. Named origins (``hal0.local``, the
+      installer hostname, a reverse proxy's ``public_url``) are seeded into
+      :func:`allowed_origins` by ``hal0.install.network`` and are stable
+      across an IP change.
+    * the ``Origin`` scheme must be ``http``/``https`` (opaque ``null`` and
+      extension origins never match), and its authority must equal
+      ``Host`` exactly, port included; a userinfo- or path-bearing value is
+      not a browser Origin.
+    * a ``wss`` upgrade that hal0 terminated itself only matches an
+      ``https`` page. A ``ws`` upgrade may come from an ``https`` page,
+      because a TLS-terminating upstream proxy (ADR-0012) forwards plain
+      ``ws`` with ``Host`` preserved. The same leniency applies when
+      uvicorn trusts ``X-Forwarded-Proto`` from more peers than loopback
+      (``FORWARDED_ALLOW_IPS`` widened): ``request_scheme`` is then whatever
+      a trusted peer claims; only the ``wss`` rule reads it, never the
+      Origin/Host match itself.
+    """
+    # IPv6 zone ids (``%eth0``) are link-local plumbing no browser Origin
+    # carries; reject them outright rather than reason about their encoding.
+    if not origin or not host or "%" in host:
+        return False
+    try:
+        parts = urlsplit(origin)
+        hostname = urlsplit(f"//{host}").hostname or ""
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    if request_scheme == "wss" and parts.scheme != "https":
+        return False
+    if "@" in parts.netloc or parts.path or parts.query or parts.fragment:
+        return False
+    return parts.netloc.lower() == host.lower()
+
+
 def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
     """Return ``True`` iff Origin is allowlisted AND cookie is valid.
 
     Used as the gate on every WS upgrade in :mod:`chat_proxy`. Returning
     ``False`` lets the caller send the policy-violation close code
     (4403) before any frame is ever exchanged.
+
+    The Origin half passes when Origin is in :func:`allowed_origins` or is
+    the request's own IP-literal origin (:func:`_is_same_origin`), a
+    narrower form of the REST Origin gate's fallback
+    (``hal0.api.auth._origin_allowed``). Without
+    it, a DHCP change to the box's LAN IP turns the install-time allowlist
+    stale and the dashboard's own WS upgrade gets 4403 (#2277). A missing
+    Origin is still denied: browsers always send one on a WS upgrade.
     """
     origin = ws.headers.get("origin", "")
-    if origin not in allowed_origins():
+    if origin not in allowed_origins() and not _is_same_origin(
+        origin, ws.headers.get("host", ""), ws.url.scheme
+    ):
         return False
     cookie = ws.cookies.get(SESSION_COOKIE_NAME)
     return bool(cookie and verify_session_cookie(cookie))
@@ -232,11 +342,14 @@ def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
 __all__ = [
     "DEFAULT_ALLOWED_ORIGINS",
     "SESSION_COOKIE_NAME",
+    "SESSION_COOKIE_REMEMBER_TTL_SECONDS",
     "SESSION_COOKIE_TTL_SECONDS",
     "allowed_origins",
     "check_ws_origin_and_cookie",
     "mint_session_cookie",
+    "request_uses_tls",
     "require_browser_auth",
+    "session_cookie_expiry",
     "set_session_cookie",
     "verify_session_cookie",
 ]

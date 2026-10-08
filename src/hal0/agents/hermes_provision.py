@@ -2152,7 +2152,9 @@ def apply_mcp_server_entries(
     function reuses the same ``hermes config set`` mechanism
     (:func:`_apply_config_set`) rather than a second one.
 
-    ``remove_ids`` are ids to delete from the ``mcp_servers`` table.
+    ``remove_ids`` are ids to delete from the ``mcp_servers`` table; header
+    keys a desired entry no longer renders are deleted in the same pass
+    (:func:`_prune_mcp_servers_yaml`, #2332).
     ``hermes config set`` cannot express deletion, so removal is a direct
     load → pop → dump of ``config.yaml`` — the same full-parse-merge-dump
     strategy :func:`_merge_config_yaml_layers` and
@@ -2166,12 +2168,32 @@ def apply_mcp_server_entries(
     Best-effort: every failure lands in the returned ``errors`` list rather
     than raising, so a caller can surface a warning without failing the
     registry mutation that triggered the sync. Returns
-    ``{"applied": int, "removed": list[str], "errors": list[str]}``.
+    ``{"applied": int, "removed": list[str], "remove_errors": list[str],
+    "errors": list[str]}``; ``remove_errors`` (also folded into ``errors``)
+    is non-empty when ``remove_ids`` could not be applied, so the caller
+    keeps owning those ids and retries.
     """
     hermes_home = Path(hermes_home)
     venv = Path(venv)
     errors: list[str] = []
+    remove_errors: list[str] = []
     applied = 0
+
+    # One YAML pass first: drop entries no longer desired, and header keys a
+    # desired entry no longer renders. `hermes config set` below can only
+    # add keys, so without this a removed or revoked credential would stay
+    # in config.yaml and keep being sent (#2332).
+    to_remove = [sid for sid in remove_ids if sid not in entries]
+    removed, yaml_error = _prune_mcp_servers_yaml(
+        hermes_home / "config.yaml",
+        remove_ids=to_remove,
+        desired_headers={sid: set(spec.get("headers") or {}) for sid, spec in entries.items()},
+    )
+    if yaml_error is not None:
+        if to_remove:
+            remove_errors.append(f"remove: {yaml_error}")
+        else:
+            errors.append(f"prune headers: {yaml_error}")
 
     if entries:
         pairs: list[tuple[str, Any]] = []
@@ -2181,6 +2203,13 @@ def apply_mcp_server_entries(
                 (f"mcp_servers.{sid}.url", spec["url"]),
                 (f"mcp_servers.{sid}.timeout", spec.get("timeout", 60)),
             ]
+            # Written on every application, true or false: `hermes config set`
+            # is additive, so a key set once would otherwise outlive the
+            # header values that justified it (#2304). If stale header keys
+            # could not be pruned, keep Hermes's header-forwarding preflight
+            # off rather than re-enable it for them.
+            skip_preflight = bool(spec.get("skip_preflight")) or yaml_error is not None
+            pairs.append((f"mcp_servers.{sid}.skip_preflight", skip_preflight))
             for hk, hv in (spec.get("headers") or {}).items():
                 pairs.append((f"mcp_servers.{sid}.headers.{hk}", hv))
         hermes_bin = _hermes_bin(venv)
@@ -2191,34 +2220,124 @@ def apply_mcp_server_entries(
             errors.extend(set_errors)
         else:
             errors.append(f"hermes binary not found at {hermes_bin}")
+    errors.extend(remove_errors)
 
-    removed: list[str] = []
-    to_remove = [sid for sid in remove_ids if sid not in entries]
-    if to_remove:
-        try:
-            import yaml
-        except ImportError:
-            errors.append("PyYAML unavailable; cannot remove stale mcp_servers entries")
-        else:
-            config_path = hermes_home / "config.yaml"
-            try:
-                data: dict[str, Any] = {}
-                if config_path.exists():
-                    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                servers = data.get("mcp_servers")
-                if isinstance(servers, dict):
-                    changed = False
-                    for sid in to_remove:
-                        if servers.pop(sid, None) is not None:
-                            removed.append(sid)
-                            changed = True
-                    if changed:
-                        out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-                        _atomic_write(config_path, out)
-            except (OSError, yaml.YAMLError) as exc:
-                errors.append(f"remove: {exc}")
+    return {
+        "applied": applied,
+        "removed": removed,
+        "remove_errors": remove_errors,
+        "errors": errors,
+    }
 
-    return {"applied": applied, "removed": removed, "errors": errors}
+
+def _prune_mcp_servers_yaml(
+    config_path: Path,
+    *,
+    remove_ids: list[str],
+    desired_headers: Mapping[str, set[str]],
+) -> tuple[list[str], str | None]:
+    """Pop ``remove_ids`` entries and stale header keys from ``config.yaml``.
+
+    One load → edit → dump, the same strategy the removal path always used
+    on this file. For each id in ``desired_headers``, header keys not in its
+    set are deleted (other keys of the entry, and entries hal0 does not
+    name, are untouched). Returns ``(removed ids, error or None)``; a
+    missing file has nothing to prune.
+    """
+    if not (remove_ids or desired_headers) or not config_path.exists():
+        return [], None
+    try:
+        import yaml
+    except ImportError:
+        return [], "PyYAML unavailable"
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return [], f"{config_path} is not a YAML mapping"
+        servers = data.get("mcp_servers")
+        if not isinstance(servers, dict):
+            return [], None
+        removed = [sid for sid in remove_ids if servers.pop(sid, None) is not None]
+        pruned = False
+        for sid, keep in desired_headers.items():
+            entry = servers.get(sid)
+            headers = entry.get("headers") if isinstance(entry, dict) else None
+            if isinstance(headers, dict):
+                for key in [k for k in headers if k not in keep]:
+                    del headers[key]
+                    pruned = True
+        if removed or pruned:
+            _atomic_write(
+                config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+            )
+        return removed, None
+    except (OSError, yaml.YAMLError) as exc:
+        return [], _yaml_error_summary(exc)
+
+
+def _yaml_error_summary(exc: Exception) -> str:
+    """Name and position of a YAML/IO error, safe to log or return.
+
+    ``str()`` of a PyYAML error quotes a snippet of the offending line, and
+    in Hermes's ``config.yaml`` that line can hold a resolved header value.
+    """
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"{type(exc).__name__} at line {mark.line + 1}, column {mark.column + 1}"
+    if isinstance(exc, OSError):
+        return str(exc)
+    return type(exc).__name__
+
+
+class PersistedMcpServers(NamedTuple):
+    """What :func:`persisted_mcp_servers` found on disk."""
+
+    servers: dict[str, Any] | None
+    """The ``mcp_servers`` table, or ``None`` when there is nothing to compare."""
+    error: str | None
+    """Set when the file exists but cannot be read (never a value snippet)."""
+
+
+def persisted_mcp_servers(
+    target: str, *, hermes_home: Path | str, venv: Path | str
+) -> PersistedMcpServers:
+    """The ``mcp_servers`` table that the ``target`` join writer edits, as on disk.
+
+    ``target`` is ``"hermes"`` (the main ``config.yaml`` that
+    :func:`apply_mcp_server_entries` writes) or ``"brain"`` (the profile
+    config :func:`apply_brain_profile_mcp_entries` writes).
+
+    * Main config absent while the hermes binary exists: an empty table, so
+      every desired entry reads as missing — ``hermes config set`` recreates
+      the file. Without the binary nothing could write it: ``servers=None``.
+    * Brain profile config absent: ``servers=None``; the brain writer only
+      edits an existing profile (the hermes binary owns profile creation).
+    * File present but unreadable, malformed, or PyYAML missing:
+      ``servers=None`` plus ``error``, so a caller never mistakes "cannot
+      read" for "differs" yet can still report it.
+    """
+    home = Path(hermes_home)
+    path = (
+        home / "config.yaml"
+        if target == "hermes"
+        else home / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
+    )
+    if not path.exists():
+        if target == "hermes" and _hermes_bin(Path(venv)).exists():
+            return PersistedMcpServers({}, None)
+        return PersistedMcpServers(None, None)
+    try:
+        import yaml
+    except ImportError:
+        return PersistedMcpServers(None, "PyYAML unavailable")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return PersistedMcpServers(None, _yaml_error_summary(exc))
+    if not isinstance(data, dict):
+        return PersistedMcpServers(None, f"{path.name} is not a YAML mapping")
+    servers = data.get("mcp_servers")
+    return PersistedMcpServers(servers if isinstance(servers, dict) else {}, None)
 
 
 def apply_brain_profile_mcp_entries(
@@ -2246,7 +2365,12 @@ def apply_brain_profile_mcp_entries(
     try:
         import yaml
     except ImportError:
-        return {"wired": False, "reason": "PyYAML unavailable", "path": str(path)}
+        return {
+            "wired": False,
+            "reason": "PyYAML unavailable",
+            "path": str(path),
+            "remove_errors": ["PyYAML unavailable"] if remove_ids else [],
+        }
 
     try:
         current = path.read_text(encoding="utf-8")
@@ -2272,12 +2396,22 @@ def apply_brain_profile_mcp_entries(
                     "headers": dict(spec.get("headers") or {}),
                     "timeout": spec.get("timeout", 60),
                 }
+                # The whole entry is rebuilt, so a false value simply drops
+                # the key — nothing stale survives a header removal.
+                if spec.get("skip_preflight"):
+                    servers[sid]["skip_preflight"] = True
         out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
         changed = out != current
         if changed:
             _atomic_write(path, out)
     except (OSError, yaml.YAMLError) as exc:
-        return {"wired": False, "error": str(exc), "path": str(path)}
+        summary = _yaml_error_summary(exc)
+        return {
+            "wired": False,
+            "error": summary,
+            "path": str(path),
+            "remove_errors": [summary] if remove_ids else [],
+        }
 
     return {
         "wired": True,

@@ -36,9 +36,20 @@ async def get_capabilities(orchestrator: CapabilityOrchestratorDep) -> dict[str,
 
         {
           "backends": [{...}],
+          "backends_settled": true,
+          "backends_retry_in_s": 0,
           "catalogs": { "embed": {...}, "voice": {...}, "img": {...} },
           "selections": { "embed": {...}, "voice": {...}, "img": {...} }
         }
+
+    ``backends_settled`` is False while the FLM-image probe has no answer
+    yet (shortly after boot, or after an FLM pull's reset), so ``backends``
+    may still change; the dashboard re-polls until it is True (#1974).
+    ``backends_retry_in_s`` is the whole seconds until the next probe is due:
+    0 while the cache is cold, a probe is in flight, or the answer is settled;
+    the rest of the 30 s retry window while only an unanswerable result is
+    held. The dashboard re-polls every ``max(2, backends_retry_in_s)`` seconds
+    while unsettled.
     """
     return await orchestrator.get_state()
 

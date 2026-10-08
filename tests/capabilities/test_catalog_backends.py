@@ -37,8 +37,12 @@ def _npu_only_hw() -> Any:
 def _reset_probe_cache() -> Any:
     """Ensure each test starts and ends with a clean image-present cache."""
     catalog.reset_flm_image_present_cache()
+    catalog._flm_last_definitive = None
     yield
+    if catalog._flm_probe_thread is not None:
+        catalog._flm_probe_thread.join(timeout=5)
     catalog.reset_flm_image_present_cache()
+    catalog._flm_last_definitive = None
 
 
 def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,6 +58,7 @@ def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+    catalog.prime_flm_image_probe(timeout=5)  # #1974: probe runs in the background
     backends = catalog.available_backends()
 
     assert backends[0]["id"] == "npu", f"NPU not advertised on podman-only host: {backends!r}"
@@ -63,7 +68,7 @@ def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_npu_hidden_when_image_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Runtime resolves but the image inspect fails → no NPU backend."""
+    """Runtime resolves but the image probe reports it absent → no NPU backend."""
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
 
@@ -72,6 +77,7 @@ def test_npu_hidden_when_image_absent(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+    catalog.prime_flm_image_probe(timeout=5)  # #1974: probe runs in the background
     backends = catalog.available_backends()
     ids = [b["id"] for b in backends]
     assert "npu" not in ids, f"NPU advertised despite missing image: {backends!r}"
@@ -92,6 +98,7 @@ def test_flm_probe_not_hardcoded_docker(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     catalog.available_backends()
+    catalog.prime_flm_image_probe(timeout=5)  # #1974: probe runs in the background
     catalog.available_backends()
 
     assert calls, "the image-present probe never ran"

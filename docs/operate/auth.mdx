@@ -19,8 +19,9 @@ enforcement off, so it is trusted-LAN-open — every route responds to any
 caller that can reach the port — until an operator configures an admin key
 or explicitly enables enforcement (see the Enabling auth section below).
 Since v1.3.0, configuring an admin key on a LAN-bound box is enough to gate
-the mutating (ADMIN-class) routes for off-box callers even with enforcement
-off — see the ADMIN routes on a LAN-bound box section below. Leaving
+the ADMIN-class routes — the control plane: changes to the box, plus the
+reads that can expose configuration or box activity — for off-box callers
+even with enforcement off — see the ADMIN routes on a LAN-bound box section below. Leaving
 enforcement off by default is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
@@ -109,9 +110,33 @@ the keyless default stays open to the LAN. `hal0 doctor all` reports both
 LAN-reachable, auth-off postures as a warning on its `auth` row rather than a
 pass.
 
-In the dashboard, a mutation refused this way opens a sign-in drawer ("This
-box is reachable from your network") that takes the admin key and retries the
-action. From other clients, send the admin key on the request. To make the
+The rule is per route **class**, not per HTTP method. ADMIN is the control
+plane: changes to the box (model pulls, slot and profile edits, settings and
+secrets writes, approvals, updates), and also the reads that can expose
+configuration or box activity — settings, secrets, memory, logs, the activity
+and event streams, approvals, services and updates. It is **not** every
+state-changing request: the `/v1` inference surface and the `/mcp/memory`
+tool mount are CLIENT for all methods, so with enforcement off they stay open
+to the LAN in this posture. An off-box browser with no session can therefore
+list slots, models and hardware, but most dashboard pages have nothing to
+show it.
+
+The dashboard therefore asks for the admin key at the front door in this
+posture: a browser whose ADMIN requests would be refused gets the login screen
+on load, worded for this case ("This hal0 is reachable from your network")
+rather than as if enforcement were on. The login is asked for on every page.
+**View this page read-only** dismisses it for the page you are on (a
+top-level section such as Slots, with its tabs) and shows what is open there;
+moving to another section asks again; a **Sign in** chip in the top bar then
+opens the admin-key drawer at any time, and a change attempted while
+read-only opens the same drawer and retries once you sign in. Signed in, the
+chip reads **Admin** with a **Log out** button. When the session
+lapses, the next refused request brings the login screen back. Whenever the
+login screen appears, whether after a log-out or a lapse, the dashboard
+discards what it had fetched under the previous session, so none of it is
+readable through the read-only view. A browser on
+the box itself (loopback), or any browser on a box with no admin key, sees
+none of this. From other clients, send the admin key on the request. To make the
 posture explicit, run `hal0 auth require on`; to take the box off the LAN
 instead, set `HAL0_BIND_HOST=127.0.0.1` in `/etc/hal0/api.env` and restart
 `hal0-api` (the value sits in the installer-managed `hal0-network` block, which
@@ -132,10 +157,13 @@ All under `/api/auth`:
 
 ### `POST /api/auth/login`
 
-Body: `{"key": "<candidate>"}`. Rate-limited per caller IP *before* the key
-is even compared (constant-time `hmac.compare_digest`, so a blocked caller
-never reaches the check). On success, sets an HttpOnly session cookie and
-returns `{"ok": true, "tier": "admin"}`. On a bad key: `401`,
+Body: `{"key": "<candidate>", "remember": false}`; `remember` is optional.
+Rate-limited per caller IP *before* the key is even compared (constant-time
+`hmac.compare_digest`, so a blocked caller never reaches the check). On
+success, sets an HttpOnly session cookie and returns
+`{"ok": true, "tier": "admin", "session_ttl_s": 28800}`. With
+`"remember": true` the session lasts 30 days instead of 8 hours and
+`session_ttl_s` is `2592000` (see Sessions below). On a bad key: `401`,
 `code: "auth.invalid_key"`. On a limiter trip: `429`,
 `code: "auth.rate_limited"`, `details: {"retry_after_s": <int>}`.
 
@@ -166,11 +194,33 @@ caller on the old key stops working immediately.
 ### `GET /api/auth/status`
 
 ```json
-{ "auth_required": true, "has_admin_key": true, "lan_exposed": true, "tier": "client" }
+{
+  "auth_required": false,
+  "has_admin_key": true,
+  "lan_exposed": true,
+  "admin_gated": true,
+  "admin_sign_in_required": true,
+  "tier": "anon"
+}
 ```
 
 `lan_exposed` is true when the API is bound beyond loopback, independent of
 `auth_required`.
+
+The last two fields are verdicts for the caller that asked, because the
+LAN-bound rule above depends on that request's own peer:
+
+- `admin_gated` — are ADMIN-class requests from you enforced at all? True when
+  enforcement is on, or the LAN-bound rule applies to your peer. It does not
+  change when you sign in.
+- `admin_sign_in_required` — would one be refused right now? True when
+  `admin_gated` is true and you hold no admin session or key.
+
+The dashboard shows its login screen on `admin_sign_in_required`, and its
+**Admin / Log out** chip only for an admin session where `admin_gated` is true.
+A browser on the box itself reads `false` for both, whatever cookie it holds.
+The example above is an off-box browser on a LAN-bound box with enforcement
+off.
 
 Never returns secrets — safe for the dashboard to poll unauthenticated.
 
@@ -178,10 +228,33 @@ Never returns secrets — safe for the dashboard to poll unauthenticated.
 
 The session cookie (`hal0_session`) is `<payload>.<hmac>`, base64url-encoded:
 payload is `{session_id, expires_at}`, signature is
-`HMAC-SHA256(secret, payload)`. TTL is **8 hours**. The signing secret is a
-32-byte random value generated on first use at
-`/var/lib/hal0/agents/secret.bin` (mode `0600`) and never leaves the hal0
-service user. The cookie is set `HttpOnly`, `SameSite=Lax`.
+`HMAC-SHA256(secret, payload)`. The signing secret is a 32-byte random value
+generated on first use at `/var/lib/hal0/agents/secret.bin` (mode `0600`) and
+never leaves the hal0 service user. The cookie is set `HttpOnly`,
+`SameSite=Lax`, and `Secure` whenever the login arrived over TLS — directly,
+or through a reverse proxy that sets `X-Forwarded-Proto: https` — so a browser
+that reached hal0 over HTTPS never sends the session in cleartext. A plain-HTTP
+install (the bare `:8080` listener) gets a cookie without `Secure`, since the
+browser could not use one otherwise.
+
+A session lasts **8 hours** by default. Ticking **Remember me** on the login
+screen (`"remember": true` on `POST /api/auth/login`) makes it **30 days**.
+The expiry is inside the signed payload, so a browser cannot extend its own
+session, and the cookie's `Max-Age` is set to match. The dashboard remembers
+only whether the box was ticked last time, never the key. Opening agent chat
+renews a session to a full 8 hours but never shortens a longer one.
+
+Sessions are not stored server-side, so one cannot be revoked on its own, and
+rotating the admin key does not end them. To end **every** session at once —
+for example after signing in with **Remember me** on a machine you no longer
+trust — delete the signing secret on the box:
+
+```bash
+sudo rm /var/lib/hal0/agents/secret.bin
+```
+
+A new secret is generated on the next request, every existing cookie stops
+verifying immediately, and no restart is needed.
 
 ## Rate limiting
 

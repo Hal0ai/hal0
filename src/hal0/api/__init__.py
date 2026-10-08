@@ -1716,6 +1716,18 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # seeding must never block startup
         log.warning("brain_profile.mcp_wire_startup_seed_failed", error=str(exc))
 
+    # #2304: drop Hermes/brain joins for user-installed MCP servers whose
+    # record no longer loads (e.g. refused by the TLS gate after an
+    # upgrade). sync_exposure otherwise runs only on MCP mutation routes, so
+    # the stale entry and its resolved secret headers would stay live.
+    # No-op on a converged box. Imported here, not at module scope (GP-15).
+    try:
+        from hal0.mcp import hermes_join as _hermes_join
+
+        await asyncio.to_thread(_hermes_join.reconcile_stale_joins)
+    except Exception as exc:  # must never block startup
+        log.warning("mcp.hermes_join.startup_reconcile_failed", error=str(exc))
+
 
 async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
     """Phase — capability orchestrator overlay (built after slots + registry)."""
@@ -1736,6 +1748,17 @@ async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
         # selections, which is the correct "blank slate" UX.
         log.warning("capabilities.init_failed", error=str(exc))
     app.state.capability_orchestrator = ctx.capability_orchestrator
+
+    # #1974: start the FLM-image probe now, in the background, so NPU is
+    # advertised from the first dashboard request rather than the second.
+    # Fire-and-forget: starts a daemon thread (no-op without an NPU) and
+    # never waits on the seam, so it cannot delay or fail the boot.
+    try:
+        from hal0.capabilities.catalog import start_flm_image_probe
+
+        start_flm_image_probe()
+    except Exception as exc:
+        log.warning("capabilities.flm_image_probe_start_failed", error=str(exc))
 
 
 async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:

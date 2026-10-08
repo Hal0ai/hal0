@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import ipaddress
 import os
 import re
 import tomllib
@@ -35,9 +36,11 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from hal0.config import paths as cfg_paths
 from hal0.config.loader import write_toml_atomic
@@ -61,6 +64,62 @@ BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
 #: rather than imported so this domain module doesn't reach up into the
 #: API route layer for a one-line regex.
 _SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def is_loopback_destination(host: str) -> bool:
+    """``localhost`` or any loopback IP literal (``127.0.0.0/8``, ``::1``).
+
+    The #2304 exemption for plaintext ``http://``. It only holds if the
+    request really goes direct, so :mod:`hal0.mcp.probe` ignores
+    environment proxies for these hosts.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _insecure_http_message(server_id: str, host: str, keys: list[str]) -> str:
+    """Operator-facing refusal for the #2304 plaintext-header gate.
+
+    Names the header *keys* and the host — never a value.
+    """
+    return (
+        f"MCP server {server_id!r}: header value(s) {keys} from [secrets]/[env] "
+        f"would be sent in clear text to non-loopback host {host!r}"
+    )
+
+
+def _proxy_header_message(server_id: str, keys: list[str]) -> str:
+    """Refusal for a ``Proxy-Authorization`` header value (#2304 review).
+
+    urllib (hal0's probe) moves that header onto the proxy ``CONNECT``
+    request, ahead of the TLS tunnel, so an ``http://`` proxy receives it in
+    clear text whatever the record's url. Names keys only, never a value.
+    """
+    return (
+        f"MCP server {server_id!r}: header value(s) {keys} from [secrets]/[env] are "
+        f"Proxy-Authorization, which is sent on the proxy CONNECT request outside TLS, "
+        f"so no url makes it safe (allow_insecure_http does not cover it); remove it "
+        f"and configure proxy credentials in the proxy environment instead"
+    )
+
+
+def _validation_reason(exc: ValidationError) -> str:
+    """Operator-facing summary of a record's validation failure.
+
+    Built from each error's ``loc``/``msg`` only. ``str(exc)`` would append
+    pydantic's ``input_value=...``, which for a record is the whole TOML
+    dict — ``[env]`` literals included — and this string lands in the
+    journal and in a 400 response body.
+    """
+    parts = []
+    for err in exc.errors(include_url=False, include_context=False, include_input=False):
+        loc = ".".join(str(x) for x in err["loc"])
+        parts.append(f"{loc}: {err['msg']}" if loc else err["msg"])
+    return "; ".join(parts)
 
 
 class ExposureConfig(BaseModel):
@@ -89,6 +148,10 @@ class InstalledServer(BaseModel):
     the dashboard can render an installed entry alongside a catalog one
     without a translation layer.
     """
+
+    # A record's input carries [env] literals; keep them out of every
+    # ValidationError rendering (see _validation_reason, #2304).
+    model_config = {"hide_input_in_errors": True}
 
     id: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=128)
@@ -135,6 +198,10 @@ class InstalledServer(BaseModel):
     """The manifest URL the install was resolved against, when applicable."""
     author: str = Field(default="user")
     verified: bool = Field(default=False)
+    allow_insecure_http: bool = Field(default=False)
+    """Explicit opt-in to send ``[secrets]``/``[env]`` header values over
+    plaintext ``http://`` to a non-loopback host (#2304). Off by default;
+    when set, :mod:`hal0.mcp.hermes_join` logs a warning on every render."""
 
     @field_validator("secrets")
     @classmethod
@@ -154,6 +221,88 @@ class InstalledServer(BaseModel):
                 f"(^[A-Z][A-Z0-9_]{{0,63}}$): {sorted(bad)}"
             )
         return v
+
+    @model_validator(mode="after")
+    def _header_values_need_tls(self) -> InstalledServer:
+        """Refuse a record that would send header values in clear text (#2304).
+
+        In practice this fires on load: ``POST /install`` never writes header
+        values, and ``[secrets]`` is set by editing the TOML. Such a record
+        fails to load (``list_installed`` skips it with
+        ``hal0.mcp.installed.bad_record``; ``get_installed`` returns
+        ``mcp.record_malformed``), so PATCH and ``/test`` cannot reach it
+        either — the message names the only ways out. An entry already joined
+        to Hermes for the server is removed at the next hal0-api start
+        (:func:`hal0.mcp.hermes_join.reconcile_stale_joins`) or registry
+        mutation, whichever comes first.
+        """
+        record_path = _registry_dir() / f"{self.id}.toml"
+        proxy_keys = self.proxy_header_keys()
+        if proxy_keys:
+            raise PydanticCustomError(
+                "mcp_proxy_header",
+                "{reason}",
+                {
+                    "reason": (
+                        f"{_proxy_header_message(self.id, proxy_keys)}. The record is "
+                        f"not loaded: edit {record_path} or DELETE the server."
+                    )
+                },
+            )
+        exposure = None if self.allow_insecure_http else self.plaintext_header_exposure()
+        if exposure is not None:
+            raise PydanticCustomError(
+                "mcp_insecure_url",
+                "{reason}",
+                {
+                    "reason": (
+                        f"{_insecure_http_message(self.id, *exposure)}; the record is "
+                        f"not loaded. Edit {record_path} to use an https:// url or a "
+                        f"loopback host, set allow_insecure_http = true, or DELETE "
+                        f"the server. Hermes keeps any entry it already joined for "
+                        f"this server until the next hal0-api restart or MCP change "
+                        f"that re-syncs it (install, uninstall, or a tools/exposure/"
+                        f"enabled PATCH)."
+                    )
+                },
+            )
+        return self
+
+    def header_value_keys(self) -> list[str]:
+        """Keys whose values :func:`hal0.mcp.probe.build_headers` sends as headers.
+
+        Every ``[secrets]`` key (resolved at send time) and every ``[env]``
+        key with a non-empty literal; an empty ``[env]`` value carries nothing.
+        """
+        return sorted(set(self.secrets) | {k for k, v in self.env.items() if v})
+
+    def proxy_header_keys(self) -> list[str]:
+        """Header-value keys naming ``Proxy-Authorization`` (any case); never safe."""
+        return [k for k in self.header_value_keys() if k.lower() == "proxy-authorization"]
+
+    def plaintext_header_exposure(self) -> tuple[str, list[str]] | None:
+        """``(host, header keys)`` when header values would cross a network
+        in clear text, else ``None``. Ignores ``allow_insecure_http``.
+
+        :func:`hal0.mcp.probe.build_headers` turns every ``[secrets]`` entry
+        and every ``[env]`` literal into a request header, sent to ``url``
+        by both the probe and Hermes (via :mod:`hal0.mcp.hermes_join`). That
+        is only safe over ``https://`` or to a loopback host. An ``[env]``
+        key with an empty value carries nothing and is not counted.
+        """
+        if self.transport not in ("streamable-http", "sse") or not self.url:
+            return None
+        keys = self.header_value_keys()
+        if not keys:
+            return None
+        try:
+            parts = urlsplit(self.url)
+            host = parts.hostname or ""
+        except ValueError:
+            return (self.url, keys)
+        if parts.scheme.lower() == "https" or is_loopback_destination(host):
+            return None
+        return (host or self.url, keys)
 
     def to_toml_dict(self) -> dict[str, Any]:
         """Serialise to a tomli_w-compatible dict (drops None values).
@@ -296,13 +445,27 @@ def list_installed() -> list[InstalledServer]:
             with p.open("rb") as f:
                 raw = tomllib.load(f)
             rows.append(InstalledServer.from_toml_dict(raw))
+            _warned_bad_records.pop(str(p), None)
         except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
-            log.warning(
-                "hal0.mcp.installed.bad_record",
-                path=str(p),
-                error=str(exc),
-            )
+            _warn_bad_record(p, exc)
     return rows
+
+
+#: ``path -> st_mtime_ns`` of malformed records already reported, so the
+#: dashboard's polling of :func:`list_installed` logs each edit once.
+_warned_bad_records: dict[str, int] = {}
+
+
+def _warn_bad_record(path: Path, exc: Exception) -> None:
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = -1
+    if _warned_bad_records.get(str(path)) == mtime:
+        return
+    _warned_bad_records[str(path)] = mtime
+    error = _validation_reason(exc) if isinstance(exc, ValidationError) else str(exc)
+    log.warning("hal0.mcp.installed.bad_record", path=str(path), error=error)
 
 
 def get_installed(server_id: str) -> InstalledServer:
@@ -323,8 +486,35 @@ def get_installed(server_id: str) -> InstalledServer:
         raise BadRequest(
             f"installed-server record at {path} is malformed",
             code="mcp.record_malformed",
-            details={"server_id": server_id, "reason": str(exc)},
+            details={
+                "server_id": server_id,
+                "reason": _validation_reason(exc) if isinstance(exc, ValidationError) else str(exc),
+            },
         ) from exc
+
+
+def _require_tls_for_header_values(record: InstalledServer) -> None:
+    """Raise ``400 mcp.insecure_url`` for a record failing the #2304 gate.
+
+    The model validator covers construction and load; this covers records
+    built with ``model_copy`` (no validators), i.e. :func:`patch_config`.
+    """
+    proxy_keys = record.proxy_header_keys()
+    if proxy_keys:
+        raise BadRequest(
+            _proxy_header_message(record.id, proxy_keys),
+            code="mcp.proxy_header",
+            details={"server_id": record.id, "header_keys": proxy_keys},
+        )
+    exposure = None if record.allow_insecure_http else record.plaintext_header_exposure()
+    if exposure is not None:
+        host, keys = exposure
+        raise BadRequest(
+            f"{_insecure_http_message(record.id, host, keys)}; use an https:// url "
+            f"or a loopback host, or set allow_insecure_http = true",
+            code="mcp.insecure_url",
+            details={"server_id": record.id, "host": host, "header_keys": keys},
+        )
 
 
 def install(record: InstalledServer) -> InstalledServer:
@@ -335,6 +525,7 @@ def install(record: InstalledServer) -> InstalledServer:
     we don't re-resolve here, that's a separate route concern.
     """
     _validate_id(record.id)
+    _require_tls_for_header_values(record)
     path = _registry_path(record.id)
     if path.exists():
         raise Conflict(
@@ -435,6 +626,7 @@ def patch_config(
         if not updates:
             return record
         next_record = record.model_copy(update=updates)
+        _require_tls_for_header_values(next_record)
         target_path = _registry_path(server_id)
         write_toml_atomic(target_path, next_record.to_toml_dict())
         _harden_registry_perms(target_path)
@@ -462,6 +654,7 @@ __all__ = [
     "InstalledServer",
     "get_installed",
     "install",
+    "is_loopback_destination",
     "list_enabled_exposed",
     "list_installed",
     "patch_config",

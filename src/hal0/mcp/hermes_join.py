@@ -135,13 +135,128 @@ def _desired_entries(target: str) -> dict[str, dict[str, Any]]:
             continue
         if not record.url:
             continue
-        entries[record.id] = {
+        # #2304: a record that would send header values in clear text only
+        # loads with the explicit `allow_insecure_http` opt-in — say so on
+        # every render rather than once at install.
+        exposure = record.plaintext_header_exposure() if record.allow_insecure_http else None
+        if exposure is not None:
+            log.warning(
+                "hal0.mcp.hermes_join.insecure_http",
+                server_id=record.id,
+                target=target,
+                host=exposure[0],
+                header_keys=exposure[1],
+            )
+        entry: dict[str, Any] = {
             "type": "sse" if record.transport == "sse" else "http",
             "url": record.url,
             "timeout": 60,
             "headers": build_headers(record, agent_id=_AGENT_ID),
         }
+        if record.header_value_keys():
+            # #2304: Hermes's content-type preflight re-sends these headers
+            # with follow_redirects=True and strips nothing, so an https
+            # endpoint redirecting to plaintext http would receive them in
+            # clear. The pinned Hermes honours `skip_preflight`; hal0's own
+            # probe (which refuses redirects) covers the same "is this MCP?"
+            # check. Hermes's live client still follows redirects, keeping
+            # every header but Authorization on a cross-origin hop — see
+            # #2330; hal0 cannot configure that.
+            entry["skip_preflight"] = True
+        entries[record.id] = entry
     return entries
+
+
+#: Entry fields :func:`reconcile_stale_joins` compares with what is on disk,
+#: plus the *set of header keys*. Deliberately not header values, ``timeout``
+#: or ``type``: ``hermes config set`` coerces scalar strings (``"true"``,
+#: ``"123"``) on the way in, so comparing those would never converge and
+#: every boot would re-sync.
+_RECONCILED_FIELDS = ("url", "skip_preflight")
+
+
+def _entry_drifted(desired: dict[str, Any], persisted: Any) -> bool:
+    if not isinstance(persisted, dict):
+        return True
+    if persisted.get("url") != desired["url"]:
+        return True
+    if bool(persisted.get("skip_preflight")) != bool(desired.get("skip_preflight")):
+        return True
+    # Header *keys* only (values are coerced by `hermes config set`), compared
+    # both ways: a key on disk no longer rendered is a removed credential still
+    # being sent; a rendered key missing on disk is a credential (e.g. a secret
+    # unresolved at the last sync) Hermes never received.
+    on_disk = persisted.get("headers")
+    on_disk_keys = set(on_disk) if isinstance(on_disk, dict) else set()
+    return on_disk_keys != set(desired.get("headers") or {})
+
+
+def _report_errors(report: dict[str, Any]) -> list[str]:
+    """Every error in a :func:`sync_exposure` report, per-target ones prefixed.
+
+    The writers report under ``report[<target>]`` (``errors``, the brain
+    writer's single ``error``, ``remove_errors``); only writer exceptions
+    reach the top-level ``errors``. Deduplicated, order kept.
+    """
+    out: list[str] = list(report.get("errors") or [])
+    for target in JOIN_TARGETS:
+        result = report.get(target) or {}
+        nested = [*(result.get("errors") or []), *(result.get("remove_errors") or [])]
+        if result.get("error"):
+            nested.append(str(result["error"]))
+        out += [f"{target}: {err}" for err in nested]
+    return list(dict.fromkeys(out))
+
+
+def reconcile_stale_joins() -> list[str]:
+    """Bring Hermes/brain joins back in line with the registry; run at hal0-api startup.
+
+    :func:`sync_exposure` otherwise runs only from MCP mutation routes, so
+    after an upgrade (#2304):
+
+    * a record the TLS gate now refuses on load would keep its entry,
+      resolved secret headers included, in Hermes's config; and
+    * a still-desired entry written before ``skip_preflight`` existed would
+      keep Hermes's header-forwarding preflight on.
+
+    Runs the full sync when membership differs from the ownership manifest
+    (either direction) or when a desired entry's :data:`_RECONCILED_FIELDS`
+    differ from the persisted one (an absent main config, with Hermes
+    installed, reads as empty, so its entries are recreated). A converged box
+    does no ``hermes config set`` work on boot; a config file hal0 cannot
+    read is logged but not treated as drift. Returns the ids that triggered
+    the sync (empty when converged).
+    """
+    from hal0.agents import hermes_provision
+
+    manifest = _load_manifest()
+    triggered: set[str] = set()
+    for target in JOIN_TARGETS:
+        desired = _desired_entries(target)
+        owned = set(manifest.get(target, []))
+        triggered |= owned ^ set(desired)
+        persisted = hermes_provision.persisted_mcp_servers(
+            target, hermes_home=_hermes_home(), venv=_hermes_venv()
+        )
+        if persisted.error is not None:
+            log.warning(
+                "hal0.mcp.hermes_join.persisted_config_unreadable",
+                target=target,
+                error=persisted.error,
+            )
+        if persisted.servers is not None:
+            servers = persisted.servers
+            triggered |= {
+                sid for sid, entry in desired.items() if _entry_drifted(entry, servers.get(sid))
+            }
+    if triggered:
+        report = sync_exposure()
+        log.warning(
+            "hal0.mcp.hermes_join.startup_resync",
+            server_ids=sorted(triggered),
+            errors=_report_errors(report),
+        )
+    return sorted(triggered)
 
 
 def _seed_tools_block(records_by_id: dict[str, InstalledServer]) -> dict[str, Any]:
@@ -205,10 +320,14 @@ def sync_exposure(*, only_server_id: str | None = None) -> dict[str, Any]:
                 )
         except Exception as exc:
             log.warning("hal0.mcp.hermes_join.apply_failed", target=target, error=str(exc))
-            result = {"errors": [str(exc)]}
             report["errors"].append(f"{target}: {exc}")
+            result = {"errors": [str(exc)], "remove_errors": [str(exc)]}
         report[target] = result
-        new_manifest[target] = sorted(desired.keys())
+        # Ownership of a stale id is only released once its removal really
+        # happened; otherwise the id stays in the manifest and the next sync
+        # (or boot, via reconcile_stale_joins) retries it.
+        kept = set(remove_ids) if result.get("remove_errors") else set()
+        new_manifest[target] = sorted(set(desired) | kept)
 
     _write_manifest(new_manifest)
 
@@ -283,4 +402,4 @@ def _mirror_seed_toml(
     write_toml_atomic(path, merged, mode=0o600)
 
 
-__all__ = ["JOIN_TARGETS", "sync_exposure"]
+__all__ = ["JOIN_TARGETS", "reconcile_stale_joins", "sync_exposure"]

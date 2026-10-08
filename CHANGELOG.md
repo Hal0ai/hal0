@@ -28,6 +28,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **"Remember me" at login.** Ticking it on the dashboard login (or the
+  in-app sign-in drawer) asks for a 30-day session instead of the 8-hour
+  default: `POST /api/auth/login` accepts `"remember": true` and reports the
+  lifetime it granted as `session_ttl_s`. The expiry is signed into the
+  session cookie by the server, so a browser cannot extend it; the dashboard
+  keeps only whether the box was ticked, never the key. Off by default.
+  Opening agent chat used to re-issue an 8-hour cookie unconditionally,
+  which would have cut a remembered session short; the handshake now renews
+  a short session but never shortens a longer one. Sessions still cannot be
+  revoked one at a time: `docs/operate/auth.mdx` documents how to end all of
+  them at once by deleting the signing secret.
+
 - **Open WebUI is now fully pre-wired**, not just chat + voice: document
   uploads route through RAG the moment an embed-capable slot is bound
   (`RAG_EMBEDDING_ENGINE`/`RAG_OPENAI_API_BASE_URL`/`RAG_EMBEDDING_MODEL`
@@ -139,6 +151,14 @@ applying. Add those subsections to a version's section to surface them; see
   CUDA lanes, and no longer marks a lane feasible on an AMD box (or ROCm on
   an NVIDIA box) just because the GPU reports `compute_capable`.
 
+- **The dashboard login is asked for on every page, and "View read-only"
+  now applies to one page at a time.** On a LAN-bound box with an admin key
+  and enforcement off, dismissing the login would have switched the whole
+  browser tab to read-only. It now dismisses it for the page you are on (a
+  top-level section such as Slots, including its tabs, and across a reload);
+  moving to another section asks again. With "Require authentication" on,
+  the login is on every page and cannot be dismissed, as before.
+
 - **Docs drift pass: reconciled `ARCHITECTURE.md`/`CONTRIBUTING.md`/`CHANGELOG.md`
   with the code** they describe. The Hermes provisioner section now
   documents the real 12-step, uncheckpointed `_INSTALL_STEPS` pipeline
@@ -170,6 +190,41 @@ applying. Add those subsections to a version's section to surface them; see
   `docs/getting-started/` is the published path. Earlier CHANGELOG entries
   that cite these files describe history and are left as written. No
   behavior change.
+
+### Fixed
+
+- **The dashboard session cookie is marked `Secure` when the browser reached
+  hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
+  deployment terminates TLS at a reverse proxy, but the session cookie was
+  always set without `Secure`, so a browser that signed in over HTTPS would
+  still send it in cleartext to a plain-HTTP address on the same host.
+  Login, logout and the agent-chat handshake now set `Secure` when the
+  request itself is `https` or a proxy says so with `X-Forwarded-Proto`.
+  Plain-HTTP installs are unchanged. (Flagged in review of #2338; the gap
+  predates it, but a 30-day "remember me" session made it matter more.)
+
+- **A LAN-bound box with an admin key no longer leaves the dashboard half
+  signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
+  off-box callers even with "Require authentication" off — and that rule is
+  per route class, so it covers ADMIN reads (settings, memory, logs, the
+  activity stream, approvals, services), not only changes. The dashboard only
+  handled a refused *change*: pages rendered empty while their reads 401'd
+  every poll, the top bar gave no hint of a session, and the admin-key drawer
+  appeared only if you happened to try a mutation. Now `GET /api/auth/status`
+  reports two per-caller fields — `admin_gated` (are this caller's ADMIN
+  requests enforced at all) and `admin_sign_in_required` (would one be
+  refused right now), computed by the same predicates the enforcement
+  middleware runs — and the dashboard keys on them: the login screen appears at
+  load (worded for this posture, with a **View read-only** way past it), a
+  top-bar chip shows **Sign in** or **Admin · Log out**, a session that
+  lapses mid-use brings the login screen back instead of silent 401s, and
+  signing in refetches every panel rather than only the retried action.
+  Whenever the login screen takes over — after a log-out or a lapsed
+  session — the dashboard now discards everything it fetched under that
+  session, so the next person at that browser cannot read the previous
+  admin's cached pages through **View read-only**. The Security page no
+  longer claims that reads stay open in this posture. Boxes with no admin
+  key, and browsers on the box itself, see no change.
 
 ## [1.3.0] — 2026-09-16
 

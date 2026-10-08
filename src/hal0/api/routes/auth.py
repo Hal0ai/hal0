@@ -16,8 +16,16 @@ import structlog
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
-from hal0.api.agents._auth import SESSION_COOKIE_NAME, set_session_cookie
+from hal0.api.agents._auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_REMEMBER_TTL_SECONDS,
+    SESSION_COOKIE_TTL_SECONDS,
+    request_uses_tls,
+    set_session_cookie,
+)
 from hal0.api.auth import (
+    admin_gated,
+    admin_sign_in_required,
     has_admin_key,
     require_auth_enabled,
     resolve_principal_from_scope,
@@ -37,6 +45,10 @@ router = APIRouter()
 
 class LoginRequest(BaseModel):
     key: str
+    # "Remember me": a 30-day session instead of the 8h default. Off unless
+    # the operator asks for it -- a shared or borrowed browser should not
+    # keep an admin session for a month by default.
+    remember: bool = False
 
 
 class RequireAuthRequest(BaseModel):
@@ -101,6 +113,12 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
     Bearer/``?api_key=``-only by design (it's meant for programmatic /
     embedded callers, not a browser session).
 
+    ``remember`` picks the session lifetime: 8 hours by default, 30 days
+    when true (``SESSION_COOKIE_REMEMBER_TTL_SECONDS``). The response echoes
+    the lifetime actually granted as ``session_ttl_s``. Either way it is one
+    signed cookie whose expiry the holder cannot extend; there is no
+    per-session revocation, see :mod:`hal0.api.agents._auth`.
+
     Brute-force guard: every attempt (success OR failure) is metered by a
     per-IP sliding-window limiter (``app.state.login_limiter``) BEFORE the
     key is checked, so an automated guesser is capped at a handful of tries
@@ -121,13 +139,14 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
     if not verify_admin_key(body.key):
         log.warning("hal0.auth.login_failed")
         raise Unauthorized("invalid key", code="auth.invalid_key")
-    set_session_cookie(response)
-    log.info("hal0.auth.login_ok")
-    return {"ok": True, "tier": "admin"}
+    ttl = SESSION_COOKIE_REMEMBER_TTL_SECONDS if body.remember else SESSION_COOKIE_TTL_SECONDS
+    set_session_cookie(response, ttl_seconds=ttl, secure=request_uses_tls(request))
+    log.info("hal0.auth.login_ok", remember=body.remember)
+    return {"ok": True, "tier": "admin", "session_ttl_s": ttl}
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, object]:
+async def logout(request: Request, response: Response) -> dict[str, object]:
     """Clear the browser session cookie so the operator returns to anonymous.
 
     OPEN (see :mod:`hal0.security.exposure`): clearing *your own* cookie is
@@ -136,7 +155,9 @@ async def logout(response: Response) -> dict[str, object]:
     only way the dashboard can end a session. Deleting a cookie the caller
     doesn't have is a no-op, so an anonymous hit is fine too.
     """
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    # Same ``Secure`` as the cookie being cleared: a browser may refuse to let
+    # a non-Secure Set-Cookie touch a Secure cookie of the same name.
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=request_uses_tls(request))
     log.info("hal0.auth.logout")
     return {"ok": True}
 
@@ -281,12 +302,22 @@ async def status(request: Request) -> dict[str, object]:
     dashboard and ``hal0 doctor all`` can both explain that ADMIN mutations
     already require a sign-in from off-box callers even while enforcement
     itself reads as "off" (see :mod:`hal0.api.auth`'s posture-coupled gate).
+    ``admin_gated`` and ``admin_sign_in_required`` are the per-caller
+    answers the three fields above cannot give on their own, because the
+    gate depends on this request's own peer (loopback or not):
+    ``admin_gated`` -- are ADMIN-class requests from THIS caller enforced at
+    all (true before and after signing in); ``admin_sign_in_required`` --
+    would one be refused right now. The dashboard keys its login screen on
+    the second and its session chip on both, rather than re-deriving the
+    gate client-side.
     """
     principal = resolve_principal_from_scope(request)
     return {
         "auth_required": require_auth_enabled(),
         "has_admin_key": has_admin_key(),
         "lan_exposed": not is_loopback_bind(),
+        "admin_gated": admin_gated(request),
+        "admin_sign_in_required": admin_sign_in_required(request),
         "tier": principal.tier,
     }
 

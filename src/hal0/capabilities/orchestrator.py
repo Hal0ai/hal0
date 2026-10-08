@@ -322,13 +322,27 @@ class CapabilityOrchestrator:
 
         Resolves: catalogs (per-child picker rows from the registry),
         backends (from the hardware probe), and selections (persisted
-        with live ``slot`` + ``status`` derived from SlotManager).
+        with live ``slot`` + ``status`` derived from SlotManager), plus
+        ``backends_settled``: False while the FLM-image probe has no answer
+        yet, so the dashboard re-polls until NPU presence is final, and
+        ``backends_retry_in_s``: seconds until the next probe is due, which
+        sets that re-poll cadence (#1974).
         """
         # Import locally so the orchestrator stays cheap to import (no
         # SlotManager dependency on module load).
-        from hal0.capabilities.catalog import available_backends, catalogs_by_slot
+        from hal0.capabilities.catalog import (
+            available_backends,
+            catalogs_by_slot,
+            flm_image_probe_retry_in_s,
+            flm_image_probe_settled,
+        )
 
         cfg = self._load()
+        # Read BEFORE ``backends``: a probe landing between the two reads then
+        # yields settled=False with a stale list (one more poll), never
+        # settled=True with a stale list (which would stop the polling).
+        backends_settled = flm_image_probe_settled()
+        backends_retry_in_s = flm_image_probe_retry_in_s()
         backends = available_backends()
         catalogs = catalogs_by_slot(registry=self._registry)
 
@@ -362,6 +376,8 @@ class CapabilityOrchestrator:
 
         return {
             "backends": backends,
+            "backends_settled": backends_settled,
+            "backends_retry_in_s": backends_retry_in_s,
             "catalogs": catalogs,
             "selections": selections_out,
         }

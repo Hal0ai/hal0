@@ -4,17 +4,37 @@
  * A LAN-bound box with `require_auth` OFF still requires an admin session
  * for ADMIN-class mutations from off-box callers (hal0.api.auth's
  * posture-coupled gate) — model pulls, slot deletes, config writes, and
- * approval execution alike. `auth_required` genuinely reads false in this
- * scenario, so the full-page login (AuthGate/LoginView) never fires; the
- * FIRST mutation that hits the 401 (`auth.required`) is what has to surface
- * the prompt. `lib/queryClient.ts`'s global `MutationCache.onError` catches
- * it and routes it to `AuthChallengeDrawer` via `useAuthChallengeStore` —
- * this spec drives that end-to-end through the approvals flow named in the
- * brief: mutation → 401 → sign-in → retried OK.
+ * approval execution alike. The shell now asks for the key at the front door
+ * in that posture (auth-gate-v3.spec.ts), so this drawer is what an operator
+ * who chose "View read-only" meets on their first refused mutation. (This
+ * spec leaves `/api/auth/status` unmocked, so the gate falls through to the
+ * app without the login view.)
+ * `lib/queryClient.ts`'s global `MutationCache.onError` catches the 401
+ * (`auth.required`) and routes it to `AuthChallengeDrawer` via
+ * `useAuthChallengeStore` — this spec drives that end-to-end through the
+ * approvals flow named in the brief: mutation → 401 → sign-in → retried OK.
  */
 import { test, expect } from '../fixtures/apiMock'
 
+// The forced-mock default for GET /api/updates/state reports an available
+// update, which the bell badge also counts. Left alone, the badge's steady
+// state here is 2 (approval + update) and `toHaveText('1')` only passed when
+// the approval happened to render a frame earlier (#2335). Pin "no update"
+// through the same seam notification-bell-v3.spec.ts uses, so the one seeded
+// approval is the only thing the badge can count.
+const NO_UPDATE = {
+  hal0: { current: '0.3.0-alpha.1', available: null, channel: 'stable' },
+  flm: { current: 'v0.9.42', source: 'manual-deb' },
+  autoCheck: true,
+}
+
 test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript((p) => {
+      ;(window as any).__hal0UpdateStateOverride = p
+    }, NO_UPDATE)
+  })
+
   test('approve 401s once, the drawer prompts sign-in, and the retry succeeds', async ({
     page,
     mockState,
@@ -87,7 +107,10 @@ test.describe('Auth challenge drawer (#1822 posture-coupled gate)', () => {
 
     await expect(drawer).toHaveCount(0)
     expect(loginAttempts).toBe(1)
-    expect(approveAttempts).toBe(2)
+    // The drawer closes BEFORE the retry is sent (the store clears the
+    // challenge, then executes it), so the second approve may still be in
+    // flight at this point — poll for it rather than reading the counter once.
+    await expect.poll(() => approveAttempts).toBe(2)
 
     // The retried approve succeeded: the entry is gone from the pending list.
     await expect(page.getByTestId('approvals-empty')).toBeVisible()

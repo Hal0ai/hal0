@@ -1,41 +1,61 @@
 // hal0 dashboard — login view (O19).
 //
-// Rendered by AuthGate in place of the whole app when auth enforcement is on
-// (posture is explicit-enable now, see hal0.api.auth) and the browser session
-// is still anonymous. Admin-key entry only: the login endpoint is admin-key
-// -only by design (the client tier is Bearer/?api_key= for programmatic
-// callers, not a browser session — routes/auth.py).
+// Rendered by AuthGate in place of the whole app when this browser session has
+// to sign in: either auth enforcement is on (explicit-enable, see
+// hal0.api.auth) or the posture-coupled gate (#1822) refuses this caller's
+// ADMIN-class requests while enforcement reads off. The copy says which, and
+// the posture case — where OPEN/CLIENT reads still work — offers
+// "View read-only" (`onViewReadOnly`, supplied by AuthGate only then).
+// Admin-key entry only: the login endpoint is admin-key-only by design (the
+// client tier is Bearer/?api_key= for programmatic callers, not a browser
+// session — routes/auth.py).
 //
 // Security contract:
 //   - The key value is NEVER displayed (masked input) and NEVER persisted
 //     (no localStorage) — the browser only ever holds the HttpOnly session
 //     cookie the server mints on success.
+//   - "Remember me" asks the server for a 30-day session instead of 8h. The
+//     lifetime is signed into that cookie by the server; the only thing kept
+//     client-side is whether the box was ticked (rememberPreference.js).
 //   - Errors never echo the key back (see gateDecision.loginErrorMessage).
 //
-// On success the session cookie is set and we invalidate the 'auth-status'
-// query; AuthGate re-reads the now-admin posture and swaps in the app. No
-// reload, no redirect.
+// On success the session cookie is set and we invalidate every query;
+// AuthGate re-reads the now-admin posture and swaps in the app, and any read
+// that was refused before the login (a lapsed session) refetches instead of
+// rendering its cached 401. No reload, no redirect.
 
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { loginErrorMessage } from './gateDecision.js'
+import { RememberMeField } from './RememberMeField.jsx'
+import { readRememberPreference, writeRememberPreference } from './rememberPreference.js'
 
-export function LoginView({ status }) {
+export function LoginView({ status, onViewReadOnly }) {
   const qc = useQueryClient()
   const [key, setKey] = useState('')
   const [error, setError] = useState(null)
+  const [remember, setRemember] = useState(readRememberPreference)
   const hasAdminKey = status ? status.has_admin_key !== false : true
+  // Enforcement on vs. the posture-coupled gate: different reasons, so
+  // different words. Telling an operator "authentication is enabled" while
+  // their Security page shows it switched off is how this gate got reported
+  // as a bug.
+  const enforced = status ? status.auth_required !== false : true
 
   const login = useMutation({
-    mutationFn: (k) => apiPost(ENDPOINTS.authLogin, { key: k }),
-    onSuccess: async () => {
+    mutationFn: (body) => apiPost(ENDPOINTS.authLogin, body),
+    onSuccess: async (_data, body) => {
       setError(null)
       setKey('')
+      writeRememberPreference(body.remember)
       // Re-read posture → AuthGate routes to the app. Refetch is awaited so
       // the app doesn't briefly re-flash the login view on the next tick.
-      await qc.invalidateQueries({ queryKey: ['auth-status'] })
+      // Everything is invalidated, not just 'auth-status': while this view is
+      // up only the status query is mounted, so that is all the await costs,
+      // and reads that 401'd before the login refetch when the app remounts.
+      await qc.invalidateQueries()
     },
     onError: (err) => setError(loginErrorMessage(err)),
   })
@@ -44,7 +64,7 @@ export function LoginView({ status }) {
     e.preventDefault()
     if (!key || login.isPending) return
     setError(null)
-    login.mutate(key)
+    login.mutate({ key, remember })
   }
 
   return (
@@ -78,7 +98,9 @@ export function LoginView({ status }) {
           </div>
           <h1 style={{ margin: 0, fontSize: 19, color: 'var(--fg, #eee)' }}>Log in</h1>
           <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-3, #aaa)' }}>
-            Authentication is enabled on this hal0. Enter the admin key to continue.
+            {enforced
+              ? 'Authentication is enabled on this hal0. Enter the admin key to continue.'
+              : 'This hal0 is reachable from your network, so managing it needs the admin key. Enter it to continue.'}
           </p>
         </div>
 
@@ -128,6 +150,13 @@ export function LoginView({ status }) {
           </div>
         )}
 
+        <RememberMeField
+          testId="login-remember"
+          checked={remember}
+          onChange={setRemember}
+          disabled={login.isPending}
+        />
+
         <button
           type="submit"
           data-testid="login-submit"
@@ -148,6 +177,38 @@ export function LoginView({ status }) {
         >
           {login.isPending ? 'Logging in…' : 'Log in'}
         </button>
+
+        <div className="mono" style={{ fontSize: 10.5, lineHeight: 1.55, color: 'var(--fg-5, #777)', wordBreak: 'normal', overflowWrap: 'break-word' }}>
+          The key lives on the box: HAL0_ADMIN_KEY in /etc/hal0/api.env.
+        </div>
+
+        {onViewReadOnly && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              paddingTop: 12,
+              borderTop: '1px solid var(--line, rgba(255,255,255,0.08))',
+            }}
+          >
+            <button
+              type="button"
+              data-testid="login-view-read-only"
+              onClick={onViewReadOnly}
+              disabled={login.isPending}
+              className="btn ghost sm"
+              style={{ alignSelf: 'flex-start' }}
+            >
+              View this page read-only
+            </button>
+            <div className="mono" style={{ fontSize: 10.5, lineHeight: 1.55, color: 'var(--fg-5, #777)', wordBreak: 'normal', overflowWrap: 'break-word' }}>
+              Slots, models and hardware stay visible. Settings, memory, logs and any change need
+              the key. You will be asked again on each page, and can sign in any time from the
+              top bar.
+            </div>
+          </div>
+        )}
       </form>
     </div>
   )

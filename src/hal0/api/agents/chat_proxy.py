@@ -56,8 +56,12 @@ from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, stat
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from hal0.api.agents._auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_TTL_SECONDS,
     check_ws_origin_and_cookie,
+    request_uses_tls,
     require_browser_auth,
+    session_cookie_expiry,
     set_session_cookie,
 )
 
@@ -507,16 +511,25 @@ async def _hermes_rpc(method: str, params: dict[str, Any], agent_id: str) -> dic
 
 
 @router.get("/{agent_id}/session/handshake")
-async def session_handshake(agent_id: str, response: Response) -> dict[str, Any]:
+async def session_handshake(agent_id: str, request: Request, response: Response) -> dict[str, Any]:
     """Mint a session cookie + return identity to the browser.
 
     The dashboard calls this once on first attach. Sets the
     ``hal0_session`` cookie so subsequent WS upgrades pass the
     :func:`_auth.check_ws_origin_and_cookie` gate.
 
+    Never shortens a session: it is the same cookie ``POST /api/auth/login``
+    mints, so an unconditional re-mint here would replace a 30-day
+    "remember me" session with an 8h one the first time the operator opened
+    agent chat. A cookie already valid past the default lifetime is left
+    alone; anything shorter (or absent) is renewed to the full default, as
+    before.
+
     No upstream hop — the cookie is purely the browser-side seam.
     """
-    set_session_cookie(response)
+    held = session_cookie_expiry(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    if held is None or held < time.time() + SESSION_COOKIE_TTL_SECONDS:
+        set_session_cookie(response, secure=request_uses_tls(request))
     return {"agent_id": agent_id, "ok": True}
 
 

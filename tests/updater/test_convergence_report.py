@@ -99,6 +99,41 @@ def test_flags_fold_noop_skips_are_not_counted_as_pending(
     assert report["detail"]["flags"]["lines"] == []
 
 
+def test_flags_fold_provider_lane_registry_miss_is_not_pending(tmp_hal0_home: str) -> None:
+    """#2324: a provider-lane slot (here the type=tts Kokoro fallback) launches
+    without a registry row and never reads the folded tune, so its miss is not
+    flags work and must not keep `hal0 update` at exit 2."""
+    _write_slot(
+        "tts",
+        'name = "tts"\ntype = "tts"\nport = 8095\n\n[model]\ndefault = "unregistered-tts"\n\n'
+        '[server]\nextra_args = "--default_voice Ryan"\n',
+    )
+    from hal0.config.migrations.slot_flags_fold import run_migration
+
+    # The planner sees the binding and names it (guards against a vacuous pass).
+    assert run_migration(dry_run=True) == [
+        "skip model 'unregistered-tts' <- slots=['tts']: provider-lane, no registry row"
+    ]
+    report = U.detect_pending_ownership_migrations()
+    assert "flags" not in report["pending"]
+    assert report["detail"]["flags"]["error"] is None
+
+
+def test_flags_fold_ordinary_registry_miss_stays_pending(tmp_hal0_home: str) -> None:
+    """A llama-server slot bound to an unregistered model still has an unfolded
+    tune; the remedy (register or rebind, then migrate-flags) must stay shown."""
+    _write_slot(
+        "chat",
+        'name = "chat"\ntype = "llm"\nport = 8081\n\n[model]\ndefault = "ghost"\n\n'
+        '[server]\nextra_args = "-b 2048"\n',
+    )
+    report = U.detect_pending_ownership_migrations()
+    assert "flags" in report["pending"]
+    assert report["detail"]["flags"]["lines"] == [
+        "SKIP model 'ghost' <- slots=['chat']: not in registry"
+    ]
+
+
 def test_real_fold_work_is_reported_with_its_command(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

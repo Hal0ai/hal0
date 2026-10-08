@@ -20,11 +20,14 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Any
+from email.message import Message
+from http.client import HTTPResponse
+from typing import IO, Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import BaseHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from hal0.mcp.installed import InstalledServer
+from hal0.mcp.installed import InstalledServer, is_loopback_destination
 
 _PROBE_TIMEOUT_S = 5.0
 
@@ -56,6 +59,53 @@ def build_headers(record: InstalledServer, *, agent_id: str = "hermes") -> dict[
         if value:
             headers[env_name] = value
     return headers
+
+
+class _RefuseRedirect(HTTPRedirectHandler):
+    """Never follow a 3xx: urllib would re-send our headers to the new URL.
+
+    ``HTTPRedirectHandler`` copies every non-content header onto the
+    redirected request, so an ``https://`` endpoint that passed the #2304
+    gate could bounce the resolved ``[secrets]``/``[env]`` values to a
+    plaintext non-loopback URL. A streamable-http endpoint has no reason
+    to redirect a JSON-RPC POST; refusing is simpler than re-checking
+    every hop.
+    """
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> Request | None:
+        raise HTTPError(
+            req.full_url,
+            code,
+            f"refused to follow redirect to {newurl} (the request carries "
+            f"[secrets]/[env] headers); set the record's url to the final endpoint",
+            headers,
+            fp,
+        )
+
+
+def _open(req: Request, *, timeout: float) -> HTTPResponse:
+    """Send ``req`` without following redirects or, for loopback, proxies.
+
+    The #2304 gate exempts loopback ``http://`` URLs. ``urlopen`` would
+    still route one through ``HTTP_PROXY`` whenever ``NO_PROXY`` misses
+    that exact host (e.g. ``127.0.0.2``), carrying the headers in clear
+    text to the proxy — so a loopback destination gets an opener with no
+    proxies at all. Other hosts keep the environment's proxy handling
+    (an ``https://`` CONNECT tunnel keeps TLS end to end).
+    """
+    handlers: list[BaseHandler] = [_RefuseRedirect()]
+    if is_loopback_destination(urlsplit(req.full_url).hostname or ""):
+        handlers.append(ProxyHandler({}))
+    resp: HTTPResponse = build_opener(*handlers).open(req, timeout=timeout)
+    return resp
 
 
 def _parse_jsonrpc(body: str) -> dict[str, Any]:
@@ -111,7 +161,7 @@ def probe_installed_server_sync(
             headers=req_headers,
             method="POST",
         )
-        with urlopen(req, timeout=timeout) as resp:
+        with _open(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             new_session = resp.headers.get("Mcp-Session-Id") or session_id
             return _parse_jsonrpc(body), new_session
