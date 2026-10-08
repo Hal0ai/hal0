@@ -281,6 +281,8 @@ export function useConsolidate() {
 export interface GraphPayload {
   nodes: { data: Record<string, unknown> }[]
   edges: { data: Record<string, unknown> }[]
+  /** Per-unit side table (`/graph` only): carries `fact_type` + `tags`, which graph nodes lack. */
+  table_rows?: Record<string, unknown>[]
   total_units?: number
   total_entities?: number
   total_edges?: number

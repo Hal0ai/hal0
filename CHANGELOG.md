@@ -192,6 +192,14 @@ applying. Add those subsections to a version's section to surface them; see
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
 
+- **The memory bank's Web view no longer greys out the whole graph when you
+  pick a tag or a fact type.** The view looked for a fact's tag and type on
+  each graph node, but the memory engine only sends those in the graph
+  response's per-fact side table, so on a real bank every dot failed the
+  filter and dots were never coloured by type. It now reads them from that
+  table, so the matching facts stay lit and each dot takes its type's
+  colour. (#1996)
+
 - **The dashboard session cookie is marked `Secure` when the browser reached
   hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
   deployment terminates TLS at a reverse proxy, but the session cookie was
