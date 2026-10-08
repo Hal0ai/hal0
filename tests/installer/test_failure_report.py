@@ -4,9 +4,9 @@ Same technique as test_seam_verification.py: source the file and invoke a
 function directly, no root/sudo/provisioned box needed.
 
 The bash redaction key-name pattern mirrors hal0.api._redact._SENSITIVE_RE
-(SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|
-^KEY$) — test_redaction_matches_the_python_pattern pins both against the
-same fixture set so a drift is caught in CI.
+(SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|
+ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$) — test_redaction_matches_the_python_pattern
+pins both against the same fixture set so a drift is caught in CI.
 """
 
 from __future__ import annotations
@@ -75,6 +75,22 @@ class TestKeySensitivity:
             "PATH",
             "KEY_ROTATION_DAYS",
             "KEYBOARD_LAYOUT",
+            # #2384: run-together and camelCase names, and their lookalikes.
+            "apikey",
+            "apiKey",
+            "api-key",
+            "accessKey",
+            "access_key",
+            "accessToken",
+            "privateKey",
+            "encryptionKey",
+            "keyboard",
+            "monkey",
+            "hotkey",
+            "max_tokens",
+            "tokenizer",
+            "token_count",
+            "api_key_env",
         ]
         for key in fixtures:
             assert _is_sensitive(key) == is_sensitive_key(key), key
@@ -500,3 +516,79 @@ class TestTomlMultilineStrings:
         assert "benign line kept" in body
         assert "upstream replied for ***REDACTED***" in body
         assert 'store = "/srv"' in body
+
+
+# ── #2384: run-together / camelCase secret names in free text ──────────────
+
+
+def _mask_patterns(text: str) -> str:
+    proc = _bash(f"_hal0_report_mask_patterns <<'__EOF__'\n{text}\n__EOF__")
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+class TestCamelCaseSecretNames:
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (
+                "GET https://x.invalid/v1?apikey=abcd1234efgh&q=1",
+                "GET https://x.invalid/v1?apikey=***REDACTED***&q=1",
+            ),
+            ('{"apiKey": "abcd1234efgh"}', '{"apiKey": "***REDACTED***"}'),
+            ('{"accessKey": "abcd1234efgh"}', '{"accessKey": "***REDACTED***"}'),
+            ('{"accessToken": "abcd1234efgh"}', '{"accessToken": "***REDACTED***"}'),
+            ("privateKey=abcd1234efgh", "privateKey=***REDACTED***"),
+            ("APIKEY=abcd1234efgh", "APIKEY=***REDACTED***"),
+        ],
+    )
+    def test_the_pattern_pass_masks_run_together_names(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "layout keyboard=us-intl-altgr",
+            "zoo monkey=bananaphone99",
+            "bind hotkey=ctrl-alt-del",
+        ],
+    )
+    def test_the_pattern_pass_leaves_key_lookalikes_alone(self, line: str) -> None:
+        assert _mask_patterns(line).strip() == line
+
+    def test_a_camelcase_secret_is_masked_everywhere(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            f"GET https://x.invalid/v1?apikey={_REAL_TOKEN}\nupstream echo {_REAL_TOKEN}\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert _REAL_TOKEN not in body
+        assert "upstream echo ***REDACTED***" in body
+
+    def test_lookalike_values_are_not_masked_elsewhere(self, tmp_path: Path) -> None:
+        """Values next to count/tokenizer/env-name fields, or under a KEY
+        lookalike, are not harvested: masking them as substrings would
+        erase unrelated report text."""
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            "llama: max_tokens=40960000 token_count=123456789\n"
+            "load tokenizer=Qwen/Qwen2.5-7B-Instruct\n"
+            "provider.credential_written key=OPENAI_API_KEY\n"
+            "api_key_env=HF_TOKEN_FILE\n"
+            "layout keyboard=us-intl-altgr monkey=bananaphone99\n"
+            "--- elsewhere ---\n"
+            "budget 40960000 / 123456789\n"
+            "model Qwen/Qwen2.5-7B-Instruct ready\n"
+            "set OPENAI_API_KEY first; HF_TOKEN_FILE missing\n"
+            "kbd us-intl-altgr; pet bananaphone99\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert "budget 40960000 / 123456789" in body
+        assert "model Qwen/Qwen2.5-7B-Instruct ready" in body
+        assert "set OPENAI_API_KEY first; HF_TOKEN_FILE missing" in body
+        assert "kbd us-intl-altgr; pet bananaphone99" in body
+        assert "layout keyboard=us-intl-altgr monkey=bananaphone99" in body

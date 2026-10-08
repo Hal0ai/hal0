@@ -367,3 +367,36 @@ class TestBareKeySuffix:
     )
     def test_non_secret_key_words_stay_clear(self, name):
         assert is_sensitive_key(name) is False
+
+
+class TestCamelAndRunTogetherKeyNames:
+    """#2384: ``apikey``, ``apiKey``, ``accessKey`` and friends are secrets
+    too; the KEY words match with or without a ``_``/``-`` separator."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "apikey",
+            "apiKey",
+            "APIKEY",
+            "api-key",
+            "x-api-key",
+            "accessKey",
+            "access_key",
+            "AWS_SECRET_ACCESS_KEY",
+            "accessToken",
+            "privateKey",
+            "encryptionKey",
+            "clientSecret",
+            "passwd",
+        ],
+    )
+    def test_run_together_secret_names_are_sensitive(self, name):
+        assert is_sensitive_key(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        ["keyboard", "monkey", "KEYBOARD_LAYOUT", "MONKEY_PATCH", "hotkey", "keys", "api_base"],
+    )
+    def test_key_lookalikes_stay_clear(self, name):
+        assert is_sensitive_key(name) is False

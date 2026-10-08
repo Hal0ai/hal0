@@ -6,7 +6,8 @@ value) — we never look at the value, only decide whether to mask it.
 
 Sensitive key pattern (case-insensitive)::
 
-    SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT
+    SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|
+    ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$
 
 For a sensitive-keyed value the helper returns::
 
@@ -56,8 +57,13 @@ _SENSITIVE_RE: Final[re.Pattern[str]] = re.compile(
     # substrings and leaked VERBATIM into shareable doctor bundles
     # (halo150 O9). Anchored as a suffix (not a bare ``KEY`` substring) so
     # non-secret settings like KEY_ROTATION_DAYS or KEYBOARD_LAYOUT don't
-    # over-mask.
-    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$)"
+    # over-mask. The KEY words take an optional ``_``/``-`` separator so
+    # run-together and camelCase names (``apikey``, ``apiKey``,
+    # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
+    # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
+    # this pattern; tests/installer/test_failure_report.py pins the two.
+    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
+    r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
 )
 
 # ``MASK`` is defined once in hal0.redaction and re-exported above — both

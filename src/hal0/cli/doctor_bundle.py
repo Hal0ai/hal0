@@ -47,7 +47,8 @@ _BEARER_RE = re.compile(r"Bearer\s+\S+")
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 _REDACTION_POLICY = (
-    "SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT "
+    "SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|"
+    "ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$ "
     "(hal0.api._redact._SENSITIVE_RE)"
 )
 

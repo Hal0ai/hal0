@@ -46,13 +46,21 @@ fi
 # Same sentinel as hal0.redaction.MASK.
 _HAL0_REPORT_MASK='***REDACTED***'
 
-# Mirrors hal0.api._redact._SENSITIVE_RE: SECRET|TOKEN|PASSWORD|PASS|
-# API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$ (case-insensitive).
+# Mirrors hal0.api._redact._SENSITIVE_RE (case-insensitive). The KEY words
+# match with or without a `_`/`-` separator, so `apikey`, `apiKey` and
+# `accessKey` are secrets too (#2384).
+_HAL0_REPORT_SENSITIVE_RE='(SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)'
+
+# The same secret words for NAME=value / NAME: value in free text: a name
+# containing one, or ending in `_KEY`, or the bare word `key`. Shared by the
+# report-text harvest and the pattern pass.
+_HAL0_REPORT_TEXT_NAME_RE='[A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)[A-Za-z0-9_]*|([A-Za-z0-9_]*_)?KEY'
+
 _hal0_report_key_is_sensitive() {
     local key="$1"
     shopt -s nocasematch
     local hit=1
-    if [[ "$key" =~ (SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT|_KEY$|^KEY$) ]]; then
+    if [[ "$key" =~ $_HAL0_REPORT_SENSITIVE_RE ]]; then
         hit=0
     fi
     shopt -u nocasematch
@@ -285,10 +293,14 @@ _hal0_report_harvest_toml_file() {
 # skipped too: in log text it names a setting, not a credential. This is
 # deliberately narrower than _hal0_report_key_is_sensitive (which keeps
 # _redact.py's ^KEY$); the pattern pass still masks the value on its own
-# line, and the env/api.env/TOML harvests are unaffected.
+# line, and the env/api.env/TOML harvests are unaffected. Names whose value
+# is not the secret itself are skipped as well (#2384): a token count or
+# tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and a field
+# naming where a secret lives (`api_key_env`, `token_file`, `..._path`).
 _hal0_report_text_value_is_secret() {
-    local name="$1" value="$2"
-    [[ "${name,,}" == key ]] && return 1
+    local name="${1,,}" value="$2"
+    [[ "$name" == key ]] && return 1
+    [[ "$name" =~ (tokens|tokenizer|token_?count|_(env|file|path|dir)$) ]] && return 1
     [[ ${#value} -ge 8 ]] || return 1
     [[ "$value" =~ ^[0-9]+$ ]] && return 1
     [[ "$value" =~ ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$ ]] && return 1
@@ -303,7 +315,7 @@ _hal0_report_text_value_is_secret() {
 _hal0_report_harvest_report_text() {
     local file="$1" hits rc=0 hit name value
     hits="$(LC_ALL=C grep -oiE \
-        '(^|[^A-Za-z0-9_])([A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT)[A-Za-z0-9_]*|([A-Za-z0-9_]*_)?KEY)["'\'']?[[:space:]]*=[[:space:]]*["'\'']?[^"'\''[:space:],}&]+' \
+        "(^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*=[[:space:]]*[\"']?[^\"'[:space:],}&]+" \
         "$file")" || rc=$?
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
@@ -356,8 +368,7 @@ _hal0_report_mask_literals() {
 # --token-style flags, and well-known token prefixes. Case-insensitive.
 _hal0_report_mask_patterns() {
     local m="$_HAL0_REPORT_MASK"
-    local name='[A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|PASS|API_KEY|PRIVATE_KEY|ENCRYPTION_KEY|SALT)[A-Za-z0-9_]*|([A-Za-z0-9_]*_)?KEY'
-    local pre="((^|[^A-Za-z0-9_])(${name})[\"']?[[:space:]]*[=:][[:space:]]*)"
+    local pre="((^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*)"
     LC_ALL=C sed -E \
         -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"]+#\\1${m}#gI" \
         -e "s#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\\1${m}#gI" \

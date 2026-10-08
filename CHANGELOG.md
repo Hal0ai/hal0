@@ -208,7 +208,9 @@ applying. Add those subsections to a version's section to surface them; see
   secret-named key (from the installer's variables, `api.env` and
   `hal0.toml`, including every line of a multi-line `"""` or `'''`
   string) is masked wherever it appears in the report, along with
-  Bearer tokens, credentials in URLs and `--token` flags. A number, short
+  Bearer tokens, credentials in URLs and `--token` flags. Run-together and
+  camelCase names such as `apikey`, `apiKey` and `accessKey` now count as
+  secret-named here and in hal0's config redaction. A number, short
   word or variable name logged as a value (`max_tokens=4096`,
   `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out
   across the rest of the report. If that pass
