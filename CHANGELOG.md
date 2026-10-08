@@ -201,6 +201,24 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The installer's failure report no longer copies secrets out of the
+  install log.** The report masked environment values by key name only and
+  then copied the install log tail verbatim, so any token the installer had
+  echoed ended up in a file presented as safe to share. Now every value of a
+  secret-named key (from the installer's variables, `api.env` and
+  `hal0.toml`) is masked wherever it appears in the report, along with
+  Bearer tokens, credentials in URLs and `--token` flags. A number, short
+  word or variable name logged as a value (`max_tokens=4096`,
+  `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out
+  across the rest of the report. If that pass
+  cannot run, the report keeps only the failed step. The report also gains
+  `systemctl --failed`, `podman info`/`podman images`, the redacted
+  `api.env`/`hal0.toml` and the hal0-api journal, runs every diagnostic
+  under a 10-second timeout so a hung Podman cannot stall the abort, and is
+  now readable by root only. `hal0 doctor bundle` lists the latest install
+  log and report under `install_artifacts` in `manifest.json` and includes
+  the report (#2307).
+
 - **Interactive `hermes` and the user-level gateway now bypass the proxy for
   loopback.** Only the `hal0-agent@hermes` unit loads
   `/etc/hal0/agents/hermes.env`, so the `hermes` and `hal0-hermes` wrappers
@@ -288,24 +306,6 @@ applying. Add those subsections to a version's section to surface them; see
   filter and dots were never coloured by type. It now reads them from that
   table, so the matching facts stay lit and each dot takes its type's
   colour. (#1996)
-
-- **The installer's failure report no longer copies secrets out of the
-  install log.** The report masked environment values by key name only and
-  then copied the install log tail verbatim, so any token the installer had
-  echoed ended up in a file presented as safe to share. Now every value of a
-  secret-named key (from the installer's variables, `api.env` and
-  `hal0.toml`) is masked wherever it appears in the report, along with
-  Bearer tokens, credentials in URLs and `--token` flags. A number, short
-  word or variable name logged as a value (`max_tokens=4096`,
-  `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out
-  across the rest of the report. If that pass
-  cannot run, the report keeps only the failed step. The report also gains
-  `systemctl --failed`, `podman info`/`podman images`, the redacted
-  `api.env`/`hal0.toml` and the hal0-api journal, runs every diagnostic
-  under a 10-second timeout so a hung Podman cannot stall the abort, and is
-  now readable by root only. `hal0 doctor bundle` lists the latest install
-  log and report under `install_artifacts` in `manifest.json` and includes
-  the report (#2307).
 
 ## [1.3.0] — 2026-09-16
 
