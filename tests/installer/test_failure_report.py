@@ -662,3 +662,55 @@ class TestSchemelessAuthorization:
         proc, report = _run_report(box)
         assert report is not None and report.is_file(), proc.stderr
         assert "rawauth_Pl34Ok56Ij78" not in report.read_text()
+
+
+# ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
+
+_ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only
+_ARR_B = "arrSecretBravo]3Xc8Rv1"  # a `]` inside a string does not close the array
+
+
+class TestTomlMultilineArrays:
+    def test_every_element_line_is_masked_and_harvested(self, tmp_path: Path) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path,
+            f"api_keys = [\n  \"{_ARR_A}\",  # first\n  '{_ARR_B}',\n]\nport = 8080\n",
+        )
+        assert _ARR_A not in out
+        assert "arrSecretBravo" not in out
+        assert 'api_keys = "***REDACTED***"' in out
+        assert "port = 8080" in out  # the array's end is found
+        assert _ARR_A in harvested
+        assert _ARR_B in harvested
+
+    def test_nested_and_one_line_arrays(self, tmp_path: Path) -> None:
+        out, harvested = _toml_redact_and_harvest(
+            tmp_path,
+            f'tokens_by_host = [\n  ["h1", "{_ARR_A}"],\n  ["h2", "{_ML_A}"],\n]\n'
+            f'api_tokens = ["{_ML_B}", "{_ARR_B}"]\nport = 8080\n',
+        )
+        for secret in (_ARR_A, _ML_A, _ML_B):
+            assert secret not in out
+            assert secret in harvested
+        assert _ARR_B in harvested
+        assert "port = 8080" in out
+
+    def test_a_non_sensitive_array_is_left_intact(self, tmp_path: Path) -> None:
+        toml = f'models = [\n  "qwen",\n  "llama",\n]\napi_key = "{_ARR_A}"\n'
+        out, harvested = _toml_redact_and_harvest(tmp_path, toml)
+        assert 'models = [\n  "qwen",\n  "llama",\n]\n' in out
+        assert _ARR_A not in out
+        assert harvested == [_ARR_A]
+
+    def test_the_report_masks_an_array_element_everywhere(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        (box["etc"] / "hal0.toml").write_text(
+            f'[upstream.openai]\napi_keys = [\n  "{_ARR_A}",\n]\nstore = "/srv"\n'
+        )
+        box["log"].write_text(f"retrying with {_ARR_A}\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert _ARR_A not in body
+        assert "retrying with ***REDACTED***" in body
+        assert 'store = "/srv"' in body

@@ -207,7 +207,7 @@ applying. Add those subsections to a version's section to surface them; see
   echoed ended up in a file presented as safe to share. Now every value of a
   secret-named key (from the installer's variables, `api.env` and
   `hal0.toml`, including every line of a multi-line `"""` or `'''`
-  string) is masked wherever it appears in the report, along with
+  string and every element of an array) is masked wherever it appears in the report, along with
   Bearer tokens, a raw `Authorization:` header value, credentials in URLs
   and `--token` flags. Run-together and
   camelCase names such as `apikey`, `apiKey` and `accessKey` now count as

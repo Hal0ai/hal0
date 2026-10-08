@@ -133,12 +133,115 @@ _hal0_report_toml_ml_close_at() {
     return 1
 }
 
+# TOML arrays under a sensitive key (#2402). An array value can run over
+# several lines, so its extent is found by scanning brackets outside
+# strings: _hal0_report_toml_array_scan TEXT feeds one line (or the value
+# part of the key line) through a small lexer whose state lives in
+# _HAL0_TA_* globals (it must not run in a subshell). Each string element
+# it completes is appended to _HAL0_TA_FOUND; a multi-line string element
+# contributes each of its lines. _HAL0_TA_DEPTH drops to 0 when the array
+# closes. Only a sensitive key's array is tracked: any other array keeps
+# being read line by line, as before.
+_hal0_report_toml_array_reset() {
+    _HAL0_TA_DEPTH=0 _HAL0_TA_STR="" _HAL0_TA_BUF=""
+    _HAL0_TA_FOUND=()
+}
+
+_hal0_report_toml_array_take() {
+    _HAL0_TA_FOUND+=("$_HAL0_TA_BUF")
+    _HAL0_TA_BUF=""
+}
+
+_hal0_report_toml_array_scan() {
+    local text="$1" i=0 c
+    while ((i < ${#text})); do
+        c="${text:i:1}"
+        case "$_HAL0_TA_STR" in
+            '"""' | "'''")
+                if [[ "${text:i:3}" == "$_HAL0_TA_STR" ]]; then
+                    _hal0_report_toml_array_take
+                    _HAL0_TA_STR=""
+                    i=$((i + 3))
+                    continue
+                fi
+                if [[ "$_HAL0_TA_STR" == '"""' && "$c" == "\\" ]]; then
+                    _HAL0_TA_BUF+="${text:i:2}"
+                    i=$((i + 2))
+                    continue
+                fi
+                _HAL0_TA_BUF+="$c"
+                ;;
+            '"')
+                if [[ "$c" == "\\" ]]; then
+                    _HAL0_TA_BUF+="${text:i:2}"
+                    i=$((i + 2))
+                    continue
+                fi
+                if [[ "$c" == '"' ]]; then
+                    _hal0_report_toml_array_take
+                    _HAL0_TA_STR=""
+                else
+                    _HAL0_TA_BUF+="$c"
+                fi
+                ;;
+            "'")
+                if [[ "$c" == "'" ]]; then
+                    _hal0_report_toml_array_take
+                    _HAL0_TA_STR=""
+                else
+                    _HAL0_TA_BUF+="$c"
+                fi
+                ;;
+            *)
+                case "$c" in
+                    '#') break ;;
+                    '[') _HAL0_TA_DEPTH=$((_HAL0_TA_DEPTH + 1)) ;;
+                    ']')
+                        _HAL0_TA_DEPTH=$((_HAL0_TA_DEPTH - 1))
+                        ((_HAL0_TA_DEPTH > 0)) || return 0
+                        ;;
+                    '"' | "'")
+                        if [[ "${text:i:3}" == "$c$c$c" ]]; then
+                            _HAL0_TA_STR="$c$c$c"
+                            i=$((i + 3))
+                            continue
+                        fi
+                        _HAL0_TA_STR="$c"
+                        ;;
+                esac
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    # A multi-line string element: take this line's part now. A one-line
+    # string left open at the end of the line is not valid TOML; take it
+    # and drop the string state.
+    if [[ -n "$_HAL0_TA_STR" ]]; then
+        _hal0_report_toml_array_take
+        [[ ${#_HAL0_TA_STR} -eq 3 ]] || _HAL0_TA_STR=""
+    fi
+    return 0
+}
+
+# True if a TOML value (leading blanks ignored) opens an array.
+_hal0_report_toml_is_array() {
+    local v="$1"
+    v="${v#"${v%%[![:space:]]*}"}"
+    [[ "$v" == '['* ]]
+}
+
 # Same key-name pass for TOML (`key = value`, dotted / quoted keys judged by
-# their last segment). A multi-line string under a sensitive key prints one
-# mask per body line, through the line holding the closing delimiter.
+# their last segment). A multi-line string or array under a sensitive key
+# prints one mask per body line, through the line that closes it.
 _hal0_report_redact_toml_stream() {
-    local line key lead name sep val delim="" mask_body=0
+    local line key lead name sep val delim="" mask_body=0 in_array=0
     while IFS= read -r line; do
+        if ((in_array)); then
+            printf '%s\n' "$_HAL0_REPORT_MASK"
+            _hal0_report_toml_array_scan "$line"
+            ((_HAL0_TA_DEPTH > 0)) || in_array=0
+            continue
+        fi
         if [[ -n "$delim" ]]; then
             if ((mask_body)); then
                 printf '%s\n' "$_HAL0_REPORT_MASK"
@@ -166,6 +269,11 @@ _hal0_report_redact_toml_stream() {
             if _hal0_report_key_is_sensitive "$key"; then
                 mask_body=1
                 printf '%s%s%s "%s"\n' "$lead" "$name" "$sep" "$_HAL0_REPORT_MASK"
+                if _hal0_report_toml_is_array "$val"; then
+                    _hal0_report_toml_array_reset
+                    _hal0_report_toml_array_scan "$val"
+                    ((_HAL0_TA_DEPTH <= 0)) || in_array=1
+                fi
                 continue
             fi
         fi
@@ -236,11 +344,21 @@ _hal0_report_emit_toml_body_line() {
 }
 
 # Values of sensitive keys in a TOML file (`key = "value"` / bare value /
-# a `"""` or `'''` multi-line string, every body line harvested).
+# a `"""` or `'''` multi-line string, every body line harvested / every
+# string element of an array, one-line or multi-line, #2402).
 _hal0_report_harvest_toml_file() {
-    local file="$1" line key raw delim="" take=0 at
+    local file="$1" line key raw delim="" take=0 at in_array=0 elem
     [[ -r "$file" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        if ((in_array)); then
+            _HAL0_TA_FOUND=()
+            _hal0_report_toml_array_scan "$line"
+            for elem in ${_HAL0_TA_FOUND[@]+"${_HAL0_TA_FOUND[@]}"}; do
+                _hal0_report_emit_toml_body_line "$elem"
+            done
+            ((_HAL0_TA_DEPTH > 0)) || in_array=0
+            continue
+        fi
         if [[ -n "$delim" ]]; then
             if at="$(_hal0_report_toml_ml_close_at "$delim" "$line")"; then
                 line="${line:0:at}"
@@ -272,6 +390,15 @@ _hal0_report_harvest_toml_file() {
                 continue
             fi
             ((take)) || continue
+            if _hal0_report_toml_is_array "$raw"; then
+                _hal0_report_toml_array_reset
+                _hal0_report_toml_array_scan "$raw"
+                for elem in ${_HAL0_TA_FOUND[@]+"${_HAL0_TA_FOUND[@]}"}; do
+                    _hal0_report_emit_toml_body_line "$elem"
+                done
+                ((_HAL0_TA_DEPTH <= 0)) || in_array=1
+                continue
+            fi
             if [[ "$raw" =~ ^\"([^\"]*)\" || "$raw" =~ ^\'([^\']*)\' ]]; then
                 raw="${BASH_REMATCH[1]}"
             else
