@@ -6533,6 +6533,62 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     return path, True
 
 
+#: Hosts Hermes must always reach directly, never through an environment proxy:
+#: hal0's own API/MCP endpoints (:data:`HAL0_API_URL`) and the usual spellings
+#: of a local MCP server (#2330).
+_NO_PROXY_BASE = ("localhost", "127.0.0.1", "::1")
+
+
+def _split_no_proxy(value: str | None) -> list[str]:
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
+def _no_proxy_in_env_file(body: str | None) -> list[str]:
+    """``NO_PROXY`` then ``no_proxy`` entries assigned in an env-file body."""
+    out: list[str] = []
+    for line in (body or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() in ("NO_PROXY", "no_proxy"):
+            out += _split_no_proxy(value)
+    return out
+
+
+def _driver_env_no_proxy(existing_body: str | None) -> str:
+    """The ``NO_PROXY`` value for the driver env (#2330).
+
+    Hermes's MCP client is an ``httpx.AsyncClient`` with the default
+    ``trust_env=True``: with ``HTTP_PROXY`` set it sends a loopback MCP url,
+    and the record's ``[secrets]`` headers, to the proxy in clear text unless
+    ``NO_PROXY`` names the host. This file is an ``EnvironmentFile=`` of the
+    unit, so its value replaces whatever the unit inherits; the result
+    therefore keeps the operator's entries first and appends
+    :data:`_NO_PROXY_BASE` plus every loopback host an exposed record uses.
+    Operator entries come from this process's environment, hal0-api's
+    ``api.env`` (readable by the hal0 user, so a run from a shell without
+    them still keeps them) and the file being replaced, when readable. Both
+    spellings are merged because Python's proxy lookup prefers the lowercase
+    one.
+    """
+    from hal0.config import paths as _cfg_paths
+
+    operator: list[str] = []
+    for name in ("NO_PROXY", "no_proxy"):
+        operator += _split_no_proxy(os.environ.get(name))
+    api_env: str | None = None
+    with contextlib.suppress(OSError):
+        api_env = _cfg_paths.api_env().read_text(encoding="utf-8")
+    operator += _no_proxy_in_env_file(api_env)
+    operator += _no_proxy_in_env_file(existing_body)
+    try:
+        from hal0.mcp.installed import exposed_loopback_hosts
+
+        exposed = exposed_loopback_hosts()
+    except Exception as exc:  # never fail the env write over the MCP registry
+        log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
+        exposed = []
+    return ",".join(dict.fromkeys([*operator, *_NO_PROXY_BASE, *exposed]))
+
+
 def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
@@ -6553,6 +6609,11 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     owner of that env-var shape; this function only appends what it
     returns. Same restart caveat as the MCP token: a running agent picks up
     a newly connected/rotated OAuth token on its next restart, not live.
+
+    Ends with ``NO_PROXY``/``no_proxy`` (:func:`_driver_env_no_proxy`, #2330)
+    so Hermes's MCP client never sends a loopback server's header values to
+    an environment proxy. :func:`hal0.mcp.hermes_join.sync_exposure` calls
+    :func:`refresh_driver_env` when the exposed loopback hosts change.
 
     ``state`` is accepted for call-site symmetry with the other bootstrap
     phase functions but unused — every value below comes from module
@@ -6582,13 +6643,19 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     if token:
         lines.append(f"HAL0_MCP_TOKEN={token}")
     lines.extend(driver_env_lines())
-    body = "\n".join(lines) + "\n"
     path = DRIVER_ENV_PATH
+    existing: str | None = None
     if path.exists():
-        try:
-            unchanged = path.read_text(encoding="utf-8") == body
-        except OSError:
-            unchanged = False
+        # Unreadable when unprivileged (0600 root:root): the operator's
+        # NO_PROXY then comes from this process's environment alone.
+        with contextlib.suppress(OSError):
+            existing = path.read_text(encoding="utf-8")
+    # #2330: keep loopback MCP traffic, and its header values, off any proxy.
+    no_proxy = _driver_env_no_proxy(existing)
+    lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
+    body = "\n".join(lines) + "\n"
+    if path.exists():
+        unchanged = existing == body
         if unchanged:
             # Re-tighten perms even on a no-op content match — self-heals a
             # file written 0644 by an older build now that it may carry a

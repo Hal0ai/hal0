@@ -691,6 +691,29 @@ def list_enabled_exposed(*, target: str) -> list[InstalledServer]:
     return [r for r in list_installed() if r.enabled and bool(getattr(r.exposure, target, False))]
 
 
+def exposed_loopback_hosts() -> list[str]:
+    """Loopback hosts in the url of a record exposed to Hermes or the brain.
+
+    Sorted and deduplicated. Hermes's MCP client honours environment proxies,
+    so each of these must be in its ``NO_PROXY`` or the record's header values
+    go to the proxy in clear text (#2330). Covers every enabled exposed
+    record, including one the join skips: an extra ``NO_PROXY`` entry for a
+    loopback host costs nothing.
+    """
+    hosts: set[str] = set()
+    for target in ("hermes", "brain"):
+        for record in list_enabled_exposed(target=target):
+            if record.transport not in ("streamable-http", "sse") or not record.url:
+                continue
+            try:
+                host = urlsplit(record.url).hostname or ""
+            except ValueError:
+                continue
+            if is_loopback_destination(host):
+                hosts.add(host)
+    return sorted(hosts)
+
+
 __all__ = [
     "AGENT_CALL_PATH_ENFORCED",
     "AGENT_EXPOSURE_UNENFORCED_CODE",
@@ -699,6 +722,7 @@ __all__ = [
     "ExposureConfig",
     "InstalledServer",
     "agent_exposure_status",
+    "exposed_loopback_hosts",
     "get_installed",
     "install",
     "is_loopback_destination",

@@ -270,6 +270,15 @@ class TestHermesEnv:
             env = agent_shim._build_hermes_env(_cfg())
         assert "NOTIFY_SOCKET" not in env
 
+    def test_no_proxy_from_the_driver_env_reaches_hermes_unchanged(self) -> None:
+        # #2330: systemd loads NO_PROXY/no_proxy from /etc/hal0/agents/hermes.env
+        # into this process; Hermes's MCP client must see exactly that value.
+        value = "localhost,127.0.0.1,::1,127.0.0.2"
+        with patch.dict(os.environ, {"NO_PROXY": value, "no_proxy": value}):
+            env = agent_shim._build_hermes_env(_cfg())
+        assert env["NO_PROXY"] == value
+        assert env["no_proxy"] == value
+
     @staticmethod
     def _mk_web_dist(venv: Path, pyver: str = "python3.14") -> Path:
         dist = venv / "lib" / pyver / "site-packages" / "hermes_cli" / "web_dist"
