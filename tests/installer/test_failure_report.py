@@ -651,6 +651,11 @@ class TestSchemelessAuthorization:
             ("Authorization: Bearer abcdef123456", "Authorization: Bearer ***REDACTED***"),
             ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***REDACTED***"),
             ("authorization: denied", "authorization: denied"),
+            ("Authorization: ApiKey ak_live_Zx81Qw45", "Authorization: ApiKey ***REDACTED***"),
+            ("Authorization: Bot MTk4NjIyNDgzNDcx", "Authorization: Bot ***REDACTED***"),
+            ("Authorization: SSWS 00aBcD1234efGh", "Authorization: SSWS ***REDACTED***"),
+            ("Authorization: Negotiate YIIC4wYGKwYB", "Authorization: Negotiate ***REDACTED***"),
+            ("authorization: denied for bob", "authorization: denied for bob"),
         ],
     )
     def test_the_pattern_pass_masks_a_raw_header_value(self, line: str, expected: str) -> None:

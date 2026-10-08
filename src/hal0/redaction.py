@@ -164,12 +164,16 @@ _NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
 _SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"(authorization:\s*(?:basic|token)\s+)[^\s'\"]+", re.I), rf"\g<1>{MASK}"),
     (re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
-    # A scheme-less ``Authorization: <value>`` (an API key sent raw, #2410);
-    # 8+ characters so a word such as ``denied`` is left alone.
+    # An ``Authorization: <value>`` the rules above don't cover: an API key
+    # sent raw (#2410) or after a short custom scheme (``ApiKey``, ``Bot``,
+    # ``SSWS``, ``Negotiate``). The optional scheme is letters only, so a raw
+    # key (which carries digits) is never taken for one; 8+ characters so a
+    # word such as ``denied`` is left alone. Already-masked values re-mask
+    # to the same text.
     (
         re.compile(
-            r"(authorization[\"']?\s*:\s*[\"']?)"
-            r"(?!(?:bearer|basic|token|digest|negotiate)(?:\s|$))[^\s\"',]{8,}",
+            r"(authorization[\"']?\s*:\s*[\"']?(?:[A-Za-z][A-Za-z-]{0,19}\s+)?)"
+            r"[^\s\"',]{8,}",
             re.I,
         ),
         rf"\g<1>{MASK}",

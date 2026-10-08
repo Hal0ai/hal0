@@ -548,7 +548,14 @@ class TestSchemelessAuthorization:
             ("Authorization: Bearer abcdef123456", "Authorization: Bearer ***REDACTED***"),
             ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***REDACTED***"),
             ("authorization: denied", "authorization: denied"),
+            ("Authorization: ApiKey ak_live_Zx81Qw45", "Authorization: ApiKey ***REDACTED***"),
+            ("Authorization: Bot MTk4NjIyNDgzNDcx", "Authorization: Bot ***REDACTED***"),
+            ("Authorization: SSWS 00aBcD1234efGh", "Authorization: SSWS ***REDACTED***"),
+            ("Authorization: Negotiate YIIC4wYGKwYB", "Authorization: Negotiate ***REDACTED***"),
+            ("authorization: denied for bob", "authorization: denied for bob"),
         ],
     )
     def test_a_scheme_is_kept_and_short_words_survive(self, line: str, expected: str) -> None:
         assert redact_shareable_text(line) == expected
+        assert redact_log_line(line) == expected
+        assert redact_shareable_text(expected) == expected  # idempotent

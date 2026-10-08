@@ -495,7 +495,8 @@ _hal0_report_mask_literals() {
 # stdin -> stdout: mask secret SHAPES (no literal known in advance). Mirrors
 # hal0.redaction.LOG_SECRET_RE and extends it for a shareable file: quoted
 # and unquoted NAME=value / NAME: value, Basic/token auth, a scheme-less
-# `Authorization: <value>` of 8+ characters (#2410), URL credentials,
+# `Authorization: <value>` of 8+ characters, raw or after a short custom
+# scheme (#2410), URL credentials,
 # --token-style flags, and well-known token prefixes. Case-insensitive.
 _hal0_report_mask_patterns() {
     local m="$_HAL0_REPORT_MASK"
@@ -503,7 +504,7 @@ _hal0_report_mask_patterns() {
     LC_ALL=C sed -E \
         -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"]+#\\1${m}#gI" \
         -e "s#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\\1${m}#gI" \
-        -e "/authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?(bearer|basic|token|digest|negotiate)([[:space:]]|\$)/I!s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?)[^[:space:]\"',]{8,}#\\1${m}#gI" \
+        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?([A-Za-z][A-Za-z-]{0,19}[[:space:]]+)?)[^[:space:]\"',]{8,}#\\1${m}#gI" \
         -e "s#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*):[^/@[:space:]]+@#\\1:${m}@#gI" \
         -e "s#([a-z][a-z0-9+.-]*://)[^/@[:space:]:]{16,}@#\\1${m}@#gI" \
         -e "s#${pre}\"[^\"]*\"#\\1\"${m}\"#gI" \
