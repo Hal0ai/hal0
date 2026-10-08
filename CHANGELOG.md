@@ -264,6 +264,14 @@ applying. Add those subsections to a version's section to surface them; see
   longer claims that reads stay open in this posture. Boxes with no admin
   key, and browsers on the box itself, see no change.
 
+- **The memory bank's Web view no longer greys out the whole graph when you
+  pick a tag or a fact type.** The view looked for a fact's tag and type on
+  each graph node, but the memory engine only sends those in the graph
+  response's per-fact side table, so on a real bank every dot failed the
+  filter and dots were never coloured by type. It now reads them from that
+  table, so the matching facts stay lit and each dot takes its type's
+  colour. (#1996)
+
 ## [1.3.0] — 2026-09-16
 
 ### Highlights
