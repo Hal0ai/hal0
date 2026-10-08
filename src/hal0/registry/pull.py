@@ -1857,6 +1857,7 @@ async def run_flm_pull(
         flm_host_async_spawn,
         flm_pull_command,
         flm_served_models,
+        flm_served_models_async,
         reset_flm_catalog_cache,
     )
 
@@ -1886,9 +1887,12 @@ async def run_flm_pull(
     # ``None`` here and never retried. So they are NOT resolved once-and-for-
     # all: :func:`_resolve_target_dir` / :func:`_resolve_advertised_total` below
     # re-attempt each tick until they succeed, then progress tracks growth.
-    target_dir = _flm_install_path(host_models_dir, tag)
+    #
+    # Both shell ``flm list -j`` (up to 30 s) on a cold cache, so every read
+    # here runs on a worker thread, never on the event loop (#2334).
+    target_dir = await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
     advertised_total = 0
-    for entry in flm_served_models():
+    for entry in await flm_served_models_async():
         if entry["tag"] == tag:
             advertised_total = int(entry.get("size_bytes") or 0)
             break
@@ -1942,11 +1946,21 @@ async def run_flm_pull(
                         job.bytes_total = advertised_total
                     break
 
+        async def _resolve_pending() -> None:
+            """Retry whichever probe is unresolved, on a worker thread (#2334)."""
+            if target_dir and advertised_total > 0:
+                return
+
+            def _resolve() -> None:
+                """Both retries, together, on one worker-thread hop."""
+                _resolve_target_dir()
+                _resolve_advertised_total()
+
+            await asyncio.to_thread(_resolve)
+
         def _tick_progress() -> None:
             """Refresh bytes_downloaded from on-disk dir size if it grew."""
             nonlocal last_emit
-            _resolve_target_dir()
-            _resolve_advertised_total()
             if not target_dir:
                 return
             now = time.monotonic()
@@ -1979,6 +1993,7 @@ async def run_flm_pull(
             except TimeoutError:
                 # No new line in 1s — loop back so cancellation observes
                 # promptly. Also a good cadence for the dir-size poll.
+                await _resolve_pending()
                 _tick_progress()
                 continue
             if not raw:
@@ -1986,6 +2001,7 @@ async def run_flm_pull(
             # Reading the line is enough — we don't parse it for byte
             # accounting any more, but the readline() drains the pipe so
             # the docker process doesn't block on a full stdout buffer.
+            await _resolve_pending()
             _tick_progress()
 
         await proc.wait()
@@ -2009,7 +2025,9 @@ async def run_flm_pull(
         # ``<host_models_dir>/<HF-repo-name>/`` — we resolve the dir from
         # the FLM model_list lookup when available, falling back to the
         # bare host dir so a missing entry doesn't fail the job.
-        final_path = _flm_install_path(host_models_dir, tag) or host_models_dir
+        final_path = (
+            await asyncio.to_thread(_flm_install_path, host_models_dir, tag)
+        ) or host_models_dir
         size_bytes = _dir_size(final_path)
         if job.bytes_total <= 0 and size_bytes > 0:
             job.bytes_total = size_bytes
@@ -2021,7 +2039,7 @@ async def run_flm_pull(
         # registry row records the model's real modality (embed/stt/chat)
         # instead of assuming chat (#1647).
         pulled_capabilities: list[str] | None = None
-        for entry in flm_served_models():
+        for entry in await flm_served_models_async():
             if entry["tag"] == tag:
                 caps = entry.get("capabilities")
                 if caps:

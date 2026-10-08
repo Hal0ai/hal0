@@ -612,9 +612,10 @@ async def hal0_llm_slot_views(
         # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
         # to the chat slot. Translate via the same map as the FLM provider.
         if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
-            from hal0.providers.flm import flm_id_to_tag
+            from hal0.providers.flm import flm_id_to_tag_async
 
-            tag = flm_id_to_tag(model_id)
+            # A cold catalog is probed off the event loop (#2334).
+            tag = await flm_id_to_tag_async(model_id)
             if tag:
                 model_id = tag
         out.append(

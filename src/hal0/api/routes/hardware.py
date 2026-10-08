@@ -377,9 +377,10 @@ async def _npu_status(request: Request) -> dict[str, Any] | None:
             sz_mb = 0.0
             if flm_catalog is None:
                 try:
-                    from hal0.providers.flm import flm_served_models
+                    from hal0.providers.flm import flm_served_models_async
 
-                    flm_catalog = {e["tag"]: e for e in flm_served_models()}
+                    # Off the event loop on a cold cache (#2334).
+                    flm_catalog = {e["tag"]: e for e in await flm_served_models_async()}
                 except Exception:
                     flm_catalog = {}
             flm_entry = flm_catalog.get(mid)

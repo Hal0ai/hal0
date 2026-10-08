@@ -18,6 +18,7 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
+import contextlib
 import time
 import tomllib
 from pathlib import Path
@@ -216,6 +217,14 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
 
     if not npu_present and not flm_slots:
         return _occupancy_absent()
+
+    if flm_slots:
+        # _model_tag / _flm_footprint_gb below read the FLM catalog
+        # synchronously; warm a cold cache off the event loop first (#2334).
+        from hal0.providers.flm import flm_served_models_async
+
+        with contextlib.suppress(Exception):
+            await flm_served_models_async()
 
     slots_out: list[dict[str, Any]] = []
     columns_available = False

@@ -118,6 +118,17 @@ _CHILD_TO_NPU_FIELD: dict[str, str] = {
 }
 
 
+async def _warm_flm_catalog() -> None:
+    """Probe a cold FLM catalog on a worker thread, never on the event loop (#2334).
+
+    ``models_for_capability`` reads it synchronously for its NPU rows, so
+    async callers await this first and that read becomes a cache hit.
+    """
+    from hal0.providers.flm import flm_served_models_async
+
+    await flm_served_models_async()
+
+
 def legal_children(slot: str) -> list[str]:
     """Return the child names valid for ``slot``."""
     return [child for (s, child) in _CHILD_TO_SLOT if s == slot]
@@ -344,6 +355,9 @@ class CapabilityOrchestrator:
         backends_settled = flm_image_probe_settled()
         backends_retry_in_s = flm_image_probe_retry_in_s()
         backends = available_backends()
+        # catalogs_by_slot reads the FLM catalog synchronously for its NPU
+        # rows; warm a cold cache off the event loop first (#2334).
+        await _warm_flm_catalog()
         catalogs = catalogs_by_slot(registry=self._registry)
 
         selections_out: dict[str, dict[str, dict[str, Any]]] = {}
@@ -499,6 +513,9 @@ class CapabilityOrchestrator:
         # picking a model while the child is off is legal staging — the
         # gate fires when the operator flips it on (#2026).
         if merged.model:
+            # Validation reads the FLM catalog synchronously; warm a cold
+            # cache off the event loop first (#2334).
+            await _warm_flm_catalog()
             self._validate_model_in_catalog(
                 slot,
                 child,

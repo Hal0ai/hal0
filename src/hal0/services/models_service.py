@@ -874,12 +874,13 @@ async def list_all(
     # uninstalled rows. The dedicated FLM probe below is the authoritative
     # source (it re-adds the INSTALLED ones with the right npu shape), so drop
     # every FLM-servable tag from the generic upstream advertisement. The probe
-    # is module-cached, so the second call in the injector below is O(1).
+    # is module-cached, so the second call in the injector below is O(1); a
+    # cold cache is probed off the event loop (#2334).
     flm_skip: set[str] = set()
     try:
-        from hal0.providers.flm import flm_served_models as _flm_probe
+        from hal0.providers.flm import flm_served_models_async as _flm_probe
 
-        for _fm in _flm_probe():
+        for _fm in await _flm_probe():
             _tag = _fm.get("tag")
             if isinstance(_tag, str) and _tag:
                 flm_skip.add(_tag)
@@ -952,9 +953,9 @@ async def list_all(
     # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
     # popover derive type/device without requiring a registry entry.
     try:
-        from hal0.providers.flm import flm_served_models
+        from hal0.providers.flm import flm_served_models_async
 
-        for fm in flm_served_models():
+        for fm in await flm_served_models_async():
             if not fm.get("installed"):
                 continue
             # A registry row already covers this installed model under FLM's

@@ -628,8 +628,12 @@ async def enqueue(
     # The ``model:tag`` shape is the dispatch signal (HF ids never use
     # colons), validated against the FLM probe so a stray ``foo:bar``
     # falls through to the HF resolver and gets a clean 422.
-    from hal0.providers.flm import is_flm_tag
+    from hal0.providers.flm import flm_served_models_async, is_flm_tag
 
+    if ":" in model_id:
+        # is_flm_tag reads the FLM catalog; warm a cold cache off the event
+        # loop first (#2334). Ids without a colon never read it.
+        await flm_served_models_async()
     if is_flm_tag(model_id):
         return await start_flm_pull(model_id, request, jobs)
 

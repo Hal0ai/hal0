@@ -1040,6 +1040,33 @@ def flm_catalog() -> list[dict[str, Any]] | None:
     return None if unanswered else out
 
 
+def _flm_catalog_fresh() -> bool:
+    """True while a cached catalog (answer or "no answer") is inside its TTL."""
+    import time
+
+    return (
+        _FLM_CATALOG_CACHE is not None
+        and (time.monotonic() - _FLM_CATALOG_CACHED_AT) < _FLM_CATALOG_TTL_S
+    )
+
+
+async def flm_served_models_async() -> list[dict[str, Any]]:
+    """:func:`flm_served_models` for async callers: never probes on the event loop.
+
+    A fresh cache answers inline. A cold or expired one runs the blocking
+    ``flm list -j`` (up to its 30 s timeout) on a worker thread via
+    :func:`asyncio.to_thread`, so a slow ``flm`` slows only the caller, not
+    every other request, SSE stream and WebSocket (#2334).
+
+    Async code that reaches the catalog through a sync helper
+    (``models_for_capability``, :func:`is_flm_tag`, ``is_resolvable``) awaits
+    this first, so the helper's own read is a cache hit.
+    """
+    if _flm_catalog_fresh():
+        return flm_served_models()
+    return await asyncio.to_thread(flm_served_models)
+
+
 def reset_flm_catalog_cache() -> None:
     """Drop the cached FLM catalog so the next call re-probes immediately.
 
@@ -1114,6 +1141,18 @@ def flm_id_to_tag(model_id: str) -> str | None:
         if isinstance(tag, str) and tag.replace(":", "-") + "-FLM" == model_id:
             return tag
     return None
+
+
+async def flm_id_to_tag_async(model_id: str) -> str | None:
+    """:func:`flm_id_to_tag` for async callers: the catalog read never blocks the loop.
+
+    Only a ``-FLM`` id reads the catalog; that read goes through
+    :func:`flm_served_models_async` first, so a cold cache is probed on a
+    worker thread (#2334).
+    """
+    if model_id.endswith("-FLM"):
+        await flm_served_models_async()
+    return flm_id_to_tag(model_id)
 
 
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
