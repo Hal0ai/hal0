@@ -3,9 +3,13 @@
 All notable changes to hal0 are recorded here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-From **v1.0.0** the project follows semver proper: breaking changes land
-only in a major release, minor releases add functionality compatibly, and
-patch releases fix bugs. Tags before v1.0.0 carried the pre-1.0 caveat —
+From **v1.0.0** the project follows semver: removed or renamed config keys,
+endpoints and CLI commands land only in a major release, minor releases add
+functionality, and patch releases fix bugs. A minor release can still carry
+a `### Breaking` entry for an operator-facing behaviour change — a changed
+default, a security fix that disables an unsafe path, or a new exit code —
+and its release notes call each one out so `hal0 update` shows it before
+applying. Tags before v1.0.0 carried the pre-1.0 caveat —
 a minor bump (v0.1 → v0.2) could break, a patch bump (v0.2.0 → v0.2.1)
 could not.
 
@@ -25,6 +29,32 @@ applying. Add those subsections to a version's section to surface them; see
 `scripts/gen_release_notes.py`.
 
 ## [Unreleased]
+
+## [1.4.0] — 2026-10-08
+
+### Highlights
+
+- **Memory writes that were silently lost now land, or are refused
+  honestly.** Hindsight's extraction ran with its own defaults (32
+  concurrent calls, 64000 tokens) on a slot that serves one request at a
+  time, so on a slow box `POST /api/memory/add` returned 200 and nothing was
+  stored. Extraction now has operator-set limits under `[memory.graph]`
+  (Settings ▸ Memory), and a write whose extraction slot is too small for
+  the prompt is refused up front, over REST and `/mcp/memory` alike.
+  (#1834, #1903, #1930)
+- **Open WebUI works with auth on, and a lost admin key is recoverable.**
+  The installer mints a client key and Open WebUI presents it to hal0's
+  `/v1` (per connection, never to another service); `hal0 auth rotate
+  client` re-points it. `sudo hal0 auth reset-key` mints and prints a new
+  admin key, live or with the API down. (#2314)
+- **Open WebUI is fully pre-wired.** Document uploads go through RAG on
+  hal0's embeddings and the image button generates through ComfyUI as soon
+  as the matching slots are bound. (#2256)
+- **Installs leave evidence.** Every run writes an owner-only log, and a
+  failed run writes a redacted failure report you can attach to an issue.
+  (#2243, #2307)
+- **Loading a stack says what it will unload** before you confirm, and the
+  result names what was stopped. (#1511)
 
 ### Breaking
 
@@ -52,7 +82,18 @@ applying. Add those subsections to a version's section to surface them; see
   non-zero exit as a failed update needs to accept 2. Because `hal0-api`
   does this at start, the upgrade to 1.4.0 itself can restart running
   slots. (#2096)
-
+- **An installed MCP server that would send its `[secrets]` or `[env]`
+  headers in clear text no longer loads.** A `streamable-http`/`sse` record
+  whose url is plain `http://` to a non-loopback host, and that carries any
+  `[secrets]` key or non-empty `[env]` value, used to send those values
+  unencrypted on every probe and Hermes call. 1.4 refuses it: on upgrade such
+  a record is skipped (`hal0.mcp.installed.bad_record` in the journal, and
+  `mcp.record_malformed` when read directly), it drops out of `hal0 mcp
+  list`, and its Hermes entry is removed at the next hal0-api start or MCP
+  change. To keep it, point the url at `https://` or a loopback host, or set
+  `allow_insecure_http = true` in its TOML under `/etc/hal0/mcp-servers/` to
+  accept the risk. A `Proxy-Authorization` header value is refused on any url
+  and belongs in the proxy environment instead. (#2304)
 ### Added
 
 - **Memory extraction has limits now, and they are yours to set.** The
