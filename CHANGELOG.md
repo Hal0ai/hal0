@@ -192,6 +192,16 @@ applying. Add those subsections to a version's section to surface them; see
   **Settings ▸ Integrations ▸ Connected Accounts** (`#settings/accounts`,
   also reachable as `#settings/oauth` and from the command palette). (#2267)
 
+- **The dashboard session cookie is marked `Secure` when the browser reached
+  hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
+  deployment terminates TLS at a reverse proxy, but the session cookie was
+  always set without `Secure`, so a browser that signed in over HTTPS would
+  still send it in cleartext to a plain-HTTP address on the same host.
+  Login, logout and the agent-chat handshake now set `Secure` when the
+  request itself is `https` or a proxy says so with `X-Forwarded-Proto`.
+  Plain-HTTP installs are unchanged. (Flagged in review of #2338; the gap
+  predates it, but a 30-day "remember me" session made it matter more.)
+
 - **A Runner Images default for the voice, speech, NPU and image-generation
   families now takes effect.** `[slots].default_images` accepts `comfyui`,
   `flm`, `kokoro`, `moonshine` and `qwen3tts`, and the dashboard reported the
@@ -205,16 +215,6 @@ applying. Add those subsections to a version's section to surface them; see
   device, so the pull fetched the wrong image, status reported an image
   mismatch and the drift check flagged an image change that was not there,
   with or without a family default. (#2234)
-
-- **The dashboard session cookie is marked `Secure` when the browser reached
-  hal0 over TLS.** `hal0-api` listens on plain HTTP and the documented
-  deployment terminates TLS at a reverse proxy, but the session cookie was
-  always set without `Secure`, so a browser that signed in over HTTPS would
-  still send it in cleartext to a plain-HTTP address on the same host.
-  Login, logout and the agent-chat handshake now set `Secure` when the
-  request itself is `https` or a proxy says so with `X-Forwarded-Proto`.
-  Plain-HTTP installs are unchanged. (Flagged in review of #2338; the gap
-  predates it, but a 30-day "remember me" session made it matter more.)
 
 - **A LAN-bound box with an admin key no longer leaves the dashboard half
   signed out.** Since v1.3.0 such a box refuses ADMIN-class requests from
