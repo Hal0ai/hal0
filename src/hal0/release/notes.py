@@ -44,7 +44,7 @@ def extract_changelog_section(changelog: str, version: str) -> str:
     # "v0.5.10" nor a pre-release "1.4.0-rc.1" matches a query for "1.4.0" /
     # "0.5.1" (#2345).
     header_re = re.compile(
-        r"^##\s+\[v?" + escaped + r"(?=\])",
+        r"^##[ \t]+\[v?" + escaped + r"(?=\])",
         re.MULTILINE,
     )
 

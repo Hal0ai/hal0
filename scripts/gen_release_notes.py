@@ -91,7 +91,12 @@ def main() -> int:
             section = extract_changelog_section(
                 changelog_path.read_text(encoding="utf-8"), args.tag
             )
-        if not section:
+        # Only subsection headings (an emptied ``[Unreleased]`` template)
+        # count as no section: there is nothing to show or to callout.
+        has_entries = any(
+            line.strip() and not line.lstrip().startswith("#") for line in section.splitlines()
+        )
+        if not has_entries:
             # A stable/preview release without its changelog section would
             # otherwise fall through to the git-log path below and ship
             # release.json with empty highlights/breaking/migrations, so

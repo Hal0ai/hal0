@@ -163,6 +163,11 @@ def test_stable_tag_skips_prerelease_header_above_its_own():
     assert body == "- stable entry"
 
 
+def test_header_must_sit_on_one_line():
+    """``##`` and ``[version]`` on separate lines is not a version header."""
+    assert extract_changelog_section("## \n[1.4.0]\n\n- entry\n", "v1.4.0") == ""
+
+
 # ── Return value properties ─────────────────────────────────────────────────
 
 
@@ -491,6 +496,31 @@ def test_missing_changelog_section_fails_off_nightly(tmp_path, tag, channel, hea
 
     assert r.returncode != 0, r.stdout
     assert tag in r.stderr
+    assert header in r.stderr
+    assert not (out / "release.json").exists()
+    assert not (out / "RELEASE_NOTES.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("tag", "channel", "header"),
+    [
+        ("v1.4.0", "stable", "## [1.4.0]"),
+        ("v1.4.0-rc.1", "preview", "## [1.4.0-rc.1]"),
+    ],
+)
+def test_heading_only_section_fails_off_nightly(tmp_path, tag, channel, header):
+    """A section holding only empty ``###`` subsection headings (e.g. a renamed
+    ``[Unreleased]`` template) has no entries and must fail like a missing one."""
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        f"# Changelog\n\n{header} — 2026-10-08\n\n### Added\n\n### Fixed\n\n"
+        "## [1.3.0] — 2026-09-16\n\n### Added\n- older entry\n",
+        encoding="utf-8",
+    )
+
+    r, out = _run_gen_notes(tmp_path, tag, channel, changelog)
+
+    assert r.returncode != 0, r.stdout
     assert header in r.stderr
     assert not (out / "release.json").exists()
     assert not (out / "RELEASE_NOTES.md").exists()
