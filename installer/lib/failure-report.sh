@@ -307,7 +307,8 @@ _hal0_report_text_value_is_secret() {
     return 0
 }
 
-# Values of every `SENSITIVE_NAME=value` that appears anywhere in the
+# Values of every `SENSITIVE_NAME=value` or `SENSITIVE_NAME: value` (a JSON
+# field, a YAML key, an HTTP header; #2400) that appears anywhere in the
 # assembled report (an echoed export, a command line), so the same value is
 # also masked where it later appears bare (in a URL, a journal line). Only
 # plausible secrets are harvested (_hal0_report_text_value_is_secret).
@@ -315,12 +316,14 @@ _hal0_report_text_value_is_secret() {
 _hal0_report_harvest_report_text() {
     local file="$1" hits rc=0 hit name value
     hits="$(LC_ALL=C grep -oiE \
-        "(^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*=[[:space:]]*[\"']?[^\"'[:space:],}&]+" \
+        "(^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
         "$file")" || rc=$?
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
-        [[ "$hit" =~ ([A-Za-z0-9_]+)[\"\']?[[:space:]]*=[[:space:]]*[\"\']?(.*)$ ]] || continue
+        [[ "$hit" =~ ([A-Za-z0-9_-]+)[\"\']?[[:space:]]*[=:][[:space:]]*[\"\']?(.*)$ ]] || continue
         name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        # A header name keeps its dashes (`x-api-key`); a flag's do not count.
+        while [[ "$name" == -* ]]; do name="${name#-}"; done
         _hal0_report_text_value_is_secret "$name" "$value" || continue
         _hal0_report_emit_secret "$value"
     done <<<"$hits"

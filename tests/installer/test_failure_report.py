@@ -592,3 +592,44 @@ class TestCamelCaseSecretNames:
         assert "set OPENAI_API_KEY first; HF_TOKEN_FILE missing" in body
         assert "kbd us-intl-altgr; pet bananaphone99" in body
         assert "layout keyboard=us-intl-altgr monkey=bananaphone99" in body
+
+
+# ── #2400: harvest NAME: value (JSON / YAML / header) as well as NAME=value ──
+
+
+class TestColonFormsAreHarvested:
+    @pytest.mark.parametrize(
+        ("first", "secret"),
+        [
+            ('{"token": "JsonTok_88bbccdd"} then', "JsonTok_88bbccdd"),
+            ("registry login password: Colon_Secret_77aa", "Colon_Secret_77aa"),
+            ("curl -H 'x-api-key: HdrK3y_55eeff00'", "HdrK3y_55eeff00"),
+        ],
+    )
+    def test_a_colon_secret_is_masked_where_it_reappears_bare(
+        self, tmp_path: Path, first: str, secret: str
+    ) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(f"{first}\nlater reused bare: {secret} end\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert secret not in body
+        assert "later reused bare: ***REDACTED*** end" in body
+
+    def test_colon_lookalikes_are_still_not_harvested(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            '{"max_tokens": 40960000, "tokenizer": "Qwen/Qwen2.5-7B-Instruct"}\n'
+            "key: OPENAI_API_KEY\n"
+            "max_tokens: 4096\n"
+            "keyboard: us-intl-altgr\n"
+            "budget 40960000; model Qwen/Qwen2.5-7B-Instruct; set OPENAI_API_KEY\n"
+            "port 14096; kbd us-intl-altgr\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert "budget 40960000; model Qwen/Qwen2.5-7B-Instruct; set OPENAI_API_KEY" in body
+        assert "port 14096; kbd us-intl-altgr" in body
+        assert "keyboard: us-intl-altgr" in body

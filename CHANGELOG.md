@@ -210,7 +210,9 @@ applying. Add those subsections to a version's section to surface them; see
   string) is masked wherever it appears in the report, along with
   Bearer tokens, credentials in URLs and `--token` flags. Run-together and
   camelCase names such as `apikey`, `apiKey` and `accessKey` now count as
-  secret-named here and in hal0's config redaction. A number, short
+  secret-named here and in hal0's config redaction, and a value seen as
+  `NAME: value` (a JSON field, YAML key or header) is masked wherever it
+  reappears, like one seen as `NAME=value`. A number, short
   word or variable name logged as a value (`max_tokens=4096`,
   `key=OPENAI_API_KEY`) is not taken for a secret, so it is not blanked out
   across the rest of the report. If that pass
