@@ -42,6 +42,16 @@ applying. Add those subsections to a version's section to surface them; see
   from Hermes's config, the brain profile and the policy mirror at the
   next hal0-api start or MCP change. hal0's built-in servers are
   unaffected. (#2358)
+- **`hal0 update` restarts slots on its own and can exit 2 on an update that
+  applied.** When a release rolls the runner image, slots on the old image
+  are now restarted after the apply, both by `hal0-api` at every start
+  (`[updates].auto_restart_image_drift`, on by default) and by the CLI
+  (`--no-restart-slots` opts out). A slot with a request in flight is skipped.
+  While any slot still runs the old image, `hal0 update` exits **2** ("applied,
+  convergence outstanding") instead of 0, so a script that treats any
+  non-zero exit as a failed update needs to accept 2. Because `hal0-api`
+  does this at start, the upgrade to 1.4.0 itself can restart running
+  slots. (#2096)
 
 ### Added
 
