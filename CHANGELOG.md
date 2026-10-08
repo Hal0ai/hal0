@@ -539,6 +539,32 @@ applying. Add those subsections to a version's section to surface them; see
   table, so the matching facts stay lit and each dot takes its type's
   colour. (#1996)
 
+### Migrations
+
+- **After `hal0 update` to 1.4.0, re-run the installer once:** `curl -fsSL
+  https://hal0.dev/install.sh | sudo bash`. It is an upgrade in place, not a
+  reinstall: `/etc/hal0`, `/var/lib/hal0` and your update channel are kept.
+  `hal0 update` swaps the release, re-installs the venv and refreshes the sudo
+  wrappers in `/usr/lib/hal0/bin`, but only the installer rewrites
+  `hindsight-api.service`, the `/usr/local/bin/hermes` wrapper and
+  `/etc/hal0/api.env`, and three 1.4.0 fixes live there (next entry).
+- **What the re-run picks up.** The memory extraction limits (#1834) are baked
+  into `hindsight-api.service`; until the installer runs, `hindsight-api`
+  keeps its own defaults (32 concurrent calls, 64000 completion tokens), the
+  failure this release fixes. Saving Settings ▸ Memory once also applies them.
+  Only the installer mints `HAL0_CLIENT_KEY` (#2314), so until it runs Open
+  WebUI still sends its placeholder and gets 401 on an auth-on box; `hal0 auth
+  rotate client` also mints the key and re-points Open WebUI, and neither
+  turns auth on. The `hermes` and `hal0-hermes` wrappers that bypass the proxy
+  for loopback (#2371) live in `/usr/local/bin`, which only the installer
+  writes.
+- **Before re-running, note any `HAL0_ALLOWED_ORIGINS` line you added to
+  `/etc/hal0/api.env` by hand** (for a reverse proxy, say). The installer
+  re-appends its network block at the end of the file on every run and the
+  last assignment wins, so your value stops applying. Afterwards, add it again
+  at the **end** of `api.env` and run `sudo systemctl restart hal0-api`. A
+  lasting fix is tracked in #2382.
+
 ## [1.3.0] — 2026-09-16
 
 ### Highlights
