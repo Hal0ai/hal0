@@ -74,20 +74,39 @@ def physical_model_keyer(models: Iterable[dict[str, Any]]) -> Callable[[dict[str
     recorded under both a clean registry id and a v1 path-like id. Keeping the
     basename wherever it is already unambiguous leaves that fold exactly as it
     was for every existing store; only genuinely colliding basenames change
-    key, and the genuine duplicate pairs among those share a full path.
+    key. A relative v1 path that is a path-boundary suffix of exactly one
+    longer path counts as that same file, so it neither makes a basename
+    ambiguous nor gets a row of its own.
     """
     paths_by_base: dict[str, set[str]] = {}
     for model in models:
         gguf = model.get("gguf") or ""
         if gguf:
             paths_by_base.setdefault(_basename(gguf), set()).add(gguf)
-    ambiguous = {base for base, paths in paths_by_base.items() if len(paths) > 1}
+
+    # Fold a path into a longer one it is a path-boundary suffix of: a v1
+    # record's relative ``chat/Foo.gguf`` and a later ``/m/chat/Foo.gguf``
+    # name the same file. Only an unambiguous suffix folds; a path that is a
+    # suffix of several longer ones stays its own file.
+    canonical: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for base, paths in paths_by_base.items():
+        roots: list[str] = []
+        for path in sorted(paths, key=len, reverse=True):
+            owners = [r for r in roots if r.endswith("/" + path)]
+            if len(owners) == 1:
+                canonical[path] = owners[0]
+            else:
+                roots.append(path)
+                canonical[path] = path
+        if len(roots) > 1:
+            ambiguous.add(base)
 
     def key(model: dict[str, Any]) -> str:
         gguf = model.get("gguf") or ""
         base = _basename(gguf)
         if base in ambiguous:
-            return gguf
+            return canonical.get(gguf, gguf)
         return base or model.get("id") or ""
 
     return key

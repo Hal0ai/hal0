@@ -92,3 +92,32 @@ def test_keyer_keeps_basename_for_unique_files_and_paths_for_collisions() -> Non
     assert key({"id": "a-v1", "gguf": "/m/a/model.gguf"}) == "/m/a/model.gguf"
     assert key({"id": "b", "gguf": "/m/b/model.gguf"}) == "/m/b/model.gguf"
     assert key({"id": "no-file"}) == "no-file"
+
+
+def test_keyer_folds_a_relative_v1_path_into_its_absolute_path() -> None:
+    """A v1 record's relative gguf (``chat/Foo.gguf``) and a later absolute one
+    (``/m/chat/Foo.gguf``) name the same file: the basename stays unambiguous,
+    so both keep the basename key and collapse into one row."""
+    key = physical_model_keyer(
+        [
+            {"id": "chat/Foo.gguf", "gguf": "chat/Foo.gguf"},
+            {"id": "foo", "gguf": "/m/chat/Foo.gguf"},
+        ]
+    )
+    assert key({"id": "chat/Foo.gguf", "gguf": "chat/Foo.gguf"}) == "Foo.gguf"
+    assert key({"id": "foo", "gguf": "/m/chat/Foo.gguf"}) == "Foo.gguf"
+
+
+def test_keyer_folds_relative_v1_paths_within_a_real_collision() -> None:
+    """Under a genuine ``model.gguf`` collision, a relative v1 path still keys
+    to the absolute path it is a suffix of, not to a third row."""
+    key = physical_model_keyer(
+        [
+            {"id": "a", "gguf": "/m/a/model.gguf"},
+            {"id": "a-v1", "gguf": "a/model.gguf"},
+            {"id": "b", "gguf": "/m/b/model.gguf"},
+        ]
+    )
+    assert key({"id": "a-v1", "gguf": "a/model.gguf"}) == "/m/a/model.gguf"
+    assert key({"id": "a", "gguf": "/m/a/model.gguf"}) == "/m/a/model.gguf"
+    assert key({"id": "b", "gguf": "/m/b/model.gguf"}) == "/m/b/model.gguf"
