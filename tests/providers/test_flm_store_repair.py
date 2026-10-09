@@ -287,3 +287,35 @@ def test_link_made_concurrently_by_another_writer_is_success(
     monkeypatch.setattr(Path, "symlink_to", _lose_the_race)
     assert flm.ensure_host_flm_store_link() == str(store)
     assert default.is_symlink()
+
+
+def test_service_owned_store_outside_the_flm_layout_is_never_chowned(
+    layout: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0 could set ``flm_store = /etc/hal0`` (hal0-owned): never hand it to uid 1000."""
+    default, _store = layout
+    odd = default.parents[2] / "etc-hal0"
+    odd.mkdir()
+    monkeypatch.setattr("hal0.config.paths.flm_models_dir", lambda: str(odd))
+    monkeypatch.setattr(flm, "_FLM_CONTAINER_UID", os.getuid() + 7)
+    default.parent.mkdir(parents=True)
+    default.symlink_to(odd)
+
+    fchown = _FChown()
+    actions = flm.repair_host_flm_store_link(fchown=fchown, link=lambda u, g: None)
+
+    assert all(p != str(odd) for p, _u, _g in fchown.calls)
+    assert any("left alone" in a for a in actions)
+
+
+def test_write_without_search_permission_is_not_writable() -> None:
+    """A dir needs ``wx``: write alone can't create entries (0600 parents/stores)."""
+    uid, gid = 990, 991
+    st = os.stat_result((stat.S_IFDIR | 0o600, 0, 0, 0, uid, gid, 0, 0, 0, 0))
+    assert not flm._writable_by(st, uid, gid)
+    st = os.stat_result((stat.S_IFDIR | 0o700, 0, 0, 0, uid, gid, 0, 0, 0, 0))
+    assert flm._writable_by(st, uid, gid)
+    st = os.stat_result((stat.S_IFDIR | 0o2775, 0, 0, 0, 1000, gid, 0, 0, 0, 0))
+    assert flm._writable_by(st, uid, gid)
+    container_owned = os.stat_result((stat.S_IFDIR | 0o600, 0, 0, 0, 1000, 0, 0, 0, 0, 0))
+    assert not flm._container_can_write(container_owned)

@@ -341,18 +341,21 @@ def _container_can_write(st: os.stat_result) -> bool:
     (:meth:`FLMProvider.container_spec`), so the hal0 group's write bit does
     not reach it: owner-write as uid 1000, or other-write.
     """
-    return (st.st_uid == _FLM_CONTAINER_UID and bool(st.st_mode & 0o200)) or bool(
-        st.st_mode & 0o002
+    return (st.st_uid == _FLM_CONTAINER_UID and st.st_mode & 0o300 == 0o300) or (
+        st.st_mode & 0o003 == 0o003
     )
 
 
 def _writable_by(st: os.stat_result, uid: int, gid: int) -> bool:
-    """Whether ``uid``/``gid`` may write a dir with this stat (mode bits only)."""
+    """Whether ``uid``/``gid`` may create entries in a dir with this stat.
+
+    Mode bits only; needs write AND search (``wx``) in the applicable class.
+    """
     if st.st_uid == uid:
-        return bool(st.st_mode & 0o200)
+        return st.st_mode & 0o300 == 0o300
     if st.st_gid == gid:
-        return bool(st.st_mode & 0o020)
-    return bool(st.st_mode & 0o002)
+        return st.st_mode & 0o030 == 0o030
+    return st.st_mode & 0o003 == 0o003
 
 
 def _creatable_by(path: str, uid: int, gid: int) -> bool:
@@ -417,7 +420,7 @@ def audit_host_flm_store_link() -> list[dict[str, str]]:
                 continue
             if parent.is_symlink() or not parent.is_dir():
                 _row(parent, f"{parent.name} owner", "drift", "not a plain directory")
-            elif parent.stat().st_uid == ids[0] and parent.stat().st_mode & 0o200:
+            elif parent.stat().st_uid == ids[0] and _writable_by(parent.stat(), *ids):
                 _row(parent, f"{parent.name} owner", "ok", f"owned by {_HOST_FLM_USER}")
             else:
                 _row(
@@ -533,6 +536,14 @@ def _chown_store_for_container(store: str, uid: int, gid: int, *, fchown: Any) -
     the service user points the configured path at is chowned unless it was
     already theirs. Any other owner, uid 1000 included, is left alone.
     """
+    if not os.path.normpath(store).endswith(os.sep + os.path.join("flm", "models")):
+        # Only the documented layouts (``$HOME/.config/flm/models`` and the
+        # co-located ``<store>/flm/models``): the path is hal0's to choose, and
+        # a hal0-owned dir such as /etc/hal0 must never go to uid 1000.
+        return (
+            f"{store} left alone (not a .../flm/models path); chown it to "
+            f"{_FLM_CONTAINER_UID}:{_HOST_FLM_USER} mode 2775 yourself"
+        )
     try:
         fd = os.open(store, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
