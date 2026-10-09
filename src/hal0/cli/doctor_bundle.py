@@ -58,14 +58,29 @@ def _now_iso() -> str:
 
 
 def _redact_text(text: str) -> str:
-    """Bearer-token / JWT scrub for free-text command output (§3.1).
+    """Redact free-text command output before it is written into the bundle.
+
+    Every free-text capture goes through here: the system/ probes, the
+    journal captures under logs/ and the install-log / failure-report
+    copies. The bundle is what users attach to public bug reports, so this
+    is the full shareable-text pass (#2434), not just a Bearer/JWT scrub:
+
+    1. :func:`hal0.redaction.redact_shareable_text` masks every plausible
+       secret value seen as ``NAME=value`` / ``NAME: value`` wherever it
+       reappears, then the secret shapes on each line (#2409);
+    2. :func:`hal0.redaction.redact_log_line` runs on each line, as
+       ``/api/logs`` and MCP ``logs_tail`` do on read (#2403);
+    3. the Bearer / JWT scrub, kept as a last pass.
 
     Complements (does not replace) ``api._redact.redact_config``, which
-    scrubs by KEY NAME in structured config trees — this is for arbitrary
-    stdout (e.g. a log line that happens to carry an ``Authorization:
-    Bearer ...`` header, or a JWT printed by a debug command).
+    scrubs by KEY NAME in structured config trees. Line breaks, including a
+    trailing newline, are preserved.
     """
-    return _BEARER_RE.sub("Bearer ***REDACTED***", _JWT_RE.sub("***JWT***", text))
+    from hal0.redaction import redact_log_line, redact_shareable_text
+
+    shared = redact_shareable_text(text)
+    body = "\n".join(redact_log_line(line) for line in shared.split("\n"))
+    return _BEARER_RE.sub("Bearer ***REDACTED***", _JWT_RE.sub("***JWT***", body))
 
 
 # ── §3.1 system/ probe table — (label, argv, output path) ─────────────────────
@@ -512,16 +527,11 @@ def _install_artifacts() -> dict[str, dict[str, str] | None]:
 def _redact_install_text(text: str) -> str:
     """Redact an installer log or failure report copied into the bundle.
 
-    :func:`hal0.redaction.redact_shareable_text` (the Python port of the
-    failure report's own text pass, #2409) masks every plausible secret
-    value seen as ``NAME=value`` / ``NAME: value`` wherever it reappears,
-    then the secret shapes on each line; :func:`hal0.redaction.redact_log_line`
-    and :func:`_redact_text` then run as on every other free-text capture.
+    The same pass as every other free-text capture (:func:`_redact_text`);
+    kept as its own name for the install-copy call sites and their tests.
+    Trailing line breaks are dropped, as before.
     """
-    from hal0.redaction import redact_log_line, redact_shareable_text
-
-    shared = redact_shareable_text(text)
-    return _redact_text("\n".join(redact_log_line(line) for line in shared.splitlines()))
+    return _redact_text("\n".join(text.splitlines()))
 
 
 def _write_install_report(out: Path) -> list[str]:

@@ -228,6 +228,31 @@ def _mask_name_value(match: re.Match[str]) -> str:
     return f"{match.group('name')}{match.group('sep')}{quote}{MASK}{quote}"
 
 
+def redact_secret_named_values(value: Any) -> Any:
+    """Mask the value of every secret-NAMED dict key inside ``value`` (#2434).
+
+    The structured counterpart of the ``NAME=value`` shape pass: a key is
+    secret by the same test (``HF_TOKEN``, ``apiKey``, ``password``,
+    ``*_KEY``, ``key``), and names that only look secret (``max_tokens``,
+    ``tokenizer``, ``token_env``) are left alone, unlike
+    :func:`hal0.api._redact.redact_config`'s broader key test. A masked
+    value becomes :data:`MASK` whatever its type; anything else is walked
+    (dicts, lists, tuples) and returned with its shape unchanged. Pure.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (
+                MASK if isinstance(k, str) and _is_secret_name(k) else redact_secret_named_values(v)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_secret_named_values(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secret_named_values(v) for v in value)
+    return value
+
+
 def redact_secret_shapes(line: str) -> str:
     """Mask secret SHAPES in one line of free text (no literal known in
     advance). Keeps each key's name, quoting and separator so a reader still
@@ -286,6 +311,7 @@ __all__ = [
     "LOG_SECRET_RE",
     "MASK",
     "redact_log_line",
+    "redact_secret_named_values",
     "redact_secret_shapes",
     "redact_shareable_text",
     "redact_text_tree",

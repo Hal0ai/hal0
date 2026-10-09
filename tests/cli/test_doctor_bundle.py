@@ -404,3 +404,49 @@ def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypat
 
     monkeypatch.setattr(Path, "stat", flaky_stat)
     assert db._latest_match(((str(tmp_path), "hal0-install-*.log"),)) == keep
+
+
+# The seven #2403 secret shapes, as one journald line (#2434). Each value is
+# what must not reach the bundle.
+_JOURNAL_SECRET_LINE = (
+    "HF_TOKEN=hf_FAKE1journal apikey=FAKE2journal "
+    '{"apiKey": "FAKE3journal"} Authorization: ApiKey FAKE4journal '
+    "https://u:FAKE5journal@x.test --token FAKE6journal "
+    "Authorization: Bearer FAKE7journal"
+)
+
+
+def test_bundle_journal_captures_mask_every_secret_shape(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2434: the journal captures under logs/ get the same redaction as the
+    install-log copy, not only the Bearer/JWT scrub."""
+    original_run = doctor_bundle.subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[0] == "journalctl":
+            import subprocess
+
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    "Oct 09 hal0-api[1]: mcp.tool.invoked tool=slot_list\n"
+                    f"Oct 09 hal0-api[1]: {_JOURNAL_SECRET_LINE}\n"
+                    "Oct 09 hal0-api[1]: llama: max_tokens=4096 HAL0_PORT=8080\n"
+                ),
+                stderr="",
+            )
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_bundle.subprocess, "run", fake_run)
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    for unit in doctor_bundle._LOG_UNITS:
+        body = (out / "logs" / f"{unit}.log").read_text()
+        assert "FAKE" not in body, (unit, body)
+        assert "mcp.tool.invoked tool=slot_list" in body
+        assert "max_tokens=4096 HAL0_PORT=8080" in body
+        assert body.endswith("\n")
