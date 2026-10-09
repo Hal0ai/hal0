@@ -245,6 +245,12 @@ else
     info "FHS layout — code ${PREFIX}, current → ${CURRENT_LINK}, venv ${VENV_DIR}"
 fi
 
+# Failure report for exits that bypass the ERR trap below — die(), explicit
+# `exit 1` (#2438). The ERR trap marks its own report as written, so one
+# failed run leaves exactly one report. Installed before the verification
+# gate so its die() is covered too.
+trap 'hal0_report_on_exit "$?"' EXIT
+
 # ── Release verification gate ──────────────────────────────────────────────
 # Refuse to run as root against an UNVERIFIED release tree. The signed
 # install path (`curl -fsSL https://hal0.dev/install.sh | sudo bash`) runs
@@ -330,6 +336,7 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
     esac
+    _HAL0_REPORT_WRITTEN=1
     _hal0_report_path="$(hal0_write_failure_report "${CURRENT_STEP:-pre-init}" 2>/dev/null || true)"
     [[ -n "${_hal0_report_path}" ]] && warn "Failure report saved: ${_hal0_report_path} — attach it to a bug report."
     exit 1' ERR

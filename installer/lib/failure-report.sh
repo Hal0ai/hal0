@@ -667,6 +667,21 @@ _hal0_report_stub() {
     echo "  do not post it publicly."
 }
 
+# EXIT-trap entry (#2438). die() and explicit `exit 1` paths never fire the
+# ERR trap, so install.sh also traps EXIT and calls this with the exit
+# status. No-op on success, and when the ERR trap already wrote a report
+# (_HAL0_REPORT_WRITTEN=1). Never changes the exit status of the caller.
+hal0_report_on_exit() {
+    local rc="${1:-0}"
+    [[ "$rc" -ne 0 ]] || return 0
+    [[ -z "${_HAL0_REPORT_WRITTEN:-}" ]] || return 0
+    _HAL0_REPORT_WRITTEN=1
+    local path
+    path="$(hal0_write_failure_report "${CURRENT_STEP:-pre-init}" 2>/dev/null || true)"
+    [[ -n "$path" ]] && warn "Failure report saved: ${path} — attach it to a bug report."
+    return 0
+}
+
 # Runs in a subshell so its umask and temp state never leak into install.sh.
 hal0_write_failure_report() (
     phase="${1:-unknown}"
