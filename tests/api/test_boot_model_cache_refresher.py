@@ -72,3 +72,43 @@ async def test_slot_reconcile_phase_starts_refresher_first(
     monkeypatch.setattr(api_mod, "_start_model_cache_refresher", _start)
     with pytest.raises(_Started):
         await api_mod._boot_slot_reconcile(types.SimpleNamespace(), api_mod.BootState())
+
+
+async def test_refresher_is_cancelled_when_a_later_boot_phase_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresher now starts before the lifespan's AsyncExitStack exists;
+    a boot phase failing after it must not leave it subscribed."""
+
+    class _Boom(Exception):
+        pass
+
+    async def _noop(_app: Any, _ctx: Any) -> None:
+        return None
+
+    for name in ("registries", "model_cache", "audit_store", "slot_manager", "dispatcher"):
+        monkeypatch.setattr(api_mod, f"_boot_{name}", _noop)
+    seen: dict[str, Any] = {}
+    bus = EventBus()
+
+    async def _reconcile(_app: Any, ctx: Any) -> None:
+        ctx.events = bus
+        ctx.upstreams = UpstreamRegistry()
+        ctx.slot_manager = types.SimpleNamespace()
+        ctx.fetch_and_cache = None
+        ctx.model_cache = {}
+        await api_mod._start_model_cache_refresher(ctx)
+        seen["task"] = ctx.refresh_task
+
+    async def _fail(_app: Any, _ctx: Any) -> None:
+        raise _Boom
+
+    monkeypatch.setattr(api_mod, "_boot_slot_reconcile", _reconcile)
+    monkeypatch.setattr(api_mod, "_boot_model_priming", _fail)
+
+    app = types.SimpleNamespace(state=types.SimpleNamespace())
+    with pytest.raises(_Boom):
+        async with api_mod.lifespan(app):  # type: ignore[arg-type]
+            pass
+    assert seen["task"].done()
+    assert bus.subscribers == set()

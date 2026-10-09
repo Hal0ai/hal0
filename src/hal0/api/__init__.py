@@ -2427,19 +2427,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
-    await _run_boot_phase(report, "slot_reconcile", lambda: _boot_slot_reconcile(app, ctx))
-    await _run_boot_phase(report, "model_priming", lambda: _boot_model_priming(app, ctx))
-    await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
-    await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
-    await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
-    await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
-    await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
-    await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
-    # RELOCATE(brain-lane): terminal phase — namespace_register,
-    # brain_profile_seed, self_report (in that order; self_report last).
-    # Runs after every other phase so its self-report reflects a fully
-    # booted process. See _boot_brain_lane's docstring.
-    await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
+    # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
+    # the AsyncExitStack below exists; a later phase failing must not leave
+    # it subscribed.
+    try:
+        await _run_boot_phase(report, "slot_reconcile", lambda: _boot_slot_reconcile(app, ctx))
+        await _run_boot_phase(report, "model_priming", lambda: _boot_model_priming(app, ctx))
+        await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
+        await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
+        await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
+        await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
+        await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
+        await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
+        # RELOCATE(brain-lane): terminal phase — namespace_register,
+        # brain_profile_seed, self_report (in that order; self_report last).
+        # Runs after every other phase so its self-report reflects a fully
+        # booted process. See _boot_brain_lane's docstring.
+        await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
+    except BaseException:
+        if ctx.stop_refresh_task is not None:
+            with contextlib.suppress(Exception):
+                await ctx.stop_refresh_task()
+        raise
 
     from contextlib import AsyncExitStack
 
