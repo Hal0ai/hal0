@@ -118,6 +118,26 @@ def _resolve_level(level: str | None) -> str | None:
 # ── Shared SSE helper ──────────────────────────────────────────────────────
 
 
+_JOURNAL_ACCESS_HINT = (
+    "journalctl returned no entries; the hal0 service user may not be able "
+    "to read the journal (is it in the systemd-journal group?)"
+)
+
+
+def _journal_failure_hint(stderr: bytes, returncode: int | None) -> str | None:
+    """Short redacted hint when journalctl failed, else ``None``.
+
+    journalctl prints permission failures (``No journal files were opened
+    due to insufficient permissions``) to stderr and often still exits 0,
+    so an empty stdout alone is indistinguishable from "no logs" (#2435).
+    """
+    err = stderr.decode("utf-8", errors="replace").strip()
+    if not err and not returncode:
+        return None
+    detail = redact_log_line(" ".join(err.split())[:300]) if err else ""
+    return f"{_JOURNAL_ACCESS_HINT}: {detail}" if detail else _JOURNAL_ACCESS_HINT
+
+
 async def journalctl_sse(
     unit: str,
     *,
@@ -163,15 +183,23 @@ async def journalctl_sse(
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
     try:
         assert proc.stdout is not None
+        emitted = False
         async for raw in proc.stdout:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if not line:
                 continue
+            emitted = True
             yield f"data: {json.dumps(redact_log_line(line))}\n\n"
+        if not emitted and proc.stderr is not None:
+            # Process exited without a single line: surface why (#2435).
+            err = await proc.stderr.read()
+            hint = _journal_failure_hint(err, proc.returncode)
+            if hint:
+                yield f"event: error\ndata: {json.dumps({'message': hint})}\n\n"
     except asyncio.CancelledError:
         raise
     finally:
@@ -232,7 +260,7 @@ async def list_logs(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8.0)
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError, OSError):
             proc.kill()
@@ -245,11 +273,16 @@ async def list_logs(
 
     text = stdout.decode("utf-8", errors="replace")
     lines = [redact_log_line(ln) for ln in text.splitlines() if ln]
-    return {
+    result: dict[str, Any] = {
         "unit": unit,
         "lines": lines,
         "count": len(lines),
     }
+    if not lines:
+        hint = _journal_failure_hint(stderr, proc.returncode)
+        if hint:
+            result["hint"] = hint
+    return result
 
 
 @router.get("/stream")
