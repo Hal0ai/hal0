@@ -296,7 +296,9 @@ _hal0_report_emit_secret() {
     while IFS= read -r line; do
         line="${line%$'\r'}"
         [[ ${#line} -ge 4 ]] || continue
-        [[ "$line" =~ ^[0-9]+$ ]] && continue
+        # Digits alone or inside one matching quote pair (`'12345'`, `"86400"`):
+        # the env harvest emits the raw value too, quotes included.
+        [[ "$line" =~ ^[0-9]+$ || "$line" =~ ^\"[0-9]+\"$ || "$line" =~ ^\'[0-9]+\'$ ]] && continue
         case "${line,,}" in
             true | false | none | null | unset) continue ;;
         esac

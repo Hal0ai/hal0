@@ -467,6 +467,8 @@ class TestStructuredHarvestSkipsNonSecrets:
             assert _REAL_TOKEN in harvested
             for number in ("4096", "12345", "86400"):
                 assert number not in harvested, number
+            # Nor in a quoted form (`'12345'`, `"86400"`) from the raw env value.
+            assert not any(h.strip("'\"").isdigit() for h in harvested), harvested
 
     def test_the_key_line_itself_is_still_redacted_by_name(self, tmp_path: Path) -> None:
         """Only the everywhere harvest is narrowed: the key-name pass still
