@@ -156,13 +156,16 @@ fi
 # The dev-install row above skips the seeding block via HAL0_NO_PROBE=1; we
 # exercise it explicitly here against the already-installed binary using
 # HAL0_HOME so paths resolve under the tmp PREFIX (not /etc or /var/lib).
+# --storage-dir must equal the installer's MODELS_DIR (${PREFIX}/var/lib/hal0/models):
+# setup rewrites [models].store, and a different value makes the install.sh
+# re-run (dev-idempotent) legitimately overwrite hal0.toml back.
 log_step "Row: dev-setup-sentinel"
 start=$(start_ms)
 HAL0_BIN="${PREFIX}/.venv/bin/hal0"
 if [[ -x "${HAL0_BIN}" ]]; then
     SETUP_LOG="${PREFIX}/setup-auto.log"
     if HAL0_HOME="${PREFIX}" "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
-        --storage-dir "${PREFIX}/var-lib/hal0/models" >"${SETUP_LOG}" 2>&1; then
+        --storage-dir "${PREFIX}/var/lib/hal0/models" >"${SETUP_LOG}" 2>&1; then
         SENTINEL="${PREFIX}/var-lib/hal0/.first_run_done"
         AGENT_TOML="${PREFIX}/etc/hal0/slots/agent.toml"
         if [[ -f "${SENTINEL}" ]]; then
@@ -218,13 +221,25 @@ fi
 # ── ROW: dev-idempotent ─────────────────────────────────────────────────────
 log_step "Row: dev-idempotent"
 start=$(start_ms)
-# Snapshot mtimes of config files we expect to be left alone.
+# Snapshot mtimes of config files we expect to be left alone. api.env is
+# excluded from the mtime check: install.sh rewrites it on every run by design
+# (it refreshes the marker-delimited hal0-network block, #1375). Its content
+# OUTSIDE those markers must survive instead — compared below.
+strip_network_block() {
+    awk '$0 == "# BEGIN hal0-network" { skip = 1; next }
+         $0 == "# END hal0-network"   { skip = 0; next }
+         !skip { print }' "$1"
+}
 declare -A MTIMES_BEFORE
-for f in etc/hal0/hal0.toml etc/hal0/api.env etc/hal0/upstreams.toml; do
+for f in etc/hal0/hal0.toml etc/hal0/upstreams.toml; do
     if [[ -f "${PREFIX}/${f}" ]]; then
         MTIMES_BEFORE["${f}"]="$(stat -c %Y "${PREFIX}/${f}")"
     fi
 done
+API_ENV_BEFORE=""
+if [[ -f "${PREFIX}/etc/hal0/api.env" ]]; then
+    API_ENV_BEFORE="$(strip_network_block "${PREFIX}/etc/hal0/api.env")"
+fi
 LOG2="${PREFIX}/install-2.log"
 if HAL0_PREFIX="${PREFIX}" HAL0_NO_PROBE=1 HAL0_PLAIN=1 HAL0_NO_HELLO=1 HAL0_NO_QR=1 \
     bash "${REPO_ROOT}/installer/install.sh" --dev >"${LOG2}" 2>&1; then
@@ -236,8 +251,12 @@ if HAL0_PREFIX="${PREFIX}" HAL0_NO_PROBE=1 HAL0_PLAIN=1 HAL0_NO_HELLO=1 HAL0_NO_
             CHANGED+=("${f}")
         fi
     done
+    if [[ -f "${PREFIX}/etc/hal0/api.env" ]] &&
+        [[ "${API_ENV_BEFORE}" != "$(strip_network_block "${PREFIX}/etc/hal0/api.env")" ]]; then
+        CHANGED+=("etc/hal0/api.env (content outside hal0-network block)")
+    fi
     if [[ ${#CHANGED[@]} -eq 0 ]]; then
-        add_row "dev-idempotent" "pass" "$(since_ms "${start}")" "re-run preserved config mtimes"
+        add_row "dev-idempotent" "pass" "$(since_ms "${start}")" "re-run preserved config (api.env compared outside the hal0-network block)"
     else
         add_row "dev-idempotent" "fail" "$(since_ms "${start}")" "config mtimes changed on re-run: ${CHANGED[*]}"
     fi

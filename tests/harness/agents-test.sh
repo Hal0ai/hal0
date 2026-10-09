@@ -39,7 +39,7 @@
 #   agents-memory-teardown-clean (#350)
 #       Spins up an in-process HTTP stub that mimics
 #       /api/memory/{search,delete} + the lifecycle DELETE; primes the
-#       search to return one hermes-agent row and the delete to wipe
+#       search to return one hermes row and the delete to wipe
 #       it; runs the CLI's _uninstall_hermes_memory + verifies the
 #       structured outcome reports ``deleted`` with no stderr warning.
 #
@@ -136,9 +136,17 @@ class _StubDriver:
         self.installs = 0
         self.uninstalls = 0
         self._installed = False
+        self.data_dir: Path | None = None
 
     def install(self, *, bearer_token: str | None = None) -> None:
         self.installs += 1
+        # Converged homes (hermes) are created + marker-stamped by the agent's
+        # provisioner, not the manager (manager.py _AGENT_HOME_SUBDIR, #466).
+        # The stub stands in for the provisioner so uninstall's
+        # .hal0-managed gate sees a managed tree.
+        if self.data_dir is not None:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            (self.data_dir / mgr_mod._HAL0_MANAGED_MARKER).write_text("")
         self._installed = True
 
     def uninstall(self) -> None:
@@ -184,6 +192,7 @@ def scenario_install_corrupt_uninstall(prefix: Path) -> None:
     stub = _StubDriver()
     _patch_driver(stub)
     mgr = _make_mgr(prefix)
+    stub.data_dir = mgr._data_dir("hermes")
 
     rec = mgr.install("hermes")
     seed = Path(rec.config_path)
@@ -227,6 +236,7 @@ def scenario_roundtrip_no_orphans(prefix: Path) -> None:
     stub = _StubDriver()
     _patch_driver(stub)
     mgr = _make_mgr(prefix)
+    stub.data_dir = mgr._data_dir("hermes")
 
     for round_idx in range(2):
         rec = mgr.install("hermes")
@@ -265,7 +275,7 @@ def _stamp_provision_json(
     state_dir.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
         "schema_version": 1,
-        "agent_id": "hermes-agent",
+        "agent_id": "hermes",
         "phases": {},
     }
     if venv is not None:
@@ -416,7 +426,7 @@ def scenario_memory_teardown_clean(prefix: Path) -> None:
         "items": [
             {
                 "id": "card-001",
-                "metadata": {"agent_id": "hermes-agent"},
+                "metadata": {"agent_id": "hermes"},
             }
         ]
     }
@@ -435,7 +445,7 @@ def scenario_memory_teardown_clean(prefix: Path) -> None:
         if state["items"]:
             raise AssertionError(
                 f"stub dataset still has {len(state['items'])} row(s) "
-                f"matching agent_id=hermes-agent after teardown"
+                f"matching agent_id=hermes after teardown"
             )
         # The wrapper must NOT print a warning for the deleted outcome.
         import io
