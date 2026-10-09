@@ -721,3 +721,49 @@ class TestTomlMultilineArrays:
         assert _ARR_A not in body
         assert "retrying with ***REDACTED***" in body
         assert 'store = "/srv"' in body
+
+
+class TestReportOnExit:
+    """#2438: die()/`exit 1` bypass the ERR trap; the EXIT trap covers them."""
+
+    @staticmethod
+    def _run(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess[str], list[Path]]:
+        log = tmp_path / "install.log"
+        log.write_text("log\n")
+        script = f"""
+set -euo pipefail
+source "{FAILURE_REPORT}"
+export HAL0_INSTALL_LOG="{log}"
+trap 'hal0_report_on_exit "$?"' EXIT
+{body}
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        return proc, sorted(tmp_path.glob("hal0-install-report-*.txt"))
+
+    def test_explicit_exit_1_writes_a_report(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "CURRENT_STEP='Pre-flight checks'; exit 1")
+        assert proc.returncode == 1
+        assert len(reports) == 1, proc.stderr
+        assert "Phase: Pre-flight checks" in reports[0].read_text()
+        assert "Failure report saved" in proc.stderr
+
+    def test_success_writes_nothing(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "exit 0")
+        assert proc.returncode == 0
+        assert reports == []
+
+    def test_already_written_report_is_not_duplicated(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "_HAL0_REPORT_WRITTEN=1; exit 1")
+        assert proc.returncode == 1
+        assert reports == []
+
+    def test_install_sh_wires_exit_trap_and_err_trap_marks_written(self) -> None:
+        src = (REPO / "installer" / "install.sh").read_text()
+        assert "trap 'hal0_report_on_exit \"$?\"' EXIT" in src
+        assert "_HAL0_REPORT_WRITTEN=1" in src
+        # The EXIT trap must precede the first release-gate die().
+        assert src.index("hal0_report_on_exit") < src.index(
+            "Refusing to install from an unverified"
+        )
