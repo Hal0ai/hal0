@@ -1141,9 +1141,10 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
     intent). A ``stdio`` record has no supervisor to make it reachable, so
     ``hermes``/``brain`` reject with ``409 mcp.exposure_needs_supervisor``
     instead of accepting a flag that would never actually join anything.
-    Turning ``hermes``/``brain`` on for any installed record rejects with
+    Asking for ``hermes``/``brain`` on any installed record rejects with
     ``409 mcp.exposure_policy_unenforced`` until hal0 enforces the record's
-    ``[tools]`` policy on the agent's call path (#2358, #2303).
+    ``[tools]`` policy on the agent's call path (#2358, #2303) — including
+    re-asserting a ``true`` an upgraded record still carries (#2440).
     """
     if server_id in installed_registry.BUNDLED_SERVER_IDS:
         raise Conflict(
@@ -1175,13 +1176,22 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
             details={"server_id": server_id},
         )
     # #2358 (Remove with #2303): hal0 cannot enforce any user-installed
-    # record's [tools] policy on Hermes's direct call path, so turning a join
-    # on is refused for every record; the join itself skips them all. Only a
-    # false → true change counts: turning exposure off, or echoing an
-    # already-on target alongside a withdrawal, is narrowing and stays allowed.
+    # record's [tools] policy on Hermes's direct call path, so asking for a
+    # join is refused for every record; the join itself skips them all.
+    # A request that withdraws a target is narrowing and stays allowed, even
+    # when it echoes the other target's current ``true`` (a toggle UI sends
+    # the whole pair). Any other ``true`` is refused whatever the record held
+    # before: an upgraded record can still carry ``true`` from before the
+    # guard while nothing joins it, and a 200 there would claim an exposure
+    # that does not exist (#2440).
     previous = record.exposure
+    agent_targets = ("hermes", "brain")
+    narrowing = any(getattr(previous, t) and not getattr(exposure, t) for t in agent_targets)
     turning_on = [
-        t for t in ("hermes", "brain") if getattr(exposure, t) and not getattr(previous, t)
+        t
+        for t in agent_targets
+        if getattr(exposure, t)
+        and (not getattr(previous, t) or (body.get(t) is True and not narrowing))
     ]
     if turning_on and not installed_registry.AGENT_CALL_PATH_ENFORCED:
         raise Conflict(

@@ -1110,7 +1110,34 @@ def test_patch_exposure_refuses_adding_a_target_to_an_exposed_record(
     _expose_directly("github", hermes=True)
     response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
     assert response.status_code == 409, response.text
-    assert response.json()["error"]["details"]["targets"] == ["brain"]
+    # #2440: the stale hermes=true is re-asserted, not narrowed, so it is
+    # refused alongside the new brain target.
+    assert response.json()["error"]["details"]["targets"] == ["hermes", "brain"]
+
+
+@pytest.mark.parametrize("target", ["hermes", "brain"])
+def test_patch_exposure_refuses_reasserting_a_stale_upgraded_flag(
+    client: TestClient, target: str
+) -> None:
+    """#2440: an upgraded record still carries ``true`` from before the #2358
+    guard, but nothing joins it. Re-asserting that ``true`` must be refused,
+    not answered with a 200 that claims the server is exposed."""
+    _install_github(client)
+    _expose_directly("github", **{target: True})
+    response = client.patch("/api/mcp/github/exposure", json={target: True})
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "mcp.exposure_policy_unenforced"
+    assert error["details"]["targets"] == [target]
+
+
+def test_patch_exposure_refuses_reasserting_both_stale_flags(client: TestClient) -> None:
+    """Echoing every already-on target with nothing withdrawn is not narrowing."""
+    _install_github(client)
+    _expose_directly("github", hermes=True, brain=True)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": True})
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["details"]["targets"] == ["hermes", "brain"]
 
 
 def test_patch_exposure_can_still_turn_off_an_exposed_record(client: TestClient) -> None:
