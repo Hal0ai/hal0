@@ -1145,7 +1145,10 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": (
                     "Also remove registry rows whose file is missing on disk; "
                     "slot/stack-referenced rows are protected and only reported "
-                    "(missing_referenced), never deleted. Default false = add-only."
+                    "(missing_referenced), never deleted. Default false = add-only. "
+                    "Every scan also removes earlier auto-scan rows whose path is "
+                    "now under a skipped directory (e.g. ComfyUI custom_nodes/), "
+                    "listed under 'reconciled'."
                 ),
             },
         },

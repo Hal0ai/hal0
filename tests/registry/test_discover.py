@@ -633,8 +633,17 @@ def _auto_scan_row(model_id: str, path: Path) -> Model:
     )
 
 
+@pytest.fixture
+def no_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the slot/stack/config reference collector to "nothing referenced,
+    every source loaded" so reconcile tests never read host config."""
+    from hal0.registry import discover
+
+    monkeypatch.setattr(discover, "_collect_referenced_model_ids", lambda: (set(), True))
+
+
 def test_scan_and_register_reconciles_auto_scan_rows_under_skip_dirs(
-    tmp_path: Path, registry: ModelRegistry
+    tmp_path: Path, registry: ModelRegistry, no_refs: None
 ) -> None:
     """An upgraded box keeps rows an older scan registered under a dir the
     skip rules now exclude (#2443: ``custom_nodes/.../encoded-silence``).
@@ -685,8 +694,8 @@ def test_scan_and_register_reconcile_defaults_protection_to_referenced_ids(
     tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Callers that pass no ``protected_ids`` (boot auto-scan, config routes)
-    still never drop a slot/stack-referenced row: reconcile falls back to
-    ``referenced_model_ids()``."""
+    still never drop a slot/stack-referenced row: reconcile always unions in
+    the collected references."""
     from hal0.registry import discover
 
     root = tmp_path / "models"
@@ -698,7 +707,7 @@ def test_scan_and_register_reconcile_defaults_protection_to_referenced_ids(
     b.write_bytes(b"b" * 64)
     registry.add(_auto_scan_row("a", a.resolve()))
     registry.add(_auto_scan_row("b", b.resolve()))
-    monkeypatch.setattr(discover, "referenced_model_ids", lambda: {"b"})
+    monkeypatch.setattr(discover, "_collect_referenced_model_ids", lambda: ({"b"}, True))
 
     cfg = ModelsConfig(roots=[str(root)], file_extensions=[".safetensors"])
     result = scan_and_register(registry, cfg)
@@ -706,3 +715,127 @@ def test_scan_and_register_reconcile_defaults_protection_to_referenced_ids(
     assert result["reconciled"] == ["a"]
     assert result["reconcile_referenced"] == ["b"]
     assert registry.has("b")
+
+
+def test_reconcile_skipped_when_reference_collection_incomplete(
+    tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If any slot/stack/config source failed to load, the protected set is
+    partial; reconcile must skip that scan rather than delete with it."""
+    from hal0.registry import discover
+
+    root = tmp_path / "models"
+    node = root / "custom_nodes" / "ComfyUI-Foo"
+    node.mkdir(parents=True)
+    a = node / "a.safetensors"
+    a.write_bytes(b"a" * 64)
+    registry.add(_auto_scan_row("a", a.resolve()))
+    monkeypatch.setattr(discover, "_collect_referenced_model_ids", lambda: (set(), False))
+
+    cfg = ModelsConfig(roots=[str(root)], file_extensions=[".safetensors"])
+    result = scan_and_register(registry, cfg)
+
+    assert result["reconciled"] == []
+    assert registry.has("a")
+
+
+def test_root_under_skip_named_parent_keeps_llm_rows(
+    tmp_path: Path, registry: ModelRegistry, no_refs: None
+) -> None:
+    """Skip-dir names only count BELOW the scan root. A root such as
+    ``/data/embeddings/models`` must keep (and keep discovering) its sharded
+    and single-file LLMs; ``main`` registered such shard sets as auto-scan."""
+    root = tmp_path / "embeddings" / "models"
+    root.mkdir(parents=True)
+    s1 = root / "qwen3-32b-q4-00001-of-00002.gguf"
+    s2 = root / "qwen3-32b-q4-00002-of-00002.gguf"
+    s1.write_bytes(b"a" * 64)
+    s2.write_bytes(b"b" * 64)
+    single = root / "llama-8b-q4.gguf"
+    single.write_bytes(b"c" * 64)
+
+    # Fresh discovery still groups the shard set under this root.
+    names = {
+        c.path.name for c in find_candidates(roots=[root], extensions=[".gguf"], known_paths=set())
+    }
+    assert "qwen3-32b-q4-00001-of-00002.gguf" in names
+
+    row = _auto_scan_row("qwen3-32b-q4-00001-of-00002", s1.resolve())
+    row.metadata = {**row.metadata, "shards": [str(s1.resolve()), str(s2.resolve())]}
+    registry.add(row)
+    registry.add(_auto_scan_row("llama-8b-q4", single.resolve()))
+
+    cfg = ModelsConfig(roots=[str(root)], file_extensions=[".gguf"])
+    result = scan_and_register(registry, cfg)
+
+    assert result["reconciled"] == []
+    assert registry.has("qwen3-32b-q4-00001-of-00002")
+    assert registry.has("llama-8b-q4")
+
+
+def test_reconcile_leaves_rows_outside_every_root(
+    tmp_path: Path, registry: ModelRegistry, no_refs: None
+) -> None:
+    """A row outside every configured root (e.g. a root since removed) is
+    never reconciled, even when an ancestor dir is named like a skip dir."""
+    root = tmp_path / "models"
+    root.mkdir()
+    elsewhere = tmp_path / "loras" / "llm"
+    elsewhere.mkdir(parents=True)
+    orphan = elsewhere / "mistral-7b-q4.gguf"
+    orphan.write_bytes(b"m" * 64)
+    registry.add(_auto_scan_row("mistral-7b-q4", orphan.resolve()))
+
+    cfg = ModelsConfig(roots=[str(root)], file_extensions=[".gguf"])
+    result = scan_and_register(registry, cfg)
+
+    assert result["reconciled"] == []
+    assert registry.has("mistral-7b-q4")
+
+
+def test_collect_referenced_model_ids_covers_brain_chat_and_realtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``[brain_chat] model``/``tool_model`` and ``[realtime] default_model``/
+    ``stt_model``/``tts_model`` name model ids too; they must be protected."""
+    import hal0.capabilities.config as cap_config
+    import hal0.config.loader as loader
+    import hal0.stacks as stacks
+    from hal0.config.schema import BrainChatConfig, Hal0Config, RealtimeConfig
+    from hal0.registry import discover
+
+    class _NoStacks:
+        def list(self) -> list:
+            return []
+
+    class _NoCaps:
+        def __init__(self) -> None:
+            self.selections: dict = {}
+
+    cfg = Hal0Config(
+        brain_chat=BrainChatConfig(model="brain-m", tool_model="tool-m"),
+        realtime=RealtimeConfig(default_model="rt-chat", stt_model="rt-stt", tts_model="rt-tts"),
+    )
+    monkeypatch.setattr(loader, "list_slots", lambda: [])
+    monkeypatch.setattr(loader, "load_hal0_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(cap_config, "load_capabilities_config", lambda *a, **k: _NoCaps())
+    monkeypatch.setattr(stacks, "StacksCatalog", _NoStacks)
+
+    ids, complete = discover._collect_referenced_model_ids()
+    assert complete
+    assert {"brain-m", "tool-m", "rt-chat", "rt-stt", "rt-tts"} <= ids
+
+
+def test_collect_referenced_model_ids_flags_a_failed_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any source that raises marks the collection incomplete."""
+    import hal0.config.loader as loader
+    from hal0.registry import discover
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("bad toml")
+
+    monkeypatch.setattr(loader, "load_hal0_config", _boom)
+    _ids, complete = discover._collect_referenced_model_ids()
+    assert complete is False

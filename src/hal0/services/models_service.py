@@ -503,10 +503,7 @@ async def auto_scan_and_register(
     """
     from hal0.registry.discover import referenced_model_ids, scan_and_register
 
-    # None (not an empty set) when not pruning: scan_and_register's
-    # skip-dir reconcile then resolves slot/stack refs itself, so a
-    # referenced row is never dropped just because prune is off.
-    protected_ids = referenced_model_ids() if prune else None
+    protected_ids = referenced_model_ids() if prune else set()
     result = scan_and_register(registry, models_cfg, prune=prune, protected_ids=protected_ids)
     if event_bus is not None:
         for mid in result.get("added", []):

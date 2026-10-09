@@ -380,7 +380,14 @@ def model_scan() -> None:
     console.print(f"Scanned: {', '.join(roots) or '—'}")
     for mid in added:
         console.print(f"  [green]+[/green] {mid}")
+    # Auto-scan rows whose path is now under a skipped dir (e.g. ComfyUI
+    # custom_nodes/) are removed at scan time; say so, never silently.
+    reconciled = result.get("reconciled", []) or []
+    for mid in reconciled:
+        console.print(f"  [red]-[/red] {mid} [dim](under a skipped directory)[/dim]")
     console.print(f"[bold]{len(added)}[/bold] added, {skipped} skipped.")
+    if reconciled:
+        console.print(f"[bold]{len(reconciled)}[/bold] removed (under a skipped directory).")
     if not added:
         console.print(
             "[dim]Nothing new. If your files live elsewhere, check the scanned "
