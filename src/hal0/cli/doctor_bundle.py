@@ -65,20 +65,29 @@ def _redact_text(text: str) -> str:
     copies. The bundle is what users attach to public bug reports, so this
     is the full shareable-text pass (#2434), not just a Bearer/JWT scrub:
 
-    1. :func:`hal0.redaction.redact_shareable_text` masks every plausible
+    1. :func:`hal0.redaction.redact_audit_row_secret_args` masks the
+       secret args of each ``mcp.tool.invoked`` audit row, which rows logged
+       before the write-time masking still carry in clear (#2434). It runs
+       first, on the text as rendered, so the row is still parseable;
+    2. :func:`hal0.redaction.redact_shareable_text` masks every plausible
        secret value seen as ``NAME=value`` / ``NAME: value`` wherever it
        reappears, then the secret shapes on each line (#2409);
-    2. :func:`hal0.redaction.redact_log_line` runs on each line, as
+    3. :func:`hal0.redaction.redact_log_line` runs on each line, as
        ``/api/logs`` and MCP ``logs_tail`` do on read (#2403);
-    3. the Bearer / JWT scrub, kept as a last pass.
+    4. the Bearer / JWT scrub, kept as a last pass.
 
     Complements (does not replace) ``api._redact.redact_config``, which
     scrubs by KEY NAME in structured config trees. Line breaks, including a
     trailing newline, are preserved.
     """
-    from hal0.redaction import redact_log_line, redact_shareable_text
+    from hal0.redaction import (
+        redact_audit_row_secret_args,
+        redact_log_line,
+        redact_shareable_text,
+    )
 
-    shared = redact_shareable_text(text)
+    audited = "\n".join(redact_audit_row_secret_args(line) for line in text.split("\n"))
+    shared = redact_shareable_text(audited)
     body = "\n".join(redact_log_line(line) for line in shared.split("\n"))
     return _BEARER_RE.sub("Bearer ***REDACTED***", _JWT_RE.sub("***JWT***", body))
 

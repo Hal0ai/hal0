@@ -450,3 +450,56 @@ def test_bundle_journal_captures_mask_every_secret_shape(
         assert "mcp.tool.invoked tool=slot_list" in body
         assert "max_tokens=4096 HAL0_PORT=8080" in body
         assert body.endswith("\n")
+
+
+# Audit rows written before #2434 carry the args verbatim. An opaque value
+# with no known token prefix and no secret-looking name: only the tool's own
+# secret-arg list says it is a credential.
+_PRE_FIX_AUDIT_ROWS = (
+    # structlog ConsoleRenderer (the API's default) renders args as a repr.
+    "Oct 09 hal0-api[1]: 2026-10-01 [info     ] mcp.tool.invoked               "
+    "args={'name': 'openai', 'key': 'OPENAI_API_KEY', 'value': 'OPAQUEdictrepr42'} "
+    "client_id=c1 gated=True outcome=enqueued timestamp=1.0 tool=provider_credential_write\n"
+    # A JSON rendering of the same row.
+    'Oct 09 hal0-api[1]: {"event": "mcp.tool.invoked", "client_id": "c1", '
+    '"tool": "provider_credential_write", "args": {"name": "openai", '
+    '"key": "OPENAI_API_KEY", "value": "OPAQUEjson42"}, "gated": true}\n'
+    # mcp_server_config_write: every env value is sent as a header.
+    "Oct 09 hal0-api[1]: mcp.tool.invoked args={'server_id': 'notes', "
+    "'env': {'X-Auth': 'OPAQUEenv1', 'Other': \"it's OPAQUEenv2\"}, 'enabled': True} "
+    "tool=mcp_server_config_write\n"
+    'Oct 09 hal0-api[1]: {"event": "mcp.tool.invoked", "tool": "mcp_server_config_write", '
+    '"args": {"server_id": "notes", "env": {"X-Auth": "OPAQUEenv3", "B": "x\\"}OPAQUEenv4"}}}\n'
+    # Another tool's "value" arg is not a secret and stays readable.
+    "Oct 09 hal0-api[1]: mcp.tool.invoked args={'path': 'a.b', 'value': 'keepme'} "
+    "tool=config_write\n"
+)
+
+
+def test_bundle_masks_secret_args_in_pre_fix_audit_rows(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2434: an audit row logged before the write-time fix still has the
+    credential in clear; the bundle export masks the tool's secret args."""
+    import subprocess
+
+    original_run = doctor_bundle.subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[0] == "journalctl":
+            return subprocess.CompletedProcess(argv, 0, stdout=_PRE_FIX_AUDIT_ROWS, stderr="")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_bundle.subprocess, "run", fake_run)
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    body = (out / "logs" / f"{doctor_bundle._LOG_UNITS[0]}.log").read_text()
+    assert "OPAQUE" not in body, body
+    assert "'name': 'openai'" in body
+    assert '"name": "openai"' in body
+    assert "'X-Auth':" in body and '"X-Auth":' in body
+    assert "'server_id': 'notes'" in body
+    assert "'value': 'keepme'" in body
+    assert body.count("mcp.tool.invoked") == 5
