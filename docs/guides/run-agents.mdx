@@ -161,12 +161,13 @@ but its MCP tools are missing. `--repair` forces every phase instead of
 converging: it rebuilds the venv, re-writes the persona seeds and
 re-renders the config.
 
-For finer control — skipping a phase, staging the agent wheel
-offline, or a dry run that doesn't persist the checkpoint — drop to the
-underlying command directly:
+To stage the agent wheel offline or watch each phase as it runs, drop to
+the underlying command directly. It is one linear pass: there is no
+preview mode and no way to skip a phase, and it refuses `--dry-run` and
+`--skip-phase` rather than run a real install.
 
 ```sh
-hal0 agent bootstrap hermes --dry-run
+hal0 agent bootstrap hermes --offline
 hal0 agent bootstrap hermes --repair --verbose
 ```
 

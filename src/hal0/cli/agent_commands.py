@@ -685,8 +685,6 @@ def _run_as_hal0(
 def _provision_hermes(
     *,
     repair: bool = False,
-    dry_run: bool = False,
-    skip_phases: tuple[str, ...] = (),
     offline: bool = False,
     verbose: bool = False,
     terminal_tool: bool | None = None,
@@ -722,12 +720,7 @@ def _provision_hermes(
         previous = _os.environ.get(HERMES_TERMINAL_ENV)
         _os.environ.update(provision_env)
         try:
-            rc = bootstrap_cli(
-                repair=repair,
-                dry_run=dry_run,
-                skip_phases=tuple(skip_phases),
-                verbose=verbose,
-            )
+            rc = bootstrap_cli(repair=repair, verbose=verbose)
         finally:
             if provision_env:
                 if previous is None:
@@ -741,10 +734,6 @@ def _provision_hermes(
         argv = [hal0_bin, "agent", "bootstrap", "hermes"]
         if repair:
             argv.append("--repair")
-        if dry_run:
-            argv.append("--dry-run")
-        for phase in skip_phases:
-            argv += ["--skip-phase", phase]
         if offline:
             argv.append("--offline")
         if verbose:
@@ -754,10 +743,7 @@ def _provision_hermes(
     # A posture change only reaches the model once the process re-reads its
     # config. Done HERE rather than in _install_hermes so every provisioning
     # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
-    # land in this function and all now honour an explicit answer. NOT gated on
-    # ``dry_run``: in this pipeline that flag only suppresses the run report,
-    # the config is still written, so a "dry" opt-out that skipped the restart
-    # would leave the live agent holding the tools.
+    # land in this function and all now honour an explicit answer.
     if rc == 0 and provision_env:
         _restart_hermes_after_posture_change()
     return rc
@@ -1523,16 +1509,12 @@ def bootstrap_hermes(
         "--repair",
         help="Force every step to re-run its writes (root: also reconciles ownership).",
     ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Run the pass but don't persist the provision.json report.",
-    ),
-    skip_phase: list[str] = typer.Option(
-        [],
-        "--skip-phase",
-        help="Skip the named phase (may be repeated).",
-    ),
+    # #2445: both flags predate the linear installer, which has no plan-only
+    # mode and no phase selection. They stay parseable (hidden) only so an old
+    # script gets a clear "not supported" error instead of a generic
+    # unknown-option one, and never the real install it asked to preview.
+    dry_run: bool = typer.Option(False, "--dry-run", hidden=True),
+    skip_phase: list[str] = typer.Option([], "--skip-phase", hidden=True),
     offline: bool = typer.Option(
         False,
         "--offline",
@@ -1545,17 +1527,23 @@ def bootstrap_hermes(
     # hermes_provision module's downstream slices grow heavier deps.
     import os as _os
 
+    unsupported = [
+        flag for flag, given in (("--dry-run", dry_run), ("--skip-phase", skip_phase)) if given
+    ]
+    if unsupported:
+        # Refuse before the root prelude or the re-exec: both of those write.
+        _stderr_console.print(
+            f"[red]error[/red]: {', '.join(unsupported)} not supported. The Hermes "
+            "installer is one linear convergent pass with no preview mode and no "
+            "phase selection. Inspect the last run with "
+            "[bold]hal0 agent status hermes[/bold]."
+        )
+        raise typer.Exit(2)
     if offline:
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     # §7.4: drops to hal0 first when invoked as root (re-execs this same command
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(
-        repair=repair,
-        dry_run=dry_run,
-        skip_phases=tuple(skip_phase),
-        offline=offline,
-        verbose=verbose,
-    )
+    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose)
     raise typer.Exit(rc)
 
 

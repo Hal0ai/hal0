@@ -7067,8 +7067,6 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
 def bootstrap_cli(
     *,
     repair: bool,
-    dry_run: bool = False,
-    skip_phases: tuple[str, ...] = (),
     verbose: bool = False,
     state_root: Path | None = None,
 ) -> int:
@@ -7077,16 +7075,12 @@ def bootstrap_cli(
     Returns a POSIX exit code (0 = success, 1 = any step failed). The
     ``--adopt`` capture flag is retired (spec-retired, O14): the single-managed
     HERMES_HOME model means hal0 owns the tree by construction, so there is no
-    foreign install to capture. ``skip_phases`` is a retired no-op kept in the
-    signature so the existing ``hal0 agent bootstrap`` flags keep parsing;
-    ``dry_run`` suppresses the last-run report write.
+    foreign install to capture. The former ``dry_run`` / ``skip_phases``
+    parameters are gone too (#2445): the pass is linear with no plan-only
+    mode, so "dry run" only ever meant "real install, no report" and phase
+    skipping was silently dropped. The CLI now refuses both flags up front.
     """
-    report = install_hermes(
-        repair=repair,
-        state_root=state_root,
-        write_report=not dry_run,
-        verbose=verbose,
-    )
+    report = install_hermes(repair=repair, state_root=state_root, verbose=verbose)
     if verbose:
         target = (state_root or _DEFAULT_STATE_ROOT) / _STATE_FILE_NAME
         print(f"state: {target}")

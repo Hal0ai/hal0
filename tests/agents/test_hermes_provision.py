@@ -135,9 +135,7 @@ def test_bootstrap_cli_returns_zero_on_success(
         return real(**kw)
 
     monkeypatch.setattr(hp, "install_hermes", _wrapped)
-    rc = hp.bootstrap_cli(
-        repair=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path / "state"
-    )
+    rc = hp.bootstrap_cli(repair=False, verbose=False, state_root=tmp_path / "state")
     assert rc == 0
 
 
@@ -163,13 +161,11 @@ def test_bootstrap_cli_returns_one_on_failure(
         return real(**kw)
 
     monkeypatch.setattr(hp, "install_hermes", _wrapped)
-    rc = hp.bootstrap_cli(
-        repair=False, dry_run=False, skip_phases=(), verbose=False, state_root=tmp_path / "state"
-    )
+    rc = hp.bootstrap_cli(repair=False, verbose=False, state_root=tmp_path / "state")
     assert rc == 1
 
 
-def test_bootstrap_cli_dry_run_skips_report(
+def test_bootstrap_cli_always_writes_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     install_target: tuple[Path, Path],
@@ -186,8 +182,12 @@ def test_bootstrap_cli_dry_run_skips_report(
 
     monkeypatch.setattr(hp, "install_hermes", _wrapped)
     sr = tmp_path / "state"
-    hp.bootstrap_cli(repair=False, dry_run=True, skip_phases=(), verbose=False, state_root=sr)
-    assert not (sr / "provision.json").exists()
+    # #2445: there is no report-less "dry run" any more — every pass is a real
+    # pass, so it always records what it did.
+    assert hp.bootstrap_cli(repair=False, verbose=False, state_root=sr) == 0
+    assert (sr / "provision.json").exists()
+    with pytest.raises(TypeError):
+        hp.bootstrap_cli(repair=False, dry_run=True, state_root=sr)  # type: ignore[call-arg]
 
 
 # ── #240 phase impls — preflight / install / home_init ──────────────────────
