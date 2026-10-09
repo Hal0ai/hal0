@@ -9,7 +9,10 @@ content first) so the two agree.
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,13 +86,83 @@ def test_migration_skips_collisions_and_leaves_dir(stores: tuple[Path, Path]) ->
     (default / "Model-NPU2").mkdir(parents=True)
     (default / "Model-NPU2" / "keep.bin").write_text("home-copy", encoding="utf-8")
 
-    flm.ensure_host_flm_store_link()
+    # #2446: a collision leaves flm's default a real dir, so a pull now would
+    # land outside the store. That must stop the caller, not log and continue.
+    with pytest.raises(flm.FLMStoreLinkError) as exc_info:
+        flm.ensure_host_flm_store_link()
+    assert "Model-NPU2" in exc_info.value.message
 
     # Store copy preserved; default dir left in place (not symlinked over a
     # collision), so nothing is orphaned or lost.
     assert _read(store / "Model-NPU2" / "keep.bin") == "store-copy"
     assert not default.is_symlink()
     assert (default / "Model-NPU2" / "keep.bin").exists()
+
+
+def test_file_at_default_path_raises(stores: tuple[Path, Path]) -> None:
+    default, _store = stores
+    default.parent.mkdir(parents=True)
+    default.write_text("not a dir", encoding="utf-8")
+
+    with pytest.raises(flm.FLMStoreLinkError):
+        flm.ensure_host_flm_store_link()
+    assert default.read_text(encoding="utf-8") == "not a dir"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory write bits")
+def test_root_owned_parent_fails_loud_as_service_user(stores: tuple[Path, Path]) -> None:
+    """#2446: hal0-api runs User=hal0; the installer made ``.config/flm`` root-owned.
+
+    Simulated with a parent the test user cannot write. The rmdir of flm's
+    default dir fails; before the fix that was a logged warning and the pull
+    went on into the default dir, outside the store the slot mounts.
+    """
+    default, store = stores
+    default.mkdir(parents=True)
+    parent = default.parent
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(flm.FLMStoreLinkError) as exc_info:
+            flm.ensure_host_flm_store_link()
+    finally:
+        parent.chmod(0o755)
+    msg = exc_info.value.message
+    assert "hal0 doctor perms --fix" in msg
+    assert str(default) in msg and str(store) in msg
+    assert default.is_dir() and not default.is_symlink()
+
+
+def test_service_user_store_dir_is_group_writable_despite_umask(tmp_path: Path) -> None:
+    """Non-root (User=hal0, UMask=0022) still births the store 2775, not 2755.
+
+    The host pull writes through the hal0 group; a 2755 dir only works for the
+    exact owner.
+    """
+    store = tmp_path / "models" / "flm" / "models"
+    old = os.umask(0o022)
+    try:
+        if os.geteuid() == 0:
+            pytest.skip("covers the unprivileged branch")
+        flm._ensure_flm_models_dir(str(store))
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(store.stat().st_mode) == 0o2775
+
+
+def test_root_chowns_the_resolved_store_to_container_uid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As root, the RESOLVED store (not only the default dir) gets uid 1000 + hal0 group."""
+    store = tmp_path / "models" / "flm" / "models"
+    calls: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(flm.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(flm.os, "chown", lambda p, u, g: calls.append((p, u, g)))
+    monkeypatch.setattr(
+        "grp.getgrnam", lambda name: SimpleNamespace(gr_gid=4242) if name == "hal0" else None
+    )
+    flm._ensure_flm_models_dir(str(store))
+    assert calls == [(str(store), 1000, 4242)]
+    assert stat.S_IMODE(store.stat().st_mode) == 0o2775
 
 
 def test_repoints_stale_symlink(stores: tuple[Path, Path]) -> None:
