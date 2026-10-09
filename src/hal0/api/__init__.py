@@ -1333,17 +1333,47 @@ async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
     )
 
 
+async def _start_model_cache_refresher(ctx: BootState) -> None:
+    """Start the READY-event model-cache refresher and wait until it listens.
+
+    Started before any slot reconciliation (#2442): startup reconcile can
+    adopt a slot into WARMING, and its promotion poll fires the READY
+    ``slot.state`` event this listener keys on. Started any later, a
+    promotion landing during boot would never refresh the model cache, and
+    ``hal0/<name>`` would keep falling back to the anchor. The stop
+    callback is registered with the lifespan's AsyncExitStack.
+    """
+    ctx.refresh_task = asyncio.create_task(
+        _refresh_model_cache_on_ready(
+            ctx.events, ctx.upstreams, ctx.slot_manager, ctx.fetch_and_cache, ctx.model_cache
+        )
+    )
+
+    async def _stop_refresh_task() -> None:
+        ctx.refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ctx.refresh_task
+
+    ctx.stop_refresh_task = _stop_refresh_task
+    # One loop turn lets the task enter ``event_bus.subscribe()`` and park on
+    # its queue, so events emitted from here on are delivered.
+    await asyncio.sleep(0)
+
+
 async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     """Phase — one-shot slot reconciliation passes + idle-monitor start.
 
-    ORDERING: ``check_outstanding_migrations`` (#1960, safety net) →
+    ORDERING: ``_start_model_cache_refresher`` (#2442) →
+    ``check_outstanding_migrations`` (#1960, safety net) →
     ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots`` →
     ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
     trio shadows just reconciled) → ``start_idle_monitor``. Everything from
     ``migrate_slot_dir`` on is otherwise preserved exactly from the
     monolithic boot.
     """
-    # #1960 safety net, FIRST: heal a box whose post-activation data
+    # #2442: listen for READY events before anything can adopt and promote.
+    await _start_model_cache_refresher(ctx)
+    # #1960 safety net, FIRST of the reconciliation passes: heal a box whose post-activation data
     # migrations (schema, slot-TOML relabels, registry cleanup) never ran —
     # either because it upgraded before this fix existed, or because
     # Updater.commit()'s post-swap migration subprocess itself failed (see
@@ -1885,18 +1915,10 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     # ``Task group is not initialized``.
     ctx.managers = getattr(app.state, "mcp_session_managers", []) or []
 
-    ctx.refresh_task = asyncio.create_task(
-        _refresh_model_cache_on_ready(
-            ctx.events, ctx.upstreams, ctx.slot_manager, ctx.fetch_and_cache, ctx.model_cache
-        )
-    )
-
-    async def _stop_refresh_task() -> None:
-        ctx.refresh_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ctx.refresh_task
-
-    ctx.stop_refresh_task = _stop_refresh_task
+    # The READY-event model-cache refresher is started earlier, at the top of
+    # ``_boot_slot_reconcile`` (see ``_start_model_cache_refresher``), so a
+    # slot promoted during boot is not missed (#2442). Its stop callback is
+    # still registered with the AsyncExitStack in ``lifespan``.
 
     # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
     # saved LLM set after the img (ComfyUI) slot idles out — window from the
@@ -2405,19 +2427,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
-    await _run_boot_phase(report, "slot_reconcile", lambda: _boot_slot_reconcile(app, ctx))
-    await _run_boot_phase(report, "model_priming", lambda: _boot_model_priming(app, ctx))
-    await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
-    await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
-    await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
-    await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
-    await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
-    await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
-    # RELOCATE(brain-lane): terminal phase — namespace_register,
-    # brain_profile_seed, self_report (in that order; self_report last).
-    # Runs after every other phase so its self-report reflects a fully
-    # booted process. See _boot_brain_lane's docstring.
-    await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
+    # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
+    # the AsyncExitStack below exists; a later phase failing must not leave
+    # it subscribed.
+    try:
+        await _run_boot_phase(report, "slot_reconcile", lambda: _boot_slot_reconcile(app, ctx))
+        await _run_boot_phase(report, "model_priming", lambda: _boot_model_priming(app, ctx))
+        await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
+        await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
+        await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
+        await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
+        await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
+        await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))
+        # RELOCATE(brain-lane): terminal phase — namespace_register,
+        # brain_profile_seed, self_report (in that order; self_report last).
+        # Runs after every other phase so its self-report reflects a fully
+        # booted process. See _boot_brain_lane's docstring.
+        await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
+    except BaseException:
+        if ctx.stop_refresh_task is not None:
+            with contextlib.suppress(Exception):
+                await ctx.stop_refresh_task()
+        raise
 
     from contextlib import AsyncExitStack
 

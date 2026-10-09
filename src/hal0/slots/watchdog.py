@@ -388,7 +388,7 @@ class SlotWatchdog:
             )
             return False
 
-    async def probe_health(self, slot_name: str) -> bool:
+    async def probe_health(self, slot_name: str, *, strict: bool = False) -> bool:
         """Probe the slot's model-server ``/health`` (#783/B4).
 
         Returns ``False`` only on a *definitive* not-ok response. Anything
@@ -397,13 +397,20 @@ class SlotWatchdog:
         exception — returns ``True`` so the fail-watch never demotes a slot
         it cannot actually judge. The watcher's strike counter handles
         transient single failures; this method only reports one probe.
+
+        ``strict=True`` inverts that bias for callers that PROMOTE on a
+        healthy answer (#2442's adopted-WARMING poll): there, only a
+        conclusive ``ok`` counts, and anything inconclusive reads as
+        not-healthy-yet.
         """
         cfg = await self._host._maybe_load_config(slot_name)
-        if not cfg or is_npu_trio_shadow(cfg):
+        if not cfg:
+            return not strict
+        if is_npu_trio_shadow(cfg):
             return True
         port = _cfg_port(cfg)
         if not port:
-            return True
+            return not strict
 
         from hal0.providers.container import container_provider
 
@@ -422,7 +429,7 @@ class SlotWatchdog:
                 "slot.health_probe_failed",
                 extra={"slot": slot_name, "error": str(exc)},
             )
-            return True
+            return not strict
         return bool(health.get("ok"))
 
     async def readiness_check(self, slot_name: str) -> tuple[bool, str]:

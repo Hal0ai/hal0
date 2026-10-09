@@ -207,6 +207,15 @@ def _crash_loop_remaining_s(failures: int, last_failure: float) -> float:
 # EventBus ring + durable activity journal.
 _FLAP_COALESCE_WINDOW_S = 60.0
 
+# #2442: a slot ADOPTED into WARMING (its unit was live but /health said
+# "still loading" when adoption probed it) has no load in flight to carry it
+# to READY, and the fail-watcher never probes /health during WARMING. A
+# background poll probes /health this often and promotes the slot the moment
+# its model server answers. It gives up after the WARMING staleness bound, at
+# which point the fail-watcher's stale-WARMING reload is the backstop.
+_ADOPTED_WARMING_POLL_INTERVAL_S: float = 5.0
+_ADOPTED_WARMING_POLL_MAX_S: float = _WARMING_STALE_AFTER_S
+
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
 #
@@ -418,6 +427,10 @@ class SlotManager:
         # slot is in a live state. Owned here (not by SlotWatchdog) since
         # `_transition` needs to check/mutate it synchronously.
         self._fail_watchers: dict[int, asyncio.Task[None]] = {}
+        # #2442: per-slot /health poll for slots ADOPTED into WARMING. Its
+        # presence is the "adopted, not cold-loading" marker: only adoption
+        # starts one, and any later transition cancels it.
+        self._adopt_promoters: dict[int, asyncio.Task[None]] = {}
         # Push-driven failure detector (P3-slots §1b-watchdog) — see watchdog.py.
         self._watchdog: SlotWatchdog = SlotWatchdog(self)
         # PULLING — optional model-pull hook + cache predicate.  When
@@ -588,8 +601,22 @@ class SlotManager:
                 # it. Adopt it here so reconciliation is the single point
                 # that heals the drift at startup.
                 adopted = await self._maybe_adopt_running_slot(name, cfg)
-                if adopted is None:
+                if adopted is None or adopted.state not in DISPATCHABLE_STATES:
                     # Nothing to adopt (e.g. no model configured) — leave it.
+                    # Adopted into WARMING (#2442): not routable yet; the
+                    # promotion poll registers the upstream once /health
+                    # answers.
+                    continue
+            elif state is SlotState.WARMING and not self._lock(name).locked():
+                # #2442: WARMING read back from state.json at startup. It was
+                # loaded from disk by ``_current_state`` without a
+                # ``_transition``, so no fail-watcher is armed and no load in
+                # this process owns it (every load holds the slot lock for its
+                # whole run) — nothing would ever move it again. Adopt it: a
+                # ready server goes straight to READY, a still-loading one
+                # re-enters WARMING with a watcher and the promotion poll.
+                adopted = await self._maybe_adopt_running_slot(name, cfg)
+                if adopted is None or adopted.state not in DISPATCHABLE_STATES:
                     continue
             else:
                 # Transitional (pulling/starting/warming/unloading): a load
@@ -795,6 +822,7 @@ class SlotManager:
         "_last_used",
         "_cfg_cache",
         "_fail_watchers",
+        "_adopt_promoters",
         "_serving_count",
         "_dispatch_tickets",
         "_load_failures",
@@ -1406,6 +1434,10 @@ class SlotManager:
         # state.  Done after broadcast so the SSE frame for the transition
         # itself lands before any watcher-induced follow-up frame.
         self._watchdog.update(name, to_state)
+        # #2442: any transition ends an adopted-WARMING promotion poll — a
+        # load, unload or watchdog verdict now owns the slot. The poll's own
+        # WARMING → READY lands here too and is left to return on its own.
+        self._cancel_adopt_promoter(name)
         return record
 
     async def _broadcast(self, record: SlotStateRecord) -> None:
@@ -1465,9 +1497,9 @@ class SlotManager:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.is_active`."""
         return await self._watchdog.is_active(slot_name)
 
-    async def _probe_health(self, slot_name: str) -> bool:
+    async def _probe_health(self, slot_name: str, *, strict: bool = False) -> bool:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.probe_health`."""
-        return await self._watchdog.probe_health(slot_name)
+        return await self._watchdog.probe_health(slot_name, strict=strict)
 
     async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`."""
@@ -4235,6 +4267,10 @@ class SlotManager:
         # the TTL runs from now, and the sweeps' state.json fallback covers
         # any dispatchable slot that still slips through in-memory tracking.
         self.bump_last_used(slot_name)
+        if resolved is SlotState.WARMING:
+            # #2442: no load is in flight to carry an adopted slot to READY,
+            # so poll /health until its model server answers.
+            self._start_adopt_promoter(slot_name)
         log.info(
             "slot.adopted",
             extra={
@@ -4260,6 +4296,120 @@ class SlotManager:
                 },
             )
         )
+
+    def _start_adopt_promoter(self, slot_name: str) -> None:
+        """Arm the adopted-WARMING ``/health`` poll for ``slot_name`` (#2442)."""
+        key = self._key(slot_name)
+        existing = self._adopt_promoters.get(key)
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._adopt_promoters[key] = asyncio.create_task(
+                self._promote_adopted_warming_loop(slot_name),
+                name=f"hal0-adopt-promote-{slot_name}",
+            )
+        except RuntimeError:
+            # No running loop (sync-context test). Nothing to poll from.
+            log.debug("slot.adopt_promote_no_loop", extra={"slot": slot_name})
+
+    def _cancel_adopt_promoter(self, slot_name: str) -> None:
+        """Stop the adopted-WARMING poll, unless it is the caller (#2442)."""
+        key = self._key(slot_name)
+        task = self._adopt_promoters.get(key)
+        if task is None:
+            return
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if task is current_task:
+            # The poll's own promotion transition — it returns by itself.
+            return
+        self._adopt_promoters.pop(key, None)
+        if not task.done():
+            task.cancel()
+
+    async def _promote_adopted_warming_loop(self, slot_name: str) -> None:
+        """Promote an ADOPTED WARMING slot to READY once ``/health`` answers.
+
+        Only adoption starts this loop. A cold load started by this process
+        never does: its own ``_await_ready`` owns the WARMING → READY edge,
+        and the fail-watcher's rule that ``/health`` is not probed during
+        WARMING stays intact for it. Exits on promotion, on any other
+        transition (which cancels it, see ``_transition``), or after
+        ``_ADOPTED_WARMING_POLL_MAX_S``, when the watchdog's stale-WARMING
+        reload takes over.
+        """
+        key = self._key(slot_name)
+        deadline = time.monotonic() + _ADOPTED_WARMING_POLL_MAX_S
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_ADOPTED_WARMING_POLL_INTERVAL_S)
+                if self._current_state(slot_name) is not SlotState.WARMING:
+                    return
+                # A dead unit is the fail-watcher's call, not ours; and a
+                # failing /health just means the model is still loading.
+                if not await self._is_active(slot_name):
+                    continue
+                # Strict: a transport error is inconclusive, and promoting on
+                # it would publish a slot nobody has seen answer.
+                if not await self._probe_health(slot_name, strict=True):
+                    continue
+                async with self._lock(slot_name):
+                    # Re-check under the lock: a load/unload that won the
+                    # lock has transitioned (and so cancelled us) already,
+                    # but never stamp over a state we did not adopt.
+                    if self._current_state(slot_name) is not SlotState.WARMING:
+                        return
+                    # Detach from the cancel hook before promoting. The idle
+                    # sweep's READY → IDLE takes no slot lock, and its
+                    # ``_transition`` would otherwise cancel this task midway
+                    # through the READY transition's event emit — skipping
+                    # the event the model-cache refresh keys on.
+                    if self._adopt_promoters.get(key) is asyncio.current_task():
+                        self._adopt_promoters.pop(key, None)
+                    await self._promote_adopted_slot(slot_name)
+                return
+            log.warning(
+                "slot.adopt_promote_gave_up",
+                extra={"slot": slot_name, "after_s": _ADOPTED_WARMING_POLL_MAX_S},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "slot.adopt_promote_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+        finally:
+            if self._adopt_promoters.get(key) is asyncio.current_task():
+                self._adopt_promoters.pop(key, None)
+
+    async def _promote_adopted_slot(self, slot_name: str) -> None:
+        """WARMING → READY for an adopted slot, as a load completion does it.
+
+        A cold load registers the slot's upstream (``_spawn_locked``) and then
+        transitions to READY; that transition's ``slot.state`` event is what
+        the api's model-cache refresher keys on. Same two steps here, so the
+        slot joins the loaded set ``hal0/<name>`` resolution reads (#2442).
+        """
+        # Restart the idle clock first. Adoption stamped it when the slot
+        # entered WARMING, up to ``_ADOPTED_WARMING_POLL_MAX_S`` ago — past
+        # the default idle-eviction TTL — so without this the next idle sweep
+        # unloads the slot it just saw promoted.
+        self.bump_last_used(slot_name)
+        cfg = await self._maybe_load_config(slot_name)
+        port = _cfg_port(cfg) if cfg else 0
+        if cfg and port and not is_npu_trio_shadow(cfg):
+            self._register_container_upstream(slot_name, port)
+        await self._transition(
+            slot_name,
+            SlotState.READY,
+            port=port,
+            message="adopted running slot (model server ready)",
+            extra={"health_ok": True},
+        )
+        log.info("slot.adopt_promoted", extra={"slot": slot_name, "port": port})
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────
