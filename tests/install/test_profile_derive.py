@@ -32,7 +32,9 @@ def _hw(*, platform="bare-metal-amd-gpu", compute=True, vulkan=True, npu=False):
     )
 
 
-def test_chat_on_rocm_box_picks_rocm():
+def test_chat_on_rocm_box_picks_rocm(monkeypatch):
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     # derive no longer prefers the MTP image on ROCm — chat/coder derive to the
     # plain `rocm` profile; MTP dense now lives on rocmfpx-rocm (opt-in only).
     hw = _hw(compute=True)
@@ -120,9 +122,11 @@ def test_npu_present_is_chat_only_no_trio_passengers():
     assert derive_device("embed-npu", hw, npu_opt_in=True) is None
 
 
-def test_embed_on_npu_box_derives_to_gpu_not_npu():
+def test_embed_on_npu_box_derives_to_gpu_not_npu(monkeypatch):
     """If embed is selected on an NPU box, it derives to the GPU lane,
     never to the NPU (design 2026-06-15)."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     hw = _hw(npu=True, compute=True)
     assert derive_device("embed", hw, npu_opt_in=True) == "gpu-rocm"
     assert derive_profile("embed", "gpu-rocm") == "embedding"
@@ -139,9 +143,11 @@ def test_npu_takes_utility_when_present_and_optin():
     assert npu_takes_utility(_hw(npu=False), npu_opt_in=True) is False
 
 
-def test_utility_capability_routes_like_chat_lane():
+def test_utility_capability_routes_like_chat_lane(monkeypatch):
     """The `utility` capability follows the chat lane: NPU when claimed,
     else the GPU lane (so the iGPU utility seed stays coherent)."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     npu_box = _hw(npu=True, compute=True)
     assert derive_device("utility", npu_box, npu_opt_in=True) == "npu"
     assert derive_profile("utility", "npu") == "flm"
@@ -296,6 +302,15 @@ def test_kfd_without_a_render_node_does_not_derive_rocm(monkeypatch):
     monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
     monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
     hw = _hw(platform="lxc", compute=False, vulkan=False)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+
+
+def test_compute_capable_with_kfd_only_does_not_derive_rocm(monkeypatch):
+    """#2452: ``compute_capable`` (rocm-smi exited 0) must not widen the ROCm
+    lane past ``rocm_lane_present()``: kfd with no render node is no lane."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    hw = _hw(platform="lxc", compute=True, vulkan=False)
     assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 

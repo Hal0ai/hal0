@@ -172,7 +172,7 @@ def _backend_for(hw: HardwareInfo) -> tuple[str, str]:
         # The ROCm lane needs /dev/kfd AND a render node (#2313, #2355) — the
         # same predicate the install seed and the picker use, so this ladder
         # cannot recommend a lane they decline.
-        if primary.compute_capable or rocm_lane_present():
+        if rocm_lane_present():
             if unified_gb >= _UMA_UNIFIED_GB_MIN and primary.vram_mb <= 4096:
                 return "rocm", f"AMD UMA (Strix Halo class — {unified_gb:.0f} GB unified)"
             return "rocm", "AMD GPU with ROCm compute reachable"

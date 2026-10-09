@@ -178,7 +178,9 @@ def test_cpu_only_host_seeds_chat_capable_profile(tmp_path) -> None:
 # every fresh install.
 
 
-def test_seeded_slot_carries_container_runtime_and_profile() -> None:
+def test_seeded_slot_carries_container_runtime_and_profile(monkeypatch) -> None:
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["runtime"] == "container"
     # Strix-Halo-class AMD UMA with ROCm reachable → ROCm device (#1888: never
@@ -190,7 +192,7 @@ def test_seeded_slot_carries_container_runtime_and_profile() -> None:
 # ── #1888: the Vulkan lane is never recommended on AMD ───────────────────────
 
 
-def test_amd_uma_recommends_rocm_not_vulkan() -> None:
+def test_amd_uma_recommends_rocm_not_vulkan(monkeypatch) -> None:
     """A ROCm-capable Strix Halo box lands on gpu-rocm.
 
     Regression for #1888: ``_backend_for`` used to return ``vulkan`` for the
@@ -198,6 +200,8 @@ def test_amd_uma_recommends_rocm_not_vulkan() -> None:
     backend they never executed on (with /dev/kfd) or executed on and emitted
     garbage from (without it).
     """
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["device"] == "gpu-rocm"
     assert "vulkan" not in str(rec.get("backend", "")).lower()
@@ -243,6 +247,16 @@ def test_amd_with_kfd_but_no_render_node_is_not_rocm(monkeypatch) -> None:
     monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
     monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: False)
     rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=False))
+    assert rec["device"] == "cpu"
+
+
+def test_amd_compute_capable_with_kfd_only_is_not_rocm(monkeypatch) -> None:
+    """#2452: ``compute_capable`` is only "rocm-smi exited 0" — it must not widen
+    the ROCm lane past the device nodes. kfd without a render node is no lane."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.hardware.recommend.default_image_serves_vulkan_lane", lambda: False)
+    rec = recommend_primary_slot(_amd_uma_host(96, compute_capable=True))
     assert rec["device"] == "cpu"
 
 
