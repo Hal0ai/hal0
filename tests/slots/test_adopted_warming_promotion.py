@@ -252,3 +252,59 @@ async def test_inconclusive_health_probe_does_not_promote(
     await asyncio.sleep(0.3)
     assert sm._current_state("chat") is SlotState.WARMING
     assert reg.get("chat") is None
+
+
+async def test_promotion_refreshes_idle_clock_so_next_sweep_keeps_slot(
+    slot_root: Path, container_stub: FakeContainerProvider, fast_promote: None
+) -> None:
+    """A slow load must not be idle-evicted right after promotion.
+
+    Adoption stamped ``last_used`` up to the poll bound (900s) earlier, past
+    the 300s default idle timeout: without a fresh bump at promotion, the
+    very next idle sweep unloads the slot it just promoted.
+    """
+    reg = UpstreamRegistry()
+    sm = SlotManager(upstreams_registry=reg)
+    sm._idle_after_s = 300.0
+    sm._evict_after_s = 300.0
+    await _adopt_into_warming(sm, container_stub)
+    sm._last_used[sm._key("chat")] = time.time() - 1000  # aged past both bounds
+
+    container_stub.healthy = True
+    assert await _wait_for(lambda: sm._current_state("chat") is SlotState.READY)
+
+    await sm._sweep_idle_once()
+
+    assert sm._current_state("chat") is SlotState.READY
+    assert reg.get("chat") is not None
+
+
+async def test_concurrent_transition_cannot_abort_promotion(
+    slot_root: Path, container_stub: FakeContainerProvider, fast_promote: None
+) -> None:
+    """The reaper's READY → IDLE takes no slot lock and calls ``_transition``,
+    which cancels the adopt poll. Landing mid-promotion, it must not abort the
+    promotion's READY event (the model-cache refresh keys on it)."""
+    events: list[str] = []
+    sm: SlotManager
+
+    class _RacingBus:
+        async def emit(self, type_: str, sev: str, src: str, msg: str, **kw: Any) -> None:
+            data = kw.get("data") or {}
+            if data.get("to") == "ready":
+                racer = asyncio.create_task(
+                    sm._transition("chat", SlotState.IDLE, message="idle sweep")
+                )
+                await asyncio.shield(racer)
+            events.append(str(data.get("to")))
+
+    reg = UpstreamRegistry()
+    sm = SlotManager(upstreams_registry=reg, event_bus=_RacingBus())
+    await _adopt_into_warming(sm, container_stub)
+    task = sm._adopt_promoters[sm._key("chat")]
+
+    container_stub.healthy = True
+    assert await _wait_for(task.done)
+    assert not task.cancelled()
+    assert "ready" in events
+    assert reg.get("chat") is not None

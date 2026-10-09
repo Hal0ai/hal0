@@ -4361,6 +4361,13 @@ class SlotManager:
                     # but never stamp over a state we did not adopt.
                     if self._current_state(slot_name) is not SlotState.WARMING:
                         return
+                    # Detach from the cancel hook before promoting. The idle
+                    # sweep's READY → IDLE takes no slot lock, and its
+                    # ``_transition`` would otherwise cancel this task midway
+                    # through the READY transition's event emit — skipping
+                    # the event the model-cache refresh keys on.
+                    if self._adopt_promoters.get(key) is asyncio.current_task():
+                        self._adopt_promoters.pop(key, None)
                     await self._promote_adopted_slot(slot_name)
                 return
             log.warning(
@@ -4386,6 +4393,11 @@ class SlotManager:
         the api's model-cache refresher keys on. Same two steps here, so the
         slot joins the loaded set ``hal0/<name>`` resolution reads (#2442).
         """
+        # Restart the idle clock first. Adoption stamped it when the slot
+        # entered WARMING, up to ``_ADOPTED_WARMING_POLL_MAX_S`` ago — past
+        # the default idle-eviction TTL — so without this the next idle sweep
+        # unloads the slot it just saw promoted.
+        self.bump_last_used(slot_name)
         cfg = await self._maybe_load_config(slot_name)
         port = _cfg_port(cfg) if cfg else 0
         if cfg and port and not is_npu_trio_shadow(cfg):
