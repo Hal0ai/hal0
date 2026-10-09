@@ -265,13 +265,24 @@ log_step "Hermes bootstrap surface"
 run_row "cli-agent-bootstrap-help" 0 "bootstrap --help" -- \
     "${HAL0_BIN}" agent bootstrap hermes --help
 
-# 'bootstrap --dry-run' is NOT side-effect free today: it runs a real
-# install_hermes() and creates HERMES_HOME (/var/lib/hal0/.hermes), and
-# --skip-phase is a retired no-op (#2445). Driving it from the harness
-# fails with PermissionError for non-root and would pip-install for root.
-# Re-enable once #2445 makes --dry-run honest.
-add_row "cli-agent-bootstrap-dry-run" "skip" "0" \
-    "blocked on #2445: --dry-run performs a real install and --skip-phase is a no-op"
+# 'bootstrap --dry-run' / '--skip-phase' are refused with exit 2 before
+# anything is written (#2445): the installer has no preview mode. The row
+# pins that refusal so a regression back to a silent real install shows.
+# A PermissionError from a real install also exits non-zero, so check
+# for exit 2 and the refusal text, not just "non-zero".
+_dry_log="${SCRIPT_DIR}/reports/cli-cli-agent-bootstrap-dry-run.log"
+_dry_start=$(start_ms)
+set +e
+"${HAL0_BIN}" agent bootstrap hermes --dry-run >"${_dry_log}" 2>&1
+_dry_rc=$?
+set -e
+if [[ "${_dry_rc}" -eq 2 ]] && grep -q "not supported" "${_dry_log}"; then
+    add_row "cli-agent-bootstrap-dry-run" "pass" "$(since_ms "${_dry_start}")" \
+        "bootstrap --dry-run refused (exit=2)"
+else
+    add_row "cli-agent-bootstrap-dry-run" "fail" "$(since_ms "${_dry_start}")" \
+        "expected exit 2 + 'not supported', got exit=${_dry_rc}: $(tail -n1 "${_dry_log}" 2>/dev/null | tr -d '\n')"
+fi
 
 run_row "cli-agent-status-help" 0 "agent status --help" -- \
     "${HAL0_BIN}" agent status --help
