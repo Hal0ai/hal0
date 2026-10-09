@@ -1717,6 +1717,23 @@ fi
 
 ui_step "Systemd units" "~2-5s"
 
+# ── hal0-api journal read (#2435) ─────────────────────────────────────────────
+# /api/logs and the MCP logs_tail tool run journalctl inside hal0-api
+# (User=hal0); without journal read they return no lines. The grant is
+# SupplementaryGroups= on THIS unit's process tree (its children inherit it)
+# — deliberately not `usermod -aG systemd-journal hal0`, which would also
+# hand it to hal0-agent@.service. The agent shares the hal0 uid (ADR-0002),
+# so this scopes the grant; it is not an isolation boundary. /api/logs
+# restricts itself to hal0's own units (src/hal0/api/routes/logs.py).
+# A host without the group gets no directive: systemd refuses to start a unit
+# whose SupplementaryGroups= does not resolve (216/GROUP).
+if getent group systemd-journal >/dev/null 2>&1; then
+    API_JOURNAL_GROUP_LINE="SupplementaryGroups=systemd-journal"
+else
+    API_JOURNAL_GROUP_LINE="# no systemd-journal group on this host: /api/logs cannot read the journal (#2435)"
+    warn "no systemd-journal group on this host — hal0-api cannot read the journal; /api/logs will return no lines"
+fi
+
 # WorkingDirectory follows `current` in prod so a `hal0 update` symlink swap
 # moves it to the new tree without rewriting the unit; dev uses the checkout.
 API_WORKDIR="${CURRENT_LINK:-${PREFIX}}"
@@ -1741,6 +1758,8 @@ Wants=network-online.target
 Type=simple
 User=hal0
 Group=hal0
+# Journal read for /api/logs + MCP logs_tail; this unit's process tree (#2435).
+${API_JOURNAL_GROUP_LINE}
 # hal0-api writes /etc/hal0/* + /var/lib/hal0/* directly — those trees are
 # hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
 # (systemd unit writes, daemon-reload, slot start/stop/restart) routes through

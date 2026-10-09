@@ -1203,11 +1203,17 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "check_agent_uid_isolation",
         lambda **_kw: Check("agent-uid", "Agent UID split", "pass", "stubbed"),
     )
+    # Journal-read row (#2435) reads /proc + systemctl otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_api_journal_access",
+        lambda **_kw: Check("api-journal", "API journal read", "pass", "stubbed"),
+    )
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 19 extras.
-    assert keys[-19:] == [
+    # 7 verify rows + 20 extras.
+    assert keys[-20:] == [
         "auth",
         "models",
         "migrations",
@@ -1220,6 +1226,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "hardware_freshness",
         "seed_context_envelope",
         "agent-uid",
+        "api-journal",
         "stt-weights",
         "seams",
         "mcp_mounts",
@@ -1345,3 +1352,95 @@ def test_command_human_exit_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(typer.Exit) as exc:
         da.doctor_all_cmd(json_output=False)
     assert exc.value.exit_code == 0
+
+
+# ── hal0-api journal read (#2435) ─────────────────────────────────────────────
+
+
+def _journal(
+    *,
+    ids: tuple[int, set[int]] | None = (999, {999, 105}),
+    gid: int | None = 105,
+) -> Check:
+    return da.check_api_journal_access(
+        process_ids=lambda: ids,
+        journal_gid=lambda: gid,
+    )
+
+
+def test_api_journal_passes_when_process_holds_the_group() -> None:
+    check = _journal()
+    assert check.key == "api-journal"
+    assert check.status == "pass"
+
+
+def test_api_journal_warns_when_process_lacks_the_group() -> None:
+    check = _journal(ids=(999, {999, 44}))
+    assert check.status == "warn"
+    # Fix text: re-run the installer once after updating to 1.4.0;
+    # `hal0 update` does not rewrite hal0-api.service.
+    assert "install.sh" in check.detail
+    assert "/api/logs" in check.detail
+    assert "systemd-journal" in check.detail
+
+
+def test_api_journal_passes_for_a_root_api() -> None:
+    assert _journal(ids=(0, {0})).status == "pass"
+
+
+def test_api_journal_passes_for_a_root_api_on_a_host_without_the_group() -> None:
+    """Root reads the journal without systemd-journal, so a missing group is
+    not a problem for a root-run API: probe the process first."""
+    assert _journal(ids=(0, {0}), gid=None).status == "pass"
+
+
+def test_api_journal_warns_when_host_has_no_journal_group() -> None:
+    check = _journal(gid=None)
+    assert check.status == "warn"
+    assert "systemd-journal" in check.detail
+
+
+def test_api_journal_warns_when_process_unknown() -> None:
+    check = _journal(ids=None)
+    assert check.status == "warn"
+    assert "hal0-api" in check.detail
+
+
+def test_api_journal_process_probe_reads_main_pid_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    """The real probe: MainPID from systemctl, Uid/Groups from /proc."""
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 0
+        stdout = "4242\n"
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    proc = tmp_path / "proc"
+    (proc / "4242").mkdir(parents=True)
+    (proc / "4242" / "status").write_text(
+        "Name:\thal0\nUid:\t999\t999\t999\t999\nGroups:\t44 105 999 \n",
+        encoding="utf-8",
+    )
+    assert da._api_process_ids(proc_root=proc) == (999, {44, 105, 999})
+
+
+def test_api_journal_process_probe_unknown_when_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: "/usr/bin/systemctl")
+
+    class _R:
+        returncode = 0
+        stdout = "0\n"
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *_a, **_k: _R())
+    assert da._api_process_ids() is None
+
+
+def test_api_journal_process_probe_unknown_without_systemctl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(da.shutil, "which", lambda _cmd: None)
+    assert da._api_process_ids() is None

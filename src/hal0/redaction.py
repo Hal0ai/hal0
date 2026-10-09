@@ -286,6 +286,21 @@ def mask_audit_secret_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def redact_audit_args(tool: str, args: Any) -> Any:
+    """Mask every secret in an MCP audit row's ``args`` (#2434, #2435).
+
+    Three layers: ``tool``'s own :data:`AUDIT_SECRET_ARGS`, the value of every
+    secret-NAMED key at any depth (:func:`redact_secret_named_values`), and
+    secret SHAPES inside any string value (:func:`redact_text_tree`). The
+    audit writer (:mod:`hal0.mcp.admin`) applies it at write time; the API
+    routes that read audit rows back from journald apply it again on read,
+    for rows logged before the write-time pass. Pure and idempotent.
+    """
+    if isinstance(args, dict):
+        args = mask_audit_secret_args(tool, args)
+    return redact_text_tree(redact_secret_named_values(args))
+
+
 _AUDIT_ROW_EVENT: Final[str] = "mcp.tool.invoked"
 _AUDIT_ROW_TOOL_RE: Final[re.Pattern[str]] = re.compile(
     r"(?<![A-Za-z0-9_])[\"']?tool[\"']?\s*[=:]\s*[\"']?(?P<tool>[A-Za-z0-9_]+)"
@@ -459,6 +474,7 @@ __all__ = [
     "LOG_SECRET_RE",
     "MASK",
     "mask_audit_secret_args",
+    "redact_audit_args",
     "redact_audit_row_secret_args",
     "redact_log_line",
     "redact_secret_named_values",

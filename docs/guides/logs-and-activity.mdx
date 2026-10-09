@@ -56,7 +56,7 @@ never disagree.
 
 | Query param | Default | Notes |
 |-------------|---------|-------|
-| `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@agent`. |
+| `unit`      | —       | Required. A hal0 unit, e.g. `hal0-api` or `hal0-slot@agent`. Only `hal0-*` units, `hal0.target`, `hindsight-api` and `hermes-gateway` are accepted; anything else is a 400. |
 | `n`         | `200`   | Trailing lines, 1–5000. |
 | `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
 | `level`     | —       | Filter to this priority **and higher severity**. |

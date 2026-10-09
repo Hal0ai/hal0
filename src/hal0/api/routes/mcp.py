@@ -52,6 +52,7 @@ from hal0.mcp import installed as installed_registry
 from hal0.mcp import manifest as manifest_resolver
 from hal0.mcp import probe as mcp_probe
 from hal0.mcp.installed import ExposureConfig, InstalledServer
+from hal0.redaction import redact_audit_args
 
 log = structlog.get_logger(__name__)
 
@@ -329,7 +330,11 @@ async def _read_audit_events(
                 "event": evt,
                 "server": server_tag,
                 "tool": payload.get("tool"),
-                "args": payload.get("args") or {},
+                # Re-masked on read: rows logged before the write-time pass
+                # (#2434) carry raw args, and #2435 made this read live.
+                "args": redact_audit_args(
+                    str(payload.get("tool") or ""), payload.get("args") or {}
+                ),
                 "client_id": str(payload.get("client_id") or ""),
                 "gated": payload.get("gated"),
                 "outcome": payload.get("outcome") or evt.split(".")[-1],

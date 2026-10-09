@@ -260,7 +260,7 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | Command | Flags |
 |---|---|
 | `doctor verify` | `--json` |
-| `doctor logs` | `--unit` (default `hal0-api`), `--follow`/`-f`, `--lines`/`-n` (default `200`, 1-5000), `--level`, `--since` |
+| `doctor logs` | `--unit` (default `hal0-api`; hal0 units only: `hal0.target`, `hal0-*`, `hindsight-api`, `hermes-gateway`, anything else is a 400), `--follow`/`-f`, `--lines`/`-n` (default `200`, 1-5000), `--level`, `--since` |
 | `doctor toolbox-pull` | `--json`, `--manifest` |
 | `doctor perms` | `--fix`, `--force`/`-f`, `--table-root` (audit old root-era table), `--json` |
 | `doctor models` | `--fix`, `--force`/`-f`, `--json` |
@@ -275,7 +275,7 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 (`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
 `migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
-`hardware_freshness`, `seed_context_envelope`, `agent-uid`, `stt-weights`, `seams`,
+`hardware_freshness`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes_mcp_auth`, `hermes_anchor_window`, `hindsight_llm_auth`,
 `memory_engine_version`. There is no standalone `hal0 doctor seams`
 command — `seams` is one of these roll-up rows, surfaced by `hal0 doctor all`.

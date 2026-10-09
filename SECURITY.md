@@ -58,7 +58,7 @@ injection from content it reads — it can reach every credential the box holds.
 
 | Control | Buys | Does not buy |
 | --- | --- | --- |
-| `User=hal0` (unprivileged, not root) | The agent is not UID 0; kernel-level and other-user data stay out of reach | Any separation from `hal0-api`, which is the same UID |
+| `User=hal0` (unprivileged, not root) | The agent is not UID 0; kernel-level and other-user data stay out of reach | Any separation from `hal0-api`, which is the same UID and holds `systemd-journal` |
 | systemd sandboxing on `hal0-agent@` (`ProtectSystem=strict`, `PrivateTmp`, restricted `ReadWritePaths=`) | Integrity: the agent cannot rewrite `/usr`, `/boot`, or most of `/etc` | Confidentiality of anything the `hal0` user may read, including `/proc` of same-UID processes; `hal0-api.service` sets none of these directives |
 | `NoNewPrivileges=yes` on `hal0-agent@` | The agent's own processes cannot invoke the setuid `sudo` wrappers | Anything about `hal0-api`, which sets no such restriction and is reachable with the admin key the agent can read |
 | `0600 root:root` on `/etc/hal0/agents/<instance>.env` | The agent cannot *open another instance's file*, and cannot create, replace or unlink one | Confidentiality of that instance's `HAL0_MCP_TOKEN`: with two agent instances running as the same user, either can read the other's `/proc/<pid>/environ`, so the file mode does not isolate the token itself |

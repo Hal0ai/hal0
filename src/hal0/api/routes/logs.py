@@ -12,6 +12,10 @@ Endpoints:
     GET /api/logs/stream?unit=<u>&level=<lvl>&since=<ts>
         SSE tail of the unit's journal output.
 
+Both endpoints only read hal0's own units (``_validate_unit``, #2435):
+hal0-api holds ``systemd-journal`` for this route, and that group would
+otherwise make it a reader for every unit on the host.
+
 Secret redaction (api-logs-redact)
 -----------------------------------
 
@@ -32,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shutil
 from typing import Any
 
@@ -71,19 +76,42 @@ class LogsError(Hal0Error):
     status = 400
 
 
+#: Unit allowlist (#2435). hal0-api runs with
+#: ``SupplementaryGroups=systemd-journal`` (installer/install.sh) so this
+#: route can read the journal at all, and that group reads *every* unit's
+#: journal. The route therefore only hands ``journalctl -u`` a hal0-owned
+#: unit, so neither a dashboard client nor the agent (MCP ``logs_tail`` is a
+#: proxy for ``GET /api/logs``) can use it to read sshd, sudo, or any other
+#: unit on the host. Redaction (:func:`redact_log_line`) still applies on top.
+#:
+#: Covers every unit hal0 ships or creates: ``hal0.target`` and anything
+#: ``hal0-``-prefixed (hal0-api, hal0-slot@<id>, hal0-agent@<id>,
+#: hal0-openwebui, hal0-bench*, hal0-gpu-perms, hal0-podman-forward), plus the
+#: two installer-written units that predate the prefix.
+_HAL0_UNIT_RE = re.compile(r"^(?:hal0\.target|hal0-[A-Za-z0-9@_\-.:]+)$")
+_EXTRA_UNITS = frozenset({"hindsight-api", "hermes-gateway"})
+
+
+def _is_hal0_unit(unit: str) -> bool:
+    """True when ``unit`` names a unit hal0 installs or creates."""
+    if _HAL0_UNIT_RE.match(unit):
+        return True
+    return unit.removesuffix(".service") in _EXTRA_UNITS
+
+
 def _validate_unit(unit: str) -> str:
-    """Validate a systemd unit name.
+    """Validate a systemd unit name and restrict it to hal0's own units.
 
     Rejects shell-special characters so the unit string can safely be
-    passed straight to journalctl. Acceptable forms::
+    passed straight to journalctl, then rejects any unit hal0 does not own
+    (see :data:`_HAL0_UNIT_RE`). Acceptable forms::
 
         hal0-api
         hal0-api.service
         hal0-slot@primary
         hal0-slot@primary.service
+        hindsight-api.service
     """
-    import re
-
     if not unit or not unit.strip():
         raise LogsError(
             "'unit' query parameter is required",
@@ -95,6 +123,15 @@ def _validate_unit(unit: str) -> str:
         raise LogsError(
             f"invalid unit name {unit!r}",
             details={"unit": unit, "hint": "only alnum + @-_.: are allowed"},
+        )
+    if not _is_hal0_unit(unit):
+        raise LogsError(
+            f"unit {unit!r} is not a hal0 unit; /api/logs only reads hal0's own units",
+            details={
+                "unit": unit,
+                "hint": "use a hal0-* unit (e.g. hal0-api, hal0-slot@<id>), "
+                "hal0.target, hindsight-api or hermes-gateway",
+            },
         )
     return unit
 
