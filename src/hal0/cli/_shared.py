@@ -301,7 +301,11 @@ def _api_request(
         # operator's point of view, so it gets the same remedy treatment.
         if code == "slot.seam_timeout":
             raise CliApiTimeout(f"{method} {url} → HTTP {resp.status_code}: {msg}")
-        raise CliApiError(f"{method} {url} → HTTP {resp.status_code}: {msg}", code=code)
+        raise CliApiError(
+            f"{method} {url} → HTTP {resp.status_code}: {msg}",
+            code=code,
+            status=resp.status_code,
+        )
     if not resp.content:
         return None
     try:
@@ -315,12 +319,14 @@ class CliApiError(RuntimeError):
 
     ``code`` (when the server answered with the hal0 error envelope) carries
     the typed ``error.code`` string — ``None`` for a transport-level failure
-    or a non-enveloped response.
+    or a non-enveloped response. ``status`` is the HTTP status code when the
+    server answered, ``None`` for a transport-level failure.
     """
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(self, message: str, *, code: str | None = None, status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.status = status
 
 
 class CliApiTimeout(CliApiError):
