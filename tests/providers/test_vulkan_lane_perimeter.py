@@ -319,6 +319,7 @@ class TestCliLadderMatchesTheOtherTwo:
         from hal0.cli.slot_commands import _detect_default_hardware
 
         self._probe(monkeypatch, tmp_path, compute=True, vulkan=True)
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
         assert _detect_default_hardware() == "rocm"
 
 
@@ -364,6 +365,7 @@ class TestTheThreeLaddersAgree:
             )
         )
         monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: compute)
 
         hw = _amd_hw(compute=compute, vulkan=vulkan)
         expected = "gpu-rocm" if compute else ("gpu-vulkan" if (vulkan and pin_is_fixed) else "cpu")
