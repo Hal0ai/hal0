@@ -15,7 +15,7 @@
 #          installer does" for the full 16-step breakdown) plus, for
 #          other tooling in this tree: a tee'd install log at
 #          $HAL0_INSTALL_LOG (installer/lib/logging.sh), a failure report
-#          on any ERR-trapped abort (installer/lib/failure-report.sh), and
+#          on any non-zero exit (installer/lib/failure-report.sh), and
 #          an optional --summary-json=<path> machine-readable install
 #          summary (schema hal0.install-summary.v1).
 # Modder notes:

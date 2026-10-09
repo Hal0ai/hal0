@@ -158,7 +158,8 @@ aborting the install) if neither location is writable.
 
 ### Failure report
 
-If `install.sh` aborts (its `ERR` trap fires), it writes
+If `install.sh` exits non-zero (an `ERR`-trapped abort, a `die`, an explicit
+`exit 1`, or an interrupt), it writes
 `hal0-install-report-<ts>.txt` (mode 0600) next to the install log and
 prints its path alongside the existing step-specific recovery advice. The
 report bundles a redacted environment dump, `systemctl --failed`,
