@@ -31,6 +31,14 @@ def _hw_rocm() -> HardwareInfo:
     return HardwareInfo(gpus=[GPUInfo(vendor="amd", compute_capable=True)])
 
 
+@pytest.fixture
+def rocm_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/dev/kfd + a render node: the ROCm lane is decided by device nodes, not
+    ``compute_capable`` alone (#2452)."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+
+
 def _hw_cpu() -> HardwareInfo:
     return HardwareInfo()
 
@@ -90,7 +98,9 @@ def _hf_handler(
 # ── model_id path ────────────────────────────────────────────────────────────
 
 
-def test_generate_from_model_id_chat_gpu_clones_chat_seed(tmp_hal0_home: str) -> None:
+def test_generate_from_model_id_chat_gpu_clones_chat_seed(
+    tmp_hal0_home: str, rocm_nodes: None
+) -> None:
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(
         Model(
@@ -143,7 +153,9 @@ def test_generate_from_model_id_not_found_raises(tmp_hal0_home: str) -> None:
         )
 
 
-def test_generate_moe_architecture_upgrades_to_moe_seed(tmp_hal0_home: str) -> None:
+def test_generate_moe_architecture_upgrades_to_moe_seed(
+    tmp_hal0_home: str, rocm_nodes: None
+) -> None:
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(
         Model(
@@ -168,7 +180,9 @@ def test_generate_moe_architecture_upgrades_to_moe_seed(tmp_hal0_home: str) -> N
     assert result.profile["profile"]["cloned_from"] == "moe"
 
 
-def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(tmp_hal0_home: str) -> None:
+def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(
+    tmp_hal0_home: str, rocm_nodes: None
+) -> None:
     """A DELETED demoted profile must degrade, not 500.
 
     "moe" is an ordinary custom profile since the demotion, so deleting it is a
@@ -325,7 +339,7 @@ def test_generate_sanitizes_invalid_requested_name(tmp_hal0_home: str) -> None:
 
 
 def test_generate_from_hf_repo_happy_path(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, rocm_nodes: None
 ) -> None:
     handler = _hf_handler(
         meta={"tags": ["text-generation", "gguf"], "cardData": {"license": "apache-2.0"}},

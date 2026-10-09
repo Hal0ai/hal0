@@ -164,9 +164,13 @@ def _detect_default_hardware() -> str:
     # again — but only when the pinned runner can actually serve it, or this
     # would just be writing a device the load-time gate refuses.
     if vendor == "amd":
-        if g.get("compute_capable"):
+        from hal0.providers._gpu import default_image_serves_vulkan_lane, rocm_lane_present
+
+        # Device nodes decide the ROCm lane (/dev/kfd + a render node, #2313);
+        # ``compute_capable`` is only "rocm-smi exited 0" and must not widen it
+        # (#2452) — the same predicate recommend/seed/picker use.
+        if rocm_lane_present():
             return "rocm"
-        from hal0.providers._gpu import default_image_serves_vulkan_lane
 
         if g.get("vulkan_capable") and default_image_serves_vulkan_lane():
             return "vulkan"

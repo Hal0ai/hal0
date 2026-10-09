@@ -160,6 +160,8 @@ def test_default_hardware_reads_probe_json(monkeypatch: pytest.MonkeyPatch, tmp_
     from hal0.config import paths as _paths
 
     monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     assert slot_commands._detect_default_hardware() == "rocm"
 
 
@@ -324,7 +326,43 @@ def test_detect_default_hardware_prefers_rocm_when_compute_is_reachable(
     # See the note above: the Vulkan branch is gated on the pinned image, so
     # the pin is stated rather than inherited from the checkout.
     monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
+    nodes = expected == "rocm"
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: nodes)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: nodes)
     assert _detect_default_hardware() == expected
+
+
+def test_detect_default_hardware_compute_capable_with_kfd_only_is_not_rocm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2452: ``compute_capable`` is only "rocm-smi exited 0"; /dev/kfd without
+    a render node is not a ROCm lane, so the default must not be ``rocm``."""
+    from hal0.cli.slot_commands import _detect_default_hardware
+    from hal0.config import paths as _paths
+
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Strix Halo",
+                        "vram_mb": 512,
+                        "compute_capable": True,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+    monkeypatch.setattr("hal0.providers._gpu.default_image_serves_vulkan_lane", lambda: True)
+    assert _detect_default_hardware() == "vulkan"
 
 
 def test_detect_default_hardware_falls_to_cpu_when_the_vulkan_lane_is_not_real(

@@ -169,7 +169,7 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     # seeded. So the device-node path requires BOTH nodes, like ODS's ROCm tier
     # check (``ods/installers/lib/detection.sh:187-204``), through the one
     # predicate every ROCm-lane surface shares (:func:`rocm_lane_present`).
-    if any(g.compute_capable for g in hw.gpus) or rocm_lane_present():
+    if rocm_lane_present():
         return "gpu-rocm"
     # Vulkan-capable GPU, any vendor — AND a runner image that can serve the
     # lane. #1923 restricted this to non-AMD because the pinned runner's Vulkan

@@ -55,7 +55,9 @@ def _strix_hw():
     )
 
 
-async def test_apply_setup_creates_chat_slot_and_plans_pull(tmp_hal0_home):
+async def test_apply_setup_creates_chat_slot_and_plans_pull(tmp_hal0_home, monkeypatch):
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     from hal0.install import orchestrate
 
     sm = _FakeSlotManager()
@@ -82,9 +84,11 @@ async def test_apply_setup_creates_chat_slot_and_plans_pull(tmp_hal0_home):
     assert len(res.pulls) == 1 and res.pulls[0].model_id == "qwen3-4b"
 
 
-async def test_apply_setup_scaffolds_modelless_slot_without_pull(tmp_hal0_home):
+async def test_apply_setup_scaffolds_modelless_slot_without_pull(tmp_hal0_home, monkeypatch):
     """A SlotSelection with model_id=None creates an empty slot (device/profile
     wired, model.default unset) and plans NO pull."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     from hal0.install import orchestrate
 
     sm = _FakeSlotManager()
