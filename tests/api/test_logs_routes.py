@@ -152,16 +152,17 @@ _LEAKED_SECRETS = (
 )
 
 
-def _make_oneshot_proc(stdout: bytes) -> MagicMock:
+def _make_oneshot_proc(stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> MagicMock:
     """Fake asyncio.Process for the one-shot `journalctl -n N` call."""
     proc = MagicMock()
-    proc.communicate = AsyncMock(return_value=(stdout, b""))
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.returncode = returncode
     proc.kill = MagicMock()
     proc.wait = AsyncMock()
     return proc
 
 
-def _make_streaming_proc(lines: list[bytes]) -> MagicMock:
+def _make_streaming_proc(lines: list[bytes], stderr: bytes = b"", returncode: int = 0) -> MagicMock:
     """Fake asyncio.Process for the follow (`journalctl -f`) call.
 
     ``proc.stdout`` is an async generator so ``async for raw in proc.stdout``
@@ -175,6 +176,9 @@ def _make_streaming_proc(lines: list[bytes]) -> MagicMock:
 
     proc = MagicMock()
     proc.stdout = _stdout_iter()
+    proc.stderr = MagicMock()
+    proc.stderr.read = AsyncMock(return_value=stderr)
+    proc.returncode = returncode
     proc.kill = MagicMock()
     proc.wait = AsyncMock()
     return proc
@@ -214,3 +218,183 @@ def test_logs_stream_redacts_secret_bearing_lines(client: TestClient) -> None:
         assert secret not in body, f"leaked secret {secret!r} in stream body"
     assert "***REDACTED***" in body
     assert "hal0.api.startup" in body
+
+
+# ── journalctl failure surfacing (#2435) ─────────────────────────────────────
+
+_PERM_ERR = b"No journal files were opened due to insufficient permissions.\n"
+
+
+def test_logs_list_surfaces_permission_error_as_hint(client: TestClient) -> None:
+    """Empty stdout + stderr must yield a hint, not a silent empty 200."""
+    proc = _make_oneshot_proc(b"", stderr=_PERM_ERR, returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["lines"] == [] and body["count"] == 0
+    assert "insufficient permissions" in body["hint"]
+    assert "journal" in body["hint"].lower()
+
+
+def test_logs_list_nonzero_exit_without_stderr_has_hint(client: TestClient) -> None:
+    proc = _make_oneshot_proc(b"", returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert r.json()["hint"]
+
+
+def test_logs_list_hint_is_redacted(client: TestClient) -> None:
+    proc = _make_oneshot_proc(b"", stderr=b"boom HF_TOKEN=hf_hintleak2435\n", returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert "hf_hintleak2435" not in r.text
+    # Presence matters: on main there is no hint at all, so the absence check
+    # above would pass vacuously and keep passing if the hint were dropped.
+    hint = r.json()["hint"]
+    assert "***REDACTED***" in hint
+    assert "boom" in hint
+
+
+def test_logs_list_hint_redacts_before_truncating(client: TestClient) -> None:
+    """A secret straddling the 300-char cut must be masked whole, not clipped.
+
+    ``client_id=`` needs 16+ value chars to match; truncating first leaves 9.
+    """
+    err = ("x" * 280 + " client_id=abcdefghijklmnopqrstuvwxy\n").encode()
+    proc = _make_oneshot_proc(b"", stderr=err, returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    hint = r.json()["hint"]
+    assert "abcdefghi" not in hint
+    assert "client_id=" in hint
+
+
+def test_logs_list_hint_for_bad_since_is_not_a_permission_hint(client: TestClient) -> None:
+    """A malformed ``since`` is a client error, not a journal-access problem."""
+    proc = _make_oneshot_proc(b"", stderr=b"Failed to parse timestamp: notadate\n", returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api", "since": "notadate"})
+    hint = r.json()["hint"]
+    assert "Failed to parse timestamp: notadate" in hint
+    assert "exit 1" in hint
+    low = hint.lower()
+    assert "permission" not in low and "group" not in low and "installer" not in low
+
+
+def test_logs_list_permission_hint_says_rerun_installer(client: TestClient) -> None:
+    """#2469 grants the group to hal0-api; the installer is what restores it."""
+    proc = _make_oneshot_proc(b"", stderr=_PERM_ERR, returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    hint = r.json()["hint"]
+    assert "installer" in hint
+    assert "usermod" not in hint and "gpasswd" not in hint and "add hal0" not in hint.lower()
+
+
+def test_logs_list_no_journal_files_opened_is_a_permission_hint(client: TestClient) -> None:
+    proc = _make_oneshot_proc(b"", stderr=b"No journal files were opened.\n", returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert "installer" in r.json()["hint"]
+
+
+def test_logs_list_nonzero_exit_without_stderr_is_neutral(client: TestClient) -> None:
+    proc = _make_oneshot_proc(b"", returncode=3)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    hint = r.json()["hint"]
+    assert "exit 3" in hint
+    assert "group" not in hint.lower()
+
+
+def test_logs_list_clean_empty_has_no_hint(client: TestClient) -> None:
+    """A successful journalctl with no entries stays a plain empty result."""
+    proc = _make_oneshot_proc(b"", returncode=0)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs", params={"unit": "hal0-api"})
+    assert "hint" not in r.json()
+
+
+def test_logs_stream_surfaces_permission_error(client: TestClient) -> None:
+    proc = _make_streaming_proc([], stderr=_PERM_ERR, returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs/stream", params={"unit": "hal0-api"})
+    assert r.status_code == 200
+    assert "event: error" in r.text
+    assert "insufficient permissions" in r.text
+
+
+def test_logs_stream_waits_for_exit_before_reading_returncode(client: TestClient) -> None:
+    """After stdout EOF ``returncode`` is still None until the process is awaited.
+
+    Empty stderr + non-zero exit must still produce an error frame; the mock
+    only sets ``returncode`` once ``wait()`` is awaited, like a real process.
+    """
+    proc = _make_streaming_proc([], stderr=b"")
+    proc.returncode = None
+
+    async def _wait() -> int:
+        proc.returncode = 1
+        return 1
+
+    proc.wait = AsyncMock(side_effect=_wait)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs/stream", params={"unit": "hal0-api"})
+    assert "event: error" in r.text
+    assert "exit 1" in r.text
+
+
+def test_logs_stream_bounds_the_stderr_read(client: TestClient) -> None:
+    proc = _make_streaming_proc([], stderr=_PERM_ERR, returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        client.get("/api/logs/stream", params={"unit": "hal0-api"})
+    (args, _kw) = proc.stderr.read.call_args
+    assert len(args) == 1 and 0 < args[0] <= 8192
+
+
+def test_logs_stream_bad_since_is_not_a_permission_hint(client: TestClient) -> None:
+    proc = _make_streaming_proc([], stderr=b"Failed to parse timestamp: notadate\n", returncode=1)
+    with (
+        patch("shutil.which", return_value="/usr/bin/journalctl"),
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+    ):
+        r = client.get("/api/logs/stream", params={"unit": "hal0-api", "since": "notadate"})
+    assert "Failed to parse timestamp" in r.text
+    assert "permission" not in r.text.lower() and "group" not in r.text.lower()
