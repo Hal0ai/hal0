@@ -1768,7 +1768,9 @@ _hal0_seam_probe_run() {
 # Returns 0 when the grant works, 1 once the last attempt has failed.
 _hal0_seam_grant() {
     local name="$1" bin="$2" grant="$3" report="$4"; shift 4
-    local attempt=0 probe_rc=0 probe_err='' last=''
+    local attempt=0 probe_rc=0 probe_err='' last='' probe_cmd=''
+    # `$*` joins on IFS[0], which is a newline under install.sh's IFS (#2436).
+    probe_cmd="$(IFS=' '; printf '%s' "$*")"
 
     while :; do
         attempt=$(( attempt + 1 ))
@@ -1801,7 +1803,7 @@ _hal0_seam_grant() {
     # broken, wrapper stale, transient that outlasted the retry window) and
     # this line cannot tell them apart. Keep the wording in lock-step with
     # src/hal0/system/seam_check.py.
-    "${report}" "seam ${name}: 'sudo -n -u hal0 sudo -n ${bin} $*' exited ${probe_rc} after ${attempt} attempt(s)${last:+ (${last})} — usually the ${grant} grant not applying or a stale wrapper, though a transient outlasting the retry window reports identically"
+    "${report}" "seam ${name}: 'sudo -n -u hal0 sudo -n ${bin} ${probe_cmd}' exited ${probe_rc} after ${attempt} attempt(s)${last:+ (${last})} — usually the ${grant} grant not applying or a stale wrapper, though a transient outlasting the retry window reports identically"
     return 1
 }
 
@@ -1845,7 +1847,11 @@ _preflight_seam() {
         # argument (a verb-only probe cannot tell a stale wrapper from a
         # current one).
         local -a probe_argv=()
-        read -r -a probe_argv <<< "${probe}"
+        #
+        # IFS is pinned to a single space for this one read: install.sh runs
+        # under IFS=$'\n\t', which does not split on spaces, so the verb and
+        # its argument stayed one word and the wrapper answered "bad cmd" (#2436).
+        IFS=' ' read -r -a probe_argv <<< "${probe}"
         _hal0_seam_grant "${name}" "${bin}" "${grant}" "${report}" "${probe_argv[@]}" || rc=1
     fi
     return "${rc}"

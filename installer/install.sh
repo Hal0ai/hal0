@@ -15,7 +15,7 @@
 #          installer does" for the full 16-step breakdown) plus, for
 #          other tooling in this tree: a tee'd install log at
 #          $HAL0_INSTALL_LOG (installer/lib/logging.sh), a failure report
-#          on any ERR-trapped abort (installer/lib/failure-report.sh), and
+#          on any non-zero exit (installer/lib/failure-report.sh), and
 #          an optional --summary-json=<path> machine-readable install
 #          summary (schema hal0.install-summary.v1).
 # Modder notes:
@@ -245,6 +245,12 @@ else
     info "FHS layout — code ${PREFIX}, current → ${CURRENT_LINK}, venv ${VENV_DIR}"
 fi
 
+# Failure report for exits that bypass the ERR trap below — die(), explicit
+# `exit 1` (#2438). The ERR trap marks its own report as written, so one
+# failed run leaves exactly one report. Installed before the verification
+# gate so its die() is covered too.
+trap 'hal0_report_on_exit "$?"' EXIT
+
 # ── Release verification gate ──────────────────────────────────────────────
 # Refuse to run as root against an UNVERIFIED release tree. The signed
 # install path (`curl -fsSL https://hal0.dev/install.sh | sudo bash`) runs
@@ -330,6 +336,7 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
     esac
+    _HAL0_REPORT_WRITTEN=1
     _hal0_report_path="$(hal0_write_failure_report "${CURRENT_STEP:-pre-init}" 2>/dev/null || true)"
     [[ -n "${_hal0_report_path}" ]] && warn "Failure report saved: ${_hal0_report_path} — attach it to a bug report."
     exit 1' ERR
@@ -3256,11 +3263,31 @@ else
     # Honours HAL0_FLM_MODELS_DIR / [models].flm_store relocations; created
     # whenever an XDNA NPU node is present (harmless otherwise).
     if [[ -e /dev/accel/accel0 ]]; then
-        FLM_CACHE_DIR="${HAL0_FLM_MODELS_DIR:-${VAR_DIR}/.config/flm/models}"
-        mkdir -p "${FLM_CACHE_DIR}"
-        chown 1000:hal0 "${FLM_CACHE_DIR}" 2>/dev/null || chown hal0:hal0 "${FLM_CACHE_DIR}" || true
-        chmod 2775 "${FLM_CACHE_DIR}" || true
-        info "FLM model cache: ${FLM_CACHE_DIR} (container-uid writable, setgid hal0)"
+        # flm hardcodes $HOME/.config/flm/models. hal0-api (User=hal0) swaps
+        # that path for a symlink to a relocated [models].flm_store before each
+        # pull, which needs write on .config/flm, so hal0 must own it (#2446).
+        # hal0 owns VAR_DIR (and on an upgrade the old hal0-api is still
+        # running), so root never mkdirs or chowns through a path hal0 could
+        # swap: hal0 creates its own dirs, and root only chowns a parent that
+        # is still root-owned, which hal0 cannot rename or replace. The
+        # resolved store gets 1000:hal0 2775 from the `doctor perms --fix`
+        # backstop below, through no-follow fds.
+        for _flm_parent in "${VAR_DIR}/.config" "${VAR_DIR}/.config/flm"; do
+            if [[ ! -L "${_flm_parent}" && -d "${_flm_parent}" && "$(stat -c %u "${_flm_parent}")" == 0 ]]; then
+                chown -h hal0:hal0 "${_flm_parent}"
+            fi
+        done
+        if runuser -u hal0 -- mkdir -p "${VAR_DIR}/.config/flm/models"; then
+            info "FLM model cache: ${VAR_DIR}/.config/flm/models (store ownership via doctor perms below)"
+        else
+            warn "could not create ${VAR_DIR}/.config/flm/models as hal0 — 'hal0 doctor perms' reports why"
+        fi
+        if [[ -n "${HAL0_FLM_MODELS_DIR:-}" ]]; then
+            # Operator override from root's own environment: a trusted path.
+            mkdir -p "${HAL0_FLM_MODELS_DIR}"
+            chown 1000:hal0 "${HAL0_FLM_MODELS_DIR}" 2>/dev/null || chown hal0:hal0 "${HAL0_FLM_MODELS_DIR}" || true
+            chmod 2775 "${HAL0_FLM_MODELS_DIR}" || true
+        fi
     fi
 
     # HuggingFace hub cache (#275 bug 4). The hal0 user's HOME is

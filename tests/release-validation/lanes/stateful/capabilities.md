@@ -24,9 +24,10 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
    `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`. Register a
    throwaway small gguf (`hal0 model add <path> --id zzprobe`) and compare its `backends` list
    against a curated row's for the same capability type; remove it when done. Do not conflate
-   this with `catalogs.voice.tts`'s `qwen3-tts` row always listing `gpu-rocm` — that is a
-   deliberate two-engine switch (`known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-
-   of-host`), not a bug.
+   this with `catalogs.voice.tts`'s `qwen3-tts` row: it is gated on the ROCm lane (/dev/kfd
+   AND a render node, #2447 — `known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-
+   of-host`, fixed), so on a lane-less box the row must be ABSENT, and its presence there is
+   a regression.
 2. **Enable a capability against the real hardware.** Bind the embedding model to the embed
    capability on the backend this box actually has, and enable it. Does the flip from the seeded
    default work cleanly? Does enabling load or require the slot? Verify through both

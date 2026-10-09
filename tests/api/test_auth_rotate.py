@@ -258,12 +258,20 @@ def test_rotate_refreshes_hindsight_llm_env_when_present(
     env_file = paths.etc() / "hindsight-llm.env"
     env_file.write_text("HINDSIGHT_API_LLM_API_KEY=old-client-key\n")
 
+    import hal0.memory.extraction_env as extraction_env
+
+    restarts: list[int] = []
+    monkeypatch.setattr(extraction_env, "restart_hindsight_background", lambda: restarts.append(1))
+
     resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
     assert body["hindsight_llm_env_refreshed"] is True
-    assert "restart hindsight-api" in body["note"]
+    # #2448: the route restarts hindsight-api itself (background, via the seam)
+    # instead of leaving the operator a "restart it yourself" hint.
+    assert restarts == [1]
+    assert "restarting hindsight-api" in body["note"]
 
     new_key = keys_from_api_env().get("HAL0_CLIENT_KEY")
     content = env_file.read_text()
@@ -274,12 +282,17 @@ def test_rotate_refreshes_hindsight_llm_env_when_present(
 def test_rotate_skips_hindsight_llm_env_when_absent(
     rotate_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import hal0.memory.extraction_env as extraction_env
+
+    restarts: list[int] = []
+    monkeypatch.setattr(extraction_env, "restart_hindsight_background", lambda: restarts.append(1))
     monkeypatch.setenv("HAL0_CLIENT_KEY", "old-client-key")
     resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["hindsight_llm_env_refreshed"] is False
-    assert "restart hindsight-api" not in body["note"]
+    assert restarts == []
+    assert "hindsight-api" not in body["note"]
 
 
 def test_rotate_client_reconciles_openwebui(

@@ -2035,6 +2035,8 @@ async def run_flm_pull(
         # ticks already resolved is final (the tag's ``url`` does not change
         # across a pull), so only an unresolved one asks the lookup again.
         final_path = target_dir or (await asyncio.to_thread(install_path)) or host_models_dir
+        # #2446: never report (or register) a path that is not on disk.
+        await asyncio.to_thread(_verify_flm_landing, str(final_path), host_models_dir, tag)
         size_bytes = await asyncio.to_thread(_dir_size, final_path)
         if job.bytes_total <= 0 and size_bytes > 0:
             job.bytes_total = size_bytes
@@ -2125,6 +2127,35 @@ class _FlmInstallPathLookup:
         if not self._models:
             return None
         return _flm_install_path_from(self._models, self.host_models_dir, self.tag)
+
+
+def _verify_flm_landing(path: str, host_models_dir: str, tag: str) -> None:
+    """Raise :class:`PullError` unless ``path`` exists after a successful ``flm pull``.
+
+    ``path`` is computed from the store and the tag's HF repo name, not read
+    back from flm, so it can name a dir that flm never wrote: when flm's
+    ``$HOME/.config/flm/models`` is not linked to the store, the weights land
+    there instead (#2446). The error names that directory when it holds the
+    tag's repo, so the user knows where the files went and how to move them.
+    """
+    if os.path.isdir(path):
+        return
+    from hal0.config.paths import default_flm_models_dir
+
+    details = {"tag": tag, "path": path}
+    stray = Path(default_flm_models_dir()) / Path(path).name
+    is_repo_dir = os.path.normpath(path) != os.path.normpath(host_models_dir)
+    if is_repo_dir and stray.is_dir() and os.path.realpath(stray) != os.path.realpath(path):
+        raise PullError(
+            f"flm pull {tag!r} finished, but the weights landed in {stray}, not in the "
+            f"FLM store at {path}. The NPU slot only mounts the store; run "
+            f"`sudo hal0 doctor perms --fix` to move them there and link flm's cache.",
+            details={**details, "landed": str(stray)},
+        )
+    raise PullError(
+        f"flm pull {tag!r} exited 0, but {path} does not exist.",
+        details=details,
+    )
 
 
 def _flm_install_path_from(models: list[Any], host_models_dir: str, tag: str) -> str | None:

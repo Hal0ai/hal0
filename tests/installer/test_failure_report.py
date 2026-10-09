@@ -418,6 +418,65 @@ class TestHarvestOnlyPlausibleSecrets:
         assert "echo ***REDACTED***" in body
 
 
+class TestStructuredHarvestSkipsNonSecrets:
+    """The env, TOML and shell-variable harvests feed the same everywhere
+    mask as the report-text harvest, so they need its filter too (#2439):
+    `[memory.graph] extraction_max_tokens = 4096` used to make every `4096`
+    in the report (an `ss` Send-Q column, `context_size = 4096` in the log
+    tail) read `***REDACTED***`."""
+
+    def test_a_token_count_in_hal0_toml_is_not_masked_elsewhere(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        toml = box["etc"] / "hal0.toml"
+        toml.write_text(
+            toml.read_text() + "\n[memory.graph]\nextraction_max_tokens = 4096\n"
+            "token_ttl_seconds = 86400\n"
+        )
+        box["log"].write_text(box["log"].read_text() + "llama: context_size = 4096\nttl 86400\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert "LISTEN 0 4096 0.0.0.0:8080" in body
+        assert "context_size = 4096" in body
+        assert "ttl 86400" in body
+        # The real secrets are still masked everywhere.
+        for secret in _ALL_SECRETS:
+            assert secret not in body, secret
+
+    def test_numeric_values_are_not_harvested(self, tmp_path: Path) -> None:
+        env = tmp_path / "api.env"
+        env.write_text(
+            "HAL0_MAX_TOKENS=4096\nSALT_ROUNDS='12345'\nTOKEN_TTL=\"86400\"\n"
+            f"HF_TOKEN={_REAL_TOKEN}\n"
+        )
+        toml = tmp_path / "hal0.toml"
+        toml.write_text(
+            '[memory.graph]\nextraction_max_tokens = 4096\ntoken_ttl = "86400"\n'
+            f'api_tokens = ["12345", "{_REAL_TOKEN}"]\n'
+        )
+        env_out = _bash(f'_hal0_report_harvest_env_file "{env}"')
+        toml_out = _bash(f'_hal0_report_harvest_toml_file "{toml}"')
+        shell_out = _bash(
+            f"HAL0_MAX_TOKENS=4096; SALT_ROUNDS=12345; DB_PASSWORD={_REAL_TOKEN}\n"
+            "_hal0_report_harvest_shell_vars"
+        )
+        for out in (env_out, toml_out, shell_out):
+            assert out.returncode == 0, out.stderr
+            harvested = out.stdout.splitlines()
+            # A real secret under a `*_tokens` / `*_TOKEN` name is still harvested.
+            assert _REAL_TOKEN in harvested
+            for number in ("4096", "12345", "86400"):
+                assert number not in harvested, number
+            # Nor in a quoted form (`'12345'`, `"86400"`) from the raw env value.
+            assert not any(h.strip("'\"").isdigit() for h in harvested), harvested
+
+    def test_the_key_line_itself_is_still_redacted_by_name(self, tmp_path: Path) -> None:
+        """Only the everywhere harvest is narrowed: the key-name pass still
+        mirrors hal0.api._redact on the key's own line."""
+        redacted, _ = _toml_redact_and_harvest(tmp_path, "api_token = 12345678\n")
+        assert redacted == 'api_token = "***REDACTED***"\n'
+
+
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────
 
 
@@ -721,3 +780,49 @@ class TestTomlMultilineArrays:
         assert _ARR_A not in body
         assert "retrying with ***REDACTED***" in body
         assert 'store = "/srv"' in body
+
+
+class TestReportOnExit:
+    """#2438: die()/`exit 1` bypass the ERR trap; the EXIT trap covers them."""
+
+    @staticmethod
+    def _run(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess[str], list[Path]]:
+        log = tmp_path / "install.log"
+        log.write_text("log\n")
+        script = f"""
+set -euo pipefail
+source "{FAILURE_REPORT}"
+export HAL0_INSTALL_LOG="{log}"
+trap 'hal0_report_on_exit "$?"' EXIT
+{body}
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        return proc, sorted(tmp_path.glob("hal0-install-report-*.txt"))
+
+    def test_explicit_exit_1_writes_a_report(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "CURRENT_STEP='Pre-flight checks'; exit 1")
+        assert proc.returncode == 1
+        assert len(reports) == 1, proc.stderr
+        assert "Phase: Pre-flight checks" in reports[0].read_text()
+        assert "Failure report saved" in proc.stderr
+
+    def test_success_writes_nothing(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "exit 0")
+        assert proc.returncode == 0
+        assert reports == []
+
+    def test_already_written_report_is_not_duplicated(self, tmp_path: Path) -> None:
+        proc, reports = self._run(tmp_path, "_HAL0_REPORT_WRITTEN=1; exit 1")
+        assert proc.returncode == 1
+        assert reports == []
+
+    def test_install_sh_wires_exit_trap_and_err_trap_marks_written(self) -> None:
+        src = (REPO / "installer" / "install.sh").read_text()
+        assert "trap 'hal0_report_on_exit \"$?\"' EXIT" in src
+        assert "_HAL0_REPORT_WRITTEN=1" in src
+        # The EXIT trap must precede the first release-gate die().
+        assert src.index("hal0_report_on_exit") < src.index(
+            "Refusing to install from an unverified"
+        )
