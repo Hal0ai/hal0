@@ -57,11 +57,14 @@ WantedBy=multi-user.target
 
 - **Journal read** — `SupplementaryGroups=systemd-journal` lets the daemon
   read the journal behind `/api/logs` and the MCP `logs_tail` tool. The group
-  is granted to this unit only; the `hal0` account is not added to it, so
-  `hal0-agent@` units (same uid) do not get it. The installer omits the line
-  on a host that has no `systemd-journal` group. `hal0 update` does not
-  rewrite this unit, so a box updated to 1.4.0 needs the installer re-run
-  once; `hal0 doctor all` warns (`API journal read`) until it has been.
+  applies to this unit's process tree (children such as podman, flm and the
+  ComfyUI fetch steps inherit it); the `hal0` account is not added to it, so
+  `hal0-agent@` units do not start with it. Under ADR-0002 the agent shares
+  the `hal0` uid and can influence `hal0-api`, so this is a scoping measure,
+  not an isolation boundary. The installer omits the line on a host that has
+  no `systemd-journal` group. `hal0 update` does not rewrite this unit:
+  re-run the installer once after updating to 1.4.0. `hal0 doctor all` warns
+  (`API journal read`) until it has been.
 - **User/group** — `hal0:hal0`. Root-only operations (writing per-slot
   units, `daemon-reload`, restarting itself during an update) go through a
   narrow `sudo -n` wrapper (`hal0-systemctl`) rather than running the daemon

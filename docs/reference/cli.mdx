@@ -260,7 +260,7 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | Command | Flags |
 |---|---|
 | `doctor verify` | `--json` |
-| `doctor logs` | `--unit` (default `hal0-api`), `--follow`/`-f`, `--lines`/`-n` (default `200`, 1-5000), `--level`, `--since` |
+| `doctor logs` | `--unit` (default `hal0-api`; hal0 units only: `hal0.target`, `hal0-*`, `hindsight-api`, `hermes-gateway`, anything else is a 400), `--follow`/`-f`, `--lines`/`-n` (default `200`, 1-5000), `--level`, `--since` |
 | `doctor toolbox-pull` | `--json`, `--manifest` |
 | `doctor perms` | `--fix`, `--force`/`-f`, `--table-root` (audit old root-era table), `--json` |
 | `doctor models` | `--fix`, `--force`/`-f`, `--json` |

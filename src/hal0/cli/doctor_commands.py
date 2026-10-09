@@ -243,7 +243,7 @@ def doctor_logs(
     unit: str = typer.Option(
         "hal0-api",
         "--unit",
-        help="systemd unit to tail (default: hal0-api — hal0's own daemon).",
+        help="hal0 unit to tail (default: hal0-api). Only hal0 units are accepted: hal0.target, hal0-*, hindsight-api, hermes-gateway.",
     ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream logs (SSE tail)."),
     lines: int = typer.Option(

@@ -1720,10 +1720,11 @@ ui_step "Systemd units" "~2-5s"
 # ── hal0-api journal read (#2435) ─────────────────────────────────────────────
 # /api/logs and the MCP logs_tail tool run journalctl inside hal0-api
 # (User=hal0); without journal read they return no lines. The grant is
-# SupplementaryGroups= on THIS unit only — deliberately not `usermod -aG
-# systemd-journal hal0`, which would also hand it to hal0-agent@.service
-# (same uid, ADR-0002). /api/logs restricts itself to hal0's own units
-# (src/hal0/api/routes/logs.py) so the group is not a host-wide log reader.
+# SupplementaryGroups= on THIS unit's process tree (its children inherit it)
+# — deliberately not `usermod -aG systemd-journal hal0`, which would also
+# hand it to hal0-agent@.service. The agent shares the hal0 uid (ADR-0002),
+# so this scopes the grant; it is not an isolation boundary. /api/logs
+# restricts itself to hal0's own units (src/hal0/api/routes/logs.py).
 # A host without the group gets no directive: systemd refuses to start a unit
 # whose SupplementaryGroups= does not resolve (216/GROUP).
 if getent group systemd-journal >/dev/null 2>&1; then
@@ -1757,7 +1758,7 @@ Wants=network-online.target
 Type=simple
 User=hal0
 Group=hal0
-# Journal read for /api/logs + MCP logs_tail, this process only (#2435).
+# Journal read for /api/logs + MCP logs_tail; this unit's process tree (#2435).
 ${API_JOURNAL_GROUP_LINE}
 # hal0-api writes /etc/hal0/* + /var/lib/hal0/* directly — those trees are
 # hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
