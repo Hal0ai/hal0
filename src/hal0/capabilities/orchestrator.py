@@ -511,8 +511,14 @@ class CapabilityOrchestrator:
         # arms when the selection is (or stays) enabled: disabling a
         # selection whose weights vanished must always succeed, and
         # picking a model while the child is off is legal staging — the
-        # gate fires when the operator flips it on (#2026).
-        if merged.model:
+        # gate fires when the operator flips it on (#2026). Catalog
+        # membership is likewise not re-checked when a disabled selection
+        # merely carries forward its already-persisted model: one the picker
+        # no longer advertises (e.g. qwen3-tts once the ROCm lane is gone,
+        # #2447) must stay disable-able. A *newly named* model is still
+        # validated even while disabled.
+        carries_persisted_model = not merged.enabled and merged.model == before_model
+        if merged.model and not carries_persisted_model:
             # Validation reads the FLM catalog synchronously; warm a cold
             # cache off the event loop first (#2334).
             await _warm_flm_catalog()

@@ -1277,29 +1277,30 @@ known_issues:
     review_at: v1.1.0
 
   - id: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host
-    status: by-design
+    status: fixed          # #2447 / #2450 — the unconditional gpu-rocm row is gone
     adjudicated: v1.0.0-rc.7
     summary: >-
-      `catalogs.voice.tts` always lists `qwen3-tts` with `backends: [gpu-rocm]`, fit_status
-      allowed, even on a box with no /dev/kfd where the top-level `.backends` array correctly
-      omits gpu-rocm.
+      `catalogs.voice.tts` listed `qwen3-tts` with `backends: [gpu-rocm]`, fit_status allowed,
+      even on a box with no /dev/kfd where the top-level `.backends` array correctly omits
+      gpu-rocm.
     why: >-
-      `voice.tts` is a two-ENGINE switch, not a host-fit model list. `catalog.py`'s
-      `_TTS_ENGINES` hardcodes `kokoro-v1 -> cpu` and `qwen3-tts -> gpu-rocm` because each engine
-      has exactly one legal device; `_tts_rows_for_capability` injects both rows directly,
-      bypassing the llamacpp host fan-out on purpose. Locked by
-      `tests/capabilities/test_tts_capability_switch.py`, which does not mock hardware. The row
-      stays honest about being unusable on a kfd-less box: `downloaded:false, pullable:false,
-      size_gb:0.0`. An apply on such a box refuses loudly at the lifecycle stage
-      (503 capability.apply_failed naming /dev/kfd) rather than serving silence. Do NOT confuse
-      this with the SEPARATE, real defect where a locally-added chat/embed/rerank GGUF
-      advertises `gpu-rocm` unconditionally regardless of host — see regression
-      `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`, which is a
-      different code path (`_backend_variants`'s rocm branch missing a host-backends
-      intersection) with no deliberate-engine-switch justification.
+      RESOLVED, not by-design any more. The rc.7 adjudication read `_TTS_ENGINES`' fixed
+      engine-to-device pairing as a deliberate two-engine switch; the picker row was nonetheless
+      advertised on hosts that cannot run it. #2447 gated the `gpu-rocm` engine row in
+      `catalog.py::_tts_rows_for_capability` on `rocm_lane_present()` (/dev/kfd AND a render
+      node) — the same predicate behind the `gpu-rocm` badge and ComfyUI's row — so a host
+      without the ROCm lane no longer sees `qwen3-tts`, while `kokoro-v1` (cpu) is always
+      offered. Apply-time behaviour is unchanged: an already-persisted qwen3-tts selection can
+      still be disabled (the catalog membership check is skipped for a disabled selection), and
+      enabling it on a lane-less box is refused with `capability.unknown_model`. Locked by
+      `tests/capabilities/test_catalog_kfd_gating.py` and
+      `tests/capabilities/test_apply_model_not_downloaded.py`. Still distinct from regression
+      `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models` (locally-added
+      GGUFs; `_backend_variants`' rocm branch).
     still_report_if: >-
-      The qwen3-tts row reports `downloaded: true` on a box with no staged Qwen3-TTS weights; OR
-      selecting qwen3-tts on a kfd-less box produces a tts slot that reports ready/serves silence
-      instead of refusing; OR the kokoro-v1 CPU row disappears or stops being the only cpu-device
-      tts option, leaving a kfd-less box with no usable TTS engine in the picker.
+      `catalogs.voice.tts` lists `qwen3-tts` on a host where `rocm_lane_present()` is false
+      (no /dev/kfd, or /dev/kfd without a /dev/dri/renderD* node); OR the row is MISSING on a
+      host that has both; OR `hal0 capabilities set voice tts --disabled` fails for a persisted
+      qwen3-tts selection; OR the kokoro-v1 CPU row disappears, leaving a lane-less box with no
+      TTS engine in the picker.
     review_at: v1.1.0

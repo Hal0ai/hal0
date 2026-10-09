@@ -94,9 +94,9 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
     the same capability type (`hal0 model add <path> --id zzprobe` against any small gguf, then
     `hal0 model rm zzprobe -f` when done). A locally-added model advertising `gpu-rocm` while the
     top-level `.backends` array and every curated row correctly omit it is the finding — do not
-    conflate it with the `catalogs.voice.tts` `qwen3-tts` row's unconditional `gpu-rocm`, which
-    is a deliberate two-engine switch (`known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-
-    regardless-of-host`), not a bug.
+    conflate it with the `catalogs.voice.tts` `qwen3-tts` row, which is gated on the ROCm lane
+    (#2447, `known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`, fixed): on a
+    box without /dev/kfd plus a render node that row must be absent.
 13. **Services health vs service registry** — regression `services-health-omits-hindsight`.
     `diff <(curl -s $API/api/services | jq -r '.[].id' | sort) <(curl -s $API/api/services/health
     | jq -r '.services[].id' | sort)`. Any id present in `/api/services` but absent from

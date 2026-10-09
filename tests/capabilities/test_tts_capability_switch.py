@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hal0.capabilities import catalog as catalog_mod
 from hal0.capabilities.catalog import models_for_capability
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
@@ -33,7 +35,10 @@ from hal0.capabilities.orchestrator import CapabilityOrchestrator
 # host's live profiles.toml.
 
 
-def test_voice_tts_catalog_enumerates_both_engines(tmp_hal0_home: str) -> None:
+def test_voice_tts_catalog_enumerates_both_engines(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_mod, "rocm_lane_present", lambda *a, **k: True)
     rows = models_for_capability("tts", registry=None)
     ids = {row["id"] for row in rows}
     assert "kokoro-v1" in ids, "Kokoro CPU engine missing from voice.tts catalog"
@@ -52,7 +57,10 @@ def test_kokoro_row_offers_cpu_backend(tmp_hal0_home: str) -> None:
     assert backends["cpu"]["profile"] == "kokoro"
 
 
-def test_qwen3_row_offers_gpu_rocm_backend(tmp_hal0_home: str) -> None:
+def test_qwen3_row_offers_gpu_rocm_backend(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_mod, "rocm_lane_present", lambda *a, **k: True)
     rows = models_for_capability("tts", registry=None)
     qwen = next((r for r in rows if r["id"] == "qwen3-tts"), None)
     assert qwen is not None
