@@ -687,7 +687,7 @@ def _stt_weights_with(monkeypatch: pytest.MonkeyPatch, flags: str | None) -> Che
     import hal0.profiles as profiles_mod
 
     monkeypatch.setattr(profiles_mod, "ProfileCatalog", lambda: _StubCatalog(flags))
-    monkeypatch.setattr(da, "_moonshine_slots", lambda: ["stt"])
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: ({"stt": "moonshine"}, []))
     return da.check_voice_stt_weights()
 
 
@@ -701,25 +701,126 @@ def test_stt_weights_skipped_when_no_slot_uses_moonshine(
     monkeypatch.setattr(
         profiles_mod, "ProfileCatalog", lambda: _StubCatalog(f"--model_path {missing}")
     )
-    monkeypatch.setattr(da, "_moonshine_slots", lambda: [])
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: ({}, []))
     c = da.check_voice_stt_weights()
     assert c.status == "pass"
     assert "no slot uses" in c.detail
 
 
-def test_moonshine_slots_detects_profile_and_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+def _slot_cfgs(monkeypatch: pytest.MonkeyPatch, cfgs: dict, families: dict | None = None) -> None:
+    """Install slot configs; ``families`` maps profile name -> runtime_family.
+
+    Dispatch itself (``_spec_provider_for``) is NOT stubbed: only the profile
+    catalog lookup it performs is, so the test exercises the real authority.
+    """
     import types
 
     import hal0.config.loader as loader
+    import hal0.providers.container as container
+    from hal0.config.schema import SlotConfig
 
-    cfgs = {
-        "a": types.SimpleNamespace(profile="moonshine", provider="llama-server"),
-        "b": types.SimpleNamespace(profile=None, provider="moonshine"),
-        "c": types.SimpleNamespace(profile="rocmfpx-rocm", provider="llama-server"),
-    }
-    monkeypatch.setattr(loader, "list_slots", lambda: list(cfgs))
-    monkeypatch.setattr(loader, "load_slot_config", lambda n: cfgs[n])
-    assert da._moonshine_slots() == ["a", "b"]
+    built = {n: SlotConfig.model_validate({"name": n, "port": 8100, **c}) for n, c in cfgs.items()}
+    monkeypatch.setattr(loader, "list_slots", lambda: list(built))
+    monkeypatch.setattr(loader, "load_slot_config", lambda n: built[n])
+
+    class _Cat:
+        def resolve(self, name: str):
+            if name not in (families or {}):
+                raise KeyError(name)
+            return types.SimpleNamespace(runtime_family=families[name])
+
+    monkeypatch.setattr(container, "ProfileCatalog", lambda: _Cat())
+
+
+def test_moonshine_slots_profileless_transcription_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slot_cfgs(monkeypatch, {"stt": {"type": "transcription", "device": "cpu"}})
+    users, unreadable = da._moonshine_slots()
+    assert users == {"stt": "moonshine"}  # provider default profile
+    assert unreadable == []
+
+
+def test_moonshine_slots_custom_profile_with_moonshine_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slot_cfgs(
+        monkeypatch,
+        {
+            "stt": {"type": "transcription", "device": "cpu", "profile": "my-stt"},
+            "chat": {"device": "gpu-rocm", "profile": "rocmfpx-rocm"},
+        },
+        families={"my-stt": "moonshine", "rocmfpx-rocm": "llama-server"},
+    )
+    users, _ = da._moonshine_slots()
+    assert users == {"stt": "my-stt"}
+
+
+def test_moonshine_slots_ignores_stale_provider_label_on_npu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``provider`` is a deprecated label dispatch ignores; npu routes to FLM."""
+    _slot_cfgs(
+        monkeypatch,
+        {"stt": {"type": "transcription", "device": "npu", "provider": "moonshine"}},
+    )
+    users, _ = da._moonshine_slots()
+    assert users == {}
+
+
+def test_moonshine_slots_reports_unreadable_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0.config.loader as loader
+
+    monkeypatch.setattr(loader, "list_slots", lambda: ["bad"])
+
+    def _boom(_n: str):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(loader, "load_slot_config", _boom)
+    users, unreadable = da._moonshine_slots()
+    assert users == {}
+    assert unreadable == ["bad"]
+
+
+def test_stt_weights_fresh_install_passes_without_checking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Fresh install: seeded profile, missing weights dir, no slot uses it."""
+    import hal0.profiles as profiles_mod
+
+    _slot_cfgs(monkeypatch, {"chat": {"device": "gpu-rocm"}})
+    monkeypatch.setattr(
+        profiles_mod, "ProfileCatalog", lambda: _StubCatalog(f"--model_path {tmp_path / 'nope'}")
+    )
+    c = da.check_voice_stt_weights()
+    assert c.status == "pass"
+
+
+def test_stt_weights_unreadable_slot_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: ({}, ["bad"]))
+    c = da.check_voice_stt_weights()
+    assert c.status == "warn"
+    assert "bad" in c.detail
+
+
+def test_stt_weights_checks_the_profile_the_slot_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import hal0.profiles as profiles_mod
+
+    seen: list[str] = []
+
+    class _Cat:
+        def resolve(self, name: str):
+            seen.append(name)
+            return _StubProfile(f"--model_path {tmp_path / name}")
+
+    monkeypatch.setattr(profiles_mod, "ProfileCatalog", lambda: _Cat())
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: ({"stt": "my-stt"}, []))
+    c = da.check_voice_stt_weights()
+    assert seen == ["my-stt"]
+    assert c.status == "fail"
+    assert "my-stt" in c.detail
 
 
 def test_stt_weights_missing_bundle_fails_by_name(
@@ -745,9 +846,11 @@ def test_stt_weights_staged_bundle_passes(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert c.status == "pass"
 
 
-def test_stt_weights_profile_absent_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stt_weights_profile_absent_warns_when_slot_uses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     c = _stt_weights_with(monkeypatch, None)
-    assert c.status == "pass"
+    assert c.status == "warn"
 
 
 # ── check_mcp_mounts ────────────────────────────────────────────────────────

@@ -494,66 +494,59 @@ def check_agent_uid_isolation(
     )
 
 
-def _moonshine_slots() -> list[str]:
-    """Names of configured slots that run the moonshine engine.
+def _moonshine_slots() -> tuple[dict[str, str], list[str]]:
+    """Slots the launch path would run on the moonshine engine.
 
-    A slot uses moonshine when it selects the ``moonshine`` profile or carries
-    ``provider = "moonshine"``. Unreadable slot files are skipped: one corrupt
-    slot must not turn a preflight row into a crash.
+    Returns ``(users, unreadable)``: ``users`` maps slot name to the profile
+    whose weights that slot's spawn enforces; ``unreadable`` lists slots whose
+    config could not be loaded (usage is then unknown, not absent).
+
+    Whether a slot uses moonshine is decided by the container dispatch
+    authority (:func:`hal0.providers.container._spec_provider_for`), not a
+    parallel heuristic: that covers profile-less ``type=transcription`` slots
+    on cpu and custom profiles with ``runtime_family = "moonshine"``, and
+    ignores the deprecated ``provider`` label (an npu slot routes to FLM
+    whatever it says). The profile is the one ``MoonshineProvider`` itself
+    resolves: the slot's ``profile``, else its default.
     """
     from hal0.config.loader import list_slots, load_slot_config
+    from hal0.providers.container import _spec_provider_for
+    from hal0.providers.moonshine import _DEFAULT_PROFILE, MoonshineProvider
 
-    names: list[str] = []
+    users: dict[str, str] = {}
+    unreadable: list[str] = []
     for name in list_slots():
         try:
-            cfg = load_slot_config(name)
+            cfg = load_slot_config(name).model_dump()
         except Exception:
+            unreadable.append(name)
             continue
-        if cfg.profile == "moonshine" or cfg.provider == "moonshine":
-            names.append(name)
-    return names
+        try:
+            provider = _spec_provider_for(cfg)
+        except Exception:
+            continue  # unknown family: not a moonshine launch
+        if isinstance(provider, MoonshineProvider):
+            users[name] = str(cfg.get("profile") or _DEFAULT_PROFILE)
+    return users, unreadable
 
 
-def check_voice_stt_weights() -> Check:
-    """Moonshine STT weights preflight — the same rule slot spawn enforces.
-
-    Only runs when a slot actually uses moonshine (#2437): the seeded
-    ``moonshine`` profile exists on every install, so keying off the profile
-    alone put a red FAIL on every fresh box that never enabled local STT.
-
-    The moonshine ONNX bundle is operator-staged (multi-file, not registry-
-    pulled), so a fresh box can configure the stt slot and only find out the
-    weights are missing when the container 500s. This row runs
-    :func:`hal0.providers.moonshine.check_moonshine_weights` against the
-    profile-baked ``--model_path`` so the gap is named here first. An empty
-    ``--model_path`` is the in-container HuggingFace auto-download path —
-    legitimate but slow on first start, so it warns rather than fails.
-    """
+def _moonshine_profile_check(profile_name: str, slots: list[str]) -> Check:
+    """Weights preflight for one moonshine profile used by ``slots``."""
     import shlex
 
     from hal0.errors import Hal0Error
     from hal0.profiles import ProfileCatalog
     from hal0.providers.moonshine import check_moonshine_weights
 
+    label = f"profile {profile_name!r} (slot {', '.join(slots)})"
     try:
-        users = _moonshine_slots()
-    except Exception:
-        users = []
-    if not users:
-        return Check(
-            "stt-weights",
-            "Moonshine weights",
-            _PASS,
-            "no slot uses the moonshine STT engine — nothing to preflight",
-        )
-    try:
-        profile = ProfileCatalog().resolve("moonshine")
+        profile = ProfileCatalog().resolve(profile_name)
     except Exception:
         return Check(
             "stt-weights",
             "Moonshine weights",
-            _PASS,
-            "moonshine profile absent — nothing to preflight",
+            _WARN,
+            f"{label} cannot be resolved — slot start will fail until it exists",
         )
     tokens = shlex.split(profile.resolved_flags or "")
     model_path = ""
@@ -565,19 +558,71 @@ def check_voice_stt_weights() -> Check:
             "stt-weights",
             "Moonshine weights",
             _WARN,
-            "no --model_path in the moonshine profile — first slot start will "
+            f"no --model_path in {label} — first slot start will "
             "auto-download from HuggingFace inside the container (slow, needs egress)",
         )
     try:
         check_moonshine_weights(model_path)
     except Hal0Error as exc:
-        return Check("stt-weights", "Moonshine weights", _FAIL, str(exc))
+        return Check("stt-weights", "Moonshine weights", _FAIL, f"{label}: {exc}")
     return Check(
         "stt-weights",
         "Moonshine weights",
         _PASS,
         f"staged bundle present at {model_path}",
     )
+
+
+def check_voice_stt_weights() -> Check:
+    """Moonshine STT weights preflight — the same rule slot spawn enforces.
+
+    Only runs when a slot actually uses moonshine (#2437): the seeded
+    ``moonshine`` profile exists on every install, so keying off the profile
+    alone put a red FAIL on every fresh box that never enabled local STT.
+    Usage is decided by the container dispatch authority and the profile
+    checked is the one the provider would resolve (see
+    :func:`_moonshine_slots`).
+
+    The moonshine ONNX bundle is operator-staged (multi-file, not registry-
+    pulled), so a fresh box can configure the stt slot and only find out the
+    weights are missing when the container 500s. This row runs
+    :func:`hal0.providers.moonshine.check_moonshine_weights` against the
+    profile-baked ``--model_path`` so the gap is named here first. An empty
+    ``--model_path`` is the in-container HuggingFace auto-download path —
+    legitimate but slow on first start, so it warns rather than fails.
+    A slot config the doctor cannot read leaves usage unknown, which warns.
+    """
+    try:
+        users, unreadable = _moonshine_slots()
+    except Exception:
+        users, unreadable = {}, []
+    by_profile: dict[str, list[str]] = {}
+    for slot, profile_name in users.items():
+        by_profile.setdefault(profile_name, []).append(slot)
+    results = [_moonshine_profile_check(p, s) for p, s in by_profile.items()]
+    rank = {_PASS: 0, _WARN: 1, _FAIL: 2}
+    if unreadable:
+        results.append(
+            Check(
+                "stt-weights",
+                "Moonshine weights",
+                _WARN,
+                f"could not read slot config for {', '.join(unreadable)} — cannot tell "
+                "whether a slot uses the moonshine STT engine",
+            )
+        )
+    if not results:
+        return Check(
+            "stt-weights",
+            "Moonshine weights",
+            _PASS,
+            "no slot uses the moonshine STT engine — nothing to preflight",
+        )
+    worst = max(results, key=lambda c: rank.get(c.status, 0))
+    if worst.status == _PASS:
+        return results[0]
+    flagged = [c.detail for c in results if c.status == worst.status]
+    return Check("stt-weights", "Moonshine weights", worst.status, "; ".join(flagged))
 
 
 def check_model_store(
