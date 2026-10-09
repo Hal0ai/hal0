@@ -273,6 +273,12 @@ def find_candidates(
             if shard_key is not None:
                 if candidate.suffix.lower() not in exts:
                     continue
+                # Honour the skip dirs here too (#2443): a complete shard
+                # set bundled in e.g. ``custom_nodes/`` must not group into
+                # a chat candidate. Check the UN-resolved path — HF snapshot
+                # shards resolve into ``blobs/``, which is itself skip-listed.
+                if any(part in _SKIP_DIR_NAMES for part in candidate.parts):
+                    continue
                 try:
                     shard_abs = candidate.resolve()
                 except OSError:
@@ -509,6 +515,68 @@ def backfill_coordless(registry: ModelRegistry) -> list[str]:
     return repaired
 
 
+#: Origin marker :func:`register_candidate` stamps on every row it writes.
+#: Only rows carrying it are eligible for :func:`reconcile_skipped_auto_scan`;
+#: scan-commit (``"scan"``), add-from-path, pulls and hand-added rows carry a
+#: different source (or none) and are never touched.
+_AUTO_SCAN_SOURCE = "auto-scan"
+
+#: Skip dirs that mark a stored registry path as "would no longer be
+#: discovered". ``blobs`` is excluded: an auto-scanned HF shard set stores
+#: its RESOLVED shard-1 path, which legitimately lives under ``blobs/``.
+_RECONCILE_DIR_NAMES = _SKIP_DIR_NAMES - {"blobs"}
+
+
+def reconcile_skipped_auto_scan(
+    registry: ModelRegistry,
+    *,
+    protected_ids: set[str],
+) -> dict:
+    """Drop auto-scan rows whose stored path now sits under a skip dir.
+
+    An older scan may have registered files the skip rules now exclude (e.g.
+    a ComfyUI ``custom_nodes/`` asset registered as a chat LLM, #2443). The
+    add pass never revisits them (their paths are in ``known_paths``) and
+    :func:`prune_missing` only drops rows whose file is gone, so without
+    this the bogus row survives every upgrade.
+
+    A row is removed only if ALL hold: ``metadata["source"] == "auto-scan"``,
+    a component of its stored path is a skip dir (``blobs`` excepted), and
+    its id is not in ``protected_ids``. Protected matches are reported under
+    ``referenced`` instead, mirroring ``prune_missing``'s
+    ``missing_referenced``. Returns ``{"removed": [...], "referenced": [...]}``.
+    """
+    removed: list[str] = []
+    referenced: list[str] = []
+    for m in registry.list():
+        if not _is_reconcilable(m):
+            continue
+        if m.id in protected_ids:
+            log.warning(
+                "discover.reconcile_kept_referenced id=%s path=%s — under a skipped dir "
+                "but referenced by a slot/stack",
+                m.id,
+                m.path,
+            )
+            referenced.append(m.id)
+            continue
+        try:
+            registry.remove(m.id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.reconcile_remove_failed id=%s err=%s", m.id, exc)
+            continue
+        log.info("discover.reconcile_removed id=%s path=%s — under a skipped dir", m.id, m.path)
+        removed.append(m.id)
+    return {"removed": removed, "referenced": referenced}
+
+
+def _is_reconcilable(m: Model) -> bool:
+    """True for an auto-scan row whose stored path sits under a skip dir."""
+    if (m.metadata or {}).get("source") != _AUTO_SCAN_SOURCE:
+        return False
+    return any(part in _RECONCILE_DIR_NAMES for part in Path(m.path).parts)
+
+
 def prune_missing(
     registry: ModelRegistry,
     *,
@@ -631,7 +699,21 @@ def scan_and_register(
     ``missing_referenced`` for repair. The ``pruned`` / ``missing_referenced``
     keys are always present (both ``[]`` when ``prune`` is False) so the return
     shape is stable.
+
+    Every call also runs :func:`reconcile_skipped_auto_scan` first, so rows an
+    older scan registered under a now-skipped dir are dropped (reported under
+    ``reconciled``; protected matches under ``reconcile_referenced``). When
+    ``protected_ids`` is None, protection falls back to
+    :func:`referenced_model_ids`, resolved only if a row actually matches.
     """
+    reconciled: list[str] = []
+    reconcile_referenced: list[str] = []
+    if any(_is_reconcilable(m) for m in registry.list()):
+        reconcile_protected = protected_ids if protected_ids is not None else referenced_model_ids()
+        rec = reconcile_skipped_auto_scan(registry, protected_ids=reconcile_protected)
+        reconciled = rec["removed"]
+        reconcile_referenced = rec["referenced"]
+
     known_paths: set[str] = set()
     for existing in registry.list():
         try:
@@ -698,6 +780,8 @@ def scan_and_register(
         "scanned_roots": [str(r) for r in roots],
         "pruned": pruned,
         "missing_referenced": missing_referenced,
+        "reconciled": reconciled,
+        "reconcile_referenced": reconcile_referenced,
     }
 
 
@@ -714,6 +798,7 @@ __all__ = [
     "find_candidates",
     "is_skippable",
     "prune_missing",
+    "reconcile_skipped_auto_scan",
     "referenced_model_ids",
     "register_candidate",
     "scan_and_register",

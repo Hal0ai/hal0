@@ -503,7 +503,10 @@ async def auto_scan_and_register(
     """
     from hal0.registry.discover import referenced_model_ids, scan_and_register
 
-    protected_ids = referenced_model_ids() if prune else set()
+    # None (not an empty set) when not pruning: scan_and_register's
+    # skip-dir reconcile then resolves slot/stack refs itself, so a
+    # referenced row is never dropped just because prune is off.
+    protected_ids = referenced_model_ids() if prune else None
     result = scan_and_register(registry, models_cfg, prune=prune, protected_ids=protected_ids)
     if event_bus is not None:
         for mid in result.get("added", []):
@@ -532,6 +535,15 @@ async def auto_scan_and_register(
                     "info",
                     f"model:{mid}",
                     f"{mid}: pruned (scan — backing file missing)",
+                    data={"id": mid, "source": "scan"},
+                )
+        for mid in result.get("reconciled", []):
+            with contextlib.suppress(Exception):
+                await event_bus.emit(
+                    "model.pruned",
+                    "info",
+                    f"model:{mid}",
+                    f"{mid}: pruned (scan — path is under a skipped directory)",
                     data={"id": mid, "source": "scan"},
                 )
     return result

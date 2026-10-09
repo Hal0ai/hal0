@@ -581,3 +581,128 @@ def test_scan_and_register_default_does_not_prune(tmp_path: Path, registry: Mode
     assert result["missing_referenced"] == []
     # Stale row is left alone — add-only behavior preserved by default.
     assert registry.has("stale")
+
+
+def test_find_candidates_skips_shard_set_under_custom_nodes(tmp_path: Path) -> None:
+    """A COMPLETE shard set bundled in a ComfyUI custom node must not be
+    grouped into a chat candidate: the shard branch has to honour the skip
+    dirs too, not only the single-file branch (#2443)."""
+    root = tmp_path / "models"
+    node = root / "custom_nodes" / "ComfyUI-Foo" / "weights"
+    node.mkdir(parents=True)
+    (node / "detector-00001-of-00002.safetensors").write_bytes(b"a" * 64)
+    (node / "detector-00002-of-00002.safetensors").write_bytes(b"b" * 64)
+    (node / "encoded-silence.safetensors").write_bytes(b"c" * 64)
+    (root / "real-chat-q4.gguf").write_bytes(b"y" * 64)
+    names = {
+        c.path.name
+        for c in find_candidates(
+            roots=[root], extensions=[".gguf", ".safetensors"], known_paths=set()
+        )
+    }
+    assert names == {"real-chat-q4.gguf"}
+
+
+def test_find_candidates_groups_hf_snapshot_shards_resolving_into_blobs(
+    tmp_path: Path,
+) -> None:
+    """HF snapshot shards are symlinks whose targets live under ``blobs/``
+    (itself skip-listed). The shard skip check reads the UN-resolved path,
+    so such a set is still grouped."""
+    repo = tmp_path / "models" / "hub" / "models--org--big"
+    blobs = repo / "blobs"
+    snap = repo / "snapshots" / "abc123"
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    for i, sha in ((1, "a" * 40), (2, "b" * 40)):
+        (blobs / sha).write_bytes(b"x" * 32)
+        (snap / f"big-0000{i}-of-00002.gguf").symlink_to(blobs / sha)
+    candidates = find_candidates(
+        roots=[tmp_path / "models"], extensions=[".gguf"], known_paths=set()
+    )
+    assert len(candidates) == 1
+    assert candidates[0].shards is not None and len(candidates[0].shards) == 2
+
+
+def _auto_scan_row(model_id: str, path: Path) -> Model:
+    return Model(
+        id=model_id,
+        path=str(path),
+        capabilities=["chat"],
+        metadata={"discovered": True, "source": "auto-scan"},
+    )
+
+
+def test_scan_and_register_reconciles_auto_scan_rows_under_skip_dirs(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """An upgraded box keeps rows an older scan registered under a dir the
+    skip rules now exclude (#2443: ``custom_nodes/.../encoded-silence``).
+    Scan-time reconcile drops AUTO-SCAN rows there, but never user-added or
+    pulled rows, never slot/stack-referenced rows, and never an auto-scan
+    shard row whose stored (resolved) path sits in an HF ``blobs/`` dir."""
+    root = tmp_path / "models"
+    node = root / "comfyui" / "custom_nodes" / "ComfyUI-WanVideoW" / "assets"
+    node.mkdir(parents=True)
+    silence = node / "encoded-silence.safetensors"
+    silence.write_bytes(b"s" * 64)
+    referenced = node / "referenced.safetensors"
+    referenced.write_bytes(b"r" * 64)
+    user_added = node / "user-added.safetensors"
+    user_added.write_bytes(b"u" * 64)
+    blob_dir = root / "hub" / "models--org--big" / "blobs"
+    blob_dir.mkdir(parents=True)
+    blob = blob_dir / ("c" * 40)
+    blob.write_bytes(b"b" * 64)
+    live = root / "real-chat-q4.gguf"
+    live.write_bytes(b"y" * 64)
+
+    registry.add(_auto_scan_row("encoded-silence", silence.resolve()))
+    registry.add(_auto_scan_row("referenced", referenced.resolve()))
+    registry.add(
+        Model(
+            id="user-added",
+            path=str(user_added.resolve()),
+            capabilities=["chat"],
+            metadata={"discovered": True, "source": "add-from-path"},
+        )
+    )
+    registry.add(Model(id="legacy-manual", path=str(user_added.resolve()), capabilities=["chat"]))
+    registry.add(_auto_scan_row("hf-sharded", blob.resolve()))
+    registry.add(_auto_scan_row("real-chat-q4", live.resolve()))
+
+    cfg = ModelsConfig(roots=[str(root)], file_extensions=[".gguf", ".safetensors"])
+    result = scan_and_register(registry, cfg, protected_ids={"referenced"})
+
+    assert result["reconciled"] == ["encoded-silence"]
+    assert result["reconcile_referenced"] == ["referenced"]
+    assert not registry.has("encoded-silence")
+    for kept in ("referenced", "user-added", "legacy-manual", "hf-sharded", "real-chat-q4"):
+        assert registry.has(kept), kept
+
+
+def test_scan_and_register_reconcile_defaults_protection_to_referenced_ids(
+    tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Callers that pass no ``protected_ids`` (boot auto-scan, config routes)
+    still never drop a slot/stack-referenced row: reconcile falls back to
+    ``referenced_model_ids()``."""
+    from hal0.registry import discover
+
+    root = tmp_path / "models"
+    node = root / "custom_nodes" / "ComfyUI-Foo"
+    node.mkdir(parents=True)
+    a = node / "a.safetensors"
+    a.write_bytes(b"a" * 64)
+    b = node / "b.safetensors"
+    b.write_bytes(b"b" * 64)
+    registry.add(_auto_scan_row("a", a.resolve()))
+    registry.add(_auto_scan_row("b", b.resolve()))
+    monkeypatch.setattr(discover, "referenced_model_ids", lambda: {"b"})
+
+    cfg = ModelsConfig(roots=[str(root)], file_extensions=[".safetensors"])
+    result = scan_and_register(registry, cfg)
+
+    assert result["reconciled"] == ["a"]
+    assert result["reconcile_referenced"] == ["b"]
+    assert registry.has("b")

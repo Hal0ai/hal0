@@ -291,7 +291,11 @@ async def scan_models(request: Request) -> dict[str, Any]:
       registry: rows whose backing file is missing on disk are removed
       (each firing a ``model.pruned`` event) UNLESS the id is referenced by
       a slot or stack, in which case it is reported under
-      ``missing_referenced`` for repair rather than deleted.
+      ``missing_referenced`` for repair rather than deleted. Every auto-scan
+      also drops earlier auto-scan rows whose path now sits under a skipped
+      directory (e.g. ComfyUI ``custom_nodes/``), reported under
+      ``reconciled`` (slot/stack-referenced ones under
+      ``reconcile_referenced``, kept).
 
     * **``{"rows": [...]}``** — commit pre-vetted preview rows. Each row
       may carry user-edited ``backends`` / ``capabilities`` / ``defaults``
@@ -300,7 +304,8 @@ async def scan_models(request: Request) -> dict[str, Any]:
       the whole point of the preview round-trip.
 
     Returns ``{added, skipped, scanned_roots}`` in both modes (plus
-    ``pruned`` / ``missing_referenced`` on the auto-scan path) so the UI's
+    ``pruned`` / ``missing_referenced`` / ``reconciled`` /
+    ``reconcile_referenced`` on the auto-scan path) so the UI's
     toast-render path is unchanged.
     """
     registry = request.app.state.model_registry
