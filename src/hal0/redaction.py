@@ -213,8 +213,12 @@ _SHAPE_RULES_AFTER: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
 
 def _is_secret_name(name: str) -> bool:
     """True if ``name`` (as matched by ``_SECRET_NAME``) names a secret value
-    rather than a count, a tokenizer, or where a secret is stored."""
-    name = name.lstrip("-")
+    rather than a count, a tokenizer, or where a secret is stored.
+
+    A ``-`` counts as ``_``, so header-style names (``x-api-key``,
+    ``auth-token``) are as secret as their ``_`` spelling, as with
+    :func:`hal0.api._redact.is_sensitive_key` (#2384)."""
+    name = name.lstrip("-").replace("-", "_")
     if _SECRET_REF_SUFFIX_RE.search(name):
         return False
     return bool(_SECRET_NAME_RE.fullmatch(_BENIGN_NAME_PART_RE.sub("", name)))
@@ -226,6 +230,174 @@ def _mask_name_value(match: re.Match[str]) -> str:
     value = match.group("value")
     quote = value[0] if value[0] in "\"'" else ""
     return f"{match.group('name')}{match.group('sep')}{quote}{MASK}{quote}"
+
+
+def redact_secret_named_values(value: Any) -> Any:
+    """Mask the value of every secret-NAMED dict key inside ``value`` (#2434).
+
+    The structured counterpart of the ``NAME=value`` shape pass: a key is
+    secret by the same test (``HF_TOKEN``, ``apiKey``, ``password``,
+    ``*_KEY``, ``key``), and names that only look secret (``max_tokens``,
+    ``tokenizer``, ``token_env``) are left alone, unlike
+    :func:`hal0.api._redact.redact_config`'s broader key test. A masked
+    value becomes :data:`MASK` whatever its type; anything else is walked
+    (dicts, lists, tuples) and returned with its shape unchanged. Pure.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (
+                MASK if isinstance(k, str) and _is_secret_name(k) else redact_secret_named_values(v)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_secret_named_values(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secret_named_values(v) for v in value)
+    return value
+
+
+# ── MCP audit rows (#2434) ──────────────────────────────────────────────────
+#
+#: MCP tool arguments that ARE a secret although their name does not say so.
+#: ``provider_credential_write``'s ``value`` is the API key itself (its
+#: ``key`` is only the env-var name). ``mcp_server_config_write``'s ``env``
+#: maps names to literals that :meth:`hal0.mcp.installed.InstalledServer.
+#: header_value_keys` sends as HTTP headers, so every value is a credential
+#: (``Authorization: Basic …``, an opaque ``X-Auth``) and only the names are
+#: kept. Owned here so the audit writer (:mod:`hal0.mcp.admin`) and the
+#: doctor bundle's export pass read the same list.
+AUDIT_SECRET_ARGS: Final[dict[str, frozenset[str]]] = {
+    "provider_credential_write": frozenset({"value"}),
+    "mcp_server_config_write": frozenset({"env"}),
+}
+
+
+def mask_audit_secret_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Return ``args`` with ``tool``'s :data:`AUDIT_SECRET_ARGS` masked.
+
+    A mapping arg keeps its keys and has every value masked; any other value
+    becomes :data:`MASK`. Pure: the caller's dict is not changed.
+    """
+    secret = AUDIT_SECRET_ARGS.get(tool, frozenset())
+    return {
+        k: (({kk: MASK for kk in v} if isinstance(v, dict) else MASK) if k in secret else v)
+        for k, v in args.items()
+    }
+
+
+_AUDIT_ROW_EVENT: Final[str] = "mcp.tool.invoked"
+_AUDIT_ROW_TOOL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9_])[\"']?tool[\"']?\s*[=:]\s*[\"']?(?P<tool>[A-Za-z0-9_]+)"
+)
+_QUOTES: Final[str] = "\"'"
+
+
+class _Unparsed(ValueError):
+    """The value at an offset is not a complete JSON / Python-repr literal."""
+
+
+def _skip_ws(s: str, i: int) -> int:
+    while i < len(s) and s[i].isspace():
+        i += 1
+    return i
+
+
+def _end_of_string(s: str, i: int) -> int:
+    """Index just past the quoted string starting at ``s[i]``."""
+    quote, i = s[i], i + 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == quote:
+            return i + 1
+        else:
+            i += 1
+    raise _Unparsed(s)
+
+
+def _masked_literal(s: str, i: int) -> tuple[str, int]:
+    """Masked rendering of the literal at ``s[i]`` and the index past it.
+
+    A string becomes a quoted :data:`MASK`; a dict keeps its keys and masks
+    every value (recursively); a list masks each item; any other scalar
+    becomes a bare :data:`MASK`.
+    """
+    if i >= len(s):
+        raise _Unparsed(s)
+    ch = s[i]
+    if ch in _QUOTES:
+        return f"{ch}{MASK}{ch}", _end_of_string(s, i)
+    if ch in "{[":
+        close, parts, i = ("}" if ch == "{" else "]"), [ch], i + 1
+        while True:
+            j = _skip_ws(s, i)
+            parts.append(s[i:j])
+            i = j
+            if i < len(s) and s[i] == close:
+                parts.append(close)
+                return "".join(parts), i + 1
+            if ch == "{":
+                if i >= len(s) or s[i] not in _QUOTES:
+                    raise _Unparsed(s)
+                j = _end_of_string(s, i)
+                k = _skip_ws(s, j)
+                if k >= len(s) or s[k] != ":":
+                    raise _Unparsed(s)
+                k = _skip_ws(s, k + 1)
+                parts.append(s[i:k])
+                i = k
+            value, i = _masked_literal(s, i)
+            parts.append(value)
+            j = _skip_ws(s, i)
+            if j < len(s) and s[j] == ",":
+                parts.append(s[i : j + 1])
+                i = j + 1
+            elif j < len(s) and s[j] == close:
+                parts.append(s[i:j])
+                i = j
+            else:
+                raise _Unparsed(s)
+    j = i
+    while j < len(s) and s[j] not in ",}] \t\n":
+        j += 1
+    if j == i:
+        raise _Unparsed(s)
+    return MASK, j
+
+
+def redact_audit_row_secret_args(line: str) -> str:
+    """Mask :data:`AUDIT_SECRET_ARGS` inside one rendered audit log line.
+
+    For ``mcp.tool.invoked`` rows logged before the write-time masking
+    (#2434), in the structlog console rendering (``args={'value': '…'}``)
+    or JSON (``"args": {"value": "…"}``). The tool is read from the row's
+    ``tool`` field; each of its secret args is masked as
+    :func:`mask_audit_secret_args` does. A value that does not parse (a
+    truncated line) is masked to the end of the line. Other lines are
+    returned unchanged. Idempotent.
+    """
+    if _AUDIT_ROW_EVENT not in line:
+        return line
+    tools = {m.group("tool") for m in _AUDIT_ROW_TOOL_RE.finditer(line)}
+    names = set().union(*(AUDIT_SECRET_ARGS.get(t, frozenset()) for t in tools))
+    for name in sorted(names):
+        arg_re = re.compile(r"([\"'])" + re.escape(name) + r"\1\s*:\s*")
+        out, pos = [], 0
+        for match in arg_re.finditer(line):
+            if match.start() < pos:
+                continue
+            out.append(line[pos : match.end()])
+            try:
+                masked, pos = _masked_literal(line, match.end())
+            except _Unparsed:
+                out.append(MASK)
+                pos = len(line)
+                break
+            out.append(masked)
+        out.append(line[pos:])
+        line = "".join(out)
+    return line
 
 
 def redact_secret_shapes(line: str) -> str:
@@ -283,9 +455,13 @@ def redact_shareable_text(text: str) -> str:
 
 
 __all__ = [
+    "AUDIT_SECRET_ARGS",
     "LOG_SECRET_RE",
     "MASK",
+    "mask_audit_secret_args",
+    "redact_audit_row_secret_args",
     "redact_log_line",
+    "redact_secret_named_values",
     "redact_secret_shapes",
     "redact_shareable_text",
     "redact_text_tree",

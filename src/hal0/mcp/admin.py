@@ -178,6 +178,9 @@ from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
+from hal0.redaction import mask_audit_secret_args as _mask_audit_secret_args
+from hal0.redaction import redact_secret_named_values as _redact_secret_named_values
+from hal0.redaction import redact_text_tree as _redact_text_tree
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
@@ -1683,18 +1686,35 @@ async def _call_rest(
 # ── Audit ────────────────────────────────────────────────────────────────────
 
 
+def _redact_audit_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Mask secret values in an MCP tool's args before they are logged (#2434).
+
+    Three layers: the tool's own secret args
+    (:data:`hal0.redaction.AUDIT_SECRET_ARGS`: a credential value, or an
+    ``env`` block whose values are sent as headers), the value of every
+    secret-NAMED key at any depth
+    (:func:`hal0.redaction.redact_secret_named_values`), and secret SHAPES
+    inside any string value (:func:`hal0.redaction.redact_text_tree`, the
+    #2403 pass ``/api/logs`` and ``logs_tail`` apply on read). Returns a new
+    dict; the caller's ``args`` keep the real values for the executor.
+    """
+    return _redact_text_tree(_redact_secret_named_values(_mask_audit_secret_args(tool, args)))
+
+
 def _audit(*, client_id: str, tool: str, args: dict[str, Any], gated: bool, outcome: str) -> None:
     """Emit a structured audit row for one MCP tool invocation.
 
     Routes through the ``hal0.mcp.audit`` logger which inherits the
     structlog config installed by the main API. That config already
-    feeds journald, so we get persisted audit history for free.
+    feeds journald, so we get persisted audit history for free. journald
+    holds the row at rest and ``hal0 doctor bundle`` copies it, so the args
+    are masked here, at write time, not only on read (#2434).
     """
     audit_log.info(
         "mcp.tool.invoked",
         client_id=client_id,
         tool=tool,
-        args=args,
+        args=_redact_audit_args(tool, args),
         gated=gated,
         outcome=outcome,
         timestamp=time.time(),
