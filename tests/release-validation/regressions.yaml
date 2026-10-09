@@ -2015,10 +2015,10 @@ regressions:
       picker's default stays correct) and selecting it fails LOUDLY at load via
       `require_kfd_for_gpu_slot` with an actionable /dev/kfd message, never silent garbage. The
       gate has no vendor check either, so it is expected (untested, code-evident only) to affect
-      non-AMD hosts too. NOTE: the `catalogs.voice.tts` row `qwen3-tts` advertising `gpu-rocm`
-      unconditionally is a SEPARATE, deliberate two-engine switch (`_TTS_ENGINES`,
-      test-locked) — do not fold that into this finding, it is by-design (see known-issues
-      `tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`).
+      non-AMD hosts too. NOTE: the `catalogs.voice.tts` row `qwen3-tts` was a SEPARATE
+      defect (hardcoded in `_TTS_ENGINES`), fixed by gating it on `rocm_lane_present()` in
+      #2447 — see known-issues `tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`; do not
+      fold it into this finding.
     repro: |
       curl -s $API/api/hardware | jq '.gpus[0].compute_capable'   # expect false
       curl -s $API/api/capabilities | jq '.backends'               # expect no gpu-rocm

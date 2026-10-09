@@ -125,6 +125,7 @@ def test_explicit_comfyui_provider_row_also_gated(monkeypatch: pytest.MonkeyPatc
 
 _NODES = {
     "kfd_only": (True, False),
+    "render_only": (False, True),
     "both": (True, True),
     "neither": (False, False),
 }
@@ -137,7 +138,8 @@ def _nodes(monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("shape", "offered"), [("kfd_only", False), ("both", True), ("neither", False)]
+    ("shape", "offered"),
+    [("kfd_only", False), ("render_only", False), ("both", True), ("neither", False)],
 )
 def test_gpu_rocm_badge_needs_kfd_and_a_render_node(
     monkeypatch: pytest.MonkeyPatch, shape: str, offered: bool
@@ -155,15 +157,16 @@ def test_gpu_rocm_badge_needs_kfd_and_a_render_node(
 
 
 @pytest.mark.parametrize(
-    ("shape", "expected"), [("kfd_only", []), ("both", ["gpu-vulkan"]), ("neither", [])]
+    ("shape", "expected"),
+    [("kfd_only", []), ("render_only", []), ("both", ["gpu-vulkan"]), ("neither", [])],
 )
 @pytest.mark.parametrize("entry", ["tagged", "explicit"])
 def test_comfyui_row_needs_kfd_and_a_render_node(
     monkeypatch: pytest.MonkeyPatch, shape: str, expected: list[str], entry: str
 ) -> None:
     """ComfyUI's image is ROCm-only, so its row follows the same predicate as
-    the gpu-rocm badge (and Qwen3-TTS, which rides that badge): on a kfd-only
-    AMD box the generic GPU row is still advertised, so this gate is the only
+    the gpu-rocm badge and Qwen3-TTS's voice.tts row (all three ask
+    ``rocm_lane_present``): on a kfd-only AMD box the generic GPU row is still advertised, so this gate is the only
     thing keeping a guaranteed-to-fail row out of the picker."""
     _nodes(monkeypatch, shape)
     row = _image_entry() if entry == "tagged" else types.SimpleNamespace(provider="comfyui")
@@ -182,7 +185,8 @@ def test_comfyui_row_needs_kfd_and_a_render_node(
 
 
 @pytest.mark.parametrize(
-    ("shape", "offered"), [("kfd_only", False), ("both", True), ("neither", False)]
+    ("shape", "offered"),
+    [("kfd_only", False), ("render_only", False), ("both", True), ("neither", False)],
 )
 def test_qwen3_tts_row_needs_the_rocm_lane(
     monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, shape: str, offered: bool

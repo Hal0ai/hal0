@@ -296,3 +296,30 @@ def test_registry_only_model_with_missing_weights_is_409(
     orch2._validate_model_in_catalog(
         "embed", "embed", "user-model", "gpu-vulkan", require_downloaded=True
     )
+
+
+async def test_disable_succeeds_when_persisted_model_left_the_catalog(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2447 follow-up: a persisted selection whose row the picker no longer
+    advertises (e.g. qwen3-tts once the ROCm lane is gone) must still be
+    disable-able — disabling always succeeds, it never re-validates the model."""
+    _patch_catalog(monkeypatch, [])
+    (home / "etc" / "hal0" / "capabilities.toml").write_text(
+        "\n".join(
+            [
+                "[selections.embed.embed]",
+                'backend = "gpu-vulkan"',
+                'provider = "llama-server"',
+                'model = "bge-base-en-v1.5-q4_k_m"',
+                "enabled = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    orch = CapabilityOrchestrator(slot_manager=FakeSlotManager())
+
+    result = await orch.apply("embed", "embed", {"enabled": False})
+
+    assert result["enabled"] is False

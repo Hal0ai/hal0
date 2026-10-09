@@ -87,7 +87,8 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
 #: HOST_BACKENDS id it fans out to being the picker's generic Vulkan GPU row
 #: (#1941's "gpu-vulkan is the row label, not an image claim"). qwen3tts is
 #: exempt from the extra check below — its own HOST_BACKENDS entry IS
-#: ``"gpu-rocm"``, already kfd-gated by :func:`available_backends`.
+#: ``"gpu-rocm"``, and the ROCm lane gate on its voice.tts picker row lives
+#: in :func:`_tts_rows_for_capability` (#2447), not in :func:`available_backends`.
 _ROCM_ONLY_RUNTIMES = frozenset({"comfyui"})
 
 _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
@@ -452,8 +453,7 @@ def available_backends() -> list[dict[str, Any]]:
         # ``compute_capable`` alone under-reports (#2216): it is only
         # "rocm-smi --showproductname exited 0", a ROCm *userspace CLI*
         # probe that install.sh never installs, so a fresh container with a
-        # perfectly usable /dev/kfd read False here and the badge (and every
-        # ROCm-only runtime's picker row, e.g. Qwen3-TTS below) went missing.
+        # perfectly usable /dev/kfd read False here and the badge went missing.
         # rocm_lane_present() (device-node truth: /dev/kfd AND a render node,
         # #2313/#2354) is sufficient on its own — the same predicate as
         # hal0.install.profile_derive.derive_device's ROCm lane, so the picker
@@ -703,8 +703,8 @@ def _backend_variants(entry: Any) -> list[str]:
                 # the correctly-gated "gpu-rocm" id itself. Gated on the
                 # whole ROCm lane, not /dev/kfd alone (#2313): the image also
                 # opens a render node, and qwen3tts's "gpu-rocm" row asks
-                # rocm_lane_present() too (_tts_rows_for_capability, #2447), so the two ROCm-only runtimes must
-                # agree about a kfd-only box.
+                # rocm_lane_present() too (_tts_rows_for_capability, #2447),
+                # so the two ROCm-only runtimes agree about a kfd-only box.
                 continue
             for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
                 if candidate in host_backends and candidate not in out:
