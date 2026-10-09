@@ -450,15 +450,12 @@ def available_backends() -> list[dict[str, Any]]:
                 }
             )
         # ROCm path — an AMD GPU this box can actually run ROCm on.
-        # ``compute_capable`` alone under-reports (#2216): it is only
-        # "rocm-smi --showproductname exited 0", a ROCm *userspace CLI*
-        # probe that install.sh never installs, so a fresh container with a
-        # perfectly usable /dev/kfd read False here and the badge went missing.
-        # rocm_lane_present() (device-node truth: /dev/kfd AND a render node,
-        # #2313/#2354) is sufficient on its own — the same predicate as
-        # hal0.install.profile_derive.derive_device's ROCm lane, so the picker
-        # never offers a lane the seed declined.
-        if primary_gpu.vendor == "amd" and (primary_gpu.compute_capable or rocm_lane_present()):
+        # ``compute_capable`` alone under-reports (#2216) and can falsely
+        # advertise a ROCm lane on kfd-only boxes where rocm-smi succeeds
+        # but no render node exists (#2452). rocm_lane_present() (device-node
+        # truth: /dev/kfd AND a render node, #2313/#2354/#2452) is the single
+        # authority for whether the ROCm lane is present and usable.
+        if primary_gpu.vendor == "amd" and rocm_lane_present():
             out.append(
                 {
                     "id": "gpu-rocm",

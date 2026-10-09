@@ -137,17 +137,19 @@ def _nodes(monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
     monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: render)
 
 
+@pytest.mark.parametrize("compute_capable", [False, True])
 @pytest.mark.parametrize(
     ("shape", "offered"),
     [("kfd_only", False), ("render_only", False), ("both", True), ("neither", False)],
 )
 def test_gpu_rocm_badge_needs_kfd_and_a_render_node(
-    monkeypatch: pytest.MonkeyPatch, shape: str, offered: bool
+    monkeypatch: pytest.MonkeyPatch, shape: str, offered: bool, compute_capable: bool
 ) -> None:
-    """#2354: an LXC with /dev/kfd forwarded and no ``/dev/dri/renderD*``
-    must not be offered the GPU (ROCm) row — the slot cannot open its device."""
+    """#2354, #2452: an LXC with /dev/kfd forwarded and no ``/dev/dri/renderD*``
+    must not be offered the GPU (ROCm) row — the slot cannot open its device,
+    even when rocm-smi succeeds (compute_capable=True)."""
     _nodes(monkeypatch, shape)
-    hw = _amd_gpu_hw(compute_capable=False)
+    hw = _amd_gpu_hw(compute_capable=compute_capable)
     with (
         patch("hal0.capabilities.catalog.load_hardware_info", return_value=hw),
         patch("hal0.capabilities.catalog._flm_image_present", return_value=False),
