@@ -193,6 +193,8 @@ async def test_boot_with_persisted_warming_and_loading_server_recovers(
     assert sm._key("chat") in sm._adopt_promoters
     rec = sm._states[sm._key("chat")]
     assert time.time() - rec.updated_at < 60
+    # Not routable until the poll has seen /health answer.
+    assert reg.get("chat") is None
 
     container_stub.healthy = True
     assert await _wait_for(lambda: sm._current_state("chat") is SlotState.READY)
@@ -212,3 +214,41 @@ async def test_boot_skips_warming_slot_whose_load_is_in_flight(
         restored = await sm.reconcile_container_upstreams()
     assert restored == []
     assert sm._key("chat") not in sm._adopt_promoters
+
+
+async def test_boot_offline_adopted_into_warming_is_not_routed_until_ready(
+    slot_root: Path, container_stub: FakeContainerProvider, fast_promote: None
+) -> None:
+    container_stub.active.add("chat")
+    container_stub.healthy = False
+
+    reg = UpstreamRegistry()
+    sm = SlotManager(upstreams_registry=reg)
+    restored = await sm.reconcile_container_upstreams()
+
+    assert restored == []
+    assert sm._current_state("chat") is SlotState.WARMING
+    assert reg.get("chat") is None
+
+    container_stub.healthy = True
+    assert await _wait_for(lambda: sm._current_state("chat") is SlotState.READY)
+    assert reg.get("chat") is not None
+
+
+async def test_inconclusive_health_probe_does_not_promote(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    fast_promote: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reg = UpstreamRegistry()
+    sm = SlotManager(upstreams_registry=reg)
+    await _adopt_into_warming(sm, container_stub)
+
+    async def _transport_error(port: int, slot_cfg: Any = None) -> dict[str, Any]:
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(container_stub, "health", _transport_error)
+    await asyncio.sleep(0.3)
+    assert sm._current_state("chat") is SlotState.WARMING
+    assert reg.get("chat") is None

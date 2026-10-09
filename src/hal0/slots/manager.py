@@ -601,8 +601,11 @@ class SlotManager:
                 # it. Adopt it here so reconciliation is the single point
                 # that heals the drift at startup.
                 adopted = await self._maybe_adopt_running_slot(name, cfg)
-                if adopted is None:
+                if adopted is None or adopted.state not in DISPATCHABLE_STATES:
                     # Nothing to adopt (e.g. no model configured) — leave it.
+                    # Adopted into WARMING (#2442): not routable yet; the
+                    # promotion poll registers the upstream once /health
+                    # answers.
                     continue
             elif state is SlotState.WARMING and not self._lock(name).locked():
                 # #2442: WARMING read back from state.json at startup. It was
@@ -613,7 +616,7 @@ class SlotManager:
                 # ready server goes straight to READY, a still-loading one
                 # re-enters WARMING with a watcher and the promotion poll.
                 adopted = await self._maybe_adopt_running_slot(name, cfg)
-                if adopted is None:
+                if adopted is None or adopted.state not in DISPATCHABLE_STATES:
                     continue
             else:
                 # Transitional (pulling/starting/warming/unloading): a load
@@ -1494,9 +1497,9 @@ class SlotManager:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.is_active`."""
         return await self._watchdog.is_active(slot_name)
 
-    async def _probe_health(self, slot_name: str) -> bool:
+    async def _probe_health(self, slot_name: str, *, strict: bool = False) -> bool:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.probe_health`."""
-        return await self._watchdog.probe_health(slot_name)
+        return await self._watchdog.probe_health(slot_name, strict=strict)
 
     async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """See :meth:`hal0.slots.watchdog.SlotWatchdog.readiness_check`."""
@@ -4348,7 +4351,9 @@ class SlotManager:
                 # failing /health just means the model is still loading.
                 if not await self._is_active(slot_name):
                     continue
-                if not await self._probe_health(slot_name):
+                # Strict: a transport error is inconclusive, and promoting on
+                # it would publish a slot nobody has seen answer.
+                if not await self._probe_health(slot_name, strict=True):
                     continue
                 async with self._lock(slot_name):
                     # Re-check under the lock: a load/unload that won the
