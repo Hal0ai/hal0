@@ -702,8 +702,8 @@ def _backend_variants(entry: Any) -> list[str]:
                 # needs no separate check here, its HOST_BACKENDS entry is
                 # the correctly-gated "gpu-rocm" id itself. Gated on the
                 # whole ROCm lane, not /dev/kfd alone (#2313): the image also
-                # opens a render node, and qwen3tts's "gpu-rocm" row already
-                # asks rocm_lane_present(), so the two ROCm-only runtimes must
+                # opens a render node, and qwen3tts's "gpu-rocm" row asks
+                # rocm_lane_present() too (_tts_rows_for_capability, #2447), so the two ROCm-only runtimes must
                 # agree about a kfd-only box.
                 continue
             for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
@@ -982,6 +982,11 @@ def _tts_rows_for_capability(
 
     out: list[dict[str, Any]] = []
     for engine in _TTS_ENGINES:
+        if engine["device"] == "gpu-rocm" and not rocm_lane_present():
+            # #2447: Qwen3-TTS runs only on the ROCm lane. A kfd-only LXC or a
+            # GPU-less box cannot load it, so don't offer a row that fails at
+            # slot start (same predicate as the chat/ComfyUI gates, #2354).
+            continue
         curated = CURATED_BY_ID.get(engine["id"])
         out.append(
             {

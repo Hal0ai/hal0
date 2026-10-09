@@ -176,3 +176,20 @@ def test_comfyui_row_needs_kfd_and_a_render_node(
     ):
         variants = catalog._backend_variants(row)
     assert variants == expected
+
+
+# ── voice.tts: Qwen3-TTS is ROCm-only (#2447) ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("shape", "offered"), [("kfd_only", False), ("both", True), ("neither", False)]
+)
+def test_qwen3_tts_row_needs_the_rocm_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, shape: str, offered: bool
+) -> None:
+    """#2447: the voice.tts picker must not offer Qwen3-TTS (gpu-rocm) on a
+    kfd-only box or a GPU-less one; Kokoro (CPU) is always offered."""
+    _nodes(monkeypatch, shape)
+    ids = {r["id"] for r in catalog.models_for_capability("tts", registry=None)}
+    assert ("qwen3-tts" in ids) is offered
+    assert "kokoro-v1" in ids
