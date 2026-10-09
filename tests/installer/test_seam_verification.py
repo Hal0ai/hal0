@@ -12,6 +12,7 @@ needs no root, no sudo and no provisioned box.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -130,6 +131,7 @@ def _call_probe(
     name: str = "hal0-podman-ro",
     required: str = "optional",
     set_e: bool = True,
+    installer_ifs: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Drive `_preflight_seam` past its stat checks with a stubbed grant probe.
 
@@ -153,8 +155,11 @@ def _call_probe(
     argv_log = tmp_path / "argv"
     sleep_log = tmp_path / "slept"
     flags = "set -euo pipefail" if set_e else "set -uo pipefail"
+    # install.sh:45 runs the whole installer under this IFS (#2436).
+    ifs = "IFS=$'\\n\\t'" if installer_ifs else ""
     script = f"""
 {flags}
+{ifs}
 source "{REPO}/installer/lib/ui.sh"
 source "{PREFLIGHT}"
 
@@ -179,7 +184,7 @@ _hal0_seam_probe_run() {{
     local n
     n=$(( $(cat "{counter}") + 1 ))
     echo "$n" > "{counter}"
-    printf '%s\\n' "$*" >> "{argv_log}"
+    printf '%s\\n' "$#:$1:${{2-}}:${{3-}}" >> "{argv_log}"
     if (( n <= {fail_attempts} )); then
         printf '%s\\n' "{stderr_line}"
         return 1
@@ -199,6 +204,20 @@ echo "slept=$(cat "{sleep_log}" 2>/dev/null | tr '\\n' ',')"
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
     )
+
+
+def test_the_probe_argv_is_split_into_words_under_the_installer_ifs(tmp_path: Path) -> None:
+    """#2436: IFS=$'\\n\\t' kept `check-slot-token hal0probe` as ONE word -> 'bad cmd'."""
+    proc = _call_probe(tmp_path, fail_attempts=0, installer_ifs=True)
+    assert "rc=0" in proc.stdout, proc.stderr
+    # argc=3 (bin, verb, arg) and verb/arg arrive separately.
+    assert re.search(r"argv=3:\S+:check-slot-token:hal0probe", proc.stdout), proc.stdout
+
+
+def test_the_failure_message_is_one_line_under_the_installer_ifs(tmp_path: Path) -> None:
+    """`$*` joins on IFS[0]; under the installer's IFS that was a newline."""
+    proc = _call_probe(tmp_path, fail_attempts=99, installer_ifs=True)
+    assert "hal0-podman-ro check-slot-token hal0probe" in proc.stderr
 
 
 def test_a_transient_grant_probe_failure_is_retried(tmp_path: Path) -> None:
