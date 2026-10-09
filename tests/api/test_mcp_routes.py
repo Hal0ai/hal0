@@ -1151,13 +1151,56 @@ def test_patch_exposure_can_still_turn_off_an_exposed_record(client: TestClient)
 
 def test_patch_exposure_withdrawing_one_target_resends_the_other(client: TestClient) -> None:
     """A body that withdraws one target while echoing the other's current
-    ``true`` (as a toggle UI sends) is narrowing, not turning anything on."""
+    ``true`` still asserts that ``true``, so it is refused (#2440)."""
     _install_github(client)
     _expose_directly("github", hermes=True, brain=True)
     response = client.patch("/api/mcp/github/exposure", json={"hermes": False, "brain": True})
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["details"]["targets"] == ["brain"]
+
+
+def test_patch_exposure_cli_hermes_no_brain_on_stale_both_is_refused(
+    client: TestClient,
+) -> None:
+    """#2440: ``hal0 mcp expose <id> --hermes --no-brain`` sends
+    ``{"hermes": true, "brain": false}``. On a record that still holds both
+    flags from before the guard, that must not answer 200 with hermes=True."""
+    _install_github(client)
+    _expose_directly("github", hermes=True, brain=True)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": True, "brain": False})
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "mcp.exposure_policy_unenforced"
+    assert error["details"]["targets"] == ["hermes"]
+    from hal0.mcp import installed
+
+    exposure = installed.get_installed("github").exposure
+    assert (exposure.hermes, exposure.brain) == (True, True)
+
+
+def test_patch_exposure_refuses_truthy_non_bool_on_a_stale_flag(client: TestClient) -> None:
+    """Pydantic coerces ``1`` to True; presence in the body is what counts."""
+    _install_github(client)
+    _expose_directly("github", hermes=True)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": 1})
+    assert response.status_code == 409, response.text
+
+
+def test_patch_exposure_body_without_agent_targets_is_unaffected(client: TestClient) -> None:
+    """A stale ``true`` the body never mentions is not re-asserted."""
+    _install_github(client)
+    _expose_directly("github", hermes=True, brain=True)
+    response = client.patch("/api/mcp/github/exposure", json={})
+    assert response.status_code == 200, response.text
+
+
+def test_patch_exposure_withdrawing_both_targets_works(client: TestClient) -> None:
+    _install_github(client)
+    _expose_directly("github", hermes=True, brain=True)
+    response = client.patch("/api/mcp/github/exposure", json={"hermes": False, "brain": False})
     assert response.status_code == 200, response.text
     exposure = response.json()["server"]["exposure"]
-    assert (exposure["hermes"], exposure["brain"]) == (False, True)
+    assert (exposure["hermes"], exposure["brain"]) == (False, False)
 
 
 def test_any_mutation_drops_a_join_written_before_the_guard(client: TestClient) -> None:

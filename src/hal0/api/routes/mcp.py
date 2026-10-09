@@ -1178,21 +1178,16 @@ async def patch_server_exposure(server_id: str, body: dict[str, Any]) -> dict[st
     # #2358 (Remove with #2303): hal0 cannot enforce any user-installed
     # record's [tools] policy on Hermes's direct call path, so asking for a
     # join is refused for every record; the join itself skips them all.
-    # A request that withdraws a target is narrowing and stays allowed, even
-    # when it echoes the other target's current ``true`` (a toggle UI sends
-    # the whole pair). Any other ``true`` is refused whatever the record held
-    # before: an upgraded record can still carry ``true`` from before the
-    # guard while nothing joins it, and a 200 there would claim an exposure
-    # that does not exist (#2440).
-    previous = record.exposure
+    # Any agent target present in the body as true is refused, whatever the
+    # record held before: an upgraded record can still carry ``true`` from
+    # before the guard while nothing joins it, and a 200 there would claim an
+    # exposure that does not exist (#2440). That includes a ``true`` echoed
+    # alongside a withdrawal: the CLI sends only the flags the operator typed
+    # (``--hermes --no-brain`` is {"hermes": true, "brain": false}). Presence
+    # plus the validated value is used, so coerced values like ``1`` count.
+    # Withdrawing (false) and bodies without agent targets are unaffected.
     agent_targets = ("hermes", "brain")
-    narrowing = any(getattr(previous, t) and not getattr(exposure, t) for t in agent_targets)
-    turning_on = [
-        t
-        for t in agent_targets
-        if getattr(exposure, t)
-        and (not getattr(previous, t) or (body.get(t) is True and not narrowing))
-    ]
+    turning_on = [t for t in agent_targets if t in body and getattr(exposure, t)]
     if turning_on and not installed_registry.AGENT_CALL_PATH_ENFORCED:
         raise Conflict(
             installed_registry.AGENT_EXPOSURE_UNENFORCED_REASON,
