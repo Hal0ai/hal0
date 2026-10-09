@@ -250,12 +250,14 @@ class TestDerivationLaddersConsultTheImage:
 
         assert recommend_primary_slot(_amd_hw(compute=False))["device"] == "gpu-vulkan"
 
-    def test_rocm_is_unaffected_by_the_pin(self, broken_pin) -> None:
+    def test_rocm_is_unaffected_by_the_pin(self, broken_pin, monkeypatch) -> None:
         """The image gate is Vulkan's. A box with ROCm compute derives ROCm
         whatever the Vulkan story is."""
         from hal0.hardware.recommend import recommend_primary_slot
         from hal0.install.profile_derive import derive_device
 
+        monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
+        monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: True)
         hw = _amd_hw(compute=True)
         assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
         assert recommend_primary_slot(hw)["device"] == "gpu-rocm"
@@ -337,8 +339,12 @@ class TestTheThreeLaddersAgree:
         from hal0.install.profile_derive import derive_device
 
         _pin(monkeypatch, VULKAN_FIXED_IMAGE if pin_is_fixed else ADE07BA_REF)
-        monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
-        monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: False)
+        # The device nodes decide ROCm (#2452); model "compute" as the nodes
+        # being present so the CLI ladder (which reads hardware.json) agrees.
+        monkeypatch.setattr(
+            "hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: compute
+        )
+        monkeypatch.setattr("hal0.hardware.recommend.rocm_lane_present", lambda *a, **k: compute)
 
         probe = tmp_path / "hardware.json"
         probe.write_text(
