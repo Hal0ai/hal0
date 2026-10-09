@@ -590,3 +590,29 @@ def test_invalid_floor_override_warns_once_not_per_write(monkeypatch):
         assert extraction_floor() == (EXTRACTION_MIN_CONTEXT_TOKENS, "hal0:extraction-prompt-floor")
 
     assert warnings == ["hal0.memory.extraction_floor_override_invalid"]
+
+
+def test_restart_hindsight_background_uses_seam_restart_verb() -> None:
+    """#2448: the post-rotate restart goes through ``systemctl restart
+    hindsight-api.service`` (the seam routes it to ``svc-restart hindsight``)."""
+    import subprocess
+
+    from hal0.memory import extraction_env as ee
+
+    calls: list[tuple[str, ...]] = []
+
+    class _Seam:
+        def systemctl(self, *args: str, **kw: object) -> None:
+            calls.append(args)
+
+    assert ee.restart_hindsight_background(seam=_Seam()) is True  # type: ignore[arg-type]
+    assert calls == [("systemctl", "restart", "hindsight-api.service")]
+
+    class _Failing:
+        def systemctl(self, *args: str, **kw: object) -> None:
+            raise subprocess.CalledProcessError(
+                1, list(args), stderr="sudo: a password is required"
+            )
+
+    # Never raises -- a failed restart must not fail the caller.
+    assert ee.restart_hindsight_background(seam=_Failing()) is False  # type: ignore[arg-type]

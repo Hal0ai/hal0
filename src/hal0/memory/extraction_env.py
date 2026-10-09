@@ -324,6 +324,29 @@ def apply_extraction_slot(
     return result
 
 
+def restart_hindsight_background(*, seam: SystemCtlSeam | None = None) -> bool:
+    """Restart ``hindsight-api`` through the privileged seam, fire-and-forget.
+
+    For callers that change something the engine only reads at start (e.g. the
+    rotated client key in ``hindsight-llm.env``, #2448) as a side effect of an
+    unrelated response — passed straight to ``BackgroundTasks.add_task``. Uses
+    the existing ``svc-restart hindsight`` seam verb (no new privilege). Never
+    raises: a failure is logged and returned as ``False``.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    try:
+        seam.systemctl("systemctl", "restart", SERVICE, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning(
+            "hal0.memory.hindsight_restart_failed",
+            error=_detail(exc),
+            remedy=f"run 'systemctl restart {SERVICE}' by hand",
+        )
+        return False
+    log.info("hal0.memory.hindsight_restarted")
+    return True
+
+
 #: Local alias so this module doesn't have to re-derive the ``hal0/`` prefix
 #: :mod:`hal0.agents.anchor_window` already owns.
 _VIRTUAL_PREFIX = "hal0/"
