@@ -29,13 +29,20 @@ def npu_block() -> str:
 
 def test_npu_block_hands_config_parents_to_hal0(npu_block: str) -> None:
     assert 'mkdir -p "${VAR_DIR}/.config/flm"' in npu_block
-    assert 'chown hal0:hal0 "${VAR_DIR}/.config" "${VAR_DIR}/.config/flm"' in npu_block
+    assert 'chown -h hal0:hal0 "${VAR_DIR}/.config" "${VAR_DIR}/.config/flm"' in npu_block
 
 
-def test_parents_are_chowned_after_the_root_mkdir(npu_block: str) -> None:
-    mkdir_at = npu_block.index('mkdir -p "${FLM_CACHE_DIR}"')
-    chown_at = npu_block.index('chown hal0:hal0 "${VAR_DIR}/.config"')
-    assert mkdir_at < chown_at
+def test_symlinked_parents_are_never_followed_as_root(npu_block: str) -> None:
+    """hal0 owns VAR_DIR, so it could point ``.config`` at ``/etc``; a root
+    ``mkdir -p``/``chown`` through that link would hand ``/etc`` to hal0."""
+    guard = '[[ -L "${VAR_DIR}/.config" || -L "${VAR_DIR}/.config/flm" ]]'
+    assert guard in npu_block
+    assert npu_block.index(guard) < npu_block.index('mkdir -p "${VAR_DIR}/.config/flm"')
+    # The cache dir itself is a symlink to the store after the first relocated
+    # pull: chown/chmod must not follow it.
+    link_check = '[[ -L "${FLM_CACHE_DIR}" ]]'
+    assert link_check in npu_block
+    assert npu_block.index(link_check) < npu_block.index('chown 1000:hal0 "${FLM_CACHE_DIR}"')
 
 
 def test_doctor_perms_backstop_runs_after_the_npu_block() -> None:
