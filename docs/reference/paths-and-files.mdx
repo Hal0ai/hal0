@@ -79,6 +79,19 @@ The default model cache is `/var/lib/hal0/models`. Resolution order:
 `[models].roots` (default: just the effective store) plus the effective store itself,
 deduplicated, form the full scan set (`scan_roots()`).
 
+### FLM (NPU) store
+
+The FLM store resolves from `HAL0_FLM_MODELS_DIR`, then `[models].flm_store`, then
+`/var/lib/hal0/.config/flm/models` (`config.paths.flm_models_dir()`). The NPU slot
+bind-mounts the resolved store. The host `flm` binary always writes to
+`$HOME/.config/flm/models`, so when the store is elsewhere hal0 replaces that path with a
+symlink to the store before each pull. `.config` and `.config/flm` must be owned by
+`hal0` for that to work. If the link can't be made, the pull fails with
+`model.flm_store_unlinked`. `sudo hal0 doctor perms --fix` repairs ownership, gives the
+store `1000:hal0` mode `2775` (the FLM container's uid), moves models stranded in the
+default dir into the store, and creates the link. When the same name exists in both
+directories it stops and reports it; it never deletes either copy.
+
 `DEFAULT_MODEL_STORE = /mnt/ai-models` is a historic convention for an external
 NFS/fast-disk mount used as a slot container bind target — it's not a resolver default,
 just a documented convention some installs still use.

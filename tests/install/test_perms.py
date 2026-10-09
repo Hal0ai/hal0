@@ -967,3 +967,32 @@ def test_model_pull_jobs_dir_snapshot_files_get_hal0_owned_child_rows(
     assert row.glob == "*.json"
     assert row.child_mode == 0o600
     assert row.optional is False
+
+
+def test_models_row_leaves_a_colocated_flm_store_to_the_flm_repair(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2446: the FLM store under ``models/`` is owned by uid 1000, not hal0.
+
+    The setup wizard co-locates ``[models].flm_store`` at
+    ``<store>/flm/models``, which on a default box sits inside the recursive
+    ``models/`` row. ``doctor perms --fix`` hands that store to the container
+    uid (1000:hal0 2775, ``hal0.providers.flm.repair_host_flm_store_link``);
+    if the table also claimed it, every audit would flag it and every ``--fix``
+    would chown it back and forth. The row skips the store's subtree and keeps
+    covering everything else, including the ``flm/`` dir above it.
+    """
+    var_lib = paths.var_lib()
+    models = var_lib / "models"
+    store = models / "flm" / "models"
+    (store / "Gemma3-1B-NPU2").mkdir(parents=True)
+    (models / "org").mkdir()
+    monkeypatch.setattr(paths, "flm_models_dir", lambda: str(store))
+
+    rows = [r for r in perms.ownership_table() if r.target == models]
+    planned = {d.path for d in perms.plan(rows).diffs}
+
+    assert models / "flm" in planned
+    assert models / "org" in planned
+    assert store not in planned
+    assert store / "Gemma3-1B-NPU2" not in planned

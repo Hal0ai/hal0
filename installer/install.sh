@@ -3258,6 +3258,13 @@ else
     if [[ -e /dev/accel/accel0 ]]; then
         FLM_CACHE_DIR="${HAL0_FLM_MODELS_DIR:-${VAR_DIR}/.config/flm/models}"
         mkdir -p "${FLM_CACHE_DIR}"
+        # flm hardcodes $HOME/.config/flm/models. hal0-api (User=hal0) swaps
+        # that path for a symlink to a relocated [models].flm_store before each
+        # pull, which needs write on .config/flm; the mkdir above ran as root
+        # (#2446). The resolved store itself is reconciled by the
+        # `doctor perms --fix` backstop below.
+        mkdir -p "${VAR_DIR}/.config/flm"
+        chown hal0:hal0 "${VAR_DIR}/.config" "${VAR_DIR}/.config/flm"
         chown 1000:hal0 "${FLM_CACHE_DIR}" 2>/dev/null || chown hal0:hal0 "${FLM_CACHE_DIR}" || true
         chmod 2775 "${FLM_CACHE_DIR}" || true
         info "FLM model cache: ${FLM_CACHE_DIR} (container-uid writable, setgid hal0)"

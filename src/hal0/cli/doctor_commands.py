@@ -796,19 +796,22 @@ def perms(
 ) -> None:
     """Audit ownership for the root-clobber regression (#843) + the path table.
 
-    Covers three surfaces: Hermes runtime state (/var/lib/hal0/.hermes), the
-    editable code checkout's group-share, and the canonical path-ownership table
-    (:mod:`hal0.install.perms` — P3-perms, the single ownership authority). The
+    Covers four surfaces: Hermes runtime state (/var/lib/hal0/.hermes), the
+    editable code checkout's group-share, the canonical path-ownership table
+    (:mod:`hal0.install.perms` — P3-perms, the single ownership authority), and
+    the FLM (NPU) store link (#2446: flm's ``$HOME/.config/flm/models`` must
+    reach ``[models].flm_store``, or host pulls strand outside it). The
     audit tables above print the concrete before/after (path, current
     owner:group:mode, wanted owner:group:mode) before anything is touched.
-    ``--fix`` then repairs the group-share in place AND applies the ownership
-    table (both need root, and both prompt for confirmation unless
-    ``--force``/``-f`` is also passed); Hermes drift is still reconciled via
+    ``--fix`` then repairs the group-share in place, applies the ownership
+    table, and relinks the FLM store, moving stranded models into it (all need
+    root, and all prompt for confirmation unless ``--force``/``-f`` is also
+    passed); Hermes drift is still reconciled via
     ``sudo hal0 agent bootstrap hermes --repair``. This command is audit-only by
     default — nothing is ever written without ``--fix``. ``--json`` prints the
     §21.4 ``Diagnosis`` rows (``HAL0-PERMS-HERMES-DRIFT`` /
-    ``HAL0-PERMS-TREE-NOT-SHARED`` / ``HAL0-PERMS-PATH-OWNERSHIP-DRIFT``)
-    instead and never applies ``--fix``, even if it was also passed.
+    ``HAL0-PERMS-TREE-NOT-SHARED`` / ``HAL0-PERMS-PATH-OWNERSHIP-DRIFT``, the
+    last also for FLM store-link rows) instead and never applies ``--fix``, even if it was also passed.
     """
 
     def _owner(p: Path) -> str | None:
@@ -877,6 +880,16 @@ def perms(
         _render_audit(_table_title, own_rows)
     own_drift = has_ownership_drift(own_rows)
 
+    # 4) FLM (NPU) store link (#2446): flm's hardcoded $HOME/.config/flm/models
+    # must reach the resolved store, or host pulls strand where the slot never
+    # looks. Lazy import: the provider module is only loaded for this command.
+    from hal0.providers import flm as flm_mod
+
+    flm_rows = flm_mod.audit_host_flm_store_link()
+    if not json_output and flm_rows:
+        _render_audit("FLM (NPU) store link (#2446)", flm_rows)
+    flm_drift = has_ownership_drift(flm_rows)
+
     if json_output:
         diagnoses = (
             _diagnose_audit_rows(
@@ -915,9 +928,25 @@ def perms(
                     )
                 ],
             )
+            + _diagnose_audit_rows(
+                flm_rows,
+                # Same id as the table: both are path-ownership drift, and the
+                # taxonomy is a frozen contract (tests/cli/test_diagnosis.py).
+                diagnosis_id="HAL0-PERMS-PATH-OWNERSHIP-DRIFT",
+                ok_summary="FLM store link clean",
+                next_steps=[
+                    NextStep(
+                        kind="command",
+                        label="sudo hal0 doctor perms --fix",
+                        target="hal0 doctor perms --fix",
+                    )
+                ],
+            )
         )
         console.print_json(render_json(diagnoses))
-        raise typer.Exit(1 if (has_ownership_drift(hermes_rows) or tree_drift or own_drift) else 0)
+        raise typer.Exit(
+            1 if (has_ownership_drift(hermes_rows) or tree_drift or own_drift or flm_drift) else 0
+        )
 
     if fix:
         if root is None:
@@ -967,6 +996,33 @@ def perms(
                 )
                 own_drift = False
 
+        # FLM store link (#2446): parents to hal0, store to the container uid,
+        # stranded models into the store, then the symlink. A name present on
+        # both sides stops it; nothing is deleted.
+        if flm_drift:
+            if os.geteuid() != 0:
+                console.print(
+                    "[red]✗[/red]  --fix needs root for the FLM store link — "
+                    "re-run `sudo hal0 doctor perms --fix`."
+                )
+                raise typer.Exit(1)
+            elif not force and not typer.confirm(
+                "Repair the FLM store link? (see the FLM rows above; stranded models "
+                "move into the store, nothing is deleted)",
+                default=False,
+            ):
+                console.print("[dim]FLM store link repair skipped (not confirmed).[/dim]")
+            else:
+                try:
+                    actions = flm_mod.repair_host_flm_store_link()
+                except (flm_mod.FLMStoreLinkError, OSError, KeyError) as exc:
+                    msg = exc.message if isinstance(exc, flm_mod.FLMStoreLinkError) else exc
+                    console.print(f"[red]✗[/red]  FLM store link repair failed: {msg}")
+                else:
+                    for action in actions:
+                        console.print(f"[green]✓[/green]  {action}")
+                    flm_drift = has_ownership_drift(flm_mod.audit_host_flm_store_link())
+
     hermes_drift = has_ownership_drift(hermes_rows)
     if hermes_drift:
         console.print(
@@ -983,7 +1039,12 @@ def perms(
             "[yellow]![/yellow]  path-ownership drift — run "
             "`sudo hal0 doctor perms --fix` to reconcile against the table."
         )
-    if hermes_drift or tree_drift or own_drift:
+    if flm_drift and not fix:
+        console.print(
+            "[yellow]![/yellow]  FLM store link drift — host FLM pulls land outside the "
+            "store the NPU slot mounts; run `sudo hal0 doctor perms --fix` to relink."
+        )
+    if hermes_drift or tree_drift or own_drift or flm_drift:
         raise typer.Exit(1)
     console.print("[green]✓[/green]  ownership clean.")
     raise typer.Exit(0)

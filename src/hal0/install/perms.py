@@ -205,6 +205,14 @@ def _avahi_services_dir() -> Path:
     return services_dir()
 
 
+def _flm_store_exclusion() -> tuple[Path, ...]:
+    """The resolved FLM store, for rows whose glob would otherwise reach it."""
+    try:
+        return (Path(os.path.normpath(paths.flm_models_dir())),)
+    except Exception:
+        return ()
+
+
 @dataclass(frozen=True)
 class PermRow:
     """One path's declared ownership + mode.
@@ -232,6 +240,8 @@ class PermRow:
     # single-level behavior byte-for-byte.
     optional: bool = True  # skip silently when the path is absent
     role: str = ""  # human label for the audit table
+    exclude: tuple[Path, ...] = ()  # glob matches equal to or under these are skipped:
+    # another owner declares them (the FLM store under ``models/``, #2446)
 
     @property
     def label(self) -> str:
@@ -691,6 +701,11 @@ def ownership_table(
             recursive=True,
             optional=False,
             role="models/ (default model store, recursive)",
+            # #2446: a co-located FLM store (``models/flm/models``, the setup
+            # wizard's default) is owned 1000:hal0 for the NPU container, set
+            # by ``hal0.providers.flm.repair_host_flm_store_link``. Claiming it
+            # here too would flip it back to hal0 on every ``--fix``.
+            exclude=_flm_store_exclusion(),
         ),
         # models/chat-templates/ — the custom chat-template store
         # (``api/routes/chat_templates.py`` ``_templates_dir``), nested one
@@ -1059,6 +1074,8 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
         # #1739: a symlink (or anything reached through one) is not hal0's to
         # own — drop it from the plan entirely so it can never be chowned.
         if _is_or_is_under_symlink(child, row.target):
+            continue
+        if any(child == ex or ex in child.parents for ex in row.exclude):
             continue
         out.append(
             (

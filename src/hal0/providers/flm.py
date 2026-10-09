@@ -117,6 +117,21 @@ def _host_flm_models_dir() -> str:
 _FLM_CONTAINER_UID = 1000
 
 
+class FLMStoreLinkError(Hal0Error):
+    """flm's hardcoded cache could not be pointed at the configured FLM store.
+
+    Raised instead of letting a host ``flm pull`` continue into
+    ``$HOME/.config/flm/models`` while the NPU slot mounts ``[models].flm_store``
+    (#2446): that pull reports success and the slot never sees the weights.
+    """
+
+    code = "model.flm_store_unlinked"
+    status = 500
+
+
+_FLM_STORE_REPAIR_HINT = "run `sudo hal0 doctor perms --fix` to repair ownership and relink"
+
+
 def _ensure_flm_models_dir(path: str) -> None:
     """Best-effort create the FLM store so the bind-mount source exists.
 
@@ -128,8 +143,13 @@ def _ensure_flm_models_dir(path: str) -> None:
 
     When running as root, ownership is set to the container uid (1000) with
     the hal0 group and mode 2775 so both the in-container FLM (uid 1000) and
-    host-side ``flm pull`` (hal0 user via group + setgid) can write. Never
-    raises: a failure here surfaces later as the slot health probe.
+    host-side ``flm pull`` (hal0 user via group + setgid) can write. As the
+    service user (hal0-api runs ``User=hal0``) it cannot chown, but it still
+    re-asserts 2775 on a dir it owns: ``makedirs`` masks the mode with the
+    unit's ``UMask=0022`` and drops the group-write bit (#2446). ``sudo hal0
+    doctor perms --fix`` hands such a dir to uid 1000. Never raises: a failure
+    here surfaces later as the slot health probe, or as
+    :class:`FLMStoreLinkError` from :func:`ensure_host_flm_store_link`.
     """
     try:
         os.makedirs(path, mode=0o2775, exist_ok=True)
@@ -141,6 +161,8 @@ def _ensure_flm_models_dir(path: str) -> None:
             except KeyError:
                 gid = _FLM_CONTAINER_UID
             os.chown(path, _FLM_CONTAINER_UID, gid)
+            os.chmod(path, 0o2775)
+        elif os.stat(path).st_uid == os.geteuid():
             os.chmod(path, 0o2775)
     except OSError:
         pass
@@ -163,14 +185,18 @@ def ensure_host_flm_store_link() -> str:
     Make flm's default path a **symlink** to the store — the host analog of the
     container bind-mount — so one host pull lands in the store, progress tracks
     it, and serving finds it. When the default path is already a real directory
-    with content (legacy / previously-mispulled weights), best-effort migrate
-    its children into the store first (never clobbering existing store files),
-    then replace it with the symlink.
+    with content (legacy / previously-mispulled weights), migrate its children
+    into the store first (never clobbering existing store files), then replace
+    it with the symlink.
 
-    Best-effort and idempotent: a no-op when the store IS the default, or when
-    the link already points at the store. Any error leaves the filesystem
-    untouched and still returns the store path, so a pull is never crashed by
-    store housekeeping (progress may read 0 on that one box until resolved).
+    Idempotent: a no-op when the store IS the default, or when the link already
+    points at the store. Raises :class:`FLMStoreLinkError` when the link cannot
+    be made — a name present in both dirs, a file where the dir should be, or
+    an ``OSError`` such as a root-owned ``.config/flm`` under ``User=hal0``
+    (#2446). Nothing is deleted on any of those paths. Raising stops the pull
+    before it can write weights where the slot never looks; the old behaviour
+    (log ``flm.store_link_failed`` and continue) reported success for a model
+    the slot could not load.
 
     Not for the async event loop's thread: the one-time migration can copy
     multi-GB weights across filesystems. Callers on the loop must offload it
@@ -187,6 +213,7 @@ def ensure_host_flm_store_link() -> str:
     default = default_flm_models_dir()
     store_p = Path(store)
     default_p = Path(default)
+    details = {"store": store, "default": default}
 
     # Default box: flm already writes to the store — nothing to reconcile.
     if os.path.normpath(store) == os.path.normpath(default):
@@ -194,6 +221,12 @@ def ensure_host_flm_store_link() -> str:
 
     try:
         _ensure_flm_models_dir(store)
+        if not store_p.is_dir():
+            raise FLMStoreLinkError(
+                f"FLM store {store} does not exist and could not be created; "
+                f"{_FLM_STORE_REPAIR_HINT}.",
+                details=details,
+            )
 
         # Already a symlink → repoint only if it aims elsewhere.
         if default_p.is_symlink():
@@ -208,21 +241,32 @@ def ensure_host_flm_store_link() -> str:
 
         if default_p.exists():
             if not default_p.is_dir():
-                # A file where the models dir should be — don't touch it.
-                log.warning("flm.store_link_unexpected_file", extra={"path": default})
-                return store
+                raise FLMStoreLinkError(
+                    f"{default} is a file, so flm pulls cannot be pointed at the FLM "
+                    f"store {store}. Move the file aside, then retry.",
+                    details=details,
+                )
             # Real dir: migrate children into the store, skipping name
             # collisions so we never clobber weights already in the store.
-            for child in default_p.iterdir():
+            conflicts: list[str] = []
+            for child in sorted(default_p.iterdir()):
                 dest = store_p / child.name
-                if dest.exists():
+                if os.path.lexists(dest):
+                    conflicts.append(child.name)
                     continue
                 shutil.move(str(child), str(dest))
-            if any(default_p.iterdir()):
-                # Something couldn't move (collision) — leave the dir in place
-                # rather than orphan it behind a symlink.
-                log.warning("flm.store_link_skipped_nonempty", extra={"path": default})
-                return store
+            if conflicts:
+                # Leave the dir in place rather than orphan it behind a symlink.
+                log.warning(
+                    "flm.store_link_skipped_nonempty",
+                    extra={"path": default, "conflicts": conflicts},
+                )
+                raise FLMStoreLinkError(
+                    f"{default} and the FLM store {store} both hold "
+                    f"{', '.join(conflicts)}. Nothing was deleted: remove one copy, "
+                    f"then retry so flm's cache can be linked to the store.",
+                    details={**details, "conflicts": conflicts},
+                )
             default_p.rmdir()
 
         # Path now absent → create the symlink.
@@ -234,7 +278,167 @@ def ensure_host_flm_store_link() -> str:
             "flm.store_link_failed",
             extra={"error": str(exc), "store": store, "default": default},
         )
+        raise FLMStoreLinkError(
+            f"cannot point flm's cache {default} at the FLM store {store}: {exc}. "
+            f"A pull now would land where the NPU slot cannot see it; "
+            f"{_FLM_STORE_REPAIR_HINT}.",
+            details={**details, "error": str(exc)},
+        ) from exc
     return store
+
+
+def _service_ids() -> tuple[int, int]:
+    """``(uid, gid)`` of the hal0 service user that runs host ``flm`` and hal0-api."""
+    import grp
+    import pwd
+
+    uid = pwd.getpwnam(_HOST_FLM_USER).pw_uid
+    try:
+        gid = grp.getgrnam(_HOST_FLM_USER).gr_gid
+    except KeyError:
+        gid = pwd.getpwnam(_HOST_FLM_USER).pw_gid
+    return uid, gid
+
+
+def _flm_link_paths() -> tuple[str, str, bool]:
+    """``(store, default, relocated)`` for the host link audit and repair."""
+    from hal0.config.paths import default_flm_models_dir
+
+    store = _host_flm_models_dir()
+    default = default_flm_models_dir()
+    return store, default, os.path.normpath(store) != os.path.normpath(default)
+
+
+def audit_host_flm_store_link() -> list[dict[str, str]]:
+    """Audit rows (``{path,label,status,detail}``) for ``hal0 doctor perms`` (#2446).
+
+    Same ``ok``/``drift``/``absent`` vocabulary as the other ``doctor perms``
+    sub-checks. Flags the states that strand host pulls outside the store:
+    flm's default path as a real dir or a wrong symlink, a HOME-side parent the
+    service user does not own (it cannot create the link at pull time), and a
+    store the container uid cannot write (owner 1000, or group/other-write —
+    the same rule as ``hal0 doctor models``). Read-only.
+    """
+    import stat as _stat
+    from pathlib import Path
+
+    store, default, relocated = _flm_link_paths()
+    store_p, default_p = Path(store), Path(default)
+    rows: list[dict[str, str]] = []
+
+    def _row(path: Path, label: str, status: str, detail: str) -> None:
+        rows.append({"path": str(path), "label": label, "status": status, "detail": detail})
+
+    in_use = store_p.exists() or os.path.lexists(default_p) or default_p.parent.exists()
+    if relocated and in_use:
+        label = "flm cache → FLM store link"
+        if default_p.is_symlink():
+            if os.path.realpath(default_p) == os.path.realpath(store_p):
+                _row(default_p, label, "ok", f"links to {store}")
+            else:
+                _row(default_p, label, "drift", f"links to {os.readlink(default_p)}, not {store}")
+        elif default_p.is_dir():
+            n = sum(1 for _ in default_p.iterdir())
+            if n:
+                _row(
+                    default_p,
+                    label,
+                    "drift",
+                    f"real directory ({n} entries): host pulls land here, not in {store}",
+                )
+            else:
+                _row(default_p, label, "absent", "empty; replaced by the link on the next pull")
+        elif default_p.exists():
+            _row(default_p, label, "drift", "a file, not a directory or link")
+        else:
+            _row(default_p, label, "absent", "created on the next FLM pull")
+
+        try:
+            uid: int | None = _service_ids()[0]
+        except KeyError:  # no hal0 user (dev box): ownership is not checkable
+            uid = None
+        for parent in (default_p.parent.parent, default_p.parent):
+            if uid is None or not parent.exists() or parent.is_symlink():
+                continue
+            if parent.stat().st_uid == uid:
+                _row(parent, f"{parent.name} owner", "ok", f"owned by {_HOST_FLM_USER}")
+            else:
+                _row(
+                    parent,
+                    f"{parent.name} owner",
+                    "drift",
+                    f"not owned by {_HOST_FLM_USER}: hal0-api cannot relink flm's cache",
+                )
+
+    if store_p.is_dir():
+        st = store_p.stat()
+        writable = st.st_uid == _FLM_CONTAINER_UID or bool(st.st_mode & 0o022)
+        mode = oct(_stat.S_IMODE(st.st_mode))
+        _row(
+            store_p,
+            "FLM store",
+            "ok" if writable else "drift",
+            f"uid {st.st_uid}, mode {mode}"
+            + ("" if writable else f"; container uid {_FLM_CONTAINER_UID} cannot write"),
+        )
+    return rows
+
+
+def repair_host_flm_store_link(*, chown: Any = os.chown) -> list[str]:
+    """Root-side repair for #2446; returns the actions taken.
+
+    The ``hal0 doctor perms --fix`` step (the installer runs it before every
+    service start, so upgrades get it too):
+
+      1. hands ``$HOME/.config`` and ``.config/flm`` to the service user, so
+         hal0-api (``User=hal0``) can relink flm's cache on a later relocation;
+      2. creates the RESOLVED store and gives it ``1000:<hal0 group>`` mode
+         2775 (dirs it creates above the store go to the service user);
+      3. runs :func:`ensure_host_flm_store_link`, which moves models stranded
+         in flm's default dir into the store and replaces the dir with the
+         symlink.
+
+    Does nothing when neither the store nor flm's cache (or its parent) exists. Raises
+    :class:`FLMStoreLinkError` on a name present in both dirs; nothing is
+    deleted. ``chown`` is injectable so the logic is testable unprivileged.
+    """
+    from pathlib import Path
+
+    store, default, relocated = _flm_link_paths()
+    store_p, default_p = Path(store), Path(default)
+    if not (store_p.exists() or os.path.lexists(default_p) or default_p.parent.exists()):
+        return []
+
+    uid, gid = _service_ids()
+    actions: list[str] = []
+
+    def _mkdirs_owned(target: Path) -> None:
+        missing = [d for d in (target, *target.parents) if not os.path.lexists(d)]
+        target.mkdir(parents=True, exist_ok=True)
+        for d in reversed(missing):
+            if d != target:
+                chown(str(d), uid, gid)
+
+    if relocated:
+        _mkdirs_owned(default_p.parent)
+        for parent in (default_p.parent.parent, default_p.parent):
+            if not parent.is_symlink():
+                chown(str(parent), uid, gid)
+                actions.append(f"{parent} → {_HOST_FLM_USER}")
+
+    _mkdirs_owned(store_p)
+    chown(str(store_p), _FLM_CONTAINER_UID, gid)
+    os.chmod(store_p, 0o2775)
+    actions.append(f"{store} → uid {_FLM_CONTAINER_UID}:{_HOST_FLM_USER} mode 2775")
+
+    if relocated:
+        was_linked = default_p.is_symlink() and os.path.realpath(default_p) == os.path.realpath(
+            store_p
+        )
+        ensure_host_flm_store_link()
+        if not was_linked:
+            actions.append(f"{default} → {store} (stranded models moved into the store)")
+    return actions
 
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
