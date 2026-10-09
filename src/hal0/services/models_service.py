@@ -534,6 +534,15 @@ async def auto_scan_and_register(
                     f"{mid}: pruned (scan — backing file missing)",
                     data={"id": mid, "source": "scan"},
                 )
+        for mid in result.get("reconciled", []):
+            with contextlib.suppress(Exception):
+                await event_bus.emit(
+                    "model.pruned",
+                    "info",
+                    f"model:{mid}",
+                    f"{mid}: pruned (scan — path is under a skipped directory)",
+                    data={"id": mid, "source": "scan"},
+                )
     return result
 
 

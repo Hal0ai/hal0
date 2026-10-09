@@ -13,6 +13,7 @@ auto-scan in :func:`hal0.api.lifespan` — both share
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -64,6 +65,9 @@ _SKIP_DIR_NAMES = frozenset(
         "upscale_models",
         "diffusion_models",
         "comfyui-nodes",
+        # ComfyUI custom-node checkouts bundle their own detector / helper
+        # weights; those are node assets, never routable chat models.
+        "custom_nodes",
         "comfyui-user",
         # vibevoice / moonshine model assets live under voices/; those
         # are managed by their respective slot providers, not by the
@@ -269,6 +273,14 @@ def find_candidates(
             shard_key = _shard_key(candidate)
             if shard_key is not None:
                 if candidate.suffix.lower() not in exts:
+                    continue
+                # Honour the skip dirs here too (#2443): a complete shard
+                # set bundled in e.g. ``custom_nodes/`` must not group into
+                # a chat candidate. Check the UN-resolved path — HF snapshot
+                # shards resolve into ``blobs/``, which is itself skip-listed —
+                # and only the dirs BELOW the scan root, so a root such as
+                # ``/data/embeddings/models`` still registers its shard sets.
+                if _under_skip_dir(candidate, root_path):
                     continue
                 try:
                     shard_abs = candidate.resolve()
@@ -506,6 +518,103 @@ def backfill_coordless(registry: ModelRegistry) -> list[str]:
     return repaired
 
 
+#: Origin marker :func:`register_candidate` stamps on every row it writes.
+#: Only rows carrying it are eligible for :func:`reconcile_skipped_auto_scan`;
+#: scan-commit (``"scan"``), add-from-path, pulls and hand-added rows carry a
+#: different source (or none) and are never touched.
+_AUTO_SCAN_SOURCE = "auto-scan"
+
+#: Skip dirs that mark a stored registry path as "would no longer be
+#: discovered". ``blobs`` is excluded: an auto-scanned HF shard set stores
+#: its RESOLVED shard-1 path, which legitimately lives under ``blobs/``.
+_RECONCILE_DIR_NAMES = _SKIP_DIR_NAMES - {"blobs"}
+
+
+def _under_skip_dir(path: Path, root: Path) -> bool:
+    """True when a directory BETWEEN ``root`` and ``path`` is a skip dir.
+
+    Skip-dir names only count below the scan root: a root such as
+    ``/data/embeddings/models`` is not itself "under a skipped dir".
+    ``path`` must be inside ``root``.
+    """
+    return any(part in _SKIP_DIR_NAMES for part in path.parent.relative_to(root).parts)
+
+
+def _containing_roots(path: Path, roots: list[Path]) -> list[Path]:
+    """The roots (as given, and resolved) that contain ``path``, deduped."""
+    out: list[Path] = []
+    for root in roots:
+        forms = [root]
+        with contextlib.suppress(OSError):
+            forms.append(root.resolve())
+        for form in forms:
+            if form not in out and path.is_relative_to(form):
+                out.append(form)
+    return out
+
+
+def reconcile_skipped_auto_scan(
+    registry: ModelRegistry,
+    *,
+    roots: list[str | Path],
+    protected_ids: set[str],
+) -> dict:
+    """Drop auto-scan rows whose stored path now sits under a skip dir.
+
+    An older scan may have registered files the skip rules now exclude (e.g.
+    a ComfyUI ``custom_nodes/`` asset registered as a chat LLM, #2443). The
+    add pass never revisits them (their paths are in ``known_paths``) and
+    :func:`prune_missing` only drops rows whose file is gone, so without
+    this the bogus row survives every upgrade.
+
+    A row is removed only if ALL hold: ``metadata["source"] == "auto-scan"``;
+    its stored path is under at least one of ``roots``; relative to EVERY
+    root containing it, a directory below that root is a skip dir (``blobs``
+    excepted); and its id is not in ``protected_ids``. Rows outside every
+    root are left alone. Protected matches are reported under ``referenced``
+    instead, mirroring ``prune_missing``'s ``missing_referenced``. Returns
+    ``{"removed": [...], "referenced": [...]}``.
+    """
+    root_paths = [Path(r).expanduser() for r in roots]
+    removed: list[str] = []
+    referenced: list[str] = []
+    for m in registry.list():
+        if not _is_reconcilable(m, root_paths):
+            continue
+        if m.id in protected_ids:
+            log.warning(
+                "discover.reconcile_kept_referenced id=%s path=%s — under a skipped dir "
+                "but referenced by a slot/stack",
+                m.id,
+                m.path,
+            )
+            referenced.append(m.id)
+            continue
+        try:
+            registry.remove(m.id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.reconcile_remove_failed id=%s err=%s", m.id, exc)
+            continue
+        log.info("discover.reconcile_removed id=%s path=%s — under a skipped dir", m.id, m.path)
+        removed.append(m.id)
+    return {"removed": removed, "referenced": referenced}
+
+
+def _is_reconcilable(m: Model, roots: list[Path]) -> bool:
+    """True for an auto-scan row that every scan root containing it would now
+    skip (a skip dir below that root, ``blobs`` excepted)."""
+    if (m.metadata or {}).get("source") != _AUTO_SCAN_SOURCE:
+        return False
+    path = Path(m.path)
+    containing = _containing_roots(path, roots)
+    if not containing:
+        return False
+    return all(
+        any(part in _RECONCILE_DIR_NAMES for part in path.parent.relative_to(root).parts)
+        for root in containing
+    )
+
+
 def prune_missing(
     registry: ModelRegistry,
     *,
@@ -549,15 +658,29 @@ def prune_missing(
 
 
 def referenced_model_ids() -> set[str]:
-    """Model ids referenced by any configured slot or any stack.
+    """Model ids referenced by any configured slot, stack, or hal0.toml field.
 
-    Union of: each slot's default model (plus its capability child models from
-    the live capabilities config) and every model id referenced by a stack
-    (slot primaries + capability rows). Best-effort — each per-slot / per-stack /
-    per-config load is wrapped so a single malformed config can't blow up the
-    whole scan. Missing subsystems are simply skipped.
+    Best-effort wrapper around :func:`_collect_referenced_model_ids` — each
+    per-slot / per-stack / per-config load is wrapped so a single malformed
+    config can't blow up the whole scan, and whatever loaded is returned.
+    Callers that DELETE rows with this as protection on every boot should use
+    the collector directly and act only when it reports ``complete``.
+    """
+    return _collect_referenced_model_ids()[0]
+
+
+def _collect_referenced_model_ids() -> tuple[set[str], bool]:
+    """``(ids, complete)`` — ``complete`` is False if any source failed to load.
+
+    Union of: each slot's default model, capability child selections, every
+    model id referenced by a stack (slot primaries + capability rows), and the
+    hal0.toml fields that name a model id (``[brain_chat] model`` /
+    ``tool_model``, ``[realtime] default_model`` / ``stt_model`` /
+    ``tts_model``). Missing config files are not failures; a load that raises
+    is.
     """
     ids: set[str] = set()
+    complete = True
 
     # ── Slots (+ live capability child selections) ────────────────────────
     try:
@@ -568,12 +691,34 @@ def referenced_model_ids() -> set[str]:
                 slot = load_slot_config(slot_name)
             except Exception as exc:  # pragma: no cover — defensive
                 log.warning("discover.ref_slot_load_failed slot=%s err=%s", slot_name, exc)
+                complete = False
                 continue
             model_id = getattr(getattr(slot, "model", None), "default", "") or ""
             if model_id:
                 ids.add(model_id)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("discover.ref_slots_failed err=%s", exc)
+        complete = False
+
+    # hal0.toml fields that name a model id directly.
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        hal0_cfg = load_hal0_config()
+        brain = hal0_cfg.brain_chat
+        rt = hal0_cfg.realtime
+        for model_id in (
+            brain.model,
+            brain.tool_model,
+            rt.default_model,
+            rt.stt_model,
+            rt.tts_model,
+        ):
+            if model_id:
+                ids.add(model_id)
+    except Exception as exc:
+        log.warning("discover.ref_hal0_config_failed err=%s", exc)
+        complete = False
 
     # Capability child selections (live [selections.<slot>.<child>] rows).
     try:
@@ -587,6 +732,7 @@ def referenced_model_ids() -> set[str]:
                     ids.add(child_model)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("discover.ref_capabilities_failed err=%s", exc)
+        complete = False
 
     # ── Stacks (slot primaries + capability rows) ─────────────────────────
     try:
@@ -604,10 +750,12 @@ def referenced_model_ids() -> set[str]:
                     getattr(stack, "slug", "?"),
                     exc,
                 )
+                complete = False
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("discover.ref_stacks_failed err=%s", exc)
+        complete = False
 
-    return ids
+    return ids, complete
 
 
 def scan_and_register(
@@ -628,7 +776,39 @@ def scan_and_register(
     ``missing_referenced`` for repair. The ``pruned`` / ``missing_referenced``
     keys are always present (both ``[]`` when ``prune`` is False) so the return
     shape is stable.
+
+    Every call also runs :func:`reconcile_skipped_auto_scan` first, so rows an
+    older scan registered under a now-skipped dir are dropped (reported under
+    ``reconciled``; protected matches under ``reconcile_referenced``). Its
+    protection is ``protected_ids`` unioned with every slot/stack/hal0.toml
+    reference, collected only if a row actually matches. If any reference
+    source fails to load, reconcile is skipped for that scan rather than
+    deleting with a partial protected set.
     """
+    # scan_roots() folds the effective store/pull_root into the declared roots
+    # so a headless install (where --models-dir wrote pull_root but not roots)
+    # still scans where the models actually are.
+    roots = cfg.scan_roots()
+
+    reconciled: list[str] = []
+    reconcile_referenced: list[str] = []
+    root_paths = [Path(r).expanduser() for r in roots]
+    if any(_is_reconcilable(m, root_paths) for m in registry.list()):
+        ref_ids, complete = _collect_referenced_model_ids()
+        if not complete:
+            log.warning(
+                "discover.reconcile_skipped — a slot/stack/config reference failed to "
+                "load; not removing rows under skipped dirs this scan"
+            )
+        else:
+            rec = reconcile_skipped_auto_scan(
+                registry,
+                roots=list(roots),
+                protected_ids=ref_ids | (protected_ids or set()),
+            )
+            reconciled = rec["removed"]
+            reconcile_referenced = rec["referenced"]
+
     known_paths: set[str] = set()
     for existing in registry.list():
         try:
@@ -637,10 +817,6 @@ def scan_and_register(
             known_paths.add(existing.path)
         known_paths.add(existing.path)
 
-    # scan_roots() folds the effective store/pull_root into the declared roots
-    # so a headless install (where --models-dir wrote pull_root but not roots)
-    # still scans where the models actually are.
-    roots = cfg.scan_roots()
     candidates = find_candidates(
         roots=list(roots),
         extensions=list(cfg.file_extensions),
@@ -695,6 +871,8 @@ def scan_and_register(
         "scanned_roots": [str(r) for r in roots],
         "pruned": pruned,
         "missing_referenced": missing_referenced,
+        "reconciled": reconciled,
+        "reconcile_referenced": reconcile_referenced,
     }
 
 
@@ -711,6 +889,7 @@ __all__ = [
     "find_candidates",
     "is_skippable",
     "prune_missing",
+    "reconcile_skipped_auto_scan",
     "referenced_model_ids",
     "register_candidate",
     "scan_and_register",
