@@ -75,6 +75,24 @@ def test_find_candidates_skips_noise(model_root: Path) -> None:
     assert "ggml-whisper-large-v3.bin" not in names
 
 
+def test_find_candidates_skips_comfyui_custom_nodes(tmp_path: Path) -> None:
+    """Weights bundled inside a ComfyUI custom node (``custom_nodes/<node>/...``)
+    are node assets, not routable models; they must not register as chat LLMs
+    (#2443)."""
+    root = tmp_path / "models"
+    node = root / "custom_nodes" / "ComfyUI-Foo" / "weights"
+    node.mkdir(parents=True)
+    (node / "foo-detector.safetensors").write_bytes(b"x" * 64)
+    (root / "real-chat-q4.gguf").write_bytes(b"y" * 64)
+    names = {
+        c.path.name
+        for c in find_candidates(
+            roots=[root], extensions=[".gguf", ".safetensors"], known_paths=set()
+        )
+    }
+    assert names == {"real-chat-q4.gguf"}
+
+
 def test_suggested_id_normalisation(model_root: Path) -> None:
     candidates = find_candidates(
         roots=[model_root],

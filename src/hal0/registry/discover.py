@@ -64,6 +64,9 @@ _SKIP_DIR_NAMES = frozenset(
         "upscale_models",
         "diffusion_models",
         "comfyui-nodes",
+        # ComfyUI custom-node checkouts bundle their own detector / helper
+        # weights; those are node assets, never routable chat models.
+        "custom_nodes",
         "comfyui-user",
         # vibevoice / moonshine model assets live under voices/; those
         # are managed by their respective slot providers, not by the

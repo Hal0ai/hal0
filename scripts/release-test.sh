@@ -17,7 +17,9 @@
 #   HAL0_TEST_SSH_KEY  SSH key  (default ~/.ssh/id_ed25519)
 #   HAL0_TEST_PREFIX   Unique slot prefix for this run (default ci-h-<job>-<pid>)
 #   HAL0_TEST_REPORT   Output JSON path (default tests/release-gate-report.json)
-#   HAL0_TEST_BIN      Remote hal0 CLI path (default: the installer's FHS venv
+#   HAL0_TEST_LLM_MODEL Registry id of the llm model the llm rows use
+#                      (default: first installed llm row)
+#   HAL0_TEST_BIN     Remote hal0 CLI path (default: the installer's FHS venv
 #                      binary /usr/lib/hal0/venv/bin/hal0 when executable,
 #                      else `hal0` on the remote PATH)
 #
@@ -243,6 +245,11 @@ remote_slot_load() {
 # carries `type` (services/models_service.py::dispatch_type — llm |
 # embedding | reranking | transcription | tts | image) and `installed`.
 remote_model_for_type() {
+    # Operator override so a gate run never picks an arbitrary first row.
+    if [[ "$1" == "llm" && -n "${HAL0_TEST_LLM_MODEL:-}" ]]; then
+        printf '%s\n' "${HAL0_TEST_LLM_MODEL}"
+        return 0
+    fi
     # -c (not a heredoc): the JSON arrives on the pipe, so stdin must stay
     # attached to it rather than being overridden by a heredoc program.
     ssh_exec "${REMOTE_HAL0_BIN} model list --json 2>/dev/null" 2>/dev/null \
