@@ -1801,6 +1801,9 @@ async def slot_logs(
 
     unit = slot_unit_name(await slot_token_for(sm, name))
     text, hint = await _logs.read_tail(unit, lines, quiet)
+    # Redacted per line with the same helper as /api/logs and the SSE twin
+    # below: read_tail returns raw journal text (#2435 made it non-empty).
+    text = "\n".join(redact_log_line(ln) for ln in text.split("\n"))
     if hint is not None:
         return {"name": name, "logs": text, "hint": hint}
     return {"name": name, "logs": text}

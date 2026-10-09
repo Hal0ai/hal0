@@ -36,6 +36,7 @@ from hal0.agents.manager import BUNDLED_AGENTS, agent_kind
 from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
 from hal0.api.agents import restart as agent_restart
 from hal0.errors import BadRequest, Conflict, Hal0Error, MultiStatus, NotFound
+from hal0.redaction import redact_audit_args
 
 router = APIRouter()
 
@@ -324,7 +325,11 @@ async def agent_activity(
                     else None
                 ),
                 "tool": payload.get("tool"),
-                "args": payload.get("args") or {},
+                # Re-masked on read: rows logged before the write-time pass
+                # (#2434) carry raw args, and #2435 made this read live.
+                "args": redact_audit_args(
+                    str(payload.get("tool") or ""), payload.get("args") or {}
+                ),
                 "gated": payload.get("gated"),
                 "outcome": payload.get("outcome") or evt.split(".")[-1],
                 "client_id": client_id,

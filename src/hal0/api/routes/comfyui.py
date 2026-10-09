@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 import hal0.comfyui.fetch as _fetch_module
+from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import Conflict, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.comfyui.selection import auto_selections, variant_for
@@ -806,6 +807,9 @@ async def comfyui_logs(tail: int = 60) -> JSONResponse:
     # never logged; normalise that to an empty list for the UI's contract.
     if len(lines) == 1 and lines[0].strip().startswith("-- No entries"):
         lines = []
+    # Same scrubber as /api/logs: the img slot's journal is raw container
+    # output, readable since hal0-api got journal read (#2435).
+    lines = [redact_log_line(ln) for ln in lines]
     return JSONResponse(status_code=200, content={"lines": lines})
 
 
