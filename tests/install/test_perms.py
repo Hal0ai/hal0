@@ -996,3 +996,18 @@ def test_models_row_leaves_a_colocated_flm_store_to_the_flm_repair(
     assert models / "org" in planned
     assert store not in planned
     assert store / "Gemma3-1B-NPU2" not in planned
+
+
+def test_models_row_is_skipped_when_the_flm_store_is_models_itself(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``flm_store = /var/lib/hal0/models``: the FLM ownership contract wins there too."""
+    models = paths.var_lib() / "models"
+    (models / "Gemma3-1B-NPU2").mkdir(parents=True)
+    monkeypatch.setattr(paths, "flm_models_dir", lambda: str(models))
+
+    rows = [r for r in perms.ownership_table() if r.target == models]
+    planned = {d.path for d in perms.plan(rows).diffs}
+
+    assert models not in planned
+    assert models / "Gemma3-1B-NPU2" not in planned

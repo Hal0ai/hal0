@@ -90,7 +90,7 @@ symlink to the store before each pull. `.config` and `.config/flm` must be owned
 `model.flm_store_unlinked`. `sudo hal0 doctor perms --fix` hands `.config` and
 `.config/flm` to `hal0`. Then, running as `hal0`, it moves models stranded in the default
 dir into the store and creates the link. Last, it gives the store `1000:hal0` mode `2775`
-(the FLM container's uid), but only if `hal0` or uid 1000 already owns it. It follows no
+(the FLM container's uid), but only if `hal0` owns it. It follows no
 symlink as root. When the same name exists in both directories it stops and reports it;
 it never deletes either copy. A store path `hal0` can't create has to be created by hand
 (`install -d -o 1000 -g hal0 -m 2775 <store>`).

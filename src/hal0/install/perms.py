@@ -240,8 +240,9 @@ class PermRow:
     # single-level behavior byte-for-byte.
     optional: bool = True  # skip silently when the path is absent
     role: str = ""  # human label for the audit table
-    exclude: tuple[Path, ...] = ()  # glob matches equal to or under these are skipped:
-    # another owner declares them (the FLM store under ``models/``, #2446)
+    exclude: tuple[Path, ...] = ()  # glob rows skip these paths and everything under
+    # them (the row itself too, when its target is one): another owner declares
+    # them (the FLM store under or at ``models/``, #2446)
 
     @property
     def label(self) -> str:
@@ -1066,6 +1067,8 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     # the symlink via `lstat` and reports it via the existing `is_symlink`
     # path (never dereferenced, never "changed") — exactly like a declared
     # row whose own target is a symlink.
+    if any(row.target == ex for ex in row.exclude):
+        return []  # the whole row is another owner's (an FLM store AT models/, #2446)
     if not row.target.is_dir() or row.target.is_symlink():
         return [(row.target, row)]  # the dir itself (absent/optional/symlink handled in plan)
     out: list[tuple[Path, PermRow]] = [(row.target, row)]

@@ -67,8 +67,12 @@ def _drift_paths(rows: list[dict[str, str]]) -> set[str]:
     return {r["path"] for r in _drift(rows)}
 
 
-def test_stranded_models_are_migrated_and_relinked(layout: tuple[Path, Path]) -> None:
+def test_stranded_models_are_migrated_and_relinked(
+    layout: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     default, store = layout
+    # The container uid is someone else, so the hal0-made store gets chowned.
+    monkeypatch.setattr(flm, "_FLM_CONTAINER_UID", os.getuid() + 7)
     model = default / "Gemma3-1B-NPU2"
     model.mkdir(parents=True)
     (model / "model.q4nx").write_text("weights", encoding="utf-8")
@@ -89,7 +93,8 @@ def test_stranded_models_are_migrated_and_relinked(layout: tuple[Path, Path]) ->
     assert (str(store), flm._FLM_CONTAINER_UID, gid) in fchown.calls
     assert stat.S_IMODE(store.stat().st_mode) == 0o2775
     assert actions
-    assert _drift(flm.audit_host_flm_store_link()) == []
+    # fchown is recorded, not applied, so only the store's container row remains.
+    assert _drift_paths(flm.audit_host_flm_store_link()) <= {str(store)}
 
 
 def test_conflict_is_reported_and_nothing_is_deleted(layout: tuple[Path, Path]) -> None:
@@ -225,3 +230,60 @@ def test_link_step_runs_as_the_service_user() -> None:
     assert (seen["user"], seen["group"], seen["extra_groups"]) == (990, 991, [])
     assert "ensure_host_flm_store_link" in seen["argv"][-1]
     assert exc_info.value.message == "both hold Model-NPU2"
+
+
+def test_store_owned_by_uid_1000_but_not_hal0_is_never_chowned(
+    layout: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0 can write hal0.toml, so ``flm_store = /home/<uid-1000 user>`` is hal0's
+    choice. Owner uid 1000 is not evidence that hal0 made the dir."""
+    default, store = layout
+    store.mkdir(parents=True)
+    store.chmod(0o700)
+    default.parent.mkdir(parents=True)
+    default.symlink_to(store)
+    monkeypatch.setattr(flm, "_service_ids", lambda: (os.getuid() + 1, os.getgid() + 1))
+    # _FLM_CONTAINER_UID is the test uid (fixture): the store "belongs to uid 1000".
+
+    fchown = _FChown()
+    flm.repair_host_flm_store_link(fchown=fchown, link=lambda u, g: None)
+
+    assert all(p != str(store) for p, _u, _g in fchown.calls)
+    assert stat.S_IMODE(store.stat().st_mode) == 0o700
+
+
+def test_store_the_service_user_cannot_write_is_drift(
+    layout: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host ``flm pull`` writes as hal0: container-writable alone is not enough."""
+    default, store = layout
+    store.mkdir(parents=True)
+    store.chmod(0o700)
+    default.parent.mkdir(parents=True)
+    default.symlink_to(store)
+    monkeypatch.setattr(flm, "_service_ids", lambda: (os.getuid() + 1, os.getgid() + 1))
+    assert str(store) in _drift_paths(flm.audit_host_flm_store_link())
+
+
+def test_parent_that_is_a_file_is_drift(layout: tuple[Path, Path]) -> None:
+    default, store = layout
+    store.mkdir(parents=True)
+    default.parent.parent.mkdir(parents=True)
+    default.parent.write_text("", encoding="utf-8")
+    assert str(default.parent) in _drift_paths(flm.audit_host_flm_store_link())
+
+
+def test_link_made_concurrently_by_another_writer_is_success(
+    layout: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two pulls (or a pull and ``doctor perms --fix``) race to create the link."""
+    default, store = layout
+    real_symlink_to = Path.symlink_to
+
+    def _lose_the_race(self: Path, target: Any, *a: Any, **kw: Any) -> None:
+        real_symlink_to(self, target, *a, **kw)  # the other writer wins
+        raise FileExistsError(17, "File exists", str(self))
+
+    monkeypatch.setattr(Path, "symlink_to", _lose_the_race)
+    assert flm.ensure_host_flm_store_link() == str(store)
+    assert default.is_symlink()
