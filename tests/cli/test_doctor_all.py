@@ -687,7 +687,39 @@ def _stt_weights_with(monkeypatch: pytest.MonkeyPatch, flags: str | None) -> Che
     import hal0.profiles as profiles_mod
 
     monkeypatch.setattr(profiles_mod, "ProfileCatalog", lambda: _StubCatalog(flags))
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: ["stt"])
     return da.check_voice_stt_weights()
+
+
+def test_stt_weights_skipped_when_no_slot_uses_moonshine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """#2437: seeded profile + missing dir must not FAIL if nothing uses it."""
+    import hal0.profiles as profiles_mod
+
+    missing = tmp_path / "nope"
+    monkeypatch.setattr(
+        profiles_mod, "ProfileCatalog", lambda: _StubCatalog(f"--model_path {missing}")
+    )
+    monkeypatch.setattr(da, "_moonshine_slots", lambda: [])
+    c = da.check_voice_stt_weights()
+    assert c.status == "pass"
+    assert "no slot uses" in c.detail
+
+
+def test_moonshine_slots_detects_profile_and_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    import hal0.config.loader as loader
+
+    cfgs = {
+        "a": types.SimpleNamespace(profile="moonshine", provider="llama-server"),
+        "b": types.SimpleNamespace(profile=None, provider="moonshine"),
+        "c": types.SimpleNamespace(profile="rocmfpx-rocm", provider="llama-server"),
+    }
+    monkeypatch.setattr(loader, "list_slots", lambda: list(cfgs))
+    monkeypatch.setattr(loader, "load_slot_config", lambda n: cfgs[n])
+    assert da._moonshine_slots() == ["a", "b"]
 
 
 def test_stt_weights_missing_bundle_fails_by_name(

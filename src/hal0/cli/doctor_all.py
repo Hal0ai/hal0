@@ -494,8 +494,32 @@ def check_agent_uid_isolation(
     )
 
 
+def _moonshine_slots() -> list[str]:
+    """Names of configured slots that run the moonshine engine.
+
+    A slot uses moonshine when it selects the ``moonshine`` profile or carries
+    ``provider = "moonshine"``. Unreadable slot files are skipped: one corrupt
+    slot must not turn a preflight row into a crash.
+    """
+    from hal0.config.loader import list_slots, load_slot_config
+
+    names: list[str] = []
+    for name in list_slots():
+        try:
+            cfg = load_slot_config(name)
+        except Exception:
+            continue
+        if cfg.profile == "moonshine" or cfg.provider == "moonshine":
+            names.append(name)
+    return names
+
+
 def check_voice_stt_weights() -> Check:
     """Moonshine STT weights preflight — the same rule slot spawn enforces.
+
+    Only runs when a slot actually uses moonshine (#2437): the seeded
+    ``moonshine`` profile exists on every install, so keying off the profile
+    alone put a red FAIL on every fresh box that never enabled local STT.
 
     The moonshine ONNX bundle is operator-staged (multi-file, not registry-
     pulled), so a fresh box can configure the stt slot and only find out the
@@ -511,6 +535,17 @@ def check_voice_stt_weights() -> Check:
     from hal0.profiles import ProfileCatalog
     from hal0.providers.moonshine import check_moonshine_weights
 
+    try:
+        users = _moonshine_slots()
+    except Exception:
+        users = []
+    if not users:
+        return Check(
+            "stt-weights",
+            "Moonshine weights",
+            _PASS,
+            "no slot uses the moonshine STT engine — nothing to preflight",
+        )
     try:
         profile = ProfileCatalog().resolve("moonshine")
     except Exception:
