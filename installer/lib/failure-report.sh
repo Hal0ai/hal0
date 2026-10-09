@@ -283,14 +283,22 @@ _hal0_report_redact_toml_stream() {
 
 # ── literal-secret harvesting (pass 2a) ─────────────────────────────────────
 
-# Print each line of a secret value worth masking: ≥4 chars, not a plain
-# boolean/null word, not a substring of the mask itself. Multi-line values
-# (a PEM key in an env var) are split so every line is masked on its own.
+# Print each line of a secret value worth masking: ≥4 chars, not purely
+# numeric, not a plain boolean/null word, not a substring of the mask
+# itself. Every line printed is masked as a substring EVERYWHERE in the
+# report, so a number would erase unrelated text: a `4096` harvested from a
+# limit turned an `ss` Send-Q column and `context_size = 4096` in the log
+# tail into the mask (#2439). The key-name pass still masks a numeric value
+# on its own line. Multi-line values (a PEM key in an env var) are split so
+# every line is masked on its own.
 _hal0_report_emit_secret() {
     local value="$1" line
     while IFS= read -r line; do
         line="${line%$'\r'}"
         [[ ${#line} -ge 4 ]] || continue
+        # Digits alone or inside one matching quote pair (`'12345'`, `"86400"`):
+        # the env harvest emits the raw value too, quotes included.
+        [[ "$line" =~ ^[0-9]+$ || "$line" =~ ^\"[0-9]+\"$ || "$line" =~ ^\'[0-9]+\'$ ]] && continue
         case "${line,,}" in
             true | false | none | null | unset) continue ;;
         esac
@@ -420,10 +428,12 @@ _hal0_report_harvest_toml_file() {
 # skipped too: in log text it names a setting, not a credential. This is
 # deliberately narrower than _hal0_report_key_is_sensitive (which keeps
 # _redact.py's ^KEY$); the pattern pass still masks the value on its own
-# line, and the env/api.env/TOML harvests are unaffected. Names whose value
-# is not the secret itself are skipped as well (#2384): a token count or
-# tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and a field
-# naming where a secret lives (`api_key_env`, `token_file`, `..._path`).
+# line, and the env/api.env/TOML harvests are unaffected (they share only
+# _hal0_report_emit_secret's filter, which skips numbers, #2439). Names
+# whose value is not the secret itself are skipped as well (#2384): a token
+# count or tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and
+# a field naming where a secret lives (`api_key_env`, `token_file`,
+# `..._path`).
 _hal0_report_text_value_is_secret() {
     local name="${1,,}" value="$2"
     [[ "$name" == key ]] && return 1
