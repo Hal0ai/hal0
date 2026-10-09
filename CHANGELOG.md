@@ -314,6 +314,39 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **`hal0 doctor bundle` and the MCP audit log no longer keep secrets in
+  clear.** The bundle's journal captures and system probes were scrubbed only
+  for Bearer tokens and JWTs, so API keys and other credentials in the journal
+  ended up in a file meant to be attached to public bug reports. Every
+  free-text capture now gets the same shareable-text pass as the install-log
+  copy. The MCP audit row (`mcp.tool.invoked`) now masks secret arguments
+  before they reach journald: `provider_credential_write`'s value, every value
+  in `mcp_server_config_write`'s `env` block, and any secret-named key,
+  including header-style names such as `x-api-key`. Audit rows written before
+  this fix are masked when the bundle is exported. (#2434)
+- **Rotating the client key no longer stops memory writes.** When
+  `hal0 auth rotate client` refreshed hindsight-api's LLM key, the engine kept
+  the old key until someone restarted it, so every memory extraction call
+  failed with 401. The rotate now restarts hindsight-api in the background
+  through the existing privileged helper; if that restart fails, the rotate
+  still succeeds and its note says how to restart by hand. (#2448)
+- **NPU models load after a fresh install.** The installer created
+  `.config/flm` as root, so hal0-api, which runs as the hal0 user, could not
+  point FLM's hardcoded cache at `[models].flm_store`. Pulls then landed in
+  `~/.config/flm/models`, reported success with a path that did not exist,
+  and the NPU slot never saw the weights. The installer now gives those
+  directories to hal0, a pull whose store link cannot be made fails with
+  `model.flm_store_unlinked` before downloading, and the reported path is
+  checked on disk. `sudo hal0 doctor perms --fix` repairs existing boxes: it
+  fixes the ownership, moves stranded models into the store (it stops and
+  reports a name that exists in both places, deleting nothing) and relinks
+  the cache. Re-running the installer does the same. (#2446)
+- **The voice TTS picker offers Qwen3-TTS only where it can run.** The
+  `gpu-rocm` Qwen3-TTS row was listed on every host, including GPU-less boxes
+  and containers with `/dev/kfd` but no render node, where the slot can never
+  start. It now needs the full ROCm lane, the same check as the `gpu-rocm`
+  badge and ComfyUI. A saved Qwen3-TTS selection on a host without the lane
+  can still be disabled. (#2447)
 - **`hal0 mcp test` shows each tool's real verdict again.** While exposure
   to Hermes and the brain profile is disabled (#2358), no installed server is
   in the agent's policy mirror, so every tool read `unknown_server`. Until
