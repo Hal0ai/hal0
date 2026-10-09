@@ -119,23 +119,40 @@ def _resolve_level(level: str | None) -> str | None:
 
 
 _JOURNAL_ACCESS_HINT = (
-    "journalctl returned no entries; the hal0 service user may not be able "
-    "to read the journal (is it in the systemd-journal group?)"
+    "journalctl returned no entries; the hal0 service user cannot read the "
+    "journal. Re-run the hal0 installer to restore its systemd-journal "
+    "group membership"
 )
+
+# journalctl's wording when the caller lacks journal read access.
+_JOURNAL_PERMISSION_MARKERS = ("insufficient permissions", "no journal files were opened")
+
+# Upper bound on stderr we ever read or inspect; the hint itself is shorter.
+_STDERR_READ_LIMIT = 4096
+_HINT_DETAIL_LIMIT = 300
+# How long to wait for an exited journalctl to be reaped so ``returncode`` is set.
+_EXIT_WAIT_SECONDS = 2.0
 
 
 def _journal_failure_hint(stderr: bytes, returncode: int | None) -> str | None:
     """Short redacted hint when journalctl failed, else ``None``.
 
-    journalctl prints permission failures (``No journal files were opened
-    due to insufficient permissions``) to stderr and often still exits 0,
-    so an empty stdout alone is indistinguishable from "no logs" (#2435).
+    journalctl reports permission failures (``No journal files were opened
+    due to insufficient permissions``) on stderr, so an empty stdout alone is
+    indistinguishable from "no logs" (#2435). The journal-group advice is
+    added only when stderr says so; any other failure (for example a bad
+    ``since``) gets a neutral ``journalctl failed (exit N)`` message.
     """
-    err = stderr.decode("utf-8", errors="replace").strip()
+    err = stderr[:_STDERR_READ_LIMIT].decode("utf-8", errors="replace").strip()
     if not err and not returncode:
         return None
-    detail = redact_log_line(" ".join(err.split())[:300]) if err else ""
-    return f"{_JOURNAL_ACCESS_HINT}: {detail}" if detail else _JOURNAL_ACCESS_HINT
+    # Redact the whole text BEFORE truncating, so a secret cut at the limit
+    # cannot fall under a pattern's minimum-length gate and survive.
+    detail = redact_log_line(" ".join(err.split()))[:_HINT_DETAIL_LIMIT] if err else ""
+    if any(marker in err.lower() for marker in _JOURNAL_PERMISSION_MARKERS):
+        return f"{_JOURNAL_ACCESS_HINT}: {detail}"
+    exit_part = f" (exit {returncode})" if returncode is not None else ""
+    return f"journalctl failed{exit_part}: {detail}" if detail else f"journalctl failed{exit_part}"
 
 
 async def journalctl_sse(
@@ -196,7 +213,12 @@ async def journalctl_sse(
             yield f"data: {json.dumps(redact_log_line(line))}\n\n"
         if not emitted and proc.stderr is not None:
             # Process exited without a single line: surface why (#2435).
-            err = await proc.stderr.read()
+            err = await proc.stderr.read(_STDERR_READ_LIMIT)
+            # ``returncode`` stays None until the process is reaped, so wait
+            # (bounded) before consulting it; otherwise a non-zero exit with
+            # empty stderr would never be reported.
+            with contextlib.suppress(TimeoutError, ProcessLookupError, OSError):
+                await asyncio.wait_for(proc.wait(), timeout=_EXIT_WAIT_SECONDS)
             hint = _journal_failure_hint(err, proc.returncode)
             if hint:
                 yield f"event: error\ndata: {json.dumps({'message': hint})}\n\n"
