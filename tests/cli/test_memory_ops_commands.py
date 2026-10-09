@@ -168,3 +168,35 @@ def test_ops_retry_all_failed_skips_op_with_no_id(
     result = runner.invoke(oc.app, ["retry", "--bank", "shared", "--all-failed", "--json"])
     assert result.exit_code == 0, result.output
     assert stub_api["post"] == ["/api/memory/banks/shared/operations/op-ok/retry"]
+
+
+def test_ops_retry_all_failed_continues_past_409_and_errors(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2441: a per-op 409 must not abort the drain; real errors exit non-zero."""
+    from hal0.cli._shared import CliApiError
+
+    posted: list[str] = []
+
+    def fake_post(path: str, **kw: Any) -> Any:
+        posted.append(path)
+        if "/shared/operations/op-1/" in path:
+            raise CliApiError("POST x -> HTTP 409: already requeued", status=409)
+        return {"success": True, "message": "queued", "operation_id": "op-3"}
+
+    monkeypatch.setattr(oc, "api_post", fake_post)
+    result = runner.invoke(oc.app, ["retry", "--all-failed", "--json"])
+    assert result.exit_code == 0, result.output
+    assert len(posted) == 2  # op-3 still attempted after op-1 409
+    payload = json.loads(result.output)
+    assert len(payload["retried"]) == 1
+    assert len(payload["skipped"]) == 1
+    assert payload["failed"] == []
+
+    def boom(path: str, **kw: Any) -> Any:
+        raise CliApiError("POST x -> HTTP 500: boom", status=500)
+
+    monkeypatch.setattr(oc, "api_post", boom)
+    result = runner.invoke(oc.app, ["retry", "--all-failed", "--json"])
+    assert result.exit_code == 1
+    assert len(json.loads(result.output)["failed"]) == 2

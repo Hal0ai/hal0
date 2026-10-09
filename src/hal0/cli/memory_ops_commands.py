@@ -137,6 +137,8 @@ def ops_retry_cmd(
 
     _require_api()
     results: list[dict[str, Any]] = []
+    skipped: list[tuple[str, str, str]] = []
+    failures: list[tuple[str, str, str]] = []
     try:
         if op_id:
             r = api_post(f"/api/memory/banks/{bank}/operations/{op_id}/retry")
@@ -159,18 +161,37 @@ def ops_retry_cmd(
                         )
                         continue
                     targets.append((b, str(oid)))
+            # One bad operation must not abort the drain: a 409 means the
+            # engine already requeued/is running it (skip); anything else is
+            # recorded and the loop continues (#2441).
             for b, oid in targets:
-                r = api_post(f"/api/memory/banks/{b}/operations/{oid}/retry")
+                try:
+                    r = api_post(f"/api/memory/banks/{b}/operations/{oid}/retry")
+                except CliApiError as exc:
+                    if exc.status == 409:
+                        skipped.append((b, oid, str(exc)))
+                    else:
+                        failures.append((b, oid, str(exc)))
+                    continue
                 r["bank_id"] = b
                 results.append(r)
     except CliApiError as exc:
         die(str(exc))
         return
 
+    def _rows(items: list[tuple[str, str, str]]) -> list[dict[str, str]]:
+        return [{"bank_id": b, "operation_id": o, "error": e} for b, o, e in items]
+
     if json_out:
-        typer.echo(jsonlib.dumps({"retried": results}, indent=2, sort_keys=True))
+        payload: dict[str, Any] = {"retried": results}
+        if not op_id:
+            payload["skipped"] = _rows(skipped)
+            payload["failed"] = _rows(failures)
+        typer.echo(jsonlib.dumps(payload, indent=2, sort_keys=True))
+        if failures:
+            raise typer.Exit(1)
         return
-    if not results:
+    if not results and not skipped and not failures:
         console.print("[dim]Nothing to retry.[/dim]")
         return
     t = Table.grid(padding=(0, 2))
@@ -182,7 +203,17 @@ def ops_retry_cmd(
         t.add_row(
             str(r.get("bank_id")), str(r.get("operation_id")), f"{ok} — {r.get('message', '')}"
         )
-    console.print(Panel(t, title="memory · ops retry", border_style="dim"))
+    if results:
+        console.print(Panel(t, title="memory · ops retry", border_style="dim"))
+    if not op_id:
+        console.print(
+            f"retried {len(results)}, skipped {len(skipped)} (already requeued), "
+            f"failed {len(failures)}"
+        )
+        for b, o, e in failures:
+            console.print(f"[red]failed {b}/{o}: {e}[/red]")
+    if failures:
+        raise typer.Exit(1)
 
 
 __all__ = ["app"]
