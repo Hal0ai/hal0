@@ -39,6 +39,7 @@ Wants=network-online.target
 Type=simple
 User=hal0
 Group=hal0
+SupplementaryGroups=systemd-journal
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
 EnvironmentFile=-${ETC_DIR}/hermes-python.env
@@ -54,6 +55,13 @@ SyslogIdentifier=hal0-api
 WantedBy=multi-user.target
 ```
 
+- **Journal read** — `SupplementaryGroups=systemd-journal` lets the daemon
+  read the journal behind `/api/logs` and the MCP `logs_tail` tool. The group
+  is granted to this unit only; the `hal0` account is not added to it, so
+  `hal0-agent@` units (same uid) do not get it. The installer omits the line
+  on a host that has no `systemd-journal` group. `hal0 update` does not
+  rewrite this unit, so a box updated to 1.4.0 needs the installer re-run
+  once; `hal0 doctor all` warns (`API journal read`) until it has been.
 - **User/group** — `hal0:hal0`. Root-only operations (writing per-slot
   units, `daemon-reload`, restarting itself during an update) go through a
   narrow `sudo -n` wrapper (`hal0-systemctl`) rather than running the daemon
@@ -215,7 +223,10 @@ GET /api/logs/stream?unit=hal0-api&level=...     # SSE tail
 ```
 
 Swap `unit=hindsight-api` for the memory engine's logs. Both routes are
-admin-tier.
+admin-tier, and both read only hal0's own units: `hal0.target`, any
+`hal0-*` unit (`hal0-api`, `hal0-slot@<id>`, `hal0-agent@<id>`,
+`hal0-openwebui`, `hal0-bench*`, ...), `hindsight-api` and `hermes-gateway`.
+Any other unit is rejected with a 400 `system.logs_error`.
 
 ## Companion services
 

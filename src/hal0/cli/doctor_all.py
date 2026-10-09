@@ -29,6 +29,7 @@ own repair. Exit codes:
 from __future__ import annotations
 
 import contextlib
+import grp
 import json as jsonlib
 import pwd
 import shutil
@@ -491,6 +492,112 @@ def check_agent_uid_isolation(
         "Agent UID split",
         _PASS,
         f"agent unit(s) run as a different user than {_API_UNIT} ({api_user})",
+    )
+
+
+#: The group that grants journal read; hal0-api.service carries it as
+#: ``SupplementaryGroups=`` (installer/install.sh, #2435).
+_JOURNAL_GROUP = "systemd-journal"
+
+
+def _api_process_ids(proc_root: Path | None = None) -> tuple[int, set[int]] | None:
+    """Real uid + supplementary gids of the running hal0-api process.
+
+    Reads ``MainPID`` from systemd and then ``/proc/<pid>/status`` (world
+    readable), so the answer reflects what the running process holds — a unit
+    file rewritten without a restart, or an old unit, shows up as it is.
+    ``None`` when it can't be told: no ``systemctl``, unit not running, or the
+    status file unreadable.
+    """
+    if shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            ["systemctl", "show", "-p", "MainPID", "--value", _API_UNIT],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pid = result.stdout.strip()
+    if result.returncode != 0 or not pid.isdigit() or int(pid) == 0:
+        return None
+    root = proc_root if proc_root is not None else Path("/proc")
+    try:
+        status = (root / pid / "status").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    uid: int | None = None
+    gids: set[int] = set()
+    for line in status.splitlines():
+        key, _, value = line.partition(":")
+        if key == "Uid":
+            fields = value.split()
+            uid = int(fields[0]) if fields and fields[0].isdigit() else None
+        elif key == "Groups":
+            gids = {int(g) for g in value.split() if g.isdigit()}
+    if uid is None:
+        return None
+    return uid, gids
+
+
+def _journal_group_gid() -> int | None:
+    """gid of ``systemd-journal`` on this host, or ``None`` if it has none."""
+    try:
+        return grp.getgrnam(_JOURNAL_GROUP).gr_gid
+    except KeyError:
+        return None
+
+
+def check_api_journal_access(
+    *,
+    process_ids: Callable[[], tuple[int, set[int]] | None] | None = None,
+    journal_gid: Callable[[], int | None] | None = None,
+) -> Check:
+    """Can hal0-api read the journal behind ``/api/logs`` and ``logs_tail``? (#2435)
+
+    hal0-api runs ``User=hal0`` and gets journal read from
+    ``SupplementaryGroups=systemd-journal`` on its own unit, written by the
+    installer. ``hal0 update`` does not rewrite ``hal0-api.service``, so a box
+    updated to 1.4.0 without the installer re-run the Migrations note asks
+    for keeps an API whose log views are silently empty. Advisory (``warn``):
+    nothing else breaks. Both probes are injectable for tests.
+    """
+    probe_ids = process_ids if process_ids is not None else _api_process_ids
+    probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
+    key, title = "api-journal", "API journal read"
+
+    gid = probe_gid()
+    if gid is None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"this host has no {_JOURNAL_GROUP} group, so hal0-api cannot be granted "
+            "journal read — /api/logs and MCP logs_tail return no lines",
+        )
+    ids = probe_ids()
+    if ids is None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"could not inspect the running {_API_UNIT} process (systemctl unavailable or "
+            "unit not running) — journal read for /api/logs unknown",
+        )
+    uid, gids = ids
+    if uid == 0 or gid in gids:
+        return Check(key, title, _PASS, f"{_API_UNIT} can read the journal ({_JOURNAL_GROUP})")
+    return Check(
+        key,
+        title,
+        _WARN,
+        f"{_API_UNIT} is not running with the {_JOURNAL_GROUP} group, so /api/logs and "
+        "MCP logs_tail return no lines — re-run the installer once "
+        "(curl -fsSL https://hal0.dev/install.sh | sudo bash); `hal0 update` does not "
+        "rewrite hal0-api.service",
     )
 
 
@@ -1395,6 +1502,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hardware_freshness(),
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
+        check_api_journal_access(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),
