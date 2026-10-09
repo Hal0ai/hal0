@@ -347,6 +347,84 @@ applying. Add those subsections to a version's section to surface them; see
   start. It now needs the full ROCm lane, the same check as the `gpu-rocm`
   badge and ComfyUI. A saved Qwen3-TTS selection on a host without the lane
   can still be disabled. (#2447)
+- **The dashboard log view and the agent's `logs_tail` tool show logs again.**
+  hal0-api runs as the `hal0` user, which could not read the journal, so
+  `/api/logs` returned an empty list on every box and read as "no logs". The
+  installer now gives the hal0-api unit, and only that unit, the
+  `systemd-journal` group; `hal0` itself is not added to the group, so the
+  agent units do not get it. In exchange, `/api/logs` and its stream accept
+  only hal0's own units (`hal0-*`, `hal0.target`, `hindsight-api`,
+  `hermes-gateway`) and refuse anything else with a 400. Every API route that
+  reads the journal, including slot and ComfyUI logs and the agent and MCP
+  activity feeds, now masks secrets in what it returns. When journalctl still
+  cannot read the journal, the response carries a `hint` saying why instead of
+  an empty list, and a new `hal0 doctor all` row warns when the running
+  hal0-api lacks the group. Existing boxes pick this up from the installer
+  re-run under Migrations. (#2435)
+- **A slot that was still loading when hal0-api started now becomes ready.**
+  hal0-api adopts a running slot at startup; if its model server was still
+  loading, the slot was left `warming` for good, never registered for
+  routing, and `hal0/<name>` requests fell through to the fallback slot.
+  Adopted slots are now polled for health and promoted to ready as soon as
+  the server answers, and a slot that was recorded as warming before a restart
+  is adopted the same way. (#2442)
+- **Installs no longer warn that the podman seams are broken.** The seam
+  probe passed its verb and argument as one word under the installer's
+  `IFS`, so every install printed two false `bad cmd` warnings for
+  `hal0-podman-ro` and `hal0-podman-rw`. (#2436)
+- **`hal0 doctor all` no longer fails "Moonshine weights" on a box that does
+  not use Moonshine.** The check ran whenever the seeded profile existed, so
+  every fresh install showed a red FAIL. It now runs only for slots that would
+  actually launch on Moonshine, decided the same way slot launch decides it,
+  and checks the profile each of those slots uses. (#2437)
+- **The installer writes its failure report on every failed exit.** Only an
+  ERR-trapped abort wrote one, so the most common refusals (no GPU, not root,
+  `die` and `exit 1` paths) left nothing to attach to a bug report. An EXIT
+  trap now writes the report for any non-zero exit. (#2438)
+- **The installer's failure report keeps numbers it does not need to hide.**
+  A numeric value under a secret-looking key, such as
+  `extraction_max_tokens = 4096`, was treated as a secret, so every `4096` in
+  the report was masked, including context sizes and socket queue columns.
+  Numeric values, quoted or not, are no longer harvested as secrets. (#2439)
+- **`hal0 mcp expose <id> --hermes` no longer claims success on an upgraded
+  record.** A record exposed to Hermes before 1.4.0 kept `hermes = true`, and
+  re-asserting it returned 200 although nothing was exposed. Any request that
+  asks for Hermes or brain exposure is now refused with
+  `mcp.exposure_policy_unenforced` while that exposure is disabled, whatever
+  the record held before. (#2440)
+- **`hal0 memory ops retry --all-failed` drains every failed operation.** It
+  stopped at the first operation the memory engine refused with 409 (one
+  already requeued with its batch), so the rest were never retried. It now
+  skips those, keeps going, and reports how many were retried, skipped and
+  failed. (#2441)
+- **ComfyUI custom-node files no longer appear as chat models.** The model
+  scan registered any `.gguf` or `.safetensors` under a ComfyUI
+  `custom_nodes/` tree as a chat LLM. Those trees are now skipped, including
+  sharded weight sets, and a scan removes rows it had registered
+  automatically from a folder it now skips. That includes a sharded model
+  inside a model root's own folder named like a ComfyUI accessory directory
+  (for example `embeddings/` or `loras/`). Rows you added by hand, pulled, or
+  that a slot, stack, capability or chat setting references are kept, and the
+  clean-up is skipped when any of those configs fails to load.
+  `make release-test` also takes `HAL0_TEST_LLM_MODEL` to pin the model its
+  LLM rows use. (#2443)
+- **`hal0 agent bootstrap hermes --dry-run` no longer performs a real
+  install.** `--dry-run` only skipped writing the report, and `--skip-phase`
+  did nothing. Both flags are now refused with exit 2 and a pointer to
+  `hal0 agent status hermes`, since the installer has no preview mode. (#2445)
+- **The ROCm lane is offered only where a slot can open it.** The picker,
+  the hardware recommender, the install seed and the default device for
+  `hal0 slot create` treated a successful `rocm-smi` as enough, so a
+  container with `/dev/kfd` and ROCm tools but no render node was still
+  offered ROCm and failed at slot load. All four now require `/dev/kfd` and a
+  render node. A box with both nodes but no `rocm-smi` now defaults to ROCm
+  rather than Vulkan for `hal0 slot create`, matching the seed. (#2452)
+- **Five stale `make harness` rows are fixed.** These δ-tier rows had
+  drifted from intended behaviour: an mtime check that the installer's
+  by-design `api.env` rewrite always tripped, two agent rows that expected a
+  data directory the provisioner now owns, a memory teardown fixture with a
+  stale agent id, and a bootstrap row that now pins the `--dry-run` refusal.
+  (#2444)
 - **`hal0 mcp test` shows each tool's real verdict again.** While exposure
   to Hermes and the brain profile is disabled (#2358), no installed server is
   in the agent's policy mirror, so every tool read `unknown_server`. Until
@@ -677,8 +755,9 @@ applying. Add those subsections to a version's section to surface them; see
   reinstall: `/etc/hal0`, `/var/lib/hal0` and your update channel are kept.
   `hal0 update` swaps the release, re-installs the venv and refreshes the sudo
   wrappers in `/usr/lib/hal0/bin`, but only the installer rewrites
-  `hindsight-api.service`, the `/usr/local/bin/hermes` wrapper and
-  `/etc/hal0/api.env`, and three 1.4.0 fixes live there (next entry).
+  `hal0-api.service`, `hindsight-api.service`, the `/usr/local/bin/hermes`
+  wrapper and `/etc/hal0/api.env`, and four 1.4.0 fixes live there (next
+  entry).
 - **What the re-run picks up.** The memory extraction limits (#1834) are baked
   into `hindsight-api.service`; until the installer runs, `hindsight-api`
   keeps its own defaults (32 concurrent calls, 64000 completion tokens), the
@@ -688,7 +767,9 @@ applying. Add those subsections to a version's section to surface them; see
   rotate client` also mints the key and re-points Open WebUI, and neither
   turns auth on. The `hermes` and `hal0-hermes` wrappers that bypass the proxy
   for loopback (#2371) live in `/usr/local/bin`, which only the installer
-  writes.
+  writes. The journal read that brings back the dashboard log view (#2435) is
+  a line in `hal0-api.service`; until the installer runs, logs stay empty and
+  `hal0 doctor all` warns.
 - **Before re-running, note any `HAL0_ALLOWED_ORIGINS` line you added to
   `/etc/hal0/api.env` by hand** (for a reverse proxy, say). The installer
   re-appends its network block at the end of the file on every run and the
