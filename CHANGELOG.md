@@ -380,8 +380,7 @@ applying. Add those subsections to a version's section to surface them; see
 - **The installer writes its failure report on every failed exit.** Only an
   ERR-trapped abort wrote one, so the most common refusals (no GPU, not root,
   `die` and `exit 1` paths) left nothing to attach to a bug report. An EXIT
-  trap now writes the report for any non-zero exit, including an
-  interrupted run. (#2438)
+  trap now writes the report for any non-zero exit. (#2438)
 - **The installer's failure report keeps numbers it does not need to hide.**
   A numeric value under a secret-looking key, such as
   `extraction_max_tokens = 4096`, was treated as a secret, so every `4096` in
@@ -420,11 +419,12 @@ applying. Add those subsections to a version's section to surface them; see
   offered ROCm and failed at slot load. All four now require `/dev/kfd` and a
   render node. A box with both nodes but no `rocm-smi` now defaults to ROCm
   rather than Vulkan for `hal0 slot create`, matching the seed. (#2452)
-- **`make harness` is green again.** Five δ-tier rows had drifted from
-  intended behaviour: an mtime check that the installer's by-design `api.env`
-  rewrite always tripped, two agent rows that expected a data directory the
-  provisioner now owns, a memory teardown fixture with a stale agent id, and a
-  bootstrap row that now pins the `--dry-run` refusal. (#2444)
+- **Five stale `make harness` rows are fixed.** These δ-tier rows had
+  drifted from intended behaviour: an mtime check that the installer's
+  by-design `api.env` rewrite always tripped, two agent rows that expected a
+  data directory the provisioner now owns, a memory teardown fixture with a
+  stale agent id, and a bootstrap row that now pins the `--dry-run` refusal.
+  (#2444)
 - **`hal0 mcp test` shows each tool's real verdict again.** While exposure
   to Hermes and the brain profile is disabled (#2358), no installed server is
   in the agent's policy mirror, so every tool read `unknown_server`. Until
