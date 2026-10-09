@@ -1377,7 +1377,7 @@ def test_api_journal_passes_when_process_holds_the_group() -> None:
 def test_api_journal_warns_when_process_lacks_the_group() -> None:
     check = _journal(ids=(999, {999, 44}))
     assert check.status == "warn"
-    # Fix text: re-run the installer once (the 1.4.0 Migrations note);
+    # Fix text: re-run the installer once after updating to 1.4.0;
     # `hal0 update` does not rewrite hal0-api.service.
     assert "install.sh" in check.detail
     assert "/api/logs" in check.detail
@@ -1386,6 +1386,12 @@ def test_api_journal_warns_when_process_lacks_the_group() -> None:
 
 def test_api_journal_passes_for_a_root_api() -> None:
     assert _journal(ids=(0, {0})).status == "pass"
+
+
+def test_api_journal_passes_for_a_root_api_on_a_host_without_the_group() -> None:
+    """Root reads the journal without systemd-journal, so a missing group is
+    not a problem for a root-run API: probe the process first."""
+    assert _journal(ids=(0, {0}), gid=None).status == "pass"
 
 
 def test_api_journal_warns_when_host_has_no_journal_group() -> None:

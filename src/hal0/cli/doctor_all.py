@@ -560,15 +560,20 @@ def check_api_journal_access(
 
     hal0-api runs ``User=hal0`` and gets journal read from
     ``SupplementaryGroups=systemd-journal`` on its own unit, written by the
-    installer. ``hal0 update`` does not rewrite ``hal0-api.service``, so a box
-    updated to 1.4.0 without the installer re-run the Migrations note asks
-    for keeps an API whose log views are silently empty. Advisory (``warn``):
-    nothing else breaks. Both probes are injectable for tests.
+    installer. ``hal0 update`` does not rewrite ``hal0-api.service``, so re-run
+    the installer once after updating to 1.4.0; until then the API's log views
+    are silently empty. Advisory (``warn``): nothing else breaks. Both probes
+    are injectable for tests.
     """
     probe_ids = process_ids if process_ids is not None else _api_process_ids
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
     key, title = "api-journal", "API journal read"
 
+    # Probe the process first: a root-run API reads the journal without the
+    # group, so a host that lacks it is not a problem for that API.
+    ids = probe_ids()
+    if ids is not None and ids[0] == 0:
+        return Check(key, title, _PASS, f"{_API_UNIT} runs as root and can read the journal")
     gid = probe_gid()
     if gid is None:
         return Check(
@@ -578,7 +583,6 @@ def check_api_journal_access(
             f"this host has no {_JOURNAL_GROUP} group, so hal0-api cannot be granted "
             "journal read — /api/logs and MCP logs_tail return no lines",
         )
-    ids = probe_ids()
     if ids is None:
         return Check(
             key,
@@ -587,8 +591,8 @@ def check_api_journal_access(
             f"could not inspect the running {_API_UNIT} process (systemctl unavailable or "
             "unit not running) — journal read for /api/logs unknown",
         )
-    uid, gids = ids
-    if uid == 0 or gid in gids:
+    _uid, gids = ids
+    if gid in gids:
         return Check(key, title, _PASS, f"{_API_UNIT} can read the journal ({_JOURNAL_GROUP})")
     return Check(
         key,
