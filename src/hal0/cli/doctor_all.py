@@ -505,7 +505,7 @@ def _moonshine_slots() -> tuple[dict[str, str], list[str]]:
     authority (:func:`hal0.providers.container._spec_provider_for`), not a
     parallel heuristic: that covers profile-less ``type=transcription`` slots
     on cpu and custom profiles with ``runtime_family = "moonshine"``, and
-    ignores the deprecated ``provider`` label (an npu slot routes to FLM
+    ignores the UI-only ``provider`` label (an npu slot routes to FLM
     whatever it says). The profile is the one ``MoonshineProvider`` itself
     resolves: the slot's ``profile``, else its default.
     """
