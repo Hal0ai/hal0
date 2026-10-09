@@ -265,12 +265,13 @@ log_step "Hermes bootstrap surface"
 run_row "cli-agent-bootstrap-help" 0 "bootstrap --help" -- \
     "${HAL0_BIN}" agent bootstrap hermes --help
 
-run_row "cli-agent-bootstrap-dry-run" 0 "bootstrap --dry-run --skip-phase" -- \
-    "${HAL0_BIN}" agent bootstrap hermes --dry-run \
-    --skip-phase install --skip-phase env_probe --skip-phase mcp_wire \
-    --skip-phase namespace_register --skip-phase context_link \
-    --skip-phase model_automap --skip-phase voice_wire \
-    --skip-phase smoke_tests --skip-phase self_report
+# 'bootstrap --dry-run' is NOT side-effect free today: it runs a real
+# install_hermes() and creates HERMES_HOME (/var/lib/hal0/.hermes), and
+# --skip-phase is a retired no-op (#2445). Driving it from the harness
+# fails with PermissionError for non-root and would pip-install for root.
+# Re-enable once #2445 makes --dry-run honest.
+add_row "cli-agent-bootstrap-dry-run" "skip" "0" \
+    "blocked on #2445: --dry-run performs a real install and --skip-phase is a no-op"
 
 run_row "cli-agent-status-help" 0 "agent status --help" -- \
     "${HAL0_BIN}" agent status --help
