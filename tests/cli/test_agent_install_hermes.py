@@ -756,12 +756,6 @@ def test_posture_restart_covers_every_provisioning_entry_point(monkeypatch) -> N
     ac._provision_hermes()
     assert seen == ["restart"]
 
-    # `dry_run` in this pipeline only suppresses the run report — the config is
-    # still written — so the restart must still happen.
-    seen.clear()
-    ac._provision_hermes(dry_run=True)
-    assert seen == ["restart"]
-
     # A failed provision likewise leaves the old posture in place.
     seen.clear()
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", lambda **_k: 3, raising=True)
@@ -984,7 +978,7 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _boom, raising=True)
 
-    rc = ac._provision_hermes(repair=True, skip_phases=("mcp_wire",), verbose=True)
+    rc = ac._provision_hermes(repair=True, verbose=True)
 
     assert rc == 0
     # Prelude runs BEFORE the drop.
@@ -994,7 +988,8 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch, tmp_path) -> None:
     assert argv[1:4] == ["agent", "bootstrap", "hermes"]
     assert "--repair" in argv and "--verbose" in argv
     assert "--adopt" not in argv  # retired flag never re-exec'd (O14)
-    assert argv[argv.index("--skip-phase") + 1] == "mcp_wire"
+    # #2445: the unsupported preview flags are refused up front, never re-exec'd.
+    assert "--dry-run" not in argv and "--skip-phase" not in argv
 
 
 def test_run_as_hal0_builds_runuser_argv(monkeypatch) -> None:
@@ -1018,3 +1013,42 @@ def test_run_as_hal0_builds_runuser_argv(monkeypatch) -> None:
     assert "env" in cmd and "-u" in cmd and "HERMES_HOME" in cmd
     # The actual command is preserved at the tail.
     assert cmd[-4:] == ["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"]
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (["--dry-run"], "--dry-run"),
+        (["--skip-phase", "install"], "--skip-phase"),
+        (["--dry-run", "--skip-phase", "mcp_wire", "--skip-phase", "smoke_tests"], "--dry-run"),
+    ],
+)
+def test_bootstrap_hermes_rejects_unsupported_preview_flags(monkeypatch, flags, named) -> None:
+    """#2445: `--dry-run` used to run a full (re)install and only skip the
+    report, and `--skip-phase` was parsed then dropped. The installer is one
+    linear convergent pass with no plan-only mode, so both flags must fail
+    fast — before the root prelude, the re-exec, or any provisioning write."""
+    from typer.testing import CliRunner
+
+    def _boom(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("no provisioning may run for an unsupported flag")
+
+    monkeypatch.setattr(ac, "_provision_hermes", _boom)
+    monkeypatch.setattr(ac, "_hermes_root_prelude", _boom)
+    monkeypatch.setattr(ac, "_run_as_hal0", _boom)
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _boom, raising=True)
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes", *flags])
+    assert res.exit_code == 2, res.output
+    assert named in res.output
+    assert "not supported" in res.output.lower()
+
+
+def test_bootstrap_hermes_help_does_not_advertise_preview_flags() -> None:
+    """#2445: help must not promise a dry run or phase skipping it cannot do."""
+    from typer.testing import CliRunner
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes", "--help"])
+    assert res.exit_code == 0
+    assert "--dry-run" not in res.output
+    assert "--skip-phase" not in res.output
