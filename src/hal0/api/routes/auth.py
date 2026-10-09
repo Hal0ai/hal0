@@ -281,9 +281,17 @@ async def rotate_key(
         note += " OpenWebUI is re-pointed at the new key automatically."
 
     if status_only.get("hindsight_llm_env_refreshed"):
+        # hindsight-api reads its LLM key from hindsight-llm.env only at start;
+        # without a restart every extraction call 401s on the old key (#2448).
+        # Same fire-and-forget posture as the OpenWebUI re-point above: a failed
+        # restart is logged, never a failure of the rotate itself.
+        from hal0.memory.extraction_env import restart_hindsight_background
+
+        background_tasks.add_task(restart_hindsight_background)
         note += (
             " The memory engine's LLM credential (/etc/hal0/hindsight-llm.env) was "
-            "refreshed too — restart hindsight-api to apply it."
+            "refreshed too — restarting hindsight-api to apply it (if memory writes "
+            "still fail, run `systemctl restart hindsight-api`)."
         )
 
     return {
