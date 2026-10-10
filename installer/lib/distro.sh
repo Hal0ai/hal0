@@ -95,6 +95,9 @@ distro_family() {
 # callers can fall back to a generic message.
 pkg_install_cmd() {
     local pm
+    # The installer runs with IFS=$'\n\t'; "$*" joins on the first IFS char,
+    # which would split a multi-package hint across lines (#2471).
+    local IFS=' '
     pm="$(pkg_mgr)" || return 1
     case "${pm}" in
         # -o DPkg::Lock::Timeout=120: unattended-upgrades runs on every fresh

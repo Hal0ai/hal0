@@ -2487,7 +2487,7 @@ fi
 # Called out explicitly here so an upgrade test does not misreport a new tile on
 # the dashboard as a regression.
 if (( SEEDED_EXISTING_SLOTS > 0 )) && (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
-    info "note: ${#SEEDED_NEW_SLOTS[@]} curated slot(s) added to this existing install: ${SEEDED_NEW_SLOTS[*]}"
+    info "note: ${#SEEDED_NEW_SLOTS[@]} curated slot(s) added to this existing install: $(IFS=' '; printf '%s' "${SEEDED_NEW_SLOTS[*]}")"
     info "      that is intentional gap-closing (this release ships slots your install predates),"
     info "      not a stray slot — each stays inert until you bind a model to it."
 fi
