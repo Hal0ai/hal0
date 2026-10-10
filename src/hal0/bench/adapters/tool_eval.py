@@ -74,6 +74,7 @@ version like ``2.5.1.dev11+g95e2b5021`` must never crash the parser, see
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -84,6 +85,7 @@ from typing import Any
 from ..schema import Outcome
 
 __all__ = [
+    "API_KEY_ENV",
     "ERA_HARDENED",
     "ERA_PRE_HARDENING",
     "ERA_UNKNOWN",
@@ -94,6 +96,7 @@ __all__ = [
     "ToolEvalSuiteRecord",
     "ToolEvalTaskRecord",
     "build_argv",
+    "build_env",
     "classify_scoring_era",
     "parse_scores",
     "parse_tool_version",
@@ -105,6 +108,13 @@ __all__ = [
 #: ``tool-eval-bench`` console script being on ``$PATH`` (see module
 #: docstring).
 MODULE = "tool_eval_bench"
+
+#: The env var tool-eval-bench reads its endpoint API key from when no
+#: ``--api-key`` flag is given (pinned v2.5.0, ``cli/dispatch.py``:
+#: ``args.api_key or os.getenv("TOOL_EVAL_API_KEY")``), sent as
+#: ``Authorization: Bearer``. The adapter passes the key ONLY this way — a
+#: key on argv is readable by every local user through ``/proc/<pid>/cmdline``.
+API_KEY_ENV = "TOOL_EVAL_API_KEY"
 
 # The scoring-hardening boundary (~2026-08-03, see module docstring). The
 # pin (v2.5.0) is tagged AFTER the hardening, so every record produced by a
@@ -175,6 +185,8 @@ class ToolEvalRequest:
     model: str
     output_path: Path
     backend: str = "llamacpp"
+    #: Endpoint API key. Delivered through :data:`API_KEY_ENV` in the child's
+    #: environment (:func:`build_env`), never on argv.
     api_key: str | None = None
     scenarios: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
@@ -211,8 +223,6 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
         "--base-url",
         request.base_url,
     ]
-    if request.api_key:
-        argv += ["--api-key", request.api_key]
     if request.scenarios:
         argv += ["--scenarios", *request.scenarios]
     if request.categories:
@@ -251,6 +261,14 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
     return argv
 
 
+def build_env(request: ToolEvalRequest) -> dict[str, str] | None:
+    """The child environment for one run: ``None`` (inherit) when there is no
+    API key, else the current environment plus :data:`API_KEY_ENV` (#2478)."""
+    if not request.api_key:
+        return None
+    return {**os.environ, API_KEY_ENV: request.api_key}
+
+
 # --------------------------------------------------------------------------- #
 # run — injectable runner, same pattern as harness.run_cell
 # --------------------------------------------------------------------------- #
@@ -270,7 +288,9 @@ class ToolEvalRunResult:
     note: str = ""
 
 
-def _default_runner(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
+def _default_runner(
+    argv: list[str], timeout_s: float, env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
     """The bare subprocess runner. Production callers should inject a
     hardened callable with their own process-group watchdog (same rationale
     as ``harness._default_runner``); tests inject a fake that runs neither
@@ -278,14 +298,19 @@ def _default_runner(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
     import tempfile
 
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout_s, cwd=tempfile.gettempdir()
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        cwd=tempfile.gettempdir(),
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
 
 def run_tool_eval(
     request: ToolEvalRequest,
-    runner: Callable[[list[str], float], tuple[int, str, str]] | None = None,
+    runner: Callable[..., tuple[int, str, str]] | None = None,
 ) -> ToolEvalRunResult:
     """Run one eval request through tool-eval-bench and classify the
     outcome. Never raises on a bad run — mirrors ``harness.run_cell`` /
@@ -295,9 +320,16 @@ def run_tool_eval(
     exception."""
     run = runner or _default_runner
     argv = build_argv(request)
+    env = build_env(request)
 
     try:
-        rc, stdout, stderr = run(argv, request.timeout_s)
+        # ``env`` is only passed when there is a key, so a two-argument
+        # injected runner keeps working for keyless requests; one that serves
+        # an authenticated request must accept ``env=``.
+        if env is None:
+            rc, stdout, stderr = run(argv, request.timeout_s)
+        else:
+            rc, stdout, stderr = run(argv, request.timeout_s, env=env)
     except subprocess.TimeoutExpired as exc:
         return ToolEvalRunResult(
             outcome=Outcome.HANG,
