@@ -12,6 +12,7 @@ pins both against the same fixture set so a drift is caught in CI.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -475,6 +476,131 @@ class TestStructuredHarvestSkipsNonSecrets:
         mirrors hal0.api._redact on the key's own line."""
         redacted, _ = _toml_redact_and_harvest(tmp_path, "api_token = 12345678\n")
         assert redacted == 'api_token = "***REDACTED***"\n'
+
+
+# ── #2466: plural `tokens` is a benign count only with a count qualifier ──
+
+
+class TestPluralTokenNames:
+    _VALUE = "Plural_Tok3n_99xyzw"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "api_tokens",
+            "auth_tokens",
+            "tokens_by_host",
+            "tokens",
+            "login_tokens",
+            "API_TOKENS_PER_SERVICE",
+            "API_TOKENS_PER_KEY",
+            "GITHUB_TOKENS_PER_SITE",
+            "HF_TOKENS_PER_SPACE",
+            "github_new_tokens",
+            "oauth_cached_tokens",
+            "mcp_tool_tokens",
+            "api_tokens_per_token",
+            "apiTokenSCount",
+            # One strip pass, as in Python: `TOKENS_COUNT` exposed by
+            # removing `_PROMPT_TOKENS` is not stripped again.
+            "TOKENS_PROMPT_TOKENS_COUNT",
+            # A camelCase location suffix does not make a name a location.
+            "secretEnv",
+            "tokenEnv",
+            "passwordFile",
+            "token-env",
+        ],
+    )
+    def test_an_unqualified_tokens_name_is_harvested(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
+        assert out.returncode == 0, (name, out.stderr)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "max_tokens",
+            "extraction_max_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "n_prompt_tokens",
+            "max_new_tokens",
+            "tokens_per_sec",
+            "tokens_count",
+            "tokens_out",
+            "tool_call_tokens",
+            "mixed_content_tool_tokens",
+            "cached_tokens",
+            "new_tokens",
+            "prompt_cached_tokens",
+            "tokens_predicted",
+            "accepted_prediction_tokens",
+            "HAL0_MAX_TOKENS",
+            "OUTPUT_TOKENS_PER_SECOND",
+            "MaxTokens",
+            "extractionMaxTokens",
+            "outputTokensPerSecond",
+            "max-tokens",
+            "--max-tokens",
+            "tokenizer",
+            "token_count",
+            "api_key_env",
+        ],
+    )
+    def test_a_count_qualified_tokens_name_is_not_harvested(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}" || echo rc=$?')
+        assert out.stdout.strip() == "rc=1", (name, out.stdout, out.stderr)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "max_tokens_secret",
+            "tokens_in_vault",
+            "api_tokens_in",
+            "authTokens",
+            "api_tokens_per_host",
+        ],
+    )
+    def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
+        assert out.returncode == 0, (name, out.stderr)
+
+    def test_the_report_masks_an_api_tokens_value_where_it_reappears(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            f"upstream api_tokens={self._VALUE} max_tokens=40960000\n"
+            f"later bare: {self._VALUE} end; budget 40960000\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert self._VALUE not in body
+        assert "later bare: ***REDACTED*** end; budget 40960000" in body
+
+    def test_hyphenated_and_camel_count_values_are_not_masked_elsewhere(
+        self, tmp_path: Path
+    ) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            "llama: max-tokens=not_available extractionMaxTokens=unlimited_budget\n"
+            "elsewhere: not_available; unlimited_budget\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        assert "elsewhere: not_available; unlimited_budget" in report.read_text()
+
+    def test_a_huge_camel_case_name_is_judged_quickly(self, tmp_path: Path) -> None:
+        """The camelCase split is quadratic in bash, so it is skipped for
+        names longer than any real one; such a name is judged as written."""
+        name = "aB" * 8000 + "Token"
+        log = tmp_path / "huge.log"
+        log.write_text(f"{name}={self._VALUE}\n")
+        start = time.monotonic()
+        out = _bash(f'_hal0_report_harvest_report_text "{log}"')
+        elapsed = time.monotonic() - start
+        assert out.returncode == 0, out.stderr
+        assert self._VALUE in out.stdout.splitlines()
+        assert elapsed < 5, elapsed
 
 
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────

@@ -433,11 +433,45 @@ _hal0_report_harvest_toml_file() {
 # whose value is not the secret itself are skipped as well (#2384): a token
 # count or tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and
 # a field naming where a secret lives (`api_key_env`, `token_file`,
-# `..._path`).
+# `..._path`; judged as written, so a camelCase `tokenEnv` or `secretEnv`
+# is still a secret).
+#
+# Plural `tokens` is a count only with a count qualifier (#2466), as in
+# hal0.redaction._BENIGN_NAME_PART_RE: a count word right before it
+# (`max_tokens`, `extraction_max_tokens`, `HAL0_MAX_TOKENS`); a weaker word
+# (`new`, `cached`, `tool`, ...) only at the start of the name or right after
+# a count word (`cached_tokens`, `max_new_tokens`; `github_new_tokens` is a
+# secret); `tokens_count` or `tokens_per_<time or count unit>`
+# (`api_tokens_per_host` is a secret); or the whole name `tokens_in`,
+# `tokens_out`, `tokens_completed`, ... (`api_tokens_in` is a secret). Only
+# the benign part is removed, so a name with another secret word left
+# (`max_tokens_secret`) is still harvested. camelCase humps and `-` count as
+# `_` for this (`maxTokens`, `max-tokens`); the hump split is quadratic in
+# bash, so a name longer than any real one is judged as written.
+_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)(max|min|num|n|total|prompt|completion|context|ctx|input|output|text|image|audio|video|content|budget|requested|expected|generated|reasoning|remaining|floor|prediction|predicted|generation|draft|thinking)_?((new|cache|cached|tool_?call|tool_?response|tool|used|extra)_?)?tokens(_|$)|^(new|cache|cached|tool_?call|tool_?response|tool|used|extra)_?tokens(_|$)|(^|_)tokens_?(count|per_?(s|sec|second|ms|min|minute|hour|request|req|iteration|iter|step|1k|k))(_|$)|^tokens_?(in|out|completed|predicted|evaluated|cached|used)$|tokenizer|token_?count'
 _hal0_report_text_value_is_secret() {
     local name="${1,,}" value="$2"
     [[ "$name" == key ]] && return 1
-    [[ "$name" =~ (tokens|tokenizer|token_?count|_(env|file|path|dir)$) ]] && return 1
+    [[ "$name" =~ _(env|file|path|dir)$ ]] && return 1
+    name="$1"
+    if [[ ${#name} -le 128 ]]; then
+        while [[ "$name" =~ ^(.*[a-z0-9])([A-Z].*)$ ]]; do
+            name="${BASH_REMATCH[1]}_${BASH_REMATCH[2]}"
+        done
+    fi
+    name="${name,,}"
+    while [[ "$name" == -* ]]; do name="${name#-}"; done
+    name="${name//-/_}"
+    # One left-to-right pass, as re.sub: what a strip exposes is not matched
+    # again, and the leading `_` kept on the rest stops a `^` match there.
+    local stripped="" rest="$name" part
+    while [[ "$rest" =~ $_HAL0_REPORT_BENIGN_NAME_PART_RE ]]; do
+        part="${BASH_REMATCH[0]}"
+        stripped+="${rest%%"$part"*}_"
+        rest="_${rest#*"$part"}"
+    done
+    name="$stripped$rest"
+    [[ "$name" =~ (secret|token|pass|api[_-]?key|access[_-]?key|private[_-]?key|encryption[_-]?key|salt|_key$|^key$) ]] || return 1
     [[ ${#value} -ge 8 ]] || return 1
     [[ "$value" =~ ^[0-9]+$ ]] && return 1
     [[ "$value" =~ ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$ ]] && return 1
@@ -453,13 +487,14 @@ _hal0_report_text_value_is_secret() {
 _hal0_report_harvest_report_text() {
     local file="$1" hits rc=0 hit name value
     hits="$(LC_ALL=C grep -oiE \
-        "(^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
+        "(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]*-)?(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
         "$file")" || rc=$?
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
         [[ "$hit" =~ ([A-Za-z0-9_-]+)[\"\']?[[:space:]]*[=:][[:space:]]*[\"\']?(.*)$ ]] || continue
         name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
-        # A header name keeps its dashes (`x-api-key`); a flag's do not count.
+        # A hyphenated name is judged whole (`x-api-key`, `max-tokens`, #2466);
+        # a flag's leading dashes do not count.
         while [[ "$name" == -* ]]; do name="${name#-}"; done
         _hal0_report_text_value_is_secret "$name" "$value" || continue
         _hal0_report_emit_secret "$value"
