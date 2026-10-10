@@ -155,6 +155,10 @@
   font-family: var(--jbm); font-size: 11.5px; color: var(--warn);
 }
 .stk-dlg-warn svg { width: 13px; height: 13px; flex-shrink: 0; }
+.stk-dlg-warnlist { align-items: flex-start; }
+.stk-dlg-warnlist ul { margin: 0; padding: 0; list-style: none; min-width: 0; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.stk-dlg-warnlist li { overflow-wrap: anywhere; }
+.stk-dlg-warnlist li.more { color: var(--fg-3); }
 
 .stk-slot-list { display: flex; flex-direction: column; gap: 5px; }
 .stk-slot-row { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--rad-sm); border: 1px solid var(--line); background: var(--bg); font-family: var(--jbm); font-size: 11.5px; }

@@ -21,6 +21,8 @@ import {
   LoadDialog,
   formatSlotNames,
   loadResultToast,
+  createsNotice,
+  warningLines,
   missingModelsNote,
   unloadNotice,
 } from '../stacks.jsx'
@@ -137,11 +139,69 @@ describe('LoadDialog', () => {
 
 describe('previewFromDryRun (#1511)', () => {
   it('passes an unloads array through', () => {
-    expect(previewFromDryRun({ unloads: ['coder'] })).toEqual({ status: 'ok', unloads: ['coder'] })
+    expect(previewFromDryRun({ unloads: ['coder'] })).toEqual({
+      status: 'ok', unloads: ['coder'], creates: [], warnings: [],
+    })
   })
 
   it('treats an answer without unloads as a failed preview, not an all-clear', () => {
     expect(previewFromDryRun({ stack: 'coding', dry_run: true })).toEqual({ status: 'error' })
     expect(previewFromDryRun(null)).toEqual({ status: 'error' })
+  })
+})
+
+describe('dry-run creates and warnings (#2348)', () => {
+  const ok = (extra: object) => previewFromDryRun({ unloads: [], ...extra })
+
+  it('carries creates and warnings through the preview', () => {
+    expect(ok({ creates: ['vision'], warnings: ['agent: model \'x\' not in registry'] })).toEqual({
+      status: 'ok', unloads: [], creates: ['vision'], warnings: ['agent: model \'x\' not in registry'],
+    })
+  })
+
+  it('defaults absent or malformed extras to empty, not a failed preview', () => {
+    expect(ok({ creates: 'nope', warnings: null })).toMatchObject({ status: 'ok', creates: [], warnings: [] })
+  })
+
+  it('renders warnings and creates next to the unload notice', () => {
+    const html = render(ok({ creates: ['vision', 'tts'], warnings: ["agent: profile 'p' not found"] }))
+    expect(html).toContain('data-testid="st-load-creates"')
+    expect(html).toContain('2 new slots will be created: vision, tts.')
+    expect(html).toContain('data-testid="st-load-warnings"')
+    expect(html).toContain('agent: profile &#x27;p&#x27; not found')
+  })
+
+  it('renders nothing extra when both lists are empty', () => {
+    const html = render(ok({ creates: [], warnings: [] }))
+    expect(html).not.toContain('st-load-creates')
+    expect(html).not.toContain('st-load-warnings')
+  })
+
+  it('renders nothing extra while loading or when the preview failed', () => {
+    for (const p of [{ status: 'loading' }, { status: 'error' }, null]) {
+      const html = render(p)
+      expect(html).not.toContain('st-load-creates')
+      expect(html).not.toContain('st-load-warnings')
+    }
+  })
+
+  it('caps a long warning list with a +N more tail', () => {
+    const warnings = Array.from({ length: 8 }, (_, i) => `w${i}`)
+    const { shown, more } = warningLines(ok({ warnings }))
+    expect(shown).toEqual(['w0', 'w1', 'w2', 'w3', 'w4'])
+    expect(more).toBe(3)
+    expect(render(ok({ warnings }))).toContain('+3 more')
+    expect(createsNotice(ok({ creates: ['a', 'b', 'c', 'd', 'e'] }))).toBe(
+      '5 new slots will be created: a, b, c, d +1 more.',
+    )
+  })
+
+  it('surfaces real-apply warnings in the result toast', () => {
+    expect(
+      loadResultToast('Coding', { converged: { errors: [], unloaded: [] }, warnings: ['a: model \'m\' not in registry'] }),
+    ).toEqual(['Stack “Coding” loaded — 1 warning: a: model \'m\' not in registry', 'warn'])
+    expect(
+      loadResultToast('Coding', { converged: { errors: [] }, warnings: ['a', 'b', 'c'] })[0],
+    ).toBe('Stack “Coding” loaded — 3 warnings: a, b +1 more')
   })
 })
