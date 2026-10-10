@@ -207,7 +207,7 @@ class TestDefaultLanes:
     def test_cpu_tier_defaults_to_the_cpu_lane_only(self) -> None:
         assert default_lanes(TIER_CPU) == ["cpu"]
 
-    def test_rocm_always_leads_the_gpu_default(self) -> None:
+    def test_rocm_always_leads_the_gpu_default(self, monkeypatch) -> None:
         """#1888 pulled vulkan_radv out of the GPU default (the ROCmFPX
         image's Vulkan backend emitted invalid tokens, so its throughput
         numbers measured garbage); #1948 restores it — but only when the
@@ -219,11 +219,37 @@ class TestDefaultLanes:
         speed ranking (the §3-C matrix has Vulkan ahead on both metrics) —
         rocm is the series with the trend history, so an interrupted sweep
         should have produced its numbers before it stopped.
+
+        On a box WITH a ROCm lane (#2511 covers the box without one).
         """
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
         for tier in (TIER_AMD, TIER_NVIDIA):
             lanes = default_lanes(tier)
             assert lanes[0] == "rocm"
             assert set(lanes) <= {"rocm", "vulkan_radv"}
+
+    def test_rocm_absent_drops_rocm_from_the_gpu_default(self, monkeypatch) -> None:
+        """#2511: no ROCm lane on the box -> a default sweep must not queue it."""
+        from hal0.bench import harness as harness_mod
+
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: True)
+        for tier in (TIER_AMD, TIER_NVIDIA):
+            assert default_lanes(tier) == ["vulkan_radv"]
+
+    def test_rocm_absent_and_vulkan_unsupported_falls_to_cpu(self, monkeypatch) -> None:
+        from hal0.bench import harness as harness_mod
+
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: lane != "vulkan_radv")
+        assert default_lanes(TIER_AMD) == ["cpu"]
+
+    def test_rocm_present_keeps_rocm_first_with_vulkan_when_supported(self, monkeypatch) -> None:
+        from hal0.bench import harness as harness_mod
+
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
+        monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: True)
+        assert default_lanes(TIER_AMD) == ["rocm", "vulkan_radv"]
 
     def test_no_default_lane_is_unsupported(self) -> None:
         for tier in (TIER_CPU, TIER_AMD, TIER_NVIDIA):

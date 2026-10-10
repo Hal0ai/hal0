@@ -291,10 +291,21 @@ def default_lanes(tier: str) -> list[str]:
     It sweeps AFTER ``rocm``. Not a throughput claim — the §3-C matrix
     measures Vulkan ahead of ROCm on both metrics on the reference hardware.
     ROCm goes first because it is the lane with the long trend history, so an
-    interrupted sweep leaves the continuous series intact."""
+    interrupted sweep leaves the continuous series intact.
+
+    ``rocm`` only leads where the box has a ROCm lane
+    (:func:`hal0.providers._gpu.rocm_lane_present`, #2511): elsewhere its cells
+    die at once, so it is dropped, leaving ``vulkan_radv`` when supported and
+    ``cpu`` when no GPU lane is usable. Lanes named explicitly are not filtered
+    here."""
     if tier == TIER_CPU:
         return ["cpu"]
-    return ["rocm", "vulkan_radv"] if lane_is_supported("vulkan_radv") else ["rocm"]
+    from hal0.providers._gpu import rocm_lane_present
+
+    lanes = ["rocm"] if rocm_lane_present() else []
+    if lane_is_supported("vulkan_radv"):
+        lanes.append("vulkan_radv")
+    return lanes or ["cpu"]
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
