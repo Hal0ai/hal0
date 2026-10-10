@@ -30,7 +30,7 @@ import time
 import httpx
 import typer
 
-from hal0.cli._shared import _api_base, _auth_headers, auth_hint
+from hal0.cli._shared import _api_base, _auth_headers, _client_kwargs, auth_hint
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,10 @@ async def _dashboard_url() -> str:
     base = _api_base()
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(5.0), headers=_auth_headers(base), follow_redirects=False
+            timeout=httpx.Timeout(5.0),
+            headers=_auth_headers(base),
+            follow_redirects=False,
+            **_client_kwargs(base),
         ) as client:
             resp = await client.get(f"{base}/api/config/urls")
             resp.raise_for_status()
@@ -253,7 +256,7 @@ async def _apply_via_api(sel) -> None:
     timeout = httpx.Timeout(SETUP_HTTP_TIMEOUT_SECS)
     t0 = time.monotonic()
     async with httpx.AsyncClient(
-        timeout=timeout, headers=_auth_headers(url), follow_redirects=False
+        timeout=timeout, headers=_auth_headers(url), follow_redirects=False, **_client_kwargs(url)
     ) as client:
         resp = await client.post(url, json=payload)
     elapsed = time.monotonic() - t0
