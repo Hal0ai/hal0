@@ -147,8 +147,8 @@ contract rather than re-reading its whole body.
 ### Install log
 
 Every run tees its full output — narrator lines and every spawned command's
-stdout/stderr — to `/var/log/hal0/install-<ts>.log` (falling back to
-a fresh `mktemp` name, `/tmp/hal0-install-XXXXXX.log`, when not root, e.g.
+stdout/stderr — to `/var/log/hal0/install-<ts>-<random>.log` (falling back to
+`/tmp/hal0-install-<random>.log` when not root, e.g.
 `--dev`, or when `/var/log/hal0` is unwritable). The path is
 printed right after the banner and again at the end, and `hal0 doctor
 bundle` includes the most recent one (redacted) under `logs/install.log`.
@@ -161,8 +161,8 @@ aborting the install) if neither location is writable.
 
 If `install.sh` exits non-zero (an `ERR`-trapped abort, a `die`, or an
 explicit `exit 1`), it writes
-`hal0-install-report-<ts>-XXXXXX.txt` (mode 0600, random suffix from
-`mktemp`) next to the install log and
+`hal0-install-report-<ts>-<random>.txt` (mode 0600)
+next to the install log and
 prints its path alongside the existing step-specific recovery advice. The
 report bundles a redacted environment dump, `systemctl --failed`,
 `podman info` / `podman images`, the owner of the hal0-api/OpenWebUI ports

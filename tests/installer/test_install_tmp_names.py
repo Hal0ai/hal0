@@ -96,11 +96,12 @@ def _installer_shell_files() -> list[Path]:
 
 
 def test_no_installer_shell_file_names_a_fixed_tmp_path() -> None:
-    """Any literal /tmp/<name> outside a comment must be a mktemp template."""
+    """Any literal /tmp/<name> outside a comment must be a mktemp template or
+    a prefix handed to hal0_excl_open (which appends a random part)."""
     offenders = []
     for path in _installer_shell_files():
         for lineno, line in enumerate(path.read_text().splitlines(), start=1):
-            if line.lstrip().startswith("#"):
+            if line.lstrip().startswith("#") or "hal0_excl_open " in line:
                 continue
             for match in _TMP_LITERAL.findall(line):
                 if "XXXXXX" not in match:

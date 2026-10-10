@@ -9,25 +9,38 @@
 #          wants captured. No dependency on lib/ui.sh (this file works
 #          standalone), though install.sh sources it right after ui.sh by
 #          convention so the banner itself is captured too.
-# Provides: hal0_install_log_path()  — pure: prints the path this run would
-#             use, without creating anything (for a non-root run, the mktemp
-#             template, since that name is only chosen at creation).
-#           hal0_install_log_init()  — picks the path, creates its directory,
-#             and re-points the CALLING SHELL's stdout/stderr through
-#             `tee -a` so every subsequent line (including output from
-#             sourced libs, subshells, and third-party tools like pip/npm/
-#             apt-get) lands in the log. Exports HAL0_INSTALL_LOG.
+# Provides: hal0_install_log_path()  — pure: prints the name template this
+#             run would use, without creating anything. The XXXXXX is
+#             replaced by random hex at creation.
+#           hal0_excl_open(prefix, suffix) — create and open a fresh
+#             prefix<random>suffix in one O_CREAT|O_EXCL step, mode 0600.
+#             Sets HAL0_EXCL_FD (an open write fd) and HAL0_EXCL_PATH.
+#           hal0_install_log_init()  — creates the log and re-points the
+#             CALLING SHELL's stdout/stderr through `tee -a` so every
+#             subsequent line (including output from sourced libs,
+#             subshells, and third-party tools like pip/npm/apt-get) lands
+#             in the log. Exports HAL0_INSTALL_LOG (the path, for display)
+#             and HAL0_INSTALL_LOG_FD (the open fd, for writing/reading).
 # Modder notes:
 #   exec-based teeing (not a per-`echo` wrapper) so nothing in the rest of
 #   the ~4,000-line install.sh has to change to be captured. Root gets
-#   /var/log/hal0/install-<ts>.log (FHS: persistent host logs); anything
-#   without root (a `--dev` run, or `bash install.sh` without sudo), and a
-#   root run whose /var/log/hal0 is unwritable, falls back to a mktemp name,
-#   /tmp/hal0-install-XXXXXX.log. Never a timestamped /tmp name (#2407): a
-#   plain `>` redirect follows a symlink a local user planted at a guessable
-#   name, so a root install could clobber any file through it. mktemp opens
-#   with O_EXCL under a random name, born 0600. Anything that reports the
-#   log path must read HAL0_INSTALL_LOG, never rebuild the name.
+#   /var/log/hal0/install-<ts>-<random>.log (FHS: persistent host logs);
+#   anything without root (a `--dev` run, or `bash install.sh` without
+#   sudo), and a root run whose /var/log/hal0 is unwritable, gets
+#   /tmp/hal0-install-<random>.log.
+#
+#   Never a guessable name, and never reopened by name (#2407). /tmp is
+#   world-writable, and /var/log/hal0 is owned by the hal0 service user
+#   (src/hal0/install/perms.py pins it hal0:hal0 0755), so in both places
+#   another uid can plant a symlink at a predictable name or swap a file
+#   between its creation and a later open. A plain `>` follows that symlink
+#   and a root install would clobber its target. hal0_excl_open creates the
+#   file with bash noclobber (O_CREAT|O_EXCL, which also refuses symlinks)
+#   under a random name and keeps the fd, so nothing after creation goes
+#   back through the name. Anything that reports the log path must read
+#   HAL0_INSTALL_LOG, never rebuild the name; anything that reads the log
+#   should prefer /dev/fd/$HAL0_INSTALL_LOG_FD.
+#
 #   A read-only /tmp (rare, but seen on some hardened containers) degrades
 #   to no log rather than aborting the install over forensics — check
 #   `HAL0_INSTALL_LOG` for emptiness before relying on it.
@@ -41,23 +54,38 @@ hal0_install_log_path() {
     local ts
     ts="$(date -u +%Y%m%d-%H%M%S)"
     if [[ "$(id -u)" -eq 0 ]]; then
-        printf '/var/log/hal0/install-%s.log\n' "$ts"
+        printf '/var/log/hal0/install-%s-XXXXXX.log\n' "$ts"
     else
-        # Not a real path: the mktemp template the non-root log is made
-        # from (see _hal0_install_log_mktemp). The name is random on purpose.
         printf '/tmp/hal0-install-XXXXXX.log\n'
     fi
 }
 
-# _hal0_install_log_mktemp — create a fresh owner-only log in /tmp and print
-# its path (#2407). mktemp opens with O_CREAT|O_EXCL, so it never follows a
-# symlink or reuses a file someone else pre-created, and the random name
-# can't be planted in advance. GNU and uutils mktemp keep the ".log" suffix
-# after the X's; a mktemp that rejects a suffix (busybox) gets the
-# suffix-less template instead.
-_hal0_install_log_mktemp() {
-    (umask 077 && mktemp /tmp/hal0-install-XXXXXX.log 2>/dev/null) \
-        || (umask 077 && mktemp /tmp/hal0-install-XXXXXX 2>/dev/null)
+# hal0_excl_open PREFIX SUFFIX — see the header. Returns 1 (HAL0_EXCL_FD and
+# HAL0_EXCL_PATH empty) when no file could be created. Bash noclobber opens
+# a name that does not exist with O_CREAT|O_EXCL, and refuses one that does
+# (a regular file, a symlink, or a dangling symlink), so the name is either
+# brand new and ours or the attempt fails and we retry with another.
+hal0_excl_open() {
+    local prefix="$1" suffix="${2:-}"
+    local - rand name old_umask fd _
+    HAL0_EXCL_FD=""
+    HAL0_EXCL_PATH=""
+    set -C
+    old_umask="$(umask)"
+    umask 077
+    for _ in 1 2 3 4 5 6 7 8; do
+        rand="$(od -An -N6 -tx1 /dev/urandom 2>/dev/null)" || break
+        rand="${rand//[^0-9a-f]/}"
+        [[ ${#rand} -eq 12 ]] || break
+        name="${prefix}${rand}${suffix}"
+        if { exec {fd}>"$name"; } 2>/dev/null; then
+            HAL0_EXCL_FD="$fd"
+            HAL0_EXCL_PATH="$name"
+            break
+        fi
+    done
+    umask "$old_umask"
+    [[ -n "$HAL0_EXCL_FD" ]]
 }
 
 # hal0_install_log_init — idempotent (a second call is a no-op once
@@ -66,41 +94,40 @@ _hal0_install_log_mktemp() {
 hal0_install_log_init() {
     [[ -n "${HAL0_INSTALL_LOG:-}" ]] && return 0
 
-    local path=""
     # The log tees installer output unredacted, so it is owner-only (#2361):
-    # born 0600 under `umask 077` (in a subshell, so the rest of the install
-    # keeps the caller's umask), then chmod'ed in case a same-second rerun
-    # appends to a file an older build created 0644. `hal0 doctor bundle`
-    # run as a non-root user therefore can't read it and skips it.
-    #
-    # Only root uses the timestamped FHS path: /var/log/hal0 is root-owned,
-    # so nobody else can plant a symlink in it. Everything else, including
-    # root's fallback, goes through mktemp in /tmp (#2407).
+    # born 0600 under `umask 077` inside hal0_excl_open, which restores the
+    # caller's umask for the rest of the install. `hal0 doctor bundle` run
+    # as a non-root user therefore can't read it and skips it.
+    local tmpl prefix suffix opened=1
     if [[ "$(id -u)" -eq 0 ]]; then
-        path="$(hal0_install_log_path)"
-        if ! mkdir -p "$(dirname "$path")" 2>/dev/null \
-            || ! (umask 077 && : >"$path") 2>/dev/null; then
-            # /var/log/hal0 couldn't be created/written (read-only FS,
-            # unusual SELinux policy, ...) — fall back to /tmp before giving
-            # up on a log entirely.
-            path=""
+        tmpl="$(hal0_install_log_path)"
+        if [[ "$tmpl" == *XXXXXX* ]]; then
+            prefix="${tmpl%%XXXXXX*}"
+            suffix="${tmpl#*XXXXXX}"
+        else
+            prefix="${tmpl%.log}-"
+            suffix=".log"
+        fi
+        # /var/log/hal0 may be uncreatable/unwritable (read-only FS, unusual
+        # SELinux policy, ...) — fall back to /tmp before giving up on a log.
+        if mkdir -p "$(dirname "$tmpl")" 2>/dev/null; then
+            hal0_excl_open "$prefix" "$suffix" && opened=0
         fi
     fi
-    if [[ -z "$path" ]]; then
-        path="$(_hal0_install_log_mktemp)" || path=""
-        if [[ -z "$path" ]]; then
-            HAL0_INSTALL_LOG=""
-            export HAL0_INSTALL_LOG
-            return 1
-        fi
+    if [[ $opened -ne 0 ]] && ! hal0_excl_open /tmp/hal0-install- .log; then
+        HAL0_INSTALL_LOG=""
+        export HAL0_INSTALL_LOG
+        return 1
     fi
-    chmod 0600 "$path" 2>/dev/null || true
 
-    HAL0_INSTALL_LOG="$path"
-    export HAL0_INSTALL_LOG
+    HAL0_INSTALL_LOG="$HAL0_EXCL_PATH"
+    HAL0_INSTALL_LOG_FD="$HAL0_EXCL_FD"
+    export HAL0_INSTALL_LOG HAL0_INSTALL_LOG_FD
     # Duplicate every line of stdout/stderr into the log while still showing
     # it on the terminal. Two independent `tee`s (rather than one merged
     # stream) keep stdout/stderr on their original fds for anything
     # downstream that distinguishes them (e.g. `2>/dev/null` callers).
-    exec > >(tee -a "$path") 2> >(tee -a "$path" >&2)
+    # /dev/fd/N reopens the inode the fd already holds, not the name.
+    exec > >(tee -a "/dev/fd/${HAL0_INSTALL_LOG_FD}") \
+        2> >(tee -a "/dev/fd/${HAL0_INSTALL_LOG_FD}" >&2)
 }

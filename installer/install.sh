@@ -74,7 +74,7 @@ hal0_install_log_init || warn "could not open an install log — continuing with
 
 # Failure report (installer/lib/failure-report.sh) — the ERR trap below
 # calls hal0_write_failure_report to leave a redacted, shareable
-# hal0-install-report-<ts>-XXXXXX.txt next to the install log on any abort.
+# hal0-install-report-<ts>-<random>.txt next to the install log on any abort.
 # shellcheck source=lib/failure-report.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/failure-report.sh"
 
@@ -2852,7 +2852,9 @@ else
     if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
         # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
         # Download to /tmp so a re-run doesn't keep a stale copy in the
-        # install tree. Every exit below removes the whole temp dir.
+        # install tree. Each outcome below (bad hash, failed
+        # download, apt success or failure) removes the whole temp dir; an
+        # abort mid-step can still leave it in /tmp.
         if curl -fsSL -o "${FLM_DEB_TMP}" "${FLM_DEB_URL}"; then
             # SHA-256 verify BEFORE dpkg installs it. An all-zeroes
             # placeholder pin means the digest was never looked up;
@@ -4032,7 +4034,13 @@ else:
 PYEOF
         )
     fi
-    _summary_brain_model="$(grep -m1 '^  brain model: ' "${HAL0_INSTALL_LOG:-/dev/null}" 2>/dev/null \
+    # Read the log through its open fd, not its name: the log dir is
+    # writable by another uid, so the name could now point anywhere (#2407).
+    _summary_log_src="/dev/null"
+    if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
+        _summary_log_src="/dev/fd/${HAL0_INSTALL_LOG_FD}"
+    fi
+    _summary_brain_model="$(grep -m1 '^  brain model: ' "${_summary_log_src}" 2>/dev/null \
         | sed -E 's/^  brain model: ([^ ]+).*/\1/')"
 
     _summary_steps_blob=""

@@ -703,7 +703,7 @@ _INSTALL_LOG_GLOBS: tuple[tuple[str, str], ...] = (
 )
 
 
-#: Where installer/lib/failure-report.sh writes hal0-install-report-<ts>-XXXXXX.txt
+#: Where installer/lib/failure-report.sh writes hal0-install-report-<ts>-<random>.txt
 #: on an aborted install — next to the install log, so the same two dirs.
 _INSTALL_REPORT_GLOBS: tuple[tuple[str, str], ...] = (
     ("/var/log/hal0", "hal0-install-report-*.txt"),

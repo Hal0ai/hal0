@@ -1151,8 +1151,9 @@ class TestReportNameIsUnpredictable:
     """#2407: the report sits next to the install log, which is /tmp when the
     log fell back there. A timestamped ``hal0-install-report-<ts>.txt``
     written with a plain ``>`` follows a symlink a local user planted at that
-    name. The report is now created by ``mktemp`` first, so the plant is never
-    opened, and the path printed back is the real file."""
+    name. The report is now created with O_EXCL under a random name and only
+    ever written through that fd, so a plant is never opened, and the path
+    printed back is the real file."""
 
     def test_a_planted_symlink_at_the_old_name_is_not_followed(self, tmp_path: Path) -> None:
         stamp = "20990101-000000"
@@ -1189,3 +1190,102 @@ echo "report=$report"
         assert report.is_file() and not report.is_symlink()
         assert (report.stat().st_mode & 0o777) == 0o600
         assert "Phase: Pre-flight checks" in report.read_text()
+
+    @staticmethod
+    def _swap_script(tmp_path: Path, victim: Path, extra: str) -> str:
+        """A report run in which, mid-harvest, a hostile owner of the report
+        dir unlinks the freshly created report and plants a symlink to
+        ``victim`` in its place. ``_hal0_report_body`` runs after the report
+        file exists, so it plays the attacker."""
+        log = tmp_path / "hal0-install-abc123.log"
+        log.write_text("log\n")
+        return f"""
+IFS=$'\\n\\t'
+source "{FAILURE_REPORT}"
+_hal0_report_body() {{
+    local f
+    for f in "{tmp_path}"/hal0-install-report-*.txt; do
+        rm -f "$f"
+        ln -s "{victim}" "$f"
+    done
+    echo "body"
+}}
+{extra}
+export HAL0_INSTALL_LOG="{log}"
+report="$(hal0_write_failure_report "Pre-flight checks")"
+echo "report=$report"
+"""
+
+    @staticmethod
+    def _victim(tmp_path: Path) -> Path:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        victim = elsewhere / "victim"
+        victim.write_text("precious\n")
+        victim.chmod(0o644)
+        return victim
+
+    def test_a_report_swapped_for_a_symlink_mid_harvest_is_not_written_through(
+        self, tmp_path: Path
+    ) -> None:
+        """#2407 review: the stub `>"$report"` and the `chmod "$report"`
+        reopened the report by name after creation."""
+        victim = self._victim(tmp_path)
+        script = self._swap_script(tmp_path, victim, "_hal0_report_redact_file() { return 1; }")
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert victim.read_text() == "precious\n", proc.stdout + proc.stderr
+        assert (victim.stat().st_mode & 0o777) == 0o644
+        # The name now points at someone else's file: it is not handed back
+        # to the operator as "the report".
+        assert proc.stdout.strip() == "report=", proc.stdout
+
+    def test_a_report_swapped_mid_harvest_on_the_redacted_path_is_safe(
+        self, tmp_path: Path
+    ) -> None:
+        victim = self._victim(tmp_path)
+        script = self._swap_script(tmp_path, victim, "")
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert victim.read_text() == "precious\n", proc.stdout + proc.stderr
+        assert (victim.stat().st_mode & 0o777) == 0o644
+
+    def test_scratch_dir_is_not_inside_the_report_dir(self, tmp_path: Path) -> None:
+        """The unredacted body is staged in a scratch dir. In the report dir
+        (writable by the hal0 uid) its name could be swapped for the
+        attacker's own dir, which would then receive the raw secrets."""
+        log = tmp_path / "hal0-install-abc123.log"
+        log.write_text("log\n")
+        seen = tmp_path / "seen-work"
+        script = f"""
+source "{FAILURE_REPORT}"
+_hal0_report_body() {{ printf '%s\\n' "$2" >"{seen}"; echo body; }}
+export HAL0_INSTALL_LOG="{log}"
+hal0_write_failure_report "x" >/dev/null
+"""
+        subprocess.run(["bash", "-c", script], check=False, cwd=str(REPO))
+        work = Path(seen.read_text().strip())
+        assert tmp_path not in work.parents, work
+        assert not work.exists()  # cleaned up
+
+    def test_log_tail_is_read_through_the_log_fd_not_its_name(self, tmp_path: Path) -> None:
+        log = tmp_path / "hal0-install-abc123.log"
+        secret = tmp_path / "root-only"
+        secret.write_text("root-only-content\n")
+        script = f"""
+source "{FAILURE_REPORT}"
+exec {{lfd}}>"{log}"
+echo "genuine log line" >&"$lfd"
+export HAL0_INSTALL_LOG="{log}" HAL0_INSTALL_LOG_FD="$lfd"
+rm -f "{log}"
+ln -s "{secret}" "{log}"
+report="$(hal0_write_failure_report "x")"
+cat "$report"
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert "genuine log line" in proc.stdout, proc.stdout + proc.stderr
+        assert "root-only-content" not in proc.stdout

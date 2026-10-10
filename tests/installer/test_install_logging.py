@@ -163,9 +163,9 @@ echo "log=$HAL0_INSTALL_LOG"
         finally:
             fallback_path.unlink(missing_ok=True)
 
-    def test_a_preexisting_world_readable_log_is_tightened(self, tmp_path: Path) -> None:
-        """umask only applies at creation; a same-second rerun appending to an
-        existing 0644 log must still end up 0600."""
+    def test_a_preexisting_log_is_never_reused(self, tmp_path: Path) -> None:
+        """#2407: the log is always a brand-new file created 0600, never an
+        existing one reopened (and so never one needing a later chmod)."""
         fake_log_dir = tmp_path / "var-log-hal0"
         fake_log_dir.mkdir()
         existing = fake_log_dir / "install-test.log"
@@ -176,15 +176,23 @@ source "{LOGGING_SH}"
 id() {{ echo 0; }}
 hal0_install_log_path() {{ printf '%s\\n' "{existing}"; }}
 hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+echo "new run"
 """
-        _run(script)
-        assert (existing.stat().st_mode & 0o777) == 0o600
+        proc = _run(script)
+        log_line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log_path = Path(log_line.removeprefix("log="))
+        assert log_path != existing
+        assert log_path.parent == fake_log_dir
+        assert (log_path.stat().st_mode & 0o777) == 0o600
+        assert "new run" in log_path.read_text()
+        assert existing.read_text() == "earlier run\n"
 
 
 class TestTmpFallbackIsUnpredictable:
     """#2407: the /tmp log used to be ``/tmp/hal0-install-<ts>.log`` opened
     with a plain ``>`` redirect, which follows a symlink a local user planted
-    at that guessable name. It is now made by ``mktemp`` (O_EXCL, random
+    at that guessable name. It is now created by ``hal0_excl_open`` (O_EXCL, random
     name), so a planted symlink is never opened and its target is untouched.
 
     ``date`` is shadowed so the "old-style" name is known in advance and
@@ -234,9 +242,9 @@ echo "line written after init"
             # The symlink's target was neither truncated nor appended to.
             assert victim.read_text() == "precious\n"
             assert (victim.stat().st_mode & 0o777) == 0o644
-            # The log is a fresh regular file at a mktemp name, not the plant.
+            # The log is a fresh regular file at a random name, not the plant.
             assert log != planted
-            assert re.fullmatch(r"/tmp/hal0-install-[A-Za-z0-9]{6}\.log", str(log)), log
+            assert re.fullmatch(r"/tmp/hal0-install-[0-9a-f]{12}\.log", str(log)), log
             assert log.is_file() and not log.is_symlink()
             assert (log.stat().st_mode & 0o777) == 0o600
             assert "line written after init" in log.read_text()
@@ -263,4 +271,62 @@ echo "line written after init"
     def test_a_writable_primary_is_still_preferred(self, tmp_path: Path) -> None:
         fake_log_dir = tmp_path / "var-log-hal0"
         proc = self._init("unused", 0, fake_log_dir)
-        assert self._log(proc) == fake_log_dir / "install-test.log", proc.stdout
+        log = self._log(proc)
+        assert log.parent == fake_log_dir, proc.stdout
+        assert re.fullmatch(r"install-test-[0-9a-f]{12}\.log", log.name), log
+
+
+class TestRootLogIsUnpredictable:
+    """#2407 review: /var/log/hal0 is hal0:hal0 0755 (src/hal0/install/
+    perms.py), so on a root re-run the hal0 uid can plant a symlink at the
+    timestamped ``install-<ts>.log`` name, and protected_symlinks does not
+    apply (the dir is neither sticky nor world-writable). The root log gets a
+    random suffix and is created with O_EXCL, so the plant is never opened.
+    """
+
+    def test_root_log_does_not_follow_a_symlink_planted_in_the_log_dir(
+        self, tmp_path: Path
+    ) -> None:
+        stamp = "20990101-000000"
+        log_dir = tmp_path / "var-log-hal0"
+        log_dir.mkdir()
+        victim = tmp_path / "victim"
+        victim.write_text("precious\n")
+        victim.chmod(0o644)
+        planted = log_dir / f"install-{stamp}.log"
+        planted.symlink_to(victim)
+        # The pre-fix root name shape, install-<ts>.log, in a test dir
+        # standing in for /var/log/hal0.
+        script = f"""
+IFS=$'\\n\\t'
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path() {{
+    printf '{log_dir}/install-%s.log\\n' "$(date -u +%Y%m%d-%H%M%S)"
+}}
+date() {{ echo "{stamp}"; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+echo "line written after init"
+"""
+        proc = _run(script)
+        assert victim.read_text() == "precious\n", proc.stdout + proc.stderr
+        assert (victim.stat().st_mode & 0o777) == 0o644
+        assert planted.is_symlink()
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log = Path(line.removeprefix("log="))
+        assert log.parent == log_dir
+        assert re.fullmatch(rf"install-{stamp}-[0-9a-f]{{12}}\.log", log.name), log
+        assert log.is_file() and not log.is_symlink()
+        assert (log.stat().st_mode & 0o777) == 0o600
+        assert "line written after init" in log.read_text()
+
+    def test_real_root_template_carries_a_random_part(self) -> None:
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+date() {{ echo 20990101-000000; }}
+hal0_install_log_path
+"""
+        proc = _run(script)
+        assert proc.stdout.strip() == "/var/log/hal0/install-20990101-000000-XXXXXX.log"
