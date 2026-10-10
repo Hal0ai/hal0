@@ -343,7 +343,8 @@ def test_git_cleanliness_rejects_all_other_dirt(
 
 # ── Gate 8: GitHub check-run conclusions on origin/main ──────────────────────
 
-_REQUIRED = ("python (3.12)", "ui", "γ-suite (chromium)")
+_GAMMA = "\u03b3-suite (chromium)"
+_REQUIRED = ("python (3.12)", "ui", _GAMMA)
 
 
 def _gate8_run(
@@ -416,7 +417,7 @@ def test_gate8_fails_on_bad_conclusion_anywhere(tmp_path: Path, conclusion: str)
 
 
 def test_gate8_fails_when_required_check_skipped(tmp_path: Path) -> None:
-    rows = [("python (3.12)", "skipped"), ("ui", "success"), ("γ-suite (chromium)", "success")]
+    rows = [("python (3.12)", "skipped"), ("ui", "success"), (_GAMMA, "success")]
     out = _gate8_run(tmp_path, rows)
     assert "python (3.12)=skipped" in out
 
