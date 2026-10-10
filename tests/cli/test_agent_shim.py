@@ -527,7 +527,7 @@ class TestIsReady:
         )
 
     def test_2xx_is_ready(self) -> None:
-        with patch("hal0.cli.agent_shim.urllib.request.urlopen") as m:
+        with patch("hal0.service_identity.open_url") as m:
             m.return_value.__enter__.return_value.status = 200
             assert agent_shim._is_ready(self._cfg()) is True
 
@@ -539,14 +539,14 @@ class TestIsReady:
         import urllib.error
 
         err = urllib.error.HTTPError("http://x", code, "msg", {}, None)  # type: ignore[arg-type]
-        with patch("hal0.cli.agent_shim.urllib.request.urlopen", side_effect=err):
+        with patch("hal0.service_identity.open_url", side_effect=err):
             assert agent_shim._is_ready(self._cfg()) is expected
 
     def test_connection_error_not_ready(self) -> None:
         import urllib.error
 
         with patch(
-            "hal0.cli.agent_shim.urllib.request.urlopen",
+            "hal0.service_identity.open_url",
             side_effect=urllib.error.URLError("boom"),
         ):
             assert agent_shim._is_ready(self._cfg()) is False

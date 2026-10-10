@@ -136,6 +136,7 @@ def test_probe_mcp_server_sends_bearer_header(
 
     monkeypatch.setenv("HAL0_ADMIN_KEY", "probe-admin-key")
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("hal0.service_identity.open_url", _fake_urlopen)
 
     hp._probe_mcp_server("http://127.0.0.1:8080/mcp/admin", agent_id="hermes-agent")
 
@@ -154,6 +155,7 @@ def test_probe_mcp_server_omits_bearer_when_no_key(
     monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
     monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("hal0.service_identity.open_url", _fake_urlopen)
 
     hp._probe_mcp_server("http://127.0.0.1:8080/mcp/admin", agent_id="hermes-agent")
 
@@ -257,6 +259,7 @@ def _capture_mcp_memory_call_headers(
         raise OSError("stop-after-capture — header inspection only")
 
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("hal0.service_identity.open_url", _fake_urlopen)
     hp._mcp_memory_call(
         "tools/call",
         {"name": "memory_add", "arguments": {"text": "probe", "dataset": "shared"}},

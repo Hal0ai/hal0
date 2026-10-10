@@ -48,6 +48,7 @@ def fake_urlopen(monkeypatch: pytest.MonkeyPatch):
             return _FakeResponse(payload)
 
         monkeypatch.setattr(_urllib, "urlopen", _fake_urlopen)
+        monkeypatch.setattr("hal0.service_identity.open_url", _fake_urlopen)
 
     return _install
 

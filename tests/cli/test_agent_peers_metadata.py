@@ -38,9 +38,9 @@ def peers_response(monkeypatch: pytest.MonkeyPatch) -> Any:
     def _install(payload: dict[str, Any]) -> None:
         monkeypatch.setattr(agent_commands, "_api_base", lambda: "http://127.0.0.1:8080")
         monkeypatch.setattr(agent_commands, "_api_unreachable", lambda url: False)
-        monkeypatch.setattr(
-            urllib.request, "urlopen", lambda req, timeout=None: _fake_response(payload)
-        )
+        fake = lambda req, timeout=None: _fake_response(payload)  # noqa: E731
+        monkeypatch.setattr(urllib.request, "urlopen", fake)
+        monkeypatch.setattr("hal0.service_identity.open_url", fake)
 
     return _install
 

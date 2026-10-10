@@ -80,6 +80,8 @@ def fake_urlopen(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
             return _FakeResponse(next_value)
 
         monkeypatch.setattr(_urllib, "urlopen", _fake_urlopen)
+        # Loopback targets go through hal0.service_identity.open_url (#2506).
+        monkeypatch.setattr("hal0.service_identity.open_url", _fake_urlopen)
 
     return _install
 

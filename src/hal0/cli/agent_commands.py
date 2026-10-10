@@ -1107,6 +1107,7 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
     # bank rows from a bootstrap smoke test's uninstall phase). Reuse
     # the same default so this stays in lockstep with the writer.
     from hal0.agents.hermes_provision import BootstrapState
+    from hal0.service_identity import open_url
 
     agent_id = BootstrapState().agent_id
 
@@ -1131,7 +1132,7 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
             f"{url}/api/memory/search", data=search_body, headers=headers, method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            with open_url(req, timeout=5.0) as resp:
                 data = _json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, _json.JSONDecodeError):
             return None
@@ -1164,7 +1165,7 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
         f"{url}/api/memory/delete", data=del_body, headers=headers, method="POST"
     )
     try:
-        with urllib.request.urlopen(req2, timeout=5.0):
+        with open_url(req2, timeout=5.0):
             pass
     except (urllib.error.URLError, OSError):
         return MemoryUninstallOutcome(
@@ -1404,6 +1405,8 @@ def agent_peers() -> None:
     import urllib.error
     import urllib.request
 
+    from hal0.service_identity import open_url
+
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -1430,7 +1433,7 @@ def agent_peers() -> None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
+        with open_url(req, timeout=5.0) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, _json.JSONDecodeError) as exc:
         die(f"memory API unreachable: {exc}")

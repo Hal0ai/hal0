@@ -263,11 +263,13 @@ def _http_get(url: str, *, timeout: float = 3.0) -> int:
     bootstrap importable on minimal install paths.
     """
     from urllib.error import URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     try:
         req = Request(url, headers={"Accept": "application/json"})
-        with urlopen(req, timeout=timeout) as resp:
+        with open_url(req, timeout=timeout) as resp:
             return int(resp.status)
     except (URLError, OSError, TimeoutError):
         return 0
@@ -2890,9 +2892,9 @@ def _probe_mcp_server(
     """
     import contextlib
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
 
-    from hal0.service_identity import service_key
+    from hal0.service_identity import open_url, service_key
 
     transport_url = url.rstrip("/") + "/mcp"
     base_headers = {
@@ -2932,7 +2934,7 @@ def _probe_mcp_server(
             method="POST",
         )
         try:
-            with urlopen(req, timeout=timeout) as resp:
+            with open_url(req, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8")
                 returned_sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get(
                     "mcp-session-id"
@@ -3881,9 +3883,9 @@ def _mcp_memory_call(
     rotation is picked up on the very next call.
     """
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
 
-    from hal0.service_identity import service_key
+    from hal0.service_identity import open_url, service_key
 
     base_url = base_url.rstrip("/")
 
@@ -3912,7 +3914,7 @@ def _mcp_memory_call(
         headers["X-hal0-Private"] = "1"
     req = Request(url, data=body_bytes, headers=headers, method="POST")
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with open_url(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
         # Surface the body if it's a hal0 error envelope so the warning
@@ -4404,11 +4406,13 @@ def _fetch_slots() -> list[dict[str, Any]]:
     diff between "no slots" and "couldn't ask."
     """
     from urllib.error import URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     req = Request(f"{HAL0_API_URL}/api/slots", headers={"Accept": "application/json"})
     try:
-        with urlopen(req, timeout=3.0) as resp:
+        with open_url(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError):
         return []
@@ -4428,11 +4432,13 @@ def _fetch_model_contexts() -> dict[str, int]:
     daemon is unreachable or no chat slot is loaded.
     """
     from urllib.error import URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     req = Request(f"{HAL0_API_URL}/v1/models", headers={"Accept": "application/json"})
     try:
-        with urlopen(req, timeout=3.0) as resp:
+        with open_url(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError):
         return {}
@@ -4575,11 +4581,13 @@ def _http_status_json(url: str) -> tuple[int | None, dict[str, Any] | None]:
     to tell "the server said no" from "the server said nothing").
     """
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     req = Request(url, headers={"Accept": "application/json"})
     try:
-        with urlopen(req, timeout=3.0) as resp:
+        with open_url(req, timeout=3.0) as resp:
             try:
                 body = json.loads(resp.read().decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
@@ -5982,7 +5990,9 @@ def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool
         }
     ).encode("utf-8")
     from urllib.error import URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     req = Request(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -5993,7 +6003,7 @@ def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool
     # Thinking models can spend tens of seconds on the reasoning block
     # before emitting visible content; 10s wasn't long enough.
     try:
-        with urlopen(req, timeout=60.0) as resp:
+        with open_url(req, timeout=60.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return (False, f"chat/completions: {exc}")
