@@ -750,3 +750,197 @@ def test_bundle_config_section_still_reads_regular_files(
 
     assert "HAL0_PORT=8080" in (out / "config" / "api.env").read_text()
     assert (out / "config" / "slots" / "chat.toml").is_file()
+
+
+# ── #2528: the bundle never writes through a planted link or into someone
+#    else's directory ────────────────────────────────────────────────────────
+
+_VICTIM_TEXT = "victim-file-must-stay-untouched\n"
+
+
+def _victim(tmp_path: Path) -> Path:
+    """Stand-in for a file root must not overwrite (e.g. /etc/passwd)."""
+    d = tmp_path / "victim"
+    d.mkdir(exist_ok=True)
+    v = d / "victim.txt"
+    v.write_text(_VICTIM_TEXT)
+    return v
+
+
+def test_default_out_ignores_a_pre_created_guessable_dir(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A local user pre-creates ./hal0-doctor-bundle-<host>-<ts> in a shared
+    cwd with commands.tsv -> victim. The default run must not write there; it
+    makes a fresh, private directory and prints that one."""
+    import os
+    import socket
+    from datetime import UTC, datetime
+
+    import typer
+
+    fixed = datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return fixed
+
+    monkeypatch.setattr(doctor_bundle, "datetime", _FrozenDatetime)
+    victim = _victim(tmp_path)
+    cwd = tmp_path / "shared-cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    ts = fixed.strftime("%Y%m%dT%H%M%SZ")
+    planted = cwd / f"hal0-doctor-bundle-{socket.gethostname()}-{ts}"
+    planted.mkdir()
+    (planted / "commands.tsv").symlink_to(victim)
+
+    with pytest.raises(typer.Exit):
+        doctor_bundle.doctor_bundle_cmd(out=None, no_rocm_smi=True, include_logs="no")
+
+    assert victim.read_text() == _VICTIM_TEXT
+    assert sorted(p.name for p in planted.iterdir()) == ["commands.tsv"]
+    printed = capsys.readouterr().out
+    written = [p for p in cwd.iterdir() if p != planted]
+    assert len(written) == 1
+    bundle = written[0]
+    assert str(bundle) in printed.replace("\n", "")
+    assert bundle.name.startswith(planted.name + "-")
+    assert os.lstat(bundle).st_mode & 0o777 == 0o700
+    assert (bundle / "commands.tsv").is_file()
+
+
+def test_out_with_a_planted_symlink_is_refused_and_not_followed(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    victim = _victim(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(mode=0o700)
+    (out / "commands.tsv").symlink_to(victim)
+
+    with pytest.raises(OSError):
+        build_bundle(out, include_rocm_smi=False, include_logs=False)
+
+    assert victim.read_text() == _VICTIM_TEXT
+
+
+def test_existing_non_empty_out_is_refused(tmp_hal0_home: str, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir(mode=0o700)
+    keep = out / "notes.txt"
+    keep.write_text("mine\n")
+
+    with pytest.raises(OSError):
+        build_bundle(out, include_rocm_smi=False, include_logs=False)
+
+    assert sorted(p.name for p in out.iterdir()) == ["notes.txt"]
+    assert keep.read_text() == "mine\n"
+
+
+def test_out_that_is_a_symlink_or_shared_is_refused(tmp_hal0_home: str, tmp_path: Path) -> None:
+    import os
+
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(OSError):
+        build_bundle(link, include_rocm_smi=False, include_logs=False)
+    assert list(real.iterdir()) == []
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    with pytest.raises(OSError):
+        build_bundle(shared, include_rocm_smi=False, include_logs=False)
+    assert list(shared.iterdir()) == []
+
+
+def test_out_owned_by_another_uid_is_refused(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    out = tmp_path / "out"
+    out.mkdir(mode=0o700)
+    if os.geteuid() == 0:
+        os.chown(out, 65534, 65534)
+    else:
+        real_uid = os.geteuid()
+        monkeypatch.setattr(doctor_bundle.os, "geteuid", lambda: real_uid + 1)
+    with pytest.raises(OSError):
+        build_bundle(out, include_rocm_smi=False, include_logs=False)
+
+
+def test_a_link_planted_mid_run_is_not_written_through(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every file is created O_EXCL|O_NOFOLLOW relative to the bundle's fd, so
+    even a link that appears inside the bundle mid-run is never followed."""
+    victim = _victim(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = tmp_path / "out"
+    real_tsv = doctor_bundle._write_commands_tsv
+
+    def plant_then_write(o: Path, rows: list[list[str]]) -> None:
+        (o / "commands.tsv").symlink_to(victim)
+        (o / "config").symlink_to(elsewhere, target_is_directory=True)
+        real_tsv(o, rows)
+
+    monkeypatch.setattr(doctor_bundle, "_write_commands_tsv", plant_then_write)
+
+    with pytest.raises(OSError):
+        build_bundle(out, include_rocm_smi=False, include_logs=False)
+    assert victim.read_text() == _VICTIM_TEXT
+
+    # And a planted subdirectory link is refused too (config/ is walked O_NOFOLLOW).
+    from hal0.config import paths as cfg_paths
+
+    cfg_paths.etc().mkdir(parents=True, exist_ok=True)
+    cfg_paths.hal0_toml().write_text('x = "y"\n')
+    out2 = tmp_path / "out2"
+
+    def plant_dir_then_write(o: Path, rows: list[list[str]]) -> None:
+        (o / "config").symlink_to(elsewhere, target_is_directory=True)
+        real_tsv(o, rows)
+
+    monkeypatch.setattr(doctor_bundle, "_write_commands_tsv", plant_dir_then_write)
+    with pytest.raises(OSError):
+        build_bundle(out2, include_rocm_smi=False, include_logs=False)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_normal_run_writes_private_files_and_dirs(tmp_hal0_home: str, tmp_path: Path) -> None:
+    import os
+    import stat
+
+    out = tmp_path / "out"
+    written, _ = build_bundle(out, include_rocm_smi=False)
+
+    assert written == out
+    assert (out / "manifest.json").is_file()
+    assert (out / "doctor-summary.txt").is_file()
+    assert os.lstat(out).st_mode & 0o777 == 0o700
+    for p in out.rglob("*"):
+        st = os.lstat(p)
+        assert not stat.S_ISLNK(st.st_mode), p
+        want = 0o700 if stat.S_ISDIR(st.st_mode) else 0o600
+        assert st.st_mode & 0o777 == want, (p, oct(st.st_mode))
+
+
+def test_existing_empty_own_out_is_accepted_and_tightened(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    import os
+
+    out = tmp_path / "out"
+    out.mkdir()
+    os.chmod(out, 0o755)
+    build_bundle(out, include_rocm_smi=False, include_logs=False)
+    assert (out / "manifest.json").is_file()
+    assert os.lstat(out).st_mode & 0o777 == 0o700

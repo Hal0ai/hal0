@@ -29,6 +29,7 @@ diagnostics only reference the future command by name.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json as jsonlib
 import os
@@ -36,7 +37,9 @@ import re
 import socket
 import stat
 import subprocess
+import tempfile
 import time
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -124,6 +127,112 @@ _ROCM_PROBES: tuple[tuple[str, tuple[str, ...], Path], ...] = (
 _LOG_UNITS: tuple[str, ...] = ("hal0-api", "hal0-agent")
 
 
+# ── safe bundle writes — every file the bundle writes goes through here ──────
+#
+# The bundle is often written by root, and its directory used to be created
+# with ``mkdir(exist_ok=True)`` under a guessable name in the cwd: from /tmp,
+# a local user could pre-create it and plant ``commands.tsv`` as a symlink to
+# any file root would then overwrite, and read the bundle besides (#2528).
+# The output directory is now created fresh (0700) or must be an empty,
+# euid-owned directory, and every file is created ``O_CREAT|O_EXCL|O_NOFOLLOW``
+# relative to that directory's fd, each subdirectory opened ``O_NOFOLLOW``.
+
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+_DIR_OPEN = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC
+
+#: The bundle being written: its root path and an fd for that directory.
+_ACTIVE_OUT: ContextVar[tuple[Path, int] | None] = ContextVar("_ACTIVE_OUT", default=None)
+
+
+class BundleOutputError(OSError):
+    """The output directory is unsafe to write a bundle into."""
+
+
+def _open_subdir(dir_fd: int, name: str) -> int:
+    """Open (creating 0700 if absent) ``name`` under ``dir_fd``, never via a symlink."""
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(name, _DIR_MODE, dir_fd=dir_fd)
+    return os.open(name, _DIR_OPEN, dir_fd=dir_fd)
+
+
+def _create_file(dest: Path) -> int:
+    """Create ``dest`` exclusively (0600) and return a writable fd.
+
+    Inside the active bundle, every component below the bundle root is walked
+    from the root's fd with ``O_NOFOLLOW``, so a planted symlink anywhere in
+    the path fails (``ELOOP``/``EEXIST``) instead of being written through.
+    Outside one (a helper called on its own, as the unit tests do), only the
+    final directory and the file are pinned.
+    """
+    active = _ACTIVE_OUT.get()
+    if active is not None and dest.is_relative_to(active[0]):
+        root, root_fd = active
+        parts = dest.relative_to(root).parts
+        base = os.dup(root_fd)
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        parts = (dest.name,)
+        base = os.open(dest.parent, _DIR_OPEN)
+    try:
+        for name in parts[:-1]:
+            nxt = _open_subdir(base, name)
+            os.close(base)
+            base = nxt
+        return os.open(parts[-1], _FILE_CREATE, _FILE_MODE, dir_fd=base)
+    finally:
+        os.close(base)
+
+
+def _write_file(dest: Path, text: str) -> None:
+    with os.fdopen(_create_file(dest), "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _make_default_out(parent: Path) -> Path:
+    """A fresh 0700 bundle directory under ``parent`` with an unguessable name."""
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    prefix = f"hal0-doctor-bundle-{socket.gethostname()}-{ts}-"
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+
+
+def _claim_out(out: Path) -> int:
+    """Return an fd for ``out``, creating it fresh or vetting an existing one.
+
+    A missing ``out`` is created with ``os.mkdir(0700)``. An existing one is
+    accepted only if it is a real (not symlinked) directory owned by the euid,
+    not group- or world-writable, and empty; it is then tightened to 0700.
+    The fd is ``fstat``-checked against the ``lstat`` so a swap is refused.
+    """
+    try:
+        os.mkdir(out, _DIR_MODE)
+    except FileExistsError:
+        pass
+    except FileNotFoundError:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        os.mkdir(out, _DIR_MODE)
+    st = os.lstat(out)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise BundleOutputError(errno.ENOTDIR, "not a real directory", str(out))
+    if st.st_uid != os.geteuid():
+        raise BundleOutputError(errno.EPERM, f"owned by uid {st.st_uid}, not us", str(out))
+    if st.st_mode & 0o022:
+        raise BundleOutputError(errno.EPERM, "group- or world-writable", str(out))
+    fd = os.open(out, _DIR_OPEN)
+    try:
+        fst = os.fstat(fd)
+        if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            raise BundleOutputError(errno.EAGAIN, "replaced while being opened", str(out))
+        if os.listdir(fd):
+            raise BundleOutputError(errno.ENOTEMPTY, "not empty", str(out))
+        os.fchmod(fd, _DIR_MODE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _run_one(argv: tuple[str, ...], dest: Path, *, timeout: float = 10.0) -> tuple[int, int, int]:
     """Run ``argv``, write (redacted) stdout to ``dest``.
 
@@ -131,21 +240,20 @@ def _run_one(argv: tuple[str, ...], dest: Path, *, timeout: float = 10.0) -> tup
     means the binary isn't on PATH; ``-2`` means it timed out. Neither
     raises — every failure mode is captured as a TSV row + a stub file.
     """
-    dest.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except FileNotFoundError:
-        dest.write_text(f"# command not found: {argv[0]}\n")
+        _write_file(dest, f"# command not found: {argv[0]}\n")
         return -1, 0, int((time.monotonic() - t0) * 1000)
     except subprocess.TimeoutExpired:
-        dest.write_text(f"# command timed out after {timeout}s: {' '.join(argv)}\n")
+        _write_file(dest, f"# command timed out after {timeout}s: {' '.join(argv)}\n")
         return -2, 0, int((time.monotonic() - t0) * 1000)
     except OSError as exc:  # e.g. EACCES
-        dest.write_text(f"# command failed to start: {exc}\n")
+        _write_file(dest, f"# command failed to start: {exc}\n")
         return -1, 0, int((time.monotonic() - t0) * 1000)
     body = _redact_text(proc.stdout)
-    dest.write_text(body)
+    _write_file(dest, body)
     return proc.returncode, len(body.encode("utf-8")), int((time.monotonic() - t0) * 1000)
 
 
@@ -157,7 +265,7 @@ def _write_commands_tsv(out: Path, rows: list[list[str]]) -> None:
         # Double-quote any field containing a tab/quote/newline (§3.1).
         safe = [f'"{f}"' if any(c in f for c in '\t"\n') else f for f in row]
         lines.append("\t".join(safe))
-    (out / "commands.tsv").write_text("\n".join(lines) + "\n")
+    _write_file(out / "commands.tsv", "\n".join(lines) + "\n")
 
 
 # ── safe file reads — every file the bundle copies goes through here ─────────
@@ -273,8 +381,7 @@ def _write_redacted_toml(dest: Path, data: dict[str, Any]) -> None:
 
     from hal0.api._redact import redact_config
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(tomli_w.dumps(redact_config(data)))
+    _write_file(dest, tomli_w.dumps(redact_config(data)))
 
 
 def _write_redacted_env(dest: Path, text: str) -> None:
@@ -287,7 +394,6 @@ def _write_redacted_env(dest: Path, text: str) -> None:
     """
     from hal0.api._redact import MASK, is_sensitive_key
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
     out_lines: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -296,7 +402,7 @@ def _write_redacted_env(dest: Path, text: str) -> None:
             continue
         key, _, _val = stripped.partition("=")
         out_lines.append(f"{key}={MASK}" if is_sensitive_key(key) else line)
-    dest.write_text("\n".join(out_lines) + ("\n" if out_lines else ""))
+    _write_file(dest, "\n".join(out_lines) + ("\n" if out_lines else ""))
 
 
 def _write_config_section(out: Path, *, skipped: SkippedFiles | None = None) -> list[str]:
@@ -358,8 +464,7 @@ def _write_config_section(out: Path, *, skipped: SkippedFiles | None = None) -> 
     manifest_text = _read(cfg_paths.manifest_json())
     if manifest_text is not None:
         # No redaction — manifest.json carries no secrets (image pins/versions).
-        (out / "config").mkdir(parents=True, exist_ok=True)
-        (out / "config" / "manifest.json").write_text(manifest_text)
+        _write_file(out / "config" / "manifest.json", manifest_text)
 
     return redacted
 
@@ -368,8 +473,7 @@ def _write_config_section(out: Path, *, skipped: SkippedFiles | None = None) -> 
 
 
 def _write_json(dest: Path, payload: Any) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(jsonlib.dumps(payload, indent=2, default=str))
+    _write_file(dest, jsonlib.dumps(payload, indent=2, default=str))
 
 
 def _api_get_or_unavailable(path: str, base: str | None) -> Any:
@@ -698,9 +802,7 @@ def _write_install_report(out: Path, *, skipped: SkippedFiles | None = None) -> 
     text = _read_latest(_INSTALL_REPORT_GLOBS, skipped=skipped)
     if text is None:
         return []
-    dest = out / "logs" / "install-failure-report.txt"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(_redact_install_text(text) + "\n")
+    _write_file(out / "logs" / "install-failure-report.txt", _redact_install_text(text) + "\n")
     return ["logs/install-failure-report.txt"]
 
 
@@ -718,10 +820,8 @@ def _write_install_log(
     text = _read_latest(_INSTALL_LOG_GLOBS, skipped=skipped)
     if text is None:
         return []
-    dest = out / "logs" / "install.log"
-    dest.parent.mkdir(parents=True, exist_ok=True)
     tail = text.splitlines()[-lines:]
-    dest.write_text(_redact_install_text("\n".join(tail)) + "\n")
+    _write_file(out / "logs" / "install.log", _redact_install_text("\n".join(tail)) + "\n")
     return ["logs/install.log"]
 
 
@@ -729,7 +829,7 @@ def _write_install_log(
 
 
 def build_bundle(
-    out: Path,
+    out: Path | None,
     *,
     include_rocm_smi: bool = True,
     include_logs: bool = True,
@@ -737,12 +837,29 @@ def build_bundle(
 ) -> tuple[Path, int]:
     """Write the full bundle under ``out``. Returns ``(out, failed_probe_count)``.
 
+    ``out=None`` creates a fresh, uniquely named 0700 directory in the cwd;
+    the returned path is the one actually written. An existing ``out`` must
+    be an empty directory the euid owns (#2528), else
+    :class:`BundleOutputError` is raised before anything is written.
+
     ``failed_probe_count`` counts probe commands with a nonzero/negative
     exit code (missing binary, timeout, real failure) — non-fatal; the
     caller uses it only to pick exit 0 vs 1 (§4.3).
     """
-    out.mkdir(parents=True, exist_ok=True)
+    if out is None:
+        out = _make_default_out(Path.cwd())
+    out_fd = _claim_out(out)
+    token = _ACTIVE_OUT.set((out, out_fd))
+    try:
+        return out, _build_into(
+            out, include_rocm_smi=include_rocm_smi, include_logs=include_logs, base=base
+        )
+    finally:
+        _ACTIVE_OUT.reset(token)
+        os.close(out_fd)
 
+
+def _build_into(out: Path, *, include_rocm_smi: bool, include_logs: bool, base: str | None) -> int:
     probes = list(_CORE_PROBES)
     if include_rocm_smi:
         probes += list(_ROCM_PROBES)
@@ -770,7 +887,9 @@ def build_bundle(
     from hal0.cli.doctor_verify import run_verify
 
     summary_console = Console(
-        file=(out / "doctor-summary.txt").open("w"), force_terminal=False, width=100
+        file=os.fdopen(_create_file(out / "doctor-summary.txt"), "w", encoding="utf-8"),
+        force_terminal=False,
+        width=100,
     )
     try:
         run_verify(console=summary_console, base=base)
@@ -796,17 +915,17 @@ def build_bundle(
         "skipped_files": skipped,
     }
     _write_json(out / "manifest.json", manifest)
-    return out, failed
-
-
-def _default_out() -> Path:
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return Path.cwd() / f"hal0-doctor-bundle-{socket.gethostname()}-{ts}"
+    return failed
 
 
 def doctor_bundle_cmd(
     out: Path | None = typer.Option(
-        None, "--out", help="Bundle output directory (default: ./hal0-doctor-bundle-<host>-<ts>/)."
+        None,
+        "--out",
+        help=(
+            "Bundle output directory: created 0700, or an existing empty directory you own "
+            "(default: a new ./hal0-doctor-bundle-<host>-<ts>-<random>/)."
+        ),
     ),
     no_rocm_smi: bool = typer.Option(
         False,
@@ -827,14 +946,14 @@ def doctor_bundle_cmd(
     ship it yourself. Exit codes: 0 clean, 1 some probe commands failed
     (non-fatal, see commands.tsv), 2 could not write the bundle at all.
     """
-    target = out or _default_out()
     logs_wanted = include_logs.strip().lower() != "no"
     try:
         written, failed = build_bundle(
-            target, include_rocm_smi=not no_rocm_smi, include_logs=logs_wanted
+            out, include_rocm_smi=not no_rocm_smi, include_logs=logs_wanted
         )
     except OSError as exc:
-        console.print(f"[red]✗[/red]  could not write bundle to {target}: {exc}")
+        where = out if out is not None else Path.cwd()
+        console.print(f"[red]✗[/red]  could not write bundle to {where}: {exc}")
         raise typer.Exit(2) from exc
 
     console.print(f"[green]✓[/green]  bundle written to {written}")
