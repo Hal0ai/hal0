@@ -32,7 +32,6 @@ keys off the concrete managed-venv artifacts instead.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import socket
 import subprocess  # nosec B404 — required for shim
@@ -244,10 +243,16 @@ class HermesDriver(AgentDriver):
         data_dir = self._data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write the env file the wrapper sources on every hermes
-        # invocation. Single source of truth for the API URL + Bearer
-        # the agent uses to reach hal0.
-        self._write_env_file(bearer_token=bearer_token)
+        # Render the driver env (/etc/hal0/agents/hermes.env) through the
+        # provisioner's single writer (#2372). It carries HAL0_MCP_TOKEN
+        # (the box service key, not the caller's ``bearer_token``) and the
+        # OAuth lines, and goes through the hal0-agentenv seam when this
+        # process is unprivileged, because the directory is root:root.
+        # Imported here, not at module level: the provisioner is a large
+        # module and only this path needs it (see the seam note above).
+        from hal0.agents.hermes_provision import refresh_driver_env
+
+        refresh_driver_env()
 
     def uninstall(self) -> None:
         # Stop the running service BEFORE removing files so the agent
@@ -536,19 +541,3 @@ class HermesDriver(AgentDriver):
             # writer won't abort the rest of the uninstall — the
             # manager's seed + data + state cleanup still runs.
             return
-
-    def _write_env_file(self, *, bearer_token: str | None) -> None:
-        api_base = os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080").rstrip("/")
-        lines = [
-            "# hal0 — Hermes-Agent env (managed by hal0; safe to edit)",
-            f"HAL0_API_URL={api_base}",
-            f"HAL0_MCP_ADMIN_URL={api_base}/mcp/admin",
-            f"HAL0_MCP_MEMORY_URL={api_base}/mcp/memory",
-        ]
-        if bearer_token:
-            lines.append(f"HAL0_BEARER_TOKEN={bearer_token}")
-        env_file = self._env_file_path()
-        env_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = env_file.with_suffix(".tmp")
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(env_file)

@@ -35,10 +35,11 @@ Group=hal0
 # without parsing argv twice (argv carries it too, but env is what
 # our `_find_child_pids` scan keys off when finding stuck children).
 Environment="HAL0_AGENT_ID=%i"
-# Per-instance env — drop-in scripts may write
-# `/etc/hal0/agents/%i.env` to override HERMES_HOME / model defaults
-# / etc. Leading `-` so a missing file isn't fatal on first boot
-# (the shim has builtin fallbacks).
+# Per-instance env written by hal0 (for hermes, the provisioner
+# regenerates `/etc/hal0/agents/%i.env` on every reprovision, so it is not
+# an operator override location; use `systemctl edit hal0-agent@%i`).
+# Leading `-` so a missing file isn't fatal on first boot (the shim has
+# builtin fallbacks).
 EnvironmentFile=-/etc/hal0/agents/%i.env
 
 # ExecStart uses `hal0-agent`, which translates `serve` into

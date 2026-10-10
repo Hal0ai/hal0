@@ -309,7 +309,7 @@ class TestHermesEnv:
 
     def test_valid_user_web_dist_env_honored(self, tmp_path: Path) -> None:
         # An operator-set HERMES_WEB_DIST that resolves to a real dir (hand-built
-        # tree via hermes.env) wins — the shim must not clobber it.
+        # tree via a systemd drop-in) wins — the shim must not clobber it.
         user_dist = tmp_path / "custom-dist"
         user_dist.mkdir()
         venv = tmp_path / "venv"

@@ -249,6 +249,15 @@ REPO_ROOT_FOR_INSTALLER = _resolve_installer_root()
 # write merges, never clobbers, any operator ``[mcp.servers.*]`` blocks.
 INSTALL_SEED_PATH = Path("/etc/hal0/agents/hermes.toml")
 DRIVER_ENV_PATH = Path("/etc/hal0/agents/hermes.env")
+
+#: Comment lines that open :data:`DRIVER_ENV_PATH`. hal0 rewrites the whole
+#: file on every reprovision and OAuth connect/disconnect, so an operator line
+#: added here is lost (#2373); overrides go in a systemd drop-in instead.
+DRIVER_ENV_HEADER: tuple[str, ...] = (
+    "# hal0 — Hermes-Agent env (managed by hal0; do not edit — it is rewritten on reprovision)",
+    "# Overrides: `systemctl edit hal0-agent@hermes`, then add Environment=KEY=value under [Service]",
+)
+
 RUNTIME_JSON_NAME = "runtime.json"
 
 
@@ -6566,7 +6575,9 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
 def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
-    Mirrors ``HermesDriver._write_env_file``: the systemd unit's
+    The one writer of this file (#2372): the dashboard/API install path
+    (``HermesDriver.install``) and the OAuth routes reach it through
+    :func:`refresh_driver_env`. The systemd unit's
     ``EnvironmentFile=-/etc/hal0/agents/%i.env`` sources this into the
     ``hal0-agent@hermes`` process env on every start — the hal0 API URL, the
     MCP endpoint URLs, and (when a box service key is resolvable)
@@ -6597,13 +6608,19 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     re-reading the file). Auth OFF (no resolvable key) still writes the file
     — just without the token line — so a keyless/dev box never fails here.
     Returns ``(path, wrote)``.
+
+    The whole file is regenerated on every call, so it is not an operator
+    override location (#2373). Its header says so and names the systemd
+    drop-in (``systemctl edit hal0-agent@hermes``), the same place
+    ``installer/systemd/hal0-agent@hermes.service.d/override.conf`` points
+    operators to.
     """
     from hal0.oauth.store import driver_env_lines
     from hal0.service_identity import service_key
 
     api_base = HAL0_API_URL.rstrip("/")
     lines = [
-        "# hal0 — Hermes-Agent env (managed by hal0; safe to edit)",
+        *DRIVER_ENV_HEADER,
         f"HAL0_API_URL={api_base}",
         f"HAL0_MCP_ADMIN_URL={api_base}/mcp/admin",
         f"HAL0_MCP_MEMORY_URL={api_base}/mcp/memory",

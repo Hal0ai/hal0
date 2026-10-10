@@ -103,7 +103,7 @@ def _prober_missing() -> bool:
 
 
 @pytest.fixture
-def driver(tmp_hal0_home: str) -> HermesDriver:
+def driver(tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch) -> HermesDriver:
     """Driver with a FAKE runner + an upstream-present prober.
 
     ``tmp_hal0_home`` (autouse'd via the project conftest) routes
@@ -118,7 +118,19 @@ def driver(tmp_hal0_home: str) -> HermesDriver:
 
     Tests that need the upstream-missing branch override
     ``driver._prober`` per-test.
+
+    ``install()`` renders the env file through the provisioner's single
+    writer (#2372), whose path is the absolute :data:`DRIVER_ENV_PATH`;
+    point it at the sandboxed ``/etc/hal0`` too, and pin the box service
+    key it writes as ``HAL0_MCP_TOKEN``.
     """
+    from hal0.agents import hermes_provision as hp
+
+    monkeypatch.setattr(
+        hp, "DRIVER_ENV_PATH", Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
+    )
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": "hal0_tok_xyz")
+    monkeypatch.setattr("hal0.oauth.store.driver_env_lines", lambda: [])
     return HermesDriver(runner=_FakeRunner(), prober=_prober_ok)
 
 
@@ -175,13 +187,13 @@ def test_install_writes_env_file_without_shelling_out_when_provisioned(
     runner = _FakeRunner()
     driver._runner = runner  # type: ignore[assignment]
 
-    driver.install(bearer_token="hal0_tok_xyz")
+    driver.install(bearer_token="caller-token")
 
     assert runner.calls == [], "thin register must not shell out"
     env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
     assert env_file.exists()
     body = env_file.read_text(encoding="utf-8")
-    assert "HAL0_BEARER_TOKEN=hal0_tok_xyz" in body
+    assert "HAL0_MCP_TOKEN=hal0_tok_xyz" in body
     assert "HAL0_API_URL=http" in body
 
 
@@ -190,7 +202,7 @@ def test_install_writes_env_file_with_expected_keys(
     tmp_hal0_home: str,
 ) -> None:
     driver._runner = _FakeRunner()  # type: ignore[assignment]
-    driver.install(bearer_token="hal0_tok_xyz")
+    driver.install(bearer_token="caller-token")
 
     env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
     assert env_file.exists()
@@ -202,20 +214,27 @@ def test_install_writes_env_file_with_expected_keys(
     assert "/mcp/admin" in body
     assert "HAL0_MCP_MEMORY_URL=" in body
     assert "/mcp/memory" in body
-    assert "HAL0_BEARER_TOKEN=hal0_tok_xyz" in body
+    # The agent's MCP bearer is the box service key (ADR-0012 naming), not
+    # the caller's token under the old HAL0_BEARER_TOKEN name (#2372).
+    assert "HAL0_MCP_TOKEN=hal0_tok_xyz" in body
+    assert "HAL0_BEARER_TOKEN" not in body
+    assert "caller-token" not in body
 
 
-def test_install_omits_bearer_when_no_token_passed(
+def test_install_omits_token_when_no_service_key(
     driver: HermesDriver,
     tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auth-disabled dev installs don't surface a token — env file
-    must not include the HAL0_BEARER_TOKEN line in that case."""
+    """Auth-disabled dev installs have no box service key — the env file
+    must not carry a token line in that case."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": None)
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token=None)
 
     env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
     body = env_file.read_text(encoding="utf-8")
+    assert "HAL0_MCP_TOKEN" not in body
     assert "HAL0_BEARER_TOKEN" not in body
 
 
@@ -225,18 +244,21 @@ def test_install_omits_bearer_when_no_token_passed(
 def test_install_rerun_overwrites_env_file(
     driver: HermesDriver,
     tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-running install with a fresh token rewrites the env file
+    """Re-running install after a key rotation rewrites the env file
     atomically; no append/dup behaviour."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": "tok-1")
     driver._runner = _FakeRunner()  # type: ignore[assignment]
-    driver.install(bearer_token="tok-1")
+    driver.install(bearer_token=None)
     env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
 
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": "tok-2")
     driver._runner = _FakeRunner()  # type: ignore[assignment]
-    driver.install(bearer_token="tok-2")
+    driver.install(bearer_token=None)
     body = env_file.read_text(encoding="utf-8")
-    assert "HAL0_BEARER_TOKEN=tok-2" in body
-    assert "HAL0_BEARER_TOKEN=tok-1" not in body
+    assert "HAL0_MCP_TOKEN=tok-2" in body
+    assert "tok-1" not in body
 
 
 # ── uninstall removes env file ───────────────────────────────────────────────
