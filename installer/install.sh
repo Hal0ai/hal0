@@ -2984,7 +2984,6 @@ fi
 # schema migration below: the reset's gate IS meta.schema_version, and letting
 # the migration stamp it forward first would make the gate unreadable on the
 # very box it exists for.
-PROFILES_TOML="${ETC_DIR}/profiles.toml"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping profile catalog reset (no system writes)"
 else

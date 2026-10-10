@@ -122,6 +122,7 @@ esac
 CHECK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hal0-release-check.XXXXXX")"
 HAL0_CHECK_HOME="${CHECK_TMPDIR}/hal0-home"
 mkdir -p "${HAL0_CHECK_HOME}"
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
 	rm -rf "${CHECK_TMPDIR}"
 }
@@ -158,9 +159,11 @@ step "2. UI build"
 
 if [[ -d "${REPO_ROOT}/ui" ]]; then
 	if command -v npm &>/dev/null; then
-		(cd "${REPO_ROOT}/ui" && npm ci --silent && npm run build --silent) &&
-			info "ui: npm run build succeeded" ||
+		if (cd "${REPO_ROOT}/ui" && npm ci --silent && npm run build --silent); then
+			info "ui: npm run build succeeded"
+		else
 			fail "ui build failed"
+		fi
 	else
 		warn "npm not installed — skipping UI build check"
 	fi
@@ -194,7 +197,7 @@ if command -v shellcheck &>/dev/null; then
 		"${REPO_ROOT}/.superset/run.sh" \
 		"${REPO_ROOT}/.superset/teardown.sh"; do
 		if [[ -f "${SCRIPT}" ]]; then
-			if shellcheck "${SCRIPT}" 2>&1; then
+			if shellcheck -x -P SCRIPTDIR "${SCRIPT}" 2>&1; then
 				info "shellcheck OK: $(basename "${SCRIPT}")"
 			else
 				fail "shellcheck: errors in $(basename "${SCRIPT}")"

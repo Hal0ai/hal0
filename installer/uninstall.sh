@@ -399,9 +399,11 @@ do
 done
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
-    systemctl daemon-reload 2>/dev/null \
-        && info "systemctl daemon-reload done" \
-        || soft_fail "systemctl daemon-reload failed"
+    if systemctl daemon-reload 2>/dev/null; then
+        info "systemctl daemon-reload done"
+    else
+        soft_fail "systemctl daemon-reload failed"
+    fi
 fi
 
 # ── Remove code + venvs ───────────────────────────────────────────────────────
