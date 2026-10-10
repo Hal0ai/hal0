@@ -579,3 +579,98 @@ def test_unparseable_flags_on_an_unregistered_slot_do_not_abort_planning():
         apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
     assert [m for m, _u in reg.updates] == ["a-model"]
     assert "SKIP model 'b-ghost' <- slots=['two']: not in registry" in exc.value.lines
+
+
+# ── #2476: an unstamped model launching on its slot's profile template ───────
+#
+# A slot that carries nothing of its own (no extra_args, parallel, -ngl or chat
+# template) and names a profile, bound to a model with no tune text and no
+# profile provenance, ALREADY launches on that profile's flags: the
+# ``slot_profile_template`` segment (providers/container.py, #1787) layers them
+# in at launch. Folding them into the model would change nothing at launch, so
+# such a slot is v1.0 shape, not pending work. A fresh install's seeded
+# ``brain`` slot has exactly this shape once install.sh binds its pulled model.
+
+_BRAIN_FLAGS = "--jinja -fa auto -b 2048 -ub 512 --temp 0.7"
+
+
+def _bare_slot(name: str, model: str, profile: str = "brain") -> dict:
+    """A seed-shaped slot (as ``model_dump`` emits it): a profile and nothing else."""
+    return {
+        "name": name,
+        "profile": profile,
+        "n_gpu_layers": -1,
+        "parallel": None,
+        "chat_template": None,
+        "model": {"default": model, "context_size": 65536, "n_gpu_layers": -1},
+        "extra": {},
+    }
+
+
+def test_bare_profile_slot_on_unstamped_model_is_not_pending():
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "lfm2.5-2.6b")],
+        {"brain": _BRAIN_FLAGS},
+        {"lfm2.5-2.6b": {"tokenizer_repo": "LiquidAI/LFM2.5-2.6B-GGUF"}},
+    )
+    assert plan.folds == [] and plan.refusals == [] and plan.missing == []
+    lines = apply_fold_plan(plan, _FakeRegistry(), dry_run=True)
+    # The updater's probe treats only "skip "-prefixed lines as converged.
+    assert lines and all(line.startswith("skip ") for line in lines)
+
+
+def test_bare_profile_slot_on_model_with_no_defaults_is_not_pending():
+    plan = plan_slot_flags_fold([_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": None})
+    assert plan.folds == [] and plan.refusals == []
+
+
+def test_bare_slots_with_different_profiles_on_one_unstamped_model_do_not_refuse():
+    """Each launches on its own profile template, which is valid v1.0 shape."""
+    plan = plan_slot_flags_fold(
+        [_bare_slot("a", "m", profile="brain"), _bare_slot("b", "m", profile="chat")],
+        {"brain": _BRAIN_FLAGS, "chat": "-fa on"},
+        {"m": None},
+    )
+    assert plan.folds == [] and plan.refusals == []
+
+
+def test_slot_extra_args_on_unstamped_model_is_still_pending():
+    """Slot extra_args are inert at launch: a genuinely legacy shape."""
+    slot = _bare_slot("brain", "m")
+    slot["extra"] = {"server": {"extra_args": "-fa on"}}
+    plan = plan_slot_flags_fold([slot], {"brain": _BRAIN_FLAGS}, {"m": None})
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_slot_parallel_on_unstamped_model_is_still_pending():
+    slot = _bare_slot("brain", "m")
+    slot["parallel"] = 4
+    plan = plan_slot_flags_fold([slot], {"brain": _BRAIN_FLAGS}, {"m": None})
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_slot_chat_template_on_unstamped_model_is_still_pending():
+    slot = _bare_slot("brain", "m")
+    slot["chat_template"] = "chatml"
+    plan = plan_slot_flags_fold([slot], {"brain": _BRAIN_FLAGS}, {"m": None})
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_profile_on_model_with_its_own_tune_text_is_still_pending():
+    """The template only applies to a model with NO tune text, so profile flags
+    the model's own tune does not carry are dropped at launch: legacy."""
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": {"extra_args": "--mlock"}}
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_bare_slot_sharing_a_model_with_a_legacy_slot_is_planned_as_before():
+    """A fold writes model tune text, which switches the template off for every
+    slot on that model, so a mixed model is planned exactly as before."""
+    legacy = _bare_slot("old", "m")
+    legacy["extra"] = {"server": {"extra_args": "-fa on"}}
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m"), legacy], {"brain": _BRAIN_FLAGS}, {"m": None}
+    )
+    assert [r.model_id for r in plan.refusals] == ["m"]

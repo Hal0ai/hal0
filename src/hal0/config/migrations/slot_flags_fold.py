@@ -20,6 +20,13 @@ bench-tuned ``flags`` used to layer in at launch. This migrator materializes
 that effective tune into the bound model's ``defaults`` so the model owns its
 full launch tune as plain text — the copy-on-stamp end state.
 
+One exception is already converged (#2476). A model with no tune text and no
+profile provenance (what every pull registers) still launches on its slot's
+profile flags through the ``slot_profile_template`` segment (#1787). A slot
+that names a profile and carries no launch surface of its own is therefore
+skipped, not folded: a fresh install's seeded slots have exactly this shape, and
+counting them made every new box report itself as pre-v1.0.
+
 DEPLOY-WINDOW GATED. Per spec §5 the execution rides the P2-config/deploy
 window, AFTER SLOT increment B. It is NOT wired into the automatic
 ``hal0.config.migrations`` schema-version runner and it does NOT run on boot.
@@ -338,6 +345,41 @@ def compute_folded_tune(
     return FoldedTune(extra_args=extra_args, n_gpu_layers=ngl, chat_template=chat_template)
 
 
+def _launches_on_profile_template(
+    slot_cfg: Mapping[str, Any], model_defaults: Mapping[str, Any] | None
+) -> bool:
+    """True when the slot already launches on its profile as the model's tune.
+
+    This mirrors the launch gate for the ``slot_profile_template`` segment in
+    :func:`hal0.providers.container._resolve_llama_scalars` (#1787). The slot
+    names a profile, and the bound model has no tune text (``defaults.
+    extra_args``) and no profile provenance (``defaults.profile``). In that
+    state the launch path layers the profile's flags in under the model tune.
+    Folding them into ``defaults.extra_args`` would change nothing at launch,
+    so the slot is already in v1.0 shape.
+
+    The slot must also carry no launch surface of its own (``[server].
+    extra_args``, ``parallel``, ``[model].n_gpu_layers``, ``chat_template``).
+    Those are what the fold exists to rescue, so such a slot is still genuinely
+    pre-v1.0. ``context_size`` is not counted: the fold discards it anyway.
+
+    This is the shape a fresh install's seeded slots have once install.sh binds
+    a pulled model, because a pull never stamps ``defaults`` (#2476).
+    """
+    if not slot_cfg.get("profile"):
+        return False
+    md = model_defaults if isinstance(model_defaults, Mapping) else {}
+    md_extra = md.get("extra_args")
+    if md_extra and str(md_extra).strip():
+        return False
+    if md.get("profile"):
+        return False
+    if _chat_template_or_none(slot_cfg.get("chat_template")) is not None:
+        return False
+    slot_extra_tokens, slot_ngl, _ctx = _slot_flag_tokens(slot_cfg)
+    return not slot_extra_tokens and slot_ngl is None
+
+
 def _merge_new_defaults(existing: Mapping[str, Any] | None, folded: FoldedTune) -> dict[str, Any]:
     """Produce the complete new ``defaults`` dict (existing ⊕ fold outputs)."""
     out: dict[str, Any] = dict(existing) if isinstance(existing, Mapping) else {}
@@ -388,6 +430,11 @@ def plan_slot_flags_fold(
     # both say name = "x"), so a name set could let a provider-lane slot
     # vouch for a llama-server slot's miss.
     lane_by_model: dict[str, list[bool]] = {}
+    # One flag per registered bound slot: does it already launch on its
+    # profile template (#2476)? A model is left alone only when EVERY slot on
+    # it does — a fold writes model tune text, which switches the template off
+    # for all of them.
+    template_by_model: dict[str, list[bool]] = {}
     unregistered: dict[str, list[str]] = {}
     for slot_cfg in slots:
         model_tbl = slot_cfg.get("model")
@@ -409,6 +456,9 @@ def plan_slot_flags_fold(
         profile = str(profile) if profile else None
         pflags = profile_flags.get(profile, "") if profile else ""
         folded = compute_folded_tune(slot_cfg, pflags, model_defaults.get(model_id))
+        template_by_model.setdefault(model_id, []).append(
+            _launches_on_profile_template(slot_cfg, model_defaults.get(model_id))
+        )
         by_model.setdefault(model_id, []).append(
             SlotRef(slot_name=slot_name, model_id=model_id, profile=profile, folded=folded)
         )
@@ -425,6 +475,10 @@ def plan_slot_flags_fold(
 
     # 2b. Resolve each registered model: sole/consensus → fold; divergent → refuse.
     for model_id, refs in sorted(by_model.items()):
+        if all(template_by_model[model_id]):
+            # Launch already reads the profile as this model's tune (#2476).
+            plan.skipped.append((model_id, "unstamped, launches on its slot profile template"))
+            continue
         distinct = {r.folded for r in refs}
         existing = model_defaults.get(model_id)
         if len(distinct) > 1:
