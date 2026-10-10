@@ -80,8 +80,10 @@ No lane sets `-ub`: every cell runs at llama-bench's own internal ubatch default
 if an operator wants one).
 
 `hal0.bench.harness.default_lanes(tier)` picks `cpu` alone when the device resolver
-reports the CPU tier, else both GPU lanes — the tier-scoped default a suite's
-`[matrix].lanes = ["default"]` (or an explicit lane list) can override. Which cells run
+reports the CPU tier, else the GPU lanes this box can run — `rocm` only when a ROCm lane is
+present (`/dev/kfd` plus a render node), `vulkan_radv` only when the pinned image supports
+it AND a render node is usable (none usable: empty, the planner skips loudly) — the
+tier-scoped default a suite's `[matrix].lanes = ["default"]` (or an explicit lane list) can override. Which cells run
 at all, and under what config/depth grid, is declared in a suite TOML under
 `/etc/hal0/bench/suites/`, not in this seam.
 

@@ -124,14 +124,19 @@ class TestBenchLaneIsImageGated:
 
         assert lane_is_supported("vulkan_radv") is True
 
-    def test_default_lanes_drops_the_vulkan_lane_on_a_broken_pin(self, broken_pin) -> None:
+    def test_default_lanes_drops_the_vulkan_lane_on_a_broken_pin(
+        self, broken_pin, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
         from hal0.bench.devices import TIER_AMD, TIER_NVIDIA
         from hal0.bench.harness import default_lanes
 
         assert default_lanes(TIER_AMD) == ["rocm"]
         assert default_lanes(TIER_NVIDIA) == ["rocm"]
 
-    def test_default_lanes_includes_it_on_the_fixed_pin(self, fixed_pin) -> None:
+    def test_default_lanes_includes_it_on_the_fixed_pin(self, fixed_pin, monkeypatch) -> None:
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
         from hal0.bench.devices import TIER_AMD
         from hal0.bench.harness import default_lanes
 

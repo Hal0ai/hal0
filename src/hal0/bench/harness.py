@@ -291,10 +291,36 @@ def default_lanes(tier: str) -> list[str]:
     It sweeps AFTER ``rocm``. Not a throughput claim — the §3-C matrix
     measures Vulkan ahead of ROCm on both metrics on the reference hardware.
     ROCm goes first because it is the lane with the long trend history, so an
-    interrupted sweep leaves the continuous series intact."""
+    interrupted sweep leaves the continuous series intact.
+
+    ``rocm`` only leads where the box has a ROCm lane
+    (:func:`hal0.providers._gpu.rocm_lane_present`, #2511): elsewhere its cells
+    die at once, so it is dropped. ``vulkan_radv`` needs a runner image that can
+    serve it AND a usable render node (:func:`vulkan_lane_usable`). A GPU tier
+    with neither returns ``[]`` — no usable GPU lane — rather than silently
+    swapping in the hours-long CPU lane; the planner reports that loudly.
+    Lanes named explicitly are not filtered here."""
     if tier == TIER_CPU:
         return ["cpu"]
-    return ["rocm", "vulkan_radv"] if lane_is_supported("vulkan_radv") else ["rocm"]
+    from hal0.providers._gpu import rocm_lane_present
+
+    lanes = ["rocm"] if rocm_lane_present(for_uid=0) else []
+    if vulkan_lane_usable():
+        lanes.append("vulkan_radv")
+    return lanes
+
+
+def vulkan_lane_usable() -> bool:
+    """Can the Vulkan lane run HERE: a supported image AND a render node?
+
+    Bench cells run rootful through ``hal0-benchctl``, so the render node is
+    probed for uid 0 — the same identity semantics as ``rocm_lane_present``
+    (#2511). The image check alone would pick a lane a render-node-less box
+    cannot open.
+    """
+    from hal0.providers._gpu import render_node_present
+
+    return lane_is_supported("vulkan_radv") and render_node_present(for_uid=0)
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

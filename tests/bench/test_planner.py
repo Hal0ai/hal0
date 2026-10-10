@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from hal0.bench.planner import _model_caps, plan
+from hal0.bench.planner import NO_GPU_LANE, _lane_is_plannable, _model_caps, _resolve_lane, plan
 from hal0.bench.schema import Host, Outcome, Record
 from hal0.bench.store import Store
 from hal0.bench.suites import suite_from_dict
@@ -329,3 +329,59 @@ class TestModelCapsTypedFields:
         narrow = _model_caps({"capabilities": ["chat"]})
         wide = _model_caps({"capabilities": ["chat"], "capability_flags": {"tool_calling": True}})
         assert narrow <= wide
+
+
+class TestResolveLaneWithoutRocm:
+    """#2511: the default lane must not be ``rocm`` on a box with no ROCm lane."""
+
+    @staticmethod
+    def _box(monkeypatch, *, rocm: bool, vulkan: bool, render_node: bool = True) -> None:
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: rocm)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: render_node)
+        monkeypatch.setattr(
+            "hal0.bench.harness.lane_is_supported",
+            lambda lane: vulkan if lane == "vulkan_radv" else True,
+        )
+
+    def test_rocm_present_keeps_rocm_for_vulkan_backend(self, monkeypatch):
+        self._box(monkeypatch, rocm=True, vulkan=True)
+        assert _resolve_lane({"backends": ["vulkan"]}, "default") == "rocm"
+        assert _resolve_lane({"default_lane": "vulkan"}, "default") == "rocm"
+
+    def test_rocm_present_keeps_rocm_with_no_hints(self, monkeypatch):
+        self._box(monkeypatch, rocm=True, vulkan=True)
+        assert _resolve_lane({}, "default") == "rocm"
+
+    def test_rocm_absent_vulkan_backend_resolves_to_vulkan(self, monkeypatch):
+        self._box(monkeypatch, rocm=False, vulkan=True)
+        assert _resolve_lane({"backends": ["vulkan"]}, "default") == "vulkan_radv"
+        assert _resolve_lane({"default_lane": "vulkan"}, "default") == "vulkan_radv"
+
+    def test_rocm_absent_no_hints_is_a_supported_lane(self, monkeypatch):
+        self._box(monkeypatch, rocm=False, vulkan=True)
+        assert _resolve_lane({}, "default") == "vulkan_radv"
+        self._box(monkeypatch, rocm=False, vulkan=False)
+        assert _resolve_lane({}, "default") == NO_GPU_LANE
+
+    def test_no_render_node_with_a_vulkan_image_is_not_a_vulkan_lane(self, monkeypatch):
+        """B2: the image check alone must not pick vulkan_radv."""
+        self._box(monkeypatch, rocm=False, vulkan=True, render_node=False)
+        assert _resolve_lane({"backends": ["vulkan"]}, "default") == NO_GPU_LANE
+        assert _resolve_lane({}, "default") == NO_GPU_LANE
+
+    def test_no_usable_gpu_lane_is_skipped_loudly(self, monkeypatch, capsys):
+        """B3: no cpu fallback; the existing loud-skip path explains it."""
+        self._box(monkeypatch, rocm=False, vulkan=True, render_node=False)
+        assert _lane_is_plannable(NO_GPU_LANE, suite_id="roster") is False
+        err = capsys.readouterr().err
+        assert "no usable GPU lane" in err and "roster" in err
+
+    def test_real_lanes_stay_plannable(self, monkeypatch):
+        self._box(monkeypatch, rocm=True, vulkan=True)
+        assert _lane_is_plannable("rocm", suite_id="roster") is True
+
+    def test_explicit_lane_is_unchanged(self, monkeypatch):
+        self._box(monkeypatch, rocm=False, vulkan=False)
+        assert _resolve_lane({"backends": ["vulkan"]}, "rocm") == "rocm"
+        assert _resolve_lane({}, "vulkan_radv") == "vulkan_radv"
+        assert _resolve_lane({"default_lane": "rocm"}, "default") == "rocm"
