@@ -1145,3 +1145,47 @@ trap 'hal0_report_on_exit "$?"' EXIT
         assert src.index("hal0_report_on_exit") < src.index(
             "Refusing to install from an unverified"
         )
+
+
+class TestReportNameIsUnpredictable:
+    """#2407: the report sits next to the install log, which is /tmp when the
+    log fell back there. A timestamped ``hal0-install-report-<ts>.txt``
+    written with a plain ``>`` follows a symlink a local user planted at that
+    name. The report is now created by ``mktemp`` first, so the plant is never
+    opened, and the path printed back is the real file."""
+
+    def test_a_planted_symlink_at_the_old_name_is_not_followed(self, tmp_path: Path) -> None:
+        stamp = "20990101-000000"
+        log = tmp_path / "hal0-install-abc123.log"
+        log.write_text("log\n")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        victim = elsewhere / "victim"
+        victim.write_text("precious\n")
+        planted = tmp_path / f"hal0-install-report-{stamp}.txt"
+        planted.symlink_to(victim)
+        # Fail redaction so the fail-closed stub branch writes the report: that
+        # branch opened the report path with a plain `>` redirect.
+        script = f"""
+IFS=$'\\n\\t'
+source "{FAILURE_REPORT}"
+date() {{ echo "{stamp}"; }}
+_hal0_report_redact_file() {{ return 1; }}
+export HAL0_INSTALL_LOG="{log}"
+report="$(hal0_write_failure_report "Pre-flight checks")"
+echo "report=$report"
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert victim.read_text() == "precious\n"
+        assert planted.is_symlink()
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("report="))
+        report = Path(line.removeprefix("report="))
+        assert report != planted
+        assert report.parent == tmp_path
+        assert report.name.startswith(f"hal0-install-report-{stamp}-")
+        assert report.name.endswith(".txt")
+        assert report.is_file() and not report.is_symlink()
+        assert (report.stat().st_mode & 0o777) == 0o600
+        assert "Phase: Pre-flight checks" in report.read_text()

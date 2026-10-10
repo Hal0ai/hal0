@@ -74,7 +74,7 @@ hal0_install_log_init || warn "could not open an install log — continuing with
 
 # Failure report (installer/lib/failure-report.sh) — the ERR trap below
 # calls hal0_write_failure_report to leave a redacted, shareable
-# hal0-install-report-<ts>.txt next to the install log on any abort.
+# hal0-install-report-<ts>-XXXXXX.txt next to the install log on any abort.
 # shellcheck source=lib/failure-report.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/failure-report.sh"
 
@@ -2821,7 +2821,6 @@ else
     # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
     #    succeeding later — GPU-only hal0 still ships fine.
-    FLM_DEB_TMP="/tmp/fastflowlm_${FLM_DEB_VERSION}.deb"
     # 0 when the host-FLM gate above found no upstream .deb for this distro —
     # skip download+install entirely (no noisy exit).
     NEED_FLM_INSTALL="${FLM_HOST_LIBS_OK}"
@@ -2831,11 +2830,29 @@ else
         NEED_FLM_INSTALL=0
     fi
 
+    # The .deb lands in a fresh mktemp dir, never a fixed /tmp name (#2407):
+    # root downloads, hashes, then apt-installs this file, so a guessable
+    # path let a local user plant a symlink (clobber any file via curl -o)
+    # or pre-own the file and swap it between the SHA-256 check and apt.
+    # The dir is root-owned and not world-writable; 0755 only so apt's
+    # unprivileged _apt user can read the .deb without a sandbox warning.
+    FLM_DEB_DIR=""
+    FLM_DEB_TMP=""
+    if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
+        if FLM_DEB_DIR="$(mktemp -d /tmp/hal0-flm-XXXXXX 2>/dev/null)"; then
+            chmod 0755 "${FLM_DEB_DIR}" 2>/dev/null || true
+            FLM_DEB_TMP="${FLM_DEB_DIR}/fastflowlm_${FLM_DEB_VERSION}.deb"
+        else
+            FLM_DEB_DIR=""
+            warn "could not create a temp dir for the FastFlowLM .deb — skipping FLM install"
+            NEED_FLM_INSTALL=0
+        fi
+    fi
+
     if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
         # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
         # Download to /tmp so a re-run doesn't keep a stale copy in the
-        # install tree. -o to a deterministic path so the SHA-256 check
-        # below can find it.
+        # install tree. Every exit below removes the whole temp dir.
         if curl -fsSL -o "${FLM_DEB_TMP}" "${FLM_DEB_URL}"; then
             # SHA-256 verify BEFORE dpkg installs it. An all-zeroes
             # placeholder pin means the digest was never looked up;
@@ -2847,19 +2864,20 @@ else
                 warn "  observed: ${ACTUAL_SHA}"
                 if [[ "${HAL0_SKIP_FLM_SHA:-0}" != "1" ]]; then
                     warn "  skipping FLM install (set HAL0_SKIP_FLM_SHA=1 to accept the placeholder)"
-                    rm -f "${FLM_DEB_TMP}"
+                    rm -rf "${FLM_DEB_DIR}"
                     NEED_FLM_INSTALL=0
                 fi
             elif [[ "${ACTUAL_SHA}" != "${FLM_DEB_SHA256}" ]]; then
                 warn "FLM .deb SHA-256 mismatch — refusing to install"
                 warn "  expected: ${FLM_DEB_SHA256}"
                 warn "  observed: ${ACTUAL_SHA}"
-                rm -f "${FLM_DEB_TMP}"
+                rm -rf "${FLM_DEB_DIR}"
                 NEED_FLM_INSTALL=0
             fi
         else
             warn "FLM .deb download failed (${FLM_DEB_URL})"
             warn "  NPU paths will be unavailable until you install FastFlowLM ${FLM_DEB_VERSION} manually"
+            rm -rf "${FLM_DEB_DIR}"
             NEED_FLM_INSTALL=0
         fi
     fi
@@ -2869,7 +2887,7 @@ else
         # apt (cleaner than `dpkg -i` + manual `apt-get -f install`).
         if ui_spinner_run "Installing FastFlowLM ${FLM_DEB_VERSION}" \
             apt-get -o DPkg::Lock::Timeout=120 install -y "${FLM_DEB_TMP}"; then
-            rm -f "${FLM_DEB_TMP}"
+            rm -rf "${FLM_DEB_DIR}"
             # Smoke-test the binary. `flm validate` returns 0 when the
             # NPU runtime is reachable AND the binary is wired up — it's
             # the upstream-recommended health check. Soft on failure:
@@ -2887,7 +2905,7 @@ else
             fi
         else
             warn "FastFlowLM ${FLM_DEB_VERSION} install failed — NPU paths will be unavailable"
-            rm -f "${FLM_DEB_TMP}"
+            rm -rf "${FLM_DEB_DIR}"
         fi
     fi
 fi

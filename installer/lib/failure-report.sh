@@ -2,7 +2,7 @@
 # installer/lib/failure-report.sh
 #
 # Purpose: On installer failure, write one bounded, shareable
-#          `hal0-install-report-<ts>.txt` an operator can attach to a bug
+#          `hal0-install-report-<ts>-XXXXXX.txt` an operator can attach to a bug
 #          report — redacted env, `systemctl --failed`, `podman info` /
 #          `podman images`, port owners, hal0 unit status, the redacted
 #          api.env / hal0.toml, the hardware summary, a log tail, and the
@@ -765,7 +765,15 @@ hal0_write_failure_report() (
         dir="/tmp"
     fi
     mkdir -p "$dir" 2>/dev/null || dir="/tmp"
-    report="${dir}/hal0-install-report-${stamp}.txt"
+    # mktemp, never a bare `>` on a timestamped name (#2407): dir is /tmp
+    # whenever the install log fell back there, and a plain redirect follows
+    # a symlink a local user planted at a guessable name. mktemp opens with
+    # O_EXCL under a random suffix (0600); the stub and the `mv -f` below
+    # then only ever touch a file this run created. A mktemp that rejects a
+    # suffix after the X's (busybox) gets the suffix-less template.
+    report="$(mktemp "${dir}/hal0-install-report-${stamp}-XXXXXX.txt" 2>/dev/null)" ||
+        report="$(mktemp "${dir}/hal0-install-report-${stamp}-XXXXXX" 2>/dev/null)" ||
+        exit 1
 
     work="$(mktemp -d "${dir}/.hal0-install-report.XXXXXX" 2>/dev/null)" || work=""
     if [[ -n "$work" ]]; then
@@ -794,5 +802,6 @@ hal0_write_failure_report() (
         printf '%s\n' "$report"
         exit 0
     fi
+    rm -f "$report" 2>/dev/null || true
     exit 1
 )

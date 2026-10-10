@@ -1572,11 +1572,19 @@ _node_autoinstall() {
     info "node >=${NODE_MIN_MAJOR} not found — attempting to install Node ${NODE_MIN_MAJOR} LTS (${fam})"
     case "${fam}" in
         debian)
-            if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" -o /tmp/hal0-nodesource-setup.sh 2>/dev/null \
-                && DEBIAN_FRONTEND=noninteractive bash /tmp/hal0-nodesource-setup.sh >/dev/null 2>&1; then
+            # mktemp, not a fixed /tmp name (#2407): this runs as root and
+            # then EXECUTES the file, so a guessable path let a local user
+            # plant a symlink (clobber) or pre-own the file and swap its
+            # contents before `bash` ran it. mktemp's O_EXCL file is ours.
+            local setup
+            setup="$(mktemp /tmp/hal0-nodesource-setup-XXXXXX.sh 2>/dev/null)" \
+                || setup="$(mktemp /tmp/hal0-nodesource-setup-XXXXXX 2>/dev/null)" \
+                || return 1
+            if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" -o "${setup}" 2>/dev/null \
+                && DEBIAN_FRONTEND=noninteractive bash "${setup}" >/dev/null 2>&1; then
                 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q nodejs >/dev/null 2>&1
             fi
-            rm -f /tmp/hal0-nodesource-setup.sh
+            rm -f "${setup}"
             ;;
         fedora) dnf install -y nodejs >/dev/null 2>&1 || dnf module install -y "nodejs:${NODE_MIN_MAJOR}" >/dev/null 2>&1 ;;
         arch) pacman -S --noconfirm nodejs npm >/dev/null 2>&1 ;;

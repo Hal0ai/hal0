@@ -8,7 +8,9 @@ without touching this test process's own stdout.
 
 from __future__ import annotations
 
+import re
 import subprocess
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -177,3 +179,88 @@ hal0_install_log_init
 """
         _run(script)
         assert (existing.stat().st_mode & 0o777) == 0o600
+
+
+class TestTmpFallbackIsUnpredictable:
+    """#2407: the /tmp log used to be ``/tmp/hal0-install-<ts>.log`` opened
+    with a plain ``>`` redirect, which follows a symlink a local user planted
+    at that guessable name. It is now made by ``mktemp`` (O_EXCL, random
+    name), so a planted symlink is never opened and its target is untouched.
+
+    ``date`` is shadowed so the "old-style" name is known in advance and
+    unique to this test run."""
+
+    @staticmethod
+    def _plant(tmp_path: Path) -> tuple[str, Path, Path]:
+        stamp = f"pytest{uuid.uuid4().hex[:12]}"
+        victim = tmp_path / "victim"
+        victim.write_text("precious\n")
+        victim.chmod(0o644)
+        planted = Path(f"/tmp/hal0-install-{stamp}.log")
+        planted.unlink(missing_ok=True)
+        planted.symlink_to(victim)
+        return stamp, victim, planted
+
+    @staticmethod
+    def _init(stamp: str, uid: int, primary: Path | None) -> subprocess.CompletedProcess[str]:
+        override = (
+            f"hal0_install_log_path() {{ printf '%s/install-test.log\\n' \"{primary}\"; }}"
+            if primary is not None
+            else ""
+        )
+        script = f"""
+IFS=$'\\n\\t'
+umask 022
+source "{LOGGING_SH}"
+id() {{ echo {uid}; }}
+date() {{ echo "{stamp}"; }}
+{override}
+hal0_install_log_init
+echo "rc=$?"
+echo "log=$HAL0_INSTALL_LOG"
+echo "line written after init"
+"""
+        return _run(script)
+
+    @staticmethod
+    def _log(proc: subprocess.CompletedProcess[str]) -> Path:
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        return Path(line.removeprefix("log="))
+
+    def _check(self, proc: subprocess.CompletedProcess[str], victim: Path, planted: Path) -> None:
+        log = self._log(proc)
+        try:
+            assert "rc=0" in proc.stdout, proc.stdout + proc.stderr
+            # The symlink's target was neither truncated nor appended to.
+            assert victim.read_text() == "precious\n"
+            assert (victim.stat().st_mode & 0o777) == 0o644
+            # The log is a fresh regular file at a mktemp name, not the plant.
+            assert log != planted
+            assert re.fullmatch(r"/tmp/hal0-install-[A-Za-z0-9]{6}\.log", str(log)), log
+            assert log.is_file() and not log.is_symlink()
+            assert (log.stat().st_mode & 0o777) == 0o600
+            assert "line written after init" in log.read_text()
+        finally:
+            if str(log).startswith("/tmp/hal0-install-") and log != planted:
+                log.unlink(missing_ok=True)
+
+    def test_root_fallback_does_not_follow_a_planted_symlink(self, tmp_path: Path) -> None:
+        stamp, victim, planted = self._plant(tmp_path)
+        try:
+            proc = self._init(stamp, 0, _unwritable_even_for_root(tmp_path))
+            self._check(proc, victim, planted)
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_non_root_log_does_not_follow_a_planted_symlink(self, tmp_path: Path) -> None:
+        stamp, victim, planted = self._plant(tmp_path)
+        try:
+            proc = self._init(stamp, 1000, None)
+            self._check(proc, victim, planted)
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_a_writable_primary_is_still_preferred(self, tmp_path: Path) -> None:
+        fake_log_dir = tmp_path / "var-log-hal0"
+        proc = self._init("unused", 0, fake_log_dir)
+        assert self._log(proc) == fake_log_dir / "install-test.log", proc.stdout
