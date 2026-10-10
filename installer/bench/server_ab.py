@@ -119,8 +119,11 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 def _is_loopback_url(url: str) -> bool:
     try:
-        host = urllib.parse.urlsplit(url).hostname
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
     except ValueError:
+        return False
+    if parts.username is not None:  # userinfo is never loopback (#2499)
         return False
     return host in _LOOPBACK_HOSTS
 

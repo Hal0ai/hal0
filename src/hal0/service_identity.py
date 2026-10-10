@@ -72,6 +72,22 @@ def keys_from_api_env() -> dict[str, str]:
     return found
 
 
+def env_service_key(prefer: str = "admin") -> str | None:
+    """The key the operator set explicitly in the process env, or ``None``.
+
+    ``HAL0_ADMIN_KEY`` / ``HAL0_CLIENT_KEY`` only, ``prefer`` tier first — no
+    api.env fallback. Unlike a key discovered on disk, an exported key is a
+    deliberate operator choice, so a caller may send it to a non-loopback
+    target (#2499).
+    """
+    first, other = _tier_order(prefer)
+    for tier in (first, other):
+        value = os.environ.get(_KEY_ENV[tier], "").strip()
+        if value:
+            return value
+    return None
+
+
 def service_key(prefer: str = "admin") -> str | None:
     """Resolve the box service key, preferring the ``prefer`` tier.
 
@@ -79,11 +95,10 @@ def service_key(prefer: str = "admin") -> str | None:
     fallback tier keeps a single-key box working; ``None`` when nothing is
     discoverable.
     """
+    explicit = env_service_key(prefer=prefer)
+    if explicit:
+        return explicit
     first, other = _tier_order(prefer)
-    for tier in (first, other):
-        value = os.environ.get(_KEY_ENV[tier], "").strip()
-        if value:
-            return value
     file_keys = keys_from_api_env()
     for tier in (first, other):
         value = file_keys.get(_KEY_ENV[tier])
@@ -109,12 +124,18 @@ _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 def is_loopback_url(url: str) -> bool:
     """True only when ``url``'s host is ``127.0.0.1``, ``::1`` or ``localhost``.
 
-    A malformed URL, an empty one, or one with no host is not loopback."""
+    A malformed URL, an empty one, or one with no host is not loopback. Nor
+    is one carrying userinfo (``http://evil@127.0.0.1:8080``): a loopback
+    host is never addressed that way by hal0, and such a URL reads as the
+    ``evil`` host to a human or a lenient parser (#2499)."""
     import urllib.parse
 
     try:
-        host = urllib.parse.urlsplit(url).hostname
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
     except ValueError:
+        return False
+    if parts.username is not None:
         return False
     return host in _LOOPBACK_HOSTS
 
@@ -336,7 +357,10 @@ def refresh_hindsight_llm_env() -> bool:
 
 
 __all__ = [
+    "attach_service_auth",
+    "env_service_key",
     "generate_service_key",
+    "is_loopback_url",
     "key_fingerprint",
     "keys_from_api_env",
     "refresh_hindsight_llm_env",

@@ -30,7 +30,7 @@ import time
 import httpx
 import typer
 
-from hal0.cli._shared import _api_base, _auth_headers
+from hal0.cli._shared import _api_base, _auth_headers, auth_hint
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +67,9 @@ async def _dashboard_url() -> str:
     """
     base = _api_base()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0), headers=_auth_headers()) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0), headers=_auth_headers(base), follow_redirects=False
+        ) as client:
             resp = await client.get(f"{base}/api/config/urls")
             resp.raise_for_status()
             api = str(resp.json().get("api") or "").strip()
@@ -250,7 +252,9 @@ async def _apply_via_api(sel) -> None:
     url = f"{_api_base()}/api/install/apply-selections"
     timeout = httpx.Timeout(SETUP_HTTP_TIMEOUT_SECS)
     t0 = time.monotonic()
-    async with httpx.AsyncClient(timeout=timeout, headers=_auth_headers()) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout, headers=_auth_headers(url), follow_redirects=False
+    ) as client:
         resp = await client.post(url, json=payload)
     elapsed = time.monotonic() - t0
     log.info("hal0 setup apply-selections: %.1fs (status=%s)", elapsed, resp.status_code)
@@ -258,7 +262,8 @@ async def _apply_via_api(sel) -> None:
         typer.echo(
             f"hal0 setup: not authorized ({resp.status_code}) to apply via the live API "
             f"({_conflict_message(resp)}). Check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY on this box, "
-            "or re-run with hal0-api stopped to apply in-process.",
+            "or re-run with hal0-api stopped to apply in-process."
+            + auth_hint(resp.status_code, url),
             err=True,
         )
         raise typer.Exit(1)
