@@ -164,7 +164,8 @@ with the auth tiers, not instead of them.
 The agent-chat WebSocket routes carry a second, narrower gate on top of the
 MCP allowlist above: every WS upgrade is checked against an **origin
 allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default covers
-`http://hal0.local`, `http://localhost:5173`, and `http://127.0.0.1:8080`),
+`http://hal0.local`, `http://localhost:5173`, `http://localhost:8080`, and
+`http://127.0.0.1:8080`; the installer replaces it with a host-derived list),
 and an **HMAC-SHA256 session cookie** (`hal0_session`, `HttpOnly`,
 `SameSite=Lax`) is minted the first time the dashboard calls
 `GET /api/agents/{agent_id}/session/handshake` and verified on every

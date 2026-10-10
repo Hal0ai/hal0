@@ -139,6 +139,74 @@ def test_origin_rejected_cross_site() -> None:
     assert auth_mod._origin_allowed(scope) is False
 
 
+# #2327: the same-origin fallback accepts only IP-literal Hosts. A DNS name
+# can be rebound to the box by an attacker page, which then sends a matching
+# Origin/Host pair; named origins must come from the allowlist instead.
+
+
+@pytest.mark.parametrize(
+    "netloc",
+    [
+        b"rebound.attacker.example:8080",
+        b"rebound.attacker.example",
+        b"hal0box:8080",
+    ],
+)
+def test_origin_rejected_rebound_dns_name_with_origin_equal_host(
+    monkeypatch: pytest.MonkeyPatch, netloc: bytes
+) -> None:
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
+    scope = _scope(headers=[(b"origin", b"http://" + netloc), (b"host", netloc)])
+    assert auth_mod._origin_allowed(scope) is False
+
+
+@pytest.mark.parametrize(
+    "netloc",
+    [
+        b"192.168.1.50:8080",
+        b"10.0.0.7",
+        b"[fd00::50]:8080",
+        b"[::1]:8080",
+    ],
+)
+def test_origin_same_origin_ip_literal_host_allowed(
+    monkeypatch: pytest.MonkeyPatch, netloc: bytes
+) -> None:
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
+    scope = _scope(headers=[(b"origin", b"http://" + netloc), (b"host", netloc)])
+    assert auth_mod._origin_allowed(scope) is True
+
+
+def test_origin_allowlisted_named_origin_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The installer seeds http://<hostname>:<port> (hal0.install.network);
+    # a named Host passes through the allowlist, not the fallback.
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0box:8080,http://hal0.local")
+    scope = _scope(headers=[(b"origin", b"http://hal0box:8080"), (b"host", b"hal0box:8080")])
+    assert auth_mod._origin_allowed(scope) is True
+
+
+def test_origin_default_allowlist_covers_localhost_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No installer env: the dashboard at http://localhost:8080 still passes.
+    monkeypatch.delenv("HAL0_ALLOWED_ORIGINS", raising=False)
+    scope = _scope(headers=[(b"origin", b"http://localhost:8080"), (b"host", b"localhost:8080")])
+    assert auth_mod._origin_allowed(scope) is True
+
+
+def test_origin_fallback_rejects_ws_downgrade_on_wss(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same rule as the chat-proxy WS gate: a wss upgrade hal0 terminated
+    # itself only matches an https page.
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
+    headers = [(b"origin", b"http://192.168.1.50:8080"), (b"host", b"192.168.1.50:8080")]
+    wss = _scope(scope_type="websocket", headers=headers)
+    wss["scheme"] = "wss"
+    assert auth_mod._origin_allowed(wss) is False
+    ws = _scope(scope_type="websocket", headers=headers)
+    ws["scheme"] = "ws"
+    assert auth_mod._origin_allowed(ws) is True
+
+
 @pytest.fixture
 def hardened_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """A fresh app with auth ENFORCED + an admin key, isolated secret/home."""
@@ -190,6 +258,84 @@ def test_middleware_rejects_cross_site_websocket(hardened_app: TestClient) -> No
     ):
         pass
     assert excinfo.value.code == 4403
+
+
+def test_middleware_rejects_rebound_dns_name_state_change(hardened_app: TestClient) -> None:
+    # #2327: Origin netloc == Host on a DNS name is not proof of same-origin.
+    resp = hardened_app.post(
+        "/api/settings",
+        headers={
+            "Host": "rebound.attacker.example:8080",
+            "Origin": "http://rebound.attacker.example:8080",
+            "Authorization": "Bearer admin-xyz",
+        },
+        json={},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "auth.origin_forbidden"
+
+
+def test_middleware_rejects_rebound_dns_name_websocket(hardened_app: TestClient) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    with (
+        pytest.raises(WebSocketDisconnect) as excinfo,
+        # TestClient derives Host from the URL, so the authority goes there.
+        # A valid admin key means only the Origin gate can refuse the upgrade
+        # (tier auth closes with the same 4403).
+        hardened_app.websocket_connect(
+            "ws://rebound.attacker.example:8080/api/board/events",
+            headers={
+                "origin": "http://rebound.attacker.example:8080",
+                "authorization": "Bearer admin-xyz",
+            },
+        ),
+    ):
+        pass
+    assert excinfo.value.code == 4403
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("192.168.1.50:8080", "http://192.168.1.50:8080"),
+        ("[fd00::50]:8080", "http://[fd00::50]:8080"),
+        ("hal0.local", "http://hal0.local"),
+    ],
+)
+def test_middleware_allows_ip_literal_and_allowlisted_origin(
+    hardened_app: TestClient, host: str, origin: str
+) -> None:
+    resp = hardened_app.post(
+        "/api/settings",
+        headers={"Host": host, "Origin": origin, "Authorization": "Bearer admin-xyz"},
+        json={},
+    )
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_dev_open_posture_skips_origin_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Origin gate only runs when auth is enforced; dev-open is untouched.
+    from hal0.api import create_app
+
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    os.makedirs(tmp_path / "home" / "etc" / "hal0", exist_ok=True)
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
+    with TestClient(create_app()) as c:
+        resp = c.post(
+            "/api/settings",
+            headers={
+                "Host": "rebound.attacker.example:8080",
+                "Origin": "http://rebound.attacker.example:8080",
+            },
+            json={},
+        )
+    assert resp.status_code != 403, resp.text
 
 
 # ---------------------------------------------------------------------------

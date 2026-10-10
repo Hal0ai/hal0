@@ -12,7 +12,7 @@ This module fixes that for the chat-proxy WebSocket routes by:
 1. Origin allowlist on every WS upgrade. Configured via
    ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
    hal0.local hostname and dev origins (``localhost:5173`` for Vite,
-   ``127.0.0.1:8080`` for the bundled SPA). An Origin equal to the
+   ``localhost:8080``/``127.0.0.1:8080`` for the bundled SPA). An Origin equal to the
    request's own IP-literal origin (``Host`` header) also passes, so a
    LAN IP change never strands the dashboard. The check is FREE; missing
    it leaves the rest of this scheme
@@ -61,10 +61,17 @@ from starlette.websockets import WebSocket
 # (comma-separated). The default covers:
 #   - http://hal0.local         — mDNS / hosts-file alias
 #   - http://localhost:5173     — Vite dev server (UI hot-reload)
-#   - http://127.0.0.1:8080     — bundled SPA served from hal0-api
+#   - http://localhost:8080     — bundled SPA served from hal0-api
+#   - http://127.0.0.1:8080       (both loopback spellings)
+# The installer replaces this with a host-derived list
+# (hal0.install.network). ``localhost`` is listed explicitly because the
+# same-origin fallback (:func:`_is_same_origin`) accepts IP literals only
+# (#2327); a loopback name is not a rebinding vector, since browsers
+# resolve ``localhost`` locally and an attacker page cannot own that origin.
 DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
     "http://hal0.local",
     "http://localhost:5173",
+    "http://localhost:8080",
     "http://127.0.0.1:8080",
 )
 
@@ -324,6 +331,10 @@ def require_browser_auth(request: Request) -> None:
 def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
     """True iff ``origin`` is this request's own origin on an IP-literal host.
 
+    The one same-origin fallback for both Origin gates: the chat-proxy WS
+    gate (:func:`check_ws_origin_and_cookie`) and the REST/WS enforcement
+    middleware (``hal0.api.auth._origin_allowed``, #2327).
+
     This is the "box's LAN IP changed since install" case (#2277): the
     browser typed ``http://<ip>:<port>``, so it sends that as ``Origin``
     and ``<ip>:<port>`` as ``Host``. Strict on everything else:
@@ -375,8 +386,8 @@ def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
     (4403) before any frame is ever exchanged.
 
     The Origin half passes when Origin is in :func:`allowed_origins` or is
-    the request's own IP-literal origin (:func:`_is_same_origin`), a
-    narrower form of the REST Origin gate's fallback
+    the request's own IP-literal origin (:func:`_is_same_origin`), the
+    same fallback the REST Origin gate uses
     (``hal0.api.auth._origin_allowed``). Without
     it, a DHCP change to the box's LAN IP turns the install-time allowlist
     stale and the dashboard's own WS upgrade gets 4403 (#2277). A missing
