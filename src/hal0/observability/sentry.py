@@ -55,8 +55,11 @@ and transaction and:
 If scrubbing itself raises, the event is **dropped**, not sent raw.
 
 The dashboard has a twin of this policy in ``ui/src/sentry.ts``, including a
-hand-port of ``LOG_SECRET_RE``. Changing the pattern list here means changing
-it there too — a browser-side leak is just as bad as a server-side one.
+hand-port of ``LOG_SECRET_RE`` and of the shared shape pass
+(``hal0.redaction.redact_secret_shapes``). Changing the pattern list here means
+changing it there too — a browser-side leak is just as bad as a server-side
+one. ``tests/fixtures/redaction_shapes.json`` holds the cases both test suites
+share.
 
 Prompt/completion content never reaches Sentry unless it appears inside an
 exception message; that residue is what ``redact_log_line`` is for. Do not
