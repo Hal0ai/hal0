@@ -541,7 +541,7 @@ class _FakeProxy:
     hal0-api path with its stub JSON, so a remote request routed through it
     completes without touching the network."""
 
-    def __init__(self) -> None:
+    def __init__(self, host: str = "127.0.0.1") -> None:
         self.seen: list[tuple[str, str, str | None]] = []
         proxy = self
 
@@ -566,8 +566,8 @@ class _FakeProxy:
             def log_message(self, *a: object) -> None:
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.server = ThreadingHTTPServer((host, 0), Handler)
+        self.url = f"http://{host}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self) -> None:
@@ -706,8 +706,116 @@ def test_tool_eval_child_reaches_loopback_directly(api_env, stub, proxied) -> No
     assert proxy.seen == [("GET", f"{REMOTE_API}/api/models", None)]
 
 
-def test_tool_eval_no_proxy_merge() -> None:
-    merge = tool_eval._no_proxy_with_loopback
-    assert merge("") == "127.0.0.1,::1,localhost"
-    assert merge("corp.example, localhost") == "corp.example,localhost,127.0.0.1,::1"
-    assert merge("*") == "*"
+_LOOPBACK_NO_PROXY = "127.0.0.1,::1,localhost"
+
+
+@pytest.mark.parametrize(
+    ("given", "merged"),
+    [
+        ({}, _LOOPBACK_NO_PROXY),
+        ({"NO_PROXY": "mirror.corp"}, f"mirror.corp,{_LOOPBACK_NO_PROXY}"),
+        ({"no_proxy": "mirror.corp"}, f"mirror.corp,{_LOOPBACK_NO_PROXY}"),
+        (
+            {"NO_PROXY": "mirror.corp, localhost", "no_proxy": "cache.corp,mirror.corp"},
+            "mirror.corp,localhost,cache.corp,127.0.0.1,::1",
+        ),
+    ],
+)
+def test_tool_eval_no_proxy_is_one_merged_value(given, merged) -> None:
+    """Both names get the union of both variables plus loopback: urllib and
+    httpx let ``no_proxy`` shadow ``NO_PROXY``, so they must agree."""
+    env = tool_eval._with_loopback_no_proxy({"PATH": "/bin", **given})
+    assert env["NO_PROXY"] == env["no_proxy"] == merged
+    assert env["PATH"] == "/bin"
+
+
+@pytest.mark.parametrize("given", [{"NO_PROXY": "*"}, {"no_proxy": "*"}, {"NO_PROXY": "a,*"}])
+def test_tool_eval_no_proxy_star_is_left_untouched(given) -> None:
+    assert tool_eval._with_loopback_no_proxy(dict(given)) == given
+
+
+@pytest.mark.parametrize("operator_no_proxy", ["127.0.0.2", "*"])
+def test_tool_eval_child_keeps_the_operators_uppercase_no_proxy(
+    api_env, stub, proxied, monkeypatch, operator_no_proxy
+) -> None:
+    """An uppercase-only NO_PROXY (a mirror host, or ``*``) still sends that
+    host DIRECT from an httpx child; the merged lowercase copy must not
+    shadow it. 127.0.0.2 stands in for a mirror: reachable, but not on the
+    loopback allowlist."""
+    pytest.importorskip("httpx")
+    _, proxy = proxied
+    monkeypatch.setenv("NO_PROXY", operator_no_proxy)
+    mirror = _FakeProxy(host="127.0.0.2")
+    try:
+        request = tool_eval.ToolEvalRequest(
+            python_exe=sys.executable,
+            base_url=f"{stub.url}/v1",
+            model="m",
+            output_path=Path("unused.json"),
+            api_key=CLIENT_KEY,
+        )
+        env = tool_eval.build_env(request)
+        assert env is not None
+        script = f"import httpx\nhttpx.get({mirror.url + '/api/health'!r}, timeout=10)\n"
+        rc, _, err = tool_eval._default_runner([sys.executable, "-c", script], 60, env=env)
+    finally:
+        mirror.close()
+
+    assert rc == 0, err
+    assert proxy.seen == []
+    assert mirror.seen == [("GET", "/api/health", None)]
+
+
+# ── a loopback request never follows a redirect off the box (#2505) ──────────
+
+
+def test_loopback_redirect_to_a_remote_host_is_refused(api_env, stub, proxied) -> None:
+    _, proxy = proxied
+    stub.redirects = {
+        "/api/models": f"{REMOTE_API}/api/models",
+        "/api/slots": f"{REMOTE_API}/api/slots",
+    }
+
+    with pytest.raises(urllib.error.HTTPError, match="non-loopback"):
+        planner.fetch_registry_models(stub.url)
+    assert runner._get_json(stub.url, "/api/slots") is None
+
+    assert proxy.seen == []
+    assert [p for _, p, _ in stub.seen] == ["/api/models", "/api/slots"]
+
+
+def test_open_url_copies_agree_on_redirects(stub, server_ab) -> None:
+    port = stub.url.rsplit(":", 1)[1]
+    stub.redirects = {
+        "/to-remote": f"{REMOTE_API}/api/slots",
+        "/to-loopback": f"http://localhost:{port}{LANDING_PATH}",
+    }
+    for opener in (open_url, server_ab._open_url):
+        with pytest.raises(urllib.error.HTTPError, match="non-loopback"):
+            opener(f"{stub.url}/to-remote", timeout=5)
+        with opener(f"{stub.url}/to-loopback", timeout=5) as resp:
+            assert json.loads(resp.read()) == SLOTS
+
+
+def test_server_ab_loopback_redirect_to_a_remote_host_is_refused(api_env, stub, server_ab) -> None:
+    stub.redirects = {"/api/slots": f"{REMOTE_API}/api/slots"}
+
+    with pytest.raises(urllib.error.HTTPError, match="non-loopback"):
+        server_ab._get_slot(stub.url, "gpu-a")
+    assert [p for _, p, _ in stub.seen] == ["/api/slots"]
+
+
+def test_bench_upload_token_is_not_carried_across_a_redirect(stub, tmp_path) -> None:
+    """The upload token is an unredirected header: a 302 from the worker to
+    another (loopback) origin reaches it without the token."""
+    port = stub.url.rsplit(":", 1)[1]
+    stub.redirects = {"/v1/bundles": f"http://localhost:{port}/api/health"}
+    bundle = tmp_path / "b.tar.gz"
+    bundle.write_bytes(b"\x1f\x8b")
+
+    assert cli._upload_bundle(bundle, stub.url, "upload-token") == 0
+
+    assert stub.seen == [
+        ("POST", "/v1/bundles", "Bearer upload-token"),
+        ("GET", "/api/health", None),
+    ]

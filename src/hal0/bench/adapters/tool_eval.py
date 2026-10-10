@@ -266,13 +266,29 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
 _LOOPBACK_NO_PROXY: tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
 
 
-def _no_proxy_with_loopback(current: str) -> str:
-    """``current`` (a NO_PROXY value) with every loopback host appended."""
-    entries = [e.strip() for e in current.split(",") if e.strip()]
+_NO_PROXY_VARS: tuple[str, ...] = ("NO_PROXY", "no_proxy")
+
+
+def _with_loopback_no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """``env`` with loopback added to its no-proxy list, written to BOTH names.
+
+    urllib's ``getproxies()`` (which httpx also reads) lets ``no_proxy`` win
+    over ``NO_PROXY`` when both are set, so the two must carry one value: the
+    union of both variables' entries plus the loopback hosts. Otherwise a new
+    lowercase value would shadow an operator's uppercase-only ``NO_PROXY``.
+    When either variable already holds ``*`` (bypass every proxy), ``env`` is
+    returned unchanged."""
+    entries: list[str] = []
+    for name in _NO_PROXY_VARS:
+        for entry in env.get(name, "").split(","):
+            entry = entry.strip()
+            if entry and entry not in entries:
+                entries.append(entry)
     if "*" in entries:
-        return ",".join(entries)
+        return env
     entries += [h for h in _LOOPBACK_NO_PROXY if h not in entries]
-    return ",".join(entries)
+    merged = ",".join(entries)
+    return {**env, **dict.fromkeys(_NO_PROXY_VARS, merged)}
 
 
 def build_env(request: ToolEvalRequest) -> dict[str, str] | None:
@@ -285,10 +301,7 @@ def build_env(request: ToolEvalRequest) -> dict[str, str] | None:
     proxy in cleartext (#2505). Remote hosts still go through the proxy."""
     if not request.api_key:
         return None
-    env = {**os.environ, API_KEY_ENV: request.api_key}
-    for name in ("NO_PROXY", "no_proxy"):
-        env[name] = _no_proxy_with_loopback(env.get(name, ""))
-    return env
+    return _with_loopback_no_proxy({**os.environ, API_KEY_ENV: request.api_key})
 
 
 # --------------------------------------------------------------------------- #

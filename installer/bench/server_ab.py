@@ -128,14 +128,34 @@ def _is_loopback_url(url: str) -> bool:
     return host in _LOOPBACK_HOSTS
 
 
+class _LoopbackOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Stdlib copy of the redirect handler in
+    hal0.service_identity._no_proxy_opener: follow a redirect only to another
+    loopback URL, refuse any other host with HTTPError."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if not _is_loopback_url(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code, "redirect to a non-loopback host refused", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _no_proxy_opener() -> urllib.request.OpenerDirector:
+    """Stdlib copy of hal0.service_identity._no_proxy_opener."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _LoopbackOnlyRedirectHandler()
+    )
+
+
 def _open_url(req: urllib.request.Request | str, timeout: float) -> Any:
     """Stdlib copy of hal0.service_identity.open_url (#2505): a loopback
     target ignores the proxy environment, so the box key never reaches an
-    HTTP_PROXY in cleartext; any other target honours it as before."""
+    HTTP_PROXY in cleartext, and follows redirects only to loopback; any
+    other target honours the proxy as before."""
     url = req if isinstance(req, str) else req.full_url
     if _is_loopback_url(url):
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        return opener.open(req, timeout=timeout)
+        return _no_proxy_opener().open(req, timeout=timeout)
     return urllib.request.urlopen(req, timeout=timeout)
 
 
