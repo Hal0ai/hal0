@@ -794,11 +794,17 @@ hal0 update --restart-slots
 hal0 doctor bundle
 ```
 
-Writes `./hal0-doctor-bundle-<host>-<ts>/` — system, config, diagnostics and
-logs in one directory, with every config dump redacted (SECRET / TOKEN /
-PASSWORD / API_KEY / PRIVATE_KEY / ENCRYPTION_KEY / SALT-named keys). It is
-read-only and never uploads anything: `tar czf` it and attach it yourself.
-Exit `1` means some probe commands failed — see `commands.tsv` inside.
+Writes a new `./hal0-doctor-bundle-<host>-<ts>-<random>/` directory and prints
+its path. It holds system, config, diagnostics and logs, with every config dump
+redacted (SECRET / TOKEN / PASSWORD / API_KEY / PRIVATE_KEY / ENCRYPTION_KEY /
+SALT-named keys). It is read-only and never uploads anything: `tar czf` it and
+attach it yourself. Exit `1` means some probe commands failed — see
+`commands.tsv` inside. `--out <dir>` must name a new directory or an empty one
+you own.
+
+The bundle is private: the directory is `0700` and every file in it `0600`.
+One made with `sudo` is owned by root, so archive it with `sudo tar czf`, or
+`sudo chown -R "$USER"` it first.
 
 ## Upgrading from an older release
 

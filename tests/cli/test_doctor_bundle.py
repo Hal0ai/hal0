@@ -957,3 +957,21 @@ def test_existing_empty_own_out_is_accepted_and_tightened(
     build_bundle(out, include_rocm_smi=False, include_logs=False)
     assert (out / "manifest.json").is_file()
     assert os.lstat(out).st_mode & 0o777 == 0o700
+
+
+def test_a_write_outside_the_active_bundle_is_refused(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While a bundle is being written, a path outside it never takes the
+    weaker stand-alone write path."""
+    stray = tmp_path / "stray.txt"
+    real_tsv = doctor_bundle._write_commands_tsv
+
+    def write_stray(o: Path, rows: list[list[str]]) -> None:
+        real_tsv(o, rows)
+        doctor_bundle._write_file(stray, "x")
+
+    monkeypatch.setattr(doctor_bundle, "_write_commands_tsv", write_stray)
+    with pytest.raises(doctor_bundle.BundleOutputError):
+        build_bundle(tmp_path / "out", include_rocm_smi=False, include_logs=False)
+    assert not stray.exists()

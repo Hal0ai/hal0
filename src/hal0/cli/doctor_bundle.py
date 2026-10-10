@@ -167,11 +167,19 @@ def _create_file(dest: Path) -> int:
     final directory and the file are pinned.
     """
     active = _ACTIVE_OUT.get()
-    if active is not None and dest.is_relative_to(active[0]):
+    if active is not None:
         root, root_fd = active
+        if not dest.is_relative_to(root):
+            # Every bundle write is under ``out``; anything else is a bug,
+            # and must not quietly fall through to the weaker path below.
+            raise BundleOutputError(errno.EINVAL, f"outside the bundle at {root}", str(dest))
         parts = dest.relative_to(root).parts
         base = os.dup(root_fd)
     else:
+        # Fallback, reached only with no bundle active: a write helper called
+        # on its own (the unit tests do this). build_bundle always sets
+        # _ACTIVE_OUT, so a real bundle never takes this path. Only the final
+        # directory and the file are pinned here, not the path above them.
         dest.parent.mkdir(parents=True, exist_ok=True)
         parts = (dest.name,)
         base = os.open(dest.parent, _DIR_OPEN)
