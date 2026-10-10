@@ -60,7 +60,13 @@ hal0_pull_backoff_delay() {
     local -a delays
     # Split on a literal space: the installer runs under IFS=$'\n\t'
     # (install.sh:45), where an unquoted expansion would never split (#2470).
-    IFS=' ' read -r -a delays <<< "${HAL0_PULL_RETRY_DELAYS:-${default_delays[*]}}"
+    # Only the env var is split; the default table is copied as an array, since
+    # "${default_delays[*]}" would join on IFS[0] (a newline) under that IFS.
+    if [[ -n "${HAL0_PULL_RETRY_DELAYS:-}" ]]; then
+        IFS=' ' read -r -a delays <<< "${HAL0_PULL_RETRY_DELAYS}"
+    else
+        delays=("${default_delays[@]}")
+    fi
     [[ ${#delays[@]} -eq 0 ]] && delays=("${default_delays[@]}")
 
     local idx=$((attempt - 1))
