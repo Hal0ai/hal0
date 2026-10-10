@@ -107,3 +107,54 @@ def test_no_installer_shell_file_names_a_fixed_tmp_path() -> None:
                 if "XXXXXX" not in match:
                     offenders.append(f"{path.relative_to(REPO)}:{lineno}: {match}")
     assert offenders == []
+
+
+def _summary_brain_model_snippet() -> str:
+    """The install summary's brain-model lookup, lifted out of install.sh."""
+    lines = INSTALL_SH.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if '_summary_log_src="/dev/null"' in line)
+    end = next(i for i in range(start, len(lines)) if "s/^  brain model: ([^ ]+)" in lines[i])
+    return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.parametrize("log_body", [None, "no model line here\n"])
+def test_summary_survives_a_log_without_a_brain_model_line(
+    tmp_path: Path, log_body: str | None
+) -> None:
+    """Under `set -euo pipefail`, grep's exit 1 on no match used to abort a
+    --summary-json run whose log had no "  brain model:" line."""
+    setup = ""
+    if log_body is not None:
+        log = tmp_path / "log"
+        log.write_text(log_body)
+        setup = f'exec {{HAL0_INSTALL_LOG_FD}}<"{log}"'
+    script = f"""
+set -euo pipefail
+IFS=$'\\n\\t'
+unset HAL0_INSTALL_LOG_FD
+{setup}
+{_summary_brain_model_snippet()}
+echo "survived model=[${{_summary_brain_model}}]"
+"""
+    proc = _run(script)
+    assert "survived model=[]" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_summary_finds_the_brain_model_through_the_log_fd(tmp_path: Path) -> None:
+    log = tmp_path / "log"
+    log.write_text("x\n  brain model: qwen3-30b (container)\n")
+    script = f"""
+set -euo pipefail
+exec {{HAL0_INSTALL_LOG_FD}}<"{log}"
+{_summary_brain_model_snippet()}
+echo "model=[${{_summary_brain_model}}]"
+"""
+    proc = _run(script)
+    assert "model=[qwen3-30b]" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_background_pull_drops_the_install_log_fd() -> None:
+    src = INSTALL_SH.read_text()
+    start = src.index("hal0_pull_with_retry podman")
+    block = src[src.rindex("(\n", 0, start) : src.index("&\n", start)]
+    assert "exec {HAL0_INSTALL_LOG_FD}>&-" in block

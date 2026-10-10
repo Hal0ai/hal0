@@ -2366,7 +2366,14 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/n
     # off. The hal0-openwebui unit also has ExecStartPre=podman pull
     # (idempotent), so missing this background pull only costs first-boot
     # latency, not correctness.
-    (hal0_pull_with_retry podman "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
+    # The disowned pull can outlive the install, so it drops the install
+    # log fd (#2407) and its stdout/stderr (the tee pipes) on the way out.
+    (
+        if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
+            exec {HAL0_INSTALL_LOG_FD}>&-
+        fi
+        hal0_pull_with_retry podman "${OPENWEBUI_IMAGE}" || true
+    ) >/dev/null 2>&1 &
     disown
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
@@ -4040,8 +4047,10 @@ PYEOF
     if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
         _summary_log_src="/dev/fd/${HAL0_INSTALL_LOG_FD}"
     fi
+    # `|| true`: no "brain model" line (or no log) is normal, and under
+    # pipefail grep's exit 1 would otherwise abort the summary.
     _summary_brain_model="$(grep -m1 '^  brain model: ' "${_summary_log_src}" 2>/dev/null \
-        | sed -E 's/^  brain model: ([^ ]+).*/\1/')"
+        | sed -E 's/^  brain model: ([^ ]+).*/\1/' || true)"
 
     _summary_steps_blob=""
     for _summary_step_title in "${!UI_STEP_DURATIONS[@]}"; do

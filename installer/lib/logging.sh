@@ -35,9 +35,10 @@
 #   another uid can plant a symlink at a predictable name or swap a file
 #   between its creation and a later open. A plain `>` follows that symlink
 #   and a root install would clobber its target. hal0_excl_open creates the
-#   file with bash noclobber (O_CREAT|O_EXCL, which also refuses symlinks)
-#   under a random name and keeps the fd, so nothing after creation goes
-#   back through the name. Anything that reports the log path must read
+#   file with bash noclobber (O_CREAT|O_EXCL for a new name) under a random
+#   name, checks the fd is a regular file that IS that name (noclobber still
+#   opens an existing symlink to a FIFO or device), and keeps the fd, so
+#   nothing after creation goes back through the name. Anything that reports the log path must read
 #   HAL0_INSTALL_LOG, never rebuild the name; anything that reads the log
 #   should prefer /dev/fd/$HAL0_INSTALL_LOG_FD.
 #
@@ -61,15 +62,22 @@ hal0_install_log_path() {
 }
 
 # hal0_excl_open PREFIX SUFFIX — see the header. Returns 1 (HAL0_EXCL_FD and
-# HAL0_EXCL_PATH empty) when no file could be created. Bash noclobber opens
-# a name that does not exist with O_CREAT|O_EXCL, and refuses one that does
-# (a regular file, a symlink, or a dangling symlink), so the name is either
-# brand new and ours or the attempt fails and we retry with another.
+# HAL0_EXCL_PATH empty) when no file could be created; HAL0_EXCL_ERR is then
+# "nodevfd" when /dev/fd (i.e. /proc) is unusable, so the fd can neither be
+# verified nor handed to other processes. Bash noclobber opens a name that
+# does not exist with O_CREAT|O_EXCL. A name that already exists as a
+# regular file, or as a symlink to one (or a dangling symlink), is refused.
+# A symlink to a FIFO or a device is NOT refused — noclobber opens it — so
+# after the open the fd must be a regular file whose dev:ino is the name's
+# own (stat without -L, so a symlink never matches); anything else is
+# closed and another random name tried. With 48 random bits per name such a
+# plant needs a lucky guess anyway; the check makes it harmless.
 hal0_excl_open() {
     local prefix="$1" suffix="${2:-}"
-    local - rand name old_umask fd _
+    local - rand name old_umask fd fd_id name_id _
     HAL0_EXCL_FD=""
     HAL0_EXCL_PATH=""
+    HAL0_EXCL_ERR=""
     set -C
     old_umask="$(umask)"
     umask 077
@@ -78,11 +86,21 @@ hal0_excl_open() {
         rand="${rand//[^0-9a-f]/}"
         [[ ${#rand} -eq 12 ]] || break
         name="${prefix}${rand}${suffix}"
-        if { exec {fd}>"$name"; } 2>/dev/null; then
+        { exec {fd}>"$name"; } 2>/dev/null || continue
+        if [[ ! -e "/dev/fd/${fd}" ]]; then
+            exec {fd}>&-
+            rm -f -- "$name" 2>/dev/null || true
+            HAL0_EXCL_ERR="nodevfd"
+            break
+        fi
+        fd_id="$(stat -L -c '%d:%i' "/dev/fd/${fd}" 2>/dev/null)" || fd_id=""
+        name_id="$(stat -c '%d:%i' "$name" 2>/dev/null)" || name_id=""
+        if [[ -f "/dev/fd/${fd}" && -n "$fd_id" && "$fd_id" == "$name_id" ]]; then
             HAL0_EXCL_FD="$fd"
             HAL0_EXCL_PATH="$name"
             break
         fi
+        exec {fd}>&-
     done
     umask "$old_umask"
     [[ -n "$HAL0_EXCL_FD" ]]
@@ -115,6 +133,11 @@ hal0_install_log_init() {
         fi
     fi
     if [[ $opened -ne 0 ]] && ! hal0_excl_open /tmp/hal0-install- .log; then
+        if [[ "${HAL0_EXCL_ERR:-}" == "nodevfd" ]]; then
+            # The log is written through /dev/fd/N; without /proc there is no
+            # way to do that safely, so say so instead of logging nothing.
+            printf 'WARN  install log disabled: /dev/fd is unavailable (is /proc mounted?)\n' >&2
+        fi
         HAL0_INSTALL_LOG=""
         export HAL0_INSTALL_LOG
         return 1

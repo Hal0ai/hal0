@@ -8,6 +8,7 @@ without touching this test process's own stdout.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import uuid
@@ -330,3 +331,69 @@ hal0_install_log_path
 """
         proc = _run(script)
         assert proc.stdout.strip() == "/var/log/hal0/install-20990101-000000-XXXXXX.log"
+
+
+class TestExclOpenRejectsNonRegularTargets:
+    """bash noclobber refuses an existing regular file or a symlink to one,
+    but still opens an existing symlink to a FIFO or a character device.
+    hal0_excl_open must notice (fd not a regular file / not the name's own
+    inode), close it, and move on to another random name.
+
+    ``od`` is shadowed so the first random name is known: the plant sits
+    there, and later calls yield a fresh name."""
+
+    @staticmethod
+    def _script(tmp_path: Path, plant_target: str, pre: str = "", post: str = "") -> str:
+        log_dir = tmp_path / "logdir"
+        log_dir.mkdir()
+        counter = tmp_path / "od-calls"
+        return f"""
+IFS=$'\\n\\t'
+source "{LOGGING_SH}"
+od() {{
+    local n=0
+    [[ -f "{counter}" ]] && n="$(cat "{counter}")"
+    echo $((n + 1)) >"{counter}"
+    if [[ $n -eq 0 ]]; then echo " aa bb cc dd ee ff"; else echo " 01 23 45 67 89 0$n"; fi
+}}
+ln -s "{plant_target}" "{log_dir}/install-test-aabbccddeeff.log"
+{pre}
+hal0_excl_open "{log_dir}/install-test-" .log
+echo "rc=$?"
+echo "path=$HAL0_EXCL_PATH"
+[[ -f "/dev/fd/$HAL0_EXCL_FD" ]] && echo "fd-regular"
+{post}
+"""
+
+    def _check(self, proc: subprocess.CompletedProcess[str], tmp_path: Path) -> None:
+        out = proc.stdout
+        assert "rc=0" in out, out + proc.stderr
+        path_line = next(line for line in out.splitlines() if line.startswith("path="))
+        path = Path(path_line.removeprefix("path="))
+        assert path.name != "install-test-aabbccddeeff.log", out
+        assert path.parent == tmp_path / "logdir"
+        assert path.is_file() and not path.is_symlink()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert "fd-regular" in out
+
+    def test_a_symlink_to_a_fifo_is_not_used(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo)
+        drained = tmp_path / "drained"
+        # A reader on the FIFO so the open does not block; whatever reaches
+        # it would be data the installer leaked into someone else's pipe.
+        pre = f'cat "{fifo}" >"{drained}" & reader=$!'
+        post = 'kill "$reader" 2>/dev/null; wait "$reader" 2>/dev/null || true'
+        proc = subprocess.run(
+            ["bash", "-c", self._script(tmp_path, str(fifo), pre, post)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(REPO),
+            timeout=30,
+        )
+        self._check(proc, tmp_path)
+
+    def test_a_symlink_to_a_char_device_is_not_used(self, tmp_path: Path) -> None:
+        proc = _run(self._script(tmp_path, "/dev/null"))
+        self._check(proc, tmp_path)
