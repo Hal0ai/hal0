@@ -448,7 +448,7 @@ def resolve_loaded_profile(
     """Resolve a profile definition the caller already holds, with no I/O.
 
     :meth:`ProfileCatalog.resolve` looks the name up on disk and can adopt a
-    shipped legacy seed by WRITING profiles.toml. A dry run (the updater's
+    shipped, demoted seed by WRITING profiles.toml. A dry run (the updater's
     convergence probe) must not write, so it resolves the definitions it has
     already loaded through this seam instead.
     """

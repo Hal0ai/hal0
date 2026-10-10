@@ -606,7 +606,7 @@ def _profile_template_classifier(
     :func:`_launches_on_profile_template` without writing anything:
 
     * the slot's profile resolves and fits the slot. Resolution uses the
-      catalog ALREADY loaded here (a not-yet-adopted legacy seed is validated
+      catalog ALREADY loaded here (a not-yet-adopted demoted seed is validated
       in memory, as :func:`_provider_lane_classifier` does), and fit is the
       pure :func:`hal0.slots.profile_adopt.resolved_profile_fits_slot`.
       ``profile_fits_slot`` itself is not called: it goes through
