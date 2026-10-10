@@ -9,12 +9,21 @@
 // bodies. These cases mirror `tests/observability/test_sentry.py`, and the
 // shared fixture below is also read by `tests/api/test_redact.py`.
 
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import sharedCases from '../../tests/fixtures/redaction_shapes.json'
-import { redactSecrets } from './sentry'
+import { initSentry, redactSecrets, redactTree } from './sentry'
 
 const MASK = '***REDACTED***'
+
+// `initSentry` imports the SDK dynamically; stand in for it and keep the
+// options it was initialised with, so the real `beforeSend` can be driven.
+const sdk = vi.hoisted(() => ({
+  init: vi.fn(),
+  setTag: vi.fn(),
+  browserTracingIntegration: vi.fn(),
+}))
+vi.mock('@sentry/react', () => sdk)
 
 describe('redactSecrets', () => {
   it('masks an Authorization: Bearer header, keeping the prefix', () => {
@@ -213,5 +222,143 @@ describe('redactSecrets: linear time', () => {
     const big = time(80_000)
     // Linear is ~4x; a quadratic rule is ~16x. Allow a noisy 10x.
     expect(big).toBeLessThan(Math.max(small, 5) * 10)
+  })
+})
+
+describe('redactTree', () => {
+  it('masks strings at any depth and returns a copy', () => {
+    const input = {
+      a: ['HF_TOKEN=hf_abcdefghijklmnop', { b: 'Bearer abc123456789' }],
+      n: 1,
+      z: null,
+    }
+    const out = redactTree(input) as typeof input
+    expect(JSON.stringify(out)).not.toContain('hf_abcdefghijklmnop')
+    expect(JSON.stringify(out)).not.toContain('abc123456789')
+    expect(out.n).toBe(1)
+    expect(out.z).toBeNull()
+    // The application's own object is not rewritten.
+    expect(input.a[0]).toBe('HF_TOKEN=hf_abcdefghijklmnop')
+  })
+
+  it('survives a cycle', () => {
+    const a: Record<string, unknown> = { s: 'HF_TOKEN=hf_abcdefghijklmnop' }
+    a.self = a
+    const out = redactTree(a) as Record<string, unknown>
+    expect(out.self).toBe('[Circular]')
+    expect(out.s).toBe(`HF_TOKEN=${MASK}`)
+  })
+
+  it('does not report a shared (non-cyclic) reference as a cycle', () => {
+    const shared = { s: 'x' }
+    expect(redactTree({ a: shared, b: shared })).toEqual({ a: { s: 'x' }, b: { s: 'x' } })
+  })
+
+  it('caps depth and size instead of walking them', () => {
+    let deep: unknown = 'HF_TOKEN=hf_abcdefghijklmnop'
+    for (let i = 0; i < 50; i += 1) deep = { next: deep }
+    expect(JSON.stringify(redactTree(deep))).toContain('[Truncated]')
+    expect(JSON.stringify(redactTree(deep))).not.toContain('hf_abcdefghijklmnop')
+
+    const wide = Array.from({ length: 20_000 }, (_, i) => ({ i }))
+    const started = performance.now()
+    const out = redactTree(wide) as unknown[]
+    expect(performance.now() - started).toBeLessThan(500)
+    expect(out.length).toBe(20_000)
+    expect(out.at(-1)).toBe('[Truncated]')
+  })
+})
+
+describe('initSentry beforeSend', () => {
+  type Hook = (event: Record<string, unknown>) => Record<string, unknown> | null
+  let beforeSend: Hook
+
+  beforeAll(async () => {
+    vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1')
+    vi.stubGlobal('__HAL0_UI_VERSION__', 'test')
+    expect(await initSentry()).toBe(true)
+    beforeSend = sdk.init.mock.calls[0][0].beforeSend as Hook
+  })
+
+  const HF = 'hf_abcdefghijklmnopqrstuvwx'
+
+  it('masks the raw arguments of a console breadcrumb', () => {
+    // What the default Breadcrumbs integration records for console.error(...).
+    const out = beforeSend({
+      breadcrumbs: [
+        {
+          category: 'console',
+          level: 'error',
+          message: `HF_TOKEN=${HF}`,
+          data: {
+            arguments: [`HF_TOKEN=${HF}`, { headers: { Authorization: 'Bearer abc123456789' } }],
+            logger: 'console',
+          },
+        },
+      ],
+    }) as { breadcrumbs: { message: string; data: { arguments: unknown[] } }[] }
+    expect(JSON.stringify(out)).not.toContain(HF)
+    expect(JSON.stringify(out)).not.toContain('abc123456789')
+    expect(out.breadcrumbs[0].data.arguments[0]).toBe(`HF_TOKEN=${MASK}`)
+  })
+
+  it('masks a thrown plain object (extra.__serialized__), contexts and tags', () => {
+    const out = beforeSend({
+      extra: { __serialized__: { error: `HF_TOKEN=${HF}`, nested: [{ k: 'password: hunter22222' }] } },
+      contexts: { app: { detail: 'Authorization: Bearer abc123456789' } },
+      tags: { page: 'https://u:pw12345678@h/r' },
+    })
+    const text = JSON.stringify(out)
+    expect(text).not.toContain(HF)
+    expect(text).not.toContain('hunter22222')
+    expect(text).not.toContain('abc123456789')
+    expect(text).not.toContain('pw12345678')
+  })
+
+  it('masks userinfo and a token in request.url, and drops the query', () => {
+    const out = beforeSend({
+      request: {
+        url: `https://user:pw12345678@host.invalid/${HF}/x?api_key=querysecret`,
+        headers: { Referer: 'https://host.invalid/page?token=querysecret2', Accept: 'x' },
+        query_string: 'api_key=querysecret',
+        cookies: { s: 'c' },
+      },
+    }) as { request: { url: string; headers: Record<string, string> } }
+    const text = JSON.stringify(out)
+    expect(text).not.toContain('pw12345678')
+    expect(text).not.toContain(HF)
+    expect(text).not.toContain('querysecret')
+    expect(out.request.headers.Referer).toBe('https://host.invalid/page')
+    expect(out.request.headers.Accept).toBe('x')
+    expect(out.request).not.toHaveProperty('query_string')
+    expect(out.request).not.toHaveProperty('cookies')
+  })
+
+  it('masks navigation breadcrumb URLs and keeps the text surfaces masked', () => {
+    const out = beforeSend({
+      message: `HF_TOKEN=${HF}`,
+      logentry: { message: `HF_TOKEN=${HF}` },
+      exception: { values: [{ value: '401 Authorization: Bearer abc123456789' }] },
+      breadcrumbs: [
+        { category: 'navigation', data: { from: '/a?x=1', to: 'https://u:pw12345678@h/p?y=2' } },
+      ],
+      user: { id: 'u' },
+    })
+    const text = JSON.stringify(out)
+    expect(text).not.toContain(HF)
+    expect(text).not.toContain('abc123456789')
+    expect(text).not.toContain('pw12345678')
+    expect(text).not.toContain('x=1')
+    expect(text).not.toContain('y=2')
+    expect(out).not.toHaveProperty('user')
+  })
+
+  it('drops the event when scrubbing throws', () => {
+    const hostile = {
+      get breadcrumbs(): unknown {
+        throw new Error('boom')
+      },
+    }
+    expect(beforeSend(hostile as unknown as Record<string, unknown>)).toBeNull()
   })
 })

@@ -960,7 +960,6 @@ class TestRedactionTimeIsLinear:
         assert f" {run}{MASK} " in out
         assert out.endswith(f"v={MASK}")
         assert "hunter2" not in out and "s3cr3t" not in out and ":pw@" not in out
-||||||| parent of 778fd596 (fix(ui): run the shared secret shape pass in the browser Sentry scrubber)
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────

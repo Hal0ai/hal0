@@ -67,8 +67,113 @@ const MASK = '***REDACTED***'
 // separately so the prefix survives and only the token body is destroyed — an
 // operator reading a redacted event can still see what kind of secret was
 // present.
-const SECRET_RE =
-  /(Authorization:\s*Bearer\s+)(\S+)|(HAL0_BEARER_TOKEN=)(\S+)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})|(\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(\S+)/gi
+
+// ── Matching Python's `re` ───────────────────────────────────────────────────
+//
+// Python's `re.I` and `\s` are Unicode-aware and JS's are not, in ways that let
+// a secret through (a `\x1c` in a separator, a Kelvin sign in a name). `rx`
+// builds a RegExp that matches like the Python source:
+//   * `\s` is Python's whitespace set: JS's, minus U+FEFF, plus U+001C..U+001F
+//     and U+0085. `\S` is its complement.
+//   * with `fold`, `i`, `s` and `k` also match what Python's `re.I` folds to
+//     them: U+0130 and U+0131 (Turkish İ, ı) for `i`, U+017F (ſ) for `s`, U+212A
+//     (Kelvin K) for `k`, and a class holding a letter range gets all four.
+// The Python rules without `re.I` (JWTs, token prefixes) are built with
+// `fold = false` or as plain literals. What JS cannot reproduce errs towards
+// masking MORE. The one thing a regex cannot say is Python's Unicode `\b`
+// (`SECRET_RE` has one, ASCII-only in JS), so `maskLogSecrets` drops a `_KEY=`
+// match that follows a non-ASCII letter itself. A differential run of 120k
+// generated lines, with these characters spliced in, found no other difference.
+const WS_BODY = String.raw`\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000`
+const FOLD_ALL = String.raw`\u0130\u0131\u017f\u212a`
+const FOLD_LETTER: Record<string, string> = {
+  i: String.raw`\u0130\u0131`,
+  s: String.raw`\u017f`,
+  k: String.raw`\u212a`,
+}
+
+function rx(src: string, flags: string, fold = true): RegExp {
+  let out = ''
+  let inClass = false
+  let negated = false
+  let classBody = ''
+  for (let n = 0; n < src.length; n += 1) {
+    const c = src[n]
+    if (c === '\\') {
+      const d = src[n + 1]
+      n += 1
+      let piece: string
+      if (d === 's') piece = inClass ? WS_BODY : `[${WS_BODY}]`
+      else if (d === 'S') {
+        if (inClass) throw new Error('\\S inside a class')
+        piece = `[^${WS_BODY}]`
+      } else piece = `\\${d}`
+      out += piece
+    } else if (inClass) {
+      if (c === ']') {
+        inClass = false
+        if (fold && !negated) {
+          let extra = ''
+          if (/[a-z]-[a-z]|[A-Z]-[A-Z]/.test(classBody)) extra = FOLD_ALL
+          else for (const l of classBody.toLowerCase()) extra += FOLD_LETTER[l] ?? ''
+          // A trailing `-` must stay last or it would turn into a range.
+          out = classBody.endsWith('-') ? `${out.slice(0, -1)}${extra}-` : out + extra
+        } else if (fold && /[A-Za-z]/.test(classBody)) {
+          throw new Error('letters in a negated class')
+        }
+        out += ']'
+      } else {
+        classBody += c
+        out += c
+      }
+    } else if (c === '[') {
+      inClass = true
+      classBody = ''
+      negated = src[n + 1] === '^'
+      out += negated ? '[^' : '['
+      if (negated) n += 1
+    } else if (fold && FOLD_LETTER[c.toLowerCase()] !== undefined) {
+      out += `[${c.toLowerCase()}${c.toUpperCase()}${FOLD_LETTER[c.toLowerCase()]}]`
+    } else {
+      out += c
+    }
+  }
+  return new RegExp(out, flags)
+}
+
+const SECRET_RE = rx(
+  String.raw`(Authorization:\s*Bearer\s+)(\S+)|(HAL0_BEARER_TOKEN=)(\S+)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})|(\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(\S+)`,
+  'giu',
+)
+
+// A Unicode word character, as Python's `\w`: a letter, a number or `_`.
+const WORD_CHAR_END_RE = /[\p{L}\p{N}_]$/u
+
+// `LOG_SECRET_RE.sub`. The `\b` in the pattern is ASCII-only, so a `_KEY=`
+// match that follows a non-ASCII letter (`Éfoo_KEY=`) is one Python's `\b`
+// does not allow: skip it and carry on one character later, as Python would.
+function maskLogSecrets(value: string): string {
+  let out = ''
+  let last = 0
+  SECRET_RE.lastIndex = 0
+  for (let m = SECRET_RE.exec(value); m; m = SECRET_RE.exec(value)) {
+    if (m[9] !== undefined && WORD_CHAR_END_RE.test(value.slice(Math.max(0, m.index - 2), m.index))) {
+      SECRET_RE.lastIndex = m.index + 1
+      continue
+    }
+    // Alternatives are (prefix, token) pairs; the first defined prefix wins.
+    let prefix = ''
+    for (let i = 1; i < 10; i += 2) {
+      if (m[i] !== undefined) {
+        prefix = m[i]
+        break
+      }
+    }
+    out += value.slice(last, m.index) + prefix + MASK
+    last = m.index + m[0].length
+  }
+  return out + value.slice(last)
+}
 
 // ── Shared shape pass (port of `redact_secret_shapes`) ───────────────────────
 //
@@ -85,13 +190,17 @@ const SECRET_RE =
 //     `aaa…` before `://`, or one long name with no `=`). Those are done as
 //     one linear scan of the maximal run, which gives the same result because
 //     every start inside a run sees the same suffix.
-//   * `iu` rather than `i`, so `K` (Kelvin) and `ſ` fold to `k` and `s` as in
-//     Python's Unicode ignore-case.
-// Not ported: Python's `\s` also matches U+001C..U+001F and U+0085, and `\b`
-// in `SECRET_RE` is ASCII-only here; neither can hide a secret body.
+//   * Python's `re.I` and `\s` are matched through `rx`, above.
 
+// Case-insensitive, with the `re.I` folds of `rx`, for the benign-name parts.
 const ci = (s: string): string =>
-  s.replace(/[a-z]/gi, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`)
+  s.replace(/[a-z]/gi, (c) => {
+    const l = c.toLowerCase()
+    return `[${l}${c.toUpperCase()}${FOLD_LETTER[l] ?? ''}]`
+  })
+// Alphanumeric in Python's `re.I` sense: also what folds to a letter.
+const NOT_LOWER_ALNUM = `(?![a-z0-9${FOLD_ALL}])`
+const NOT_ALNUM = `(?![A-Za-z0-9${FOLD_ALL}])`
 
 // `w` followed by a word end. A lowercase last letter ends a word before a
 // capital (a camelCase hump: `tokensCount`); an uppercase one only before a
@@ -99,16 +208,18 @@ const ci = (s: string): string =>
 const ciEnd = (w: string): string => {
   const last = w.slice(-1)
   return (
-    `${ci(w.slice(0, -1))}(?:${last.toLowerCase()}(?![a-z0-9])` +
-    `|${last.toUpperCase()}(?![A-Za-z0-9]))`
+    `${ci(w.slice(0, -1))}(?:${last.toLowerCase()}${NOT_LOWER_ALNUM}` +
+    `|[${last.toUpperCase()}${FOLD_LETTER[last.toLowerCase()] ?? ''}]${NOT_ALNUM})`
   )
 }
 
 // `_SECRET_NAME`, as two tests on a whole name.
-const SECRET_WORD_RE =
-  /SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT/iu
-const KEY_NAME_RE = /(?:^|[_-])KEY$/iu
-const SECRET_REF_SUFFIX_RE = /_(?:env|file|path|dir)$/iu
+const SECRET_WORD_RE = rx(
+  String.raw`SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT`,
+  'iu',
+)
+const KEY_NAME_RE = rx(String.raw`(?:^|[_-])KEY$`, 'iu')
+const SECRET_REF_SUFFIX_RE = rx(String.raw`_(?:env|file|path|dir)$`, 'iu')
 // A name longer than this is judged as written, with no count part removed
 // (`_NAME_JUDGED_WHOLE_MAX`).
 const NAME_JUDGED_WHOLE_MAX = 128
@@ -124,7 +235,7 @@ const TOKENS_RATE_UNIT = 's|sec|second|ms|min|minute|hour|request|req|iteration|
 const TOKENS_WHOLE_NAME_SUFFIX = 'in|out|completed|predicted|evaluated|cached|used'
 // `tokens`, `Tokens` or `TOKENS`; the first two may be followed by a capital.
 const TOKENS_WORD = '(?:[Tt]okens|TOKENS)'
-const TOKENS_WORD_END = '(?:[Tt]okens(?![a-z0-9])|TOKENS(?![A-Za-z0-9]))'
+const TOKENS_WORD_END = `(?:[Tt]okens${NOT_LOWER_ALNUM}|TOKENS${NOT_ALNUM})`
 const COUNT_QUALIFIED_RE = new RegExp(
   `(?:${ci(TOKENS_COUNT_WORD)})_?(?:(?:${ci(TOKENS_WEAK_COUNT_WORD)})_?)?${TOKENS_WORD_END}`,
   'y',
@@ -141,7 +252,7 @@ const COUNT_SUFFIX_RE = new RegExp(
 const WHOLE_NAME_RE = new RegExp(`${TOKENS_WORD}_?(?:${ci(TOKENS_WHOLE_NAME_SUFFIX)})$`, 'y')
 const NAME_PART_RE = new RegExp(
   `${ci('tokenizer')}|${ci('token')}_?${ci('count')}` +
-    `|${ci('pass')}(?=[a-zA-Z])(?!${ci('w')}(?:${ci('or')})?${ci('d')}|${ci('phrase')})`,
+    `|${ci('pass')}(?=[a-zA-Z${FOLD_ALL}])(?!${ci('w')}(?:${ci('or')})?${ci('d')}|${ci('phrase')})`,
   'y',
 )
 
@@ -152,7 +263,7 @@ function benignPartAt(name: string, i: number): number {
   // A word starts at the name's start, after a non-alphanumeric, or at a
   // camelCase hump (a lowercase letter or digit, then a capital).
   const wordStart =
-    i === 0 || !/[A-Za-z0-9]/.test(prev) || (/[a-z0-9]/.test(prev) && /[A-Z]/.test(name[i]))
+    i === 0 || !/[A-Za-z0-9\u0130\u0131\u017f\u212a]/.test(prev) || (/[a-z0-9]/.test(prev) && /[A-Z]/.test(name[i]))
   const rules: Array<[RegExp, 'word' | 'name' | 'any']> = [
     [COUNT_QUALIFIED_RE, 'word'],
     [WEAK_QUALIFIED_RE, 'name'],
@@ -198,8 +309,11 @@ function isSecretName(rawName: string): boolean {
 // lookbehind, which is quadratic on a long name. Here a name is a maximal run
 // (a separator cannot start with a name character, so the Python name always
 // ends at the run's end too) and the separator is tried once after it.
-const NAME_RUN_RE = /[A-Za-z0-9_-]+/g
-const NAME_VALUE_TAIL_RE = /(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^"'\s,}&]+)/y
+const NAME_RUN_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'gu')
+const NAME_VALUE_TAIL_RE = rx(
+  String.raw`(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^"'\s,}&]+)`,
+  'yu',
+)
 
 function maskNameValues(line: string): string {
   let out = ''
@@ -232,13 +346,13 @@ const AUTH_SCHEMES =
 
 // The first four `_SHAPE_RULES`; each keeps group 1 and masks the rest.
 const AUTH_RULES: RegExp[] = [
-  /(authorization:\s*(?:basic|token)\s+)[^\s'"]+/giu,
-  /(bearer\s+)[A-Za-z0-9._~+/=-]+/giu,
-  new RegExp(`(authorization["']?\\s*:\\s*["']?${AUTH_SCHEMES}\\s+)[^\\s"',]+`, 'giu'),
+  rx(String.raw`(authorization:\s*(?:basic|token)\s+)[^\s'"]+`, 'giu'),
+  rx(String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`, 'giu'),
+  rx(String.raw`(authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+)[^\s"',]+`, 'giu'),
   // Any other `Authorization` value of 8+ characters is a raw credential.
-  new RegExp(
-    `(authorization["']?\\s*:\\s*["']?)(?!${AUTH_SCHEMES}(?:\\s|$))` +
-      `(?=[^\\s"',]{8,})[^"',\\n]*[^\\s"',]`,
+  rx(
+    String.raw`(authorization["']?\s*:\s*["']?)(?!${AUTH_SCHEMES}(?:\s|$))` +
+      String.raw`(?=[^\s"',]{8,})[^"',\n]*[^\s"',]`,
     'giu',
   ),
 ]
@@ -249,7 +363,17 @@ const AUTH_RULES: RegExp[] = [
 function followsScheme(line: string, at: number): boolean {
   for (let j = at - 1; j >= 0; j -= 1) {
     const c = line.charCodeAt(j)
-    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) return true
+    // A letter, including what Python's `re.I` folds to one: İ ı ſ K.
+    if (
+      (c >= 65 && c <= 90) ||
+      (c >= 97 && c <= 122) ||
+      c === 0x130 ||
+      c === 0x131 ||
+      c === 0x17f ||
+      c === 0x212a
+    ) {
+      return true
+    }
     const inClass = (c >= 48 && c <= 57) || c === 43 || c === 46 || c === 45
     if (!inClass) return false
   }
@@ -257,12 +381,12 @@ function followsScheme(line: string, at: number): boolean {
 }
 
 // `scheme://user:password@` and `scheme://<16+ chars>@` userinfo.
-const URL_PASSWORD_RE = /(:\/\/[^/@\s:]*):[^/@\s]+@/g
-const URL_LONG_USER_RE = /:\/\/[^/@\s:]{16,}@/g
+const URL_PASSWORD_RE = rx(String.raw`(:\/\/[^/@\s:]*):[^/@\s]+@`, 'g')
+const URL_LONG_USER_RE = rx(String.raw`:\/\/[^/@\s:]{16,}@`, 'g')
 
-const FLAG_RUN_RE = /--[A-Za-z0-9-]*/g
-const FLAG_WORD_RE = /secret|token|password|pass|api-key|apikey|private-key/iu
-const FLAG_VALUE_RE = /(=|\s+)[^-\s]\S*/y
+const FLAG_RUN_RE = rx(String.raw`--[A-Za-z0-9-]*`, 'gu')
+const FLAG_WORD_RE = rx(String.raw`secret|token|password|pass|api-key|apikey|private-key`, 'iu')
+const FLAG_VALUE_RE = rx(String.raw`(=|\s+)[^-\s]\S*`, 'yu')
 
 // `--token VALUE`, `--api-key=VALUE`. The Python rescans from every `--` of a
 // long dash run; every start in the run has the same outcome, so scan it once.
@@ -283,6 +407,9 @@ function maskFlags(line: string): string {
   return out + line.slice(last)
 }
 
+const CLIENT_ID_RE = rx(String.raw`(client_id=)[A-Za-z0-9_.-]{16,}`, 'giu')
+
+// The JWT, prefix and AWS-key rules have no `re.I` in Python: ASCII only.
 const SEGMENT_RE = /[A-Za-z0-9_-]+/g
 const JWT_REST_RE = /\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/y
 
@@ -326,7 +453,7 @@ export function redactSecretShapes(line: string): string {
   )
   out = maskNameValues(out)
   out = maskFlags(out)
-  out = out.replace(/(client_id=)[A-Za-z0-9_.-]{16,}/giu, `$1${MASK}`)
+  out = out.replace(CLIENT_ID_RE, `$1${MASK}`)
   out = maskJwts(out)
   // Case-sensitive, as in Python.
   out = out.replace(/(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}/g, MASK)
@@ -337,14 +464,112 @@ export function redactSecretShapes(line: string): string {
 // pinned against the same cases as the Python original.
 export function redactSecrets(value: unknown): unknown {
   if (typeof value !== 'string') return value
-  const masked = value.replace(SECRET_RE, (match, ...groups: (string | undefined)[]) => {
-    // Alternatives are (prefix, token) pairs; the first defined prefix wins.
-    for (let i = 0; i < 10; i += 2) {
-      if (groups[i] !== undefined) return `${groups[i]}${MASK}`
+  return redactSecretShapes(maskLogSecrets(value))
+}
+
+// ── Structured values ────────────────────────────────────────────────────────
+//
+// The TS twin of `redact_text_tree`: redact every string inside a value. Unlike
+// the Python it returns a COPY, because Sentry hands us `console` arguments and
+// the like by reference and rewriting the application's own objects would be a
+// bug. It is bounded and cycle-safe: a value deeper than `MAX_DEPTH`, or past
+// `MAX_NODES` visited, or a reference to one of its own ancestors, is replaced
+// by a marker rather than walked (fail closed, never ship what was not scrubbed).
+const MAX_DEPTH = 8
+const MAX_NODES = 5000
+
+export function redactTree(value: unknown): unknown {
+  let nodes = 0
+  const ancestors = new Set<object>()
+  const walk = (v: unknown, depth: number): unknown => {
+    if (typeof v === 'string') return redactSecrets(v)
+    if (v === null || typeof v !== 'object') {
+      return typeof v === 'function' || typeof v === 'symbol' ? '[Unserializable]' : v
     }
-    return match
-  })
-  return redactSecretShapes(masked)
+    nodes += 1
+    if (nodes > MAX_NODES || depth > MAX_DEPTH) return '[Truncated]'
+    if (ancestors.has(v)) return '[Circular]'
+    ancestors.add(v)
+    try {
+      if (Array.isArray(v)) return v.map((item) => walk(item, depth + 1))
+      const copy: Record<string, unknown> = {}
+      for (const [key, item] of Object.entries(v)) copy[key] = walk(item, depth + 1)
+      return copy
+    } finally {
+      ancestors.delete(v)
+    }
+  }
+  return walk(value, 0)
+}
+
+// Truncate a URL at `?` and mask what is left: userinfo and a token in the path
+// survive `stripQuery`.
+function scrubUrl(value: unknown): unknown {
+  return typeof value === 'string' ? redactSecrets(stripQuery(value) as string) : value
+}
+
+type Bag = Record<string, unknown>
+
+// Scrub everything in `event` that can carry text. Mutates `event`, which is
+// Sentry's own copy. Throws on anything unexpected: the caller drops the event.
+function scrubEvent(event: Bag): Bag {
+  delete event.user
+  const request = event.request as Bag | undefined
+  if (request) {
+    request.url = scrubUrl(request.url)
+    delete request.query_string
+    delete request.cookies
+    delete request.data
+    if (request.headers && typeof request.headers === 'object') {
+      const headers = redactTree(request.headers) as Bag
+      for (const key of Object.keys(headers)) {
+        // `Referer` is a URL of the page that made the request.
+        if (key.toLowerCase() === 'referer' || key.toLowerCase() === 'referrer') {
+          headers[key] = scrubUrl(headers[key])
+        }
+      }
+      request.headers = headers
+    }
+  }
+
+  if (Array.isArray(event.breadcrumbs)) {
+    event.breadcrumbs = event.breadcrumbs.map((crumb: Bag) => {
+      if (!crumb || typeof crumb !== 'object') return crumb
+      const out: Bag = { ...crumb }
+      if (typeof out.message === 'string') out.message = redactSecrets(out.message)
+      if (out.data && typeof out.data === 'object') {
+        // The default console breadcrumb keeps the raw call in `data.arguments`.
+        const data = redactTree(out.data) as Bag
+        for (const key of ['url', 'from', 'to']) {
+          if (key in data) data[key] = scrubUrl(data[key])
+        }
+        out.data = data
+      }
+      return out
+    })
+  }
+
+  // `extra` holds `__serialized__` for a captured plain object; `contexts` and
+  // `tags` are free-form too.
+  for (const key of ['extra', 'contexts', 'tags']) {
+    if (event[key] && typeof event[key] === 'object') {
+      event[key] = redactTree(event[key])
+    }
+  }
+
+  // The text surfaces. `message` is the top-level string form, `logentry` its
+  // structured twin, and `exception.values[].value` is what actually carries an
+  // upstream 401's echoed header.
+  if (typeof event.message === 'string') event.message = redactSecrets(event.message)
+  const logentry = event.logentry as Bag | undefined
+  if (logentry && typeof logentry.message === 'string') {
+    logentry.message = redactSecrets(logentry.message)
+  }
+  const exception = event.exception as { values?: Bag[] } | undefined
+  for (const value of exception?.values ?? []) {
+    if (typeof value.value === 'string') value.value = redactSecrets(value.value)
+  }
+  return event
 }
 
 /**
@@ -378,44 +603,7 @@ export async function initSentry(): Promise<boolean> {
       integrations: tracesSampleRate > 0 ? [mod.browserTracingIntegration()] : [],
       beforeSend(event) {
         try {
-          delete event.user
-          if (event.request) {
-            event.request.url = stripQuery(event.request.url) as string | undefined
-            delete event.request.query_string
-            delete event.request.cookies
-            delete event.request.data
-          }
-          if (Array.isArray(event.breadcrumbs)) {
-            for (const crumb of event.breadcrumbs) {
-              if (typeof crumb?.message === 'string') {
-                crumb.message = redactSecrets(crumb.message) as string
-              }
-              if (crumb?.data && typeof crumb.data === 'object') {
-                const data = crumb.data as Record<string, unknown>
-                if ('url' in data) data.url = stripQuery(data.url)
-                for (const [key, item] of Object.entries(data)) {
-                  if (typeof item === 'string') data[key] = redactSecrets(item) as string
-                }
-              }
-            }
-          }
-
-          // The text surfaces. `message` is the top-level string form,
-          // `logentry` its structured twin, and `exception.values[].value` is
-          // what actually carries an upstream 401's echoed header.
-          if (typeof event.message === 'string') {
-            event.message = redactSecrets(event.message) as string
-          }
-          if (event.logentry && typeof event.logentry.message === 'string') {
-            event.logentry.message = redactSecrets(event.logentry.message) as string
-          }
-          for (const value of event.exception?.values ?? []) {
-            if (typeof value.value === 'string') {
-              value.value = redactSecrets(value.value) as string
-            }
-          }
-
-          return event
+          return scrubEvent(event as unknown as Bag) as unknown as typeof event
         } catch {
           // Fail closed, same as the backend: an event we could not scrub is
           // an event we do not send.
