@@ -150,3 +150,55 @@ def test_driver_env_keeps_the_exclusions_in_hal0_apis_env_file(
     upper, lower = _no_proxy_entries(driver_env)
     assert upper == lower
     assert upper == [".hal0.example.com", "localhost", "127.0.0.1", "::1"]
+
+
+@pytest.mark.parametrize(
+    ("upper", "lower"),
+    [("*", None), (None, "*"), ("intranet,*", None)],
+    ids=["upper", "lower", "among-others"],
+)
+def test_driver_env_writes_an_operators_star_alone(
+    driver_env: Path,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    upper: str | None,
+    lower: str | None,
+) -> None:
+    """urllib and requests honour ``*`` only as the whole value, so
+    ``*,localhost,...`` would turn "bypass the proxy for everything" into
+    "bypass it for loopback only". Same rule as the #2371 wrappers."""
+    if upper is not None:
+        monkeypatch.setenv("NO_PROXY", upper)
+    if lower is not None:
+        monkeypatch.setenv("no_proxy", lower)
+    _install(
+        "local-a",
+        "http://127.0.0.2:9000/mcp",
+        exposure=installed.ExposureConfig(hermes=True),
+    )
+    hp._write_driver_env()
+    assert _no_proxy_entries(driver_env) == (["*"], ["*"])
+
+
+def test_driver_env_strips_quotes_and_export_from_env_file_values(
+    driver_env: Path, tmp_hal0_home: str
+) -> None:
+    """A shell-style ``export NO_PROXY="a,b"`` in api.env must yield ``a`` and
+    ``b``, not ``"a`` and ``b"`` (which match no host)."""
+    from hal0.config import paths
+
+    paths.api_env().parent.mkdir(parents=True, exist_ok=True)
+    paths.api_env().write_text(
+        "export NO_PROXY=\".hal0.example.com, 192.0.2.10\"\nno_proxy='intranet'\n"
+    )
+    hp._write_driver_env()
+    upper, lower = _no_proxy_entries(driver_env)
+    assert upper == lower
+    assert upper == [
+        ".hal0.example.com",
+        "192.0.2.10",
+        "intranet",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]

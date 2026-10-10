@@ -1179,18 +1179,22 @@ applying. Add those subsections to a version's section to surface them; see
   calls to loopback servers, and their `[secrets]` headers, could go through
   the proxy. Both wrappers now add `localhost,127.0.0.1,::1` to `NO_PROXY` and
   `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
-  finishes the #2330 fix. (#2371)
+  covers interactive runs; the `hal0-agent@hermes` service gets its own
+  `NO_PROXY`, including exposed loopback hosts, from the #2330 entry below.
+  (#2371)
 
-- **Hermes no longer sends a loopback MCP server's `[secrets]` headers to an
-  HTTP proxy, and warns when a header would follow a redirect.** Hermes's own
-  MCP client honours `HTTP_PROXY` and follows redirects, so on a box with a
-  proxy set a server exposed at `127.0.0.2` (say) had its header values sent
-  to the proxy in clear text, and every header but `Authorization` goes on to
-  wherever an endpoint redirects. hal0 now writes `NO_PROXY` and `no_proxy` to
-  `/etc/hal0/agents/hermes.env` covering `localhost`, `127.0.0.1`, `::1` and
-  every loopback host an exposed server uses, keeping the operator's own
-  entries, and re-renders it when that set changes (the agent picks it up on
-  restart). Hermes has no setting to stop following redirects, so `PATCH
+- **The `hal0-agent@hermes` service no longer sends a loopback MCP server's
+  `[secrets]` headers to an HTTP proxy, and hal0 warns when a header would
+  follow a redirect.** Hermes's own MCP client honours `HTTP_PROXY` and
+  follows redirects, so on a box with a proxy set a server exposed at
+  `127.0.0.2` (say) had its header values sent to the proxy in clear text, and
+  every header but `Authorization` goes on to wherever an endpoint redirects.
+  hal0 now writes `NO_PROXY` and `no_proxy` to `/etc/hal0/agents/hermes.env`,
+  which only that service loads, covering `localhost`, `127.0.0.1`, `::1` and
+  every loopback host an exposed server uses. It keeps the operator's own
+  entries from hal0-api's environment and `/etc/hal0/api.env` (set them there,
+  not by hand in `hermes.env`), writes an operator's `*` alone, and re-renders
+  the file when the host set changes (the agent picks it up on restart). Hermes has no setting to stop following redirects, so `PATCH
   /api/mcp/{id}/exposure`, `POST /api/mcp/{id}/test`, `hal0 mcp expose` and
   `hal0 mcp test` return or print a `warnings` entry for an exposed server
   with a header value other than `Authorization`; the connect-mcp guide says

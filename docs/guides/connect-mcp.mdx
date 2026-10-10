@@ -90,8 +90,13 @@ headers from their own MCP client, which hal0 cannot configure:
   `/etc/hal0/agents/hermes.env` to `localhost`, `127.0.0.1`, `::1` and every
   loopback host an exposed server uses. hal0 rewrites that file, so add your
   own exclusions to hal0-api's environment (`/etc/hal0/api.env`); hal0
-  copies them in. A newly exposed loopback host takes effect when the agent
-  restarts: `sudo systemctl restart hal0-agent@hermes`.
+  copies them in. A changed `NO_PROXY` in `api.env` is copied in the next
+  time the set of exposed loopback hosts changes or Hermes is reprovisioned.
+  A newly exposed loopback host takes effect when the agent restarts:
+  `sudo systemctl restart hal0-agent@hermes`. The exposed hosts are added for
+  that `hal0-agent@hermes` service only: interactive `hermes` and the
+  user-level gateway bypass the proxy for `localhost`, `127.0.0.1` and `::1`
+  alone.
 </Aside>
 
 ### Probe an installed server

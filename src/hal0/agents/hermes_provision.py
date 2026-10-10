@@ -6588,12 +6588,24 @@ def _split_no_proxy(value: str | None) -> list[str]:
 
 
 def _no_proxy_in_env_file(body: str | None) -> list[str]:
-    """``NO_PROXY`` then ``no_proxy`` entries assigned in an env-file body."""
+    """``NO_PROXY`` then ``no_proxy`` entries assigned in an env-file body.
+
+    Accepts the shell spellings an operator may use in ``api.env``: an
+    ``export`` prefix and a value wrapped in matching single or double
+    quotes, which would otherwise end up inside the first and last entries.
+    """
     out: list[str] = []
     for line in (body or "").splitlines():
         key, sep, value = line.partition("=")
-        if sep and key.strip() in ("NO_PROXY", "no_proxy"):
-            out += _split_no_proxy(value)
+        key = key.strip()
+        if key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export") :].strip()
+        if not sep or key not in ("NO_PROXY", "no_proxy"):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out += _split_no_proxy(value)
     return out
 
 
@@ -6635,6 +6647,10 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
         except Exception as exc:  # never fail the env write over the MCP registry
             log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
             exposed = []
+    # urllib and requests honour `*` (bypass every proxy) only as the whole
+    # value, so an operator's `*` is written alone, as the #2371 wrappers do.
+    if "*" in operator:
+        return "*"
     return ",".join(dict.fromkeys([*operator, *_NO_PROXY_BASE, *exposed]))
 
 
