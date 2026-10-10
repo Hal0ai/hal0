@@ -180,7 +180,30 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 # An explicit "vulkan_radv" resolves to itself and is a supported lane again
 # whenever the pinned runner image can serve it (``harness.lane_is_supported``),
 # so a suite that wants the Vulkan numbers simply names it.
+#
+# That continuity argument only holds on a box that HAS a ROCm lane (#2511): on
+# a Vulkan-only or CPU-only box a rocm cell dies at once, so the bare "vulkan"
+# hint and the no-hint fallback resolve through :func:`_preferred_gpu_lane`,
+# which keeps rocm where ``rocm_lane_present()`` says it exists and otherwise
+# picks a lane the box supports. The table below is the ROCm-present answer.
 _BACKEND_TO_LANE = {"vulkan": "rocm", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
+
+
+def _preferred_gpu_lane() -> str:
+    """The lane an unspecific request (bare ``vulkan`` hint, or no hint) benches.
+
+    ``rocm`` where the box has a ROCm lane (device-node check shared with the
+    install seed and the picker, #2452) so existing trend series continue;
+    otherwise ``vulkan_radv`` when the pinned runner can serve it, else
+    ``cpu``. Never a lane that is unusable on this box (#2511).
+    """
+    from hal0.providers._gpu import rocm_lane_present
+
+    if rocm_lane_present():
+        return "rocm"
+    if harness.lane_is_supported("vulkan_radv"):
+        return "vulkan_radv"
+    return "cpu"
 
 
 def _model_caps(m: dict[str, Any]) -> set[str]:
@@ -362,16 +385,25 @@ def _resolve_lane(model: dict[str, Any], lane: str) -> str:
     """Map the matrix lane token to a concrete lane. ``"default"`` resolves to
     the model's preferred lane: the test hint (``default_lane``/``lane``) or, on a
     real box, the first entry of the registry's ``backends`` list mapped through
-    ``_BACKEND_TO_LANE`` (e.g. "vulkan" -> "vulkan_radv"). Falls back to rocm."""
+    ``_BACKEND_TO_LANE``. The bare "vulkan" hint and the no-hint fallback go
+    through :func:`_preferred_gpu_lane` (rocm only where a ROCm lane exists,
+    #2511). An explicit lane token, or an explicit rocm/vulkan_radv hint, is
+    returned as given."""
     if lane != "default":
         return lane
     hint = model.get("default_lane") or model.get("lane")
     if hint:
-        return _BACKEND_TO_LANE.get(hint, hint)
+        return _mapped_lane(hint)
     for backend in model.get("backends") or []:
         if backend in _BACKEND_TO_LANE:
-            return _BACKEND_TO_LANE[backend]
-    return "rocm"
+            return _mapped_lane(backend)
+    return _preferred_gpu_lane()
+
+
+def _mapped_lane(token: str) -> str:
+    if token == "vulkan":
+        return _preferred_gpu_lane()
+    return _BACKEND_TO_LANE.get(token, token)
 
 
 def _sampler_block(sampler: str) -> dict[str, Any]:

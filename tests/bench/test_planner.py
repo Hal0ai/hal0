@@ -329,3 +329,51 @@ class TestModelCapsTypedFields:
         narrow = _model_caps({"capabilities": ["chat"]})
         wide = _model_caps({"capabilities": ["chat"], "capability_flags": {"tool_calling": True}})
         assert narrow <= wide
+
+
+class TestResolveLaneWithoutRocm:
+    """#2511: the default lane must not be ``rocm`` on a box with no ROCm lane."""
+
+    @staticmethod
+    def _box(monkeypatch, *, rocm: bool, vulkan: bool) -> None:
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: rocm)
+        monkeypatch.setattr(
+            "hal0.bench.harness.lane_is_supported",
+            lambda lane: vulkan if lane == "vulkan_radv" else True,
+        )
+
+    def test_rocm_present_keeps_rocm_for_vulkan_backend(self, monkeypatch):
+        from hal0.bench.planner import _resolve_lane
+
+        self._box(monkeypatch, rocm=True, vulkan=True)
+        assert _resolve_lane({"backends": ["vulkan"]}, "default") == "rocm"
+        assert _resolve_lane({"default_lane": "vulkan"}, "default") == "rocm"
+
+    def test_rocm_present_keeps_rocm_with_no_hints(self, monkeypatch):
+        from hal0.bench.planner import _resolve_lane
+
+        self._box(monkeypatch, rocm=True, vulkan=True)
+        assert _resolve_lane({}, "default") == "rocm"
+
+    def test_rocm_absent_vulkan_backend_resolves_to_vulkan(self, monkeypatch):
+        from hal0.bench.planner import _resolve_lane
+
+        self._box(monkeypatch, rocm=False, vulkan=True)
+        assert _resolve_lane({"backends": ["vulkan"]}, "default") == "vulkan_radv"
+        assert _resolve_lane({"default_lane": "vulkan"}, "default") == "vulkan_radv"
+
+    def test_rocm_absent_no_hints_is_a_supported_lane(self, monkeypatch):
+        from hal0.bench.planner import _resolve_lane
+
+        self._box(monkeypatch, rocm=False, vulkan=True)
+        assert _resolve_lane({}, "default") == "vulkan_radv"
+        self._box(monkeypatch, rocm=False, vulkan=False)
+        assert _resolve_lane({}, "default") not in ("rocm", "vulkan_radv")
+
+    def test_explicit_lane_is_unchanged(self, monkeypatch):
+        from hal0.bench.planner import _resolve_lane
+
+        self._box(monkeypatch, rocm=False, vulkan=False)
+        assert _resolve_lane({"backends": ["vulkan"]}, "rocm") == "rocm"
+        assert _resolve_lane({}, "vulkan_radv") == "vulkan_radv"
+        assert _resolve_lane({"default_lane": "rocm"}, "default") == "rocm"
