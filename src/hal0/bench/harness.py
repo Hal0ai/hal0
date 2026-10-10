@@ -295,17 +295,32 @@ def default_lanes(tier: str) -> list[str]:
 
     ``rocm`` only leads where the box has a ROCm lane
     (:func:`hal0.providers._gpu.rocm_lane_present`, #2511): elsewhere its cells
-    die at once, so it is dropped, leaving ``vulkan_radv`` when supported and
-    ``cpu`` when no GPU lane is usable. Lanes named explicitly are not filtered
-    here."""
+    die at once, so it is dropped. ``vulkan_radv`` needs a runner image that can
+    serve it AND a usable render node (:func:`vulkan_lane_usable`). A GPU tier
+    with neither returns ``[]`` — no usable GPU lane — rather than silently
+    swapping in the hours-long CPU lane; the planner reports that loudly.
+    Lanes named explicitly are not filtered here."""
     if tier == TIER_CPU:
         return ["cpu"]
     from hal0.providers._gpu import rocm_lane_present
 
-    lanes = ["rocm"] if rocm_lane_present() else []
-    if lane_is_supported("vulkan_radv"):
+    lanes = ["rocm"] if rocm_lane_present(for_uid=0) else []
+    if vulkan_lane_usable():
         lanes.append("vulkan_radv")
-    return lanes or ["cpu"]
+    return lanes
+
+
+def vulkan_lane_usable() -> bool:
+    """Can the Vulkan lane run HERE: a supported image AND a render node?
+
+    Bench cells run rootful through ``hal0-benchctl``, so the render node is
+    probed for uid 0 — the same identity semantics as ``rocm_lane_present``
+    (#2511). The image check alone would pick a lane a render-node-less box
+    cannot open.
+    """
+    from hal0.providers._gpu import render_node_present
+
+    return lane_is_supported("vulkan_radv") and render_node_present(for_uid=0)
 
 
 def dedupe_flags(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

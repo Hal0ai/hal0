@@ -233,21 +233,35 @@ class TestDefaultLanes:
         from hal0.bench import harness as harness_mod
 
         monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
         monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: True)
         for tier in (TIER_AMD, TIER_NVIDIA):
             assert default_lanes(tier) == ["vulkan_radv"]
 
-    def test_rocm_absent_and_vulkan_unsupported_falls_to_cpu(self, monkeypatch) -> None:
+    def test_no_usable_gpu_lane_is_empty_not_cpu(self, monkeypatch) -> None:
+        """B3: GPU tier with no usable lane has no default lane (no cpu swap)."""
         from hal0.bench import harness as harness_mod
 
         monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
         monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: lane != "vulkan_radv")
-        assert default_lanes(TIER_AMD) == ["cpu"]
+        assert default_lanes(TIER_AMD) == []
+        assert default_lanes(TIER_CPU) == ["cpu"]
+
+    def test_vulkan_image_without_a_render_node_is_not_a_default_lane(self, monkeypatch) -> None:
+        """B2: image support alone must not put vulkan_radv in the default."""
+        from hal0.bench import harness as harness_mod
+
+        monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: False)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: False)
+        monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: True)
+        assert default_lanes(TIER_AMD) == []
 
     def test_rocm_present_keeps_rocm_first_with_vulkan_when_supported(self, monkeypatch) -> None:
         from hal0.bench import harness as harness_mod
 
         monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
+        monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
         monkeypatch.setattr(harness_mod, "lane_is_supported", lambda lane: True)
         assert default_lanes(TIER_AMD) == ["rocm", "vulkan_radv"]
 

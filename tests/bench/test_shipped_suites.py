@@ -72,7 +72,10 @@ def test_lane_matrix_with_unset_include_selects_nothing(tmp_path, capsys):
     assert plan(suite, registry, Store(tmp_path)) == []
 
 
-def test_roster_plans_over_the_registry(tmp_path):
+def test_roster_plans_over_the_registry(tmp_path, monkeypatch):
+    # The roster's "default" lane resolves through the box's GPU lanes (#2511);
+    # state a ROCm box rather than inheriting the CI host's device nodes.
+    monkeypatch.setattr("hal0.providers._gpu.rocm_lane_present", lambda *a, **k: True)
     suite = load_suites(SEED_DIR)["roster"]
     registry = [{"id": "m1", "installed": True, "capabilities": ["chat"], "gguf": "/x/m1.gguf"}]
     cells = plan(suite, registry, Store(tmp_path))

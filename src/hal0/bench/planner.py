@@ -189,21 +189,28 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
 _BACKEND_TO_LANE = {"vulkan": "rocm", "vulkan_radv": "vulkan_radv", "rocm": "rocm"}
 
 
+#: Sentinel "lane": the box has no usable GPU lane (#2511). Never a real lane.
+NO_GPU_LANE = "no-gpu-lane"
+
+
 def _preferred_gpu_lane() -> str:
     """The lane an unspecific request (bare ``vulkan`` hint, or no hint) benches.
 
     ``rocm`` where the box has a ROCm lane (device-node check shared with the
     install seed and the picker, #2452) so existing trend series continue;
-    otherwise ``vulkan_radv`` when the pinned runner can serve it, else
-    ``cpu``. Never a lane that is unusable on this box (#2511).
+    otherwise ``vulkan_radv`` when the pinned runner can serve it and a render
+    node is usable (``harness.vulkan_lane_usable``). With neither, returns
+    :data:`NO_GPU_LANE`, which :func:`_lane_is_plannable` skips loudly instead
+    of planning cells that die (#2511). Cells run rootful via hal0-benchctl, so
+    both probes use ``for_uid=0``.
     """
     from hal0.providers._gpu import rocm_lane_present
 
-    if rocm_lane_present():
+    if rocm_lane_present(for_uid=0):
         return "rocm"
-    if harness.lane_is_supported("vulkan_radv"):
+    if harness.vulkan_lane_usable():
         return "vulkan_radv"
-    return "cpu"
+    return NO_GPU_LANE
 
 
 def _model_caps(m: dict[str, Any]) -> set[str]:
@@ -363,6 +370,17 @@ def _lane_is_plannable(
     ``warned`` de-dupes the message to once per lane per plan; pass ``None``
     for a one-shot check that always explains.
     """
+    if lane == NO_GPU_LANE:
+        if warned is None or lane not in warned:
+            if warned is not None:
+                warned.add(lane)
+            print(
+                f"WARNING: suite {suite_id!r} asked for the default lane, but there is "
+                "no usable GPU lane: no ROCm lane and no Vulkan-capable render "
+                "node/image — SKIPPING those cells. Name a lane explicitly to override.",
+                file=sys.stderr,
+            )
+        return False
     if harness.lane_is_supported(lane):
         return True
     if warned is None or lane not in warned:
