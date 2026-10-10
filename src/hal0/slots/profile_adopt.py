@@ -16,6 +16,7 @@ which grabs the bound staticmethod off the class directly).
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from hal0.slot_config import slot_write_lock, write_slot_toml
@@ -65,6 +66,16 @@ def profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
         resolved = ProfileCatalog().resolve(profile_name)
     except NotFound:
         return False
+    return resolved_profile_fits_slot(resolved, cfg_dict)
+
+
+def resolved_profile_fits_slot(resolved: Any, cfg_dict: Mapping[str, Any]) -> bool:
+    """The fit half of :func:`profile_fits_slot`, for an already-resolved profile.
+
+    Pure: no catalog lookup, so a dry run that already holds the definition
+    (see :func:`hal0.profiles.resolve_loaded_profile`) can ask the same
+    question without the adoption write ``ProfileCatalog.resolve`` may do.
+    """
     slot_type = cfg_dict.get("type")
     if slot_type and slot_type not in resolved.supported_slot_types:
         return False

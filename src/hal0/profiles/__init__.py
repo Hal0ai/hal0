@@ -403,26 +403,7 @@ class ProfileCatalog:
         *,
         used_by: tuple[str, ...] = (),
     ) -> ResolvedProfile:
-        runtime = _runtime_family(name, profile)
-        bench = PROFILE_BENCH.get(name, {})
-        return ResolvedProfile(
-            name=name,
-            flags=profile.flags,
-            mtp=profile.mtp,
-            device_class=profile.device_class,
-            backend=profile.backend,
-            runner=profile.runner,
-            resolved_flags=resolve_profile_flags(profile),
-            seed=name in SEED_PROFILES,
-            runtime_family=runtime,
-            supported_slot_types=_supported_slot_types(runtime),
-            cloned_from=profile.cloned_from,
-            intent=profile.intent,
-            quant=profile.quant,
-            tps=bench.get("tps"),
-            rtf=bench.get("rtf"),
-            used_by=used_by,
-        )
+        return resolve_loaded_profile(name, profile, used_by=used_by)
 
     def _guard_custom(self, name: str) -> None:
         if name in SEED_PROFILES:
@@ -454,10 +435,43 @@ __all__ = [
     "ResolvedProfile",
     "RuntimeFamily",
     "SlotType",
+    "resolve_loaded_profile",
     "runtime_family_of",
     "screen_profile_flags",
     "screen_profile_runner",
 ]
+
+
+def resolve_loaded_profile(
+    name: str, profile: ProfileConfig, *, used_by: tuple[str, ...] = ()
+) -> ResolvedProfile:
+    """Resolve a profile definition the caller already holds, with no I/O.
+
+    :meth:`ProfileCatalog.resolve` looks the name up on disk and can adopt a
+    shipped, demoted seed by WRITING profiles.toml. A dry run (the updater's
+    convergence probe) must not write, so it resolves the definitions it has
+    already loaded through this seam instead.
+    """
+    runtime = _runtime_family(name, profile)
+    bench = PROFILE_BENCH.get(name, {})
+    return ResolvedProfile(
+        name=name,
+        flags=profile.flags,
+        mtp=profile.mtp,
+        device_class=profile.device_class,
+        backend=profile.backend,
+        runner=profile.runner,
+        resolved_flags=resolve_profile_flags(profile),
+        seed=name in SEED_PROFILES,
+        runtime_family=runtime,
+        supported_slot_types=_supported_slot_types(runtime),
+        cloned_from=profile.cloned_from,
+        intent=profile.intent,
+        quant=profile.quant,
+        tps=bench.get("tps"),
+        rtf=bench.get("rtf"),
+        used_by=used_by,
+    )
 
 
 def runtime_family_of(name: str, profile: ProfileConfig) -> RuntimeFamily:

@@ -579,3 +579,190 @@ def test_unparseable_flags_on_an_unregistered_slot_do_not_abort_planning():
         apply_fold_plan(plan, reg, deploy_window=True, dry_run=False)
     assert [m for m, _u in reg.updates] == ["a-model"]
     assert "SKIP model 'b-ghost' <- slots=['two']: not in registry" in exc.value.lines
+
+
+# ── #2476: an unstamped model launching on its slot's profile template ───────
+#
+# A slot that carries nothing of its own (no extra_args, parallel, -ngl or chat
+# template) and names a profile, bound to a model with no tune text and no
+# profile provenance, ALREADY launches on that profile's flags: the
+# ``slot_profile_template`` segment (providers/container.py, #1787) layers them
+# in at launch. Folding them into the model would change nothing at launch, so
+# such a slot is v1.0 shape, not pending work. A fresh install's seeded
+# ``brain`` slot has exactly this shape once install.sh binds its pulled model.
+
+_BRAIN_FLAGS = "--jinja -fa auto -b 2048 -ub 512 --temp 0.7"
+
+
+def _bare_slot(name: str, model: str, profile: str = "brain") -> dict:
+    """A seed-shaped slot (as ``model_dump`` emits it): a profile and nothing else."""
+    return {
+        "name": name,
+        "profile": profile,
+        "n_gpu_layers": -1,
+        "parallel": None,
+        "chat_template": None,
+        "model": {"default": model, "context_size": 65536, "n_gpu_layers": -1},
+        "extra": {},
+    }
+
+
+def _applies(_slot_cfg) -> bool:
+    """A ``template_applies`` stand-in: the profile resolves and fits."""
+    return True
+
+
+def _never(_slot_cfg) -> bool:
+    return False
+
+
+def test_bare_profile_slot_on_unstamped_model_is_not_pending():
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "lfm2.5-2.6b")],
+        {"brain": _BRAIN_FLAGS},
+        {"lfm2.5-2.6b": {"tokenizer_repo": "LiquidAI/LFM2.5-2.6B-GGUF"}},
+        template_applies=_applies,
+    )
+    assert plan.folds == [] and plan.refusals == [] and plan.missing == []
+    lines = apply_fold_plan(plan, _FakeRegistry(), dry_run=True)
+    # The updater's probe treats only "skip "-prefixed lines as converged.
+    assert lines and all(line.startswith("skip ") for line in lines)
+
+
+def test_bare_profile_slot_on_model_with_no_defaults_is_not_pending():
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_applies
+    )
+    assert plan.folds == [] and plan.refusals == []
+
+
+def test_bare_slots_with_different_profiles_on_one_unstamped_model_do_not_refuse():
+    """Each launches on its own profile template, which is valid v1.0 shape."""
+    plan = plan_slot_flags_fold(
+        [_bare_slot("a", "m", profile="brain"), _bare_slot("b", "m", profile="chat")],
+        {"brain": _BRAIN_FLAGS, "chat": "-fa on"},
+        {"m": None},
+        template_applies=_applies,
+    )
+    assert plan.folds == [] and plan.refusals == []
+
+
+def test_slot_extra_args_on_unstamped_model_is_still_pending():
+    """Slot extra_args are inert at launch: a genuinely legacy shape."""
+    slot = _bare_slot("brain", "m")
+    slot["extra"] = {"server": {"extra_args": "-fa on"}}
+    plan = plan_slot_flags_fold(
+        [slot], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_applies
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_slot_parallel_on_unstamped_model_is_still_pending():
+    slot = _bare_slot("brain", "m")
+    slot["parallel"] = 4
+    plan = plan_slot_flags_fold(
+        [slot], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_applies
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_slot_chat_template_on_unstamped_model_is_still_pending():
+    slot = _bare_slot("brain", "m")
+    slot["chat_template"] = "chatml"
+    plan = plan_slot_flags_fold(
+        [slot], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_applies
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_profile_on_model_with_its_own_tune_text_is_still_pending():
+    """The template only applies to a model with NO tune text, so profile flags
+    the model's own tune does not carry are dropped at launch: legacy."""
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m")],
+        {"brain": _BRAIN_FLAGS},
+        {"m": {"extra_args": "--mlock"}},
+        template_applies=_applies,
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_bare_slot_sharing_a_model_with_a_legacy_slot_is_planned_as_before():
+    """A fold writes model tune text, which switches the template off for every
+    slot on that model, so a mixed model is planned exactly as before."""
+    legacy = _bare_slot("old", "m")
+    legacy["extra"] = {"server": {"extra_args": "-fa on"}}
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m"), legacy],
+        {"brain": _BRAIN_FLAGS},
+        {"m": None},
+        template_applies=_applies,
+    )
+    assert [r.model_id for r in plan.refusals] == ["m"]
+
+
+def test_without_a_template_gate_the_planner_folds_as_before():
+    """No ``template_applies`` means the gate is unknown: plan the fold."""
+    plan = plan_slot_flags_fold([_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": None})
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_a_slot_whose_profile_does_not_reach_launch_is_still_pending():
+    """Fit, resolved-name or specialty check fails: launch reads no template."""
+    plan = plan_slot_flags_fold(
+        [_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_never
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+def test_one_misfit_slot_keeps_a_shared_model_planned():
+    plan = plan_slot_flags_fold(
+        [_bare_slot("a", "m"), _bare_slot("b", "m")],
+        {"brain": _BRAIN_FLAGS},
+        {"m": None},
+        template_applies=lambda cfg: cfg["name"] == "a",
+    )
+    assert [f.model_id for f in plan.folds] == ["m"]
+
+
+# ── the write-free template classifier (launch-gate conditions 4 and 5) ──────
+
+
+def _classifier(profiles_toml: str, specialty: frozenset[str] = frozenset()):
+    import tomllib
+
+    from hal0.config.migrations.slot_flags_fold import _profile_template_classifier
+    from hal0.config.schema import ProfilesConfig
+
+    return _profile_template_classifier(
+        ProfilesConfig.model_validate(tomllib.loads(profiles_toml)), specialty
+    )
+
+
+def _rocm_slot(profile: str, model: str = "m") -> dict:
+    slot = _bare_slot("brain", model, profile=profile)
+    slot.update({"type": "llm", "device": "gpu-rocm"})
+    return slot
+
+
+_FIT = '[profile.tuned]\nflags = "-fa on"\nmtp = false\n'
+_UNFIT = '[profile.legacy]\nflags = "-fa on"\nbackend = "vulkan"\nmtp = false\n'
+
+
+def test_classifier_accepts_a_loaded_profile_that_fits():
+    assert _classifier(_FIT)(_rocm_slot("tuned")) is True
+
+
+def test_classifier_rejects_a_profile_that_does_not_fit_the_slot():
+    """A runner-less vulkan backend hint is vetoed on a gpu-rocm slot."""
+    assert _classifier(_UNFIT)(_rocm_slot("legacy")) is False
+
+
+def test_classifier_rejects_a_profile_that_is_not_the_one_loaded():
+    """The slot names a profile the catalog does not hold: launch falls back
+    to the backend base, never this slot's profile."""
+    assert _classifier(_FIT)(_rocm_slot("no-such-profile")) is False
+
+
+def test_classifier_rejects_a_specialty_model_whose_launch_may_be_degraded():
+    assert _classifier(_FIT, frozenset({"m"}))(_rocm_slot("tuned")) is False
