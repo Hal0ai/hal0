@@ -756,7 +756,11 @@ def require_kfd_for_gpu_slot(
     Scope by device, given that lane:
 
     * ``gpu-rocm`` — always gated on ``/dev/kfd``, in every lane. The device
-      name IS the ROCm claim, whatever the runtime does with it. Unaffected by
+      name IS the ROCm claim, whatever the runtime does with it. Once kfd is
+      usable it is also gated on a ``/dev/dri/renderD*`` node the runner
+      identity can open (:func:`render_node_present`, #2401); kfd without one
+      raises a :class:`GpuPreflightError` naming the render node instead of
+      failing at container start. Unaffected by
       the image gate below: a ROCm slot on a Vulkan-fixed image is still a
       ROCm slot.
     * ``gpu-vulkan`` + the **llama** lane on an **AMD** host — the lane #1923
@@ -824,6 +828,18 @@ def require_kfd_for_gpu_slot(
     uid = runner_uid() if callable(runner_uid) else runner_uid
     status = kfd_status(kfd_path, for_uid=uid)
     if status == KFD_OK:
+        # kfd alone is not the ROCm lane (#2401): the container also opens a
+        # renderD* node. kfd forwarded with no render node passed this guard
+        # and then died at container start with an unclear device error.
+        if not render_node_present(dri_dir, for_uid=uid):
+            raise GpuPreflightError(
+                f"slot {slot_name!r} (device={device}) has the ROCm compute node "
+                f"{kfd_path} but needs a DRM render node ({dri_dir}/renderD*) "
+                "that the hal0 runner identity can open, and none is available "
+                "here. Forward the render node from the host (Proxmox LXC: add "
+                "'dev0: /dev/dri/renderD128' to /etc/pve/lxc/<CTID>.conf with a "
+                "gid the runner is a member of, then pct stop/start)."
+            )
         return
     # Computed once and reused on both the warn and raise paths below, so
     # neither can drift from the lane it is actually describing (#1952

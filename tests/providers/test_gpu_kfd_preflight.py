@@ -35,6 +35,16 @@ from hal0.providers._gpu import (
 )
 
 
+def _render_dir(tmp_path) -> str:
+    """A ``/dev/dri``-shaped dir with one character-device render node (#2401)."""
+    dri = tmp_path / "dri"
+    dri.mkdir(exist_ok=True)
+    node = dri / "renderD128"
+    if not node.exists():
+        node.symlink_to("/dev/null")
+    return str(dri)
+
+
 class TestKfdPresent:
     def test_true_when_the_node_exists(self, tmp_path) -> None:
         node = tmp_path / "kfd"
@@ -225,8 +235,97 @@ class TestRequireKfdForGpuSlot:
         node = tmp_path / "kfd"
         node.write_text("")
         require_kfd_for_gpu_slot(
-            "agent", device="gpu-rocm", kfd_path=str(node), env={}, amd_host=True
+            "agent",
+            device="gpu-rocm",
+            kfd_path=str(node),
+            dri_dir=_render_dir(tmp_path),
+            env={},
+            amd_host=True,
         )
+
+    def test_kfd_without_a_render_node_is_refused(self, tmp_path) -> None:
+        """#2401: kfd forwarded, no renderD* - refuse at preflight, naming the
+        render node and the forward remedy, not at container start."""
+        node = tmp_path / "kfd"
+        node.write_text("")
+        empty = tmp_path / "dri"
+        empty.mkdir()
+        (empty / "card0").write_text("")  # card* is not a render node
+        for dri in (str(empty), str(tmp_path / "no-dri")):
+            with pytest.raises(GpuPreflightError) as exc:
+                require_kfd_for_gpu_slot(
+                    "agent",
+                    device="gpu-rocm",
+                    kfd_path=str(node),
+                    dri_dir=dri,
+                    env={},
+                    amd_host=True,
+                )
+            msg = str(exc.value)
+            assert "agent" in msg
+            assert "renderD*" in msg
+            assert "render node" in msg
+            assert "dev0: /dev/dri/renderD128" in msg
+
+    @pytest.mark.parametrize("lane", ["llama", "rocm", "no-rocm"])
+    def test_missing_render_node_is_refused_in_every_lane(self, tmp_path, lane) -> None:
+        node = tmp_path / "kfd"
+        node.write_text("")
+        with pytest.raises(GpuPreflightError, match="render node"):
+            require_kfd_for_gpu_slot(
+                "agent",
+                device="gpu-rocm",
+                runtime_lane=lane,
+                kfd_path=str(node),
+                dri_dir=str(tmp_path / "no-dri"),
+                env={},
+                amd_host=True,
+            )
+
+    def test_render_node_unreadable_for_the_uid_is_refused(self, tmp_path, monkeypatch) -> None:
+        """Same for_uid semantics as render_node_present: a node the runner uid
+        cannot open counts as absent; uid 0 (the default) fails open."""
+        from hal0.providers import _gpu as gpu_mod
+
+        node = tmp_path / "kfd"
+        node.write_text("")
+        dri = _render_dir(tmp_path)
+        monkeypatch.setattr(gpu_mod, "_mode_grants_rw", lambda path, uid: False)
+        monkeypatch.setattr(gpu_mod, "kfd_status", lambda *a, **k: KFD_OK)
+        with pytest.raises(GpuPreflightError, match="render node"):
+            require_kfd_for_gpu_slot(
+                "agent",
+                device="gpu-rocm",
+                kfd_path=str(node),
+                dri_dir=dri,
+                env={},
+                amd_host=True,
+                runner_uid=1000,
+            )
+        # uid 0 is judged on existence alone, so the same node passes.
+        require_kfd_for_gpu_slot(
+            "agent",
+            device="gpu-rocm",
+            kfd_path=str(node),
+            dri_dir=dri,
+            env={},
+            amd_host=True,
+            runner_uid=0,
+        )
+
+    def test_cpu_and_no_rocm_vulkan_slots_do_not_need_a_render_node(self, tmp_path) -> None:
+        """The new check is gpu-rocm only: cpu is never gated, and the
+        no-rocm gpu-vulkan lane never reaches it."""
+        for device, lane in (("cpu", "llama"), ("gpu-vulkan", "no-rocm")):
+            require_kfd_for_gpu_slot(
+                "x",
+                device=device,
+                runtime_lane=lane,
+                kfd_path=str(tmp_path / "kfd"),
+                dri_dir=str(tmp_path / "no-dri"),
+                env={},
+                amd_host=True,
+            )
 
     def test_gpu_vulkan_on_a_non_amd_host_is_not_gated(self, tmp_path) -> None:
         """An Intel iGPU / NVIDIA-without-CDI box has no /dev/kfd by design and
@@ -1027,6 +1126,7 @@ class TestTheUidProbeIsLazy:
             "brain",
             device="gpu-rocm",
             kfd_path=str(node),
+            dri_dir=_render_dir(tmp_path),
             env={},
             amd_host=True,
             runner_uid=_probe,
@@ -1037,5 +1137,11 @@ class TestTheUidProbeIsLazy:
         node = tmp_path / "kfd"
         node.write_text("")
         require_kfd_for_gpu_slot(
-            "brain", device="gpu-rocm", kfd_path=str(node), env={}, amd_host=True, runner_uid=0
+            "brain",
+            device="gpu-rocm",
+            kfd_path=str(node),
+            dri_dir=_render_dir(tmp_path),
+            env={},
+            amd_host=True,
+            runner_uid=0,
         )
