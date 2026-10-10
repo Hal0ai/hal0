@@ -41,7 +41,7 @@ import httpx
 import typer
 from rich.console import Console
 
-from hal0.cli._shared import _api_base, auth_client
+from hal0.cli._shared import _api_base, auth_client, auth_hint
 from hal0.normalize.thinking import apply_thinking_policy
 from hal0.toolloop.engine import assistant_text, assistant_thinking, split_thinking
 
@@ -360,7 +360,7 @@ def chat_command(
         f"think={session.think_mode} stream={session.stream} · {url}[/dim]"
     )
     console.print("[dim]/think on|off|default  ·  /clear  ·  /quit (or Ctrl-D)[/dim]")
-    with auth_client(timeout=120.0) as client:
+    with auth_client(target=url, timeout=120.0) as client:
         while True:
             try:
                 line = input("you> ")
@@ -387,7 +387,10 @@ def chat_command(
                 else:
                     _run_nonstreaming_turn(session, client, url, line)
             except httpx.HTTPError as exc:
-                console.print(f"[red]transport error:[/red] {exc}")
+                status = (
+                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                )
+                console.print(f"[red]transport error:[/red] {exc}{auth_hint(status, url)}")
 
 
 __all__ = ["ChatSession", "chat_command"]

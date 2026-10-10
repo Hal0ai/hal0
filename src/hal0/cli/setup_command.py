@@ -72,7 +72,8 @@ _SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts")
 
 def _api_reachable(timeout: float = 0.5) -> bool:
     try:
-        r = httpx.get(f"{_api_base()}/api/install/state", timeout=timeout, headers=_auth_headers())
+        url = f"{_api_base()}/api/install/state"
+        r = httpx.get(url, timeout=timeout, headers=_auth_headers(url), follow_redirects=False)
         return r.status_code < 500
     except Exception:
         return False

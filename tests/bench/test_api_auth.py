@@ -429,6 +429,9 @@ def test_tool_eval_default_runner_hands_the_env_to_the_child() -> None:
         (REMOTE_API, False),
         ("http://127.0.0.1.evil.example:8080", False),
         ("http://user@203.0.113.1:8080", False),
+        ("http://evil@127.0.0.1:8080", False),  # userinfo never counts (#2499)
+        ("http://user:pw@localhost:8080", False),
+        ("http://@[::1]:8080", False),
         ("/api/slots", False),
         ("", False),
         ("http://[bad", False),

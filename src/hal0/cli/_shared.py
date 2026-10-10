@@ -51,26 +51,65 @@ def _key_from_api_env() -> str | None:
     return found.get("HAL0_ADMIN_KEY") or found.get("HAL0_CLIENT_KEY")
 
 
-def _auth_headers() -> dict[str, str]:
-    """Bearer header for CLI→API calls on an auth-enabled box (halo150 O2).
+def _auth_headers(url: str | None = None) -> dict[str, str]:
+    """Bearer header for a CLI→API call to ``url`` (halo150 O2, #2499).
 
+    ``url`` is the request target; ``None`` means :func:`_api_base`.
     Precedence: HAL0_ADMIN_KEY env → HAL0_CLIENT_KEY env → api.env on disk.
-    Empty when no key is discoverable — loopback dev boxes stay keyless and
-    the API's development-open posture handles them. Delegates to the shared
-    :mod:`hal0.service_identity` seam (admin-preferred, matching the CLI's
-    historical behaviour).
+
+    A key the operator exported is sent to any target — pointing
+    ``HAL0_API_URL`` at another box with an explicit key is deliberate. A key
+    *discovered* in api.env belongs to this box's own API, so it is attached
+    only when ``url`` is loopback (:func:`hal0.service_identity.is_loopback_url`);
+    otherwise ``HAL0_API_URL=http://<other-host>`` would hand that host this
+    box's admin key. Empty when no key applies — loopback dev boxes stay
+    keyless and the API's development-open posture handles them.
     """
-    from hal0.service_identity import service_auth_headers
+    from hal0.service_identity import env_service_key, is_loopback_url, service_key
 
-    return service_auth_headers(prefer="admin")
+    target = _api_base() if url is None else url
+    key = env_service_key(prefer="admin")
+    if key is None and is_loopback_url(target):
+        key = service_key(prefer="admin")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def auth_client(**kwargs: Any) -> httpx.Client:
-    """Build an ``httpx.Client`` with ``_auth_headers()`` baked into its
+def _discovered_key_withheld(url: str | None = None) -> bool:
+    """True when :func:`_auth_headers` left out a discovered key for ``url``
+    because the target is not loopback — the case a 401 should explain."""
+    from hal0.service_identity import env_service_key, is_loopback_url, keys_from_api_env
+
+    target = _api_base() if url is None else url
+    if env_service_key(prefer="admin") is not None or is_loopback_url(target):
+        return False
+    found = keys_from_api_env()
+    return bool(found.get("HAL0_ADMIN_KEY") or found.get("HAL0_CLIENT_KEY"))
+
+
+#: Appended to a 401 when :func:`_discovered_key_withheld` — never the key.
+REMOTE_KEY_HINT = (
+    "this box's discovered API key is only sent to a local hal0 API; "
+    "set HAL0_ADMIN_KEY to authenticate to a remote one"
+)
+
+
+def auth_hint(status: int | None, url: str | None = None) -> str:
+    """``" (<REMOTE_KEY_HINT>)"`` for a 401 caused by a withheld key, else ``""``."""
+    if status == 401 and _discovered_key_withheld(url):
+        return f" ({REMOTE_KEY_HINT})"
+    return ""
+
+
+def auth_client(*, target: str | None = None, **kwargs: Any) -> httpx.Client:
+    """Build an ``httpx.Client`` with ``_auth_headers(target)`` baked into its
     default headers, so every request issued through it — one-shot or
-    long-lived streaming — carries the CLI's discovered bearer token on
-    auth-enabled boxes. An explicit ``headers=`` kwarg is merged on top
-    (a caller-set ``Authorization`` wins over the discovered one).
+    long-lived streaming — carries the CLI's bearer token on auth-enabled
+    boxes. ``target`` is the URL the client will talk to (default
+    :func:`_api_base`); a discovered key is only baked in for a loopback
+    target (#2499), so use the client for that origin only. An explicit
+    ``headers=`` kwarg is merged on top (a caller-set ``Authorization`` wins
+    over the discovered one). Redirects are never followed, so the header
+    cannot be carried to another origin.
 
     Use this directly (rather than :func:`api_stream`) when a call site
     needs a *persistent* client across several requests — e.g. ``hal0
@@ -78,7 +117,8 @@ def auth_client(**kwargs: Any) -> httpx.Client:
     """
     headers = dict(kwargs.pop("headers", None) or {})
     if "Authorization" not in headers:
-        headers.update(_auth_headers())
+        headers.update(_auth_headers(target))
+    kwargs.setdefault("follow_redirects", False)
     return httpx.Client(headers=headers, **kwargs)
 
 
@@ -106,7 +146,10 @@ def api_stream(
     a log line) on auth-enabled boxes.
     """
     url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
-    with auth_client(timeout=timeout) as client, client.stream(method, url, params=params) as resp:
+    with (
+        auth_client(target=url, timeout=timeout) as client,
+        client.stream(method, url, params=params) as resp,
+    ):
         yield resp
 
 
@@ -156,7 +199,10 @@ def follow_sse_logs(
     try:
         with api_stream("GET", path, timeout=None, params=params) as r:
             if r.status_code in (401, 403):
-                die(f"not authorized ({r.status_code}) — check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY.")
+                die(
+                    f"not authorized ({r.status_code}) — check HAL0_ADMIN_KEY/HAL0_CLIENT_KEY."
+                    + auth_hint(r.status_code)
+                )
                 return
             for event, item in _iter_sse_payloads(r):
                 if event == "degraded":
@@ -237,11 +283,11 @@ def api_get_bytes(
     url = (base or _api_base()).rstrip("/") + (path if path.startswith("/") else "/" + path)
     headers = dict(kwargs.pop("headers", None) or {})
     if "Authorization" not in headers:
-        headers.update(_auth_headers())
+        headers.update(_auth_headers(url))
     if headers:
         kwargs["headers"] = headers
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             resp = client.get(url, **kwargs)
     except httpx.HTTPError as exc:
         raise CliApiError(f"GET {url} failed: {type(exc).__name__}: {exc}") from exc
@@ -251,7 +297,9 @@ def api_get_bytes(
             msg = body.get("error", {}).get("message") or body
         except ValueError:
             msg = resp.text[:300]
-        raise CliApiError(f"GET {url} → HTTP {resp.status_code}: {msg}")
+        raise CliApiError(
+            f"GET {url} → HTTP {resp.status_code}: {msg}{auth_hint(resp.status_code, url)}"
+        )
     return resp.content, resp.headers.get("content-type", "application/octet-stream")
 
 
@@ -265,7 +313,7 @@ def _api_request(
     # (halo150 O2: doctor reported every gated endpoint "unreachable").
     headers = dict(kwargs.pop("headers", None) or {})
     if "Authorization" not in headers:
-        headers.update(_auth_headers())
+        headers.update(_auth_headers(url))
     if headers:
         kwargs["headers"] = headers
     # ``timeout`` is the READ budget: the slot lifecycle call sites pass
@@ -273,7 +321,9 @@ def _api_request(
     # Widening connect to match would let a half-open daemon stall the CLI for
     # that whole budget with no output, so connect stays short.
     try:
-        with httpx.Client(timeout=_client_timeout(timeout)) as client:
+        # Never follow a redirect: the bearer must not reach another origin
+        # (#2499). httpx's default is already False; pinned here on purpose.
+        with httpx.Client(timeout=_client_timeout(timeout), follow_redirects=False) as client:
             resp = client.request(method, url, **kwargs)
     except httpx.TimeoutException as exc:
         # The client's OWN read budget expired with no response at all — the
@@ -302,7 +352,7 @@ def _api_request(
         if code == "slot.seam_timeout":
             raise CliApiTimeout(f"{method} {url} → HTTP {resp.status_code}: {msg}")
         raise CliApiError(
-            f"{method} {url} → HTTP {resp.status_code}: {msg}",
+            f"{method} {url} → HTTP {resp.status_code}: {msg}{auth_hint(resp.status_code, url)}",
             code=code,
             status=resp.status_code,
         )
