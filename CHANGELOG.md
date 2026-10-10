@@ -475,8 +475,9 @@ applying. Add those subsections to a version's section to surface them; see
   passed on the caller's environment untouched: with `HTTP_PROXY` set, MCP
   calls to loopback servers, and their `[secrets]` headers, could go through
   the proxy. Both wrappers now add `localhost,127.0.0.1,::1` to `NO_PROXY` and
-  `no_proxy`, keeping any existing entries, and leave a bare `*` alone. This
-  finishes the #2330 fix. (#2371)
+  `no_proxy`, keeping any existing entries, and leave a bare `*` alone. The
+  `hal0-agent@hermes` service doesn't run the wrappers, so this doesn't cover
+  it; that part of the fix is tracked in #2330. (#2371)
 
 - **A user-installed MCP server with `gated` or `blocked` tools is no longer
   handed to Hermes or the brain profile.** Both call the server's URL
