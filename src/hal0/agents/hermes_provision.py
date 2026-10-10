@@ -6582,6 +6582,12 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
 #: of a local MCP server (#2330).
 _NO_PROXY_BASE = ("localhost", "127.0.0.1", "::1")
 
+#: One ``NO_PROXY`` entry the driver env will write: a host name (optionally
+#: with a leading dot or ``*.``), an IPv4/IPv6 address (bracketed or not), a
+#: CIDR, an optional ``:port``, or ``*``. Nothing that can quote, comment,
+#: assign or break a line in a systemd ``EnvironmentFile``.
+_NO_PROXY_ENTRY_RE = re.compile(r"[A-Za-z0-9._:/\[\]*-]+")
+
 
 def _split_no_proxy(value: str | None) -> list[str]:
     return [part.strip() for part in (value or "").split(",") if part.strip()]
@@ -6647,6 +6653,11 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
         except Exception as exc:  # never fail the env write over the MCP registry
             log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
             exposed = []
+    # Only host, IP, CIDR, `*` and leading-dot entries reach the file: the
+    # value lands unquoted in a systemd EnvironmentFile, where a stray quote
+    # (say from a malformed api.env line) would swallow the lines after it.
+    operator = [e for e in operator if _NO_PROXY_ENTRY_RE.fullmatch(e)]
+    exposed = [e for e in exposed if _NO_PROXY_ENTRY_RE.fullmatch(e)]
     # urllib and requests honour `*` (bypass every proxy) only as the whole
     # value, so an operator's `*` is written alone, as the #2371 wrappers do.
     if "*" in operator:

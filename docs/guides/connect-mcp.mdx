@@ -92,6 +92,11 @@ headers from their own MCP client, which hal0 cannot configure:
   own exclusions to hal0-api's environment (`/etc/hal0/api.env`); hal0
   copies them in. A changed `NO_PROXY` in `api.env` is copied in the next
   time the set of exposed loopback hosts changes or Hermes is reprovisioned.
+  Removing an entry from `api.env` does not remove it from `hermes.env`,
+  because a rewrite run as root keeps the entries already in the file: to
+  clear one, delete it from `api.env`, run `sudo systemctl restart hal0-api`,
+  delete it from both the `NO_PROXY=` and `no_proxy=` lines of
+  `/etc/hal0/agents/hermes.env` (as root), then restart `hal0-agent@hermes`.
   A newly exposed loopback host takes effect when the agent restarts:
   `sudo systemctl restart hal0-agent@hermes`. The exposed hosts are added for
   that `hal0-agent@hermes` service only: interactive `hermes` and the

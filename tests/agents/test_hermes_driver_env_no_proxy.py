@@ -202,3 +202,39 @@ def test_driver_env_strips_quotes_and_export_from_env_file_values(
         "127.0.0.1",
         "::1",
     ]
+
+
+def test_driver_env_drops_no_proxy_entries_that_could_break_the_env_file(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The value is written unquoted into a systemd EnvironmentFile, where an
+    unmatched quote would swallow the following lines. Only host/IP/CIDR/``*``
+    and leading-dot entries survive."""
+    from hal0.config import paths
+
+    paths.api_env().parent.mkdir(parents=True, exist_ok=True)
+    # A broken api.env line: the opening quote never closes.
+    paths.api_env().write_text('NO_PROXY="intranet,10.0.0.0/8\n')
+    monkeypatch.setenv(
+        "NO_PROXY",
+        "a b,x#y,k=v,bell\x07,'q',.hal0.example.com,[::1]:8080,192.0.2.0/24,host-1:3128",
+    )
+    hp._write_driver_env()
+    body = driver_env.read_text()
+    for char in ('"', "'", "#y", "=v", "\x07", "a b"):
+        assert char not in body.split("\n", 1)[1]
+    upper, lower = _no_proxy_entries(driver_env)
+    assert upper == lower
+    assert upper == [
+        ".hal0.example.com",
+        "[::1]:8080",
+        "192.0.2.0/24",
+        "host-1:3128",
+        "10.0.0.0/8",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
+    # Every line is still a comment or a single KEY=value assignment.
+    for line in body.splitlines():
+        assert line.startswith("#") or line.count("=") == 1, line
