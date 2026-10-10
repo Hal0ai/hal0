@@ -49,9 +49,9 @@ test.describe('Stacks — Load dialog discloses unloads (#1511)', () => {
           dry_run: true,
           summary: [],
           changes: [],
-          creates: [],
+          creates: ['vision'],
           unloads: ['coder', 'img'],
-          warnings: [],
+          warnings: ["agent: model 'qwen3-coder' not in registry"],
         })
       }
       return json(route, {
@@ -82,6 +82,8 @@ test.describe('Stacks — Load dialog discloses unloads (#1511)', () => {
 
     releasePreview()
     await expect(notice).toHaveText(/2 running slots not in this stack will be unloaded: coder, img\./)
+    await expect(dialog.locator('[data-testid="st-load-creates"]')).toContainText('1 new slot will be created: vision.')
+    await expect(dialog.locator('[data-testid="st-load-warnings"]')).toContainText("model 'qwen3-coder' not in registry")
     await expect(confirm).toBeEnabled()
     expect(applyCalls).toEqual(['dry'])
 

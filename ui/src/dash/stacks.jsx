@@ -209,7 +209,27 @@ export function missingModelsNote(n) {
  * ``unloads`` array (an older API) is not "nothing unloads": it becomes
  * ``error`` so the dialog shows its warning, not an all-clear. */
 export function previewFromDryRun(r) {
-  return Array.isArray(r?.unloads) ? { status: 'ok', unloads: r.unloads } : { status: 'error' };
+  if (!Array.isArray(r?.unloads)) return { status: 'error' };
+  // `creates` / `warnings` are advisory extras (#2348): absent or malformed
+  // means "nothing to show", never a failed preview.
+  const list = (v) => (Array.isArray(v) ? v.map(String) : []);
+  return { status: 'ok', unloads: r.unloads, creates: list(r.creates), warnings: list(r.warnings) };
+}
+
+/** Max warning lines shown before the "+N more" tail (the list also scrolls). */
+const MAX_WARNINGS = 5;
+
+/** "N slots will be created: a, b" — or null when the apply creates nothing. */
+export function createsNotice(preview) {
+  const creates = preview?.status === 'ok' ? preview.creates || [] : [];
+  if (creates.length === 0) return null;
+  return `${plural(creates.length, 'new slot')} will be created: ${formatSlotNames(creates)}.`;
+}
+
+/** Validation warnings from the dry-run: `{ shown: string[], more: number }`. */
+export function warningLines(preview) {
+  const all = preview?.status === 'ok' ? preview.warnings || [] : [];
+  return { shown: all.slice(0, MAX_WARNINGS), more: Math.max(0, all.length - MAX_WARNINGS) };
 }
 
 export function unloadNotice(preview) {
@@ -235,7 +255,9 @@ export function loadResultToast(name, result) {
   const unloaded = result?.converged?.unloaded || [];
   let msg = errs ? `Loaded ${name} with ${plural(errs, 'slot error')}` : `Stack “${name}” loaded`;
   if (unloaded.length) msg += ` — unloaded ${plural(unloaded.length, 'slot')}: ${formatSlotNames(unloaded)}`;
-  return [msg, errs ? 'warn' : 'ok'];
+  const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+  if (warnings.length) msg += ` — ${plural(warnings.length, 'warning')}: ${formatSlotNames(warnings, 2)}`;
+  return [msg, errs || warnings.length ? 'warn' : 'ok'];
 }
 
 export function LoadDialog({ vm, preview, onLoad, onPull, busy, onClose }) {
@@ -243,6 +265,8 @@ export function LoadDialog({ vm, preview, onLoad, onPull, busy, onClose }) {
   const hasMissing = missing.length > 0;
   const notice = unloadNotice(preview);
   const checking = !preview || preview.status === 'loading';
+  const creates = createsNotice(preview);
+  const { shown: warnShown, more: warnMore } = warningLines(preview);
   return (
     <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
       <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Load stack" aria-busy={busy}>
@@ -265,6 +289,18 @@ export function LoadDialog({ vm, preview, onLoad, onPull, busy, onClose }) {
             {notice.tone === 'warn' && Icons.alert}
             {notice.text}
           </div>
+          {creates && (
+            <div className="stk-dlg-hint" data-testid="st-load-creates">{creates}</div>
+          )}
+          {warnShown.length > 0 && (
+            <div className="stk-dlg-warn stk-dlg-warnlist" data-testid="st-load-warnings">
+              {Icons.alert}
+              <ul>
+                {warnShown.map((w, i) => <li key={i}>{w}</li>)}
+                {warnMore > 0 && <li className="more">+{warnMore} more</li>}
+              </ul>
+            </div>
+          )}
           <div className="stk-slot-list">
             {vm.slots.map(s => (
               <div key={s.name + s.model} className={'stk-slot-row' + (!s.available ? ' miss' : '')}>
