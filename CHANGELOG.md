@@ -771,6 +771,16 @@ applying. Add those subsections to a version's section to surface them; see
   straight to the box; requests to a remote API still honour it, and
   `SSL_CERT_FILE` / `SSL_CERT_DIR` still apply. (#2503)
 
+- **Security: benchmarks no longer send the box key through your HTTP proxy
+  or along a redirect.** The bench planner, runner, slot A/B harness and
+  `hal0 bench upload` sent their loopback requests, bearer key included,
+  through `HTTP_PROXY` when `NO_PROXY` did not cover loopback, and the upload
+  token was copied onto any redirect. Loopback bench requests now skip the
+  proxy and refuse a redirect to another host, the upload token is never
+  forwarded on a redirect, and Tool Bench adds the loopback addresses to the
+  `NO_PROXY` it passes on while keeping your own entries. Remote targets
+  still use the proxy. (#2505)
+
 - **Queued benchmarks run on a box that requires authentication.** With
   "Require authentication" on, the bench worker called hal0-api with no key
   and got 401: it could not list models, so the queued item was re-queued
