@@ -433,11 +433,21 @@ _hal0_report_harvest_toml_file() {
 # whose value is not the secret itself are skipped as well (#2384): a token
 # count or tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and
 # a field naming where a secret lives (`api_key_env`, `token_file`,
-# `..._path`).
+# `..._path`). Plural `tokens` is a count only with a count qualifier
+# (#2466), as in hal0.redaction._BENIGN_NAME_PART_RE: `max_tokens`,
+# `prompt_tokens`, `tokens_count`, `tokens_per_sec`; `api_tokens`,
+# `auth_tokens` and `tokens_by_host` are secrets. Only the benign part is
+# removed, so a name with another secret word left (`max_tokens_secret`)
+# is still harvested.
+_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)((max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor)_?tokens|tokens_?(count|per))(_|$)|(^|_)tokens_?(in|out)$|tokenizer|token_?count'
 _hal0_report_text_value_is_secret() {
     local name="${1,,}" value="$2"
     [[ "$name" == key ]] && return 1
-    [[ "$name" =~ (tokens|tokenizer|token_?count|_(env|file|path|dir)$) ]] && return 1
+    [[ "$name" =~ _(env|file|path|dir)$ ]] && return 1
+    while [[ "$name" =~ $_HAL0_REPORT_BENIGN_NAME_PART_RE ]]; do
+        name="${name/"${BASH_REMATCH[0]}"/_}"
+    done
+    [[ "$name" =~ (secret|token|pass|api[_-]?key|access[_-]?key|private[_-]?key|encryption[_-]?key|salt|_key$|^key$) ]] || return 1
     [[ ${#value} -ge 8 ]] || return 1
     [[ "$value" =~ ^[0-9]+$ ]] && return 1
     [[ "$value" =~ ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$ ]] && return 1

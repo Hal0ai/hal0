@@ -561,3 +561,64 @@ class TestSchemelessAuthorization:
         assert redact_shareable_text(line) == expected
         assert redact_log_line(line) == expected
         assert redact_shareable_text(expected) == expected  # idempotent
+
+
+# ── #2466: plural ``tokens`` is a benign count only with a count qualifier ──
+
+
+class TestPluralTokenNames:
+    _VALUE = "Plural_Tok3n_99xyzw"
+
+    @pytest.mark.parametrize(
+        "name", ["api_tokens", "auth_tokens", "tokens_by_host", "tokens", "authTokens"]
+    )
+    def test_an_unqualified_tokens_name_is_masked(self, name: str) -> None:
+        from hal0.redaction import redact_secret_named_values
+
+        line = f"{name}={self._VALUE}"
+        for redact in (redact_shareable_text, redact_log_line):
+            out = redact(line)
+            assert self._VALUE not in out, (redact.__name__, out)
+            assert MASK in out
+        assert redact_secret_named_values({name: self._VALUE}) == {name: MASK}
+
+    def test_an_unqualified_tokens_value_is_masked_where_it_reappears(self) -> None:
+        out = redact_shareable_text(f"api_tokens={self._VALUE}\nlater bare: {self._VALUE} end\n")
+        assert self._VALUE not in out
+        assert "later bare: ***REDACTED*** end" in out
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "max_tokens",
+            "extraction_max_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "n_prompt_tokens",
+            "max_new_tokens",
+            "max_completion_tokens",
+            "tokens_per_sec",
+            "output_tokens_per_second",
+            "tokens_count",
+            "maxTokens",
+            "totalTokens",
+            "max-tokens",
+            "tokenizer",
+            "token_count",
+        ],
+    )
+    def test_a_count_qualified_tokens_name_is_left_alone(self, name: str) -> None:
+        from hal0.redaction import redact_secret_named_values
+
+        line = f"{name}={self._VALUE}"
+        assert redact_shareable_text(line) == line
+        assert redact_log_line(line) == line
+        assert redact_secret_named_values({name: 4096}) == {name: 4096}
+
+    @pytest.mark.parametrize(
+        "name", ["login_tokens", "max_tokens_secret", "tokens_in_vault", "api_tokens_count_key"]
+    )
+    def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
+        line = f"{name}={self._VALUE}"
+        assert self._VALUE not in redact_shareable_text(line)

@@ -477,6 +477,59 @@ class TestStructuredHarvestSkipsNonSecrets:
         assert redacted == 'api_token = "***REDACTED***"\n'
 
 
+# ── #2466: plural `tokens` is a benign count only with a count qualifier ──
+
+
+class TestPluralTokenNames:
+    _VALUE = "Plural_Tok3n_99xyzw"
+
+    @pytest.mark.parametrize(
+        "name", ["api_tokens", "auth_tokens", "tokens_by_host", "tokens", "login_tokens"]
+    )
+    def test_an_unqualified_tokens_name_is_harvested(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
+        assert out.returncode == 0, (name, out.stderr)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "max_tokens",
+            "extraction_max_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "n_prompt_tokens",
+            "max_new_tokens",
+            "tokens_per_sec",
+            "tokens_count",
+            "MaxTokens",
+            "tokenizer",
+            "token_count",
+            "api_key_env",
+        ],
+    )
+    def test_a_count_qualified_tokens_name_is_not_harvested(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}" || echo rc=$?')
+        assert out.stdout.strip() == "rc=1", (name, out.stdout, out.stderr)
+
+    @pytest.mark.parametrize("name", ["max_tokens_secret", "tokens_in_vault"])
+    def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
+        assert out.returncode == 0, (name, out.stderr)
+
+    def test_the_report_masks_an_api_tokens_value_where_it_reappears(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            f"upstream api_tokens={self._VALUE} max_tokens=40960000\n"
+            f"later bare: {self._VALUE} end; budget 40960000\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert self._VALUE not in body
+        assert "later bare: ***REDACTED*** end; budget 40960000" in body
+
+
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────
 
 
