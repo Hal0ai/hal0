@@ -24,6 +24,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,7 +35,7 @@ import pytest
 from hal0.bench import cli, control, evalrun, planner, runner
 from hal0.bench.adapters import tool_eval
 from hal0.security.exposure import AuthClass, classify
-from hal0.service_identity import is_loopback_url
+from hal0.service_identity import is_loopback_url, open_url
 
 _SERVER_AB = Path(__file__).resolve().parents[2] / "installer" / "bench" / "server_ab.py"
 
@@ -529,3 +530,184 @@ def test_server_ab_redirect_does_not_carry_the_key(api_env, stub, server_ab) -> 
 @pytest.mark.parametrize("bad_api", ["", "not a url", "http://[bad"])
 def test_runner_get_json_returns_none_for_a_malformed_api(api_env, bad_api) -> None:
     assert runner._get_json(bad_api, "/api/slots") is None
+
+
+# ── loopback requests never go through a proxy (#2505) ────────────────────────
+
+
+class _FakeProxy:
+    """A real listener standing in for an HTTP forward proxy. It records every
+    request it receives (request target + Authorization) and answers a known
+    hal0-api path with its stub JSON, so a remote request routed through it
+    completes without touching the network."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str, str | None]] = []
+        proxy = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _handle(self) -> None:
+                length = int(self.headers.get("content-length") or 0)
+                if length:
+                    self.rfile.read(length)
+                proxy.seen.append((self.command, self.path, self.headers.get("Authorization")))
+                path = urllib.parse.urlsplit(self.path).path
+                raw = json.dumps(ROUTES.get(path, {})).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            do_GET = _handle
+            do_PUT = _handle
+            do_POST = _handle
+
+            def log_message(self, *a: object) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+@pytest.fixture(params=["HTTP_PROXY", "ALL_PROXY"])
+def proxied(request, monkeypatch) -> Iterator[tuple[str, _FakeProxy]]:
+    """The proxy environment pointing at a live fake proxy, NO_PROXY unset."""
+    for name in _PROXY_VARS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)  # getproxies' CGI guard
+    # urlopen caches its default opener, and that opener's ProxyHandler read
+    # the proxy environment when it was built. Drop it so this env applies.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    proxy = _FakeProxy()
+    monkeypatch.setenv(request.param, proxy.url)
+    try:
+        yield request.param, proxy
+    finally:
+        proxy.close()
+
+
+def test_loopback_bench_reads_bypass_the_proxy(api_env, stub, proxied) -> None:
+    _, proxy = proxied
+
+    assert planner.fetch_registry_models(stub.url) == REGISTRY
+    assert runner._get_json(stub.url, "/api/slots") == SLOTS
+    assert runner.fetch_host(stub.url).name == "stubbox"
+
+    assert proxy.seen == []
+    assert stub.keys_sent() == {f"Bearer {CLIENT_KEY}"}
+
+
+def test_server_ab_loopback_requests_bypass_the_proxy(api_env, stub, proxied, server_ab) -> None:
+    _, proxy = proxied
+
+    assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
+    server_ab._apply_extra_args(stub.url, "gpu-a", "--cache-reuse 256")
+    server_ab._http("POST", f"{stub.url}/completion", {"prompt": "x"})
+
+    assert proxy.seen == []
+    assert stub.keys_sent() == {f"Bearer {CLIENT_KEY}", f"Bearer {ADMIN_KEY}", None}
+
+
+def test_open_url_and_its_stdlib_copy_agree(stub, proxied, server_ab) -> None:
+    _, proxy = proxied
+    for opener in (open_url, server_ab._open_url):
+        with opener(f"{stub.url}{LANDING_PATH}", timeout=5) as resp:
+            assert json.loads(resp.read()) == SLOTS
+    assert proxy.seen == []
+
+
+def _skip_unless_http_proxy(var: str) -> None:
+    if var != "HTTP_PROXY":
+        pytest.skip("urllib's default opener does not read ALL_PROXY")
+
+
+def test_remote_bench_reads_still_use_the_proxy(api_env, proxied) -> None:
+    """A non-loopback --api keeps urllib's default opener, so the proxy
+    environment is honoured exactly as before: HTTP_PROXY routes through the
+    proxy, without the key. (urllib's default opener never reads ALL_PROXY.)"""
+    var, proxy = proxied
+    _skip_unless_http_proxy(var)
+
+    assert planner.fetch_registry_models(REMOTE_API) == REGISTRY
+    assert runner._get_json(REMOTE_API, "/api/slots") == SLOTS
+    with open_url(f"{REMOTE_API}/api/hardware", timeout=10) as resp:
+        assert json.loads(resp.read()) == HARDWARE
+
+    assert proxy.seen == [
+        ("GET", f"{REMOTE_API}/api/models", None),
+        ("GET", f"{REMOTE_API}/api/slots", None),
+        ("GET", f"{REMOTE_API}/api/hardware", None),
+    ]
+
+
+def test_server_ab_remote_requests_still_use_the_proxy(api_env, proxied, server_ab) -> None:
+    var, proxy = proxied
+    _skip_unless_http_proxy(var)
+
+    assert server_ab._get_slot(REMOTE_API, "gpu-a") == SLOTS[0]
+    with server_ab._open_url(f"{REMOTE_API}/api/hardware", timeout=10) as resp:
+        assert json.loads(resp.read()) == HARDWARE
+
+    assert proxy.seen == [
+        ("GET", f"{REMOTE_API}/api/slots", None),
+        ("GET", f"{REMOTE_API}/api/hardware", None),
+    ]
+
+
+def test_bench_upload_to_loopback_bypasses_the_proxy(proxied, tmp_path) -> None:
+    _, proxy = proxied
+    worker = _FakeProxy()  # any 200-answering listener stands in for the worker
+    bundle = tmp_path / "b.tar.gz"
+    bundle.write_bytes(b"\x1f\x8b")
+    try:
+        assert cli._upload_bundle(bundle, worker.url, "upload-token") == 0
+    finally:
+        worker.close()
+
+    assert proxy.seen == []
+    assert worker.seen == [("POST", "/v1/bundles", "Bearer upload-token")]
+
+
+def test_tool_eval_child_reaches_loopback_directly(api_env, stub, proxied) -> None:
+    """tool-eval-bench runs as a child process with an httpx-style client,
+    which honours HTTP_PROXY *and* ALL_PROXY. Its keyed env must keep loopback
+    off the proxy while a remote host still goes through it."""
+    pytest.importorskip("httpx")
+    _, proxy = proxied
+    request = tool_eval.ToolEvalRequest(
+        python_exe=sys.executable,
+        base_url=f"{stub.url}/v1",
+        model="m",
+        output_path=Path("unused.json"),
+        api_key=CLIENT_KEY,
+    )
+    env = tool_eval.build_env(request)
+    assert env is not None
+    script = (
+        "import os, httpx\n"
+        f"h = {{'Authorization': 'Bearer ' + os.environ[{tool_eval.API_KEY_ENV!r}]}}\n"
+        f"httpx.get({stub.url + '/api/slots'!r}, headers=h, timeout=10)\n"
+        f"httpx.get({REMOTE_API + '/api/models'!r}, timeout=10)\n"
+    )
+    rc, _, err = tool_eval._default_runner([sys.executable, "-c", script], 60, env=env)
+
+    assert rc == 0, err
+    assert stub.seen == [("GET", "/api/slots", f"Bearer {CLIENT_KEY}")]
+    assert proxy.seen == [("GET", f"{REMOTE_API}/api/models", None)]
+
+
+def test_tool_eval_no_proxy_merge() -> None:
+    merge = tool_eval._no_proxy_with_loopback
+    assert merge("") == "127.0.0.1,::1,localhost"
+    assert merge("corp.example, localhost") == "corp.example,localhost,127.0.0.1,::1"
+    assert merge("*") == "*"

@@ -128,6 +128,17 @@ def _is_loopback_url(url: str) -> bool:
     return host in _LOOPBACK_HOSTS
 
 
+def _open_url(req: urllib.request.Request | str, timeout: float) -> Any:
+    """Stdlib copy of hal0.service_identity.open_url (#2505): a loopback
+    target ignores the proxy environment, so the box key never reaches an
+    HTTP_PROXY in cleartext; any other target honours it as before."""
+    url = req if isinstance(req, str) else req.full_url
+    if _is_loopback_url(url):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def _api_env_path() -> Path:
     home = os.environ.get("HAL0_HOME", "").strip()
     return (Path(home) / "etc" / "hal0" if home else Path("/etc/hal0")) / "api.env"
@@ -192,7 +203,7 @@ def _http(
         # whatever its origin, but never unredirected_hdrs.
         for name, value in _api_auth_headers(auth).items():
             req.add_unredirected_header(name, value)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _open_url(req, timeout=timeout) as resp:
         payload = resp.read()
     return json.loads(payload) if payload else {}
 
@@ -211,7 +222,7 @@ def _wait_ready(port: int, timeout_s: float = 300.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=3) as resp:
+            with _open_url(url, timeout=3) as resp:
                 if resp.status == 200:
                     return
         except (urllib.error.URLError, OSError):

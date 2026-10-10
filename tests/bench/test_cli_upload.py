@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import types
 import urllib.error
 
 import pytest
@@ -77,6 +78,11 @@ def _capture(monkeypatch, payload: dict) -> dict:
         return _Response(payload)
 
     monkeypatch.setattr("hal0.bench.cli.urllib.request.urlopen", fake_urlopen)
+    # A loopback --api-url goes through the no-proxy opener instead (#2505).
+    monkeypatch.setattr(
+        "hal0.service_identity._no_proxy_opener",
+        lambda: types.SimpleNamespace(open=fake_urlopen),
+    )
     return seen
 
 

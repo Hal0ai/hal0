@@ -721,8 +721,13 @@ def _upload_bundle(path: Path, api: str, token: str | None) -> int:
             "content-type": "application/gzip",
         },
     )
+    from hal0.service_identity import open_url
+
     try:
-        with urllib.request.urlopen(req, timeout=120) as res:
+        # A loopback --api-url (a local worker) bypasses the proxy environment so
+        # the bearer never reaches a proxy in cleartext (#2505); a remote one
+        # honours the proxy environment as before.
+        with open_url(req, timeout=120) as res:
             payload = json.loads(res.read().decode() or "{}")
     except urllib.error.HTTPError as exc:
         detail = ""

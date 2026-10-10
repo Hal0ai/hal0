@@ -261,12 +261,34 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
     return argv
 
 
+#: Hosts a keyed tool-eval-bench child must reach directly, never through a
+#: proxy (#2505). Same allowlist as ``hal0.service_identity.is_loopback_url``.
+_LOOPBACK_NO_PROXY: tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
+
+
+def _no_proxy_with_loopback(current: str) -> str:
+    """``current`` (a NO_PROXY value) with every loopback host appended."""
+    entries = [e.strip() for e in current.split(",") if e.strip()]
+    if "*" in entries:
+        return ",".join(entries)
+    entries += [h for h in _LOOPBACK_NO_PROXY if h not in entries]
+    return ",".join(entries)
+
+
 def build_env(request: ToolEvalRequest) -> dict[str, str] | None:
     """The child environment for one run: ``None`` (inherit) when there is no
-    API key, else the current environment plus :data:`API_KEY_ENV` (#2478)."""
+    API key, else the current environment plus :data:`API_KEY_ENV` (#2478).
+
+    The key is only set for this box's loopback API, so the child's
+    ``NO_PROXY``/``no_proxy`` are extended with the loopback hosts: an
+    inherited ``HTTP_PROXY``/``ALL_PROXY`` must not carry the bearer to a
+    proxy in cleartext (#2505). Remote hosts still go through the proxy."""
     if not request.api_key:
         return None
-    return {**os.environ, API_KEY_ENV: request.api_key}
+    env = {**os.environ, API_KEY_ENV: request.api_key}
+    for name in ("NO_PROXY", "no_proxy"):
+        env[name] = _no_proxy_with_loopback(env.get(name, ""))
+    return env
 
 
 # --------------------------------------------------------------------------- #
