@@ -8,24 +8,43 @@ auth middleware does. The key is discovered the way the worker discovers it
 under systemd: no key in the process env, only ``api.env`` on disk (read via
 ``$HAL0_HOME/etc/hal0/api.env`` here instead of ``/etc/hal0/api.env``).
 
-Every bench endpoint is a CLIENT-class route (or OPEN), so the bench presents
-the client key — the least-privilege tier — even when the admin key is also
-readable.
+Every endpoint the bench package reads is a CLIENT-class route (or OPEN), so it
+presents the client key — the least-privilege tier — even when the admin key
+is also readable. ``server_ab.py`` (Tier B/C cells) presents the admin key only
+for the ADMIN routes it drives (slot config PUT and restart). Tool Bench hands
+the client key to tool-eval-bench through its environment, never argv.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 import threading
 import time
 import types
+import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
-from hal0.bench import cli, control, planner, runner
+from hal0.bench import cli, control, evalrun, planner, runner
+from hal0.bench.adapters import tool_eval
 from hal0.security.exposure import AuthClass, classify
+
+_SERVER_AB = Path(__file__).resolve().parents[2] / "installer" / "bench" / "server_ab.py"
+
+
+def _load_server_ab():
+    """server_ab.py is a stdlib script, not a package — load it by path."""
+    spec = importlib.util.spec_from_file_location("server_ab_2478", _SERVER_AB)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 CLIENT_KEY = "test-client-key-2478"
 ADMIN_KEY = "test-admin-key-2478"
@@ -47,23 +66,53 @@ ROUTES: dict[str, object] = {
 BENCH_API_PATHS = sorted(ROUTES)
 
 
+#: Paths the stub answers like a slot's own llama-server port: no auth, and
+#: a bench client must never send the box key there.
+SLOT_PORT_PATHS = {"/completion"}
+
+
 class _Stub:
+    """hal0-api stand-in that enforces each route's real tier (``classify``):
+    OPEN needs nothing, CLIENT needs the client or admin key, ADMIN needs the
+    admin key (403 for the client key), like ``hal0.api.auth._decide``."""
+
     def __init__(self) -> None:
-        self.seen: list[tuple[str, str | None]] = []
+        self.seen: list[tuple[str, str, str | None]] = []
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
+            def _handle(self) -> None:
                 auth = self.headers.get("Authorization")
                 path = self.path.split("?", 1)[0]
-                stub.seen.append((path, auth))
-                if auth not in (f"Bearer {CLIENT_KEY}", f"Bearer {ADMIN_KEY}"):
+                length = int(self.headers.get("content-length") or 0)
+                if length:
+                    self.rfile.read(length)
+                stub.seen.append((self.command, path, auth))
+                if path in SLOT_PORT_PATHS:
+                    self._send(200, {"content": "ok", "timings": {}})
+                    return
+                tier = {f"Bearer {CLIENT_KEY}": "client", f"Bearer {ADMIN_KEY}": "admin"}.get(
+                    auth or "", "anon"
+                )
+                need = classify(self.command, path)
+                if need is AuthClass.CLIENT and tier == "anon":
                     self._send(401, {"error": {"code": "auth.required"}})
                     return
-                if path not in ROUTES:
-                    self._send(404, {})
+                needs_admin = need not in (AuthClass.OPEN, AuthClass.CLIENT)
+                if needs_admin and tier != "admin":
+                    self._send(401 if tier == "anon" else 403, {"error": {}})
                     return
-                self._send(200, ROUTES[path])
+                if self.command == "GET":
+                    if path not in ROUTES:
+                        self._send(404, {})
+                        return
+                    self._send(200, ROUTES[path])
+                    return
+                self._send(200, {})
+
+            do_GET = _handle
+            do_PUT = _handle
+            do_POST = _handle
 
             def _send(self, status: int, body: object) -> None:
                 raw = json.dumps(body).encode()
@@ -86,7 +135,7 @@ class _Stub:
         self.server.server_close()
 
     def keys_sent(self) -> set[str | None]:
-        return {auth for _, auth in self.seen}
+        return {auth for _, _, auth in self.seen}
 
 
 @pytest.fixture
@@ -197,3 +246,149 @@ def test_worker_drains_a_queued_model_on_an_auth_required_box(
     assert control.read_queue() == []
     assert control.read_failed() == []
     assert stub.keys_sent() == {f"Bearer {CLIENT_KEY}"}
+
+
+# ── server_ab.py (Tier B/C cells) ──────────────────────────────────────────────
+
+
+@pytest.fixture(params=["hal0-importable", "stdlib-only"])
+def server_ab(request, monkeypatch):
+    """Both key-resolution paths: with hal0 importable (service_identity) and
+    the box's real one — system python3, no hal0 venv (stdlib fallback)."""
+    if request.param == "stdlib-only":
+        monkeypatch.setitem(sys.modules, "hal0.service_identity", None)
+    return _load_server_ab()
+
+
+def test_server_ab_routes_tiers() -> None:
+    assert classify("GET", "/api/slots") is AuthClass.CLIENT
+    assert classify("PUT", "/api/slots/gpu-a/config") is AuthClass.ADMIN
+    assert classify("POST", "/api/slots/gpu-a/restart") is AuthClass.ADMIN
+
+
+def test_server_ab_slot_lookup_uses_the_client_key(api_env, stub, server_ab) -> None:
+    assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
+    assert stub.keys_sent() == {f"Bearer {CLIENT_KEY}"}
+
+
+def test_server_ab_slot_config_and_restart_use_the_admin_key(api_env, stub, server_ab) -> None:
+    server_ab._apply_extra_args(stub.url, "gpu-a", "--cache-reuse 256")
+
+    assert stub.seen == [
+        ("PUT", "/api/slots/gpu-a/config", f"Bearer {ADMIN_KEY}"),
+        ("POST", "/api/slots/gpu-a/restart", f"Bearer {ADMIN_KEY}"),
+    ]
+
+
+def test_server_ab_falls_back_to_admin_key_for_reads(api_env, stub, server_ab) -> None:
+    api_env.write_text(f"HAL0_ADMIN_KEY={ADMIN_KEY}\n", encoding="utf-8")
+
+    assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
+    assert stub.keys_sent() == {f"Bearer {ADMIN_KEY}"}
+
+
+def test_server_ab_prefers_env_over_api_env(api_env, stub, server_ab, monkeypatch) -> None:
+    api_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HAL0_CLIENT_KEY", CLIENT_KEY)
+
+    assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
+    assert stub.keys_sent() == {f"Bearer {CLIENT_KEY}"}
+
+
+def test_server_ab_never_sends_the_key_to_a_slot_port(api_env, stub, server_ab) -> None:
+    server_ab._http("POST", f"{stub.url}/completion", {"prompt": "x"})
+    assert stub.seen == [("POST", "/completion", None)]
+
+
+# ── Tool Bench (tool-eval-bench) ──────────────────────────────────────────────
+
+
+def _happy_eval_doc(scenario_id: str) -> dict:
+    return {
+        "status": "completed",
+        "run_id": "r1",
+        "tool_eval_bench_version": "2.5.0",
+        "final_score": 2,
+        "total_scenarios": 1,
+        "scores": {
+            "scenario_results": [
+                {
+                    "scenario_id": scenario_id,
+                    "status": "pass",
+                    "points": 2,
+                    "summary": "ok",
+                    "expected_behavior": "ok",
+                    "tool_calls_made": [],
+                    "duration_seconds": 1.0,
+                    "turn_count": 1,
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                }
+            ]
+        },
+    }
+
+
+def test_tool_bench_sends_the_client_key_through_env_not_argv(api_env, stub, tmp_path) -> None:
+    """The fake runner behaves like pinned tool-eval-bench v2.5.0: it reads
+    the key from ``TOOL_EVAL_API_KEY`` and calls ``{base_url}/chat/completions``
+    with it as a Bearer token."""
+    seen: dict[str, object] = {}
+
+    def upstream_like(argv, timeout_s, env=None):
+        seen["argv"] = list(argv)
+        key = (env or {}).get(tool_eval.API_KEY_ENV)
+        base = argv[argv.index("--base-url") + 1]
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=b"{}",
+            method="POST",
+            headers={"Authorization": f"Bearer {key}"} if key else {},
+        )
+        urllib.request.urlopen(req, timeout=5).read()
+        out_path = argv[argv.index("--json-file") + 1]
+        Path(out_path).write_text(json.dumps(_happy_eval_doc("s1")), encoding="utf-8")
+        return 0, "", ""
+
+    rec = evalrun.run_task(
+        evalrun.Task(id="s1", kind="A"), "m1", "run-1", stub.url, tmp_path, runner=upstream_like
+    )
+
+    assert rec.outcome == "ok", rec.note
+    assert stub.seen == [("POST", "/v1/chat/completions", f"Bearer {CLIENT_KEY}")]
+    argv_text = " ".join(seen["argv"])
+    assert "--api-key" not in argv_text
+    assert CLIENT_KEY not in argv_text
+    assert ADMIN_KEY not in argv_text
+
+
+def test_tool_eval_adapter_keeps_the_key_off_argv(tmp_path) -> None:
+    req = tool_eval.ToolEvalRequest(
+        python_exe=sys.executable,
+        base_url="http://x/v1",
+        model="m",
+        output_path=tmp_path / "out.json",
+        api_key="sekrit",
+    )
+    argv = tool_eval.build_argv(req)
+    assert not any("sekrit" in a for a in argv)
+    assert "--api-key" not in argv
+    assert tool_eval.build_env(req)[tool_eval.API_KEY_ENV] == "sekrit"
+
+    keyless = tool_eval.ToolEvalRequest(
+        python_exe=sys.executable, base_url="http://x/v1", model="m", output_path=tmp_path / "o"
+    )
+    assert tool_eval.build_env(keyless) is None
+
+
+def test_tool_eval_default_runner_hands_the_env_to_the_child() -> None:
+    import os
+
+    script = f"import os, sys; sys.stdout.write(os.environ.get({tool_eval.API_KEY_ENV!r}, ''))"
+    rc, out, _ = tool_eval._default_runner(
+        [sys.executable, "-c", script],
+        30,
+        env={**os.environ, tool_eval.API_KEY_ENV: "from-env"},
+    )
+    assert rc == 0
+    assert out == "from-env"

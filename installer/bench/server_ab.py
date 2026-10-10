@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -101,17 +102,85 @@ def _build_prompt(depth_tokens: int) -> str:
     return _PARA * reps
 
 
-def _http(method: str, url: str, body: dict | None = None, timeout: float = 600.0) -> Any:
+# ── hal0-api auth (#2478) ─────────────────────────────────────────────────────
+# On an auth-required box every hal0-api call needs the box service key. This
+# script runs under the system python3 (no hal0 venv), so when hal0 is not
+# importable it resolves the key exactly as hal0.service_identity does: env
+# first, then api.env ($HAL0_HOME/etc/hal0 or /etc/hal0), the preferred tier
+# first and the other tier as a fallback. Keys go ONLY to hal0-api, never to a
+# slot's own llama-server port.
+_KEY_ENV = {"admin": "HAL0_ADMIN_KEY", "client": "HAL0_CLIENT_KEY"}
+
+
+def _api_env_path() -> Path:
+    home = os.environ.get("HAL0_HOME", "").strip()
+    return (Path(home) / "etc" / "hal0" if home else Path("/etc/hal0")) / "api.env"
+
+
+def _keys_from_api_env() -> dict[str, str]:
+    try:
+        text = _api_env_path().read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    found: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k in _KEY_ENV.values() and v:
+            found[k] = v.strip().strip('"').strip("'")
+    return found
+
+
+def _api_auth_headers(prefer: str) -> dict[str, str]:
+    """``{"Authorization": "Bearer <key>"}`` for the box identity, or ``{}``.
+
+    ``prefer="client"`` for CLIENT routes (``GET /api/slots``);
+    ``prefer="admin"`` only for the ADMIN routes this script drives
+    (``PUT /api/slots/{slot}/config``, ``POST /api/slots/{slot}/restart``)."""
+    try:
+        from hal0.service_identity import service_auth_headers
+    except ImportError:
+        pass
+    else:
+        return service_auth_headers(prefer=prefer)
+    order = ("admin", "client") if prefer == "admin" else ("client", "admin")
+    for tier in order:
+        key = os.environ.get(_KEY_ENV[tier], "").strip()
+        if key:
+            return {"Authorization": f"Bearer {key}"}
+    file_keys = _keys_from_api_env()
+    for tier in order:
+        key = file_keys.get(_KEY_ENV[tier], "")
+        if key:
+            return {"Authorization": f"Bearer {key}"}
+    return {}
+
+
+def _http(
+    method: str,
+    url: str,
+    body: dict | None = None,
+    timeout: float = 600.0,
+    auth: str | None = None,
+) -> Any:
+    """JSON request. ``auth`` ("client"/"admin") marks a hal0-api call and
+    attaches the box key for that tier; ``None`` (a slot's own port) sends no
+    key."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if auth is not None:
+        for name, value in _api_auth_headers(auth).items():
+            req.add_header(name, value)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = resp.read()
     return json.loads(payload) if payload else {}
 
 
 def _get_slot(api: str, name: str) -> dict:
-    slots = _http("GET", f"{api}/api/slots")
+    slots = _http("GET", f"{api}/api/slots", auth="client")
     items = slots if isinstance(slots, list) else slots.get("slots", slots.get("data", []))
     for s in items:
         if s.get("name") == name:
@@ -220,8 +289,13 @@ def _summarize_runs(runs: list[dict]) -> dict:
 
 def _apply_extra_args(api: str, slot: str, extra_args: str | None) -> None:
     """PUT [server].extra_args (None deletes the key = back to profile flags)."""
-    _http("PUT", f"{api}/api/slots/{slot}/config", {"server": {"extra_args": extra_args}})
-    _http("POST", f"{api}/api/slots/{slot}/restart", {})
+    _http(
+        "PUT",
+        f"{api}/api/slots/{slot}/config",
+        {"server": {"extra_args": extra_args}},
+        auth="admin",
+    )
+    _http("POST", f"{api}/api/slots/{slot}/restart", {}, auth="admin")
 
 
 def mode_ab(args: argparse.Namespace) -> dict:
@@ -369,8 +443,8 @@ def mode_batch(args: argparse.Namespace) -> dict:
         for np in np_values:
             conc = args.concurrency or np  # default: saturate the slots
             print(f"[batch] parallel={np}, concurrency={conc}", flush=True)
-            _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": np})
-            _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {})
+            _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": np}, auth="admin")
+            _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {}, auth="admin")
             _wait_ready(port)
             rounds: list[dict] = []
             for r in range(args.n):
@@ -415,8 +489,13 @@ def mode_batch(args: argparse.Namespace) -> dict:
             }
     finally:
         print(f"[batch] restoring parallel = {original!r}", flush=True)
-        _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": original})
-        _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {})
+        _http(
+            "PUT",
+            f"{args.api}/api/slots/{args.slot}/config",
+            {"parallel": original},
+            auth="admin",
+        )
+        _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {}, auth="admin")
     return results
 
 

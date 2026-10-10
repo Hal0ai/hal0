@@ -289,7 +289,7 @@ def run_task(
     api: str,
     workroot: Path,
     *,
-    runner: Callable[[list[str], float], tuple[int, str, str]] | None = None,
+    runner: Callable[..., tuple[int, str, str]] | None = None,
     python_exe: str = sys.executable,
 ) -> EvalRecord:
     """Drive ONE tool-eval-bench scenario for one model, then translate its
@@ -298,12 +298,18 @@ def run_task(
     tool doesn't recognize all produce a returned FAILED/HANG record, not an
     exception (mirrors ``harness.run_cell`` / the old hermes-driven
     ``run_task``)."""
+    from hal0.service_identity import service_key
+
     out_path = workroot / f"{task.id}-{run_id[-6:]}.json"
     request = tool_eval.ToolEvalRequest(
         python_exe=python_exe,
         base_url=f"{api.rstrip('/')}/v1",
         model=model,
         output_path=out_path,
+        # #2478: /v1/chat/completions is a CLIENT route, so an auth-required
+        # box needs the box client key (admin only as a single-key fallback).
+        # The adapter hands it to the tool through its env, never argv.
+        api_key=service_key(prefer="client"),
         scenarios=(task.id,),
         timeout_s=_DEFAULT_TASK_TIMEOUT_S,
     )
