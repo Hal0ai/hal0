@@ -126,7 +126,7 @@ def test_deferred_eval_yields_head_of_line(monkeypatch, tmp_path):
     control.enqueue({"id": "ev1", "model": "m-eval", "kind": "eval"})
     control.enqueue({"id": "su1", "suite": "roster"})
 
-    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [])
+    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [{"id": "m-eval"}, {"id": "m"}])
     # eval always defers over (simulated) live traffic
     monkeypatch.setattr(cli, "_worker_eval", lambda model, api, item: False)
 
@@ -153,7 +153,7 @@ def test_stopped_eval_keeps_head_of_line(monkeypatch, tmp_path):
     control.enqueue({"id": "ev1", "model": "m-eval", "kind": "eval"})
     control.enqueue({"id": "su1", "suite": "roster"})
 
-    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [])
+    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [{"id": "m-eval"}, {"id": "m"}])
 
     def stop_then_defer(model, api, item):
         control.set_control(state="stopped")  # operator hits Stop mid-eval
@@ -181,7 +181,7 @@ def test_eval_item_dropped_when_tool_eval_bench_is_missing(monkeypatch, tmp_path
     monkeypatch.setenv("HAL0_BENCH_STATE", str(tmp_path))
     control.set_control(state="running")
     control.enqueue({"id": "ev1", "kind": "eval", "model": "m"})
-    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [])
+    monkeypatch.setattr(cli, "fetch_registry_models", lambda api: [{"id": "m-eval"}, {"id": "m"}])
     monkeypatch.setattr(evalrun, "tool_eval_missing", lambda: "no tool-eval-bench here")
 
     import time as _time
@@ -193,3 +193,4 @@ def test_eval_item_dropped_when_tool_eval_bench_is_missing(monkeypatch, tmp_path
     with pytest.raises(KeyboardInterrupt):
         cli.cmd_worker(types.SimpleNamespace(poll=0, api="http://x"))
     assert control.read_queue() == []
+    assert [f["id"] for f in control.read_failed()] == ["ev1"]
