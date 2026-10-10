@@ -358,7 +358,12 @@ case "$cmd" in
             echo "{\"ts\":\"$TIMESTAMP\",\"temp_c\":$GPU_TEMP,\"power_mw\":$GPU_POWER,\"gpu_busy_pct\":$GPU_BUSY,\"vram_b\":$GPU_VRAM,\"gtt_b\":$GPU_GTT,\"sclk_mhz\":$GPU_SCLK}" >> "$TELEMETRY_FILE"
             sleep 1
           done
-        ) &
+        # Detach the sampler's stdio: a backgrounded subshell otherwise
+        # inherits the caller's stdout/stderr pipes (through sudo), and a
+        # caller that reads them to EOF (subprocess.run(capture_output=True))
+        # blocks until the sampler dies — i.e. forever. Every child of the
+        # subshell (date, sleep, head, grep) inherits the redirects too.
+        ) </dev/null >/dev/null 2>&1 &
         echo $! > "$ARTIFACTS_DIR/telemetry.pid"
         echo "[telemetry] started (PID $!)"
         ;;

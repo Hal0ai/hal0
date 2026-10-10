@@ -387,14 +387,37 @@ def _telemetry_root() -> Path:
     return Path(os.environ.get("HAL0_BENCH_TELEMETRY_ROOT") or _TELEMETRY_DEFAULT_ROOT)
 
 
+# Upper bound on one telemetry start/end call. Both verbs return in well under
+# a second; this only exists so a regression (a sampler holding the caller's
+# pipes open, a wedged sudo) degrades to a warning instead of wedging the
+# worker forever (#2510).
+_TELEMETRY_CMD_TIMEOUT_S = 30.0
+
+
 def _run_telemetry_cmd(argv: list[str]) -> tuple[int, str]:
     """Bare subprocess call for the telemetry start/end verbs: ``start``
     backgrounds its own sampler and returns immediately, ``end`` just signals
     it — both are short, so unlike the cell-execution path (``_tier_a_runner``)
-    no watchdog is warranted here. A module-level function (not inlined into
-    ``_telemetry_session``) so tests can monkeypatch it without a real
-    ``sudo``/``hal0-benchctl`` on PATH."""
-    proc = subprocess.run(argv, capture_output=True, text=True)
+    no watchdog is warranted beyond a generous timeout. A module-level function
+    (not inlined into ``_telemetry_session``) so tests can monkeypatch it
+    without a real ``sudo``/``hal0-benchctl`` on PATH.
+
+    A timeout is reported as a failed call (rc 124, the ``timeout(1)``
+    convention) with a clear message, never raised: telemetry is diagnostic."""
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=_TELEMETRY_CMD_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {_TELEMETRY_CMD_TIMEOUT_S:g}s"
+    except OSError as exc:
+        # Missing sudo/benchctl, or PermissionError (e.g. kill() of a wedged
+        # setuid sudo after a timeout): a failed call, not an exception.
+        return 126, f"could not run {argv[0] if argv else 'telemetry command'}: {exc}"
     return proc.returncode, (proc.stderr or proc.stdout or "")
 
 
