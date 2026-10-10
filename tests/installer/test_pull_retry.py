@@ -87,6 +87,37 @@ hal0_pull_backoff_delay 4
         )
         assert proc.stdout.splitlines() == ["1", "3", "6"], proc.stdout
 
+    def test_custom_table_splits_under_the_installer_ifs(self) -> None:
+        """#2470: install.sh:45 sets IFS=$'\\n\\t'; the space-separated knob must still split."""
+        script = f"""
+set -uo pipefail
+IFS=$'\\n\\t'
+source "{PULL_RETRY}"
+HAL0_PULL_RETRY_DELAYS="2 4 8"
+hal0_pull_backoff_delay 1
+hal0_pull_backoff_delay 2
+hal0_pull_backoff_delay 3
+hal0_pull_backoff_delay 4
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert proc.stdout.splitlines() == ["2", "4", "8", "16"], proc.stdout
+
+    def test_default_table_is_intact_under_the_installer_ifs(self) -> None:
+        """The unset-env default must not collapse when IFS[0] is a newline."""
+        script = f"""
+set -uo pipefail
+IFS=$'\\n\\t'
+source "{PULL_RETRY}"
+unset HAL0_PULL_RETRY_DELAYS
+for i in 1 2 3 4 5; do hal0_pull_backoff_delay "$i"; done
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, cwd=str(REPO)
+        )
+        assert proc.stdout.splitlines() == ["5", "15", "30", "60", "120"], proc.stdout
+
 
 class TestPullWithRetry:
     def _fake_runtime(self, tmp_path: Path, script_body: str) -> Path:
