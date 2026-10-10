@@ -748,6 +748,99 @@ applying. Add those subsections to a version's section to surface them; see
   table, so the matching facts stay lit and each dot takes its type's
   colour. (#1996)
 
+- **Security: the `hal0` CLI no longer hands this box's API key to another
+  host.** The CLI attached the key it found in `/etc/hal0/api.env` (the admin
+  key, or the client key on a single-key box) to whatever `HAL0_API_URL`
+  named, so pointing the CLI at another machine, or at a mistyped address,
+  sent that machine this box's admin key in the `Authorization` header. A key
+  found in `api.env` now goes only to a loopback API (`127.0.0.1`, `::1` or
+  `localhost`; `127.0.0.2`, look-alike hostnames and URLs carrying
+  `user@` credentials do not count). A key you exported yourself as
+  `HAL0_ADMIN_KEY` or `HAL0_CLIENT_KEY` is still sent to a remote target,
+  since exporting it is a deliberate choice. The CLI also no longer follows
+  redirects, so a `3xx` cannot carry the key to a different address. When a
+  remote target answers 401 and a discovered key was held back, the error
+  says so and points at `HAL0_ADMIN_KEY`; it never prints the key. This
+  covers `hal0 chat` and the `hal0 setup` probes too. (#2499)
+
+- **Security: the `hal0` CLI no longer sends local API requests through your
+  HTTP proxy.** With `HTTP_PROXY` or `ALL_PROXY` set and `NO_PROXY` not
+  covering loopback, every CLI request to the local API went to the proxy in
+  cleartext, bearer key included, so a corporate or system proxy saw this
+  box's key. Requests to a loopback API now skip the proxy environment and go
+  straight to the box; requests to a remote API still honour it, and
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` still apply. (#2503)
+
+- **Queued benchmarks run on a box that requires authentication.** With
+  "Require authentication" on, the bench worker called hal0-api with no key
+  and got 401: it could not list models, so the queued item was re-queued
+  twice and then dropped; it read the GPU as busy forever and found no slot;
+  and the slot-tuning and Tool Bench cells failed the same way. Every bench
+  call now carries the box key (the client key where the route allows it, the
+  admin key only for the two slot-changing calls), read from the environment
+  and then `/etc/hal0/api.env`, which the worker's user can already read.
+  The key is attached only when the bench is pointed at the box's own
+  loopback address and is never forwarded on a redirect, so `--api` or
+  `HAL0_BENCH_API` aimed at another host sends nothing. (#2478)
+
+- **Header-style secret names are masked like their underscore spelling.**
+  The text redaction behind `hal0 doctor bundle`, live log views and the
+  installer's failure report matched a secret word only when the rest of the
+  name used letters, digits and underscores. A hyphen after the secret word
+  ended the match, so `api-token-prod=…`, `github-token-ci=…`,
+  `token-type: …` and `anthropic-ratelimit-tokens-*` passed through with
+  their values visible, while `api_token_prod` was masked. Names now run over
+  hyphens the same way they run over underscores, in both the Python
+  redaction and the installer. Names that are locations stay readable
+  (`api-token-file`, `token-env`), as do plain counts such as `max-tokens`.
+  (#2488)
+
+- **Plural secret names such as `api_tokens` are no longer read as token
+  counts.** The rule that keeps counts like `max_tokens` readable also
+  skipped any name containing `tokens`, so a credential stored under
+  `api_tokens`, `auth_tokens` or `tokens_by_host` was left unmasked in the
+  doctor bundle, the MCP audit log and live log views. `tokens` is now
+  treated as a count only after a counting word (`max_`, `prompt_`,
+  `completion_`, `total_` and the like) or in a count shape (`tokens_count`,
+  `tokens_per_second`); `max_tokens` and `cached_tokens` stay readable and
+  `api_tokens` is masked. (#2466)
+
+- **A fresh install no longer reports itself as a pre-v1.0 box.** The seeded
+  `brain` slot, bound to a pulled model, was counted by `hal0 slot
+  migrate-flags` as an outstanding flag fold, so every new box warned of a
+  "pre-v1.0 slot/model shape" and the first `hal0 update` exited 2
+  ("convergence outstanding"). That slot already launches with its profile's
+  flags, so folding them into the model would change nothing. The check now
+  treats a model as converged when every slot bound to it names a profile
+  that fits, has no flags of its own, and the model has no tune of its own.
+  Boxes with real pre-v1.0 slot flags are still detected. (#2476)
+
+- **`HAL0_PULL_RETRY_DELAYS` takes effect in the installer.** The documented
+  space-separated list (`"2 4 8"`) never split under the installer's shell
+  settings, so the override was read as one bad value and the default
+  schedule applied silently. It now splits on spaces. (#2470)
+
+- **The installer's package install hint stays on one line.** A hint for
+  several missing packages was broken across lines, so pasting it installed
+  only the first. It is now joined with spaces. (#2471)
+
+- **`make release-test` no longer fails the Vulkan and ROCm rows on a box
+  that has an NPU model.** With `HAL0_TEST_LLM_MODEL` unset, the default
+  model was the first installed `llm` entry, which could be an FLM (NPU)
+  model that llama-server cannot load. FLM and NPU models are now skipped
+  when picking the default; an explicit `HAL0_TEST_LLM_MODEL` is still used
+  as given. (#2477)
+
+- **The release check's GitHub-checks gate no longer fails on a green
+  `main`, and no longer passes when GitHub cannot be asked.** The gate
+  rejected any check that was not `success`, so the nightly's two
+  deliberately skipped jobs failed it, while an error from `gh api` was
+  treated as all clear. It now requires `python (3.12)`, `ui` and
+  `γ-suite (chromium)` to succeed, accepts `skipped` and `neutral` for
+  the rest, fails on `failure`, `cancelled` or `timed_out`, counts only the
+  latest run of each check, reads every page of results, and fails when the
+  query errors or a required check is missing. (#2479)
+
 ### Migrations
 
 - **After `hal0 update` to 1.4.0, re-run the installer once:** `curl -fsSL
