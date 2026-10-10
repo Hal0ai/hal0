@@ -74,6 +74,34 @@ def _auth_headers(url: str | None = None) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
+def _client_kwargs(url: str | None = None) -> dict[str, Any]:
+    """httpx client kwargs for a CLI→API call to ``url`` (#2503).
+
+    ``url`` is the request target; ``None`` means :func:`_api_base`. For a
+    loopback target (:func:`hal0.service_identity.is_loopback_url`) the client
+    must not read the proxy environment: with ``HTTP_PROXY``/``ALL_PROXY`` set
+    and ``NO_PROXY`` not covering loopback, httpx would hand the request —
+    bearer header included — to the proxy in cleartext. So loopback gets
+    ``trust_env=False``. That flag also stops httpx reading ``SSL_CERT_FILE``
+    / ``SSL_CERT_DIR``, so the CA context is built with the environment
+    honoured and passed as ``verify``: an ``https://localhost`` API behind an
+    operator-supplied CA keeps verifying exactly as before. ``.netrc`` is no
+    longer consulted for loopback, which only ever matters for a request the
+    CLI has not already given an ``Authorization`` header.
+
+    Remote targets get ``{}``: they keep the default ``trust_env=True`` and
+    honour the proxy environment.
+    """
+    from hal0.service_identity import is_loopback_url
+
+    target = _api_base() if url is None else url
+    if not is_loopback_url(target):
+        return {}
+    from hal0.http_client import shared_ssl_context
+
+    return {"trust_env": False, "verify": shared_ssl_context(trust_env=True)}
+
+
 def _discovered_key_withheld(url: str | None = None) -> bool:
     """True when :func:`_auth_headers` left out a discovered key for ``url``
     because the target is not loopback — the case a 401 should explain."""
@@ -109,7 +137,8 @@ def auth_client(*, target: str | None = None, **kwargs: Any) -> httpx.Client:
     target (#2499), so use the client for that origin only. An explicit
     ``headers=`` kwarg is merged on top (a caller-set ``Authorization`` wins
     over the discovered one). Redirects are never followed, so the header
-    cannot be carried to another origin.
+    cannot be carried to another origin, and a loopback target bypasses the
+    proxy environment (:func:`_client_kwargs`, #2503).
 
     Use this directly (rather than :func:`api_stream`) when a call site
     needs a *persistent* client across several requests — e.g. ``hal0
@@ -119,6 +148,8 @@ def auth_client(*, target: str | None = None, **kwargs: Any) -> httpx.Client:
     if "Authorization" not in headers:
         headers.update(_auth_headers(target))
     kwargs.setdefault("follow_redirects", False)
+    for key, value in _client_kwargs(target).items():
+        kwargs.setdefault(key, value)
     return httpx.Client(headers=headers, **kwargs)
 
 
@@ -221,7 +252,7 @@ def _api_unreachable(url: str) -> bool:
     full HTTP timeout when the daemon is down.
     """
     try:
-        with httpx.Client(timeout=1.0) as client:
+        with httpx.Client(timeout=1.0, **_client_kwargs(url)) as client:
             r = client.head(url + "/api/status")
         if r.status_code >= 500:
             api_unreachable_print(url)
@@ -287,7 +318,7 @@ def api_get_bytes(
     if headers:
         kwargs["headers"] = headers
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False, **_client_kwargs(url)) as client:
             resp = client.get(url, **kwargs)
     except httpx.HTTPError as exc:
         raise CliApiError(f"GET {url} failed: {type(exc).__name__}: {exc}") from exc
@@ -323,7 +354,10 @@ def _api_request(
     try:
         # Never follow a redirect: the bearer must not reach another origin
         # (#2499). httpx's default is already False; pinned here on purpose.
-        with httpx.Client(timeout=_client_timeout(timeout), follow_redirects=False) as client:
+        # A loopback target never goes through the proxy environment (#2503).
+        with httpx.Client(
+            timeout=_client_timeout(timeout), follow_redirects=False, **_client_kwargs(url)
+        ) as client:
             resp = client.request(method, url, **kwargs)
     except httpx.TimeoutException as exc:
         # The client's OWN read budget expired with no response at all — the
