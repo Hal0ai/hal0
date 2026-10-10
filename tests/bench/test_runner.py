@@ -18,6 +18,7 @@ now comes back on stdout.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 import time
@@ -604,6 +605,72 @@ class TestTelemetrySession:
             pass  # must not raise on either side
 
         assert "permission denied" in capsys.readouterr().err
+
+
+class TestRunTelemetryCmd:
+    """``_run_telemetry_cmd`` (#2510): a verb that backgrounds a child holding
+    the inherited pipes must not wedge the caller, and a hung verb must time
+    out into a failed call instead of blocking forever."""
+
+    @staticmethod
+    def _call_bounded(argv, pidf, wait_s):
+        """Run the seam on a thread so a regression fails the test instead of
+        hanging the suite; always reap the backgrounded sleeper."""
+        import threading
+
+        out: list[tuple[int, str]] = []
+        t = threading.Thread(target=lambda: out.append(runner._run_telemetry_cmd(argv)))
+        t.start()
+        t.join(wait_s)
+        alive = t.is_alive()
+        if pidf.exists():
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(pidf.read_text()), 9)
+        t.join(5)
+        return alive, out
+
+    def _bg_script(self, tmp_path, redirect: str):
+        pidf = tmp_path / "pid"
+        script = tmp_path / "bg.sh"
+        script.write_text(f"#!/bin/sh\nsleep 30 {redirect}&\necho $! > '{pidf}'\necho started\n")
+        script.chmod(0o755)
+        return script, pidf
+
+    def test_returns_promptly_when_the_background_child_is_detached(self, tmp_path):
+        script, pidf = self._bg_script(tmp_path, "</dev/null >/dev/null 2>&1 ")
+        alive, out = self._call_bounded([str(script)], pidf, 10)
+        assert not alive
+        assert out == [(0, "started\n")]
+
+    def test_a_background_child_holding_the_pipes_cannot_wedge_the_caller(
+        self, tmp_path, monkeypatch
+    ):
+        # The pre-fix hal0-benchctl shape: the sampler inherits stdout. EOF
+        # never arrives, so only the timeout lets the call return.
+        monkeypatch.setattr(runner, "_TELEMETRY_CMD_TIMEOUT_S", 1.0)
+        script, pidf = self._bg_script(tmp_path, "")
+        alive, out = self._call_bounded([str(script)], pidf, 10)
+        assert not alive, "_run_telemetry_cmd blocked on a backgrounded child's inherited pipe"
+        assert out and out[0][0] != 0 and "timed out" in out[0][1]
+
+    def test_a_hung_verb_times_out_as_a_failed_call(self, monkeypatch):
+        monkeypatch.setattr(runner, "_TELEMETRY_CMD_TIMEOUT_S", 0.5)
+        rc, msg = runner._run_telemetry_cmd(["sleep", "30"])
+        assert rc != 0
+        assert "timed out" in msg
+
+    def test_a_timed_out_start_still_runs_end(self, monkeypatch, capsys):
+        calls: list[str] = []
+
+        def fake(argv):
+            calls.append(argv[4])
+            return 124, "timed out after 30s"
+
+        monkeypatch.setattr(runner, "_run_telemetry_cmd", fake)
+        with runner._telemetry_session("run-1", "amd"):
+            pass
+        assert calls == ["start", "end"]
+        assert "timed out" in capsys.readouterr().err
 
 
 class TestLoadTelemetry:

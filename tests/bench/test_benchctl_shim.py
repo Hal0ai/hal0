@@ -500,6 +500,11 @@ class TestTelemetrySampler:
         assert "/sys/class/hwmon/hwmon*" not in sampler
         assert "device/hwmon/hwmon*" in sampler
 
+    def test_the_backgrounded_sampler_stdio_is_detached(self, sampler) -> None:
+        """#2510: the ``( … ) &`` sampler must not inherit the caller's pipes,
+        or ``subprocess.run(capture_output=True)`` never sees EOF."""
+        assert ") </dev/null >/dev/null 2>&1 &" in sampler
+
 
 def test_the_shim_is_syntactically_valid() -> None:
     proc = subprocess.run(["bash", "-n", str(BENCHCTL)], capture_output=True, text=True, timeout=60)
