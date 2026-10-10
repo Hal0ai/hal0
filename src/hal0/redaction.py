@@ -140,9 +140,13 @@ def redact_text_tree(value: Any) -> Any:
 # ``tokens`` only with a count qualifier, #2466) or that names
 # where a secret lives (``*_env``, ``*_file``, ``*_path``, ``*_dir``) is left
 # alone: :func:`redact_log_line` runs this on every live log line.
+#
+# A name runs over ``-`` as over ``_``, before and after the secret word, so
+# ``api-token-prod``, ``github-token-ci`` and ``x-api-key-v2`` are names, and
+# ``max-tokens`` or ``api-token-file`` are judged whole (#2488).
 _SECRET_NAME: Final[str] = (
-    r"[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY"
-    r"|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)[A-Za-z0-9_]*|(?:[A-Za-z0-9_]*_)?KEY"
+    r"[A-Za-z0-9_-]*(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY"
+    r"|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)[A-Za-z0-9_-]*|(?:[A-Za-z0-9_-]*[_-])?KEY"
 )
 _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE)
 # Plural ``tokens`` is a count only with a count qualifier (#2466):
@@ -150,9 +154,11 @@ _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE
 # * a count word right before it (``max_tokens``, ``extraction_max_tokens``,
 #   ``prompt_tokens``, ``maxTokens``, ``HAL0_MAX_TOKENS``);
 # * a weaker word that also names credential stores (``new``, ``cached``,
-#   ``tool``, ...) only at the start of the name or right after a count word
-#   (``cached_tokens``, ``max_new_tokens``), so ``github_new_tokens``,
-#   ``oauth_cached_tokens`` and ``mcp_tool_tokens`` stay secret;
+#   ``tool``, ``draft``, ``content``, ``thinking``, ...) only at the start of
+#   the name or right after a count word (``cached_tokens``, ``draft_tokens``,
+#   ``max_new_tokens``, ``max_thinking_tokens``), so ``github_new_tokens``,
+#   ``oauth_cached_tokens``, ``mcp_tool_tokens``, ``cms_draft_tokens`` and
+#   ``api_content_tokens`` stay secret (#2488);
 # * a count suffix right after it: ``tokens_count``, or ``tokens_per_<unit>``
 #   for a time or count unit only (``api_tokens_per_host`` stays secret);
 # * the whole name ``tokens_in``, ``tokens_out``, ``tokens_completed``, ...
@@ -167,11 +173,12 @@ _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE
 # other secret word left in the name (``max_tokens_secret``) still counts.
 _TOKENS_COUNT_WORD: Final[str] = (
     r"(?:max|min|num|n|total|prompt|completion|context|ctx|input|output|text|image"
-    r"|audio|video|content|budget|requested|expected|generated|reasoning|remaining"
-    r"|floor|prediction|predicted|generation|draft|thinking)"
+    r"|audio|video|budget|requested|expected|generated|reasoning|remaining"
+    r"|floor|prediction|predicted)"
 )
 _TOKENS_WEAK_COUNT_WORD: Final[str] = (
-    r"(?:new|cache|cached|tool_?call|tool_?response|tool|used|extra)"
+    r"(?:new|cache|cached|tool_?call|tool_?response|tool|used|extra|draft|content"
+    r"|thinking|generation)"
 )
 _TOKENS_RATE_UNIT: Final[str] = (
     r"(?:s|sec|second|ms|min|minute|hour|request|req|iteration|iter|step|1k|k)"
@@ -191,10 +198,15 @@ _BENIGN_NAME_PART_RE: Final[re.Pattern[str]] = re.compile(
 _SECRET_REF_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
     r"_(?:env|file|path|dir)$", re.IGNORECASE
 )
+# A name longer than this is judged as written, with no count part removed,
+# as in the installer, whose strip is quadratic in bash: such a name is
+# masked whenever it holds a secret word at all.
+_NAME_JUDGED_WHOLE_MAX: Final[int] = 128
 
 # ``NAME`` + separator, then the value: double-quoted, single-quoted or bare.
+# The name starts at a word start, so a hyphenated name is matched whole.
 _NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<name>" + _SECRET_NAME + r")"
+    r"(?<![A-Za-z0-9_-])(?P<name>" + _SECRET_NAME + r")"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\"'\s,}&]+)",
     re.IGNORECASE,
@@ -258,25 +270,21 @@ def _is_secret_name(name: str) -> bool:
 
     A ``-`` counts as ``_``, so header-style names (``x-api-key``,
     ``auth-token``) are as secret as their ``_`` spelling, as with
-    :func:`hal0.api._redact.is_sensitive_key` (#2384)."""
+    :func:`hal0.api._redact.is_sensitive_key` (#2384). A name longer than
+    ``_NAME_JUDGED_WHOLE_MAX`` keeps its count parts (#2488)."""
     name = name.lstrip("-").replace("-", "_")
     if _SECRET_REF_SUFFIX_RE.search(name):
         return False
-    return bool(_SECRET_NAME_RE.fullmatch(_BENIGN_NAME_PART_RE.sub("", name)))
-
-
-# The ``-``-joined head of a hyphenated name that ``_SECRET_NAME`` cannot
-# span: in ``max-tokens=4096`` the match's name is ``tokens``.
-_NAME_HEAD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_-]*-$")
+    if len(name) <= _NAME_JUDGED_WHOLE_MAX:
+        name = _BENIGN_NAME_PART_RE.sub("", name)
+    return bool(_SECRET_NAME_RE.fullmatch(name))
 
 
 def _matched_name_is_secret(match: re.Match[str]) -> bool:
-    """:func:`_is_secret_name` on the whole hyphenated word around a
-    ``_NAME_VALUE_SHAPE_RE`` match, so ``max-tokens`` is judged as
-    ``max_tokens`` rather than as a bare ``tokens`` (#2466)."""
-    start = match.start("name")
-    head = _NAME_HEAD_RE.search(match.string, max(0, start - 128), start)
-    return _is_secret_name((head.group(0) if head else "") + match.group("name"))
+    """:func:`_is_secret_name` on a ``_NAME_VALUE_SHAPE_RE`` match's whole
+    name, so ``max-tokens`` is judged as ``max_tokens`` (#2466) and
+    ``api-token-prod`` as ``api_token_prod`` (#2488)."""
+    return _is_secret_name(match.group("name"))
 
 
 def _mask_name_value(match: re.Match[str]) -> str:
