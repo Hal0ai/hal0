@@ -29,9 +29,12 @@ diagnostics only reference the future command by name.
 
 from __future__ import annotations
 
+import errno
 import json as jsonlib
+import os
 import re
 import socket
+import stat
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -157,6 +160,111 @@ def _write_commands_tsv(out: Path, rows: list[list[str]]) -> None:
     (out / "commands.tsv").write_text("\n".join(lines) + "\n")
 
 
+# ── safe file reads — every file the bundle copies goes through here ─────────
+#
+# ``hal0 doctor bundle`` is run as root, and some of what it copies lives in
+# directories a less-privileged account can write: /tmp (anyone), and
+# /var/log/hal0 and /etc/hal0 (the hal0 service user under the ownership
+# flip, install/perms.py). A planted symlink or hard link there would put a
+# root-only file such as /etc/shadow into a bundle made to be shared (#2522).
+# :func:`_safe_read_text` is the one way the bundle reads such a file.
+
+#: Files a safe-read check refused to copy, as ``{"path", "reason"}`` rows
+#: for the manifest's ``skipped_files``.
+SkippedFiles = list[dict[str, str]]
+
+
+def _note_skip(skipped: SkippedFiles | None, path: Path, reason: str) -> None:
+    if skipped is not None:
+        skipped.append({"path": str(path), "reason": reason})
+
+
+def _trusted_uids() -> frozenset[int]:
+    """Owners a copied file may have: root, or whoever runs the bundle."""
+    return frozenset({0, os.geteuid()})
+
+
+def _reject_reason(st: os.stat_result, allowed_uids: frozenset[int]) -> str | None:
+    """Why an ``lstat``/``fstat`` result is not safe to copy, or ``None``."""
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if not stat.S_ISREG(st.st_mode):
+        return "not a regular file"
+    if st.st_uid not in allowed_uids:
+        return f"owned by uid {st.st_uid}"
+    if st.st_nlink != 1:
+        # A hard link to a root-only file keeps that file's (root) owner.
+        return "hard-linked"
+    return None
+
+
+def _same_file(a: os.stat_result, b: os.stat_result) -> bool:
+    return (a.st_dev, a.st_ino, a.st_uid) == (b.st_dev, b.st_ino, b.st_uid)
+
+
+def _safe_read_text(
+    path: Path,
+    *,
+    expected: os.stat_result | None = None,
+    allow_dir_owner: bool = False,
+    skipped: SkippedFiles | None = None,
+) -> str | None:
+    """Read ``path`` without following a symlink a non-root writer could plant.
+
+    The parent directory is opened ``O_NOFOLLOW`` and the file is looked up
+    relative to it, so neither that directory nor the file can be a symlink.
+    The file must be a regular, singly linked file owned by root or the
+    running euid, or by the parent directory's owner when ``allow_dir_owner``
+    (/etc/hal0 is the service user's under the ownership flip, and that
+    account can only hand over content it could write anyway). It is opened
+    ``O_NOFOLLOW | O_NONBLOCK`` and ``fstat``-rechecked against the ``lstat``,
+    and against ``expected`` (the stat a caller selected the file by), before
+    a byte is read, so a swap in between is rejected.
+
+    Returns ``None`` for a missing, unreadable or rejected file and never
+    raises ``OSError``; a rejection is recorded in ``skipped``.
+    """
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            _note_skip(skipped, path, "parent directory is a symlink")
+        return None
+    try:
+        allowed = _trusted_uids()
+        if allow_dir_owner:
+            allowed |= {os.fstat(dir_fd).st_uid}
+        try:
+            st = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return None
+        reason = _reject_reason(st, allowed)
+        if reason is None and expected is not None and not _same_file(st, expected):
+            reason = "replaced after it was selected"
+        if reason is not None:
+            _note_skip(skipped, path, reason)
+            return None
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+        try:
+            fd = os.open(path.name, flags, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                _note_skip(skipped, path, "replaced by a symlink before it was opened")
+            return None
+        with os.fdopen(fd, "rb") as fh:
+            fst = os.fstat(fh.fileno())
+            if _reject_reason(fst, allowed) is not None or not _same_file(fst, st):
+                _note_skip(skipped, path, "replaced before it was opened")
+                return None
+            try:
+                data = fh.read()
+            except OSError:
+                return None
+    finally:
+        os.close(dir_fd)
+    return data.decode("utf-8", errors="replace")
+
+
 # ── config/ — every dump redacted ───────────────────────────────────────────
 
 
@@ -191,62 +299,67 @@ def _write_redacted_env(dest: Path, text: str) -> None:
     dest.write_text("\n".join(out_lines) + ("\n" if out_lines else ""))
 
 
-def _write_config_section(out: Path) -> list[str]:
+def _write_config_section(out: Path, *, skipped: SkippedFiles | None = None) -> list[str]:
     """Write ``config/`` (§3.1). Returns the list of redacted-file labels
-    for the manifest's ``redaction_applied`` field."""
+    for the manifest's ``redaction_applied`` field.
+
+    /etc/hal0 is the service user's under the ownership flip, so every file
+    here is read with :func:`_safe_read_text` (#2522): a planted symlink or
+    hard link is skipped, not followed.
+    """
     import tomllib
 
     from hal0.config import paths as cfg_paths
 
     redacted: list[str] = []
 
-    hal0_toml_path = cfg_paths.hal0_toml()
-    if hal0_toml_path.is_file():
+    def _read(path: Path) -> str | None:
+        return _safe_read_text(path, allow_dir_owner=True, skipped=skipped)
+
+    def _toml(text: str) -> dict[str, Any]:
         try:
-            data = tomllib.loads(hal0_toml_path.read_text())
+            return tomllib.loads(text)
         except Exception:
-            data = {}
-        _write_redacted_toml(out / "config" / "hal0.toml", data)
+            return {}
+
+    hal0_toml_text = _read(cfg_paths.hal0_toml())
+    if hal0_toml_text is not None:
+        _write_redacted_toml(out / "config" / "hal0.toml", _toml(hal0_toml_text))
         redacted.append("config/hal0.toml")
 
-    api_env_path = cfg_paths.etc() / "api.env"
-    if api_env_path.is_file():
-        _write_redacted_env(out / "config" / "api.env", api_env_path.read_text())
+    api_env_text = _read(cfg_paths.etc() / "api.env")
+    if api_env_text is not None:
+        _write_redacted_env(out / "config" / "api.env", api_env_text)
         redacted.append("config/api.env")
 
     slots_dir = cfg_paths.slots_config_dir()
     if slots_dir.is_dir():
         for slot_toml in sorted(slots_dir.glob("*.toml")):
+            slot_text = _read(slot_toml)
+            if slot_text is None:
+                continue
             try:
-                data = tomllib.loads(slot_toml.read_text())
+                data = tomllib.loads(slot_text)
             except Exception:
                 continue
             _write_redacted_toml(out / "config" / "slots" / slot_toml.name, data)
             redacted.append(f"config/slots/{slot_toml.name}")
 
-    profiles_toml_path = cfg_paths.profiles_toml()
-    if profiles_toml_path.is_file():
-        try:
-            data = tomllib.loads(profiles_toml_path.read_text())
-        except Exception:
-            data = {}
-        _write_redacted_toml(out / "config" / "profiles.toml", data)
+    profiles_text = _read(cfg_paths.profiles_toml())
+    if profiles_text is not None:
+        _write_redacted_toml(out / "config" / "profiles.toml", _toml(profiles_text))
         redacted.append("config/profiles.toml")
 
-    capabilities_toml_path = cfg_paths.etc() / "capabilities.toml"
-    if capabilities_toml_path.is_file():
-        try:
-            data = tomllib.loads(capabilities_toml_path.read_text())
-        except Exception:
-            data = {}
-        _write_redacted_toml(out / "config" / "capabilities.toml", data)
+    capabilities_text = _read(cfg_paths.etc() / "capabilities.toml")
+    if capabilities_text is not None:
+        _write_redacted_toml(out / "config" / "capabilities.toml", _toml(capabilities_text))
         redacted.append("config/capabilities.toml")
 
-    manifest_path = cfg_paths.manifest_json()
-    if manifest_path.is_file():
+    manifest_text = _read(cfg_paths.manifest_json())
+    if manifest_text is not None:
         # No redaction — manifest.json carries no secrets (image pins/versions).
         (out / "config").mkdir(parents=True, exist_ok=True)
-        (out / "config" / "manifest.json").write_text(manifest_path.read_text())
+        (out / "config" / "manifest.json").write_text(manifest_text)
 
     return redacted
 
@@ -455,7 +568,9 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
 # ── logs/ — best-effort journalctl captures ─────────────────────────────────
 
 
-def _write_logs_section(out: Path, *, lines: int = 500) -> list[str]:
+def _write_logs_section(
+    out: Path, *, lines: int = 500, skipped: SkippedFiles | None = None
+) -> list[str]:
     """Capture ``journalctl -u <unit> -n <lines> --no-pager`` per unit.
 
     Returns the labels captured (for the manifest). A systemd-less box
@@ -469,8 +584,8 @@ def _write_logs_section(out: Path, *, lines: int = 500) -> list[str]:
         dest = out / "logs" / f"{unit}.log"
         _run_one(argv, dest)
         captured.append(f"logs/{unit}.log")
-    captured += _write_install_log(out)
-    captured += _write_install_report(out)
+    captured += _write_install_log(out, skipped=skipped)
+    captured += _write_install_report(out, skipped=skipped)
     return captured
 
 
@@ -492,25 +607,55 @@ _INSTALL_REPORT_GLOBS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _latest_match(globs: tuple[tuple[str, str], ...]) -> Path | None:
-    # A candidate can vanish between glob() and stat() (e.g. /tmp cleanup):
-    # skip it rather than abort the bundle.
-    best: tuple[float, Path] | None = None
+def _latest_candidate(
+    globs: tuple[tuple[str, str], ...], *, skipped: SkippedFiles | None = None
+) -> tuple[Path, os.stat_result] | None:
+    """The newest safe match for ``globs``, with the ``lstat`` it was chosen by.
+
+    Both directories are writable by someone other than root (#2522), so a
+    candidate is ``lstat``-ed, never followed: a symlink, anything that is
+    not a regular file, a hard link, or a file owned by anyone but root or
+    the running euid is skipped. A candidate can also vanish between glob()
+    and lstat() (e.g. /tmp cleanup): skip it rather than abort the bundle.
+    """
+    allowed = _trusted_uids()
+    best: tuple[Path, os.stat_result] | None = None
     for directory, pattern in globs:
         d = Path(directory)
         if d.is_dir():
             for p in d.glob(pattern):
                 try:
-                    mtime = p.stat().st_mtime
+                    st = p.lstat()
                 except OSError:
                     continue
-                if best is None or mtime > best[0]:
-                    best = (mtime, p)
-    return best[1] if best else None
+                reason = _reject_reason(st, allowed)
+                if reason is not None:
+                    _note_skip(skipped, p, reason)
+                    continue
+                if best is None or st.st_mtime > best[1].st_mtime:
+                    best = (p, st)
+    return best
+
+
+def _latest_match(globs: tuple[tuple[str, str], ...]) -> Path | None:
+    found = _latest_candidate(globs)
+    return found[0] if found else None
 
 
 def _latest_install_log() -> Path | None:
     return _latest_match(_INSTALL_LOG_GLOBS)
+
+
+def _read_latest(
+    globs: tuple[tuple[str, str], ...], *, skipped: SkippedFiles | None = None
+) -> str | None:
+    """Select the newest safe match and read it with :func:`_safe_read_text`,
+    which rejects it if it is no longer the file that was selected."""
+    found = _latest_candidate(globs, skipped=skipped)
+    if found is None:
+        return None
+    path, st = found
+    return _safe_read_text(path, expected=st, skipped=skipped)
 
 
 def _install_artifacts() -> dict[str, dict[str, str] | None]:
@@ -518,18 +663,16 @@ def _install_artifacts() -> dict[str, dict[str, str] | None]:
     install log and installer failure report on this box, or ``None`` for
     each that is absent. A ``HAL0-INSTALL-*`` diagnosis keys off this."""
 
-    def _describe(path: Path | None) -> dict[str, str] | None:
-        if path is None:
+    def _describe(found: tuple[Path, os.stat_result] | None) -> dict[str, str] | None:
+        if found is None:
             return None
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-        except OSError:
-            return None
+        path, st = found
+        mtime = datetime.fromtimestamp(st.st_mtime, UTC)
         return {"path": str(path), "mtime_utc": mtime.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     return {
-        "install_log": _describe(_latest_install_log()),
-        "failure_report": _describe(_latest_match(_INSTALL_REPORT_GLOBS)),
+        "install_log": _describe(_latest_candidate(_INSTALL_LOG_GLOBS)),
+        "failure_report": _describe(_latest_candidate(_INSTALL_REPORT_GLOBS)),
     }
 
 
@@ -543,20 +686,17 @@ def _redact_install_text(text: str) -> str:
     return _redact_text("\n".join(text.splitlines()))
 
 
-def _write_install_report(out: Path) -> list[str]:
+def _write_install_report(out: Path, *, skipped: SkippedFiles | None = None) -> list[str]:
     """Copy the newest installer failure report into the bundle.
 
     The installer already redacts it (installer/lib/failure-report.sh); it
     is scrubbed again here with :func:`_redact_install_text` so a report
     from an older installer cannot carry a ``NAME=value`` secret in.
-    The report is 0600 root-owned: an unreadable one is skipped, not fatal.
+    The report is 0600 root-owned: an unreadable one is skipped, not fatal,
+    and so is one that fails the :func:`_safe_read_text` checks (#2522).
     """
-    src = _latest_match(_INSTALL_REPORT_GLOBS)
-    if src is None:
-        return []
-    try:
-        text = src.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = _read_latest(_INSTALL_REPORT_GLOBS, skipped=skipped)
+    if text is None:
         return []
     dest = out / "logs" / "install-failure-report.txt"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -564,23 +704,23 @@ def _write_install_report(out: Path) -> list[str]:
     return ["logs/install-failure-report.txt"]
 
 
-def _write_install_log(out: Path, *, lines: int = 500) -> list[str]:
+def _write_install_log(
+    out: Path, *, lines: int = 500, skipped: SkippedFiles | None = None
+) -> list[str]:
     """Copy the tail of the most recent installer log (installer/lib/logging.sh)
     into the bundle, redacted like the failure report (§3.1, #2360).
 
     Best-effort: no install log on this box (a long-lived install predating
     this feature, or a box whose /tmp was cleaned) writes nothing rather
-    than failing the bundle.
+    than failing the bundle. A candidate that fails the
+    :func:`_safe_read_text` checks (#2522) is skipped the same way.
     """
-    src = _latest_install_log()
-    if src is None:
+    text = _read_latest(_INSTALL_LOG_GLOBS, skipped=skipped)
+    if text is None:
         return []
     dest = out / "logs" / "install.log"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        tail = src.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
-    except OSError:
-        return []
+    tail = text.splitlines()[-lines:]
     dest.write_text(_redact_install_text("\n".join(tail)) + "\n")
     return ["logs/install.log"]
 
@@ -616,12 +756,14 @@ def build_bundle(
         tsv_rows.append([label, str(rc), str(nbytes), "0", _now_iso(), str(dur)])
     _write_commands_tsv(out, tsv_rows)
 
-    redacted = _write_config_section(out)
+    # Files a safe-read check refused to copy (#2522), for the manifest.
+    skipped: SkippedFiles = []
+    redacted = _write_config_section(out, skipped=skipped)
     _write_diagnostics_section(out, base=base)
 
     sections = ["manifest.json", "commands.tsv", "system/", "config/", "diagnostics/"]
     if include_logs:
-        _write_logs_section(out)
+        _write_logs_section(out, skipped=skipped)
         sections.append("logs/")
 
     # doctor-summary.txt — the rich `doctor verify` report, as plain text.
@@ -651,6 +793,7 @@ def build_bundle(
         "command_count": len(tsv_rows),
         "failed_probe_count": failed,
         "install_artifacts": _install_artifacts(),
+        "skipped_files": skipped,
     }
     _write_json(out / "manifest.json", manifest)
     return out, failed

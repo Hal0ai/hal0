@@ -354,20 +354,21 @@ def test_bundle_skips_an_install_log_it_cannot_read(
 ) -> None:
     """#2361: the install log is 0600 root-owned, so a non-root bundle can't
     read it. That must skip the log, not fail the bundle. (Simulated with a
-    patched read: the suite may run as root, which ignores file modes.)"""
+    patched open: the suite may run as root, which ignores file modes.)"""
     log_dir = tmp_path / "var-log-hal0"
     log_dir.mkdir()
-    (log_dir / "install-20260101-000000.log").write_text("root-only\n")
+    log = log_dir / "install-20260101-000000.log"
+    log.write_text("root-only\n")
     monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(log_dir), "install-*.log"),))
 
-    real_read_text = Path.read_text
+    real_open = doctor_bundle.os.open
 
-    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if self.parent == log_dir:
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+    def _open(path: object, *args: object, **kwargs: object) -> int:
+        if str(path) == log.name:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "read_text", _read_text)
+    monkeypatch.setattr(doctor_bundle.os, "open", _open)
 
     out = tmp_path / "bundle"
     _, _failed = build_bundle(out, include_rocm_smi=False)
@@ -503,3 +504,249 @@ def test_bundle_masks_secret_args_in_pre_fix_audit_rows(
     assert "'server_id': 'notes'" in body
     assert "'value': 'keepme'" in body
     assert body.count("mcp.tool.invoked") == 5
+
+
+# ── #2522: the bundle never follows a planted link into a root-only file ──────
+
+_PLANTED = "planted-target-content-must-not-reach-the-bundle"
+
+
+def _link_target(tmp_path: Path) -> Path:
+    """Stand-in for a root-only file such as /etc/shadow: what a planted link points at."""
+    target = tmp_path / "link-target"
+    target.mkdir(exist_ok=True)
+    victim = target / "root-only.txt"
+    victim.write_text(_PLANTED + "\n")
+    return victim
+
+
+def _two_log_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Point the install-log and report globs at /var/log/hal0 and /tmp stand-ins."""
+    var_log = tmp_path / "var-log-hal0"
+    tmp_dir = tmp_path / "tmp"
+    var_log.mkdir()
+    tmp_dir.mkdir()
+    monkeypatch.setattr(
+        doctor_bundle,
+        "_INSTALL_LOG_GLOBS",
+        ((str(var_log), "install-*.log"), (str(tmp_dir), "hal0-install-*.log")),
+    )
+    monkeypatch.setattr(
+        doctor_bundle,
+        "_INSTALL_REPORT_GLOBS",
+        (
+            (str(var_log), "hal0-install-report-*.txt"),
+            (str(tmp_dir), "hal0-install-report-*.txt"),
+        ),
+    )
+    return var_log, tmp_dir
+
+
+def _age(path: Path, seconds: float) -> None:
+    import os
+    import time
+
+    t = time.time() - seconds
+    os.utime(path, (t, t), follow_symlinks=False)
+
+
+def _bundle_text(out: Path) -> str:
+    return "\n".join(p.read_text(errors="replace") for p in out.rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("planted_in", ["var_log", "tmp"])
+def test_bundle_skips_a_planted_symlink_install_log_and_report(
+    planted_in: str, tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2522: a newer symlink named like an install log or failure report, in
+    either directory, is skipped; its target never reaches the bundle and the
+    real (older) file is still collected."""
+    victim = _link_target(tmp_path)
+    var_log, tmp_dir = _two_log_dirs(tmp_path, monkeypatch)
+    real_log = var_log / "install-20261001-000000-AbCdEf.log"
+    real_log.write_text("real install run\n")
+    real_report = var_log / "hal0-install-report-20261001-000000.txt"
+    real_report.write_text("Phase: real report\n")
+    _age(real_log, 100)
+    _age(real_report, 100)
+
+    d = var_log if planted_in == "var_log" else tmp_dir
+    log_name = "install-zzz.log" if planted_in == "var_log" else "hal0-install-zzz.log"
+    planted_log = d / log_name
+    planted_report = d / "hal0-install-report-zzz.txt"
+    planted_log.symlink_to(victim)
+    planted_report.symlink_to(victim)
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert _PLANTED not in _bundle_text(out)
+    assert "real install run" in (out / "logs" / "install.log").read_text()
+    assert "Phase: real report" in (out / "logs" / "install-failure-report.txt").read_text()
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert manifest["install_artifacts"]["install_log"]["path"] == str(real_log)
+    skipped = {row["path"]: row["reason"] for row in manifest["skipped_files"]}
+    assert skipped[str(planted_log)] == "symlink"
+    assert skipped[str(planted_report)] == "symlink"
+
+
+def test_bundle_skips_a_hard_linked_install_log(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hard link keeps the target's owner, so the owner check alone would
+    pass it; the bundle rejects any multiply linked candidate."""
+    import os
+
+    victim = _link_target(tmp_path)
+    _, tmp_dir = _two_log_dirs(tmp_path, monkeypatch)
+    os.link(victim, tmp_dir / "hal0-install-zzz.log")
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert _PLANTED not in _bundle_text(out)
+    assert not (out / "logs" / "install.log").exists()
+
+
+def test_bundle_skips_an_install_log_owned_by_another_uid(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only root or the running euid may own a copied install log."""
+    import os
+
+    var_log, _ = _two_log_dirs(tmp_path, monkeypatch)
+    foreign = var_log / "install-20261001-000000.log"
+    foreign.write_text("written by someone else\n")
+    if os.geteuid() == 0:
+        os.chown(foreign, 65534, 65534)
+        foreign_uid = 65534
+    else:
+        # Not root, so the file cannot be given away: make our own uid untrusted.
+        monkeypatch.setattr(doctor_bundle, "_trusted_uids", lambda: frozenset({0}))
+        foreign_uid = os.geteuid()
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert not (out / "logs" / "install.log").exists()
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert manifest["install_artifacts"]["install_log"] is None
+    assert {"path": str(foreign), "reason": f"owned by uid {foreign_uid}"} in manifest[
+        "skipped_files"
+    ]
+
+
+def test_bundle_still_collects_a_regular_own_uid_install_log(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, tmp_dir = _two_log_dirs(tmp_path, monkeypatch)
+    (tmp_dir / "hal0-install-AbCdEf.log").write_text("dev install run\n")
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert "dev install run" in (out / "logs" / "install.log").read_text()
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert manifest["skipped_files"] == []
+
+
+@pytest.mark.parametrize("swap_to", ["symlink", "new_file"])
+def test_install_log_swapped_after_selection_is_rejected(
+    swap_to: str, tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TOCTOU: the selected log is replaced between selection and read, by a
+    symlink or by a different file under the same name. Neither is copied."""
+    import os
+
+    victim = _link_target(tmp_path)
+    _, tmp_dir = _two_log_dirs(tmp_path, monkeypatch)
+    log = tmp_dir / "hal0-install-AbCdEf.log"
+    log.write_text("genuine\n")
+
+    real_select = doctor_bundle._latest_candidate
+
+    def select_then_swap(globs, **kw):
+        found = real_select(globs, **kw)
+        if found is not None and found[0] == log:
+            os.unlink(log)
+            if swap_to == "symlink":
+                log.symlink_to(victim)
+            else:
+                log.write_text(_PLANTED + "\n")
+        return found
+
+    monkeypatch.setattr(doctor_bundle, "_latest_candidate", select_then_swap)
+
+    out = tmp_path / "bundle"
+    assert doctor_bundle._write_install_log(out) == []
+    assert not (out / "logs" / "install.log").exists()
+
+
+def test_install_log_swapped_to_a_symlink_just_before_open_is_rejected(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TOCTOU at the open itself: the file passes the lstat checks and is
+    swapped for a symlink before os.open; O_NOFOLLOW refuses it."""
+    import os
+
+    victim = _link_target(tmp_path)
+    _, tmp_dir = _two_log_dirs(tmp_path, monkeypatch)
+    log = tmp_dir / "hal0-install-AbCdEf.log"
+    log.write_text("genuine\n")
+
+    real_open = os.open
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if str(path) == log.name:
+            os.unlink(log)
+            log.symlink_to(victim)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_bundle.os, "open", swapping_open)
+    skipped: list[dict[str, str]] = []
+    out = tmp_path / "bundle"
+
+    assert doctor_bundle._write_install_log(out, skipped=skipped) == []
+    assert not (out / "logs" / "install.log").exists()
+    assert skipped == [{"path": str(log), "reason": "replaced by a symlink before it was opened"}]
+
+
+@pytest.mark.parametrize("name", ["api.env", "manifest.json", "hal0.toml"])
+def test_bundle_config_section_skips_a_planted_symlink(
+    name: str, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """/etc/hal0 is the service user's under the ownership flip, so the config
+    dumps take the same safe read: api.env keeps non-KEY=value lines verbatim
+    and manifest.json is copied as is, so a followed symlink would leak."""
+    from hal0.config import paths as cfg_paths
+
+    victim = _link_target(tmp_path)
+    etc = cfg_paths.etc()
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / name).symlink_to(victim)
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert _PLANTED not in _bundle_text(out)
+    manifest = jsonlib.loads((out / "manifest.json").read_text())
+    assert {"path": str(etc / name), "reason": "symlink"} in manifest["skipped_files"]
+
+
+def test_bundle_config_section_still_reads_regular_files(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.config import paths as cfg_paths
+
+    etc = cfg_paths.etc()
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "api.env").write_text("# comment\nHAL0_PORT=8080\n")
+    slots = cfg_paths.slots_config_dir()
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / "chat.toml").write_text('name = "chat"\n')
+
+    out = tmp_path / "bundle"
+    build_bundle(out, include_rocm_smi=False)
+
+    assert "HAL0_PORT=8080" in (out / "config" / "api.env").read_text()
+    assert (out / "config" / "slots" / "chat.toml").is_file()
