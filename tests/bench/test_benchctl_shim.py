@@ -30,6 +30,7 @@ here essentially verbatim from ``tests/bench/test_harness_matrix.py``
 
 from __future__ import annotations
 
+import contextlib
 import re
 import subprocess
 from pathlib import Path
@@ -504,6 +505,83 @@ class TestTelemetrySampler:
         """#2510: the ``( … ) &`` sampler must not inherit the caller's pipes,
         or ``subprocess.run(capture_output=True)`` never sees EOF."""
         assert ") </dev/null >/dev/null 2>&1 &" in sampler
+
+
+class TestTelemetryEndToEnd:
+    """#2510 end to end: the REAL wrapper, driven through the REAL runner seam
+    with a fake ``sudo`` (drops ``-n``, execs). The wrapper's RESULTS dir is
+    sed'd into ``tmp_path`` (it is hardcoded on purpose, see above)."""
+
+    @staticmethod
+    def _drive(tmp_path: Path, monkeypatch, wrapper_text: str) -> tuple[tuple, tuple, bool]:
+        import os
+        import threading
+
+        from hal0.bench import runner
+
+        results = tmp_path / "results"
+        patched = tmp_path / "benchctl-e2e"
+        patched.write_text(
+            wrapper_text.replace("RESULTS=/var/lib/hal0/benchmarks", f"RESULTS={results}", 1)
+        )
+        patched.chmod(0o755)
+        bindir = tmp_path / "fake-bin"
+        bindir.mkdir()
+        _write_stub(bindir / "sudo", 'shift\nexec "$@"')
+        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        monkeypatch.setattr(runner, "_TELEMETRY_CMD_TIMEOUT_S", 3.0)
+        pidf = results / "v2" / "artifacts" / "e2e-run" / "telemetry.pid"
+
+        def call(verb: str, *extra: str) -> tuple:
+            out: list[tuple] = []
+            argv = ["sudo", "-n", str(patched), "telemetry", verb, "e2e-run", *extra]
+            t = threading.Thread(target=lambda: out.append(runner._run_telemetry_cmd(argv)))
+            t.start()
+            t.join(15)
+            assert not t.is_alive(), f"telemetry {verb} wedged past the hard bound"
+            return out[0]
+
+        started = call("start", "cpu")
+        sampler_alive = False
+        try:
+            if pidf.exists():
+                pid = int(pidf.read_text().strip())
+                os.kill(pid, 0)
+                sampler_alive = True
+            ended = call("end")
+        finally:
+            if pidf.exists():
+                with contextlib.suppress(OSError, ValueError):
+                    os.kill(int(pidf.read_text().strip()), 9)
+        if sampler_alive:
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    sampler_alive = False
+                    break
+                import time
+
+                time.sleep(0.1)
+            else:
+                ended = (*ended, "sampler survived end")  # type: ignore[assignment]
+        return started, ended, not sampler_alive
+
+    def test_start_returns_promptly_and_end_stops_the_sampler(self, tmp_path, monkeypatch) -> None:
+        started, ended, stopped = self._drive(tmp_path, monkeypatch, BENCHCTL.read_text())
+        assert started[0] == 0, started
+        assert ended[0] == 0 and "[telemetry] stopped" in ended[1], ended
+        assert stopped
+
+    def test_the_pre_fix_wrapper_wedges_start_until_the_timeout(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # The pre-fix wrapper is the shipped one minus the stdio detach.
+        text = BENCHCTL.read_text()
+        assert ") </dev/null >/dev/null 2>&1 &" in text
+        old = text.replace(") </dev/null >/dev/null 2>&1 &", ") &", 1)
+        started, _ended, _stopped = self._drive(tmp_path, monkeypatch, old)
+        assert started[0] == 124, started
 
 
 def test_the_shim_is_syntactically_valid() -> None:

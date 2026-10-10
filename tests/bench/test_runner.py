@@ -659,6 +659,20 @@ class TestRunTelemetryCmd:
         assert rc != 0
         assert "timed out" in msg
 
+    def test_a_missing_binary_is_a_failed_call_not_an_exception(self, tmp_path):
+        rc, msg = runner._run_telemetry_cmd([str(tmp_path / "no-such-sudo"), "-n"])
+        assert rc != 0
+        assert "could not run" in msg
+
+    def test_a_permission_error_on_timeout_kill_is_a_failed_call(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(runner.subprocess, "run", boom)
+        rc, msg = runner._run_telemetry_cmd(["sudo", "-n", "x"])
+        assert rc != 0
+        assert "Operation not permitted" in msg
+
     def test_a_timed_out_start_still_runs_end(self, monkeypatch, capsys):
         calls: list[str] = []
 

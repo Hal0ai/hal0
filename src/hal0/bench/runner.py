@@ -414,6 +414,10 @@ def _run_telemetry_cmd(argv: list[str]) -> tuple[int, str]:
         )
     except subprocess.TimeoutExpired:
         return 124, f"timed out after {_TELEMETRY_CMD_TIMEOUT_S:g}s"
+    except OSError as exc:
+        # Missing sudo/benchctl, or PermissionError (e.g. kill() of a wedged
+        # setuid sudo after a timeout): a failed call, not an exception.
+        return 126, f"could not run {argv[0] if argv else 'telemetry command'}: {exc}"
     return proc.returncode, (proc.stderr or proc.stdout or "")
 
 
