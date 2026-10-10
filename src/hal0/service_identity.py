@@ -24,7 +24,7 @@ import hashlib
 import os
 import secrets
 import tempfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
 
@@ -152,6 +152,49 @@ def attach_service_auth(req: urllib.request.Request, prefer: str = "admin") -> N
         return
     for name, value in service_auth_headers(prefer=prefer).items():
         req.add_unredirected_header(name, value)
+
+
+def _no_proxy_opener() -> urllib.request.OpenerDirector:
+    """A urllib opener for loopback targets that ignores the proxy environment.
+
+    ``ProxyHandler({})`` replaces the default one, which reads the
+    ``<scheme>_proxy`` variables (``http_proxy``/``HTTP_PROXY``). The redirect
+    handler is replaced by one that follows a redirect only to another
+    loopback URL: a redirect to any other host raises ``HTTPError`` instead of
+    being sent there directly, bypassing the proxy. Every other default
+    handler is still installed."""
+    import urllib.error
+    import urllib.request
+
+    class _LoopbackOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+            if not is_loopback_url(newurl):
+                raise urllib.error.HTTPError(
+                    req.full_url, code, "redirect to a non-loopback host refused", headers, fp
+                )
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _LoopbackOnlyRedirectHandler()
+    )
+
+
+def open_url(req: urllib.request.Request | str, timeout: float) -> Any:
+    """Open ``req`` the way a request to this box's API must be opened (#2505).
+
+    A loopback target (:func:`is_loopback_url`) goes through an opener that
+    ignores the proxy environment. The default opener honours
+    ``HTTP_PROXY``, so with a proxy set and ``NO_PROXY`` not
+    covering loopback, a request carrying the box key from
+    :func:`attach_service_auth` would reach the proxy in cleartext. Any other
+    target keeps ``urllib.request.urlopen`` and honours the proxy as before.
+    """
+    import urllib.request
+
+    url = req if isinstance(req, str) else req.full_url
+    if is_loopback_url(url):
+        return _no_proxy_opener().open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------

@@ -146,15 +146,16 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
     """
     import json
 
-    from hal0.service_identity import attach_service_auth
+    from hal0.service_identity import attach_service_auth, open_url
 
     # #2478: on an auth-required box /api/models is a CLIENT route, so present
     # the box service key (env, then /etc/hal0/api.env — readable by the hal0
     # uid, ADR-0002). Client tier first: nothing the bench reads needs admin.
     # Attached only for a loopback --api, and never forwarded on a redirect.
+    # open_url keeps a loopback request away from the proxy environment (#2505).
     req = urllib.request.Request(f"{api.rstrip('/')}{REGISTRY_PATH}", method="GET")
     attach_service_auth(req, prefer="client")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with open_url(req, timeout=timeout) as resp:
         payload = resp.read()
     data = json.loads(payload) if payload else []
     if isinstance(data, dict):

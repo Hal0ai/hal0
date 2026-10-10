@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import types
 import urllib.error
 
 import pytest
@@ -71,12 +72,19 @@ def _capture(monkeypatch, payload: dict) -> dict:
     def fake_urlopen(req, timeout=None):
         seen["url"] = req.full_url
         seen["method"] = req.get_method()
-        seen["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        seen["headers"] = {k.lower(): v for k, v in req.header_items()}
+        # Headers urllib would copy onto a redirect (#2505).
+        seen["redirected"] = {k.lower() for k in req.headers}
         seen["body"] = req.data
         seen["timeout"] = timeout
         return _Response(payload)
 
     monkeypatch.setattr("hal0.bench.cli.urllib.request.urlopen", fake_urlopen)
+    # A loopback --api-url goes through the no-proxy opener instead (#2505).
+    monkeypatch.setattr(
+        "hal0.service_identity._no_proxy_opener",
+        lambda: types.SimpleNamespace(open=fake_urlopen),
+    )
     return seen
 
 
@@ -91,6 +99,7 @@ def test_upload_posts_bundle_with_bearer_token(tmp_path, monkeypatch, capsys):
     assert seen["url"] == "https://api.hal0.dev/v1/bundles"
     assert seen["method"] == "POST"
     assert seen["headers"]["authorization"] == "Bearer s3cret"
+    assert "authorization" not in seen["redirected"]
     assert seen["headers"]["content-type"] == "application/gzip"
     assert seen["body"] == bundle.read_bytes()
     assert "uploaded sha256:abc (1 record(s))" in capsys.readouterr().out

@@ -261,12 +261,47 @@ def build_argv(request: ToolEvalRequest) -> list[str]:
     return argv
 
 
+#: Hosts a keyed tool-eval-bench child must reach directly, never through a
+#: proxy (#2505). Same allowlist as ``hal0.service_identity.is_loopback_url``.
+_LOOPBACK_NO_PROXY: tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
+
+
+_NO_PROXY_VARS: tuple[str, ...] = ("NO_PROXY", "no_proxy")
+
+
+def _with_loopback_no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """``env`` with loopback added to its no-proxy list, written to BOTH names.
+
+    urllib's ``getproxies()`` (which httpx also reads) lets ``no_proxy`` win
+    over ``NO_PROXY`` when both are set, so the two must carry one value: the
+    union of both variables' entries plus the loopback hosts. Otherwise a new
+    lowercase value would shadow an operator's uppercase-only ``NO_PROXY``.
+    When either variable already holds ``*`` (bypass every proxy), ``env`` is
+    returned unchanged."""
+    entries: list[str] = []
+    for name in _NO_PROXY_VARS:
+        for entry in env.get(name, "").split(","):
+            entry = entry.strip()
+            if entry and entry not in entries:
+                entries.append(entry)
+    if "*" in entries:
+        return env
+    entries += [h for h in _LOOPBACK_NO_PROXY if h not in entries]
+    merged = ",".join(entries)
+    return {**env, **dict.fromkeys(_NO_PROXY_VARS, merged)}
+
+
 def build_env(request: ToolEvalRequest) -> dict[str, str] | None:
     """The child environment for one run: ``None`` (inherit) when there is no
-    API key, else the current environment plus :data:`API_KEY_ENV` (#2478)."""
+    API key, else the current environment plus :data:`API_KEY_ENV` (#2478).
+
+    The key is only set for this box's loopback API, so the child's
+    ``NO_PROXY``/``no_proxy`` are extended with the loopback hosts: an
+    inherited ``HTTP_PROXY``/``ALL_PROXY`` must not carry the bearer to a
+    proxy in cleartext (#2505). Remote hosts still go through the proxy."""
     if not request.api_key:
         return None
-    return {**os.environ, API_KEY_ENV: request.api_key}
+    return _with_loopback_no_proxy({**os.environ, API_KEY_ENV: request.api_key})
 
 
 # --------------------------------------------------------------------------- #
