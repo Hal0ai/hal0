@@ -589,6 +589,12 @@ class TestPluralTokenNames:
             "mcp_tool_tokens",
             "api_tokens_per_token",
             "apiTokenSCount",
+            # #2488: draft/content/thinking/generation are weak qualifiers.
+            "cms_draft_tokens",
+            "api_content_tokens",
+            "api_thinking_tokens",
+            "hf_generation_tokens",
+            "mixed_content_tool_tokens",
         ],
     )
     def test_an_unqualified_tokens_name_is_masked(self, name: str) -> None:
@@ -632,7 +638,6 @@ class TestPluralTokenNames:
             "tool_call_tokens",
             "video_tokens",
             "tool_response_tokens",
-            "mixed_content_tool_tokens",
             "tokens_per_iteration",
             "cached_tokens",
             "cache_tokens",
@@ -686,3 +691,98 @@ class TestPluralTokenNames:
         from hal0.redaction import redact_secret_named_values
 
         assert redact_secret_named_values({name: {"OPENAI": self._VALUE}}) == {name: MASK}
+
+
+# ── #2488: a secret name that continues with a hyphen ──────────────────────
+
+
+class TestHyphenatedSecretNames:
+    _VALUE = "Zq8vR2mW9xK4tL7pQ3"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "api-token-prod",
+            "github-token-ci",
+            "auth-tokens-per-user",
+            "x-api-key-v2",
+            "HF-TOKEN-READ",
+            "db-password-primary",
+            "client-secret-staging",
+            "my-key",
+        ],
+    )
+    def test_a_hyphenated_secret_name_is_masked(self, name: str) -> None:
+        from hal0.redaction import redact_secret_named_values
+
+        v = self._VALUE
+        for line in (f"{name}={v}", f"{name}: {v}", f'{{"{name}": "{v}"}}', f"--{name}={v}"):
+            for redact in (redact_shareable_text, redact_log_line):
+                out = redact(line)
+                assert v not in out, (redact.__name__, line, out)
+                # The name is kept so a reader sees a secret was present.
+                assert name in out, out
+        assert redact_secret_named_values({name: self._VALUE}) == {name: MASK}
+
+    def test_a_hyphenated_secret_value_is_masked_where_it_reappears(self) -> None:
+        out = redact_shareable_text(f"api-token-prod={self._VALUE}\nlater: {self._VALUE} end\n")
+        assert self._VALUE not in out
+        assert "later: ***REDACTED*** end" in out
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "max-tokens",
+            "api-token-file",
+            "api-token-path",
+            "hf-token-env",
+            "client-secret-dir",
+            "max-completion-tokens",
+            "tokens-per-sec",
+            "max-thinking-tokens",
+        ],
+    )
+    def test_a_hyphenated_count_or_location_name_is_left_alone(self, name: str) -> None:
+        from hal0.redaction import redact_secret_named_values
+
+        line = f"{name}={self._VALUE}"
+        assert redact_shareable_text(line) == line
+        assert redact_log_line(line) == line
+        assert redact_secret_named_values({name: 4096}) == {name: 4096}
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "draft_tokens",
+            "content_tokens",
+            "thinking_tokens",
+            "generation_tokens",
+            "max_thinking_tokens",
+            "max_draft_tokens",
+            "n_generation_tokens",
+            "maxThinkingTokens",
+        ],
+    )
+    def test_a_weak_qualifier_at_the_start_or_after_a_count_word_is_a_count(
+        self, name: str
+    ) -> None:
+        line = f"{name}={self._VALUE}"
+        assert redact_shareable_text(line) == line
+        assert redact_log_line(line) == line
+
+    def test_strip_is_judged_at_the_match_position(self) -> None:
+        """``max_tokensx`` is not a count word; the later ``max_tokens`` is.
+        Only the later one is removed, leaving ``tokensx``, a secret word."""
+        from hal0.redaction import redact_secret_named_values
+
+        name = "a_max_tokensx_max_tokens"
+        assert redact_secret_named_values({name: self._VALUE}) == {name: MASK}
+
+    def test_a_long_name_is_judged_as_written(self) -> None:
+        """Past 128 characters no count part is removed, as in the installer:
+        such a name is masked whenever it carries a secret word."""
+        from hal0.redaction import redact_secret_named_values
+
+        name = "max_tokens_" * 20
+        assert redact_secret_named_values({name: self._VALUE}) == {name: MASK}
+        assert redact_secret_named_values({"max_tokens": 1}) == {"max_tokens": 1}

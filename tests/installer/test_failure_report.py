@@ -508,7 +508,11 @@ class TestPluralTokenNames:
             "secretEnv",
             "tokenEnv",
             "passwordFile",
-            "token-env",
+            # #2488: draft/content/thinking/generation are weak qualifiers.
+            "cms_draft_tokens",
+            "api_content_tokens",
+            "api_thinking_tokens",
+            "mixed_content_tool_tokens",
         ],
     )
     def test_an_unqualified_tokens_name_is_harvested(self, name: str) -> None:
@@ -529,7 +533,6 @@ class TestPluralTokenNames:
             "tokens_count",
             "tokens_out",
             "tool_call_tokens",
-            "mixed_content_tool_tokens",
             "cached_tokens",
             "new_tokens",
             "prompt_cached_tokens",
@@ -545,6 +548,8 @@ class TestPluralTokenNames:
             "tokenizer",
             "token_count",
             "api_key_env",
+            # #2488: `-` counts as `_` for the location suffix, as in Python.
+            "token-env",
         ],
     )
     def test_a_count_qualified_tokens_name_is_not_harvested(self, name: str) -> None:
@@ -601,6 +606,194 @@ class TestPluralTokenNames:
         assert out.returncode == 0, out.stderr
         assert self._VALUE in out.stdout.splitlines()
         assert elapsed < 5, elapsed
+
+
+# ── #2488: a secret name that continues with a hyphen ──────────────────────
+
+# Masked by hal0.redaction and harvested by the installer.
+_HYPHEN_SECRET_NAMES = [
+    "api-token-prod",
+    "github-token-ci",
+    "auth-tokens-per-user",
+    "x-api-key-v2",
+    "HF-TOKEN-READ",
+    "db-password-primary",
+    "client-secret-staging",
+    "cms_draft_tokens",
+    "api_content_tokens",
+    "api_thinking_tokens",
+]
+# Left alone by hal0.redaction and not harvested by the installer.
+_HYPHEN_BENIGN_NAMES = [
+    "max-tokens",
+    "api-token-file",
+    "api-token-path",
+    "hf-token-env",
+    "client-secret-dir",
+    "max-completion-tokens",
+    "tokens-per-sec",
+    "draft_tokens",
+    "max_thinking_tokens",
+    "max-thinking-tokens",
+    "maxThinkingTokens",
+]
+# Every token-count name hal0 itself writes into a log, a metric row, an API
+# body or a config file: none may be masked, or redaction erases real values.
+_HAL0_COUNT_NAMES = [
+    "max_tokens",
+    "completion_tokens",
+    "prompt_tokens",
+    "total_tokens",
+    "output_tokens",
+    "tokens_per_sec",
+    "tokens_in",
+    "tokens_out",
+    "tokens_completed",
+    "tokens_count",
+    "output_tokens_per_second",
+    "prompt_tokens_per_second",
+    "prompt_tokens_total",
+    "n_prompt_tokens",
+    "n_prompt_tokens_total",
+    "extraction_max_tokens",
+    "max_affordable_context_tokens",
+    "requested_tokens",
+    "budget_tokens",
+    "floor_tokens",
+    "cache_tokens",
+    "cached_tokens",
+    "max_new_tokens",
+    "default_max_tokens",
+    "ctx_tokens",
+    "n_tokens",
+    "max-tokens",
+    "maxTokens",
+    "totalTokens",
+    "HAL0_MAX_TOKENS",
+    "SANITY_CHAT_MAX_TOKENS",
+    "EXTRACTION_MIN_CONTEXT_TOKENS",
+    "EXPECTED_TOKENS",
+    "token_count",
+    "tokenizer",
+]
+# Names whose verdict once differed between Python and bash, or easily could.
+_PARITY_EXTRA_NAMES = [
+    "a_max_tokensx_max_tokens",
+    "max_tokensx_max_tokens",
+    "TOKENS_PROMPT_TOKENS_COUNT",
+    "max_tokens_prompt_tokens",
+    "api_tokens",
+    "tokens",
+    "tokens_by_host",
+    "github_new_tokens",
+    "oauth_cached_tokens",
+    "max_tokens_secret",
+    "api_tokens_in",
+    "API_TOKENS_PER_KEY",
+    "apiTokenSCount",
+    "token-env",
+    "tokenEnv",
+    "secretEnv",
+    "api_key_env",
+    "my-key",
+    "content_tokens",
+    "thinking_tokens",
+    "generation_tokens",
+    "n_generation_tokens",
+    "mixed_content_tool_tokens",
+    "auth-tokens-per-sec",
+    "max_tokens_" * 20,
+    "api-token-" * 20,
+]
+_PARITY_NAMES = list(
+    dict.fromkeys(
+        _HYPHEN_SECRET_NAMES + _HYPHEN_BENIGN_NAMES + _HAL0_COUNT_NAMES + _PARITY_EXTRA_NAMES
+    )
+)
+
+
+class TestHyphenatedSecretNames:
+    _VALUE = "Zq8vR2mW9xK4tL7pQ3"
+
+    @pytest.mark.parametrize("name", _HYPHEN_SECRET_NAMES)
+    def test_a_hyphenated_or_weakly_qualified_secret_name_is_masked(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        from hal0.redaction import redact_log_line, redact_shareable_text
+
+        line = f"{name}={self._VALUE}"
+        for redact in (redact_shareable_text, redact_log_line):
+            assert self._VALUE not in redact(line), (redact.__name__, name)
+        log = tmp_path / "hit.log"
+        log.write_text(f"{line}\n")
+        harvested = _bash(f'_hal0_report_harvest_report_text "{log}"')
+        assert harvested.returncode == 0, harvested.stderr
+        assert harvested.stdout.splitlines() == [self._VALUE], name
+        masked = _bash(f'_hal0_report_mask_patterns <"{log}"')
+        assert masked.stdout == f"{name}=***REDACTED***\n", masked.stdout
+
+    @pytest.mark.parametrize("name", _HYPHEN_BENIGN_NAMES + _HAL0_COUNT_NAMES)
+    def test_a_count_or_location_name_is_not_masked(self, tmp_path: Path, name: str) -> None:
+        from hal0.redaction import redact_log_line, redact_shareable_text
+
+        line = f"{name}={self._VALUE}"
+        for redact in (redact_shareable_text, redact_log_line):
+            assert redact(line) == line, (redact.__name__, name)
+        out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}" || echo rc=$?')
+        assert out.stdout.strip() == "rc=1", (name, out.stdout, out.stderr)
+
+    def test_the_report_masks_a_hyphenated_value_where_it_reappears(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            f"deploy: api-token-prod={self._VALUE} max-tokens=40960000\n"
+            f"later bare: {self._VALUE} end; budget 40960000\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        assert self._VALUE not in body
+        assert "later bare: ***REDACTED*** end; budget 40960000" in body
+
+    def test_the_strip_cuts_at_the_match_not_an_earlier_copy(self) -> None:
+        """`_max_tokens` matches only at the end (`max_tokensx` is no count
+        word), so the earlier copy stays and `tokensx` is a secret word."""
+        out = _bash(f'_hal0_report_text_value_is_secret "a_max_tokensx_max_tokens" "{self._VALUE}"')
+        assert out.returncode == 0, out.stderr
+
+    def test_a_huge_snake_case_name_is_judged_quickly_and_as_written(self, tmp_path: Path) -> None:
+        """Past 128 characters the name is judged as written, with no count
+        part removed: an 80 KB name of `max_tokens_` parts took seconds to
+        strip. Judged whole, it still carries a secret word and is masked."""
+        name = "max_tokens_" * 7300 + "api"
+        log = tmp_path / "huge.log"
+        log.write_text(f"{name}={self._VALUE}\n")
+        start = time.monotonic()
+        out = _bash(f'_hal0_report_harvest_report_text "{log}"')
+        elapsed = time.monotonic() - start
+        assert out.returncode == 0, out.stderr
+        assert self._VALUE in out.stdout.splitlines()
+        # Milliseconds when capped; the uncapped strip took several seconds.
+        assert elapsed < 3, elapsed
+
+    def test_python_and_the_installer_agree_on_every_name(self, tmp_path: Path) -> None:
+        """One harvest verdict per name, from hal0.redaction and from the
+        installer's free-text harvest over the same text."""
+        from hal0.redaction import _harvest_secret_literals
+
+        values = {name: f"ParityValue{i:03d}xyz" for i, name in enumerate(_PARITY_NAMES)}
+        text = "".join(f"{name}={value}\n" for name, value in values.items())
+        log = tmp_path / "parity.log"
+        log.write_text(text)
+        out = _bash(f'_hal0_report_harvest_report_text "{log}"')
+        assert out.returncode == 0, out.stderr
+        bash_hits = set(out.stdout.split())
+        py_hits = set(_harvest_secret_literals(text))
+        mismatched = {
+            name: ("python" if value in py_hits else "-", "bash" if value in bash_hits else "-")
+            for name, value in values.items()
+            if (value in py_hits) != (value in bash_hits)
+        }
+        assert not mismatched, mismatched
 
 
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────
