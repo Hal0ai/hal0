@@ -339,3 +339,115 @@ def test_git_cleanliness_rejects_all_other_dirt(
 
     assert result.returncode == 1
     assert "working tree is dirty" in result.stderr
+
+
+# ── Gate 8: GitHub check-run conclusions on origin/main ──────────────────────
+
+_GAMMA = "\u03b3-suite (chromium)"
+_REQUIRED = ("python (3.12)", "ui", _GAMMA)
+
+
+def _gate8_run(
+    tmp_path: Path, rows: list[tuple[str, ...]] | None, *, api_error: bool = False
+) -> str:
+    """Run the preflight with a stubbed ``gh`` and return its combined output."""
+    root, env = _make_tree(tmp_path, _fresh_report())
+    repo_root = Path(__file__).resolve().parents[2]
+    (root / "src" / "hal0").symlink_to(repo_root / "src" / "hal0")
+    sha = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", sha], check=True
+    )
+    tsv = tmp_path / "check-runs.tsv"
+    # Rows are (name, conclusion[, id]); the id defaults to the row position.
+    lines = []
+    for i, row in enumerate(rows or []):
+        name, conclusion = row[0], row[1]
+        run_id = row[2] if len(row) > 2 else str(i + 1)
+        lines.append(f"{name}\t{run_id}\t{conclusion}\n")
+    tsv.write_text("".join(lines), encoding="utf-8")
+    _write_executable(
+        tmp_path / "bin" / "gh",
+        f"""#!/usr/bin/env bash
+if [[ "$1" == "api" ]]; then
+    if {"true" if api_error else "false"}; then
+        echo "gh: HTTP 502" >&2
+        exit 1
+    fi
+    [[ "$*" == *--paginate* ]] || {{ echo "missing --paginate" >&2; exit 1; }}
+    cat "{tsv}"
+    exit 0
+fi
+exit 1
+""",
+    )
+    result = _run(root, env, "--channel", "preview", "--tag", "v1.0.0-alpha.1", "--dry-run")
+    return result.stdout + result.stderr
+
+
+def test_gate8_passes_with_required_success_and_skipped_others(tmp_path: Path) -> None:
+    rows = [(n, "success") for n in _REQUIRED] + [
+        ("nightly-a", "skipped"),
+        ("nightly-b", "skipped"),
+        ("advisory", "neutral"),
+    ]
+    out = _gate8_run(tmp_path, rows)
+    assert "required checks succeeded" in out
+    assert "GitHub checks on origin/main not green" not in out
+
+
+def test_gate8_sees_all_paginated_rows(tmp_path: Path) -> None:
+    rows = [(f"filler-{i}", "success") for i in range(45)] + [(n, "success") for n in _REQUIRED]
+    assert "required checks succeeded" in _gate8_run(tmp_path, rows)
+
+
+@pytest.mark.parametrize("missing", _REQUIRED)
+def test_gate8_fails_when_required_check_missing(tmp_path: Path, missing: str) -> None:
+    rows = [(n, "success") for n in _REQUIRED if n != missing]
+    out = _gate8_run(tmp_path, rows)
+    assert "not green" in out
+    assert f"{missing}=missing" in out
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+def test_gate8_fails_on_bad_conclusion_anywhere(tmp_path: Path, conclusion: str) -> None:
+    rows = [(n, "success") for n in _REQUIRED] + [("other-job", conclusion)]
+    out = _gate8_run(tmp_path, rows)
+    assert "not green" in out
+    assert f"other-job={conclusion}" in out
+
+
+def test_gate8_fails_when_required_check_skipped(tmp_path: Path) -> None:
+    rows = [("python (3.12)", "skipped"), ("ui", "success"), (_GAMMA, "success")]
+    out = _gate8_run(tmp_path, rows)
+    assert "python (3.12)=skipped" in out
+
+
+def test_gate8_fails_on_gh_api_error(tmp_path: Path) -> None:
+    out = _gate8_run(tmp_path, None, api_error=True)
+    assert "gh api check-runs query for origin/main failed" in out
+    assert "required checks succeeded" not in out
+
+
+@pytest.mark.parametrize("listed_first", ["old", "new"])
+def test_gate8_failure_then_rerun_success_passes(tmp_path: Path, listed_first: str) -> None:
+    old, new = ("ui", "failure", "10"), ("ui", "success", "20")
+    rows = [("python (3.12)", "success"), (_GAMMA, "success")]
+    rows += [old, new] if listed_first == "old" else [new, old]
+    out = _gate8_run(tmp_path, rows)
+    assert "required checks succeeded" in out
+    assert "not green" not in out
+
+
+@pytest.mark.parametrize("listed_first", ["old", "new"])
+def test_gate8_success_then_rerun_failure_fails(tmp_path: Path, listed_first: str) -> None:
+    old, new = ("ui", "success", "10"), ("ui", "failure", "20")
+    rows = [("python (3.12)", "success"), (_GAMMA, "success")]
+    rows += [old, new] if listed_first == "old" else [new, old]
+    out = _gate8_run(tmp_path, rows)
+    assert "ui=failure" in out
