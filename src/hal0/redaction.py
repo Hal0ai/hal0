@@ -144,9 +144,12 @@ def redact_text_tree(value: Any) -> Any:
 # A name runs over ``-`` as over ``_``, before and after the secret word, so
 # ``api-token-prod``, ``github-token-ci`` and ``x-api-key-v2`` are names, and
 # ``max-tokens`` or ``api-token-file`` are judged whole (#2488).
+_SECRET_WORD: Final[str] = (
+    r"(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY"
+    r"|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)"
+)
 _SECRET_NAME: Final[str] = (
-    r"[A-Za-z0-9_-]*(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY"
-    r"|PRIVATE[_-]?KEY|ENCRYPTION[_-]?KEY|SALT)[A-Za-z0-9_-]*|(?:[A-Za-z0-9_-]*[_-])?KEY"
+    r"[A-Za-z0-9_-]*" + _SECRET_WORD + r"[A-Za-z0-9_-]*|(?:[A-Za-z0-9_-]*[_-])?KEY"
 )
 _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE)
 # Plural ``tokens`` is a count only with a count qualifier (#2466):
@@ -203,10 +206,28 @@ _SECRET_REF_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
 # masked whenever it holds a secret word at all.
 _NAME_JUDGED_WHOLE_MAX: Final[int] = 128
 
+# Linear time on any line (#2501). The rules below never backtrack over a
+# run of name characters, because on a long run with no match that is
+# quadratic or worse: 80 KB of ``api_token_`` took 21 s, and ``--token-x-``
+# far longer. Two devices keep each rule's matches exactly as before:
+#
+# * a run is scanned possessively (``*+``) when the character that must
+#   follow it cannot be part of the run, so giving characters back could
+#   never help;
+# * a rule that may start anywhere inside a run tries only at the run's
+#   start. Which characters it then needs depends only on where the run
+#   ends, so the leftmost start the old rule would have taken is the only
+#   one worth trying: the new rule skips to it inside its first group,
+#   which the replacement keeps.
+_NAME_RUN: Final[str] = r"[A-Za-z0-9_-]"
+
 # ``NAME`` + separator, then the value: double-quoted, single-quoted or bare.
 # The name starts at a word start, so a hyphenated name is matched whole.
+# The separator cannot start with a name character, so the name is the whole
+# run, and _SECRET_NAME is tested once on it by a lookahead (#2501).
 _NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<name>" + _SECRET_NAME + r")"
+    rf"(?<!{_NAME_RUN})(?P<name>(?={_NAME_RUN}*?{_SECRET_WORD}"
+    rf"|(?:{_NAME_RUN}*[_-])?KEY(?!{_NAME_RUN})){_NAME_RUN}*+)"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\"'\s,}&]+)",
     re.IGNORECASE,
@@ -218,6 +239,10 @@ _AUTH_SCHEMES: Final[str] = (
     r"(?:basic|bearer|token|apikey|api-key|key|bot|ssws|negotiate|digest|ntlm"
     r"|oauth|hawk|dpop|aws4-hmac-sha256)"
 )
+
+# Opens group 1 at the start of a run of scheme characters and ends after
+# ``://``; the run's leading non-letters are kept in the group (#2501).
+_URL_SCHEME: Final[str] = r"((?<![a-z0-9+.-])[0-9+.-]*+[a-z][a-z0-9+.-]*+://"
 
 # Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns:
 # these run before the NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
@@ -245,20 +270,32 @@ _SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
         ),
         rf"\g<1>{MASK}",
     ),
-    (re.compile(r"([a-z][a-z0-9+.-]*://[^/@\s:]*):[^/@\s]+@", re.I), rf"\g<1>:{MASK}@"),
-    (re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s:]{16,}@", re.I), rf"\g<1>{MASK}@"),
+    # URL userinfo. The scheme starts at the first letter of its run.
+    (re.compile(_URL_SCHEME + r"[^/@\s:]*+):[^/@\s]++@", re.I), rf"\g<1>:{MASK}@"),
+    (re.compile(_URL_SCHEME + r")[^/@\s:]{16,}+@", re.I), rf"\g<1>{MASK}@"),
 )
 _SHAPE_RULES_AFTER: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
+    # ``--token=value`` / ``--api-key value``. The flag is the run's first
+    # ``--``: group 1 starts at the run's start and keeps what comes before.
     (
         re.compile(
-            r"(--[A-Za-z0-9-]*(?:secret|token|password|pass|api-key|apikey|private-key)"
-            r"[A-Za-z0-9-]*(?:=|\s+))[^-\s]\S*",
+            r"((?<![A-Za-z0-9-])(?:[A-Za-z0-9]|-(?!-))*+"
+            r"--(?=[A-Za-z0-9-]*?(?:secret|token|password|pass|api-key|apikey|private-key))"
+            r"[A-Za-z0-9-]*+(?:=|\s++))[^-\s]\S*",
             re.I,
         ),
         rf"\g<1>{MASK}",
     ),
     (re.compile(r"(client_id=)[A-Za-z0-9_.-]{16,}", re.I), rf"\g<1>{MASK}"),
-    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), MASK),
+    # A JWT starts at the first ``eyJ`` of its run; group 1 keeps what
+    # comes before it.
+    (
+        re.compile(
+            r"((?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*+)"
+            r"eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}"
+        ),
+        rf"\g<1>{MASK}",
+    ),
     (re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK),
     (re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
 )

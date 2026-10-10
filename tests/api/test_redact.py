@@ -786,3 +786,52 @@ class TestHyphenatedSecretNames:
         name = "max_tokens_" * 20
         assert redact_secret_named_values({name: self._VALUE}) == {name: MASK}
         assert redact_secret_named_values({"max_tokens": 1}) == {"max_tokens": 1}
+
+
+class TestRedactionTimeIsLinear:
+    """#2501: a long run of name characters is redacted in linear time.
+
+    On v1.4.0-rc ``main`` 80 KB of ``api_token_`` took about 21 s, the
+    hyphenated form about 50 s, and 8 KB of ``--token-x-`` about 20 s (the
+    ``--flag`` rule was cubic), while journald passes lines of up to about
+    48 KB that a client can partly control. Each line here takes well under
+    0.1 s with the fix; the 1 s bound only leaves room for a slow CI box.
+    """
+
+    _BOUND_S = 1.0
+
+    @pytest.mark.parametrize(
+        ("unit", "length"),
+        [
+            ("api_token_", 80_000),  # name continuation, underscore form
+            ("api-token-", 80_000),  # hyphen form, also the URL scheme rule
+            ("aaaaaaaaaa", 80_000),  # URL scheme rule alone
+            ("eyJ", 80_000),  # JWT rule
+            ("-", 80_000),  # ``--flag`` rule, no secret word
+            ("--token-x-", 8_000),  # ``--flag`` rule, a word at every start
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_worst_case_line_is_fast(self, redact, unit: str, length: int) -> None:
+        import time
+
+        line = (unit * (length // len(unit) + 1))[:length]
+        start = time.perf_counter()
+        redact(line)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self._BOUND_S, f"{len(line)} chars of {unit!r} took {elapsed:.2f}s"
+
+    def test_a_secret_after_a_long_run_is_still_masked(self) -> None:
+        """The fast rules start at a run's start; a secret at its end still
+        counts, with what comes before it kept."""
+        run = "x" * 50_000
+        line = (
+            f"{run}--api-key=hunter2hunter2 {run}+https://u:pw@h "
+            f"{run}eyJaaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc api-token-{'v' * 50_000}=s3cr3tvalue"
+        )
+        out = redact_log_line(line)
+        assert f"{run}--api-key={MASK} " in out
+        assert f"{run}+https://u:{MASK}@h " in out
+        assert f" {run}{MASK} " in out
+        assert out.endswith(f"v={MASK}")
+        assert "hunter2" not in out and "s3cr3t" not in out and ":pw@" not in out
