@@ -601,6 +601,11 @@ class TestPluralTokenNames:
             "tokens_per_sec",
             "output_tokens_per_second",
             "tokens_count",
+            "tokens_in",
+            "tokens_completed",
+            "text_tokens",
+            "image_tokens",
+            "tool_call_tokens",
             "maxTokens",
             "totalTokens",
             "max-tokens",
@@ -617,7 +622,15 @@ class TestPluralTokenNames:
         assert redact_secret_named_values({name: 4096}) == {name: 4096}
 
     @pytest.mark.parametrize(
-        "name", ["login_tokens", "max_tokens_secret", "tokens_in_vault", "api_tokens_count_key"]
+        "name",
+        [
+            "login_tokens",
+            "max_tokens_secret",
+            "tokens_in_vault",
+            "api_tokens_count_key",
+            "api_tokens_in",
+            "auth_tokens_out",
+        ],
     )
     def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
         line = f"{name}={self._VALUE}"

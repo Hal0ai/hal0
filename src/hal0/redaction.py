@@ -148,14 +148,16 @@ _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE
 # Plural ``tokens`` is a count only with a count qualifier (#2466): a
 # qualifier word right before it (``max_tokens``, ``extraction_max_tokens``,
 # ``prompt_tokens``, ``maxTokens``) or a count suffix right after it
-# (``tokens_count``, ``tokens_per_sec``, a whole-name ``tokens_in``/``_out``).
+# (``tokens_count``, ``tokens_per_sec``), or the whole name ``tokens_in``,
+# ``tokens_out`` or ``tokens_completed`` (``api_tokens_in`` stays secret).
 # Unqualified, ``api_tokens``, ``auth_tokens``, ``tokens_by_host`` or bare
 # ``tokens`` name a list of secrets. A word starts at the name's start, after
 # ``_`` or at a camelCase hump; only the qualified part is removed, so any
 # other secret word left in the name (``max_tokens_secret``) still counts.
 _TOKENS_COUNT_QUALIFIER: Final[str] = (
     r"(?:max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached"
-    r"|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor)"
+    r"|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor"
+    r"|text|image|audio|tool_?call)"
 )
 _WORD_START: Final[str] = r"(?:(?<![a-z0-9])|(?-i:(?<=[a-z0-9])(?=[A-Z])))"
 _WORD_END: Final[str] = r"(?:(?![a-z0-9])|(?-i:(?=[A-Z])))"
@@ -165,9 +167,7 @@ _BENIGN_NAME_PART_RE: Final[re.Pattern[str]] = re.compile(
     + _TOKENS_COUNT_QUALIFIER
     + r"_?tokens|tokens_?(?:count|per))"
     + _WORD_END
-    + r"|"
-    + _WORD_START
-    + r"tokens_?(?:in|out)$"
+    + r"|^tokens_?(?:in|out|completed)$"
     + r"|tokenizer|token_?count|pass(?=[a-z])(?!w(?:or)?d|phrase)",
     re.IGNORECASE,
 )

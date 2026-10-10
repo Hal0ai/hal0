@@ -502,7 +502,13 @@ class TestPluralTokenNames:
             "max_new_tokens",
             "tokens_per_sec",
             "tokens_count",
+            "tokens_out",
+            "tool_call_tokens",
             "MaxTokens",
+            "extractionMaxTokens",
+            "outputTokensPerSecond",
+            "max-tokens",
+            "--max-tokens",
             "tokenizer",
             "token_count",
             "api_key_env",
@@ -512,7 +518,9 @@ class TestPluralTokenNames:
         out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}" || echo rc=$?')
         assert out.stdout.strip() == "rc=1", (name, out.stdout, out.stderr)
 
-    @pytest.mark.parametrize("name", ["max_tokens_secret", "tokens_in_vault"])
+    @pytest.mark.parametrize(
+        "name", ["max_tokens_secret", "tokens_in_vault", "api_tokens_in", "authTokens"]
+    )
     def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
         out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
         assert out.returncode == 0, (name, out.stderr)
@@ -528,6 +536,18 @@ class TestPluralTokenNames:
         body = report.read_text()
         assert self._VALUE not in body
         assert "later bare: ***REDACTED*** end; budget 40960000" in body
+
+    def test_hyphenated_and_camel_count_values_are_not_masked_elsewhere(
+        self, tmp_path: Path
+    ) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            "llama: max-tokens=not_available extractionMaxTokens=unlimited_budget\n"
+            "elsewhere: not_available; unlimited_budget\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        assert "elsewhere: not_available; unlimited_budget" in report.read_text()
 
 
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────

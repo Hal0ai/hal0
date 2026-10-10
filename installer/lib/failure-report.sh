@@ -438,10 +438,18 @@ _hal0_report_harvest_toml_file() {
 # `prompt_tokens`, `tokens_count`, `tokens_per_sec`; `api_tokens`,
 # `auth_tokens` and `tokens_by_host` are secrets. Only the benign part is
 # removed, so a name with another secret word left (`max_tokens_secret`)
-# is still harvested.
-_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)((max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor)_?tokens|tokens_?(count|per))(_|$)|(^|_)tokens_?(in|out)$|tokenizer|token_?count'
+# is still harvested. The whole names `tokens_in`, `tokens_out` and
+# `tokens_completed` are counts; `api_tokens_in` is not.
+_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)((max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor|text|image|audio|tool_?call)_?tokens|tokens_?(count|per))(_|$)|^tokens_?(in|out|completed)$|tokenizer|token_?count'
 _hal0_report_text_value_is_secret() {
-    local name="${1,,}" value="$2"
+    local name="$1" value="$2"
+    # camelCase humps and `-` count as `_` (`maxTokens`, `max-tokens`).
+    while [[ "$name" =~ ^(.*[a-z0-9])([A-Z].*)$ ]]; do
+        name="${BASH_REMATCH[1]}_${BASH_REMATCH[2]}"
+    done
+    name="${name,,}"
+    while [[ "$name" == -* ]]; do name="${name#-}"; done
+    name="${name//-/_}"
     [[ "$name" == key ]] && return 1
     [[ "$name" =~ _(env|file|path|dir)$ ]] && return 1
     while [[ "$name" =~ $_HAL0_REPORT_BENIGN_NAME_PART_RE ]]; do
@@ -463,13 +471,14 @@ _hal0_report_text_value_is_secret() {
 _hal0_report_harvest_report_text() {
     local file="$1" hits rc=0 hit name value
     hits="$(LC_ALL=C grep -oiE \
-        "(^|[^A-Za-z0-9_])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
+        "(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]*-)?(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
         "$file")" || rc=$?
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
         [[ "$hit" =~ ([A-Za-z0-9_-]+)[\"\']?[[:space:]]*[=:][[:space:]]*[\"\']?(.*)$ ]] || continue
         name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
-        # A header name keeps its dashes (`x-api-key`); a flag's do not count.
+        # A hyphenated name is judged whole (`x-api-key`, `max-tokens`, #2466);
+        # a flag's leading dashes do not count.
         while [[ "$name" == -* ]]; do name="${name#-}"; done
         _hal0_report_text_value_is_secret "$name" "$value" || continue
         _hal0_report_emit_secret "$value"
