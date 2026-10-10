@@ -57,6 +57,9 @@ if cmd.endswith(" --version"):
     print("hal0 9.9.9-contract")
     sys.exit(0)
 if "model list --json" in cmd:
+    if os.environ.get("STUB_MODELS_JSON"):
+        print(os.environ["STUB_MODELS_JSON"])
+        sys.exit(0)
     print(json.dumps({"models": [
         {"id": "llm-model", "type": "llm", "installed": True},
         {"id": "stt-model", "type": "transcription", "installed": True},
@@ -187,6 +190,70 @@ def test_cleanup_tears_down_every_created_slot(
         assert f"/opt/test/hal0 slot delete {slot} --force 2>/dev/null || true" in cmds[create_at:]
         assert f"/opt/test/hal0 slot unload {slot} 2>/dev/null || true" in cmds[create_at:]
         assert f"cleaned up {slot}" in proc.stdout
+
+
+# ── #2477: the default llm pick never lands on an FLM (NPU) model ───────────
+
+
+def _flm_first_models(flm_row: dict) -> str:
+    return json.dumps(
+        {
+            "models": [
+                {"id": "stt-model", "type": "transcription", "installed": True},
+                flm_row,
+                {
+                    "id": "gguf-model",
+                    "type": "llm",
+                    "installed": True,
+                    "provider_effective": "llama-server",
+                },
+                {"id": "tts-model", "type": "tts", "installed": True},
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "flm_row",
+    [
+        {"id": "flm-npu-model", "type": "llm", "installed": True, "provider_effective": "flm"},
+        {"id": "flm-npu-model", "type": "llm", "installed": True, "provider": "flm"},
+        # Older /api/models rows without provider_effective: backend tags only.
+        {"id": "flm-npu-model", "type": "llm", "installed": True, "backends": ["flm"]},
+        {"id": "flm-npu-model", "type": "llm", "installed": True, "backends": ["npu"]},
+    ],
+)
+def test_default_llm_model_skips_flm_rows(tmp_path: Path, flm_row: dict) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_MODELS_JSON=_flm_first_models(flm_row),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    llm_creates = [
+        c for c in cmds if c.startswith("/opt/test/hal0 slot create ") and "--type llm" in c
+    ]
+    assert llm_creates, cmds
+    assert all("-m 'gguf-model'" in c for c in llm_creates), llm_creates
+    assert not [c for c in cmds if "flm-npu-model" in c and "slot create" in c]
+
+
+def test_no_llama_server_llm_model_means_skip_not_flm_slot(tmp_path: Path) -> None:
+    only_flm = json.dumps(
+        {
+            "models": [
+                {
+                    "id": "flm-npu-model",
+                    "type": "llm",
+                    "installed": True,
+                    "provider_effective": "flm",
+                }
+            ]
+        }
+    )
+    _proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_MODELS_JSON=only_flm)
+    created = [c for c in cmds if "slot create" in c and "--type llm" in c and "--hardware" in c]
+    assert not [c for c in created if "flm-npu-model" in c and ("vulkan" in c or "rocm" in c)]
 
 
 # ── #2351: the unload row asserts every loaded slot unloads to offline ──────
