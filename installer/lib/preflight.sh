@@ -514,7 +514,7 @@ preflight_writable() {
         rc=1
     done
     if [[ ${#unverified[@]} -gt 0 ]]; then
-        info "writable paths: not root, cannot verify ${unverified[*]} (root-owned install trees; re-run 'sudo hal0 doctor' to check)"
+        info "writable paths: not root, cannot verify $(IFS=' '; printf '%s' "${unverified[*]}") (root-owned install trees; re-run 'sudo hal0 doctor' to check)"
     elif [[ "${rc}" -eq 0 ]]; then
         info "writable paths: ok"
     fi

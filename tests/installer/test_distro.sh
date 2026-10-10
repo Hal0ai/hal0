@@ -67,5 +67,15 @@ want "double-source guard holds" "${_HAL0_DISTRO_SH_LOADED}" = 1
 want "ID did not leak from os-release"   -z "${ID:-}"
 want "NAME did not leak from os-release" -z "${NAME:-}"
 
+# pkg_install_cmd must emit a ONE-line hint with every package even when the
+# caller (install.sh) has set IFS=$'\n\t' — "$*" joins on the first IFS char (#2471).
+hint="$(
+    IFS=$'\n\t'
+    pkg_mgr() { echo apt-get; }
+    pkg_install_cmd python3 python3-venv
+)"
+want "multi-package hint is a single line under IFS=\$'\\n\\t'" "$(printf '%s\n' "${hint}" | wc -l)" -eq 1
+case "${hint}" in *"python3 python3-venv") ok "multi-package hint is space-joined" ;; *) bad "multi-package hint is space-joined (${hint})" ;; esac
+
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "PASS"; exit 0; else echo "FAIL"; exit 1; fi
