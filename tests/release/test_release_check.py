@@ -348,7 +348,7 @@ _REQUIRED = ("python (3.12)", "ui", _GAMMA)
 
 
 def _gate8_run(
-    tmp_path: Path, rows: list[tuple[str, str]] | None, *, api_error: bool = False
+    tmp_path: Path, rows: list[tuple[str, ...]] | None, *, api_error: bool = False
 ) -> str:
     """Run the preflight with a stubbed ``gh`` and return its combined output."""
     root, env = _make_tree(tmp_path, _fresh_report())
@@ -364,7 +364,13 @@ def _gate8_run(
         ["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", sha], check=True
     )
     tsv = tmp_path / "check-runs.tsv"
-    tsv.write_text("".join(f"{n}\t{c}\n" for n, c in rows or []), encoding="utf-8")
+    # Rows are (name, conclusion[, id]); the id defaults to the row position.
+    lines = []
+    for i, row in enumerate(rows or []):
+        name, conclusion = row[0], row[1]
+        run_id = row[2] if len(row) > 2 else str(i + 1)
+        lines.append(f"{name}\t{run_id}\t{conclusion}\n")
+    tsv.write_text("".join(lines), encoding="utf-8")
     _write_executable(
         tmp_path / "bin" / "gh",
         f"""#!/usr/bin/env bash
@@ -426,3 +432,22 @@ def test_gate8_fails_on_gh_api_error(tmp_path: Path) -> None:
     out = _gate8_run(tmp_path, None, api_error=True)
     assert "gh api check-runs query for origin/main failed" in out
     assert "required checks succeeded" not in out
+
+
+@pytest.mark.parametrize("listed_first", ["old", "new"])
+def test_gate8_failure_then_rerun_success_passes(tmp_path: Path, listed_first: str) -> None:
+    old, new = ("ui", "failure", "10"), ("ui", "success", "20")
+    rows = [("python (3.12)", "success"), (_GAMMA, "success")]
+    rows += [old, new] if listed_first == "old" else [new, old]
+    out = _gate8_run(tmp_path, rows)
+    assert "required checks succeeded" in out
+    assert "not green" not in out
+
+
+@pytest.mark.parametrize("listed_first", ["old", "new"])
+def test_gate8_success_then_rerun_failure_fails(tmp_path: Path, listed_first: str) -> None:
+    old, new = ("ui", "success", "10"), ("ui", "failure", "20")
+    rows = [("python (3.12)", "success"), (_GAMMA, "success")]
+    rows += [old, new] if listed_first == "old" else [new, old]
+    out = _gate8_run(tmp_path, rows)
+    assert "ui=failure" in out

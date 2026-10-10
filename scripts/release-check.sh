@@ -435,21 +435,26 @@ else
 				# sync with the main branch protection required status checks.
 				REQUIRED_CHECKS=("python (3.12)" "ui" "γ-suite (chromium)")
 				if ! GH_CHECKS="$(gh api --paginate "repos/:owner/:repo/commits/${MAIN_SHA}/check-runs?per_page=100" \
-					--jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>&1)"; then
+					--jq '.check_runs[] | [.name, .id, (.conclusion // "pending")] | @tsv' 2>&1)"; then
 					fail "gh api check-runs query for origin/main failed: ${GH_CHECKS}"
 				else
 					CHECK_VERDICT="$(python3 -c '
 import sys
 required = sys.argv[1:]
-runs = {}
-bad = []
+latest = {}
 for line in sys.stdin.read().splitlines():
     if not line.strip():
         continue
-    name, _, conclusion = line.partition("\t")
-    runs[name] = conclusion
-    if conclusion in ("failure", "cancelled", "timed_out", "action_required", "stale"):
-        bad.append(f"{name}={conclusion}")
+    name, run_id, conclusion = line.split("\t")
+    # A re-run adds a check run with the same name; only the newest counts.
+    if name not in latest or int(run_id) > latest[name][0]:
+        latest[name] = (int(run_id), conclusion)
+runs = {name: conclusion for name, (_, conclusion) in latest.items()}
+bad = [
+    f"{name}={conclusion}"
+    for name, conclusion in runs.items()
+    if conclusion in ("failure", "cancelled", "timed_out", "action_required", "stale")
+]
 for name in required:
     if name not in runs:
         bad.append(f"{name}=missing")
