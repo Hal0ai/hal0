@@ -788,6 +788,62 @@ class TestHyphenatedSecretNames:
         assert redact_secret_named_values({"max_tokens": 1}) == {"max_tokens": 1}
 
 
+class TestShareableLiteralsSinglePass:
+    """#2533: harvested secrets are masked in one scan, with the same result
+    as one ``str.replace`` per secret, longest first."""
+
+    @staticmethod
+    def _loop(text: str, literals: list[str]) -> str:
+        for literal in literals:
+            text = text.replace(literal, MASK)
+        return text
+
+    @pytest.mark.parametrize(
+        ("text", "literals"),
+        [
+            # A longer literal wins over a shorter one that starts earlier.
+            ("aaaaaaaaBBBBBBBB", ["aaaaaaaBBBBBBBB", "aaaaaaaaB"]),
+            # A substring is masked only where its container is not.
+            ("x=abcdefghij y=cdefghij z", ["abcdefghij", "cdefghij"]),
+            # Overlapping occurrences of one literal: left to right.
+            ("aaaaaaaaaaaaaaaaaaaaa", ["aaaaaaaa"]),
+            # Equal length, overlapping: list order decides.
+            ("xabcdefgh", ["xabcdefg", "abcdefgh"]),
+            ("xabcdefgh", ["abcdefgh", "xabcdefg"]),
+            # A repeated literal masks nothing more.
+            ("s3cr3tvalue s3cr3tvalue", ["s3cr3tvalue", "s3cr3tvalue"]),
+            # Literals that could match a MASK take the loop itself.
+            ("abc***x abc", ["abc*", "abc***x", "***x"]),
+            ("vD***REDACTED***x", ["vD", "D***R"]),
+            ("a\nb.c(d)[e]^$", ["\nb.c(", "(d)[e]^$"]),
+        ],
+    )
+    def test_matches_one_replace_per_literal(self, text: str, literals: list[str]) -> None:
+        from hal0.redaction import _mask_literals
+
+        assert _mask_literals(text, literals) == self._loop(text, literals)
+
+    def test_a_longer_literal_wins_over_an_earlier_shorter_one(self) -> None:
+        from hal0.redaction import _mask_literals
+
+        out = _mask_literals("aaaaaaaaBBBBBBBB", ["aaaaaaaBBBBBBBB", "aaaaaaaaB"])
+        assert out == f"a{MASK}"
+
+    @pytest.mark.parametrize("value", ["val{:07d}", "v*{:07d}"])
+    def test_800kb_of_distinct_secrets_is_fast(self, value: str) -> None:
+        """18 s on main for the plain form; a ``*`` inside a value that
+        cannot touch a MASK keeps the single pass."""
+        import time
+
+        text = " ".join(f"token={value.format(i)}" for i in range(45_000))
+        assert len(text) > 700_000
+        start = time.perf_counter()
+        out = redact_shareable_text(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 5.0, f"{len(text)} chars took {elapsed:.2f}s"
+        assert out == " ".join([f"token={MASK}"] * 45_000)
+
+
 class TestRedactionTimeIsLinear:
     """#2501: a long run of name characters is redacted in linear time.
 

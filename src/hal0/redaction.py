@@ -564,9 +564,128 @@ def redact_shareable_text(text: str) -> str:
     line. The Python counterpart of installer/lib/failure-report.sh's text
     pass. Idempotent.
     """
-    for literal in _harvest_secret_literals(text):
-        text = text.replace(literal, MASK)
+    text = _mask_literals(text, _harvest_secret_literals(text))
     return "\n".join(redact_secret_shapes(line) for line in text.split("\n"))
+
+
+# Past these, _mask_literals falls back to one str.replace per literal: a
+# trie this deeply nested is past what ``re`` compiles, and this many
+# occurrences per character of text means literals that are prefixes of
+# each other, many times over.
+_LITERAL_TRIE_MAX_NESTING: Final[int] = 100
+_LITERAL_OCCURRENCES_PER_CHAR_MAX: Final[int] = 4
+
+
+def _may_match_a_mask(literal: str) -> bool:
+    """True if ``literal`` could match text that includes part of an
+    inserted :data:`MASK`: lie inside one, contain one, or start or end
+    partway through one."""
+    return (
+        literal in MASK
+        or MASK in literal
+        or any(
+            literal.startswith(MASK[i:]) or literal.endswith(MASK[:i]) for i in range(1, len(MASK))
+        )
+    )
+
+
+def _replace_each(text: str, literals: list[str]) -> str:
+    for literal in literals:
+        text = text.replace(literal, MASK)
+    return text
+
+
+def _literal_trie_regex(trie: dict[str, Any], nesting: int = 0) -> str | None:
+    """The alternation of every literal in ``trie``, factored as a trie so
+    ``re`` walks it in time bounded by the longest literal, not their number.
+    At each position it matches the longest literal starting there. ``None``
+    if the trie nests deeper than _LITERAL_TRIE_MAX_NESTING."""
+    if nesting > _LITERAL_TRIE_MAX_NESTING:
+        return None
+    alts = []
+    for char in sorted(k for k in trie if k):
+        run, node = char, trie[char]
+        while "" not in node and len(node) == 1:
+            ((char, node),) = node.items()
+            run += char
+        rest = _literal_trie_regex(node, nesting + 1)
+        if rest is None:
+            return None
+        alts.append(re.escape(run) + rest)
+    if not alts:
+        return ""
+    body = alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
+    return f"(?:{body})?" if "" in trie else body
+
+
+def _mask_literals(text: str, literals: list[str]) -> str:
+    """``text`` with every literal replaced by :data:`MASK`, byte for byte as
+    ``for lit in literals: text = text.replace(lit, MASK)`` would, in one
+    scan of ``text`` (#2533). That loop rescans the whole text per literal,
+    so a bundle with many distinct secrets took quadratic time (18 s at
+    800 KB).
+
+    The loop's result is the original text with some occurrences masked: a
+    literal masks its occurrences left to right, skipping one that overlaps
+    an earlier mask of its own or of an earlier literal. Its occurrences in
+    the partly masked text are exactly the original ones that overlap no
+    mask, unless the literal could match part of a :data:`MASK`
+    (:func:`_may_match_a_mask`). So every occurrence is found once, then
+    masked in the loop's order. Such a literal, or a pathological set of
+    literals, takes the loop itself.
+    """
+    if not literals or any(_may_match_a_mask(literal) for literal in literals):
+        return _replace_each(text, literals)
+    # A trie of the literals; key "" marks where one ends and holds its id.
+    # A repeated literal masks nothing the second time, so its first id owns
+    # every occurrence.
+    trie: dict[str, Any] = {}
+    for i, literal in enumerate(literals):
+        node = trie
+        for char in literal:
+            node = node.setdefault(char, {})
+        node.setdefault("", i)
+    lit_id: dict[str, int] = {}
+    ends: list[list[int]] = []  # per literal, the ids of literals that are its prefixes
+    for literal in literals:
+        node, prefixes = trie, []
+        for char in literal:
+            node = node[char]
+            if "" in node:
+                prefixes.append(node[""])
+        lit_id[literal] = prefixes[-1]
+        ends.append(prefixes)
+    body = _literal_trie_regex(trie)
+    if body is None:
+        return _replace_each(text, literals)
+
+    occurrences: list[list[int]] = [[] for _ in literals]
+    budget = _LITERAL_OCCURRENCES_PER_CHAR_MAX * len(text) + len(literals)
+    for match in re.finditer(f"(?=({body}))", text):
+        start, prefixes = match.start(), ends[lit_id[match.group(1)]]
+        budget -= len(prefixes)
+        if budget < 0:
+            return _replace_each(text, literals)
+        for i in prefixes:
+            occurrences[i].append(start)
+
+    masked = bytearray(len(text))
+    spans: list[tuple[int, int]] = []
+    for i, literal in enumerate(literals):
+        size, free_from = len(literal), 0
+        for start in occurrences[i]:
+            end = start + size
+            if start >= free_from and masked.find(1, start, end) < 0:
+                masked[start:end] = b"\x01" * size
+                spans.append((start, end))
+                free_from = end
+    out: list[str] = []
+    pos = 0
+    for start, end in sorted(spans):
+        out += (text[pos:start], MASK)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 __all__ = [
