@@ -249,6 +249,11 @@ remote_slot_load() {
 }
 
 # First installed registry model of the given dispatcher type, or empty.
+# For `llm` the pick must be servable by llama-server: FLM (NPU) models are
+# registered as `llm` too, but the vulkan/rocm rows build a llama-server slot
+# and would fail on an NPU model directory (#2477). Rows are skipped when
+# provider_effective/provider names another engine or the backend tags say
+# flm/npu.
 # `hal0 model list --json` emits the raw /api/models aggregate; each row
 # carries `type` (services/models_service.py::dispatch_type — llm |
 # embedding | reranking | transcription | tts | image) and `installed`.
@@ -270,10 +275,22 @@ try:
 except Exception:
     raise SystemExit(0)
 models = data.get("models", []) if isinstance(data, dict) else data
+
+def llama_servable(m):
+    prov = m.get("provider_effective") or m.get("provider")
+    if prov and prov != "llama-server":
+        return False
+    tags = {str(b).strip().lower() for b in (m.get("backends") or [])}
+    return not (tags & {"flm", "npu"})
+
+
 for m in models:
-    if m.get("installed") and m.get("type") == want:
-        print(m.get("id", ""))
-        break
+    if not (m.get("installed") and m.get("type") == want):
+        continue
+    if want == "llm" and not llama_servable(m):
+        continue
+    print(m.get("id", ""))
+    break
 ' "$1"
 }
 
