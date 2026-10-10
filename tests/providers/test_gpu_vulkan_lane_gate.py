@@ -484,6 +484,7 @@ class TestUnchangedNeighbours:
             device="gpu-rocm",
             runtime_lane="llama",
             kfd_path=str(node),
+            dri_dir=_render_node(tmp_path),
             image=ADE07BA_REF,
             env={},
             amd_host=True,
@@ -702,11 +703,13 @@ class TestPreflightDoesNotDisplaceTheSanityGate:
         # ROCm side: gated on the compute node, indifferent to the image.
         kfd = tmp_path / "kfd"
         kfd.write_text("")
+        render_dir = _render_node(tmp_path)
         require_kfd_for_gpu_slot(
             before["name"],
             device=before["device"],
             runtime_lane="llama",
             kfd_path=str(kfd),
+            dri_dir=render_dir,
             image=ADE07BA_REF,
             env={},
             amd_host=True,
@@ -719,7 +722,7 @@ class TestPreflightDoesNotDisplaceTheSanityGate:
             device=after["device"],
             runtime_lane="llama",
             kfd_path=str(tmp_path / "gone"),
-            dri_dir=_render_node(tmp_path),
+            dri_dir=render_dir,
             image=VULKAN_FIXED_IMAGE,
             env={},
             amd_host=True,
