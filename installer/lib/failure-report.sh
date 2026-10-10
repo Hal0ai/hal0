@@ -433,29 +433,44 @@ _hal0_report_harvest_toml_file() {
 # whose value is not the secret itself are skipped as well (#2384): a token
 # count or tokenizer (`max_tokens`, `token_count`, `tokenizer=Qwen/...`) and
 # a field naming where a secret lives (`api_key_env`, `token_file`,
-# `..._path`). Plural `tokens` is a count only with a count qualifier
-# (#2466), as in hal0.redaction._BENIGN_NAME_PART_RE: `max_tokens`,
-# `prompt_tokens`, `tokens_count`, `tokens_per_sec` (a rate unit only:
-# `api_tokens_per_host` is a secret); `api_tokens`,
-# `auth_tokens` and `tokens_by_host` are secrets. Only the benign part is
-# removed, so a name with another secret word left (`max_tokens_secret`)
-# is still harvested. The whole names `tokens_in`, `tokens_out` and
-# `tokens_completed` are counts; `api_tokens_in` is not.
-_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)((max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor|text|image|audio|video|tool|tool_?call|tool_?response)_?tokens|tokens_?count|tokens_?per_?(s|sec|second|ms|min|minute|hour|request|req|iteration|iter|step|token|1k|k))(_|$)|^tokens_?(in|out|completed)$|tokenizer|token_?count'
+# `..._path`; judged as written, so a camelCase `tokenEnv` or `secretEnv`
+# is still a secret).
+#
+# Plural `tokens` is a count only with a count qualifier (#2466), as in
+# hal0.redaction._BENIGN_NAME_PART_RE: a count word right before it
+# (`max_tokens`, `extraction_max_tokens`, `HAL0_MAX_TOKENS`); a weaker word
+# (`new`, `cached`, `tool`, ...) only at the start of the name or right after
+# a count word (`cached_tokens`, `max_new_tokens`; `github_new_tokens` is a
+# secret); `tokens_count` or `tokens_per_<time or count unit>`
+# (`api_tokens_per_host` is a secret); or the whole name `tokens_in`,
+# `tokens_out`, `tokens_completed`, ... (`api_tokens_in` is a secret). Only
+# the benign part is removed, so a name with another secret word left
+# (`max_tokens_secret`) is still harvested. camelCase humps and `-` count as
+# `_` for this (`maxTokens`, `max-tokens`); the hump split is quadratic in
+# bash, so a name longer than any real one is judged as written.
+_HAL0_REPORT_BENIGN_NAME_PART_RE='(^|_)(max|min|num|n|total|prompt|completion|context|ctx|input|output|text|image|audio|video|content|budget|requested|expected|generated|reasoning|remaining|floor|prediction|predicted|generation|draft|thinking)_?((new|cache|cached|tool_?call|tool_?response|tool|used|extra)_?)?tokens(_|$)|^(new|cache|cached|tool_?call|tool_?response|tool|used|extra)_?tokens(_|$)|(^|_)tokens_?(count|per_?(s|sec|second|ms|min|minute|hour|request|req|iteration|iter|step|1k|k))(_|$)|^tokens_?(in|out|completed|predicted|evaluated|cached|used)$|tokenizer|token_?count'
 _hal0_report_text_value_is_secret() {
-    local name="$1" value="$2"
-    # camelCase humps and `-` count as `_` (`maxTokens`, `max-tokens`).
-    while [[ "$name" =~ ^(.*[a-z0-9])([A-Z].*)$ ]]; do
-        name="${BASH_REMATCH[1]}_${BASH_REMATCH[2]}"
-    done
+    local name="${1,,}" value="$2"
+    [[ "$name" == key ]] && return 1
+    [[ "$name" =~ _(env|file|path|dir)$ ]] && return 1
+    name="$1"
+    if [[ ${#name} -le 128 ]]; then
+        while [[ "$name" =~ ^(.*[a-z0-9])([A-Z].*)$ ]]; do
+            name="${BASH_REMATCH[1]}_${BASH_REMATCH[2]}"
+        done
+    fi
     name="${name,,}"
     while [[ "$name" == -* ]]; do name="${name#-}"; done
     name="${name//-/_}"
-    [[ "$name" == key ]] && return 1
-    [[ "$name" =~ _(env|file|path|dir)$ ]] && return 1
-    while [[ "$name" =~ $_HAL0_REPORT_BENIGN_NAME_PART_RE ]]; do
-        name="${name/"${BASH_REMATCH[0]}"/_}"
+    # One left-to-right pass, as re.sub: what a strip exposes is not matched
+    # again, and the leading `_` kept on the rest stops a `^` match there.
+    local stripped="" rest="$name" part
+    while [[ "$rest" =~ $_HAL0_REPORT_BENIGN_NAME_PART_RE ]]; do
+        part="${BASH_REMATCH[0]}"
+        stripped+="${rest%%"$part"*}_"
+        rest="_${rest#*"$part"}"
     done
+    name="$stripped$rest"
     [[ "$name" =~ (secret|token|pass|api[_-]?key|access[_-]?key|private[_-]?key|encryption[_-]?key|salt|_key$|^key$) ]] || return 1
     [[ ${#value} -ge 8 ]] || return 1
     [[ "$value" =~ ^[0-9]+$ ]] && return 1

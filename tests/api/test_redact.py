@@ -570,7 +570,26 @@ class TestPluralTokenNames:
     _VALUE = "Plural_Tok3n_99xyzw"
 
     @pytest.mark.parametrize(
-        "name", ["api_tokens", "auth_tokens", "tokens_by_host", "tokens", "authTokens"]
+        "name",
+        [
+            "api_tokens",
+            "auth_tokens",
+            "tokens_by_host",
+            "tokens",
+            "authTokens",
+            # ALL-CAPS: a capital is not a word end unless it starts a hump.
+            "API_TOKENS_PER_SERVICE",
+            "API_TOKENS_PER_KEY",
+            "GITHUB_TOKENS_PER_SITE",
+            "HF_TOKENS_PER_SPACE",
+            # A weak qualifier only counts at the start of the name or after
+            # a count word, not after a credential prefix.
+            "github_new_tokens",
+            "oauth_cached_tokens",
+            "mcp_tool_tokens",
+            "api_tokens_per_token",
+            "apiTokenSCount",
+        ],
     )
     def test_an_unqualified_tokens_name_is_masked(self, name: str) -> None:
         from hal0.redaction import redact_secret_named_values
@@ -586,6 +605,11 @@ class TestPluralTokenNames:
         out = redact_shareable_text(f"api_tokens={self._VALUE}\nlater bare: {self._VALUE} end\n")
         assert self._VALUE not in out
         assert "later bare: ***REDACTED*** end" in out
+
+    def test_a_hyphenated_all_caps_name_is_judged_whole(self) -> None:
+        line = f"API-TOKENS-PER-SECRET={self._VALUE}"
+        for redact in (redact_shareable_text, redact_log_line):
+            assert self._VALUE not in redact(line), redact.__name__
 
     @pytest.mark.parametrize(
         "name",
@@ -610,6 +634,16 @@ class TestPluralTokenNames:
             "tool_response_tokens",
             "mixed_content_tool_tokens",
             "tokens_per_iteration",
+            "cached_tokens",
+            "cache_tokens",
+            "prompt_cached_tokens",
+            "new_tokens",
+            "tokens_predicted",
+            "tokens_evaluated",
+            "accepted_prediction_tokens",
+            "HAL0_MAX_TOKENS",
+            "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS",
+            "OUTPUT_TOKENS_PER_SECOND",
             "maxTokens",
             "totalTokens",
             "max-tokens",
@@ -642,8 +676,13 @@ class TestPluralTokenNames:
         line = f"{name}={self._VALUE}"
         assert self._VALUE not in redact_shareable_text(line)
 
-    @pytest.mark.parametrize("name", ["apiTokensFile", "authTokensEnv", "apiTokenPath"])
-    def test_a_camel_case_reference_name_is_left_alone(self, name: str) -> None:
+    @pytest.mark.parametrize(
+        "name",
+        ["secretEnv", "clientSecretEnv", "tokenEnv", "passwordFile", "privateKeyPath", "TokenFile"],
+    )
+    def test_a_camel_case_location_name_stays_masked(self, name: str) -> None:
+        """Only ``_env``/``_file``/``_path``/``_dir`` mark a location: a
+        Helm-style ``secretEnv`` is a map of secret values, not a reference."""
         from hal0.redaction import redact_secret_named_values
 
-        assert redact_secret_named_values({name: "/run/x"}) == {name: "/run/x"}
+        assert redact_secret_named_values({name: {"OPENAI": self._VALUE}}) == {name: MASK}

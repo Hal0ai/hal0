@@ -12,6 +12,7 @@ pins both against the same fixture set so a drift is caught in CI.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -484,7 +485,31 @@ class TestPluralTokenNames:
     _VALUE = "Plural_Tok3n_99xyzw"
 
     @pytest.mark.parametrize(
-        "name", ["api_tokens", "auth_tokens", "tokens_by_host", "tokens", "login_tokens"]
+        "name",
+        [
+            "api_tokens",
+            "auth_tokens",
+            "tokens_by_host",
+            "tokens",
+            "login_tokens",
+            "API_TOKENS_PER_SERVICE",
+            "API_TOKENS_PER_KEY",
+            "GITHUB_TOKENS_PER_SITE",
+            "HF_TOKENS_PER_SPACE",
+            "github_new_tokens",
+            "oauth_cached_tokens",
+            "mcp_tool_tokens",
+            "api_tokens_per_token",
+            "apiTokenSCount",
+            # One strip pass, as in Python: `TOKENS_COUNT` exposed by
+            # removing `_PROMPT_TOKENS` is not stripped again.
+            "TOKENS_PROMPT_TOKENS_COUNT",
+            # A camelCase location suffix does not make a name a location.
+            "secretEnv",
+            "tokenEnv",
+            "passwordFile",
+            "token-env",
+        ],
     )
     def test_an_unqualified_tokens_name_is_harvested(self, name: str) -> None:
         out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')
@@ -505,6 +530,13 @@ class TestPluralTokenNames:
             "tokens_out",
             "tool_call_tokens",
             "mixed_content_tool_tokens",
+            "cached_tokens",
+            "new_tokens",
+            "prompt_cached_tokens",
+            "tokens_predicted",
+            "accepted_prediction_tokens",
+            "HAL0_MAX_TOKENS",
+            "OUTPUT_TOKENS_PER_SECOND",
             "MaxTokens",
             "extractionMaxTokens",
             "outputTokensPerSecond",
@@ -556,6 +588,19 @@ class TestPluralTokenNames:
         proc, report = _run_report(box)
         assert report is not None and report.is_file(), proc.stderr
         assert "elsewhere: not_available; unlimited_budget" in report.read_text()
+
+    def test_a_huge_camel_case_name_is_judged_quickly(self, tmp_path: Path) -> None:
+        """The camelCase split is quadratic in bash, so it is skipped for
+        names longer than any real one; such a name is judged as written."""
+        name = "aB" * 8000 + "Token"
+        log = tmp_path / "huge.log"
+        log.write_text(f"{name}={self._VALUE}\n")
+        start = time.monotonic()
+        out = _bash(f'_hal0_report_harvest_report_text "{log}"')
+        elapsed = time.monotonic() - start
+        assert out.returncode == 0, out.stderr
+        assert self._VALUE in out.stdout.splitlines()
+        assert elapsed < 5, elapsed
 
 
 # ── #2385: TOML multi-line strings under a sensitive key ────────────────────
