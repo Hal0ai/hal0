@@ -300,6 +300,16 @@ def _model_ref_problem(model: str, registry: list[dict]) -> str | None:
     return f"unknown model {model!r}"
 
 
+def _failure_note(reason: str) -> str:
+    """The text stored with a failed queue item (failed.json, shown by the
+    dashboard and the queue API). Exception text can carry request URLs or
+    auth headers, so mask secret shapes and bound the length (#2408)."""
+    from hal0.redaction import redact_log_line
+
+    note = redact_log_line(" ".join(str(reason).split()))
+    return note if len(note) <= 300 else note[:299] + "…"
+
+
 def _worklist_suite(item: dict, base: Suite | None) -> Suite:
     """Build the suite for one queued item: a named suite id, or a single model
     (an ad-hoc roster-shaped suite scoped to that model via the include list).
@@ -411,13 +421,23 @@ def cmd_worker(args: argparse.Namespace) -> int:
         try:
             models = fetch_registry_models(args.api)
             if item.get("kind") == "eval" and item.get("model"):
+                # Eval drives tool-eval-bench against the LIVE endpoint by registry
+                # model id, and its records join the dashboard by that id, so a
+                # reference that resolves to no single registry model can't be
+                # run meaningfully. Record the failure like the bench path (#2408).
+                problem = _model_ref_problem(item["model"], models)
+                if problem:
+                    print(f"[worker] {problem} — eval item {item.get('id')} failed, not run")
+                    control.fail(item.get("id"), _failure_note(problem), _now_stamp())
+                    control.write_status(None, _now_stamp())
+                    continue
                 resolved = _resolve_model_id(item["model"], models)
                 from . import evalrun
 
                 missing = evalrun.tool_eval_missing()
                 if missing:
-                    print(f"[worker] {missing} — dropping eval item {item.get('id')}")
-                    control.dequeue(item.get("id"))
+                    print(f"[worker] {missing} — failing eval item {item.get('id')}")
+                    control.fail(item.get("id"), _failure_note(str(missing)), _now_stamp())
                     control.write_status(None, _now_stamp())
                     continue
 
@@ -459,14 +479,16 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 try:
                     suite = _load_suite(item["suite"])
                 except SystemExit:
-                    print(f"[worker] unknown suite {item.get('suite')!r} — dropping item")
-                    control.dequeue(item.get("id"))
+                    note = f"unknown suite {item.get('suite')!r}"
+                    print(f"[worker] {note} — item {item.get('id')} failed, not run")
+                    control.fail(item.get("id"), _failure_note(note), _now_stamp())
+                    control.write_status(None, _now_stamp())
                     continue
             elif item.get("model"):
                 problem = _model_ref_problem(item["model"], models)
                 if problem:
                     print(f"[worker] {problem} — item {item.get('id')} failed, not run")
-                    control.fail(item.get("id"), problem, _now_stamp())
+                    control.fail(item.get("id"), _failure_note(problem), _now_stamp())
                     control.write_status(None, _now_stamp())
                     continue
                 resolved = _resolve_model_id(item["model"], models)
@@ -475,7 +497,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
                     None,
                 )
             else:
-                control.dequeue(item.get("id"))
+                note = "queued item names neither a suite nor a model"
+                print(f"[worker] {note} — item {item.get('id')} failed, not run")
+                control.fail(item.get("id"), note, _now_stamp())
+                control.write_status(None, _now_stamp())
                 continue
 
             cells = plan(suite, models, store)
@@ -530,8 +555,8 @@ def cmd_worker(args: argparse.Namespace) -> int:
             # up to 3 attempts, re-queued at the tail so it can't head-of-line
             # block; give up loudly after that.
             attempts = int(item.get("attempts") or 0) + 1
-            control.dequeue(item.get("id"))
             if attempts < 3:
+                control.dequeue(item.get("id"))
                 control.enqueue({**item, "attempts": attempts})
                 print(
                     f"[worker] error on item {item.get('id')} "
@@ -541,6 +566,13 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 print(
                     f"[worker] error on item {item.get('id')} "
                     f"(attempt {attempts}/3): {exc!r} — giving up on this item"
+                )
+                control.fail(
+                    item.get("id"),
+                    _failure_note(
+                        f"gave up after {attempts} attempts: {type(exc).__name__}: {exc}"
+                    ),
+                    _now_stamp(),
                 )
             control.write_status(None, _now_stamp())
             time.sleep(args.poll)
