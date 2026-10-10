@@ -118,8 +118,10 @@ def _run(
 
 def _http_get_json(url: str, timeout: float = 5.0) -> dict[str, Any] | None:
     """Best-effort GET returning parsed JSON, ``None`` on any failure."""
+    from hal0.service_identity import open_url
+
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with open_url(url, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return None

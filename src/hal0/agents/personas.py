@@ -314,7 +314,9 @@ def hermes_reload(
     raise here; the caller does.
     """
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from hal0.service_identity import open_url
 
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).encode(
         "utf-8"
@@ -326,7 +328,7 @@ def hermes_reload(
         method="POST",
     )
     try:
-        with urlopen(req, timeout=timeout) as resp:  # nosec B310 — localhost JSON-RPC
+        with open_url(req, timeout=timeout) as resp:  # nosec B310 — localhost JSON-RPC
             resp.read()
     except (URLError, HTTPError, OSError, TimeoutError) as exc:
         return (False, str(exc))

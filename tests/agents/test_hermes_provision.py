@@ -2800,6 +2800,7 @@ def _fake_http(
         raise HTTPError(url, 404, "Not Found", None, None)  # type: ignore[arg-type]
 
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr("hal0.service_identity.open_url", _urlopen)
 
 
 def _stub_non_chat_probes(monkeypatch: pytest.MonkeyPatch) -> None:

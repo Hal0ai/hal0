@@ -225,8 +225,10 @@ def _is_ready(cfg: AgentConfig, *, timeout: float = 1.0) -> bool:
     than time out if a future hermes release auth-gates the health route too.
     """
 
+    from hal0.service_identity import open_url
+
     try:
-        with urllib.request.urlopen(cfg.status_url, timeout=timeout) as resp:
+        with open_url(cfg.status_url, timeout=timeout) as resp:
             status: int = resp.status
             return 200 <= status < 300
     except urllib.error.HTTPError:

@@ -146,7 +146,7 @@ def _logs_transport(monkeypatch: pytest.MonkeyPatch) -> None:
             }
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_kw: Any) -> None:
             self.base_url = base_url
 
         async def __aenter__(self) -> _MockClient:
