@@ -24,8 +24,12 @@ import hashlib
 import os
 import secrets
 import tempfile
+from typing import TYPE_CHECKING
 
 from hal0.config import paths
+
+if TYPE_CHECKING:
+    import urllib.request
 
 # tier -> the env var / api.env key name that carries it.
 _KEY_ENV: dict[str, str] = {"admin": "HAL0_ADMIN_KEY", "client": "HAL0_CLIENT_KEY"}
@@ -92,6 +96,41 @@ def service_auth_headers(prefer: str = "admin") -> dict[str, str]:
     """``{"Authorization": "Bearer <key>"}`` for the box identity, or ``{}``."""
     key = service_key(prefer=prefer)
     return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+# The box key belongs to THIS box's API. A caller-supplied base URL (the bench
+# ``--api`` flag, ``HAL0_BENCH_API``) can name any host, so the key is attached
+# only when the target is loopback. Same strict allowlist as
+# ``hal0.api.openrouter._loopback.is_loopback_host`` (not 127.0.0.0/8), kept
+# here so non-API callers don't import FastAPI for it.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_url(url: str) -> bool:
+    """True only when ``url``'s host is ``127.0.0.1``, ``::1`` or ``localhost``.
+
+    A malformed URL, an empty one, or one with no host is not loopback."""
+    import urllib.parse
+
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    return host in _LOOPBACK_HOSTS
+
+
+def attach_service_auth(req: urllib.request.Request, prefer: str = "admin") -> None:
+    """Add the box service key to a urllib ``req`` bound for this box's API.
+
+    No-op unless ``req.full_url`` is loopback (:func:`is_loopback_url`), so a
+    request aimed at another host never carries this box's key. The header is
+    added *unredirected*: urllib's redirect handler copies ``req.headers`` to
+    the new URL whatever its origin, but never ``unredirected_hdrs``.
+    """
+    if not is_loopback_url(req.full_url):
+        return
+    for name, value in service_auth_headers(prefer=prefer).items():
+        req.add_unredirected_header(name, value)
 
 
 # ---------------------------------------------------------------------------

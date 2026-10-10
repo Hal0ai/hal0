@@ -68,6 +68,7 @@ import statistics
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -107,9 +108,21 @@ def _build_prompt(depth_tokens: int) -> str:
 # script runs under the system python3 (no hal0 venv), so when hal0 is not
 # importable it resolves the key exactly as hal0.service_identity does: env
 # first, then api.env ($HAL0_HOME/etc/hal0 or /etc/hal0), the preferred tier
-# first and the other tier as a fallback. Keys go ONLY to hal0-api, never to a
-# slot's own llama-server port.
+# first and the other tier as a fallback. Keys go ONLY to this box's hal0-api
+# on loopback — never to a slot's own llama-server port, never to a remote
+# --api host, and never across a redirect.
 _KEY_ENV = {"admin": "HAL0_ADMIN_KEY", "client": "HAL0_CLIENT_KEY"}
+
+# Stdlib copy of hal0.service_identity.is_loopback_url (strict allowlist).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    return host in _LOOPBACK_HOSTS
 
 
 def _api_env_path() -> Path:
@@ -171,9 +184,11 @@ def _http(
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
-    if auth is not None:
+    if auth is not None and _is_loopback_url(url):
+        # Unredirected: urllib copies req.headers onto a redirect's new URL
+        # whatever its origin, but never unredirected_hdrs.
         for name, value in _api_auth_headers(auth).items():
-            req.add_header(name, value)
+            req.add_unredirected_header(name, value)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = resp.read()
     return json.loads(payload) if payload else {}

@@ -219,14 +219,16 @@ def _get_json(api: str, path: str, timeout: float = 5.0) -> Any:
     unauthenticated read 401s and every caller degrades silently — the GPU
     gate reads "busy" forever and slot lookups find nothing. Every route read
     here is CLIENT-class (or OPEN), so the client tier is preferred; the admin
-    key is only a fallback for a box provisioned without a client key.
+    key is only a fallback for a box provisioned without a client key. The key
+    goes only to a loopback ``api`` and is never forwarded on a redirect.
     """
-    from hal0.service_identity import service_auth_headers
+    from hal0.service_identity import attach_service_auth
 
-    req = urllib.request.Request(
-        f"{api.rstrip('/')}{path}", headers=service_auth_headers(prefer="client")
-    )
     try:
+        # Built inside the try: a malformed/empty ``api`` raises ValueError
+        # here, which must stay a ``None`` like any other read failure.
+        req = urllib.request.Request(f"{api.rstrip('/')}{path}")
+        attach_service_auth(req, prefer="client")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read() or b"null")
     except (urllib.error.URLError, OSError, ValueError):

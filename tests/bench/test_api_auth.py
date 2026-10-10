@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import types
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +34,7 @@ import pytest
 from hal0.bench import cli, control, evalrun, planner, runner
 from hal0.bench.adapters import tool_eval
 from hal0.security.exposure import AuthClass, classify
+from hal0.service_identity import is_loopback_url
 
 _SERVER_AB = Path(__file__).resolve().parents[2] / "installer" / "bench" / "server_ab.py"
 
@@ -69,6 +71,11 @@ BENCH_API_PATHS = sorted(ROUTES)
 #: Paths the stub answers like a slot's own llama-server port: no auth, and
 #: a bench client must never send the box key there.
 SLOT_PORT_PATHS = {"/completion"}
+LANDING_PATH = "/landing"
+
+#: A non-loopback --api (TEST-NET-3). Requests to it are intercepted before
+#: any connection is attempted.
+REMOTE_API = "http://203.0.113.1:8080"
 
 
 class _Stub:
@@ -78,6 +85,8 @@ class _Stub:
 
     def __init__(self) -> None:
         self.seen: list[tuple[str, str, str | None]] = []
+        #: path -> absolute Location to answer with a 302.
+        self.redirects: dict[str, str] = {}
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -88,6 +97,17 @@ class _Stub:
                 if length:
                     self.rfile.read(length)
                 stub.seen.append((self.command, path, auth))
+                if path in stub.redirects:
+                    self.send_response(302)
+                    self.send_header("Location", stub.redirects[path])
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return
+                if path == LANDING_PATH:
+                    # A redirect target on another origin: open, so the test
+                    # sees whatever the client chose to send it.
+                    self._send(200, SLOTS)
+                    return
                 if path in SLOT_PORT_PATHS:
                     self._send(200, {"content": "ok", "timings": {}})
                     return
@@ -392,3 +412,117 @@ def test_tool_eval_default_runner_hands_the_env_to_the_child() -> None:
     )
     assert rc == 0
     assert out == "from-env"
+
+
+# ── the key never leaves the box (review B1) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("url", "loopback"),
+    [
+        ("http://127.0.0.1:8080", True),
+        ("http://localhost:8080/api", True),
+        ("http://LOCALHOST:8080", True),
+        ("http://[::1]:8080", True),
+        ("http://127.0.0.2:8080", False),  # strict allowlist, not 127/8
+        ("http://10.0.0.5:8080", False),
+        (REMOTE_API, False),
+        ("http://127.0.0.1.evil.example:8080", False),
+        ("http://user@203.0.113.1:8080", False),
+        ("/api/slots", False),
+        ("", False),
+        ("http://[bad", False),
+    ],
+)
+def test_is_loopback_url(url, loopback, server_ab) -> None:
+
+    assert is_loopback_url(url) is loopback
+    assert server_ab._is_loopback_url(url) is loopback  # the stdlib copy agrees
+
+
+@pytest.fixture
+def remote_calls(monkeypatch) -> list[tuple[str, str | None]]:
+    """Intercept urlopen: record (url, Authorization) and fail like an
+    unreachable host, so a non-loopback --api never touches the network."""
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_urlopen(req, *a, **k):
+        if isinstance(req, str):
+            calls.append((req, None))
+        else:
+            calls.append((req.full_url, dict(req.header_items()).get("Authorization")))
+        raise urllib.error.URLError("intercepted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+def test_non_loopback_api_gets_no_key_from_planner_or_runner(api_env, remote_calls) -> None:
+    with pytest.raises(urllib.error.URLError):
+        planner.fetch_registry_models(REMOTE_API)
+    assert runner._get_json(REMOTE_API, "/api/slots") is None
+    runner.fetch_host(REMOTE_API)
+
+    assert remote_calls
+    assert all(url.startswith(REMOTE_API) for url, _ in remote_calls)
+    assert {auth for _, auth in remote_calls} == {None}
+
+
+def test_non_loopback_api_gets_no_key_from_server_ab(api_env, remote_calls, server_ab) -> None:
+    with pytest.raises(urllib.error.URLError):
+        server_ab._get_slot(REMOTE_API, "gpu-a")
+    with pytest.raises(urllib.error.URLError):
+        server_ab._apply_extra_args(REMOTE_API, "gpu-a", "--cache-reuse 256")
+
+    assert [url for url, _ in remote_calls] == [
+        f"{REMOTE_API}/api/slots",
+        f"{REMOTE_API}/api/slots/gpu-a/config",
+    ]
+    assert {auth for _, auth in remote_calls} == {None}
+
+
+def test_non_loopback_api_gives_tool_bench_no_key(api_env, tmp_path) -> None:
+    seen: dict[str, object] = {}
+
+    def runner_spy(argv, timeout_s, env=None):
+        seen["env"] = env
+        return 1, "", "no server"
+
+    evalrun.run_task(
+        evalrun.Task(id="s1", kind="A"), "m1", "run-1", REMOTE_API, tmp_path, runner=runner_spy
+    )
+    # No env override at all: the child inherits ours, which holds no key.
+    assert seen["env"] is None
+
+
+def test_redirect_does_not_carry_the_key(api_env, stub) -> None:
+    """A 302 from this box's API to another origin must not forward the key."""
+    port = stub.url.rsplit(":", 1)[1]
+    elsewhere = f"http://localhost:{port}{LANDING_PATH}"  # different origin
+    stub.redirects = {"/api/models": elsewhere, "/api/slots": elsewhere}
+
+    planner.fetch_registry_models(stub.url)
+    assert runner._get_json(stub.url, "/api/slots") == SLOTS
+
+    assert stub.seen == [
+        ("GET", "/api/models", f"Bearer {CLIENT_KEY}"),
+        ("GET", LANDING_PATH, None),
+        ("GET", "/api/slots", f"Bearer {CLIENT_KEY}"),
+        ("GET", LANDING_PATH, None),
+    ]
+
+
+def test_server_ab_redirect_does_not_carry_the_key(api_env, stub, server_ab) -> None:
+    port = stub.url.rsplit(":", 1)[1]
+    stub.redirects = {"/api/slots": f"http://localhost:{port}{LANDING_PATH}"}
+
+    assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
+    assert stub.seen == [
+        ("GET", "/api/slots", f"Bearer {CLIENT_KEY}"),
+        ("GET", LANDING_PATH, None),
+    ]
+
+
+@pytest.mark.parametrize("bad_api", ["", "not a url", "http://[bad"])
+def test_runner_get_json_returns_none_for_a_malformed_api(api_env, bad_api) -> None:
+    assert runner._get_json(bad_api, "/api/slots") is None
