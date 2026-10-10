@@ -606,6 +606,10 @@ class TestPluralTokenNames:
             "text_tokens",
             "image_tokens",
             "tool_call_tokens",
+            "video_tokens",
+            "tool_response_tokens",
+            "mixed_content_tool_tokens",
+            "tokens_per_iteration",
             "maxTokens",
             "totalTokens",
             "max-tokens",
@@ -630,8 +634,16 @@ class TestPluralTokenNames:
             "api_tokens_count_key",
             "api_tokens_in",
             "auth_tokens_out",
+            "api_tokens_per_host",
+            "auth_tokens_per_user",
         ],
     )
     def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
         line = f"{name}={self._VALUE}"
         assert self._VALUE not in redact_shareable_text(line)
+
+    @pytest.mark.parametrize("name", ["apiTokensFile", "authTokensEnv", "apiTokenPath"])
+    def test_a_camel_case_reference_name_is_left_alone(self, name: str) -> None:
+        from hal0.redaction import redact_secret_named_values
+
+        assert redact_secret_named_values({name: "/run/x"}) == {name: "/run/x"}

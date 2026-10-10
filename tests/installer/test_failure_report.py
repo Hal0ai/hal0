@@ -504,6 +504,7 @@ class TestPluralTokenNames:
             "tokens_count",
             "tokens_out",
             "tool_call_tokens",
+            "mixed_content_tool_tokens",
             "MaxTokens",
             "extractionMaxTokens",
             "outputTokensPerSecond",
@@ -519,7 +520,14 @@ class TestPluralTokenNames:
         assert out.stdout.strip() == "rc=1", (name, out.stdout, out.stderr)
 
     @pytest.mark.parametrize(
-        "name", ["max_tokens_secret", "tokens_in_vault", "api_tokens_in", "authTokens"]
+        "name",
+        [
+            "max_tokens_secret",
+            "tokens_in_vault",
+            "api_tokens_in",
+            "authTokens",
+            "api_tokens_per_host",
+        ],
     )
     def test_a_qualifier_does_not_hide_another_secret_word(self, name: str) -> None:
         out = _bash(f'_hal0_report_text_value_is_secret "{name}" "{self._VALUE}"')

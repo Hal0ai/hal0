@@ -148,8 +148,9 @@ _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE
 # Plural ``tokens`` is a count only with a count qualifier (#2466): a
 # qualifier word right before it (``max_tokens``, ``extraction_max_tokens``,
 # ``prompt_tokens``, ``maxTokens``) or a count suffix right after it
-# (``tokens_count``, ``tokens_per_sec``), or the whole name ``tokens_in``,
-# ``tokens_out`` or ``tokens_completed`` (``api_tokens_in`` stays secret).
+# (``tokens_count``, ``tokens_per_sec``; see ``_TOKENS_RATE_UNIT``), or the
+# whole name ``tokens_in``, ``tokens_out`` or ``tokens_completed``
+# (``api_tokens_in`` stays secret).
 # Unqualified, ``api_tokens``, ``auth_tokens``, ``tokens_by_host`` or bare
 # ``tokens`` name a list of secrets. A word starts at the name's start, after
 # ``_`` or at a camelCase hump; only the qualified part is removed, so any
@@ -157,7 +158,12 @@ _SECRET_NAME_RE: Final[re.Pattern[str]] = re.compile(_SECRET_NAME, re.IGNORECASE
 _TOKENS_COUNT_QUALIFIER: Final[str] = (
     r"(?:max|min|num|n|total|prompt|completion|context|ctx|input|output|cache|cached"
     r"|new|extra|budget|requested|expected|generated|reasoning|remaining|used|floor"
-    r"|text|image|audio|tool_?call)"
+    r"|text|image|audio|video|tool|tool_?call|tool_?response)"
+)
+# ``tokens_per_<unit>`` is a rate only for a count or time unit:
+# ``api_tokens_per_host`` is a secret.
+_TOKENS_RATE_UNIT: Final[str] = (
+    r"(?:s|sec|second|ms|min|minute|hour|request|req|iteration|iter|step|token|1k|k)"
 )
 _WORD_START: Final[str] = r"(?:(?<![a-z0-9])|(?-i:(?<=[a-z0-9])(?=[A-Z])))"
 _WORD_END: Final[str] = r"(?:(?![a-z0-9])|(?-i:(?=[A-Z])))"
@@ -165,14 +171,18 @@ _BENIGN_NAME_PART_RE: Final[re.Pattern[str]] = re.compile(
     _WORD_START
     + r"(?:"
     + _TOKENS_COUNT_QUALIFIER
-    + r"_?tokens|tokens_?(?:count|per))"
+    + r"_?tokens|tokens_?count|tokens_?per_?"
+    + _TOKENS_RATE_UNIT
+    + r")"
     + _WORD_END
     + r"|^tokens_?(?:in|out|completed)$"
     + r"|tokenizer|token_?count|pass(?=[a-z])(?!w(?:or)?d|phrase)",
     re.IGNORECASE,
 )
+# A name for where a secret lives ends in ``_env`` / ``_file`` / ``_path`` /
+# ``_dir`` or in the camelCase form of one (``apiTokensFile``).
 _SECRET_REF_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
-    r"_(?:env|file|path|dir)$", re.IGNORECASE
+    r"(?:_(?:env|file|path|dir)|(?-i:(?<=[a-z0-9])(?:Env|File|Path|Dir)))$", re.IGNORECASE
 )
 
 # ``NAME`` + separator, then the value: double-quoted, single-quoted or bare.
