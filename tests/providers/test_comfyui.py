@@ -3,8 +3,7 @@
 Covers: build_env / start_cmd / image_ref / container_spec / health
 (/system_stats), and the infer() pipeline (submit → poll history → fetch
 PNGs) via mocked httpx. ComfyUI's own runtime is not exercised here; the
-toolbox image itself is built and published out of band, and its pinned
-digest is refreshed by scripts/update-toolbox-digests.sh before a release.
+toolbox image itself is built and published out of band (Hal0ai/hal0-runner-images).
 """
 
 from __future__ import annotations

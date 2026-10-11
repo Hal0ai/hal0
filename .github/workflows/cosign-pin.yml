@@ -9,8 +9,7 @@ name: Cosign pin drift (weekly)
 #   host has none. Nothing in this repo bumped that pin: there is no
 #   dependabot/renovate config (neither has a manager for sha256 constants
 #   inside a shell script, and neither would verify the digest against
-#   sigstore's signed checksums file), and scripts/update-toolbox-digests.sh
-#   only refreshes ghcr.io image digests in manifest.json. A hand-maintained
+#   sigstore's signed checksums file). A hand-maintained
 #   security pin with no watcher rots silently.
 #
 # The script is the contract (scripts/update-cosign-pin.sh):

@@ -30,6 +30,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Removed
+
+- hal0 no longer builds runner or toolbox images. Those images are built
+  only in `Hal0ai/hal0-runner-images`. The in-repo builder (the `toolbox.yml`
+  workflow, `scripts/update-toolbox-digests.sh`, `packaging/toolbox/`,
+  `packaging/runner/` and their tests) is gone. The workflow had re-run on a
+  dependency bump and moved the published
+  `hal0-toolbox-qwen3tts:v1` tag to an image that had not passed the gate.
+
 ### Breaking
 
 - `DELETE /api/models/{id}` now deletes the model's files by default:

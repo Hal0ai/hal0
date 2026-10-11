@@ -1,1 +1,0 @@
-../rocmfpx/build.sh
