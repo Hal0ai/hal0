@@ -16,7 +16,7 @@ from hal0.runners import (
     get_runner,
     resolve_runner_image,
 )
-from hal0.runners.pins import RunnerPin
+from hal0.runners.pins import RunnerPin, RunnerPinsError
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -57,12 +57,15 @@ def test_old_toolbox_env_name_is_not_read(pinned: dict[str, RunnerPin], monkeypa
     assert resolve_runner_image(get_runner("standard")) == pinned["standard"].ref
 
 
-def test_unpublished_pin_resolves_to_the_bare_repo(monkeypatch) -> None:
+def test_unpublished_pin_never_resolves_to_the_bare_repo(monkeypatch) -> None:
+    """The bare repo would pull ``latest``; an unpublished pin refuses."""
     table = {
         key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
     }
     monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
-    assert resolve_runner_image(get_runner("cpu")) == "ghcr.io/hal0ai/hal0-runner-cpu"
+    monkeypatch.delenv("HAL0_RUNNER_IMAGE_CPU", raising=False)
+    with pytest.raises(RunnerPinsError, match="not published"):
+        resolve_runner_image(get_runner("cpu"))
 
 
 def test_cpu_lane_needs_a_published_pin_or_an_override(monkeypatch) -> None:

@@ -12,8 +12,10 @@ that digest. Everything else that needs an image ref derives it from here:
 * the bench harness lanes, ``hal0 doctor toolbox-pull``, and the installer's
   Stage-1 preflight (``installer/lib/preflight.sh`` reads the same JSON).
 
-``tag: null`` marks a runner whose image is not published yet: its ref is the
-bare repo and a pull fails until a pin lands. ``digest: null`` pulls by tag.
+``tag: null`` marks a runner whose image is not published yet: it has no ref
+(:attr:`RunnerPin.ref` raises), so nothing can launch it unless a
+``HAL0_RUNNER_IMAGE_<KEY>`` override names an image. A bare repo is never used:
+podman would pull whatever ``latest`` is. ``digest: null`` pulls by tag.
 :func:`release_gate_problems` lists the default-tier runners still in either
 state; ``scripts/release-check.sh`` refuses to cut a release while it is
 non-empty (``scripts/check_runner_pins.py``).
@@ -66,14 +68,20 @@ class RunnerPin:
 
     @property
     def ref(self) -> str:
-        """The pull-ready ref: ``repo:tag@digest``, ``repo:tag``, or the bare repo."""
+        """The pull-ready ref: ``repo:tag@digest`` or ``repo:tag``.
+
+        Raises :class:`RunnerPinsError` for an unpublished row (``tag: null``):
+        the bare repo would pull ``latest``, never a pinned image.
+        """
         if self.tag and self.digest:
             return f"{self.image}:{self.tag}@{self.digest}"
         if self.tag:
             return f"{self.image}:{self.tag}"
-        if self.digest:
-            return f"{self.image}@{self.digest}"
-        return self.image
+        raise RunnerPinsError(
+            f"runner {self.key!r} is not published yet (manifest.json has no tag for "
+            f"it); set {ENV_OVERRIDE_PREFIX}{self.key.upper()} to run an image of your own",
+            details={"runner": self.key},
+        )
 
     def spellings(self) -> frozenset[str]:
         """Every ref spelling that names exactly this pinned image.
@@ -82,7 +90,7 @@ class RunnerPin:
         ``repo:tag`` or ``repo@digest``; all three name the same bytes. The
         bare repo is never included (it names whatever ``latest`` is).
         """
-        if not self.published and not self.digest:
+        if not self.published:
             return frozenset()
         out = {self.ref}
         if self.tag:

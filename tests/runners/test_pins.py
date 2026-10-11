@@ -49,7 +49,25 @@ def test_ref_shapes() -> None:
     repo = "ghcr.io/hal0ai/hal0-runner-cpu"
     assert RunnerPin("cpu", repo, "t", _D).ref == f"{repo}:t@{_D}"
     assert RunnerPin("cpu", repo, "t").ref == f"{repo}:t"
-    assert RunnerPin("cpu", repo).ref == repo
+
+
+def test_an_unpublished_pin_has_no_ref() -> None:
+    """The bare repo would pull ``latest``: an unpublished row must refuse."""
+    with pytest.raises(RunnerPinsError, match="HAL0_RUNNER_IMAGE_CPU"):
+        _ = RunnerPin("cpu", "ghcr.io/hal0ai/hal0-runner-cpu").ref
+
+
+def test_an_unpublished_runner_resolves_only_through_an_env_override(monkeypatch) -> None:
+    from hal0.runners import resolve_runner_image
+
+    table = dict(load_runner_pins())
+    table["cpu"] = RunnerPin("cpu", "ghcr.io/hal0ai/hal0-runner-cpu")
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    monkeypatch.delenv("HAL0_RUNNER_IMAGE_CPU", raising=False)
+    with pytest.raises(RunnerPinsError):
+        resolve_runner_image(RUNNER_IMAGES["cpu"])
+    monkeypatch.setenv("HAL0_RUNNER_IMAGE_CPU", "docker.io/me/cpu:1")
+    assert resolve_runner_image(RUNNER_IMAGES["cpu"]) == "docker.io/me/cpu:1"
 
 
 def test_spellings_name_the_same_bytes() -> None:

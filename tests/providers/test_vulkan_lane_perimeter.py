@@ -43,11 +43,10 @@ def _pin(monkeypatch, *, vulkan_gated: bool) -> str:
     """
     import hal0.runners.pins as pins_mod
     from hal0.runners import RUNNER_IMAGES
-    from hal0.runners.pins import RunnerPin
+    from hal0.runners.pins import RunnerPin, load_runner_pins
 
-    table = {
-        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
-    }
+    table = dict(load_runner_pins())
+    assert set(table) == set(RUNNER_IMAGES)
     table["standard"] = RunnerPin(
         key="standard",
         image="ghcr.io/hal0ai/hal0-runner-standard",

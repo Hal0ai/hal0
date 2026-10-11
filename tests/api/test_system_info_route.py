@@ -124,7 +124,6 @@ def test_system_info_backend_image_is_the_runner_pin_ref(
 ) -> None:
     """``image`` is ``resolve_runner_image``: the release pin ref, or the
     ``HAL0_RUNNER_IMAGE_<KEY>`` env override when one is set."""
-    from hal0.runners import RUNNER_IMAGES
     from hal0.runners.pins import RunnerPin, load_runner_pins
 
     digest = "sha256:" + "d" * 64
@@ -142,9 +141,8 @@ def test_system_info_backend_image_is_the_runner_pin_ref(
     backends = isolated_client.get("/api/system-info").json()["backends"]
     assert backends["standard"]["image"] == f"ghcr.io/hal0ai/hal0-runner-standard:b2-r1@{digest}"
     assert backends["cpu"]["image"] == "ghcr.io/me/my-cpu:dev"
-    # An unpublished pin (tag null) is the bare repo.
-    assert backends["flm"]["image"] == RUNNER_IMAGES["flm"].image
-    assert backends["flm"]["image"] == "ghcr.io/hal0ai/hal0-runner-flm"
+    # An unpublished pin (tag null) has no image, never the bare repo.
+    assert backends["flm"]["image"] is None
 
 
 def test_system_info_unresolvable_pin_reports_no_image_and_unavailable(
