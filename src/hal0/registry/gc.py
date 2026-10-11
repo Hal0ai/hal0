@@ -108,7 +108,12 @@ def prune_orphans(conn=None, *, dry_run: bool = True) -> GCReport:
 
 
 def release_blob_ref(
-    conn: sqlite3.Connection, sha256: str | None, dest: str | None, *, model_id: str
+    conn: sqlite3.Connection,
+    sha256: str | None,
+    dest: str | None,
+    *,
+    model_id: str,
+    keep_bytes: bool = False,
 ) -> None:
     """Drop one reference on ``sha256``'s ``store_blob`` row for a file of
     ``model_id`` that is being (or has just been) unlinked at ``dest``.
@@ -118,10 +123,20 @@ def release_blob_ref(
     When it stays above 0 and ``blob_path`` IS ``dest``, the canonical path
     is re-pointed at a surviving referent's live hardlink so it never
     dangles (#8). A ``None``/empty ``sha256`` (non-LFS file) is a no-op.
+
+    ``keep_bytes=True`` is for a file a delete left ON DISK (keep-files, a
+    guard refusal, a failed unlink): the reference is still dropped, because
+    the ``model_file`` row behind it is gone, but at refcount 0 the
+    ``store_blob`` row is forgotten instead of its bytes being unlinked. The
+    kept file then stays where it is, untracked and tombstoned, and a later
+    same-sha pull starts a fresh blob row.
     """
     if not sha256:
         return
     new_count = repository.drop_blob_ref(conn, sha256)
+    if new_count == 0 and keep_bytes:
+        conn.execute("DELETE FROM store_blob WHERE sha256 = ?", (sha256,))
+        return
     if new_count == 0:
         blob = repository.get_blob(conn, sha256)
         if blob is not None:
@@ -152,20 +167,28 @@ def model_blob_refs(db_path: str | Path, model_id: str) -> list[tuple[str, str]]
 
 
 def release_blob_refs(
-    db_path: str | Path, refs: Sequence[tuple[str | None, str]], *, model_id: str
+    db_path: str | Path,
+    refs: Sequence[tuple[str | None, str]],
+    *,
+    model_id: str,
+    kept: Sequence[tuple[str | None, str]] = (),
 ) -> None:
     """Apply :func:`release_blob_ref` to each ``(sha256, dest)`` in one transaction.
 
     Used after a model's registry row is gone, by an explicit delete (for
     the files it removed) and by :func:`hal0.registry.discover.prune_missing`
     (for a pruned row), so a ``store_blob`` row never keeps a reference no
-    ``model_file`` row backs. Raises on a DB error; callers decide.
+    ``model_file`` row backs. ``kept`` lists refs whose files stay on disk;
+    they are released with ``keep_bytes=True``. Raises on a DB error;
+    callers decide.
     """
-    if not any(sha for sha, _ in refs):
+    if not any(sha for sha, _ in refs) and not any(sha for sha, _ in kept):
         return
     with connect(db_path) as conn, tx(conn):
         for sha, dest in refs:
             release_blob_ref(conn, sha, dest, model_id=model_id)
+        for sha, dest in kept:
+            release_blob_ref(conn, sha, dest, model_id=model_id, keep_bytes=True)
 
 
 def delete_model_files(conn, model_id: str) -> int:

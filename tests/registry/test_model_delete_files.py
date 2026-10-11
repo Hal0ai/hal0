@@ -276,14 +276,14 @@ def test_unlink_failure_is_reported_not_raised(
 ) -> None:
     f = _write(root / "stuck.gguf")
     registry.add(Model(id="stuck", path=str(f)))
-    real_unlink = Path.unlink
+    real_unlink = os.unlink
 
-    def boom(self: Path, missing_ok: bool = False) -> None:
-        if self == f:
+    def boom(path: Any, *, dir_fd: int | None = None) -> None:
+        if str(path) == f.name:
             raise PermissionError(13, "Permission denied")
-        real_unlink(self, missing_ok=missing_ok)
+        real_unlink(path, dir_fd=dir_fd)
 
-    monkeypatch.setattr(Path, "unlink", boom)
+    monkeypatch.setattr(os, "unlink", boom)
 
     out = _delete(registry, "stuck", [root])
 
@@ -372,3 +372,176 @@ def test_files_under_a_remaining_directory_model_are_kept(
     assert inner.exists()
     assert _kept(out) == {str(inner): "shared:moonshine-dir"}
     assert out["tombstoned"] == []
+
+
+# ── PR #2543 review round 2 ──────────────────────────────────────────────────
+
+
+def test_directory_swapped_for_symlink_after_checks_is_not_followed(
+    registry: ModelRegistry, root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TOCTOU: another account swaps a checked directory for a symlink to an
+    outside directory between the guards and the unlink. The fd-based unlink
+    must refuse instead of deleting the same-named file outside the roots."""
+    f = _write(root / "sub" / "m.gguf")
+    outside = _write(tmp_path / "victim" / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    real_guard = svc._in_hal0_state
+    swapped = {"done": False}
+
+    def swap_then_check(p: Path, guard: Any) -> bool:
+        if not swapped["done"]:
+            (root / "sub").rename(root / "sub-moved")
+            (root / "sub").symlink_to(outside.parent)
+            swapped["done"] = True
+        return real_guard(p, guard)
+
+    monkeypatch.setattr(svc, "_in_hal0_state", swap_then_check)
+
+    out = _delete(registry, "m", [root])
+
+    assert outside.exists(), "file outside the roots must survive"
+    assert _kept(out) == {str(f): "path_changed"}
+
+
+def test_prune_empty_parents_does_not_follow_a_swapped_symlink(root: Path, tmp_path: Path) -> None:
+    victim = tmp_path / "victim-dir"
+    (victim / "empty").mkdir(parents=True)
+    (root / "a").symlink_to(victim)
+
+    svc._prune_empty_parents(root / "a" / "empty", root, set())
+
+    assert (victim / "empty").is_dir()
+
+
+def test_tombstone_write_failure_is_reported(
+    registry: ModelRegistry, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _write(root / "kept.gguf")
+    registry.add(Model(id="kept", path=str(f)))
+    monkeypatch.setattr(tombstones, "_write", lambda entries: False)
+
+    out = _delete(registry, "kept", [root], delete_files=False)
+
+    assert out["tombstoned"] == []
+    assert any(w.startswith("tombstone_failed") for w in out["warnings"])
+
+
+def test_keep_files_releases_blob_ref_without_touching_bytes(
+    registry: ModelRegistry, root: Path
+) -> None:
+    f = _write(root / "pulled" / "p.gguf", 32)
+    registry.add(Model(id="pulled", path=str(f)))
+    sha = "f" * 64
+    with connect(registry.db_path) as conn, tx(conn):
+        repository.insert_blob(conn, sha256=sha, size_bytes=32, blob_path=str(f))
+        repository.upsert_model_file(
+            conn,
+            model_id="pulled",
+            rel="p.gguf",
+            dest=str(f),
+            size_bytes=32,
+            sha256=sha,
+            lfs=True,
+            role="model",
+        )
+
+    _delete(registry, "pulled", [root], delete_files=False)
+
+    assert f.exists(), "kept bytes stay on disk"
+    with connect(registry.db_path) as conn:
+        assert repository.get_blob(conn, sha) is None, "no stale positive refcount"
+
+
+def test_delete_holds_the_scan_lock_during_row_removal_and_cleanup(
+    registry: ModelRegistry, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.registry.discover import SCAN_DELETE_LOCK
+
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    seen: dict[str, bool] = {}
+    real_remove = registry.remove
+    real_cleanup = svc.delete_model_files_on_disk
+
+    def remove(mid: str) -> bool:
+        seen["remove"] = SCAN_DELETE_LOCK.locked()
+        return real_remove(mid)
+
+    def cleanup(*a: Any, **kw: Any) -> dict[str, Any]:
+        seen["cleanup"] = SCAN_DELETE_LOCK.locked()
+        return real_cleanup(*a, **kw)
+
+    monkeypatch.setattr(registry, "remove", remove)
+    monkeypatch.setattr(svc, "delete_model_files_on_disk", cleanup)
+
+    _delete(registry, "m", [root])
+
+    assert seen == {"remove": True, "cleanup": True}
+
+
+def test_scan_waits_for_the_scan_delete_lock(registry: ModelRegistry, root: Path) -> None:
+    import threading
+
+    from hal0.registry.discover import SCAN_DELETE_LOCK
+
+    _write(root / "new-q4.gguf")
+    done = threading.Event()
+
+    def scan() -> None:
+        scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+        done.set()
+
+    with SCAN_DELETE_LOCK:
+        t = threading.Thread(target=scan)
+        t.start()
+        assert not done.wait(0.3), "scan must block while a delete holds the lock"
+    t.join(10)
+    assert done.is_set()
+
+
+def test_delete_cancels_an_active_pull_and_waits(registry: ModelRegistry, root: Path) -> None:
+    from hal0.registry.pull import make_job
+
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    job = make_job("m")
+    job.state = "running"
+
+    async def run() -> dict[str, Any]:
+        async def pull_task() -> None:
+            while not job.cancel_requested:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            job.state = "cancelled"
+            job._signal()
+
+        task = asyncio.create_task(pull_task())
+        out = await svc.cascade_delete_model(
+            registry, None, "m", [], roots=[str(root)], pull_jobs={"m": job}
+        )
+        await task
+        return out
+
+    out = asyncio.run(run())
+
+    assert job.cancel_requested is True
+    assert job.state == "cancelled"
+    assert out["deleted"] is True
+    assert not f.exists()
+
+
+def test_delete_refuses_while_a_pull_will_not_stop(registry: ModelRegistry, root: Path) -> None:
+    from hal0.errors import Conflict
+    from hal0.registry.pull import make_job
+
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    job = make_job("m")
+    job.state = "running"
+
+    with pytest.raises(Conflict):
+        asyncio.run(svc.cancel_active_pull({"m": job}, "m", timeout_s=0.2))
+
+    assert registry.has("m")
+    assert f.exists()

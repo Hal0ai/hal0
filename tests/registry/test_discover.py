@@ -1045,3 +1045,75 @@ def test_prune_missing_trusts_an_empty_root_that_is_a_mountpoint(
     result = prune_missing(registry, protected_ids=set(), roots=[mounted_empty])
 
     assert result["pruned"] == ["gone"]
+
+
+# ── PR #2543 review round 2 ──────────────────────────────────────────────────
+
+
+def test_scan_prunes_before_adding_so_a_moved_file_keeps_its_id(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    (root / "new").mkdir(parents=True)
+    moved = root / "new" / "moved-q4.gguf"
+    moved.write_bytes(b"x" * 16)
+    registry.add(Model(id="moved-q4", path=str(root / "old" / "moved-q4.gguf")))
+
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]), prune=True)
+
+    assert result["pruned"] == ["moved-q4"]
+    assert result["added"] == ["moved-q4"]
+    assert registry.get("moved-q4").path == str(moved.resolve())
+
+
+def test_scan_reports_missing_unverified(tmp_path: Path, registry: ModelRegistry) -> None:
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "a-q4.gguf").write_bytes(b"x")
+    empty = tmp_path / "nfs"
+    empty.mkdir()
+    registry.add(Model(id="on-nfs", path=str(empty / "m.gguf")))
+
+    result = scan_and_register(registry, ModelsConfig(roots=[str(live), str(empty)]), prune=True)
+
+    assert result["missing_unverified"] == ["on-nfs"]
+    assert registry.has("on-nfs")
+
+
+def test_tombstoned_mmproj_is_not_attached_to_a_sibling(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    mm = root / "mmproj-F16.gguf"
+    mm.write_bytes(b"x")
+    (root / "b-q4.gguf").write_bytes(b"x")
+
+    cands = find_candidates([root], [".gguf"], set(), ignored_paths={str(mm.resolve())})
+
+    assert [c.path.name for c in cands] == ["b-q4.gguf"]
+    assert cands[0].mmproj is None
+
+
+def test_walk_does_not_descend_into_tombstoned_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "models"
+    kept = root / "kept-flm-model" / "deep"
+    kept.mkdir(parents=True)
+    for i in range(10):
+        (kept / f"w{i}.gguf").write_bytes(b"x")
+    (root / "live-q4.gguf").write_bytes(b"x")
+    visited: list[str] = []
+    real_is_file = Path.is_file
+
+    def spy(self: Path, *a: object, **kw: object) -> bool:
+        visited.append(str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", spy)
+
+    found = find_candidates(
+        [root], [".gguf"], set(), ignored_paths={str((root / "kept-flm-model").resolve())}
+    )
+
+    assert [c.path.name for c in found] == ["live-q4.gguf"]
+    assert not [v for v in visited if "kept-flm-model" in v]

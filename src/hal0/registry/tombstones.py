@@ -99,7 +99,12 @@ def load() -> set[str]:
     return {e for e in entries if isinstance(e, str) and e}
 
 
-def _write(entries: set[str]) -> None:
+class TombstoneWriteError(OSError):
+    """The tombstone file could not be written; the entries are NOT persisted."""
+
+
+def _write(entries: set[str]) -> bool:
+    """Atomically replace the tombstone file. Returns whether it was written."""
     target = paths.model_tombstones_path()
     payload = json.dumps({"version": 1, "paths": sorted(entries)}, indent=2) + "\n"
     tmp: Path | None = None
@@ -122,8 +127,10 @@ def _write(entries: set[str]) -> None:
             raise
         os.replace(tmp, target)
         tmp = None
+        return True
     except OSError as exc:
         log.warning("tombstones.write_failed path=%s err=%s", target, exc)
+        return False
     finally:
         if tmp is not None:
             with suppress(OSError):
@@ -131,15 +138,20 @@ def _write(entries: set[str]) -> None:
 
 
 def add(path_list: Iterable[str | Path]) -> list[str]:
-    """Tombstone every path in ``path_list``; return the normalised entries added."""
+    """Tombstone every path in ``path_list``; return the normalised entries added.
+
+    Raises :class:`TombstoneWriteError` when the file cannot be written (full
+    or read-only filesystem), so a caller never reports a path as hidden from
+    scans when it is not.
+    """
     new = {_norm(p) for p in path_list if str(p)}
     if not new:
         return []
     with _locked():
         current = load()
         added = sorted(new - current)
-        if added:
-            _write(current | new)
+        if added and not _write(current | new):
+            raise TombstoneWriteError(f"could not write {paths.model_tombstones_path()}")
     return added
 
 
@@ -179,4 +191,4 @@ def is_tombstoned(path: str | Path, entries: set[str]) -> bool:
     return str(p) in entries or any(str(parent) in entries for parent in p.parents)
 
 
-__all__ = ["add", "clear", "is_tombstoned", "load"]
+__all__ = ["TombstoneWriteError", "add", "clear", "is_tombstoned", "load"]

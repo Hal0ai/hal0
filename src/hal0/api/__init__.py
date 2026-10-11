@@ -1251,6 +1251,9 @@ async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
                 skipped=len(scan_result.get("skipped", [])),
                 pruned=len(scan_result.get("pruned", [])),
                 missing_referenced=len(scan_result.get("missing_referenced", [])),
+                # Rows kept because their root is empty/absent (an unmounted
+                # share?) — reconciliation was incomplete for those.
+                missing_unverified=len(scan_result.get("missing_unverified", [])),
                 roots=len(scan_result.get("scanned_roots", [])),
             )
         except Exception as exc:

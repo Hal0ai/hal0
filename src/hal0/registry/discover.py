@@ -17,10 +17,12 @@ import contextlib
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
@@ -31,6 +33,12 @@ from hal0.registry.model import Model
 from hal0.registry.store import ModelAlreadyExists, ModelRegistry
 
 log = logging.getLogger(__name__)
+
+#: Serialises a scan with a model delete (ADR-0026). The delete removes the
+#: row, cleans up files and writes tombstones while holding it; without it a
+#: scan landing between the row removal and the tombstone re-registers the
+#: file, and the cleanup then treats the new row as a sharing owner.
+SCAN_DELETE_LOCK = threading.Lock()
 
 # Soft budget — beyond this the scan returns what it has and logs a warning.
 _SCAN_BUDGET_SECONDS = 30.0
@@ -257,7 +265,7 @@ def find_candidates(
         root_path = Path(root).expanduser()
         if not root_path.exists() or not root_path.is_dir():
             continue
-        for candidate in _walk_files(root_path):
+        for candidate in _walk_files(root_path, ignored):
             if time.monotonic() - started > _SCAN_BUDGET_SECONDS:
                 log.warning(
                     "discover.budget_exceeded after=%.1fs roots=%s — returning partial results",
@@ -279,7 +287,10 @@ def find_candidates(
                     mmproj_abs = candidate.resolve()
                 except OSError:
                     mmproj_abs = candidate
-                mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
+                # A tombstoned sidecar stays ignored: attaching it to a sibling
+                # would hand the file back to a model (and to its later delete).
+                if not tombstones.is_tombstoned(mmproj_abs, ignored):
+                    mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
                 continue
             # Shard grouping (plan §7.1c a4): bucket by (dir, stem, total)
             # instead of falling into the generic skip rule below, which
@@ -578,7 +589,7 @@ def _inode(path: Path) -> tuple[int, int] | None:
     return (st.st_dev, st.st_ino)
 
 
-def _walk_files(root: Path) -> Iterator[Path]:
+def _walk_files(root: Path, ignored: set[str] | None = None) -> Iterator[Path]:
     """Yield every file below ``root`` without descending into dot directories.
 
     ``os.walk`` lets the walk prune ``.Trash-1000/``, ``.cache/`` and similar
@@ -587,15 +598,21 @@ def _walk_files(root: Path) -> Iterator[Path]:
     dot directory (``~/.cache/models``) still scans. Symlinked directories
     are not followed, matching the old ``Path.rglob`` walk; symlinked files
     (HF ``snapshots/``) are yielded. The file name itself is covered by
-    :func:`_is_skippable`.
+    :func:`_is_skippable`. A directory at or below a tombstoned path
+    (``ignored``) is pruned too, so a kept FLM/ONNX model tree costs nothing.
     """
 
     def _onerror(exc: OSError) -> None:
         log.warning("discover.walk_failed root=%s err=%s", root, exc)
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_onerror):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         here = Path(dirpath)
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and not (ignored and tombstones.is_tombstoned(os.path.realpath(here / d), ignored))
+        ]
         for name in filenames:
             yield here / name
 
@@ -948,12 +965,15 @@ def scan_and_register(
     Returns a result dict shaped for both the API surface and the
     startup log line.
 
-    When ``prune`` is True, also run :func:`prune_missing` after the add pass
-    to drop registry rows whose backing file no longer exists — except rows in
-    ``protected_ids`` (slot/stack-referenced), which are reported under
-    ``missing_referenced`` for repair. The ``pruned`` / ``missing_referenced``
-    keys are always present (both ``[]`` when ``prune`` is False) so the return
-    shape is stable.
+    When ``prune`` is True, also run :func:`prune_missing` BEFORE the add pass
+    (so a file moved within a root re-registers under its id in the same
+    scan) to drop registry rows whose backing file no longer exists — except
+    rows in ``protected_ids`` (slot/stack-referenced), which are reported
+    under ``missing_referenced`` for repair, and rows whose miss can't be
+    trusted (empty/absent root), reported under ``missing_unverified``. The
+    ``pruned`` / ``missing_referenced`` / ``missing_unverified`` keys are
+    always present (``[]`` when ``prune`` is False) so the return shape is
+    stable. The whole scan holds :data:`SCAN_DELETE_LOCK`.
 
     Every call also runs :func:`reconcile_skipped_auto_scan` first, so rows an
     older scan registered under a now-skipped dir are dropped (reported under
@@ -963,6 +983,17 @@ def scan_and_register(
     source fails to load, reconcile is skipped for that scan rather than
     deleting with a partial protected set.
     """
+    with SCAN_DELETE_LOCK:
+        return _scan_and_register_locked(registry, cfg, prune=prune, protected_ids=protected_ids)
+
+
+def _scan_and_register_locked(
+    registry: ModelRegistry,
+    cfg: ModelsConfig,
+    *,
+    prune: bool,
+    protected_ids: set[str] | None,
+) -> dict[str, Any]:
     # scan_roots() folds the effective store/pull_root into the declared roots
     # so a headless install (where --models-dir wrote pull_root but not roots)
     # still scans where the models actually are.
@@ -986,6 +1017,23 @@ def scan_and_register(
             )
             reconciled = rec["removed"]
             reconcile_referenced = rec["referenced"]
+
+    # Prune BEFORE the add pass: a file moved within a root keeps its derived
+    # id, so the stale row must go first or the new path is skipped as an
+    # id_collision and the model is missing until the next scan.
+    pruned: list[str] = []
+    missing_referenced: list[str] = []
+    missing_unverified: list[str] = []
+    if prune:
+        prune_result = prune_missing(
+            registry,
+            protected_ids=protected_ids or set(),
+            dry_run=False,
+            roots=list(roots),
+        )
+        pruned = prune_result["pruned"]
+        missing_referenced = prune_result["missing_referenced"]
+        missing_unverified = prune_result["missing_unverified"]
 
     known_paths: set[str] = set()
     known_inodes: set[tuple[int, int]] = set()
@@ -1037,18 +1085,6 @@ def scan_and_register(
             log.warning("discover.register_failed path=%s err=%s", cand.path, exc)
             skipped.append({"path": str(cand.path), "reason": f"register_failed:{exc}"})
 
-    pruned: list[str] = []
-    missing_referenced: list[str] = []
-    if prune:
-        prune_result = prune_missing(
-            registry,
-            protected_ids=protected_ids or set(),
-            dry_run=False,
-            roots=list(roots),
-        )
-        pruned = prune_result["pruned"]
-        missing_referenced = prune_result["missing_referenced"]
-
     return {
         "added": added,
         "backfilled": backfilled,
@@ -1056,6 +1092,7 @@ def scan_and_register(
         "scanned_roots": [str(r) for r in roots],
         "pruned": pruned,
         "missing_referenced": missing_referenced,
+        "missing_unverified": missing_unverified,
         "reconciled": reconciled,
         "reconcile_referenced": reconcile_referenced,
     }

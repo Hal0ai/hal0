@@ -1035,7 +1035,12 @@ async def delete_model(
         # the terminal model.deleted emit fires AFTER the audit context closes.
         slot_manager = getattr(request.app.state, "slot_manager", None)
         outcome = await _svc.cascade_delete_model(
-            registry, slot_manager, model_id, affected, delete_files=delete_files
+            registry,
+            slot_manager,
+            model_id,
+            affected,
+            delete_files=delete_files,
+            pull_jobs=getattr(request.app.state, "model_pull_jobs", None),
         )
         removed = bool(outcome.get("deleted"))
         files = {k: v for k, v in outcome.items() if k != "deleted"}
