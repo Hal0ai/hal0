@@ -189,7 +189,7 @@ def sort_tags_newest_first(tags: list[str]) -> list[str]:
     return runner + numeric + semver + rest
 
 
-async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, Any]], str | None]:
+async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[Any], str | None]:
     """Fetch + validate ``images.json``.
 
     Returns ``(entries, error)`` — ``entries`` is ``[]`` and ``error`` is a
@@ -211,7 +211,9 @@ async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, A
     entries = payload.get("images")
     if not isinstance(entries, list):
         return [], "images.json has no 'images' array"
-    return [e for e in entries if isinstance(e, dict)], None
+    # Non-object entries are passed through: the sync counts them as
+    # unreadable, which keeps a partial catalogue from pruning rows.
+    return list(entries), None
 
 
 def _str_list(value: Any) -> list[str]:
@@ -559,7 +561,11 @@ async def sync_runner_images(
 
         rows: dict[str, RunnerImage] = {}
         malformed = 0
-        for entry in entries:
+        for position, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                result.skipped[f"entry {position}"] = "entry is not an object"
+                malformed += 1
+                continue
             row, reason = catalogue_row(entry)
             if row is None:
                 entry_id = entry.get("id")
@@ -593,7 +599,13 @@ async def sync_runner_images(
                             "available_tags": previous.available_tags,
                         }
                     )
-                result.images.append(store.upsert(row))
+                stored = store.upsert(row)
+                if previous is not None and previous.image != row.image:
+                    # The runner moved repositories: the old repo's per-tag
+                    # digests and provenance describe nothing in the new one.
+                    store.set_tags(key, [])
+                    stored = stored.model_copy(update={"tags": []})
+                result.images.append(stored)
                 continue
             row = outcome
             # Persist the fresh tags first, then stamp them onto the row this

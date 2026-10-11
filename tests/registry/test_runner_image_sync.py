@@ -240,7 +240,9 @@ async def test_fetch_images_json_rejects_wrong_shapes(payload: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_images_json_drops_non_object_entries() -> None:
+async def test_fetch_images_json_passes_non_object_entries_through() -> None:
+    """The sync, not the fetch, decides: a non-object entry makes the
+    catalogue partial, so it must reach the sync to block the prune."""
     payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY, "junk", 7, None]}
     client = _client(_route_handler(images_json=payload))
     try:
@@ -248,7 +250,44 @@ async def test_fetch_images_json_drops_non_object_entries() -> None:
     finally:
         await client.aclose()
     assert err is None
-    assert [e["id"] for e in entries] == ["cpu"]
+    assert entries == [_CPU_ENTRY, "junk", 7, None]
+
+
+@pytest.mark.asyncio
+async def test_a_non_object_entry_blocks_the_prune(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(RunnerImage(id="flm", image="ghcr.io/hal0ai/hal0-runner-flm", tag="v0"))
+    payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY, "junk"]}
+    result = await _sync(store, _route_handler(images_json=payload))
+
+    assert result.prune_skipped is True
+    assert store.get("flm") is not None
+    assert "entry 1" in result.skipped
+
+
+@pytest.mark.asyncio
+async def test_a_runner_moved_to_another_repo_drops_its_old_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the new repo's probe fails, the old repo's per-tag digests must
+    not be presented as the new repo's."""
+    import hal0.registry.runner_image_sync as sync_mod
+    from hal0.registry.runner_image import RunnerImageTag
+
+    store = _store(tmp_path)
+    store.upsert(_cpu_row(image="ghcr.io/hal0ai/old-cpu"))
+    store.set_tags("cpu", [RunnerImageTag(tag="b1-r1111111", digest="sha256:" + "c" * 64)])
+
+    async def _fail(row: RunnerImage, *, client: Any) -> RunnerImage:
+        raise RuntimeError("ghcr down")
+
+    monkeypatch.setattr(sync_mod, "probe_ghcr_package", _fail)
+    payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY]}
+    await _sync(store, _route_handler(images_json=payload))
+
+    cpu = store.get("cpu")
+    assert cpu is not None and cpu.image == "ghcr.io/hal0ai/hal0-runner-cpu"
+    assert cpu.tags == []
 
 
 # ── catalogue_row (pure entry → RunnerImage mapping) ────────────────────────
