@@ -1081,6 +1081,11 @@ async def run_pull(
                 base_total=main_rec.bytes_total,
             )
 
+        # A delete cancels the job and waits for it (ADR-0026): if the cancel
+        # landed after the last chunk, never re-register the deleted model.
+        if job.cancel_requested:
+            raise _PullCancelled()
+
         # Register / update the registry entry (mmproj set directly — the
         # row is vision-ready without waiting for a directory scan).
         _register_pulled(
@@ -1774,6 +1779,11 @@ async def _run_pull_fileset(
         entry_dest = next(dest for e, dest in installed if e.rel == fileset.entry_rel)
         mmproj_dest = next((dest for e, dest in installed if e.role == "mmproj"), None)
 
+        # Cancelled after the last file landed (e.g. the model is being
+        # deleted, ADR-0026): don't re-register it.
+        if job.cancel_requested:
+            raise _PullCancelled()
+
         await asyncio.to_thread(
             _register_pulled_fileset,
             registry,
@@ -2060,6 +2070,14 @@ async def run_flm_pull(
                 if caps:
                     pulled_capabilities = list(caps)
                 break
+
+        # Cancelled while FLM finished (e.g. the model is being deleted,
+        # ADR-0026): don't re-register it.
+        if job.cancel_requested:
+            job.state = "cancelled"
+            job.finished_at = time.time()
+            job._signal()
+            return
 
         # Register an FLM tag so the registry surfaces it for downstream
         # consumers (catalog, slot model resolution). hf_repo/filename
