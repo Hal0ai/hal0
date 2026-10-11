@@ -12,38 +12,49 @@ A **runner image** is the container image a slot actually launches: the
 Moonshine, ComfyUI) plus the GPU/CPU backend it was built against. hal0
 tracks the known runner images in a catalogue, and the dashboard's **Runner
 Images** page — a sub-page of **Slots** (`#slots/runner-images`) — is where
-you browse it, pull an image ahead of time, and set per-family defaults.
+you browse it, pull an image ahead of time, and choose which image each
+runtime launches.
 
 ## How a runner image relates to a slot
 
 A [slot](/docs/concepts/slots/) owns its own hardware placement: `device`,
 `binary`, and an optional `image_pin`. `binary` is a key into hal0's runner
 registry (`hal0.runners.RUNNER_IMAGES`) — the fixed set of runner families
-hal0 knows how to launch:
+hal0 knows how to launch. Each entry carries the title and one-line
+description the dashboard shows, and a **tier**:
 
-| Runner key | Runtime | Device class | Backend(s) |
-|---|---|---|---|
-| `rocmfpx` | llama-server | gpu | rocm, vulkan (the **Standard** default) |
-| `promptforge` | llama-server | gpu | rocm |
-| `strix` | llama-server | gpu | vulkan |
-| `cuda` | llama-server | gpu | cuda |
-| `cpu` | llama-server | cpu | — |
-| `flm` | flm (NPU) | npu | — |
-| `kokoro` | kokoro (TTS) | cpu | — |
-| `moonshine` | moonshine (STT) | cpu | — |
-| `qwen3tts` | qwen3tts (TTS) | gpu | rocm |
-| `comfyui` | comfyui (image gen) | img | — |
+| Runner key | Dashboard title | Tier | Runtime | Device class | Backend(s) |
+|---|---|---|---|---|---|
+| `rocmfpx` | ROCmFPX | default | llama-server | gpu | rocm, vulkan |
+| `cpu` | CPU | default | llama-server | cpu | — |
+| `flm` | NPU (FastFlowLM) | default | flm (NPU) | npu | — |
+| `kokoro` | Kokoro speech | default | kokoro (TTS) | cpu | — |
+| `moonshine` | Moonshine transcription | default | moonshine (STT) | cpu | — |
+| `comfyui` | ComfyUI | default | comfyui (image gen) | img | — |
+| `strix` | Strix Halo Vulkan | optional | llama-server | gpu | vulkan |
+| `qwen3tts` | Qwen3 TTS | optional | qwen3tts (TTS) | gpu | rocm |
+| `cuda` | NVIDIA CUDA | optional | llama-server | gpu | cuda |
+| `promptforge` | PromptForge (legacy) | optional | llama-server | gpu | rocm |
 
-`rocmfpx` (dashboard title **Standard**) is the one image allowed to declare
-two backends: the shipped build is Vulkan-portable, so it serves both GPU
-lanes on AMD. `vulkanfpx` is a **retired spelling**, not a separate registry
-entry — it folds to `rocmfpx` through a permanent alias
-(`hal0.runners.RUNNER_ALIASES`) kept only for old TOML/env values and
-operator muscle memory. Every other GPU runner declares exactly one backend
-by design (ADR-0006): `promptforge` (dashboard title **PromptForge**) is
-ROCm-only, and `strix` (dashboard title **Strix**) is Vulkan-only —
-qwen4exp-architecture and MTP speculative-decode support, no FPX-family
-quants.
+The tier (`hal0.runners.Runner.tier`, ADR-0027) is the one place hal0 records
+whether a runtime is a default. **Default** runtimes are the set every box is
+expected to have, one per kind of work. **Optional** runtimes are opt-in: you
+pick one on purpose for a specific model or device. A **frozen** runtime
+(none today) is kept only to load models already on slots and gets no
+updates. The slot drawer's Runtime select lists default runtimes first, and
+the Runner Images page groups its list by the same field.
+
+`rocmfpx` (**ROCmFPX**) is the one image allowed to declare two backends:
+the shipped build is Vulkan-portable, so it serves both GPU lanes on AMD,
+and it is the only runtime that loads ROCmFPX/ROCmFP4-quantized models.
+`vulkanfpx` is a **retired spelling**, not a separate registry entry — it
+folds to `rocmfpx` through a permanent alias (`hal0.runners.RUNNER_ALIASES`)
+kept only for old TOML/env values and operator muscle memory. Every other
+GPU runner declares exactly one backend by design (ADR-0006): `promptforge`
+(**PromptForge (legacy)**) is ROCm-only and slated for removal, and `strix`
+(**Strix Halo Vulkan**) is Vulkan-only — it loads the qwen4exp architecture
+(Qwen3.8-Flash-Next) that ROCmFPX cannot, with MTP speculative decoding, but
+no FPX-family quants.
 
 A slot with no `binary` set derives one from its `device`
 (`hal0.runners.runner_for_backend`) — this is the ordinary case. A
@@ -73,8 +84,9 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
 1. `slot.image_pin` — a per-slot escape hatch (debug build, A/B test, pinned
    rollback). A non-empty value is honored verbatim and never re-resolved.
 2. `[slots].default_images[<runner key>]` in `hal0.toml` — the operator's
-   per-family default, set from the Runner Images page's **Defaults strip**
-   or the **Set as … default** button.
+   choice of **launch image** for that runtime, set from the Runner Images
+   page's **Set as … launch image** button and cleared from its **Launch
+   images** strip.
 3. The release-baked default (`hal0.runners.RUNNER_IMAGES[key].image`),
    further resolved through an `HAL0_TOOLBOX_IMAGE_<KEY>` environment
    override or a release manifest digest pin, in that order.
@@ -85,7 +97,7 @@ follow the same order, keyed by their runtime's family (`comfyui`, `flm`,
 `kokoro`, `moonshine`, `qwen3tts`) rather than a `binary`: `image_pin` (top-level
 or `[slot]`-nested), then `[slots].default_images[<family>]`, then that
 family's release-baked default. The `img` (ComfyUI) slot also honors a legacy
-`image` string between `image_pin` and the family default — see
+`image` string between `image_pin` and the launch-image override — see
 [Generate images](/docs/guides/generate-images). The image pull, slot status,
 drift check and load-time GPU preflight all resolve the same ref the slot
 launches, including for a slot with no profile or `image_pin` (for example a
@@ -94,36 +106,52 @@ bare `type = "tts"` slot that falls back to Kokoro).
 ## The Runner Images page
 
 Open **Slots → Runner Images**. The list is every catalogued image; the
-right-hand card shows the selected row's detail. Rows group under two
-headings: **Default runtime** — each family's current release/override
-default — and **Optional runtimes** — every other registry entry, with
-specialty images (PromptForge, Strix) sorted first. Since ADR-0006 made
-every catalogued image a real registry entry, this is a strict two-way
-split; there's no longer a third bucket for uncatalogued or pin-only images.
+right-hand card shows the selected row's detail. Each row belongs to the
+registry runtime whose image lives in that repository, and rows group by
+that runtime's tier:
 
-**Defaults strip** (top of the list, when at least one family has a
-catalogued row): one line per runner family — its effective image:tag, and
-a `release default` or `override` chip. An `override` row gets a **clear**
-button that removes the `[slots].default_images` entry and falls back to
-the release default; the confirm dialog names the slots currently on that
-family's image, since they pick up the change on their next restart, not
-immediately.
+- **Default runtimes** — the runtimes every box is expected to have.
+- **Optional runtimes** — opt-in runtimes for a specific model or device.
+- **Frozen runtimes** — shown only when a runtime is frozen (none today).
+- **Other images** — catalogued images that no registry runtime ships, such
+  as the legacy per-backend toolboxes. They are not runtimes; a slot uses
+  one only through its own `image_pin`, or when a launch-image override
+  (`[slots].default_images`) points a runtime at it.
+
+Rows sort by title within each group. A row's tier comes from the runtime,
+never from which image a runtime currently launches, so an optional runtime
+stays under **Optional runtimes** even though it has its own launch image.
+
+**Launch images strip** (top of the list): one line per runtime — its title,
+the image:tag its slots launch, and where that choice comes from (`release`
+for the image this hal0 release ships, `override`, `env` or `manifest`). An
+`override` line gets a **clear** button that removes the
+`[slots].default_images` entry, so the runtime falls back to the next
+source: an `HAL0_TOOLBOX_IMAGE_<KEY>` env override, then the manifest pin,
+then the release image. The confirm dialog names the slots currently on that
+image; those that follow the launch image pick up the change on their next
+restart, not immediately, and a slot with its own `image_pin` does not move.
 
 Each row in the list shows:
 
 - A download indicator (green when `local_path`/`downloaded_at` is set).
-- The catalogue id and `image:tag`.
-- Chips: `<family> default` (with `· override` when it's an operator
-  override), `newer: <tag>` when the registry has a tag ahead of the row's
-  headline, `ownership` (`owned`/`referenced`), `publish`
-  (`ci`/`external`/`manual`), and any `extra.features` chips (forward-compat
-  — today's `images.json` carries no `features` field, so this is usually
-  empty).
+- The runtime's title (the catalogue id for an image no runtime ships) and
+  `image:tag`.
+- Chips: `launch image` when this is the image the runtime's slots launch
+  (with `· override` when it's an operator override, and the runtime's name
+  when the override points one runtime at another's repository),
+  `newer: <tag>` when the registry has a tag ahead of the row's headline,
+  `ownership` (`owned`/`referenced`), `publish` (`ci`/`external`/`manual`),
+  and any `extra.features` chips (forward-compat — today's `images.json`
+  carries no `features` field, so this is usually empty).
 - Size, and a `✓ downloaded` chip once pulled.
 
-The detail card adds digest, ownership, publish, `manifest_key`, and **in
+The detail card leads with the runtime's title, its tier, and its one-line
+description, then adds digest, ownership, publish, `manifest_key`, and **in
 use by** — the slot names whose rendered unit (or, absent that, resolved
-config) currently launches this exact `image:tag`.
+config) currently launches this exact `image:tag`. The `images.json` notes
+for the image sit under a collapsed **maintainer notes** toggle: they record
+build and gate history, not guidance for choosing a runtime.
 
 ### Sync now
 
@@ -139,7 +167,7 @@ failing never aborts the rest of the run.
 <Aside type="note">
 The catalogue only knows about GHCR repos that appear in `images.json`. An
 image published to GHCR but never added there — including, historically,
-hal0's own flagship combined image — will not appear until that file lists
+hal0's own ROCmFPX image (`hal0-combined`) — will not appear until that file lists
 it. This is an external-repo edit, not something a sync run can fix on its
 own.
 </Aside>
@@ -154,15 +182,12 @@ unpinned — the newest tag by `sort_tags_newest_first`: all-digit tags
 then everything else in registry order.
 
 The card's **tag** dropdown lets you pick any tag in `available_tags` for
-display and for **Set as … default**, but the **Pull** button always pulls
-the row's headline tag — it is disabled with an explanatory tooltip if you've
-picked a different one in the dropdown. Pulling a specific non-headline tag
-isn't wired up in the dashboard; see "Pulling a specific tag" further down
-this page for the API-level workaround.
+display, for **Set as … launch image**, and for **Pull**: the button pulls
+whichever tag is selected (its label shows `:<tag>`), headline or not.
 
-### The defaults strip and #2043
+### The launch images strip and #2043
 
-The Defaults strip, the tag picker, and Set-as-family-default all shipped
+The launch images strip, the tag picker, and Set-as-launch-image all shipped
 together as the runner-image-catalogue v2 UI wave. What did **not** ship
 from that design: there is still no way to remove a catalogued or
 downloaded image from the dashboard or the API ("Removing an image" below),
@@ -231,9 +256,9 @@ exact image ref, not by "newer than the pin": the tags are git shortrefs and
 date stamps, not versions, and Vulkan correctness has not been monotonic
 across builds (an older tree passed where a newer one failed). As of this
 writing the set holds two refs: `ghcr.io/hal0ai/hal0-combined:0826`
-(`VULKAN_FIXED_IMAGE`, the Standard/`rocmfpx` runtime's Vulkan lane) and
+(`VULKAN_FIXED_IMAGE`, the ROCmFPX/`rocmfpx` runtime's Vulkan lane) and
 `ghcr.io/hal0ai/hal0-strix-vulkan:0831` (`DEFAULT_STRIX_IMAGE`, the Strix
-runtime) — check the constant in `src/hal0/config/schema.py` for the current
+Halo Vulkan runtime) — check the constant in `src/hal0/config/schema.py` for the current
 membership, since new refs are added only after passing the validation
 matrix.
 
@@ -282,9 +307,9 @@ runner_image.pull_conflict`.
 
 #### Pulling a specific tag
 
-The pull route does accept `?tag=<tag>` for any tag in the row's
-`available_tags` — the dashboard just never sends it. If you need a
-non-headline tag pulled onto disk right now, call the API directly:
+The pull route accepts `?tag=<tag>` for any tag in the row's
+`available_tags`; the dashboard sends it when you pick a non-headline tag
+before clicking **Pull**. From the API:
 
 ```sh
 curl -X POST "http://localhost:8080/api/runner-images/hal0ai%2Fhal0-toolbox-cpu/pull?tag=v1.2.3"
@@ -292,14 +317,15 @@ curl -X POST "http://localhost:8080/api/runner-images/hal0ai%2Fhal0-toolbox-cpu/
 
 An unknown tag 404s as `runner_image.tag_not_available`.
 
-### Setting a family default (updating what new/unpinned slots launch)
+### Setting a runtime's launch image (updating what new/unpinned slots launch)
 
 <Tabs>
 <TabItem label="Dashboard">
 On the card, pick the tag you want (if not the headline), then **Set as
-`<family>` default**. The confirm dialog names every slot currently running
-that family's image — none of them restart immediately; they pick up the
-new default on their next (re)start. This writes
+`<runtime>` launch image**. The confirm dialog names every slot currently
+running that image — none of them restart immediately. Those that follow
+the launch image pick it up on their next (re)start; a slot with its own
+`image_pin` stays on its pin. This writes
 `{"slots": {"default_images": {"<family>": "<image>:<tag>"}}}` through the
 existing settings deep-merge, i.e. `[slots].default_images.<family>` in
 `hal0.toml`.
@@ -312,15 +338,16 @@ curl -X PUT http://localhost:8080/api/settings \
 ```
 
 Send an explicit `null` value for the family to clear the override and fall
-back to the release default (the deep-merge has no key-delete idiom, so
+back to the next source — env override, manifest pin, then the release image
+(the deep-merge has no key-delete idiom, so
 `null` is the documented clear signal) — an empty string is rejected.
 </TabItem>
 </Tabs>
 
 ### Pinning a single slot
 
-A family default changes what *unpinned* slots in that family launch. To
-pin one slot to a specific image regardless of the family default, set that
+A runtime's launch image changes what *unpinned* slots on that runtime launch. To
+pin one slot to a specific image regardless of the launch image, set that
 slot's `image_pin` — see
 [Manage slots](/docs/guides/manage-slots/) for the CLI/dashboard flow. A
 non-default pin is surfaced on the slot card so the drift is never hidden.
@@ -370,8 +397,8 @@ or the dashboard's restart control on each slot card. There is no
 about individually.
 </Aside>
 
-**Operator defaults and per-slot pins.** Same story: setting a family
-default or a slot's `image_pin` writes config, it does not bounce anything.
+**Launch-image overrides and per-slot pins.** Same story: setting a launch
+image or a slot's `image_pin` writes config, it does not bounce anything.
 Watch a slot's `image_mismatch` field (or the dashboard's drift indicator)
 to see when the running container's actual image has diverged from what
 hal0 would now resolve — see

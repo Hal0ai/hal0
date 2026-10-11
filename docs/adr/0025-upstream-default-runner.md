@@ -9,6 +9,11 @@ maintainability decide. Nothing here lands in hal0 before the hardware
 gate in `Hal0ai/hal0-runner-images` `runners/upstream/manifest.toml`
 `[verification]` passes (Hal0ai/hal0-runner-images#14).
 
+ADR-0027 (accepted 2026-10-11) replaced `Runner.is_default` with
+`Runner.tier` (`default` / `optional` / `frozen`), fixed the runner titles,
+and answered open question 1 below. Where this record says a runner gains
+or loses `is_default`, read it as moving to the `default` or `frozen` tier.
+
 ## Context
 
 ### Every fork hal0 built from has the same shape
@@ -56,14 +61,15 @@ versioned, signed repository. The new recipe pins the exact NEVR
 
 1. **The default runner is `upstream`.** A new `RUNNER_IMAGES["upstream"]`
    row: pristine ggml-org llama.cpp at a tagged release, HIP + Vulkan
-   (`supported_backends=("rocm", "vulkan")`), `is_default=True`, title
-   **Standard**. `runner_for_backend()` returns it for every non-cuda,
+   (`supported_backends=("rocm", "vulkan")`), `tier="default"`, title
+   **Standard** (reserved for this runner by ADR-0027). `runner_for_backend()` returns it for every non-cuda,
    non-cpu device. Its image is a CI-built immutable tag from
    `Hal0ai/hal0-runner-images` (`ghcr.io/hal0ai/hal0-runner-upstream:
    upstream-<ref7>-r<sha7>`), pinned with its digest after the gate.
 2. **`rocmfpx` is frozen, not deleted.** It keeps its row, its image
    (`hal0-combined:0826`), both backends and `FPX_RUNNER_KEYS` membership,
-   loses `is_default`, and is retitled **ROCmFPX (frozen)**. It exists
+   moves from the `default` to the `frozen` tier, and is retitled
+   **ROCmFPX (frozen)** (today's title is **ROCmFPX**, per ADR-0027). It exists
    only to load ROCmFPX / ROCmI4 / IU4 GGUFs already on slots. No bumps.
    Deleted in the release after the last FPX slot migrates.
    This amends ADR-0006 decision 3: the two-backend shape belongs to the
@@ -134,7 +140,7 @@ versioned, signed repository. The new recipe pins the exact NEVR
   migration and `promptforge` removal; docs and UI. Each cites the gate
   digest and run.
 - Tests that pin `rocmfpx` as the default key
-  (`tests/runners/test_registry.py` `test_exactly_one_default_gpu_runtime`,
+  (`tests/runners/test_registry.py` `test_tiers_are_the_operator_decided_sets`,
   `test_single_backend_invariant`, `test_runner_for_backend_*`;
   `ui/src/dash/__tests__/hw-cascade.test.ts`) and the UI mirror of
   `runner_for_backend` (`ui/src/dash/hw-cascade.js`) change together.
@@ -153,11 +159,16 @@ versioned, signed repository. The new recipe pins the exact NEVR
 
 ## Open questions for the operator
 
-1. Agent-lane model: Qwen3.8-27B for Hermes and pi coder as well, or keep
-   the chadrock ladder on the frozen runner for one more release? The
-   gate's tool-calling probe informs this; the call is the owner's.
-2. Default context for `qwen3.8-27b`: 64K (safe with the brain + voice
-   slots resident) or 128K (fit-tested)?
+1. ~~Agent-lane model: Qwen3.8-27B for Hermes and pi coder as well, or keep
+   the chadrock ladder on the frozen runner for one more release?~~
+   **Answered 2026-10-11 (ADR-0027 decision 6):** the agent slot moves to
+   Qwen3.8-27B on `upstream`. It still ships behind the gate's
+   tool-calling probe, as decision 6 above says.
+2. ~~Default context for `qwen3.8-27b`: 64K (safe with the brain + voice
+   slots resident) or 128K (fit-tested)?~~
+   **Answered 2026-10-11:** 96K (98,304 tokens). The PR #14 hardware gate
+   measured resident memory with MTP at about 25 GiB for 64K and about
+   29 GiB for 128K on both lanes; 96K sits between the two.
 
 ## References
 

@@ -139,24 +139,24 @@ in the repository, not published to these docs).
 
 ## Runner images
 
-`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can launch. Every entry carries a bundled default image ref, a `runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), an optional `backend` (`rocm`/`vulkan`/`cuda`), a `supported_backends` tuple, and operator-facing display metadata (`title`, `blurb`, `is_default`) surfaced by `GET /api/system-info`'s `backends` object (keyed by runner key, one entry per `RUNNER_IMAGES` row).
+`hal0.runners.RUNNER_IMAGES` is the code registry of runner keys hal0 can launch. Every entry carries a bundled default image ref, a `runtime_family`, a `device_class` (`gpu`/`cpu`/`npu`/`img`), an optional `backend` (`rocm`/`vulkan`/`cuda`), a `supported_backends` tuple, operator-facing display metadata (`title`, `blurb`), and a `tier` (`default` / `optional` / `frozen`). `GET /api/system-info`'s `backends` object (keyed by runner key, one entry per `RUNNER_IMAGES` row) surfaces `title`, `blurb` and `tier` (plus `is_default`, equal to `tier == "default"`, kept until v2.0.0 for older readers); `GET /api/runner-images` copies the same three onto each catalogue row whose repository a runner ships, plus the runner key as `runner`. `tier` is the only record of whether a runtime is a default (ADR-0027): the runtime pickers sort by it and the Runner Images page groups by it.
 
 As of ADR-0006 (`docs/adr/0006-every-shipped-image-is-a-registry-runner.md`), every image hal0 ships gets its own `RUNNER_IMAGES` entry — a pin-only image, catalogued for discovery but reachable only through a slot's `image_pin` escape hatch, is retired as a shipping shape. `image_pin` remains available as a debug-only hatch (a custom build, a rollback, a hand-edited ref) but is never how an operator normally reaches a shipped runtime.
 
 The registry today:
 
-| Key | `runtime_family` | `backend`(s) | Default / optional | Notes |
+| Key | `runtime_family` | `backend`(s) | `tier` (title) | Notes |
 |---|---|---|---|---|
-| `rocmfpx` | `llama-server` | `rocm`, `vulkan` | Default (`is_default=True`) | The only runner allowed two `supported_backends` — one Vulkan-portable image serves both lanes. Denies the `qwen4exp` GGUF architecture (see the arch fit-check below). |
-| `promptforge` | `llama-server` | `rocm` | Optional | HIP-only build; accelerated PromptForge model distributions. |
-| `strix` | `llama-server` | `vulkan` | Optional | Vulkan-only; qwen4exp + MTP speculative decode support. Deliberately excluded from `FPX_RUNNER_KEYS`, so an FPX-family GGUF is refused cleanly on this runner instead of SIGSEGVing (the #1790 quant/runner guard). Image: `ghcr.io/hal0ai/hal0-strix-vulkan` (manifest digest pin, key `strix`). Supersedes the retired pin-only `combined-upstream` image as the intended runtime for `qwen4exp` slots. |
-| `cuda` | `llama-server` | `cuda` | Optional | NVIDIA GPUs. |
-| `cpu` | `llama-server` | `cpu` (device_class `cpu`) | Optional | Portable `-march`, no GPU required. |
-| `flm` | `flm` | `npu` (device_class `npu`) | Optional | FastFlowLM. |
-| `kokoro` | `kokoro` | `cpu` (device_class `cpu`) | Optional | TTS. |
-| `moonshine` | `moonshine` | `cpu` (device_class `cpu`) | Optional | STT, ONNX. |
-| `qwen3tts` | `qwen3tts` | `rocm` | Optional | TTS. |
-| `comfyui` | `comfyui` | `rocm` (device_class `img`) | Optional | Image generation. |
+| `rocmfpx` | `llama-server` | `rocm`, `vulkan` | `default` (ROCmFPX) | The only runner allowed two `supported_backends` — one Vulkan-portable image serves both lanes. Denies the `qwen4exp` GGUF architecture (see the arch fit-check below). |
+| `promptforge` | `llama-server` | `rocm` | `optional` (PromptForge (legacy)) | HIP-only build for the PromptForge Qwen3.8 quant; slated for removal (ADR-0025). |
+| `strix` | `llama-server` | `vulkan` | `optional` (Strix Halo Vulkan) | Vulkan-only; qwen4exp + MTP speculative decode support. Deliberately excluded from `FPX_RUNNER_KEYS`, so an FPX-family GGUF is refused cleanly on this runner instead of SIGSEGVing (the #1790 quant/runner guard). Image: `ghcr.io/hal0ai/hal0-strix-vulkan` (manifest digest pin, key `strix`). Supersedes the retired pin-only `combined-upstream` image as the intended runtime for `qwen4exp` slots. |
+| `cuda` | `llama-server` | `cuda` | `optional` (NVIDIA CUDA) | NVIDIA GPUs. |
+| `cpu` | `llama-server` | `cpu` (device_class `cpu`) | `default` (CPU) | Portable `-march`, no GPU required. |
+| `flm` | `flm` | `npu` (device_class `npu`) | `default` (NPU (FastFlowLM)) | FastFlowLM on the XDNA 2 NPU. |
+| `kokoro` | `kokoro` | `cpu` (device_class `cpu`) | `default` (Kokoro speech) | TTS. |
+| `moonshine` | `moonshine` | `cpu` (device_class `cpu`) | `default` (Moonshine transcription) | STT, ONNX. |
+| `qwen3tts` | `qwen3tts` | `rocm` | `optional` (Qwen3 TTS) | GPU TTS. |
+| `comfyui` | `comfyui` | `rocm` (device_class `img`) | `default` (ComfyUI) | Image and video generation. |
 
 `vulkanfpx` is a permanent legacy alias (`RUNNER_ALIASES`) that folds to `rocmfpx` before every lookup — it is not a separate registry entry, and never was one after the ROCmFPX image collapse; it is kept only so on-disk `binary = "vulkanfpx"` values, model `preferred_runner` rows, env overrides, and operator muscle memory keep working.
 

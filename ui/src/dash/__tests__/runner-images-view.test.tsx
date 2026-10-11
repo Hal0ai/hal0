@@ -149,6 +149,8 @@ vi.mock('@/api/client', async () => {
 
 const {
   groupRows,
+  launchImageLabel,
+  familyTitleMap,
   newerTagAvailable,
   newerTagCandidate,
   newestComparableTag,
@@ -173,51 +175,104 @@ function row(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('groupRows', () => {
-  it('groups default-family rows apart from everything else', () => {
+describe('groupRows (ADR-0027: grouped by runtime tier)', () => {
+  const ids = (list: Array<{ id: string }>) => list.map(r => r.id)
+
+  it('groups rows by their registry tier, not by the launch-image marker', () => {
+    // The live-box bug: every family has its own launch image, so grouping
+    // by `is_default` put Qwen3 TTS and Strix Halo Vulkan under "Default".
     const rows = [
-      { id: 'a', is_default: { family: 'rocmfpx', source: 'release' } },
-      { id: 'b', is_default: null, specialties: ['promptforge'] },
-      { id: 'c', is_default: null, ownership: 'referenced' },
+      { id: 'combined', tier: 'default', title: 'ROCmFPX', is_default: { family: 'rocmfpx', source: 'release' } },
+      { id: 'qwen3tts', tier: 'optional', title: 'Qwen3 TTS', is_default: { family: 'qwen3tts', source: 'release' } },
+      { id: 'strix', tier: 'optional', title: 'Strix Halo Vulkan', is_default: { family: 'strix', source: 'release' } },
+      { id: 'old-fpx', tier: 'frozen', title: 'Old FPX', is_default: null },
+      { id: 'rocm', tier: null, is_default: null },
     ]
     const g = groupRows(rows)
-    expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['a'])
-    expect(g.optional.map((r: { id: string }) => r.id)).toEqual(['b', 'c'])
+    expect(ids(g.defaults)).toEqual(['combined'])
+    expect(ids(g.optional)).toEqual(['qwen3tts', 'strix'])
+    expect(ids(g.frozen)).toEqual(['old-fpx'])
+    expect(ids(g.other)).toEqual(['rocm'])
   })
 
-  it('sorts optional rows specialties-first, ahead of uncatalogued/referenced rows', () => {
+  it('sorts each section by display title, falling back to the catalogue id', () => {
     const rows = [
-      { id: 'other1', is_default: null, ownership: 'referenced' },
-      { id: 'spec1', is_default: null, specialties: ['promptforge'] },
-      { id: 'other2', is_default: null },
-      { id: 'spec2', is_default: null, extra: { specialties: ['comfyui'] } },
+      { id: 'z-untitled', tier: 'optional' },
+      { id: 'b', tier: 'optional', title: 'Strix Halo Vulkan' },
+      { id: 'c', tier: 'optional', title: 'NVIDIA CUDA' },
+    ]
+    expect(ids(groupRows(rows).optional)).toEqual(['c', 'b', 'z-untitled'])
+  })
+
+  it('an untiered or unknown-tier row is "other", never optional', () => {
+    const rows = [
+      { id: 'legacy', is_default: null, specialties: ['promptforge'] },
+      { id: 'weird', tier: 'experimental' },
     ]
     const g = groupRows(rows)
-    expect(g.optional.map((r: { id: string }) => r.id)).toEqual([
-      'spec1',
-      'spec2',
-      'other1',
-      'other2',
-    ])
-  })
-
-  it('reads specialties from extra.specialties when the top-level field is absent', () => {
-    const rows = [{ id: 'd', is_default: null, extra: { specialties: ['comfyui'] } }]
-    expect(groupRows(rows).optional.map((r: { id: string }) => r.id)).toEqual(['d'])
-  })
-
-  it('a default-family row wins over specialties (defaults bucket takes priority)', () => {
-    const rows = [
-      { id: 'e', is_default: { family: 'rocmfpx', source: 'override' }, specialties: ['promptforge'] },
-    ]
-    const g = groupRows(rows)
-    expect(g.defaults.map((r: { id: string }) => r.id)).toEqual(['e'])
+    expect(ids(g.other)).toEqual(['legacy', 'weird'])
     expect(g.optional).toEqual([])
   })
 
   it('tolerates empty/absent input', () => {
-    expect(groupRows([])).toEqual({ defaults: [], optional: [] })
-    expect(groupRows(undefined)).toEqual({ defaults: [], optional: [] })
+    const empty = { defaults: [], optional: [], frozen: [], other: [] }
+    expect(groupRows([])).toEqual(empty)
+    expect(groupRows(undefined)).toEqual(empty)
+  })
+})
+
+describe('launchImageLabel', () => {
+  it('reads "launch image" on a runtime\'s own row and never says "default"', () => {
+    const label = launchImageLabel({ runner: 'qwen3tts', is_default: { family: 'qwen3tts', source: 'release' } })
+    expect(label).toBe('launch image')
+    expect(label).not.toMatch(/default/i)
+  })
+
+  it('names the runtime when an override points it at another runtime\'s repo', () => {
+    const label = launchImageLabel(
+      { runner: 'strix', is_default: { family: 'rocmfpx', source: 'override' } },
+      familyTitleMap([{ family: 'rocmfpx', title: 'ROCmFPX' }]),
+    )
+    expect(label).toBe('ROCmFPX launch image · override')
+  })
+
+  it('is null when the row is no runtime\'s launch image', () => {
+    expect(launchImageLabel({ runner: 'cuda', is_default: null })).toBeNull()
+  })
+})
+
+describe('Runner Images list sections (render)', () => {
+  it('renders Default / Optional / Other headings from row tiers and shows registry titles', () => {
+    imagesOverride.current = [
+      { ...PULL_ROW, id: 'rocmfpx-combined', runner: 'rocmfpx', title: 'ROCmFPX', blurb: 'AMD GPU llama.cpp.', tier: 'default' },
+      { ...PULL_ROW, id: 'qwen3tts', image: 'ghcr.io/hal0ai/hal0-toolbox-qwen3tts', runner: 'qwen3tts', title: 'Qwen3 TTS', blurb: 'GPU TTS.', tier: 'optional', is_default: { family: 'qwen3tts', source: 'release' } },
+      { ...PULL_ROW, id: 'rocm', image: 'ghcr.io/hal0ai/hal0-toolbox-rocm', runner: null, title: null, blurb: null, tier: null, is_default: null, notes: 'Legacy per-backend toolbox. NO LIVE BUILDER.' },
+    ]
+    familiesOverride.current = []
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    act(() => {
+      root.render(
+        React.createElement(QueryClientProvider, { client: qc }, React.createElement(RunnerImagesView)),
+      )
+    })
+
+    const sectionOf = (key: string) => host.querySelector(`[data-testid="ri-section-${key}"]`)
+    expect(sectionOf('defaults')?.textContent).toContain('Default runtimes')
+    expect(sectionOf('optional')?.textContent).toContain('Optional runtimes')
+    expect(sectionOf('other')?.textContent).toContain('Other images')
+    expect(sectionOf('frozen')).toBeNull()
+    // Rows read by registry title; the vague catalogue id is not the name.
+    expect(host.textContent).toContain('Qwen3 TTS')
+    // Maintainer notes never render as the description.
+    expect(host.querySelector('[data-testid="ri-card-blurb"]')?.textContent).toBe('AMD GPU llama.cpp.')
+
+    act(() => {
+      root.unmount()
+    })
+    imagesOverride.current = null
   })
 })
 
@@ -337,7 +392,7 @@ describe('FamilyStrip (Task 10)', () => {
     })
   })
 
-  it('renders env/manifest as plain chips and release as "release default"', () => {
+  it('renders env/manifest as plain chips and release as "release"', () => {
     familiesOverride.current = [
       { family: 'a', effective_ref: 'ghcr.io/x/a:1', source: 'env', store_state: 'missing', slots: [], pinned_slots: [], newest_release: null, update_available: false },
       { family: 'b', effective_ref: 'ghcr.io/x/b:1', source: 'manifest', store_state: 'unknown', slots: [], pinned_slots: [], newest_release: null, update_available: false },
@@ -348,7 +403,8 @@ describe('FamilyStrip (Task 10)', () => {
     expect(host.querySelector('[data-testid="ri-family-a"]')?.textContent).toContain('env')
     expect(host.querySelector('[data-testid="ri-family-b"]')?.textContent).toContain('manifest')
     const releaseRow = host.querySelector('[data-testid="ri-family-c"]') as HTMLElement
-    expect(releaseRow.textContent).toContain('release default')
+    expect(releaseRow.textContent).toContain('release')
+    expect(releaseRow.textContent).not.toContain('default')
     expect(releaseRow.textContent).toContain('pinned: agent')
 
     act(() => {

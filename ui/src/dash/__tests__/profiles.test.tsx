@@ -110,7 +110,7 @@ const BACKENDS = {
     backend: 'rocm',
     title: 'Standard',
     blurb: 'Runs every model type, incl. FPX quants.',
-    is_default: true,
+    tier: 'default',
     supported_backends: ['rocm', 'vulkan'],
     state: 'installed',
   },

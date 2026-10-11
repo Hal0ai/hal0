@@ -23,17 +23,17 @@ import { profileApplyPreview } from '../profile-apply-preview.js'
 // reachable.
 const backends = {
   rocmfpx: {
-    title: 'Standard', blurb: 'Runs everything.', is_default: true,
+    title: 'Standard', blurb: 'Runs everything.', tier: 'default',
     supported_backends: ['rocm', 'vulkan'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },
   promptforge: {
-    title: 'PromptForge', blurb: 'Accelerated PF.', is_default: false,
+    title: 'PromptForge', blurb: 'Accelerated PF.', tier: 'optional',
     supported_backends: ['rocm'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },
   strix: {
-    title: 'Strix', blurb: 'Qwen4 + MTP.', is_default: false,
+    title: 'Strix', blurb: 'Qwen4 + MTP.', tier: 'optional',
     supported_backends: ['vulkan'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },

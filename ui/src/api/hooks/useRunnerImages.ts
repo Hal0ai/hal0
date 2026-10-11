@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import type { RunnerTier } from './useRuntimes'
 
 // Which family default (if any) resolves to this row's image, and where that
 // default comes from: the baked release constant or the operator's
@@ -54,8 +55,17 @@ export interface RunnerImage {
   // Optional so rows from a pre-contract backend still type-check; the view
   // helpers degrade gracefully when they're absent.
   available_tags?: string[]
+  // The family LAUNCH IMAGE marker — which runtime's unpinned slots launch
+  // this repo right now. Not the runtime tier (see `tier` below).
   is_default?: RunnerImageDefault | null
   in_use_by?: string[]
+  // ADR-0027: the registry runner that ships this image lineage, its
+  // operator-facing title + one-line description, and its tier. All null for
+  // a catalogued image no runner ships (legacy toolbox, pin-only variant).
+  runner?: string | null
+  title?: string | null
+  blurb?: string | null
+  tier?: RunnerTier | null
   // runner-catalogue-v3 enrichment: per-tag digest/store facts
   // (tags[].{tag,digest,size_bytes,last_seen,downloaded}), validated/
   // candidate/deprecated badges keyed by tag, and store-truth fields
@@ -84,6 +94,9 @@ const RUNNER_IMAGES_POLL_MS = 30_000
 // (`pinned_slots`), and whether a newer release-shaped tag is catalogued.
 export interface RunnerImageFamily {
   family: string
+  /** The runtime's registry title and tier (ADR-0027). */
+  title?: string
+  tier?: RunnerTier | null
   effective_ref: string
   source: 'override' | 'env' | 'manifest' | 'release'
   store_state: 'present' | 'missing' | 'unknown'

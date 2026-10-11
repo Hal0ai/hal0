@@ -26,20 +26,23 @@ import { useSlots } from './useSlots'
 
 export type RunnerState = 'installed' | 'installable' | 'unavailable'
 
+/** `hal0.runners.RunnerTier` (ADR-0027). */
+export type RunnerTier = 'default' | 'optional' | 'frozen'
+
 export interface SystemInfoBackend {
   image: string
   runtime_family: string
   device_class: string
   backend: string
-  /** Operator-facing runtime name (Task 2/D3) — "Standard", "Strix", … —
+  /** Operator-facing runtime name (Task 2/D3) — "ROCmFPX", "CPU", … —
    *  the Runtime select's option label and the Profile row's apply-preview
    *  read this instead of the raw registry key. */
   title?: string
   /** One-line operator-facing description shown as the Runtime select's hint. */
   blurb?: string
-  /** True for the one combined default runtime (rocmfpx) — sorts first in
-   *  runner pickers. */
-  is_default?: boolean
+  /** Runtime tier from the registry (ADR-0027) — default-tier runtimes sort
+   *  first in runner pickers; the Runner Images page groups by the same field. */
+  tier?: RunnerTier | null
   /** Fit-check metadata (spec-hw-slot-ownership §4): the backends this runner
    *  image can serve. RUNNER_IMAGES carries `supported_backends`; the
    *  system-info endpoint is assumed to surface it (backend Lane C). Absent on

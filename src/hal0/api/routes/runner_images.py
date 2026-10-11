@@ -16,7 +16,7 @@ import contextlib
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -27,6 +27,9 @@ from hal0.registry import runner_pull_jobs as _pull_jobs
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_sync import sync_runner_images
 from hal0.registry.runner_pull import RunnerPullJob
+
+if TYPE_CHECKING:
+    from hal0.runners import Runner
 
 log = logging.getLogger(__name__)
 
@@ -147,10 +150,16 @@ def enrich_row(
     ``specialties`` maps repo (``_repo_of`` shape) -> the sorted union of
     every :data:`hal0.runners.RUNNER_IMAGES` entry's
     ``supports.specialties`` whose image resolves to that repo (see
-    :func:`_repo_specialties`, hoisted once per request beside ``defaults``)
-    — the catalogue-v3 field the UI's ``groupRows`` (``runner-images.jsx``)
-    reads to route a row into the "Specialized" group. ``[]`` for a repo no
-    specialty runner claims — every plain toolbox image included.
+    :func:`_repo_specialties`, hoisted once per request beside ``defaults``).
+    ``[]`` for a repo no specialty runner claims — every plain toolbox image
+    included. The UI no longer groups by it: ``groupRows``
+    (``runner-images.jsx``) groups by ``tier`` (ADR-0027).
+
+    ``runner``/``title``/``blurb``/``tier`` (ADR-0027) come from the
+    :data:`hal0.runners.RUNNER_IMAGES` entry whose bundled image lives in
+    this row's repo (:func:`_runner_for_repo`), all ``None`` when no entry
+    does. They replace ``images.json``'s ``notes`` as the operator-facing
+    copy; ``notes`` stays on the row as maintainer detail.
 
     Build provenance (h0/runner-provenance): every ``tags[]`` entry carries
     ``provenance`` (``{"source_repo", "revision", "patch_count"}`` | null —
@@ -161,6 +170,18 @@ def enrich_row(
     """
     row = _image_to_dict(image)
     row["specialties"] = list(specialties.get(image.image, []))
+    # ADR-0027: the registry runner this image lineage belongs to, and that
+    # runner's own title/blurb/tier — the page's grouping and display copy.
+    # ``None`` for a catalogued image no RUNNER_IMAGES entry ships (an old
+    # per-backend toolbox, a pin-only variant): it is not a runtime, so it
+    # has no tier.
+    runner = _runner_for_repo(image.image)
+    row["runner"] = runner.key if runner else None
+    row["title"] = runner.title if runner else None
+    row["blurb"] = runner.blurb if runner else None
+    row["tier"] = runner.tier if runner else None
+    # ``is_default`` is the per-family LAUNCH IMAGE marker (which repo a
+    # family's unpinned slots launch right now), not the runtime tier above.
     is_default: dict[str, str] | None = None
     for family, (ref, source) in defaults.items():
         if _repo_of(ref) == image.image:
@@ -229,6 +250,24 @@ def provenance_for_ref(ref: str, images: list[RunnerImage]) -> dict[str, Any] | 
         for t in image.tags:
             if (digest and t.digest == digest) or (tag is not None and t.tag == tag):
                 return t.provenance
+    return None
+
+
+def _runner_for_repo(repo: str) -> Runner | None:
+    """The :data:`hal0.runners.RUNNER_IMAGES` entry whose bundled image lives
+    in ``repo`` (``_repo_of`` shape), or ``None``. Pure fold over the code
+    registry; first entry in registry order wins, and every shipped image has
+    its own repo today, so there is no tie to break.
+
+    Matches the BUNDLED image, not the effective (override/env/manifest)
+    ref: a runner's identity is its image lineage, so pinning ROCmFPX's
+    family to some other repo does not make that repo's row "ROCmFPX".
+    """
+    from hal0.runners import RUNNER_IMAGES
+
+    for runner in RUNNER_IMAGES.values():
+        if _repo_of(runner.image) == repo:
+            return runner
     return None
 
 
@@ -361,6 +400,8 @@ def _families_payload(
     """
     import re as _re
 
+    from hal0.runners import RUNNER_IMAGES
+
     release_re = _re.compile(r"^v?\d+(\.\d+)*$")
     by_repo: dict[str, RunnerImage] = {i.image: i for i in images}
     out: list[dict[str, Any]] = []
@@ -395,9 +436,14 @@ def _families_payload(
             store_state = "present" if present else "missing"
         slots = sorted(n for n, r in slot_usage.items() if r == ref)
         pinned = sorted(n for n, r in slot_usage.items() if r != ref and _repo_of(r) == repo)
+        runner = RUNNER_IMAGES.get(family)
         out.append(
             {
                 "family": family,
+                # ADR-0027: the runtime's display name and tier, from the
+                # registry (families are runner keys by construction).
+                "title": runner.title if runner else family,
+                "tier": runner.tier if runner else None,
                 "effective_ref": ref,
                 "source": source,
                 "store_state": store_state,

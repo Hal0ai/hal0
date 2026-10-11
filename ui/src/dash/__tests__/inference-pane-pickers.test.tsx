@@ -185,7 +185,7 @@ const BACKENDS = {
   rocmfpx: {
     title: 'Standard',
     blurb: 'Runs everything.',
-    is_default: true,
+    tier: 'default',
     supported_backends: ['rocm', 'vulkan'],
     device_class: 'gpu',
     runtime_family: 'llama-server',
@@ -194,7 +194,7 @@ const BACKENDS = {
   promptforge: {
     title: 'PromptForge',
     blurb: 'Accelerated PF.',
-    is_default: false,
+    tier: 'optional',
     supported_backends: ['rocm'],
     device_class: 'gpu',
     runtime_family: 'llama-server',

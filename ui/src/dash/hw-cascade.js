@@ -43,6 +43,18 @@ function deviceClassOf(device) {
 			: "cpu";
 }
 
+// Runtime tier → sort rank (ADR-0027). The tier itself is owned by the backend
+// registry (`hal0.runners.Runner.tier`, surfaced as system-info
+// `backends[].tier`); this table only orders it, in the same order the Runner
+// Images page lists its sections. An unknown/absent tier sorts last rather
+// than vanishing.
+export const TIER_ORDER = ["default", "optional", "frozen"];
+
+export function tierRank(tier) {
+	const i = TIER_ORDER.indexOf(tier);
+	return i === -1 ? TIER_ORDER.length : i;
+}
+
 // Lane token → the hw capability flag that gates it (systemInfo.hardware's
 // computeCapable/vulkanCapable, threaded through as `hw`). A lane with no
 // entry here (e.g. cpu) is never hardware-vetoed.
@@ -104,7 +116,8 @@ export function hostHwFlags(rawHardware) {
  *                 flags never veto (unknown hw applies no filter).
  *
  * Returns `{ options }`, where each option is
- * `{ key, title, blurb, lanes, state, isDefault, provenance }`.
+ * `{ key, title, blurb, lanes, state, tier, provenance }`, default-tier
+ * runtimes first (ADR-0027), then by title.
  */
 export function runnerOptions({ backends, device, slotType, hw }) {
 	const devClass = deviceClassOf(device);
@@ -131,12 +144,13 @@ export function runnerOptions({ backends, device, slotType, hw }) {
 			blurb: r.blurb || "",
 			lanes,
 			state: r.state,
-			isDefault: !!r.is_default,
+			tier: r.tier || null,
 			provenance: r.provenance || undefined,
 		});
 	}
 	options.sort(
-		(a, b) => b.isDefault - a.isDefault || a.title.localeCompare(b.title),
+		(a, b) =>
+			tierRank(a.tier) - tierRank(b.tier) || a.title.localeCompare(b.title),
 	);
 	return { options };
 }

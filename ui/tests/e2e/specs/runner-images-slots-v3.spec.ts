@@ -35,8 +35,14 @@ test.describe('Runner Images under Slots (/slots/runner-images)', () => {
     const strip = page.getByTestId('ri-family-strip')
     await expect(strip).toBeVisible()
     const familyRow = strip.getByTestId('ri-family-rocmfpx')
-    await expect(familyRow).toContainText('rocmfpx')
+    // ADR-0026: the strip names the runtime by its registry title.
+    await expect(familyRow).toContainText('ROCmFPX')
     await expect(familyRow).toContainText('ghcr.io/hal0ai/hal0-combined:0822')
+    // The list groups by runtime tier, and the row reads as the runtime's
+    // launch image — never as "<family> default".
+    await expect(page.getByTestId('ri-section-defaults')).toContainText('Default runtimes')
+    await expect(page.getByTestId('ri-launch-image').first()).toHaveText('launch image')
+    await expect(page.getByTestId('ri-card-title')).toHaveText('ROCmFPX')
     // Row card: pull CTA present; tag picker renders when several tags exist.
     await expect(page.getByTestId('ri-pull')).toBeVisible()
     await expect(page.getByTestId('ri-tag-pick')).toBeVisible()

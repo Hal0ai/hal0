@@ -4,6 +4,9 @@
 
 Accepted. Decision 3 is amended by ADR-0025 (proposed): the two-backend
 shape belongs to the default runner and to the frozen `rocmfpx` loader.
+The Runner Images grouping consequence below is amended by ADR-0027: the
+list groups by each runner's `tier`, not by which family resolves to an
+image.
 
 ## Context
 

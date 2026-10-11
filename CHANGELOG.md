@@ -30,7 +30,39 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- The Runner Images page no longer lists niche runtimes (PromptForge,
+  Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
+  registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
+  runtimes** (when any) and **Other images** for catalogued images no
+  runtime ships — instead of by which image a runtime currently launches
+  (ADR-0027).
+
 ### Changed
+
+- ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
+  `Runner.is_default` as the one record of whether a runtime is a default.
+  Default: ROCmFPX, CPU, NPU (FastFlowLM), Kokoro speech, Moonshine
+  transcription, ComfyUI. Optional: Strix Halo Vulkan, Qwen3 TTS, NVIDIA
+  CUDA, PromptForge (legacy). `GET /api/system-info` `backends[]` gains
+  `tier`, and its `is_default` now reads `tier == "default"` (so CPU, FLM,
+  Kokoro, Moonshine and ComfyUI also report `true`) until it is removed in
+  v2.0.0. `GET /api/runner-images` rows gain `runner`, `title`, `blurb` and
+  `tier`, and `families` gain `title` and `tier`. The slot and profile
+  drawers list default runtimes first.
+- Every runtime now has a plain-language title and one-line description
+  saying what it runs on and when to pick it. The AMD llama.cpp runtime is
+  titled **ROCmFPX** (it was **Standard**, a name now reserved for the
+  upstream runner ADR-0025 proposes). The Runner Images page shows these in
+  place of the `images.json` maintainer notes, which move to a collapsed
+  "maintainer notes" toggle.
+- The Runner Images page calls the per-runtime image choice the **launch
+  image** (`launch image` chip, **Launch images** strip, **Set as … launch
+  image** button, `release` source chip), so it can no longer be read as the
+  runtime's tier.
+- ADR-0025 open question 1 is answered: the agent slot moves to
+  Qwen3.8-27B on the `upstream` runner when that runner ships.
 
 - ADR-0024: the "approval-route fix only" option is recorded as considered and
   not shipped (an agent holding the admin key can log in for a cookie, and an

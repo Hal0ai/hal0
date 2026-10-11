@@ -50,6 +50,10 @@ const { mutateSpy, ROWS, FAMILIES } = vi.hoisted(() => ({
       available_tags: ['0824', '0822'],
       is_default: { family: 'rocmfpx', source: 'release' },
       in_use_by: ['agent', 'utility'],
+      runner: 'rocmfpx',
+      title: 'ROCmFPX',
+      blurb: 'llama.cpp build for AMD GPUs.',
+      tier: 'default',
     },
   ],
   // Task 10's launch-truth families summary — kept in sync with ROWS[0]'s
@@ -58,6 +62,8 @@ const { mutateSpy, ROWS, FAMILIES } = vi.hoisted(() => ({
   FAMILIES: [
     {
       family: 'rocmfpx',
+      title: 'ROCmFPX',
+      tier: 'default',
       effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
       source: 'release',
       store_state: 'unknown',
@@ -142,13 +148,15 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
     // that will drift to the new default.
     act(() => { setBtn.click() })
     expect(host.querySelector('.modal-backdrop')).toBeTruthy()
-    expect(host.textContent).toContain('Set rocmfpx default')
+    expect(host.textContent).toContain('Set ROCmFPX launch image')
     expect(host.textContent).toContain('ghcr.io/hal0ai/hal0-combined:0824')
     expect(host.textContent).toContain('agent, utility')
+    // in_use_by can include image_pin slots, which do not follow the change.
+    expect(host.textContent).toContain('a slot with its own image pin stays where it is')
 
     // Confirm → exactly one PUT /api/settings mutation with the family +
     // selected ref; the dialog closes.
-    const confirmBtn = textButtons(host).find(b => b.textContent === 'Set default')
+    const confirmBtn = textButtons(host).find(b => b.textContent === 'Set launch image')
     expect(confirmBtn).toBeTruthy()
     act(() => { confirmBtn!.click() })
     expect(mutateSpy).toEqual([{ family: 'rocmfpx', ref: 'ghcr.io/hal0ai/hal0-combined:0824' }])

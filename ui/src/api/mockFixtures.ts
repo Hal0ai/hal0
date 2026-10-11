@@ -1492,6 +1492,12 @@ function buildRunnerImages() {
         downloaded: true,
         is_default: { family: 'rocmfpx', source: 'release' },
         in_use_by: ['agent', 'utility'],
+        // ADR-0027 registry copy + tier (hal0.runners.RUNNER_IMAGES["rocmfpx"]).
+        runner: 'rocmfpx',
+        title: 'ROCmFPX',
+        blurb:
+          'llama.cpp build for AMD GPUs (ROCm or Vulkan) that also loads ROCmFPX/ROCmFP4-quantized models. The default on AMD.',
+        tier: 'default',
       },
     ],
     // Launch-truth per-family summary (Task 9 contract) — kept in sync with
@@ -1500,6 +1506,8 @@ function buildRunnerImages() {
     families: [
       {
         family: 'rocmfpx',
+        title: 'ROCmFPX',
+        tier: 'default',
         effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
         source: 'release',
         store_state: 'present',
