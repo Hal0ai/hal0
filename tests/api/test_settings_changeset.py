@@ -107,14 +107,15 @@ def test_default_images_null_clear_reports_a_removal(isolated_client: TestClient
     must appear in the changeset as a ``"removed"`` entry, not be silently
     absent or folded into a same-key "changed" that hides the family name."""
     isolated_client.put(
-        "/api/settings", json={"slots": {"default_images": {"rocmfpx": "ghcr.io/hal0ai/hal0:test"}}}
+        "/api/settings",
+        json={"slots": {"default_images": {"standard": "ghcr.io/hal0ai/hal0:test"}}},
     )
 
-    r = isolated_client.put("/api/settings", json={"slots": {"default_images": {"rocmfpx": None}}})
+    r = isolated_client.put("/api/settings", json={"slots": {"default_images": {"standard": None}}})
     assert r.status_code == 200, r.text
     changes = {c["path"]: c for c in r.json()["_hal0"]["changeset"]["changes"]}
-    assert "slots.default_images.rocmfpx" in changes
-    change = changes["slots.default_images.rocmfpx"]
+    assert "slots.default_images.standard" in changes
+    change = changes["slots.default_images.standard"]
     assert change["kind"] == "removed"
     assert change["after"] is None
     assert change["before"] == "ghcr.io/hal0ai/hal0:test"

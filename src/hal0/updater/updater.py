@@ -354,9 +354,9 @@ class ReleaseManifest(BaseModel):
     released_at: str | None = Field(default=None, description="ISO-8601 release timestamp.")
     notes_url: str | None = Field(default=None, description="Release notes URL.")
     manifest_url: str | None = Field(default=None, description="Self-reference URL.")
-    toolbox_images: dict[str, dict[str, Any]] = Field(
+    runners: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
-        description="Mirror of manifest.json's toolbox_images block.",
+        description="Mirror of manifest.json's runners pin table.",
     )
 
     @field_validator("version")
@@ -1774,7 +1774,7 @@ def run_post_activation_migrations(
     *,
     job_id: str | None = None,
     ceiling: int | None = None,
-    skip_image_retag: bool = False,
+    skip_catalogue_sync: bool = False,
     repair_hermes_venv: bool = True,
     upgrade_memory_engine_venv: bool = True,
     converge_companions: bool = True,
@@ -1801,7 +1801,11 @@ def run_post_activation_migrations(
     ``asyncio.to_thread`` hop instead of one per pass.
 
     Error handling mirrors ``commit()``'s original inline sequence: the
-    schema migration (first) is NOT swallowed — a hard failure there means
+    runner-system conversion (first, :mod:`hal0.config.migrations.runner_system`)
+    and the schema migration (second) are NOT swallowed. The conversion restores
+    its own backup before raising, so a failure leaves config as it was; the
+    post-swap caller reports it and ``hal0 update`` does not call the run
+    converged. A hard failure in the schema migration means
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
@@ -1823,7 +1827,7 @@ def run_post_activation_migrations(
     pass should land even when it wedges, and it has no ordering dependency
     on any of them (the engine venv is disjoint state).
     :func:`check_outstanding_migrations` passes ``False`` — the engine pass
-    is the ``retag_stale_slot_images``/``repair_hermes_venv`` argument taken
+    is the ``skip_catalogue_sync``/``repair_hermes_venv`` argument taken
     further still: a boot-time pip is an unbounded network operation, the
     stop/start is a surprise memory outage on every crash-restart race, and
     the first start of a newer engine triggers its ONE-WAY database
@@ -1831,22 +1835,12 @@ def run_post_activation_migrations(
     At boot the pass only logs ``updater.memory_engine_stale`` with the
     remedy.
 
-    ``skip_image_retag`` (#1960 N2) omits ``retag_stale_slot_images``.
-    Every OTHER pass here is either purely additive (mtp clearing) or
-    corrects a state that actively breaks something (a
-    gpu-vulkan slot that refuses to load, an unsanitised managed flag) —
-    running them outside an update is harmless or actively good.
-    ``retag_stale_slot_images`` is different: it rewrites a slot's image
-    pin whenever that pin exactly matches a KNOWN FORMER default, which is
-    a good bet during an actual release (a new default just shipped) but
-    is not correlated with "a release just shipped" at all when called on
-    every daemon boot — an operator who deliberately re-pinned a slot to
-    an older image that happens to be a listed former default would have
-    that choice silently reverted on every crash-restart or reboot, not
-    just when they run an update. :func:`check_outstanding_migrations`
-    passes ``True`` here for exactly that reason; :meth:`Updater.commit`'s
-    post-swap subprocess (an actual update) always passes the default
-    ``False``, so the pass still gets its shot every time a release ships.
+    ``skip_catalogue_sync`` omits the runner-image catalogue sync the
+    ``runner-images`` component arm runs on an update (a network fetch of the
+    runner-images repo's ``images.json``). Boot runs its own non-blocking
+    sync from ``hal0-api`` (``_boot_background_tasks``), so
+    :func:`check_outstanding_migrations` passes ``True`` here; an actual
+    update passes the default ``False``.
 
     ``converge_companions`` gates whether the component catalog
     (:func:`hal0.components.runner.converge_components`, the final pass
@@ -1854,7 +1848,7 @@ def run_post_activation_migrations(
     ``apply`` kwarg: ``True`` (the default, what an actual update passes)
     lets each arm converge; ``False`` (what :func:`check_outstanding_migrations`
     passes) makes every arm diagnose-only, matching the boot-time posture
-    the other three flags (``skip_image_retag``, ``repair_hermes_venv``,
+    the other three flags (``skip_catalogue_sync``, ``repair_hermes_venv``,
     ``upgrade_memory_engine_venv``) already hold at boot. Without this flag
     the openwebui arm — which has no dedicated "install" toggle of its own —
     would still mutate at boot; adding an explicit kwarg here instead of
@@ -1864,6 +1858,15 @@ def run_post_activation_migrations(
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned.
     """
+    # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
+    # rewrites raw TOML before anything validates config, because a removed
+    # runner key in ``[slots].default_images`` fails config load. It backs up
+    # before writing and restores every write before raising, so a failure
+    # here leaves the box exactly as it was and the caller reports it.
+    from hal0.config.migrations.runner_system import migrate_runner_system
+
+    migrate_runner_system(job_id=job_id)
+
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
 
     # Retire a leftover registry.toml: back it up, rename it, never import
@@ -1925,14 +1928,14 @@ def run_post_activation_migrations(
     # slowest pass and stops a companion service; every cheap pass above
     # must land even when a component wedges. Flags carry the callers'
     # existing semantics: boot (check_outstanding_migrations) passes
-    # engine/hermes-install/retag all off, an actual update passes them on.
+    # engine/hermes-install/catalogue-sync off, an actual update passes them on.
     try:
         from hal0.components.runner import converge_components
 
         converge_components(
             job_id=job_id,
             apply=converge_companions,
-            image_retag=not skip_image_retag,
+            catalogue_sync=not skip_catalogue_sync,
             engine=upgrade_memory_engine_venv,
             hermes_install=repair_hermes_venv,
         )
@@ -1962,20 +1965,9 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
     docstring), so a converged box pays for one ``hal0.toml`` read plus a
     handful of near-instant no-ops.
 
-    ``skip_image_retag=True`` (#1960 N2): unlike every other pass here,
-    ``retag_stale_slot_images``'s heuristic ("this pin exactly matches a
-    known FORMER default") is only actually correlated with staleness right
-    after a release ships a new default — see
-    :func:`run_post_activation_migrations`'s own docstring for the full
-    reasoning. Running it on every boot (crash-restarts and reboots
-    included, not just updates) would silently revert an operator's
-    deliberate re-pin to an old image on every bounce — the same class of
-    bug as #1867 (an automated convergence pass overwriting deliberate
-    operator state), just with a much higher firing frequency. The pass
-    still gets its shot on every actual update, via
-    :meth:`Updater.commit`'s post-swap subprocess, which does not skip it —
-    a box that misses it there only waits until its next real update to
-    converge, same as before this function existed.
+    ``skip_catalogue_sync=True``: the API boot runs its own background
+    catalogue sync, so this safety net never blocks startup on a network
+    fetch.
 
     Never raises — a startup safety net that could itself fail startup would
     be worse than the staleness it exists to fix. Returns the ``(source,
@@ -1987,7 +1979,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
     try:
         return run_post_activation_migrations(
             job_id=job_id,
-            skip_image_retag=True,
+            skip_catalogue_sync=True,
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
             converge_companions=False,
@@ -2622,175 +2614,6 @@ def sanitize_model_extra_args(*, job_id: str | None = None, registry: Any = None
     return sanitized
 
 
-def retag_stale_slot_images(*, job_id: str | None = None) -> int:
-    """Retag slot ``image`` pins that are stale FORMER DEFAULTS (upgrade migration).
-
-    Slot creation historically materialised the then-current default runner
-    image into the slot TOML (``image = "..."``, top-level or under
-    ``[slot]``). Those pins freeze the default at creation time, so a release
-    that bumps :data:`~hal0.config.schema.DEFAULT_ROCMFPX_IMAGE` never reaches
-    existing slots. For every slot whose pin is in
-    :data:`~hal0.runners.STALE_RUNNER_IMAGE_REFS` — exactly equal to a
-    known former default, so demonstrably NOT a deliberate operator pin —
-    rewrite it to the current default and log loudly. Any other value is an
-    intentional per-slot override (debug build, A/B test) and is never
-    touched: the escape hatch stands.
-
-    The same policy covers CUSTOM (non-seed-named) profiles in
-    ``profiles.toml``: a custom profile is typically cloned from a seed, so
-    its ``image`` field carries the same materialised-default debris. Only
-    the ``image`` value is rewritten — the operator's flags/name are theirs.
-    (Seed-NAMED profiles are ensure_seed_profiles' job, not ours.)
-
-    Runs before :func:`rerender_slot_units` in the update flow, so the
-    re-rendered units carry the new ref in the same pass; nothing is bounced —
-    the new image applies (and is pulled by podman if absent) on each slot's
-    next start.
-
-    Returns:
-        Number of pins retagged (slot TOMLs + custom profile entries).
-    """
-    import tomllib
-
-    from hal0.config.loader import _read_toml, write_toml_atomic
-    from hal0.config.paths import profiles_toml, slots_config_dir
-    from hal0.runners import STALE_RUNNER_IMAGE_REFS, resolve_runner_image, runner_for_backend
-
-    def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
-        """Local alias — §7.1b / ML-4 HW-gated default via the runner registry."""
-        return resolve_runner_image(runner_for_backend(backend, device_class))
-
-    def _cfg_str(cfg: dict, key: str) -> str:
-        """Read a string field top-level or nested under ``[slot]``."""
-        v = cfg.get(key)
-        if isinstance(v, str):
-            return v
-        slot = cfg.get("slot")
-        if isinstance(slot, dict) and isinstance(slot.get(key), str):
-            return slot[key]
-        return ""
-
-    def _backend_of(cfg: dict) -> str:
-        be = _cfg_str(cfg, "backend")
-        if be:
-            return be
-        dev = _cfg_str(cfg, "device")  # "gpu-rocm" / "gpu-vulkan" / "cpu" / "npu"
-        return dev.split("-", 1)[1] if dev.startswith("gpu-") else ""
-
-    def _device_class_of(cfg: dict) -> str:
-        dev = _cfg_str(cfg, "device") or _cfg_str(cfg, "device_class")
-        if dev == "cpu":
-            return "cpu"
-        return "gpu" if dev.startswith("gpu") else dev
-
-    retagged = 0
-    slots_dir = slots_config_dir()
-    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
-        slot_name = toml_path.stem
-        try:
-            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning("updater.image_retag_slot_unreadable", slot=slot_name, error=str(exc))
-            continue
-        # An image REF is a top-level or [slot]-nested STRING. The ``[image]``
-        # TOML table (image-gen settings, #599) shares the key and must be
-        # ignored — same trap as providers.container._resolve_image_ref.
-        #
-        # BOTH key shapes, deliberately (#1948 B1). The bare ``image`` string is
-        # only half the population: ``_resolve_image_ref`` now resolves the
-        # TYPED ``image_pin`` field, and ``hal0 slot migrate-hw --apply`` folds
-        # ``image`` into it — recording the then-current default as a
-        # "deliberate pin" (it was not in STALE_RUNNER_IMAGE_REFS at the time)
-        # and dropping the older key. A folded box therefore carries
-        # ``image_pin = <old default>``, honoured verbatim and INVISIBLE to a
-        # sweep that reads only the bare key, so it would keep serving a
-        # retired runner forever — behind the release that replaces it.
-        # Matching against the stale set is what keeps this safe: a genuine
-        # operator pin is never an exact former default.
-        # PRECEDENCE MATCHES THE RESOLVER (#1959 review nit): ``image_pin``
-        # binds first, because ``_resolve_image_ref`` reads it first and no
-        # longer reads the bare key at all. Binding ``image`` first here made
-        # the sweep retag (or skip on) a value the runtime never serves while
-        # the pin that IS served stayed stale.
-        holder: dict | None = None
-        key = "image_pin"
-        if isinstance(raw.get("image_pin"), str):
-            holder = raw
-        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image_pin"), str):
-            holder = raw["slot"]
-        elif isinstance(raw.get("image"), str):
-            holder, key = raw, "image"
-        elif isinstance(raw.get("slot"), dict) and isinstance(raw["slot"].get("image"), str):
-            holder, key = raw["slot"], "image"
-        if holder is None or holder[key] not in STALE_RUNNER_IMAGE_REFS:
-            continue
-        old_ref = holder[key]
-        # HW-gated target: rocmfpx on a Strix GPU lane, the lean toolbox
-        # elsewhere. When the host/lane default already equals the pin (e.g. a
-        # non-Strix box on the vulkan toolbox), it's a no-op — leave it be.
-        new_ref = resolve_default_image(_backend_of(raw), _device_class_of(raw))
-        if new_ref == old_ref:
-            continue
-        holder[key] = new_ref
-        try:
-            write_toml_atomic(toml_path, raw)
-        except Exception as exc:
-            log.warning("updater.image_retag_write_failed", slot=slot_name, error=str(exc))
-            continue
-        retagged += 1
-        log.warning(
-            "updater.slot_image_retagged",
-            job_id=job_id,
-            slot=slot_name,
-            field=key,
-            old=old_ref,
-            new=new_ref,
-            note=(
-                "slot image pin matched a stale former default runner; rolled to "
-                "the current HW-gated default (applies on the slot's next start)"
-            ),
-        )
-
-    # Custom (non-seed-named) profiles: same stale-former-default policy,
-    # image field only.
-    prof_path = profiles_toml()
-    if prof_path.exists():
-        try:
-            raw = _read_toml(prof_path)
-        except Exception as exc:
-            log.warning("updater.image_retag_profiles_unreadable", error=str(exc))
-            return retagged
-        changed = False
-        for name, entry in (raw.get("profile") or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("image") in STALE_RUNNER_IMAGE_REFS:
-                old_ref = entry["image"]
-                new_ref = resolve_default_image(entry.get("backend"), entry.get("device_class"))
-                if new_ref == old_ref:
-                    continue
-                entry["image"] = new_ref
-                changed = True
-                retagged += 1
-                log.warning(
-                    "updater.profile_image_retagged",
-                    job_id=job_id,
-                    profile=name,
-                    old=old_ref,
-                    new=new_ref,
-                    note=(
-                        "custom profile image matched a stale former default "
-                        "runner; rolled to the current HW-gated default (flags untouched)"
-                    ),
-                )
-        if changed:
-            try:
-                write_toml_atomic(prof_path, raw)
-            except Exception as exc:
-                log.warning("updater.image_retag_profiles_write_failed", error=str(exc))
-    return retagged
-
-
 def converge_kfd_group(*, job_id: str | None = None) -> str:
     """Align ``/dev/kfd``'s group with the render node's. PRIVILEGED CALLERS ONLY.
 
@@ -2854,14 +2677,6 @@ def _vulkan_lane_is_loadable(holder: dict) -> bool:
     preflight also use — so no two of them can reach different conclusions
     about the same box.
 
-    Critically, that predicate looks through the retag (review B5). This pass
-    runs BEFORE :func:`retag_stale_slot_images`, so a slot carrying a stale
-    former-default pin is about to have that pin rewritten. Judging it on the
-    pin it has *right now* rewrote ``device`` to ``cpu`` first, and the retag —
-    which computes its replacement from the freshly-rewritten TOML — then read
-    ``device = "cpu"`` and installed the CPU toolbox image: the GPU stranded,
-    and a pin that looks like a deliberate CPU choice nobody made.
-
     Fails CLOSED on any error: an unresolvable image is not an
     established-safe one, and the relabel is the conservative outcome.
     """
@@ -2903,8 +2718,7 @@ def relabel_stale_vulkan_slots(
 
     On an AMD host, for every slot TOML with a literal ``device =
     "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
-    handling :func:`retag_stale_slot_images` and
-    :func:`clear_stale_mtp_overrides` use) that is ALSO llama.cpp-backed
+    handling :func:`clear_stale_mtp_overrides` uses) that is ALSO llama.cpp-backed
     (see runtime scope below), relabel ``device`` to:
 
     * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.rocm_lane_present`
@@ -2925,7 +2739,7 @@ def relabel_stale_vulkan_slots(
     whisper.cpp/Moonshine STT, ComfyUI), where it means "the picker's GPU
     row", not "this image runs Vulkan" (#1941) — #1923's Vulkan-lane
     retirement and its ``require_kfd_for_gpu_slot`` guard are about
-    llama.cpp's unified ROCmFPX runner specifically, not those.
+    llama.cpp's Standard runner specifically, not those.
     Relabeling a non-llama slot here would be actively wrong on both kfd
     axes: ``gpu-rocm`` is a label its image can't honor (and
     ``gpu_visibility_env`` would silently swap
@@ -2956,7 +2770,7 @@ def relabel_stale_vulkan_slots(
     :func:`~hal0.config.loader.write_toml_atomic`, which reserializes the
     whole parsed document via ``tomli_w`` — so any comments in a touched
     slot's TOML are dropped on that rewrite, exactly as they are for
-    :func:`retag_stale_slot_images` and :func:`clear_stale_mtp_overrides`.
+    :func:`clear_stale_mtp_overrides`.
     Image scope — #1948, and the reason this pass is no longer a blanket
     rescue: the Vulkan LLM lane is supported again, on a runner image whose
     Vulkan backend passed validation. Under #1923 every ``gpu-vulkan`` llama
@@ -3040,7 +2854,7 @@ def relabel_stale_vulkan_slots(
         if provider is not None:
             # A non-llama runtime (Kokoro/Moonshine/ComfyUI/FLM/Qwen3TTS)
             # genuinely runs a Vulkan image on this device string — #1923's
-            # guard is scoped to llama.cpp's unified ROCmFPX runner, not
+            # guard is scoped to llama.cpp's Standard runner, not
             # these. Leave completely untouched (see docstring; #1941 tracks
             # the separate kfd-absent over-firing issue for this class).
             continue

@@ -24,7 +24,7 @@ EXPECTED_MAPPING = {
     # backend emits invalid tokens for every model — so the six seeds a fresh
     # install actually receives named a lane no slot could validly run.
     "brain": (8089, "gpu-rocm", "brain"),
-    "agent": (8081, "gpu-rocm", "chadrock-moe"),
+    "agent": (8081, "gpu-rocm", "dense"),
     "utility": (8090, "gpu-rocm", "chat"),
     "flm": (8088, "npu", "flm"),
     "img": (8188, "gpu-rocm", "comfyui"),

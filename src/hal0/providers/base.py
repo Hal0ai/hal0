@@ -178,7 +178,7 @@ class RuntimeLaunchPlan:
     """
 
     image: str
-    """Fully-qualified toolbox image ref, e.g. ghcr.io/hal0ai/hal0-toolbox-vulkan:v1."""
+    """Fully-qualified toolbox image ref, e.g. ghcr.io/hal0ai/hal0-runner-standard:<tag>."""
 
     command: list[str]
     """argv for the inference process inside the container."""
@@ -311,7 +311,7 @@ class Provider(ABC):
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
         """Return the toolbox image reference for this Provider + slot config.
 
-        Example: "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1".
+        Example: "ghcr.io/hal0ai/hal0-runner-standard:<tag>".
         Varies by slot.backend (Vulkan vs ROCm for llama-server).
         Concrete Providers MUST override.
 

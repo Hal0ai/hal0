@@ -169,26 +169,6 @@ async def _config_field_enrichment(request: Request) -> dict[str, dict[str, Any]
     return config_enrichment(configs)
 
 
-async def _slot_config_for(request: Request, name: str) -> dict[str, Any] | None:
-    """This slot's raw TOML dict, or ``None``.
-
-    Request-bound sibling of :func:`_config_field_enrichment` over the same
-    ``SlotManager.iter_configs()`` read. Never raises — an unreadable or
-    missing config degrades to ``None``, which every consumer already treats as
-    "no cfg available" rather than an error.
-    """
-    sm = getattr(request.app.state, "slot_manager", None)
-    if sm is None:
-        return None
-    try:
-        for cfg in await sm.iter_configs():
-            if str(cfg.get("name") or "") == name:
-                return cfg
-    except Exception:
-        return None
-    return None
-
-
 async def _container_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
     """Build per-slot container state for container-backed slots.
 
@@ -639,153 +619,6 @@ def _fit_check_warning(device: str | None, binary: str | None) -> str | None:
     return None
 
 
-def _merged_model_default(body: dict[str, Any], before: dict[str, Any]) -> str | None:
-    """The bound-model id a config write resolves to (write wins over disk).
-
-    The ``model`` sub-table may arrive as a dict (``{"default": "id"}``) or —
-    on the create path's pre-normalized flat shape — a bare string; both are
-    folded. A write that omits ``model`` entirely falls back to the persisted
-    section.
-    """
-    for cfg in (body, before):
-        if "model" not in cfg:
-            continue
-        sect = cfg.get("model")
-        if isinstance(sect, str):
-            return sect or None
-        if isinstance(sect, dict):
-            val = sect.get("default")
-            return val if isinstance(val, str) and val else None
-        return None
-    return None
-
-
-def _image_repo(ref: str) -> str:
-    """Strip a trailing ``:tag`` off an image ref, e.g.
-    ``ghcr.io/hal0ai/hal0-strix-vulkan:0831`` → ``ghcr.io/hal0ai/hal0-strix-vulkan``.
-    A ref with no tag is returned unchanged. Used only for the cheap
-    reverse lookup that names an arch-fit hint's Runtime by title instead
-    of a bare ref (:func:`_arch_fit_warning`) — never for launch-path
-    image resolution, which lives in :mod:`hal0.runners`.
-    """
-    head, sep, tail = ref.rpartition(":")
-    return head if sep and "/" not in tail else ref
-
-
-def _arch_fit_warning(
-    model_arch: str | None,
-    device: str | None,
-    binary: str | None,
-    image_pin: str | None,
-    *,
-    alternative_ref: str | None = None,
-) -> str | None:
-    """Non-blocking model↔runner GGUF-arch fit-check (hal0#2118).
-
-    WARN — never reject, mirroring :func:`_fit_check_warning` — when the
-    bound model's detected ``general.architecture`` is on the effective
-    runner's ``unsupported_archs`` denylist: the runner's llama.cpp build
-    rejects the arch at model load, so the slot crash-loops with nothing
-    operator-visible but the breaker chip. An ``image_pin`` disarms the
-    check entirely — the pin IS the documented escape hatch (#2118 wires
-    the combined-upstream variant through it), and the catalogue can't
-    know a pinned image's arch table. An unknown/unset arch or BINARY, or
-    a non-GGUF lane, never warns. ``alternative_ref`` (a catalogued image
-    ref that CAN load the arch, resolved by the route glue) turns the
-    warning into an actionable hint: switch the slot's Runtime, per
-    ADR-0006 (``image_pin`` is a debug-only hatch, not how an operator
-    normally reaches a shipped runtime) — named by the runner's ``title``
-    when the ref matches a ``RUNNER_IMAGES`` entry, else by the bare ref.
-    """
-    if not model_arch or image_pin:
-        return None
-    from hal0.runners import (
-        RUNNER_IMAGES,
-        canonical_runner_key,
-        runner_for_backend,
-        runner_supports_arch,
-    )
-
-    backend = _device_backend(device)
-    if binary:
-        runner = RUNNER_IMAGES.get(canonical_runner_key(str(binary)))
-        if runner is None:
-            return None  # unknown BINARY — the launch path reports its own error
-    else:
-        # No BINARY = the HW-gated default the launcher will derive from the
-        # device — check THAT runner, since it's the build that actually loads
-        # the model. Guarded to llama-server lanes below via format_arch.
-        runner = runner_for_backend(backend or None)
-    if runner.format_arch != "gguf":
-        # The arch marker is a GGUF header fact; a non-GGUF runtime family
-        # (flm/kokoro/…) has its own format vocabulary — no opinion here.
-        return None
-    if runner_supports_arch(runner, model_arch):
-        return None
-    msg = (
-        f'model architecture "{model_arch}" is not supported by the '
-        f"{runner.key} runner's llama.cpp build; the model will fail at "
-        "load and the slot will crash-loop"
-    )
-    if alternative_ref:
-        alt_title = None
-        alt_repo = _image_repo(alternative_ref)
-        for candidate in RUNNER_IMAGES.values():
-            if _image_repo(candidate.image) == alt_repo:
-                alt_title = candidate.title
-                break
-        if alt_title:
-            msg += f' — switch this slot\'s Runtime to "{alt_title}" to serve it'
-        else:
-            msg += (
-                " — switch this slot's Runtime to one that supports it: the "
-                f'"{alternative_ref}" runner image serves this architecture'
-            )
-    return msg
-
-
-def _model_arch_fit_warning(
-    request: Request,
-    model_id: object,
-    device: str | None,
-    binary: str | None,
-    image_pin: str | None,
-) -> str | None:
-    """Route glue for :func:`_arch_fit_warning`: resolve the bound model's
-    persisted ``architecture`` and, when the arch has a catalogued
-    alternative image (``hal0.runners.ARCH_ALTERNATIVE_IMAGES``), the
-    concrete ``image:tag`` ref for the hint. Best-effort throughout — an
-    unresolvable model / registry / catalogue yields ``None``, never an
-    error, because this only decorates an already-successful write.
-    """
-    if not model_id or not isinstance(model_id, str):
-        return None
-    registry = getattr(request.app.state, "model_registry", None)
-    if registry is None:
-        return None
-    try:
-        model = registry.get(model_id)
-    except Exception:
-        return None
-    arch = getattr(model, "architecture", None)
-    if not arch:
-        return None
-    from hal0.runners import ARCH_ALTERNATIVE_IMAGES
-
-    alternative_ref: str | None = None
-    alt_id = ARCH_ALTERNATIVE_IMAGES.get(arch)
-    if alt_id:
-        store = getattr(request.app.state, "runner_image_registry", None)
-        if store is not None:
-            try:
-                row = store.get(alt_id)
-            except Exception:
-                row = None
-            if row is not None:
-                alternative_ref = f"{row.image}:{row.tag}" if row.tag else row.image
-    return _arch_fit_warning(arch, device, binary, image_pin, alternative_ref=alternative_ref)
-
-
 def _normalize_create_body(
     body: dict[str, Any],
     *,
@@ -928,19 +761,6 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
     fit_warn = _fit_check_warning(body.get("device"), body.get("binary"))
     if fit_warn:
         out["fit_warning"] = fit_warn
-    # Model↔runner arch fit-check (hal0#2118) — same warn-never-reject
-    # contract, keyed separately so the UI can render it by the Model select
-    # rather than the HW grid.
-    model_sect_for_fit = body.get("model")
-    arch_warn = _model_arch_fit_warning(
-        request,
-        model_sect_for_fit.get("default") if isinstance(model_sect_for_fit, dict) else None,
-        body.get("device"),
-        body.get("binary"),
-        body.get("image_pin"),
-    )
-    if arch_warn:
-        out["model_fit_warning"] = arch_warn
 
     # Post-create model-default promotion. The slot is the primary object and is
     # already persisted — a promotion failure (unresolved / unregistered model,
@@ -1252,19 +1072,11 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         # context window to resolve; see the comment there for the full
         # rationale.
         if out.get("type") == "llm" and (model_id or isinstance(raw_ctx_max, int)):
-            # #1946/I2: hand this slot's own TOML down so a DEGRADED specialty
-            # slot advertises the plain-model window it actually launches with,
-            # instead of the card's 262144 — and so this body agrees with the
-            # ``specialty_degraded`` reason it is already carrying (``status``
-            # was called with ``include_config_drift=True`` above). Detail-route
-            # only: the hot list poll deliberately skips this (see
-            # :meth:`hal0.slot_view.SlotViewAggregator.snapshot`).
             out["ctx_max"] = resolve_ctx_max(
                 raw_ctx_max if isinstance(raw_ctx_max, int) else None,
                 getattr(request.app.state, "model_registry", None),
                 model_id,
                 name,
-                await _slot_config_for(request, name),
             )
         return out
     except Exception:
@@ -1477,18 +1289,6 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     fit_warn = _fit_check_warning(merged_device, merged_binary)
     if fit_warn:
         out["fit_warning"] = fit_warn
-    # Model↔runner arch fit-check (hal0#2118) over the same merged view — a
-    # write that touches only ONE of model/device/binary/image_pin still
-    # checks against the persisted rest.
-    arch_warn = _model_arch_fit_warning(
-        request,
-        _merged_model_default(body, _before),
-        merged_device,
-        merged_binary,
-        body.get("image_pin", _before.get("image_pin")),
-    )
-    if arch_warn:
-        out["model_fit_warning"] = arch_warn
     return out
 
 
@@ -1701,20 +1501,6 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
         snap = await sm.swap(name, model_id)
         _rec.after = {"model_id": model_id, "state": _state_value(snap)}
     out = _slot_to_dict(snap, request)
-    # Model↔runner arch fit-check (hal0#2118): the swap is THE model-assign
-    # verb, so a model whose detected GGUF arch the slot's effective runner
-    # rejects gets the same warn-never-reject notice the config writes carry
-    # — naming why the load it just kicked off is about to crash-loop.
-    cfg_after = await _safe_config(sm, name) or {}
-    arch_warn = _model_arch_fit_warning(
-        request,
-        model_id,
-        cfg_after.get("device"),
-        cfg_after.get("binary"),
-        cfg_after.get("image_pin"),
-    )
-    if arch_warn:
-        out["model_fit_warning"] = arch_warn
     return out
 
 

@@ -16,16 +16,17 @@ Four folds, all onto the SLOT (spec §6):
    **BINARY** (:attr:`SlotConfig.binary`).
 3. ``profile.image`` **deliberate** pins → ``image_pin`` of every referencing
    slot (fold-to-slots, each gets its own copy). Former-default **debris** —
-   an image in :data:`~hal0.runners.STALE_RUNNER_IMAGE_REFS` — is dropped, never
-   folded. A profile whose deliberate pin has **zero** referencing slots logs
+   an image in the caller's ``stale_refs`` set — is dropped, never folded. A profile whose deliberate pin has **zero** referencing slots logs
    the lost pin. ``profile.image`` is deleted either way.
 4. ``slot.image`` / ``[slot].image`` → slot **image_pin**; the ``image`` key is
    collapsed away. Same deliberate-vs-debris rule as #3. A slot's own image wins
    over its profile's (old ``_resolve_image_ref`` precedence: slot → profile).
 
-Reuses the :func:`hal0.updater.retag_stale_slot_images` machinery's
-deliberate-pin-vs-former-default-debris distinction
-(:data:`~hal0.runners.STALE_RUNNER_IMAGE_REFS`) on both slot and profile images.
+Retired runner images never reach this fold: the runner-system migration
+(:mod:`hal0.config.migrations.runner_system`) runs first, on every update and
+boot, and drops pins to them from slots and profiles. ``run_migration``
+therefore passes an empty ``stale_refs``; the parameter stays for callers that
+need the deliberate-pin-vs-debris distinction.
 
 Idempotent / re-runnable / snapshot-first:
 
@@ -113,7 +114,7 @@ class ProfileAction:
 
     ``disposition``:
       * ``"folded"``  — deliberate pin copied onto ≥1 referencing slot, deleted.
-      * ``"debris"``  — a stale former default (STALE_RUNNER_IMAGE_REFS), deleted.
+      * ``"debris"``  — a ref in ``stale_refs``, deleted.
       * ``"lost"``    — deliberate pin with NO referencing slot; logged + deleted.
     """
 
@@ -170,8 +171,8 @@ def _slot_own_image(cfg: Mapping[str, Any]) -> str | None:
 
     The ``[image]`` TOML table (image-gen settings, #599) shares the key and
     is deliberately ignored (same trap as
-    ``providers.container._resolve_image_ref`` /
-    ``updater.retag_stale_slot_images``): only a string value is an image pin.
+    ``providers.container._resolve_image_ref``): only a string value is an
+    image pin.
     """
     if isinstance(cfg.get("image"), str):
         return cfg["image"]
@@ -216,8 +217,8 @@ def plan_unfold(
         model_hw: model-id → :class:`ModelHw` (raw old NGL/runner columns). A
             model absent here (or with both fields None) contributes nothing.
         profile_images: profile-name → its ``image`` pin string.
-        stale_refs: :data:`~hal0.runners.STALE_RUNNER_IMAGE_REFS` — an image in
-            this set is former-default debris (dropped, never folded).
+        stale_refs: refs that are former-default debris (dropped, never
+            folded).
 
     Returns:
         An :class:`UnfoldPlan`.
@@ -578,10 +579,8 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
 
     Returns the report lines.
     """
-    from hal0.runners import STALE_RUNNER_IMAGE_REFS
-
     slots, model_hw, profile_images = collect_inputs()
-    plan = plan_unfold(slots, model_hw, profile_images, stale_refs=STALE_RUNNER_IMAGE_REFS)
+    plan = plan_unfold(slots, model_hw, profile_images, stale_refs=frozenset())
     return apply_unfold_plan(plan, deploy_window=deploy_window, dry_run=dry_run)
 
 

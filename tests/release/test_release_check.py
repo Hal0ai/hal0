@@ -19,8 +19,46 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+_DIGEST = "sha256:" + "a" * 64
+
+#: Stand-in for ``scripts/check_runner_pins.py`` in the fixture tree. The real
+#: checker imports ``hal0.runners.pins`` from the tree's ``src/`` and applies
+#: ``release_gate_problems`` (covered in ``tests/runners/test_pins.py``); this
+#: stub honours the same contract (exit 0 only when every pin names a tag AND a
+#: digest, problems on stderr) so these tests exercise how ``release-check.sh``
+#: wires step 4, not the pin rules.
+_PIN_CHECKER_STUB = """#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+rows = json.loads((root / "manifest.json").read_text())["runners"]
+problems = [
+    f"default runner {key!r} is not release-ready"
+    for key, row in rows.items()
+    if not row.get("tag") or not row.get("digest")
+]
+for line in problems:
+    print(f"runner pins: {line}", file=sys.stderr)
+if problems:
+    raise SystemExit(1)
+print(f"runner pins: all {len(rows)} runners release-ready")
+"""
+
+
+def _runner_pins(*, ready: bool) -> dict[str, dict[str, object]]:
+    return {
+        "standard": {
+            "image": "ghcr.io/hal0ai/hal0-runner-standard",
+            "tag": "b1-r1" if ready else None,
+            "digest": _DIGEST if ready else None,
+            "lanes_gated": [],
+        }
+    }
+
+
 def _make_tree(
-    tmp_path: Path, report: dict[str, object] | None = None
+    tmp_path: Path, report: dict[str, object] | None = None, *, pins_ready: bool = True
 ) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
@@ -31,9 +69,9 @@ def _make_tree(
         '[project]\nname = "hal0ai"\nversion = "1.0.0-alpha.1"\n', encoding="utf-8"
     )
     (root / "manifest.json").write_text(
-        json.dumps({"toolbox_images": {"test": {"digest": "sha256:abc"}}}),
-        encoding="utf-8",
+        json.dumps({"runners": _runner_pins(ready=pins_ready)}), encoding="utf-8"
     )
+    (root / "scripts" / "check_runner_pins.py").write_text(_PIN_CHECKER_STUB, encoding="utf-8")
     (root / "uv.lock").write_bytes(b"fixture lock bytes\n")
     (root / ".gitignore").write_text(".pi/\ngraphify-out/\n", encoding="utf-8")
     tracked_generated = {
@@ -137,6 +175,39 @@ def test_help_and_unknown_argument_contract(tmp_path: Path) -> None:
     assert "dependency/build caches may change" in help_result.stdout.lower()
     assert bad_result.returncode == 2
     assert "Unknown argument" in bad_result.stderr
+
+
+def test_step_4_runs_the_runner_pin_checker(tmp_path: Path) -> None:
+    """Step 4 is ``scripts/check_runner_pins.py`` over manifest.json ``runners``."""
+    root, env = _make_tree(tmp_path)
+
+    result = _run(root, env, "--local")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "4. Runner image pins" in output
+    assert "runner image pins release-ready" in output
+
+
+def test_step_4_refuses_a_release_while_pins_are_placeholders(tmp_path: Path) -> None:
+    """A ``tag: null`` / ``digest: null`` default runner means the images are not
+    built yet: the release must not cut until the promote PR lands."""
+    root, env = _make_tree(tmp_path, pins_ready=False)
+
+    result = _run(root, env, "--local")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "runner pins: default runner 'standard' is not release-ready" in output
+    assert "manifest.json runner pins are not release-ready" in output
+    assert "promote PR" in output
+
+
+def test_step_4_is_wired_to_the_real_checker_script() -> None:
+    """The fixture swaps in a stub; this pins that the shipped script is the one
+    ``release-check.sh`` calls, and that it exists."""
+    assert "scripts/check_runner_pins.py" in SCRIPT.read_text(encoding="utf-8")
+    assert (SCRIPT.parent / "check_runner_pins.py").is_file()
 
 
 def test_local_uses_isolated_repository_uv_and_skips_remote_report(tmp_path: Path) -> None:

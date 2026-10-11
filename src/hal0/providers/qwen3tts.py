@@ -50,12 +50,6 @@ from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Mount, Provider
-from hal0.runners import RUNNER_IMAGES
-
-# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
-# lives in exactly one place (hal0.runners.RUNNER_IMAGES["qwen3tts"].image).
-# Kept as a module attribute for back-compat imports.
-_DEFAULT_QWEN3TTS_IMAGE = RUNNER_IMAGES["qwen3tts"].image
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "qwen3-tts"
@@ -144,8 +138,8 @@ class Qwen3TTSProvider(Provider):
         :func:`hal0.providers._image.resolve_family_image`):
         ``slot_cfg["image_pin"]`` (top-level or ``[slot]``-nested, honored
         verbatim) → ``[slots].default_images["qwen3tts"]`` (operator family
-        default) → the runner registry (``HAL0_TOOLBOX_IMAGE_QWEN3TTS`` env
-        override → the manifest digest pin → the bundled default) — see
+        default) → the runner registry (``HAL0_RUNNER_IMAGE_QWEN3TTS`` env
+        override → the ``manifest.json`` pin) — see
         :func:`hal0.runners.resolve_runner_image`.
         """
         from hal0.providers._image import resolve_family_image

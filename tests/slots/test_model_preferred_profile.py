@@ -16,6 +16,7 @@ import pytest
 from hal0.registry.model import Model, ModelDefaults
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
+from hal0.slots.state import SlotConfigError
 
 
 def _register(model_id: str, *, profile: str | None) -> None:
@@ -105,12 +106,12 @@ def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
 
 @pytest.fixture
 def profile_catalog_fixture(tmp_hal0_home: str) -> str:
-    """Add profile "pf" — runner="promptforge" (rocm) — to the catalog.
+    """Add profile "pf" — runner="cuda" (a single-lane GPU runtime) — to the catalog.
 
     ``load_profiles_config``/``ProfileCatalog`` read ``profiles.toml`` off
     ``paths.profiles_toml()`` (``$HAL0_HOME/etc/hal0/profiles.toml``), which
     ``tmp_hal0_home`` already isolates — writing the file there is enough for
-    every catalog reader in this process to pick "pf" up. ``backend="rocm"``
+    every catalog reader in this process to pick "pf" up. ``backend="cuda"``
     puts "pf" at odds with a ``gpu-vulkan`` slot's backend so the two new
     tests actually exercise the runner-carrying-profile veto relief (Task 6)
     rather than passing on the pre-existing device-agnostic (backend=None)
@@ -118,14 +119,12 @@ def profile_catalog_fixture(tmp_hal0_home: str) -> str:
     """
     etc_dir = Path(tmp_hal0_home) / "etc" / "hal0"
     etc_dir.mkdir(parents=True, exist_ok=True)
-    (etc_dir / "profiles.toml").write_text(
-        '[profile.pf]\nrunner = "promptforge"\nbackend = "rocm"\n'
-    )
+    (etc_dir / "profiles.toml").write_text('[profile.pf]\nrunner = "cuda"\nbackend = "cuda"\n')
     return tmp_hal0_home
 
 
 def test_runner_profile_fits_across_gpu_lanes(profile_catalog_fixture) -> None:
-    # profile "pf" carries runner="promptforge" (rocm); slot is gpu-vulkan.
+    # profile "pf" carries runner="cuda"; slot is gpu-vulkan.
     # Same device class → fits (the config-write reconcile flips the lane).
     assert SlotManager._profile_fits_slot("pf", {"type": "llm", "device": "gpu-vulkan"})
 
@@ -156,8 +155,6 @@ async def test_swap_adopts_runner_carrying_profile_flips_binary_and_device(
     # incoherent triple. It must now route through the SAME
     # _reconcile_device_profile the drawer/update_config path uses, so all
     # three land together in the one write.
-    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
-    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     _register("pf-model", profile="pf")
     sm = SlotManager()
     cfg0 = _gpu_vulkan_cfg("g", "pf-model")
@@ -169,17 +166,21 @@ async def test_swap_adopts_runner_carrying_profile_flips_binary_and_device(
     assert changed is True
     persisted = await sm.get_config("g")
     assert persisted["profile"] == "pf"
-    assert persisted["binary"] == "promptforge"
-    assert persisted["device"] == "gpu-rocm"  # flipped from gpu-vulkan
+    assert persisted["binary"] == "cuda"
+    assert persisted["device"] == "gpu-cuda"  # flipped from gpu-vulkan
 
 
 async def test_swap_keeps_prior_profile_when_runner_infeasible(
     profile_catalog_fixture, monkeypatch
 ) -> None:
-    # kfd-less host: the reconcile raises SlotConfigError for the ROCm-only
-    # "pf" runner. Swap must treat this as "preference doesn't fit" — keep
+    # The reconcile raises SlotConfigError when the profile's runtime is
+    # physically infeasible on this host (the ROCm lane's kfd/render-node gate
+    # in production). Swap must treat this as "preference doesn't fit" — keep
     # the slot's current profile/binary/device and NOT raise.
-    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: False)
+    def _infeasible(cfg_dict, changed):
+        raise SlotConfigError("runtime needs a lane this host lacks")
+
+    monkeypatch.setattr("hal0.slots.config_write._reconcile_device_profile", _infeasible)
     _register("pf-model-2", profile="pf")
     sm = SlotManager()
     cfg0 = _gpu_vulkan_cfg("g", "pf-model-2")

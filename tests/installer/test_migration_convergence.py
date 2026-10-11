@@ -32,7 +32,7 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
     the boot-time safety net opts out: a boot-time pip is an unbounded
     network op and the first start of a newer engine triggers its one-way DB
     migration, neither of which belongs outside an operator-visible update
-    (the ``skip_image_retag``/``repair_hermes_venv`` posture, one step
+    (the ``skip_catalogue_sync``/``repair_hermes_venv`` posture, one step
     further).
 
     Since the 2026-08-30 component-updates spec, the engine pass rides in
@@ -73,7 +73,7 @@ def test_migration_sequence_runs_engine_pass_by_default_but_not_at_boot() -> Non
 def test_install_sh_no_longer_hand_picks_a_migration_subset() -> None:
     """The old two-heredoc block imported the seed-profile prune and
     clear_stale_mtp_overrides directly, skipping _maybe_run_config_migrations,
-    retag_stale_slot_images, and sanitize_model_extra_args entirely. Once
+    and sanitize_model_extra_args entirely. Once
     the shared sequence is wired in, those two passes should only be
     reachable through it (no standalone re-introduction of the old subset)."""
     text = _INSTALL_SH.read_text(encoding="utf-8")

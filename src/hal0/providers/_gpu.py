@@ -40,7 +40,7 @@ log = structlog.get_logger(__name__)
 #: string, which cannot answer the question — see that function's docstring
 #: and :func:`runtime_lane_for_provider` (#1941).
 #:
-#: * ``"llama"``   — the unified ROCmFPX llama.cpp runner (#1888's lane).
+#: * ``"llama"``   — the Standard llama.cpp runner (#1888's lane).
 #: * ``"rocm"``    — a non-llama runtime whose image resolves ROCm/HIP.
 #: * ``"no-rocm"`` — a runtime that never touches HIP.
 RuntimeLane = Literal["llama", "rocm", "no-rocm"]
@@ -73,7 +73,7 @@ def runtime_lane_for_provider(spec_provider: Any | None) -> RuntimeLane:
 _GPU_GROUP_FALLBACK_GIDS: dict[str, int] = {"render": 993, "video": 44}
 
 #: The ROCm compute device node. Its presence inside the container is what
-#: decides which llama.cpp backend the unified ROCmFPX runner image actually
+#: decides which llama.cpp backend the Standard runner image actually
 #: executes on: ``ggml_rocm_init`` succeeds and the slot runs ROCm, or it
 #: fails and llama.cpp SILENTLY falls back to that image's Vulkan backend.
 KFD_DEVICE_PATH = "/dev/kfd"
@@ -468,95 +468,43 @@ def _uid_can_open(node: str, for_uid: int | None) -> bool:
 def image_serves_vulkan_lane(image: str | None) -> bool:
     """May this runner image serve the ``gpu-vulkan`` llama.cpp lane?
 
-    Membership in :data:`~hal0.config.schema.VULKAN_CAPABLE_IMAGE_REFS` — an
-    allowlist earned per-image by the #1948 §3-C validation matrix, NOT an
-    ordering comparison over tags. That constant's docstring carries the full
-    argument for why an order cannot be written honestly here; the short form
-    is that the tags are shortrefs and date stamps rather than versions, and
-    that Vulkan correctness was empirically NOT monotonic in build recency (the
-    bisect found the older tree correct and the newer one broken).
+    Membership in :func:`hal0.runners.pins.vulkan_capable_refs` — the pinned
+    images whose digest passed the hardware gate's Vulkan lane
+    (``manifest.json`` ``runners.<key>.lanes_gated``). Admission is earned
+    per digest by evidence, never by an ordering over tags: Vulkan
+    correctness was empirically NOT monotonic in build recency (#1948).
 
     Fails closed on ``None``/blank: a caller that cannot say which image a slot
     launches has not established that the lane is safe, and the #1888 failure
     mode is silent garbage at full speed — the expensive direction to guess
     wrong in.
     """
-    from hal0.config.schema import VULKAN_CAPABLE_IMAGE_REFS
+    from hal0.runners.pins import vulkan_capable_refs
 
-    return (image or "").strip() in VULKAN_CAPABLE_IMAGE_REFS
+    return (image or "").strip() in vulkan_capable_refs()
 
 
 def effective_runner_image(slot_cfg: Any | None = None) -> str | None:
-    """What image will this slot ACTUALLY end up running?
+    """What image will this slot end up running?
 
     The one question every pre-launch decision needs answered, asked once so
-    the answers cannot disagree (review B5). ``None`` means "a slot that does
-    not exist yet and pins nothing" — the case the derivation ladders and the
-    bench harness are deciding for.
+    the answers cannot disagree (review B5).
 
-    For a real slot config it is deliberately NOT just
-    :func:`~hal0.providers.container._resolve_image_ref`. That returns the
-    ref the TOML names *right now*, and on an upgrade the upgrade itself moves
-    it: :func:`hal0.updater.updater.retag_stale_slot_images` rewrites any pin
-    that is exactly a known former default
-    (:data:`~hal0.config.schema.STALE_ROCMFPX_IMAGE_REFS`) to the current one.
-    A decision made against the pre-retag ref is a decision about an image the
-    slot is about to stop using.
-
-    That distinction is not academic — it is the #1888 re-admission the review
-    found. On a kfd-less box, ``relabel_stale_vulkan_slots`` runs BEFORE the
-    retag. Judging a stale-pinned ``gpu-vulkan`` slot on its stale pin says
-    "cannot serve Vulkan", so the relabel rewrites ``device`` to ``cpu``; the
-    retag then runs, and because it computes the replacement from the
-    *freshly rewritten* TOML it now reads ``device = "cpu"`` and installs the
-    CPU toolbox image. Net effect: the GPU is stranded, and the slot's pin
-    looks like a deliberate CPU choice nobody made. Looking through the retag
-    first makes the relabel see the image the slot will really have, skip it,
-    and leave the retag to do its job.
-
-    Fixing it here rather than by reordering the passes is deliberate: #1954's
-    ``converge_kfd_group`` pins itself before the relabel pass in its own
-    docstring contract, and swapping the sequence mid-chain would re-open that.
-
-    Resolution:
-
-    1. ``None`` → :func:`~hal0.config.schema.resolve_default_image` for the
-       AMD GPU lane, i.e. the image a new GPU slot gets with no pin.
-    2. otherwise the slot's resolved ref, and if that ref is a stale former
-       default, what the retag will replace it with — computed from the slot's
-       CURRENT backend/device class, which is what the retag would read if it
-       ran first.
-
-    NOT used by the load path, deliberately. ``load_sync`` passes the RAW
-    ``_resolve_image_ref`` result to :func:`require_kfd_for_gpu_slot`, and that
-    is correct: a launch happening right now runs the image the TOML names
-    right now, not the one a migration would install later. Looking ahead there
-    would refuse — or worse, admit — a slot on the strength of an image that is
-    not on the box yet.
-
-    The two callers differ because they are asking about different moments. A
-    migration is deciding what a slot should look like AFTER the upgrade
-    converges, so it must see past a rewrite that is about to happen; a launch
-    is deciding what will run in the next second. Conflating them is what
-    produced the #1948 B5 bug in the first place, from the other direction.
+    * ``None`` (a slot that does not exist yet and pins nothing) → the image
+      a new AMD GPU slot gets: the ``standard`` runner's resolved ref.
+    * otherwise the slot's resolved ref
+      (:func:`~hal0.providers.container._resolve_image_ref`).
     """
-    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, resolve_default_image
+    from hal0.runners import resolve_runner_image, runner_for_backend
 
     if slot_cfg is None:
-        return resolve_default_image("vulkan", "gpu")
+        return resolve_runner_image(runner_for_backend("vulkan", "gpu"))
 
     # Local import: hal0.providers.container imports THIS module at its top
     # level, so the dependency has to be inverted lazily here.
-    from hal0.providers.container import (
-        _effective_backend_and_device_class,
-        _resolve_image_ref,
-    )
+    from hal0.providers.container import _resolve_image_ref
 
-    resolved = _resolve_image_ref(slot_cfg, None)
-    if resolved in STALE_ROCMFPX_IMAGE_REFS:
-        backend, device_class = _effective_backend_and_device_class(slot_cfg, None)
-        return resolve_default_image(backend, device_class)
-    return resolved
+    return _resolve_image_ref(slot_cfg, None)
 
 
 def vulkan_lane_serves(slot_cfg: Any | None = None) -> bool:
@@ -609,10 +557,9 @@ def default_image_serves_vulkan_lane() -> bool:
     all flip at the same instant the pin does, and there is no state of main
     where they disagree.
 
-    Resolved through :func:`~hal0.config.schema.resolve_default_image`, so the
-    ``HAL0_TOOLBOX_IMAGE_*`` env overrides and the release manifest's digest
-    pin are honoured exactly as they are at launch. Fails closed if that
-    resolution raises at all.
+    Resolved through :func:`hal0.runners.resolve_runner_image`, so the
+    ``HAL0_RUNNER_IMAGE_*`` env overrides and the manifest pin are honoured
+    exactly as they are at launch. Fails closed if that resolution raises.
     """
     return vulkan_lane_serves(None)
 
@@ -641,13 +588,12 @@ def _require_vulkan_lane_prerequisites(
     Two gates, checked in that order because the first is the one #1888 is
     about and the second is an ordinary passthrough problem:
 
-    1. **Image.** The resolved runner image must be one whose Vulkan backend
-       has passed the #1948 §3-C matrix. The ade07ba lineage — still the
-       default pin — emits invalid tokens on Vulkan for every model at full
-       nominal speed while every health surface reads green, so serving this
-       lane from it is the exact regression #1923 retired the lane to prevent.
-       Refusing here means a stale-image box gets a one-line explanation
-       instead of two hours of garbage.
+    1. **Image.** The resolved runner image must be a pin whose digest passed
+       the hardware gate's Vulkan lane (``lanes_gated``). An ungated Vulkan
+       backend can emit invalid tokens for every model at full nominal speed
+       while every health surface reads green (#1888), so refusing here means
+       an ungated image gets a one-line explanation instead of two hours of
+       garbage.
     2. **Render node.** Vulkan runs on ``/dev/dri/renderD*``. Without one the
        container has no device at all — a forwarding problem, described as
        such, with no mention of #1888. Evaluated for ``runner_uid``, the
@@ -662,14 +608,12 @@ def _require_vulkan_lane_prerequisites(
     opted_in = str(environ.get(ENV_ALLOW_VULKAN_FALLBACK, "")).strip() in ("1", "true", "yes")
 
     if not image_serves_vulkan_lane(image):
-        from hal0.config.schema import VULKAN_FIXED_IMAGE
-
         resolved = (image or "").strip() or "<unresolved>"
         why = (
-            f"Runner image {resolved} is not validated for the Vulkan lane: the "
-            "pinned ROCmFPX lineage's Vulkan backend emits invalid tokens for "
-            "every model it serves, at full nominal speed, while HTTP 200, "
-            "container health and hal0 doctor all read green (#1888)."
+            f"Runner image {resolved} has not passed the hardware gate's Vulkan "
+            "lane (manifest.json runners.<key>.lanes_gated). An ungated Vulkan "
+            "backend can emit invalid tokens at full nominal speed while HTTP "
+            "200, container health and hal0 doctor all read green (#1888)."
         )
         if opted_in:
             log.warning(
@@ -683,9 +627,9 @@ def _require_vulkan_lane_prerequisites(
         else:
             raise GpuPreflightError(
                 f"slot {slot_name!r} (device=gpu-vulkan) cannot run on this runner "
-                f"image. {why} Repin this slot to {VULKAN_FIXED_IMAGE} (or a later "
-                "image validated for the Vulkan lane), or move the slot to "
-                "device='gpu-rocm' on a host with /dev/kfd."
+                f"image. {why} Clear this slot's image_pin so it runs the Standard "
+                "runner's pinned image (once that digest is Vulkan-gated), or move "
+                "the slot to device='gpu-rocm' on a host with /dev/kfd."
             )
 
     # Resolved HERE, after the image gate has already had its chance to refuse:
@@ -718,12 +662,13 @@ def require_kfd_for_gpu_slot(
 ) -> None:
     """Loud-fail a GPU slot that cannot validly run on this host as configured.
 
-    The release-pinned ROCmFPX runner (``DEFAULT_ROCMFPX_IMAGE``) is a single
+    The release-pinned Standard runner (``manifest.json`` ``runners.standard``) is a single
     HIP+Vulkan build. llama.cpp picks ROCm when ``/dev/kfd`` is visible and
     silently falls back to that image's **Vulkan** backend when
-    ``ggml_rocm_init`` fails. That Vulkan backend emits invalid tokens for
-    every model it serves, at full nominal speed, while HTTP 200, container
-    health, ``hal0 doctor`` and the SSE ``done`` frame all read green (#1888).
+    ``ggml_rocm_init`` fails. A Vulkan backend that has not passed the
+    hardware gate can emit invalid tokens for every model it serves, at full
+    nominal speed, while HTTP 200, container health, ``hal0 doctor`` and the
+    SSE ``done`` frame all read green (#1888).
 
     So ``/dev/kfd`` is a hard requirement for a GPU llama.cpp slot on this
     image, not an optimisation: without it there is no lane that produces
@@ -743,7 +688,7 @@ def require_kfd_for_gpu_slot(
     call site (``ContainerProvider.load_sync``) translates:
 
     * ``"llama"`` — the default llama-server provider, i.e. the unified
-      ROCmFPX runner. Gated, with #1888's silent-garbage explanation.
+      Standard runner. Gated, with #1888's silent-garbage explanation.
     * ``"rocm"`` — a non-llama runtime whose image resolves ROCm/HIP.
       Gated, but the refusal does not blame llama.cpp's fallback: quoting
       #1888 at a ComfyUI operator sends them chasing the wrong defect. Its
@@ -769,8 +714,7 @@ def require_kfd_for_gpu_slot(
       where Vulkan is the only lane there is. Gated instead on the two things
       that actually decide whether it produces language:
       :func:`image_serves_vulkan_lane` (the resolved runner image must be one
-      whose Vulkan backend passed the #1948 §3-C matrix — the ade07ba lineage
-      never can) and :func:`render_node_present` (a ``renderD*`` node the
+      whose pinned digest passed the hardware gate's Vulkan lane) and :func:`render_node_present` (a ``renderD*`` node the
       runner identity can open).
     * ``gpu-vulkan`` + the **rocm** lane — unchanged (#1952). ComfyUI and
       Qwen3-TTS run HIP images behind the picker's GPU row; the llama.cpp

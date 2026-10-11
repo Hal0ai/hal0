@@ -446,23 +446,21 @@ def _probe_version(candidates: tuple[str, ...]) -> str | None:
 
 
 def _flm_toolbox_image() -> str:
-    """Return the bundled FLM toolbox image reference (source of truth post-PR #822).
+    """Return the FLM runner's image reference (``manifest.json`` ``runners.flm``).
 
-    Delegates to ``providers.flm._DEFAULT_FLM_IMAGE`` so the version is
-    never duplicated — updating the image constant updates the updater
-    surface automatically. Returns an empty string on import failure so
-    callers can degrade gracefully.
+    Returns an empty string when the pin cannot be read so callers can
+    degrade gracefully.
     """
     try:
-        from hal0.providers.flm import _DEFAULT_FLM_IMAGE
+        from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
-        return _DEFAULT_FLM_IMAGE
+        return resolve_runner_image(RUNNER_IMAGES["flm"])
     except Exception:  # pragma: no cover
         return ""
 
 
 def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
-    """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`` → ``0.9.44``.
+    """``ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4`` → ``0.9.44``.
 
     Parses the tag off an OCI image reference (everything after the last
     ``:``) and returns it, or ``None`` if the ref is empty / has no tag.
@@ -499,8 +497,7 @@ async def update_state(request: Request) -> dict[str, Any]:
         }
 
     The ``flm.current`` version is derived from the bundled toolbox image
-    tag (``providers.flm._DEFAULT_FLM_IMAGE``) — the single source of truth
-    post PR #822. Failures in any single probe degrade gracefully — the
+    tag (``manifest.json`` ``runners.flm``). Failures in any single probe degrade gracefully — the
     corresponding field comes back as ``None`` rather than 5xx'ing the whole
     response.
     """
@@ -1016,7 +1013,7 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
     # job_id is dropped from the base mapping and passed explicitly by
     # ``_run_component_job`` once the job id is known.
     arm_kwargs: dict[str, Any] = _arm_kwargs(
-        comp, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+        comp, job_id=None, apply=True, catalogue_sync=True, engine=True, hermes_install=True
     )
     arm_kwargs.pop("job_id", None)
     if component_id == "openwebui" and isinstance(body, dict):

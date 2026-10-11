@@ -25,7 +25,7 @@
 #                      else `hal0` on the remote PATH)
 #
 # Cross-team notes (PLAN §10.2):
-#   - Team A owns toolbox image presence in manifest.json. Rows that need
+#   - Runner image pins live in manifest.json `runners`. Rows that need
 #     an image not yet published (flm, rocm) are reported as "skip" with
 #     a clear "image-not-available" detail — not a hard failure.
 #   - The updater row is check-only by design: a headless
@@ -136,21 +136,19 @@ log_info "remote hal0 version: ${REMOTE_HAL0_VERSION}"
 log_info "remote hal0 API:    ${REMOTE_HAL0_API}"
 
 # ── manifest gate ────────────────────────────────────────────────────────────
-# Each row that needs a toolbox image first asks manifest.json whether the
-# image is present-and-pinned. If digest is null/empty the row reports
-# skip("image-not-available"). This is Team A territory — we read, never write.
+# Each row that needs a runner image first asks manifest.json whether that
+# runner's image is pinned (manifest.json `runners.<key>.digest`). A null
+# digest makes the row report skip("image-not-available"). Read-only.
 manifest_digest() {
-    # Usage: manifest_digest <short_name>  → prints digest or empty string.
+    # Usage: manifest_digest <runner_key>  → prints digest or empty string.
     python3 - "$1" <<'PY'
 import json, sys
 from pathlib import Path
 
-name = sys.argv[1]
+key = sys.argv[1]
 m = json.loads(Path("manifest.json").read_text())
-images = m.get("toolbox_images", {})
-entry = images.get(name, {})
-digest = entry.get("digest")
-print(digest or "")
+entry = (m.get("runners") or {}).get(key) or {}
+print(entry.get("digest") or "")
 PY
 }
 
@@ -341,10 +339,10 @@ log_info "llm model: $(remote_model_for_type llm || true)"
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
-DIGEST="$(manifest_digest vulkan || true)"
+DIGEST="$(manifest_digest standard || true)"
 MODEL="$(remote_model_for_type llm || true)"
 if [[ -z "${DIGEST}" ]]; then
-    add_row "vulkan" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.vulkan.digest] is null — Team A pending)"
+    add_row "vulkan" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json runners.standard.digest is null)"
 elif [[ -z "${MODEL}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
@@ -367,10 +365,10 @@ fi
 # ── ROW: ROCm ────────────────────────────────────────────────────────────────
 log_step "Row: rocm"
 start=$(date +%s%N)
-DIGEST="$(manifest_digest rocm || true)"
+DIGEST="$(manifest_digest standard || true)"
 MODEL="$(remote_model_for_type llm || true)"
 if [[ -z "${DIGEST}" ]]; then
-    add_row "rocm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.rocm.digest] is null — Team A pending)"
+    add_row "rocm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json runners.standard.digest is null)"
 elif ! ssh_exec "test -e /dev/kfd"; then
     # gpu-rocm llama.cpp slots refuse loudly on a kfd-less host
     # (providers/_gpu.py::require_kfd_for_gpu_slot) — that refusal is
@@ -392,7 +390,7 @@ log_step "Row: flm (NPU)"
 start=$(date +%s%N)
 DIGEST="$(manifest_digest flm || true)"
 if [[ -z "${DIGEST}" ]]; then
-    add_row "flm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.flm.digest] is null — Team A marked FLM as a stretch)"
+    add_row "flm" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json runners.flm.digest is null)"
 elif ! ssh_exec "test -e /dev/accel/accel0"; then
     add_row "flm" "skip" "$(since_ms "${start}")" "npu-not-present (/dev/accel/accel0 missing on ${HAL0_TEST_HOST})"
 else
@@ -420,7 +418,7 @@ start=$(date +%s%N)
 DIGEST="$(manifest_digest moonshine || true)"
 MODEL="$(remote_model_for_type transcription || true)"
 if [[ -z "${DIGEST}" ]]; then
-    add_row "moonshine" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.moonshine.digest] is null)"
+    add_row "moonshine" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json runners.moonshine.digest is null)"
 elif [[ -z "${MODEL}" ]]; then
     add_row "moonshine" "skip" "$(since_ms "${start}")" "no installed transcription model in the registry — pull/register a moonshine model first"
 else
@@ -463,7 +461,7 @@ start=$(date +%s%N)
 DIGEST="$(manifest_digest kokoro || true)"
 MODEL="$(remote_model_for_type tts || true)"
 if [[ -z "${DIGEST}" ]]; then
-    add_row "kokoro" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json[toolbox_images.kokoro.digest] is null)"
+    add_row "kokoro" "skip" "$(since_ms "${start}")" "image-not-available (manifest.json runners.kokoro.digest is null)"
 elif [[ -z "${MODEL}" ]]; then
     add_row "kokoro" "skip" "$(since_ms "${start}")" "no installed tts model in the registry — pull/register a kokoro model first"
 else

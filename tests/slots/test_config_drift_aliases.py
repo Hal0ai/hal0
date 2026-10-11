@@ -13,9 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 from hal0.slots.manager import _CONFIG_DRIFT_KEYS, SlotManager, _argv_values
 from tests.slots.conftest import FakeContainerProvider
+
+#: The image an unpinned GPU slot launches: the ``standard`` runner pin.
+_STANDARD_IMAGE = resolve_runner_image(RUNNER_IMAGES["standard"])
 
 
 def test_argv_values_matches_long_spelling_for_short_key() -> None:
@@ -334,7 +337,7 @@ async def test_stale_image_surfaces_as_drift_even_with_matching_argv(
         {
             "key": "image",
             "running": "ghcr.io/hal0ai/hal0-toolbox-cpu:retired",
-            "rendered": DEFAULT_ROCMFPX_IMAGE,
+            "rendered": _STANDARD_IMAGE,
         }
     ]
 
@@ -347,7 +350,7 @@ async def test_matching_image_is_not_drift(
     matching_argv = ["--model", "/mnt/ai-models/qwen.gguf"]
     container_stub.expected_argv_by_slot["chat"] = list(matching_argv)
     container_stub.running_argv_by_slot["chat"] = list(matching_argv)
-    container_stub.running_image_by_slot["chat"] = DEFAULT_ROCMFPX_IMAGE
+    container_stub.running_image_by_slot["chat"] = _STANDARD_IMAGE
 
     sm = SlotManager()
     await sm.load("chat")

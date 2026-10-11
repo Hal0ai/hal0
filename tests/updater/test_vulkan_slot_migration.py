@@ -37,27 +37,13 @@ import pytest
 from hal0.config.paths import slots_config_dir
 from hal0.updater.updater import relabel_stale_vulkan_slots
 
-#: The runner image whose Vulkan backend carries #1888. Named LITERALLY, never
-#: as ``DEFAULT_ROCMFPX_IMAGE``: the default pin is a moving target, and once
-#: it moves to a Vulkan-validated image every fixture relying on "the default
-#: is broken" would silently invert and stop exercising the path it names.
-#:
-#: Used ONLY by the composition tests at the bottom of this file, which grow
-#: the stale set deliberately to reproduce the pass-ordering hazard. It is the
-#: wrong fixture for the plain rescue-path tests — see below.
-STALE_LLAMA_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
-
 #: A DELIBERATE operator pin to an image nobody has validated for the Vulkan
 #: lane — a private build, a debug runner, an A/B candidate.
 #:
-#: This, not a former default, is the right fixture for "a gpu-vulkan slot
-#: that genuinely cannot serve the lane". A former-default pin is rescued by
-#: ``retag_stale_slot_images``, which moves it onto the current runner — so
-#: once that runner is Vulkan-validated, a slot pinned to a former default is
-#: NOT a broken slot, it is a slot one migration away from working, and
-#: relabeling it to cpu would be the very over-reach the composition tests
-#: below exist to prevent. A pin outside the stale set is never touched by the
-#: retag, so it stays broken and the relabel is genuinely its only rescue.
+#: The fixture for "a gpu-vulkan slot that genuinely cannot serve the lane":
+#: the image is not a pinned digest whose manifest row lists ``vulkan`` in
+#: ``lanes_gated``, and no other migration will change it, so the relabel is
+#: its only rescue.
 UNVALIDATED_PIN = "ghcr.io/example/hal0-runner-private:1"
 
 
@@ -68,8 +54,7 @@ def _write_slot(name: str, body: str) -> None:
     :data:`UNVALIDATED_PIN` injected, so it is unambiguously a slot whose lane
     does not work and which no other migration will fix — the population this
     pass exists to rescue. Pinning it explicitly keeps each fixture's meaning
-    fixed regardless of what ``DEFAULT_ROCMFPX_IMAGE`` becomes, and regardless
-    of what joins ``STALE_ROCMFPX_IMAGE_REFS``.
+    fixed regardless of what the ``standard`` pin in manifest.json becomes.
 
     A fixture that DOES pin an image is left exactly as written, which is how
     the #1948 "validated image is not migrated" cases and the composition
@@ -517,36 +502,94 @@ def _vulkan_slot_on(image: str) -> str:
     return f'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\nimage_pin = "{image}"\n'
 
 
-def test_slot_pinned_to_a_vulkan_validated_image_is_left_alone(tmp_hal0_home: str) -> None:
-    """The re-enabled lane must survive an update.
+def _gate_standard_pin(monkeypatch) -> str:
+    """Make ``standard`` a published pin whose digest passed the Vulkan gate.
+
+    Returns the pinned ref: the Vulkan-validated image a slot can name.
+    """
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners.pins import RunnerPin
+
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b11552-r1",
+        digest="sha256:" + "a" * 64,
+        lanes_gated=("rocm", "vulkan"),
+    )
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    return table["standard"].ref
+
+
+def test_slot_pinned_to_a_vulkan_validated_image_is_left_alone(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """The Vulkan lane must survive an update.
 
     Without this, every ``hal0 update`` would silently undo a deliberate
     ``gpu-vulkan`` choice — the migration would see the label, not the image.
     """
-    from hal0.config.schema import VULKAN_FIXED_IMAGE
-
-    _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
+    _write_slot("utility", _vulkan_slot_on(_gate_standard_pin(monkeypatch)))
 
     assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 0
     assert _device_of("utility") == "gpu-vulkan"
 
 
-def test_it_is_left_alone_on_a_kfd_less_box_too(tmp_hal0_home: str) -> None:
+def test_it_is_left_alone_on_a_kfd_less_box_too(tmp_hal0_home: str, monkeypatch) -> None:
     """The ct151 shape, and the case with the most to lose: Vulkan is the only
     lane this box has, so relabeling to ``cpu`` would strand the GPU."""
-    from hal0.config.schema import VULKAN_FIXED_IMAGE
-
-    _write_slot("utility", _vulkan_slot_on(VULKAN_FIXED_IMAGE))
+    _write_slot("utility", _vulkan_slot_on(_gate_standard_pin(monkeypatch)))
 
     assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("utility") == "gpu-vulkan"
+
+
+def test_an_unpinned_slot_follows_the_standard_pins_gate(tmp_hal0_home: str, monkeypatch) -> None:
+    """A slot that pins nothing launches the ``standard`` runner, so whether it
+    keeps ``gpu-vulkan`` depends on that pin's ``lanes_gated``: kept once the
+    digest passed the Vulkan gate, rescued while it has not."""
+    slots_config_dir().mkdir(parents=True, exist_ok=True)
+    (slots_config_dir() / "utility.toml").write_text(
+        'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
+    )
+
+    # The shipped placeholder pin gates nothing.
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 1
+    assert _device_of("utility") == "cpu"
+
+    (slots_config_dir() / "utility.toml").write_text(
+        'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
+    )
+    _gate_standard_pin(monkeypatch)
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
+    assert _device_of("utility") == "gpu-vulkan"
+
+
+def test_an_env_override_of_the_standard_image_is_not_vulkan_validated(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    """``HAL0_RUNNER_IMAGE_STANDARD`` names an image the hardware gate never
+    saw, so an unpinned slot resolving it is rescued even when the pin is gated."""
+    _gate_standard_pin(monkeypatch)
+    monkeypatch.setenv("HAL0_RUNNER_IMAGE_STANDARD", "ghcr.io/me/own-build:1")
+    slots_config_dir().mkdir(parents=True, exist_ok=True)
+    (slots_config_dir() / "utility.toml").write_text(
+        'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
+    )
+
+    assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=True) == 1
+    assert _device_of("utility") == "gpu-rocm"
 
 
 def test_slot_pinned_to_an_unvalidated_image_is_still_rescued(tmp_hal0_home: str) -> None:
     """The rescue this pass exists for is untouched.
 
     A deliberate pin to an unvalidated runner: the Vulkan lane cannot serve
-    it, the retag will not move it (it is not a former default), so the slot
+    it, no migration moves a deliberate pin, so the slot
     would refuse to load forever. The relabel moves it to a lane that works.
     """
     _write_slot("utility", _vulkan_slot_on(UNVALIDATED_PIN))
@@ -584,169 +627,3 @@ def test_it_never_relabels_gpu_rocm_back_to_vulkan(tmp_hal0_home: str) -> None:
 
     assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 0
     assert _device_of("utility") == "gpu-rocm"
-
-
-# ── B5: the two migration passes compose (real sequence) ────────────────── #
-#
-# ``relabel_stale_vulkan_slots`` runs BEFORE ``retag_stale_slot_images``, and
-# the retag computes its replacement image from the TOML *as the relabel left
-# it*. That ordering is load-bearing and was untested: a slot carrying a stale
-# former-default pin on a kfd-less box was relabeled to ``cpu`` (because its
-# stale pin cannot serve Vulkan), after which the retag read ``device = "cpu"``
-# and installed the CPU toolbox image — GPU stranded, and a pin that now looks
-# like a deliberate CPU choice nobody made.
-#
-# The fix is in the predicate, not the order: ``vulkan_lane_serves`` looks
-# THROUGH the retag, so the relabel judges the image the slot will really run.
-# Reordering the passes was rejected — #1954's ``converge_kfd_group`` pins
-# itself before the relabel in its own docstring contract.
-
-
-def _run_both_passes(*, rocm_lane: bool) -> None:
-    """The real post-activation sequence, in the real order."""
-    from hal0.updater.updater import retag_stale_slot_images
-
-    relabel_stale_vulkan_slots(amd_host=True, rocm_lane=rocm_lane)
-    retag_stale_slot_images()
-
-
-def _image_pin_of(name: str):
-    raw = _raw(name)
-    if "image_pin" in raw:
-        return raw.get("image_pin")
-    slot = raw.get("slot")
-    return slot.get("image_pin") if isinstance(slot, dict) else None
-
-
-def _repin_default(monkeypatch, ref: str) -> None:
-    """Point default-image resolution at ``ref`` via the documented seam."""
-    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", ref)
-    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", ref)
-
-
-def _stale_set_includes_ade07ba(monkeypatch) -> None:
-    """Simulate #1959's half: ade07ba joins the stale former-default set.
-
-    That is what makes the retag willing to move a slot off it — and therefore
-    what creates the composition hazard in the first place.
-    """
-    import hal0.config.schema as schema_mod
-    import hal0.runners as runners_mod
-
-    grown = frozenset(schema_mod.STALE_ROCMFPX_IMAGE_REFS | {STALE_LLAMA_IMAGE})
-    monkeypatch.setattr(schema_mod, "STALE_ROCMFPX_IMAGE_REFS", grown)
-    monkeypatch.setattr(runners_mod, "STALE_RUNNER_IMAGE_REFS", grown, raising=False)
-    monkeypatch.setattr(runners_mod, "STALE_ROCMFPX_IMAGE_REFS", grown, raising=False)
-
-
-class TestRelabelAndRetagCompose:
-    """ct151 shape throughout: AMD, render node, NO /dev/kfd — the box whose
-    only lane is Vulkan, and the one Phase D exists to serve."""
-
-    def test_control_unpinned_slot_lands_on_the_vulkan_lane(
-        self, tmp_hal0_home: str, monkeypatch
-    ) -> None:
-        """The reviewer's control row. A slot with no pin resolves the new
-        default directly, so the relabel skips it and it keeps its GPU lane."""
-        from hal0.config.schema import VULKAN_FIXED_IMAGE
-
-        _repin_default(monkeypatch, VULKAN_FIXED_IMAGE)
-        _stale_set_includes_ade07ba(monkeypatch)
-        # Written without the fixture's stale-pin injection: this row is
-        # specifically about a slot that pins nothing.
-        (slots_config_dir()).mkdir(parents=True, exist_ok=True)
-        (slots_config_dir() / "utility.toml").write_text(
-            'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
-        )
-
-        _run_both_passes(rocm_lane=False)
-
-        assert _device_of("utility") == "gpu-vulkan"
-
-    def test_stale_pinned_slot_survives_the_real_pass_order(
-        self, tmp_hal0_home: str, monkeypatch
-    ) -> None:
-        """The B5 repro, and the row that was BROKEN.
-
-        Before the fix this ended at ``device = "cpu"`` with the CPU toolbox
-        image pinned. It must end where a retag-first ordering would have put
-        it: on the GPU, on the validated runner.
-        """
-        from hal0.config.schema import FALLBACK_VULKAN_IMAGE, VULKAN_FIXED_IMAGE
-
-        _repin_default(monkeypatch, VULKAN_FIXED_IMAGE)
-        _stale_set_includes_ade07ba(monkeypatch)
-        _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-
-        _run_both_passes(rocm_lane=False)
-
-        # The harm, precisely: the slot lost the GPU entirely, and the retag
-        # then computed its replacement from the rewritten ``device = "cpu"``
-        # and installed the CPU toolbox image.
-        assert _device_of("utility") == "gpu-vulkan"
-        assert _image_pin_of("utility") != FALLBACK_VULKAN_IMAGE
-
-        # NOT asserted here: that the pin now reads VULKAN_FIXED_IMAGE. Moving
-        # an ``image_pin`` is #1959's half of the work (this branch's retag
-        # still only reads the legacy ``image`` keys), so pinning that value
-        # would make this test assert someone else's diff. The equivalence
-        # test below covers the pin without naming a version-specific value.
-
-    def test_the_fixed_order_matches_a_retag_first_ordering(
-        self, tmp_hal0_home: str, monkeypatch
-    ) -> None:
-        """The reviewer's third row, as an equivalence rather than a constant.
-
-        Looking through the retag is supposed to make the real order produce
-        the same outcome a retag-first order would — that is the whole claim,
-        so assert it directly instead of restating the expected values.
-        """
-        from hal0.config.schema import VULKAN_FIXED_IMAGE
-        from hal0.updater.updater import retag_stale_slot_images
-
-        _repin_default(monkeypatch, VULKAN_FIXED_IMAGE)
-        _stale_set_includes_ade07ba(monkeypatch)
-        _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-
-        retag_stale_slot_images()
-        relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False)
-        retag_first = (_device_of("utility"), _image_pin_of("utility"))
-
-        # Same fixture again, real order.
-        _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-        _run_both_passes(rocm_lane=False)
-        real_order = (_device_of("utility"), _image_pin_of("utility"))
-
-        # Stated as an equivalence, with no version-specific literal: the
-        # claim is that looking through the retag makes the pass ORDER stop
-        # mattering, which stays true whether or not #1959's image_pin
-        # coverage has landed. The device is pinned literally because that
-        # half is entirely this branch's.
-        assert real_order == retag_first
-        assert real_order[0] == "gpu-vulkan"
-
-    def test_a_stale_pin_is_still_rescued_when_the_new_default_is_broken_too(
-        self, tmp_hal0_home: str, monkeypatch
-    ) -> None:
-        """Looking through the retag must not become optimism.
-
-        Pre-repin, the retag would move the pin to another image that also
-        cannot serve Vulkan — so the slot genuinely has no lane on this
-        kfd-less box, and the relabel must still rescue it to ``cpu``.
-        """
-        _repin_default(monkeypatch, STALE_LLAMA_IMAGE)
-        _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-
-        _run_both_passes(rocm_lane=False)
-
-        assert _device_of("utility") == "cpu"
-
-    def test_a_kfd_box_still_gets_the_rocm_rescue(self, tmp_hal0_home: str, monkeypatch) -> None:
-        """Unchanged where a ROCm lane exists: an unservable Vulkan slot on a
-        kfd box moves to gpu-rocm rather than all the way to cpu."""
-        _repin_default(monkeypatch, STALE_LLAMA_IMAGE)
-        _write_slot("utility", _vulkan_slot_on(STALE_LLAMA_IMAGE))
-
-        _run_both_passes(rocm_lane=True)
-
-        assert _device_of("utility") == "gpu-rocm"

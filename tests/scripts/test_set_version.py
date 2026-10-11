@@ -109,7 +109,7 @@ def _populate_project(tmp_path: Path, version: str) -> dict[str, Path]:
         "_schema": "hal0.manifest.v1",
         "version": version,
         "channel": "stable",
-        "toolbox_images": {},
+        "runners": {},
     }
     p = tmp_path / "manifest.json"
     p.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

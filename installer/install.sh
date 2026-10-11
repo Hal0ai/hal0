@@ -38,8 +38,8 @@
 #   HAL0_PORT          API port (default 8080)
 #   HAL0_PYTHON        python interpreter (default python3)
 #   HAL0_NO_PROBE=1    skip the hardware probe at the end
-#   HAL0_TOOLBOX_IMAGE_VULKAN, HAL0_TOOLBOX_IMAGE_ROCM, ...
-#                      override per-backend container image refs
+#   HAL0_RUNNER_IMAGE_<KEY>  override one runner's image ref
+#                      (e.g. HAL0_RUNNER_IMAGE_STANDARD, HAL0_RUNNER_IMAGE_CPU)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -755,8 +755,8 @@ if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
     info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
     info "effectively gives the agent full control of the machine, including anything it is"
     info "talked into running by a web page or a stored memory. There is no sandboxed option:"
-    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune,"
-    info "hal0-quantize) need the real host, so a container would break them by design."
+    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune)"
+    info "need the real host, so a container would break them by design."
     info "Leave it off unless you want that; you can turn it on later with"
     info "  hal0 agent install hermes --terminal-tool"
     _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
@@ -1490,9 +1490,9 @@ ${NETWORK_BLOCK}
 # applies the token live with no restart; prefer it.
 # \`systemctl restart hal0-api\` either way.
 # HF_TOKEN=
-# HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
-# the per-backend container image refs used by providers/llama_server.py.
-# Unset = use the image pinned in the provider at release time.
+# HAL0_RUNNER_IMAGE_<KEY> (e.g. HAL0_RUNNER_IMAGE_STANDARD) — optional
+# override for one runner's container image ref. Unset = use the image
+# pinned in this release's manifest.json.
 EOF
     # api.env is the EnvironmentFile that carries provider tokens, operator
     # secrets and (after a rotation) HAL0_ADMIN_KEY/HAL0_CLIENT_KEY. Owner-only
@@ -2538,8 +2538,7 @@ fi
 #
 # HAL0_SKIP_BRAIN_MODEL=1 skips it entirely; HAL0_BRAIN_MODEL=<curated-id>
 # forces a specific variant instead of the default (lfm2.5-2.6b — 2.87 GB,
-# plain GGUF, every runner class; the hal0-brain-sft ids are the override
-# set, and their Q8/Q4 quants are ROCmFPX-runner-only).
+# plain GGUF, every runner class; hal0-brain-sft-f16 is the override).
 #
 # The AGENT anchor offer below shares this step (no extra ui_step banner, so
 # UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
@@ -2558,7 +2557,7 @@ else
 fi
 
 # ── agent anchor model — OPT-IN, size disclosed, default SKIP ───────────────
-# As of runner ade07ba (DEFAULT_ROCMFPX_IMAGE) the brain models are NATIVE
+# The brain models are NATIVE
 # tool-callers — the steward executes its own calls on the brain slot
 # (installer/etc-hal0/slots/brain.toml, verified live on the SFT quants and
 # the MiniCPM5 base). The `[brain_chat] tool_model` reroute, code default
@@ -2570,7 +2569,7 @@ fi
 # than the ~1B brain.
 #
 # That is what this offer provides — and the shape of the offer is the whole
-# point. Unlike the brain pull (unconditional, ~1-2 GB) the anchor is 15-31 GB,
+# point. Unlike the brain pull (unconditional, ~1-3 GB) the anchor is ~18.5 GB,
 # so:
 #
 #   * it is ASKED, never assumed, and the exact GB figure is printed first;
@@ -2918,6 +2917,8 @@ fi
 
 # ── post-activation migrations (schema + mtp/vulkan/image-pin/extra-args) ─────
 # One shared sequence with Updater.commit()'s self-update path (GH #1475):
+# the one-shot runner-system conversion (hal0.config.migrations.runner_system,
+# which runs FIRST and is fatal on failure after restoring its backup),
 # hal0.toml schema migrations, stale mtp=true slot-override clearing (a
 # force-on pointing at a model with no MTP heads crashes llama-server at load),
 # retired device="gpu-vulkan" slot relabeling (#1924 — llama.cpp-backed GPU
@@ -2925,7 +2926,7 @@ fi
 # under the /dev/kfd preflight guard; relabeled to gpu-rocm/cpu, AMD hosts only,
 # non-llama runtimes like Kokoro/ComfyUI left untouched), defaults.extra_args
 # sanitizing, --reasoning-format none stripping (#2545), and component
-# convergence (runner-image pin retagging, the
+# convergence (runner-image catalogue sync, the
 # memory engine). Every pass after the schema migration is independently
 # best-effort — a single pass failing never aborts the others — so a box
 # upgraded by re-running install.sh ends in the same on-disk state as one

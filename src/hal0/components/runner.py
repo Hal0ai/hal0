@@ -54,7 +54,7 @@ def _arm_kwargs(
     *,
     job_id: str | None,
     apply: bool,
-    image_retag: bool,
+    catalogue_sync: bool,
     engine: bool,
     hermes_install: bool,
 ) -> dict[str, Any]:
@@ -62,7 +62,7 @@ def _arm_kwargs(
         # engine_upgrade's own kwarg spelling; boot passes upgrade=False.
         return {"job_id": job_id, "upgrade": apply and engine}
     if comp.id == "runner-images":
-        return {"job_id": job_id, "apply": apply and image_retag}
+        return {"job_id": job_id, "apply": apply and catalogue_sync}
     if comp.id == "hermes":
         return {"job_id": job_id, "apply": apply and hermes_install}
     return {"job_id": job_id, "apply": apply}
@@ -117,7 +117,7 @@ def converge_components(
     *,
     job_id: str | None = None,
     apply: bool = True,
-    image_retag: bool = True,
+    catalogue_sync: bool = True,
     engine: bool = True,
     hermes_install: bool = True,
 ) -> dict[str, dict[str, Any]]:
@@ -127,7 +127,7 @@ def converge_components(
             comp,
             job_id=job_id,
             apply=apply,
-            image_retag=image_retag,
+            catalogue_sync=catalogue_sync,
             engine=engine,
             hermes_install=hermes_install,
         )

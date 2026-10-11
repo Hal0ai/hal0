@@ -116,32 +116,29 @@ class TestImportDryRun:
         """The preview names the runtime the envelope drags along, so the
         operator sees it before committing."""
         _create_custom(client, "pf-runner")
-        client.put("/api/profiles/pf-runner", json={"runner": "strix"})
+        client.put("/api/profiles/pf-runner", json={"runner": "cuda"})
         env = client.post("/api/profiles/pf-runner/export").json()
-        assert env["profile"]["runner"] == "strix"
+        assert env["profile"]["runner"] == "cuda"
 
         r = client.post("/api/profiles/import", json={"envelope": env, "dry_run": True})
         body = r.json()
-        assert body["runner"] == "strix"
+        assert body["runner"] == "cuda"
         assert body["runner_stripped"] is False
         assert body["runtime_family"] == "llama-server"
 
-    def test_dry_run_reports_an_alias_runtime_under_its_canonical_key(
-        self, client: TestClient
-    ) -> None:
-        """A superseded key folds rather than strips, so the preview must name
-        the key the box actually has — the UI looks the reported key up in its
-        runtime registry, and the raw alias would render as 'unknown' for an
-        import that in fact lands the runtime fine."""
+    def test_dry_run_treats_a_retired_alias_key_as_unavailable(self, client: TestClient) -> None:
+        """The runner registry has no aliases (ADR-0028): a superseded key such as
+        ``vulkanfpx`` is an unknown runtime, so the preview says the import lands
+        as Auto instead of silently folding it onto ``standard``."""
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()
-        env["profile"]["runner"] = "vulkanfpx"  # RUNNER_ALIASES → rocmfpx
+        env["profile"]["runner"] = "vulkanfpx"
         r = client.post(
             "/api/profiles/import",
             json={"envelope": env, "name": "fresh-alias", "dry_run": True, "force": True},
         )
         body = r.json()
-        assert body["runner_stripped"] is False
-        assert body["runner"] == "rocmfpx"
+        assert body["runner_stripped"] is True
+        assert body["runner"] == "vulkanfpx"
 
     def test_dry_run_flags_a_runtime_this_box_does_not_have(self, client: TestClient) -> None:
         """An unavailable runtime is a WARNING, not a block: the dry run names
@@ -197,12 +194,12 @@ class TestImportCommit:
 
     def test_commit_keeps_an_available_runtime(self, client: TestClient) -> None:
         _create_custom(client, "pf-keep")
-        client.put("/api/profiles/pf-keep", json={"runner": "strix"})
+        client.put("/api/profiles/pf-keep", json={"runner": "cuda"})
         env = client.post("/api/profiles/pf-keep/export").json()
         r = client.post("/api/profiles/import", json={"envelope": env, "name": "pf-keep-copy"})
         assert r.status_code == 201
         assert r.json()["runner_stripped"] is False
-        assert r.json()["profile"]["runner"] == "strix"
+        assert r.json()["profile"]["runner"] == "cuda"
 
     def test_commit_without_name_400(self, client: TestClient) -> None:
         env = client.post(f"/api/profiles/{_seed_name()}/export").json()

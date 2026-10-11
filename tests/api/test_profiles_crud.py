@@ -766,9 +766,9 @@ def test_create_is_still_fully_screened(legacy_client: TestClient) -> None:
 
 
 def test_create_profile_with_runner_roundtrip(client: TestClient) -> None:
-    r = client.post("/api/profiles", json={"name": "pf-api", "flags": "", "runner": "promptforge"})
+    r = client.post("/api/profiles", json={"name": "pf-api", "flags": "", "runner": "cuda"})
     assert r.status_code == 201
-    assert r.json()["runner"] == "promptforge"
+    assert r.json()["runner"] == "cuda"
 
 
 def test_create_profile_unknown_runner_422(client: TestClient) -> None:
@@ -782,14 +782,21 @@ def test_create_profile_unknown_runner_422(client: TestClient) -> None:
 @pytest.fixture
 def ghost_client(tmp_hal0_home: str) -> Iterator[TestClient]:
     """Client over a box whose stored profile pins a runtime this build's
-    RUNNER_IMAGES no longer carries (removed/renamed key, or a downgrade)."""
-    _seed_profiles_toml(tmp_hal0_home, "ghosted", "-fa on", runner="ghost-runner", intent="before")
+    RUNNER_IMAGES no longer carries (removed/renamed key, or a downgrade).
+
+    Seeded AFTER the app has booted: the runner-system conversion that runs at
+    boot drops an unknown profile ``runner`` once, so a ghost key only survives
+    when it arrives later (a hand edit, a downgrade-then-upgrade).
+    """
     with TestClient(create_app()) as c:
+        _seed_profiles_toml(
+            tmp_hal0_home, "ghosted", "-fa on", runner="ghost-runner", intent="before"
+        )
         yield c
 
 
 def _pinned(client: TestClient, name: str = "pf-runtime") -> None:
-    r = client.post("/api/profiles", json={"name": name, "flags": "", "runner": "promptforge"})
+    r = client.post("/api/profiles", json={"name": name, "flags": "", "runner": "cuda"})
     assert r.status_code == 201, r.text
 
 
@@ -807,7 +814,7 @@ def test_put_omitting_runner_keeps_the_stored_runtime(client: TestClient) -> Non
     _pinned(client)
     r = client.put("/api/profiles/pf-runtime", json={"intent": "Renamed"})
     assert r.status_code == 200, r.text
-    assert r.json()["runner"] == "promptforge"
+    assert r.json()["runner"] == "cuda"
 
 
 def test_put_null_runner_keeps_the_stored_runtime(client: TestClient) -> None:
@@ -816,7 +823,7 @@ def test_put_null_runner_keeps_the_stored_runtime(client: TestClient) -> None:
     _pinned(client)
     r = client.put("/api/profiles/pf-runtime", json={"intent": "Renamed", "runner": None})
     assert r.status_code == 200, r.text
-    assert r.json()["runner"] == "promptforge"
+    assert r.json()["runner"] == "cuda"
 
 
 def test_ghost_profile_metadata_edit_is_not_blocked_by_its_stored_runner(

@@ -13,7 +13,7 @@ provides no parallelism gain — port the single-multiplex design from
 haloai's lib/providers/flm.py.
 
 # Hybrid container packaging:
-#   - Image: hal0-toolbox-flm carries Ubuntu 24.04 + ffmpeg + libxrt-npu2
+#   - Image: hal0-runner-flm carries Ubuntu 24.04 + ffmpeg + libxrt-npu2
 #     + libboost-program-options. Freely redistributable, ~250 MB.
 #   - Host: FLM binary tree (bin/, lib/, share/, deps/) bind-mounted in
 #     at the SAME absolute path inside the container so that
@@ -42,15 +42,8 @@ import httpx
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
 from hal0.providers.base import ContainerSpec, Provider
-from hal0.runners import RUNNER_IMAGES
 
 # ── Toolbox image ─────────────────────────────────────────────────────────────
-# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
-# lives in exactly one place (hal0.runners.RUNNER_IMAGES["flm"].image).
-# Kept as a module attribute for back-compat: api/routes/updater.py and
-# tests/providers/test_flm.py both import this name directly.
-_DEFAULT_FLM_IMAGE = RUNNER_IMAGES["flm"].image
-
 # ── On-disk layout ────────────────────────────────────────────────────────────
 # The toolbox image is self-contained: it bundles FLM at /opt/fastflowlm/
 # (binary, libs, xclbins, share assets) and symlinks /usr/local/bin/flm
@@ -813,8 +806,8 @@ class FLMProvider(Provider):
         :func:`hal0.providers._image.resolve_family_image`):
         ``slot_cfg["image_pin"]`` (top-level or ``[slot]``-nested, honored
         verbatim) → ``[slots].default_images["flm"]`` (operator family
-        default) → the runner registry (``HAL0_TOOLBOX_IMAGE_FLM`` env
-        override → the manifest digest pin → the bundled default) — see
+        default) → the runner registry (``HAL0_RUNNER_IMAGE_FLM`` env
+        override → the ``manifest.json`` pin) — see
         :func:`hal0.runners.resolve_runner_image`.
         """
         from hal0.providers._image import resolve_family_image

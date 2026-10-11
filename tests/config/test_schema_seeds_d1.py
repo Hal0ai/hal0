@@ -3,12 +3,7 @@
 import tomllib
 from pathlib import Path
 
-from hal0.config.loader import (
-    load_manifest,
-    load_slot_config,
-    manifest_image_ref,
-    save_slot_config,
-)
+from hal0.config.loader import load_slot_config, save_slot_config
 from hal0.config.schema import SEED_PROFILES, ImageGenConfig, SlotConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -129,10 +124,12 @@ def test_load_slot_config_string_image_survives_in_extra(tmp_path: Path) -> None
     assert reloaded.extra["image"] == "ghcr.io/foo:v1"
 
 
-def test_manifest_comfyui_pinned_to_hal0_image() -> None:
-    manifest = load_manifest(_REPO_ROOT / "manifest.json")
-    ref = manifest_image_ref("comfyui", manifest=manifest)
-    assert ref == (
-        "ghcr.io/hal0ai/hal0-comfyui"
-        "@sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b"
-    )
+def test_manifest_comfyui_pin_is_hal0s_own_runner_image() -> None:
+    from hal0.runners.pins import load_runner_pins
+
+    pin = load_runner_pins(_REPO_ROOT / "manifest.json")["comfyui"]
+    assert pin.image == "ghcr.io/hal0ai/hal0-runner-comfyui"
+    # A published pin is digest-pinned: the ref is repo:tag@digest.
+    if pin.published:
+        assert pin.digest is not None
+        assert pin.ref == f"{pin.image}:{pin.tag}@{pin.digest}"

@@ -108,13 +108,47 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _run(tmp_path: Path, **extra_env: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+#: Runners whose pin carries a digest in the fixture manifest. The shipped
+#: manifest.json holds placeholder pins (every digest null), under which every
+#: image-gated row skips; the slot-creating rows need pinned runners.
+#: ``vulkan`` and ``rocm`` both read ``runners.standard``.
+_DEFAULT_PINNED = frozenset({"standard", "flm", "kokoro", "moonshine"})
+
+#: Fixture row name -> the ``runners`` key ``manifest_digest`` reads for it.
+_ROW_RUNNER = {"vulkan": "standard", "rocm": "standard"}
+
+
+def _write_manifest(tree: Path, pinned: frozenset[str]) -> None:
+    """Write ``manifest.json`` with a ``runners`` row per runner key.
+
+    Only the keys in ``pinned`` carry a digest, mirroring how a promoted
+    release pins a runner.
+    """
+    keys = ("standard", "cpu", "flm", "kokoro", "moonshine", "comfyui", "qwen3tts", "cuda")
+    runners = {
+        key: {
+            "image": f"ghcr.io/hal0ai/hal0-runner-{key}",
+            "tag": "b1-r1" if key in pinned else None,
+            "digest": ("sha256:" + "a" * 64) if key in pinned else None,
+            "lanes_gated": [],
+        }
+        for key in keys
+    }
+    (tree / "manifest.json").write_text(json.dumps({"runners": runners}), encoding="utf-8")
+
+
+def _run(
+    tmp_path: Path,
+    *,
+    pinned: frozenset[str] = _DEFAULT_PINNED,
+    **extra_env: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     # A throwaway tree: REPO_ROOT resolves to tmp_path, so the report and the
     # manifest.json read by manifest_digest() never touch the real checkout.
     tree = tmp_path / "tree"
     (tree / "scripts").mkdir(parents=True)
     shutil.copy2(_SCRIPT, tree / "scripts" / "release-test.sh")
-    shutil.copy2(_REPO_ROOT / "manifest.json", tree / "manifest.json")
+    _write_manifest(tree, pinned)
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -151,8 +185,52 @@ def _run(tmp_path: Path, **extra_env: str) -> tuple[subprocess.CompletedProcess[
 
 
 def _manifest_has(name: str) -> bool:
-    data = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
-    return bool(data.get("toolbox_images", {}).get(name, {}).get("digest"))
+    """Does the fixture manifest pin the runner behind row ``name``?"""
+    return _ROW_RUNNER.get(name, name) in _DEFAULT_PINNED
+
+
+# ── manifest_digest reads runners.<key>.digest ──────────────────────────────
+
+
+def _rows_by_name(tmp_path: Path) -> dict[str, dict]:
+    report = json.loads(
+        (tmp_path / "tree" / "tests" / "release-gate-report.json").read_text(encoding="utf-8")
+    )
+    return {r["name"]: r for r in report["rows"]}
+
+
+def test_unpinned_runners_skip_their_rows_as_image_not_available(tmp_path: Path) -> None:
+    """With every ``runners.<key>.digest`` null (the shipped placeholder
+    manifest) the image-gated rows skip and name the runner key, not a
+    ``toolbox_images`` entry."""
+    proc, cmds = _run(tmp_path, pinned=frozenset(), HAL0_TEST_BIN="/opt/test/hal0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rows = _rows_by_name(tmp_path)
+    for name, key in (
+        ("vulkan", "standard"),
+        ("rocm", "standard"),
+        ("flm", "flm"),
+        ("moonshine", "moonshine"),
+        ("kokoro", "kokoro"),
+    ):
+        assert rows[name]["status"] == "skip", rows[name]
+        assert "image-not-available" in rows[name]["detail"]
+        assert f"runners.{key}.digest is null" in rows[name]["detail"]
+    assert not [c for c in cmds if c.startswith("/opt/test/hal0 slot create ")]
+
+
+def test_vulkan_and_rocm_rows_read_the_standard_runner(tmp_path: Path) -> None:
+    """Pinning ``standard`` alone un-gates both GPU rows; the other runners'
+    rows stay skipped."""
+    _proc, cmds = _run(tmp_path, pinned=frozenset({"standard"}), HAL0_TEST_BIN="/opt/test/hal0")
+    rows = _rows_by_name(tmp_path)
+    assert "image-not-available" not in rows["vulkan"]["detail"]
+    assert "image-not-available" not in rows["rocm"]["detail"]
+    for name in ("flm", "moonshine", "kokoro"):
+        assert rows[name]["status"] == "skip"
+        assert "image-not-available" in rows[name]["detail"]
+    created = [c.split()[3] for c in cmds if c.startswith("/opt/test/hal0 slot create ")]
+    assert f"{_PREFIX}-vulkan" in created
 
 
 # ── #2262: cleanup sees slots created through the row call sites ────────────

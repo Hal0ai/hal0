@@ -679,11 +679,11 @@ class TestContainerSpec:
         # spec-hw-slot-ownership §3: _TEST_IMAGE is DELETED from the chain.
         # With no slot image_pin/binary, the image is the HW-gated default —
         # NOT the (now-ignored) _TEST_IMAGE.
-        from hal0.config.schema import DEFAULT_ROCMFPX_IMAGE
+        from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
         spec = self._build_spec()
         assert spec.image != _TEST_IMAGE
-        assert spec.image == DEFAULT_ROCMFPX_IMAGE
+        assert spec.image == resolve_runner_image(RUNNER_IMAGES["standard"])
 
     def test_model_arg_in_command(self) -> None:
         spec = self._build_spec()
@@ -1512,7 +1512,7 @@ class TestContextSizeOwnership:
         dict — the exact shape of a pre-#1657 registry row on an upgraded or
         pre-fix-built box — must resolve from the curated catalogue's
         ``context_length`` instead of the bare 8192 safe fallback."""
-        mi = _model_info(_model_key="hal0-brain-sft-q8-rocmfpx", metadata={})
+        mi = _model_info(_model_key="lfm2.5-2.6b", metadata={})
         assert _resolve_context_size(None, mi) != _CTX_SAFE_FALLBACK
         assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
 
@@ -1521,7 +1521,7 @@ class TestContextSizeOwnership:
         go through the same dense cap as a GGUF-detected native window — this
         is a derived fact, not an operator's explicit choice, so an
         unconfigured slot can't request an impractical KV cache."""
-        mi = _model_info(_model_key="hal0-brain-sft-q8-rocmfpx")
+        mi = _model_info(_model_key="lfm2.5-2.6b")
         mi.pop("metadata", None)
         assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
 
@@ -1549,7 +1549,7 @@ _HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 #: A curated brain pick whose catalogue row carries a ``context_length`` but
 #: whose registry row on an older-build box carries no ``metadata`` at all
 #: (#1617). This is the shape the curated backfill exists for.
-_CURATED_BRAIN_ID = "hal0-brain-sft-q8-rocmfpx"
+_CURATED_BRAIN_ID = "lfm2.5-2.6b"
 
 
 class TestDenseCapDoesNotUndercutAConfiguredSlot:
@@ -2121,16 +2121,17 @@ class TestSlotHardwareSegment:
         assert "--metrics" in segs["slot_hardware"]
 
 
-class TestFPXQuantRunnerGuard:
-    """hal0#1790 defense-in-depth: a ROCmFPX-family quant (custom GGML tensor
-    type ids 100/103 — see ``hal0.registry.detect.quant_from_rocmfpx_filename``)
-    must never reach a launch on a runner that isn't ``rocmfpx`` (vulkan
-    served via ``supported_backends``, not a separate runner key).
-    The probe fix (``hal0.hardware.probe._amd_gpu_info``) stops the installer
-    from picking this pairing going forward; this guard is the backstop for a
-    stale slot TOML, a manual ``HAL0_BRAIN_MODEL`` override, or a hand-swapped
-    model — refuse the launch with a clear error instead of a SIGSEGV crash
-    loop (exit 139).
+class TestUnsupportedQuantGuard:
+    """hal0#1790 defense-in-depth: a fork-only quant (the ROCmFPX family's
+    custom GGML tensor type ids 100/103 — see
+    ``hal0.registry.detect.quant_from_rocmfpx_filename`` — plus IU4 and
+    ActiveFPX) must never reach a launch. No runner hal0 ships can load them
+    (ADR-0028), whatever the slot's device or runner.
+
+    Model add, pull and scan refuse these up front; this guard is the backstop
+    for a model registered before that refusal existed, a stale slot TOML, a
+    manual ``HAL0_BRAIN_MODEL`` override, or a hand-swapped model — refuse the
+    launch with a clear 422 instead of a SIGSEGV crash loop (exit 139).
     """
 
     _GPU_NODES: ClassVar[list[str]] = ["/dev/kfd", "/dev/dri/renderD128"]
@@ -2149,42 +2150,63 @@ class TestFPXQuantRunnerGuard:
             return provider.container_spec(cfg, model_info)
 
     def test_rocmfpx_quant_on_cpu_slot_is_refused(self) -> None:
-        """The exact hal0#1790 shape: hal0-brain-sft-q8-rocmfpx on a device='cpu'
-        slot. The old wrong pairing must now raise instead of spawning."""
+        """The exact hal0#1790 shape: a ROCmFP8 build on a device='cpu' slot
+        must raise instead of spawning."""
         cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat", name="brain")
         model_info = _model_info(quant="ROCmFP8", _model_key="hal0-brain-sft-q8-rocmfpx")
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
             self._spec(cfg, model_info, cpu_chat)
         err = exc_info.value
-        assert err.code == "slot.unsupported_quant_for_runner"
+        assert err.code == "slot.unsupported_quant"
         assert err.details["quant"] == "ROCmFP8"
-        assert err.details["runner"] == "cpu"
         assert err.details["model"] == "hal0-brain-sft-q8-rocmfpx"
+        assert err.details["slot"] == "brain"
+        assert "no hal0 runner can load" in str(err)
 
     @pytest.mark.parametrize("quant", ["ROCmFP3", "ROCmFP4", "ROCmFP6", "ROCmFP8", "ROCmFPX"])
     def test_every_fpx_family_label_is_refused_on_cpu(self, quant: str) -> None:
         cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat")
         model_info = _model_info(quant=quant)
-        with pytest.raises(_container_mod.UnprocessableEntity):
+        with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
             self._spec(cfg, model_info, cpu_chat)
+        assert exc_info.value.code == "slot.unsupported_quant"
 
-    def test_rocmfpx_quant_on_gpu_rocm_slot_is_allowed(self) -> None:
+    def test_rocmfpx_quant_on_gpu_rocm_slot_is_refused(self) -> None:
+        """No runner accepts the fork family any more, the rocm lane included."""
         rocm = SEED_PROFILES["chat"]
         cfg = _slot_cfg(device="gpu-rocm", profile="chat")
-        model_info = _model_info(quant="ROCmFP8", _model_key="hal0-brain-sft-q8-rocmfpx")
-        spec = self._spec(cfg, model_info, rocm)
-        assert spec is not None  # no raise — rocmfpx runner accepts its own family
+        model_info = _model_info(quant="ROCmFP8", _model_key="some-model")
+        with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
+            self._spec(cfg, model_info, rocm)
+        assert exc_info.value.code == "slot.unsupported_quant"
 
-    def test_rocmfpx_quant_on_gpu_vulkan_slot_is_allowed(self) -> None:
+    def test_rocmfpx_quant_on_gpu_vulkan_slot_is_refused(self) -> None:
         vulkan = ProfileConfig(flags="-fa on", backend="vulkan")
-        # binary="vulkanfpx" is deliberate here: the legacy alias spelling,
-        # exercised on purpose — it heals to "rocmfpx" via get_runner().
-        cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat", binary="vulkanfpx")
+        cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat")
         model_info = _model_info(quant="ROCmFP4")
-        spec = self._spec(cfg, model_info, vulkan)
-        assert spec is not None
+        with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
+            self._spec(cfg, model_info, vulkan)
+        assert exc_info.value.code == "slot.unsupported_quant"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/mnt/ai-models/qwen3-ROCmFP4.gguf",
+            "/mnt/ai-models/model-IU4.gguf",
+            "/mnt/ai-models/model-ActiveFPX.gguf",
+        ],
+    )
+    def test_a_fork_family_filename_is_refused_without_a_quant_label(self, path: str) -> None:
+        """A registry row that never got a ``quant`` label is still caught by
+        the file name."""
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cfg = _slot_cfg(device="cpu", profile="cpu-chat")
+        model_info = _model_info(path=path)
+        with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
+            self._spec(cfg, model_info, cpu_chat)
+        assert exc_info.value.code == "slot.unsupported_quant"
 
     def test_plain_quant_on_cpu_slot_is_unaffected(self) -> None:
         """A normal quant (no ROCmFP* marker) must never trip the guard."""

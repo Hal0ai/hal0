@@ -829,11 +829,10 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/runner-images/pulls/list": ("runner_image_pulls",),
     "POST:/api/runner-images/sync": ("runner_image_sync",),
     # runner_image_pull / pull/status / pull/cancel / detail (all keyed by
-    # {image_id:path}) deliberately NOT aliased — catalogue ids embed the
-    # GHCR repo path (e.g. "hal0ai/hal0-toolbox-cpu"), and _split_args
-    # rejects any path-arg value containing "/" (deliberate guard against
-    # path-segment splicing — see its docstring). Wiring these needs a
-    # slash-safe path-arg encoder; out of scope for this pass.
+    # {image_id:path}) are not aliased: they were written when catalogue ids
+    # were GHCR repo paths, which _split_args refuses (it rejects any path-arg
+    # value containing "/"). Ids are runner keys now (ADR-0028), so wiring
+    # them is possible; not done in this pass.
     "GET:/api/backends": ("backend_list",),
     "GET:/api/backends/{backend_id}": ("backend_detail",),
     "POST:/api/backends/npu/load": ("npu_backend_load",),
@@ -1183,8 +1182,8 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             "image": {
                 "type": "string",
                 "description": (
-                    "Container image override — FPX/FP4 quants need "
-                    "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba with runtime='container'"
+                    "Container image override (debug builds only; the slot's "
+                    "runner image is used when omitted). Requires runtime='container'"
                 ),
             },
             "runtime": {"type": "string", "description": "Set 'container' when image is set"},
@@ -2776,9 +2775,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Create a new slot config (gated). Args pass through to POST /api/slots "
         "(full SlotConfig schema): name + model required; omit port to auto-assign "
         "the next free one; optional type/device, model.context_size, and a string "
-        "image override (FPX/FP4-quant GGUFs need the hal0-rocmfpx toolbox image, "
-        "with runtime='container'). Writes config only — follow with slot_load to "
-        "start it."
+        "image override (debug builds only, with runtime='container'). Writes config "
+        "only — follow with slot_load to start it."
     ),
     "slot_delete": "Delete a slot (gated).",
     "slot_rename": (

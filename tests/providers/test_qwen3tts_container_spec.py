@@ -126,7 +126,7 @@ def test_cache_dir_env_override() -> None:
 def test_no_registry_model_path_required() -> None:
     """qwen3-tts is not a GGUF; model_info with NO 'path' must not raise."""
     spec = Qwen3TTSProvider().container_spec(_slot_cfg(), {})  # {} = no 'path'
-    assert spec.image == "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
+    assert spec.image.startswith("ghcr.io/hal0ai/hal0-runner-qwen3tts")
 
 
 # ── Renderer integration ───────────────────────────────────────────────────────

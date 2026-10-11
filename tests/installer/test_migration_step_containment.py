@@ -145,7 +145,7 @@ def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
     """install.sh convergence must not be weaker than `hal0 update` convergence.
 
     ``clear_stale_mtp_overrides``,
-    ``retag_stale_slot_images`` and ``sanitize_model_extra_args`` run through
+    and ``sanitize_model_extra_args`` run through
     the SAME shared ``run_post_activation_migrations`` sequence
     ``Updater.commit()`` calls (GH #1475), rather than being called
     separately here — the two upgrade paths can never drift onto different

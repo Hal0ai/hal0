@@ -31,48 +31,48 @@ from hal0.providers._gpu import (
     render_node_present,
 )
 
-ADE07BA_REF = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
+_DIGEST = "sha256:" + "a" * 64
 
 
-def _pin(monkeypatch, ref: str) -> None:
-    """Point every default-image resolution at ``ref``.
+def _pin(monkeypatch, *, vulkan_gated: bool) -> str:
+    """Point the ``standard`` pin at a published image, gated or not.
 
-    Uses ``resolve_runner_image``'s documented ``HAL0_TOOLBOX_IMAGE_<KEY>``
-    seam rather than reaching into the registry — :class:`hal0.runners.Runner`
-    is a frozen dataclass, and going through the real resolver means these
-    tests exercise the same precedence chain a box does. Both the canonical
-    (``ROCMFPX``) and legacy-alias (``VULKANFPX``) env var names are pinned:
-    ``rocmfpx`` is the only runner key since the collapse, but
-    ``resolve_runner_image`` still checks the legacy name as a fallback (see
-    ``RUNNER_ALIASES``), and pinning both keeps this test correct regardless
-    of which one a caller's config happens to hit.
-
-    ``hal0.bench.harness`` imported ``DEFAULT_ROCMFPX_IMAGE`` by value at
-    module load, so its ``LaneSpec`` table is pinned separately.
+    The Vulkan lane admits an image only when its pin row lists ``vulkan`` in
+    ``lanes_gated`` (``manifest.json`` ``runners.standard``). Patching the pin
+    table exercises the same resolver chain a box does.
     """
-    import hal0.bench.harness as harness_mod
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners.pins import RunnerPin
 
-    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", ref)
-    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", ref)
-    monkeypatch.setattr(harness_mod, "DEFAULT_ROCMFPX_IMAGE", ref)
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b1-r1",
+        digest=_DIGEST,
+        lanes_gated=("rocm", "vulkan") if vulkan_gated else ("rocm",),
+    )
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    return table["standard"].ref
 
 
 @pytest.fixture
 def broken_pin(monkeypatch):
-    """main between #1973 and #1959: the default runner cannot serve Vulkan."""
-    _pin(monkeypatch, ADE07BA_REF)
+    """The default runner's digest has not passed the Vulkan gate."""
+    ref = _pin(monkeypatch, vulkan_gated=False)
     assert default_image_serves_vulkan_lane() is False
-    return ADE07BA_REF
+    return ref
 
 
 @pytest.fixture
 def fixed_pin(monkeypatch):
-    """main after #1959: the default runner is Vulkan-validated."""
-    from hal0.config.schema import VULKAN_FIXED_IMAGE
-
-    _pin(monkeypatch, VULKAN_FIXED_IMAGE)
+    """The default runner's digest passed the Vulkan gate."""
+    ref = _pin(monkeypatch, vulkan_gated=True)
     assert default_image_serves_vulkan_lane() is True
-    return VULKAN_FIXED_IMAGE
+    return ref
 
 
 # ── N3: a render node must be a character device ────────────────────────── #
@@ -110,9 +110,9 @@ class TestRenderNodeIsACharacterDevice:
 
 class TestBenchLaneIsImageGated:
     def test_vulkan_radv_is_unsupported_on_a_broken_pin(self, broken_pin) -> None:
-        """The exact window the agreed land order opens: main carries #1973
-        but not yet #1959. A GPU sweep must not silently publish throughput
-        for a backend that emits non-language."""
+        """A digest that has not passed the Vulkan gate must not be swept: a
+        GPU sweep would silently publish throughput for a backend that may
+        emit non-language."""
         from hal0.bench.harness import lane_is_supported
 
         assert lane_is_supported("vulkan_radv") is False
@@ -161,19 +161,19 @@ class TestBenchLaneIsImageGated:
         assert "vulkan_radv" in lane_specs()
 
     def test_the_bench_lane_benches_the_image_slots_actually_run(self, broken_pin) -> None:
-        """Deliberately NOT pinned to ``VULKAN_FIXED_IMAGE``.
+        """The lane spec tracks the ``standard`` runner's resolved ref.
 
-        Pinning the lane spec to the fixed image would make the sweep "work"
-        on a broken-pin box by benchmarking an image no slot on that box
-        launches — a number about nothing. The lane keeps tracking the default
-        runner and is refused instead.
+        Pinning the lane spec to some other image would make the sweep "work"
+        on an ungated box by benchmarking an image no slot there launches — a
+        number about nothing. The lane keeps tracking the default runner and
+        is refused instead.
         """
         import hal0.bench.harness as harness_mod
 
         specs = harness_mod.lane_specs()
-        assert specs["vulkan_radv"].image == harness_mod.DEFAULT_ROCMFPX_IMAGE
-        assert specs["rocm"].image == harness_mod.DEFAULT_ROCMFPX_IMAGE
-        assert specs["vulkan_radv"].image == ADE07BA_REF
+        assert specs["vulkan_radv"].image == broken_pin
+        assert specs["rocm"].image == broken_pin
+        assert specs["vulkan_radv"].bench_bin == "/opt/hal0/bin/llama-bench"
 
 
 class TestBenchPlannerSkipsAnUnsupportedLane:
@@ -340,11 +340,10 @@ class TestTheThreeLaddersAgree:
         import json
 
         from hal0.config import paths as _paths
-        from hal0.config.schema import VULKAN_FIXED_IMAGE
         from hal0.hardware.recommend import recommend_primary_slot
         from hal0.install.profile_derive import derive_device
 
-        _pin(monkeypatch, VULKAN_FIXED_IMAGE if pin_is_fixed else ADE07BA_REF)
+        _pin(monkeypatch, vulkan_gated=pin_is_fixed)
         # The device nodes decide ROCm (#2452); model "compute" as the nodes
         # being present so the CLI ladder (which reads hardware.json) agrees.
         monkeypatch.setattr(
@@ -386,11 +385,16 @@ class TestTheThreeLaddersAgree:
 class TestDefaultImageServesVulkanLane:
     def test_it_answers_the_same_question_as_the_slot_load_gate(self, monkeypatch) -> None:
         """One predicate, so the perimeter and the gate cannot disagree."""
-        from hal0.config.schema import VULKAN_FIXED_IMAGE, resolve_default_image
+        from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
-        for ref in (ADE07BA_REF, VULKAN_FIXED_IMAGE):
-            monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_ROCMFPX", ref)
-            monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKANFPX", ref)
+        for gated in (False, True):
+            _pin(monkeypatch, vulkan_gated=gated)
             assert default_image_serves_vulkan_lane() is image_serves_vulkan_lane(
-                resolve_default_image("vulkan", "gpu")
+                resolve_runner_image(RUNNER_IMAGES["standard"])
             )
+            assert default_image_serves_vulkan_lane() is gated
+
+    def test_an_env_override_is_not_a_gated_pin(self, fixed_pin, monkeypatch) -> None:
+        """``HAL0_RUNNER_IMAGE_STANDARD`` names an image the gate never saw."""
+        monkeypatch.setenv("HAL0_RUNNER_IMAGE_STANDARD", "ghcr.io/me/own-build:1")
+        assert default_image_serves_vulkan_lane() is False

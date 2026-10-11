@@ -25,12 +25,12 @@ import httpx
 import pytest
 
 from hal0.providers.flm import (
-    _DEFAULT_FLM_IMAGE,
     FLMInferError,
     FLMProvider,
 )
+from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
-_HAL0_FLM_IMAGE = _DEFAULT_FLM_IMAGE
+_HAL0_FLM_IMAGE = resolve_runner_image(RUNNER_IMAGES["flm"])
 
 
 @pytest.fixture
@@ -99,19 +99,10 @@ def test_start_cmd_uses_flm_serve(
 
 
 def test_image_ref_is_hal0ai_flm(provider: FLMProvider, tmp_hal0_home: str) -> None:
-    """Bundled default when no slot override / env / manifest pin applies.
-
-    §7.1b / ML-4: image_ref now routes through the shared runner registry
-    (env override -> manifest digest pin -> this bundled default), so this
-    needs a manifest-isolated home — without it, ``resolve_runner_image``
-    picks up this checkout's real ``manifest.json`` digest pin (by design,
-    see ``hal0.config.loader._find_manifest_path``'s repo-root fallback for
-    ad-hoc/no-HAL0_HOME runs), which is exactly the fix (FLM honoring the
-    manifest at all is new — see ``tests/runners/test_resolve_image.py``
-    for the digest-pin-wins case).
-    """
+    """With no slot override / env override, image_ref is the ``flm`` runner
+    pin (the bare repo while the manifest row is a placeholder)."""
     assert provider.image_ref({}) == _HAL0_FLM_IMAGE
-    assert _HAL0_FLM_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-flm")
+    assert _HAL0_FLM_IMAGE.startswith("ghcr.io/hal0ai/hal0-runner-flm")
 
 
 def test_image_ref_honors_slot_override(provider: FLMProvider, tmp_hal0_home: str) -> None:

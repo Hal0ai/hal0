@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 PREFLIGHT = Path(__file__).resolve().parents[2] / "installer" / "lib" / "preflight.sh"
+INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 
 # Return codes exported by preflight.sh — kept in lock-step with the shell.
 RC_OK = 0
@@ -51,10 +52,10 @@ def _run_gpu_gate_full(env_overrides: dict[str, str]) -> subprocess.CompletedPro
     # (or without) a real /dev/kfd. Tests that exercise that check set it.
     #
     # HAL0_GPU_VULKAN_LANE_OVERRIDE defaults OFF for the same reason — the
-    # answer would otherwise depend on what DEFAULT_ROCMFPX_IMAGE happens to
-    # be in this checkout, which is exactly the moving target #1959 moves.
-    # "0" reproduces the pre-repin world, which is the conservative default
-    # and the one the historical assertions below were written against.
+    # answer would otherwise depend on whether this checkout's manifest.json
+    # ``standard`` pin has passed the Vulkan gate, which changes with every
+    # runner promote. "0" is the conservative default and the one the
+    # historical assertions below were written against.
     env = {
         **os.environ,
         "HAL0_GPU_AMD_OVERRIDE": "0",
@@ -336,103 +337,337 @@ def test_gate_amd_without_kfd_or_render_node_stops_and_says_which(tmp_path: Path
     assert proc.returncode in (RC_NO_DEVICE, RC_NO_KFD)
 
 
-def test_the_shell_mirror_agrees_with_the_python_predicate(tmp_path: Path) -> None:
-    """``_hal0_vulkan_lane_serves_default_image`` is a shell RE-IMPLEMENTATION
-    of ``providers._gpu.default_image_serves_vulkan_lane`` (preflight runs
-    before hal0 is installed, so it cannot just call it). Two implementations
-    of one predicate drift; this is the tripwire.
+# ── the manifest.json reader behind the shell mirrors ────────────────────────
+# ``_hal0_vulkan_lane_serves_default_image`` and ``_hal0_cpu_lane_has_runner_image``
+# are shell RE-IMPLEMENTATIONS of ``hal0.providers._gpu.default_image_serves_vulkan_lane``
+# and ``hal0.runners.cpu_lane_has_runner_image`` (preflight runs before hal0 is
+# installed, so it cannot call them). Both read the ``runners`` pin table in
+# manifest.json through ``_hal0_runner_pin_state``. Two implementations of one
+# predicate drift; the tests below pin each state of the table and assert the
+# shell and Python answers agree on it.
 
-    Historically this test also asserted ``len(VULKAN_CAPABLE_IMAGE_REFS) ==
-    1`` as a static guard: the shell mirror used to recognise only the
-    single-member shape (default == VULKAN_FIXED_IMAGE) and would silently
-    refuse a validated image once the set grew. #2118 (the strix runner)
-    grew VULKAN_CAPABLE_IMAGE_REFS to two members, which tripped that guard;
-    the shell mirror in installer/lib/preflight.sh was taught the general
-    case (it now resolves every frozenset member to its own literal and
-    checks membership), so the static member-count guard no longer applies
-    and this test goes back to what it always was underneath: a runtime
-    agreement check against whatever this checkout's set actually contains.
+_DIGEST = "sha256:" + "a" * 64
+_SEAMS = (
+    "HAL0_GPU_VULKAN_LANE_OVERRIDE",
+    "HAL0_CPU_RUNNER_IMAGE_OVERRIDE",
+    "HAL0_MANIFEST_JSON_OVERRIDE",
+    "HAL0_RUNNER_IMAGE_STANDARD",
+    "HAL0_RUNNER_IMAGE_CPU",
+)
+_VULKAN_ASK = "if _hal0_vulkan_lane_serves_default_image; then echo yes; else echo no; fi"
+_CPU_ASK = "if _hal0_cpu_lane_has_runner_image; then echo yes; else echo no; fi"
+
+
+def _pin_row(
+    key: str, *, tag: str | None = None, digest: str | None = None, lanes: tuple[str, ...] = ()
+) -> dict:
+    return {
+        "image": f"ghcr.io/hal0ai/hal0-runner-{key}",
+        "tag": tag,
+        "digest": digest,
+        "lanes_gated": list(lanes),
+    }
+
+
+def _manifest(tmp_path: Path, *, standard: dict, cpu: dict | None = None) -> Path:
+    """Write a manifest.json whose ``standard``/``cpu`` rows are as given."""
+    import json
+
+    from hal0.runners import RUNNER_IMAGES
+
+    runners = {key: _pin_row(key) for key in RUNNER_IMAGES}
+    runners["standard"] = standard
+    if cpu is not None:
+        runners["cpu"] = cpu
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"version": "0.0.0", "runners": runners}), encoding="utf-8")
+    return path
+
+
+def _run_preflight(snippet: str, **env_overrides: str) -> subprocess.CompletedProcess:
+    """Source preflight.sh and run ``snippet``.
+
+    ``set -euo pipefail`` mirrors install.sh so the functions are proven safe
+    to source there. The seam variables are stripped from the inherited
+    environment unless a test sets them, so the answer never depends on the box
+    running the suite.
     """
+    script = f"set -euo pipefail\nsource {PREFLIGHT!s}\n{snippet}\n"
+    env = {k: v for k, v in os.environ.items() if k not in _SEAMS}
+    env.update(env_overrides)
+    return subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
+
+
+def _ask(snippet: str, **env_overrides: str) -> str:
+    return _run_preflight(snippet, **env_overrides).stdout.strip()
+
+
+#: (id, standard row, expected shell answer for the Vulkan-lane gate)
+_STANDARD_CASES = [
+    ("unpublished", _pin_row("standard"), "no"),
+    ("published-ungated", _pin_row("standard", tag="b1-r1", digest=_DIGEST, lanes=("rocm",)), "no"),
+    (
+        "published-vulkan-gated",
+        _pin_row("standard", tag="b1-r1", digest=_DIGEST, lanes=("rocm", "vulkan")),
+        "yes",
+    ),
+    (
+        "tag-only-vulkan-gated",
+        _pin_row("standard", tag="b1-r1", lanes=("rocm", "vulkan")),
+        "yes",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"), [c[1:] for c in _STANDARD_CASES], ids=[c[0] for c in _STANDARD_CASES]
+)
+def test_vulkan_mirror_reads_the_standard_pin(tmp_path: Path, row: dict, expected: str) -> None:
+    manifest = _manifest(tmp_path, standard=row)
+    assert _ask(_VULKAN_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(manifest)) == expected
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"), [c[1:] for c in _STANDARD_CASES], ids=[c[0] for c in _STANDARD_CASES]
+)
+def test_vulkan_mirror_agrees_with_the_python_predicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, row: dict, expected: str
+) -> None:
+    """The tripwire: for every state of the ``standard`` row the shell mirror
+    and ``default_image_serves_vulkan_lane`` give the same answer."""
+    import hal0.runners.pins as pins_mod
     from hal0.providers._gpu import default_image_serves_vulkan_lane
 
-    script = (
-        "set -euo pipefail\n"
-        f"source {PREFLIGHT!s}\n"
-        "if _hal0_vulkan_lane_serves_default_image; then echo yes; else echo no; fi\n"
-    )
-    env = {k: v for k, v in os.environ.items() if k != "HAL0_GPU_VULKAN_LANE_OVERRIDE"}
-    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    shell_says = proc.stdout.strip() == "yes"
+    manifest = _manifest(tmp_path, standard=row)
+    table = pins_mod.load_runner_pins(manifest)
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    for key in _SEAMS:
+        monkeypatch.delenv(key, raising=False)
 
+    shell_says = _ask(_VULKAN_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(manifest)) == "yes"
     assert shell_says is default_image_serves_vulkan_lane(), (
-        "the shell mirror and the Python predicate disagree about whether this "
-        f"checkout's default runner image serves the Vulkan lane (shell={shell_says})"
+        "the shell mirror and the Python predicate disagree about whether the "
+        f"standard runner pin serves the Vulkan lane (shell={shell_says}, row={row})"
     )
+    assert shell_says is (expected == "yes")
 
 
-def _run_shell_mirror(schema_path: Path) -> str:
-    script = (
-        "set -euo pipefail\n"
-        f"source {PREFLIGHT!s}\n"
-        "if _hal0_vulkan_lane_serves_default_image; then echo yes; else echo no; fi\n"
-    )
-    env = {
-        **{k: v for k, v in os.environ.items() if k != "HAL0_GPU_VULKAN_LANE_OVERRIDE"},
-        "HAL0_SCHEMA_PY_OVERRIDE": str(schema_path),
-    }
-    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    return proc.stdout.strip()
-
-
-def test_the_shell_mirror_matches_a_non_first_member_of_a_multi_member_set(
-    tmp_path: Path,
+def test_vulkan_mirror_refuses_when_standard_is_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The actual regression this task fixes: before the shell mirror was
-    taught the general case, it only ever compared the default against
-    VULKAN_FIXED_IMAGE — the FIRST historical member. A default that matches
-    some OTHER member of a (now multi-member) VULKAN_CAPABLE_IMAGE_REFS, e.g.
-    DEFAULT_STRIX_IMAGE joining alongside VULKAN_FIXED_IMAGE (#2118), must
-    still be recognised."""
-    schema = tmp_path / "schema.py"
-    schema.write_text(
-        'DEFAULT_ROCMFPX_IMAGE = "ghcr.io/example/combined:default"\n'
-        'VULKAN_FIXED_IMAGE = "ghcr.io/example/combined:fixed"\n'
-        'DEFAULT_STRIX_IMAGE = "ghcr.io/example/combined:default"\n'
-        "VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})\n"
+    """``HAL0_RUNNER_IMAGE_STANDARD`` replaces the pinned image with one the
+    hardware gate never saw, so the lane is refused even for a gated pin — in
+    shell and in Python alike."""
+    import hal0.runners.pins as pins_mod
+    from hal0.providers._gpu import default_image_serves_vulkan_lane
+
+    gated = _pin_row("standard", tag="b1-r1", digest=_DIGEST, lanes=("rocm", "vulkan"))
+    manifest = _manifest(tmp_path, standard=gated)
+    table = pins_mod.load_runner_pins(manifest)
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    monkeypatch.setenv("HAL0_RUNNER_IMAGE_STANDARD", "ghcr.io/me/own-build:1")
+
+    shell = _ask(
+        _VULKAN_ASK,
+        HAL0_MANIFEST_JSON_OVERRIDE=str(manifest),
+        HAL0_RUNNER_IMAGE_STANDARD="ghcr.io/me/own-build:1",
     )
-    assert _run_shell_mirror(schema) == "yes"
+    assert shell == "no"
+    assert default_image_serves_vulkan_lane() is False
 
 
-def test_the_shell_mirror_still_says_no_when_default_matches_no_member(
-    tmp_path: Path,
-) -> None:
-    """A multi-member set that still doesn't include the default must answer
-    'no' — growing the set past one member must not accidentally widen this
-    into an always-yes check."""
-    schema = tmp_path / "schema.py"
-    schema.write_text(
-        'DEFAULT_ROCMFPX_IMAGE = "ghcr.io/example/combined:unvalidated"\n'
-        'VULKAN_FIXED_IMAGE = "ghcr.io/example/combined:fixed"\n'
-        'DEFAULT_STRIX_IMAGE = "ghcr.io/example/strix:default"\n'
-        "VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})\n"
-    )
-    assert _run_shell_mirror(schema) == "no"
-
-
-def test_the_shell_mirror_fails_closed_on_an_unreadable_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize("body", ["not json at all", "{}", '{"runners": {}}', '{"runners": []}'])
+def test_vulkan_mirror_fails_closed_on_a_malformed_manifest(tmp_path: Path, body: str) -> None:
     """A false 'yes' ships a box that serves invalid tokens; a false 'no'
     costs a CPU-only install. The asymmetry decides the default."""
-    script = (
-        "set -euo pipefail\n"
-        f"source {PREFLIGHT!s}\n"
-        "if _hal0_vulkan_lane_serves_default_image; then echo yes; else echo no; fi\n"
+    bad = tmp_path / "manifest.json"
+    bad.write_text(body, encoding="utf-8")
+    assert _ask(_VULKAN_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(bad)) == "no"
+
+
+def test_vulkan_mirror_fails_closed_on_a_missing_manifest(tmp_path: Path) -> None:
+    gone = tmp_path / "does-not-exist.json"
+    assert _ask(_VULKAN_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(gone)) == "no"
+
+
+def test_vulkan_mirror_fails_closed_when_the_standard_row_is_missing(tmp_path: Path) -> None:
+    import json
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"runners": {"cpu": _pin_row("cpu")}}), encoding="utf-8")
+    assert _ask(_VULKAN_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(manifest)) == "no"
+
+
+def test_vulkan_override_seam_decides_outright(tmp_path: Path) -> None:
+    gated = _pin_row("standard", tag="b1-r1", digest=_DIGEST, lanes=("rocm", "vulkan"))
+    manifest = _manifest(tmp_path, standard=gated)
+    seams = {"HAL0_MANIFEST_JSON_OVERRIDE": str(manifest)}
+    assert _ask(_VULKAN_ASK, HAL0_GPU_VULKAN_LANE_OVERRIDE="0", **seams) == "no"
+    assert _ask(_VULKAN_ASK, HAL0_GPU_VULKAN_LANE_OVERRIDE="1") == "yes"
+
+
+def test_the_shipped_manifest_is_readable_by_the_shell_reader() -> None:
+    """With no override the reader finds this checkout's manifest.json and
+    classifies every runner key (the placeholders are ``unpublished``)."""
+    from hal0.runners import RUNNER_IMAGES
+
+    for key in RUNNER_IMAGES:
+        state = _ask(f"_hal0_runner_pin_state {key}")
+        assert state in {"unpublished", "published", "vulkan-gated"}, (key, state)
+
+
+# ── CPU-lane runner-image gate (#2126) ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("cpu_row", "expected"),
+    [
+        (_pin_row("cpu"), "no"),
+        (_pin_row("cpu", tag="b1-r1"), "yes"),
+        (_pin_row("cpu", tag="b1-r1", digest=_DIGEST), "yes"),
+        (_pin_row("cpu", tag="b1-r1", digest=_DIGEST, lanes=("cpu", "vulkan")), "yes"),
+    ],
+    ids=["unpublished", "tag", "tag+digest", "gated"],
+)
+def test_cpu_mirror_agrees_with_the_python_predicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_row: dict, expected: str
+) -> None:
+    """``_hal0_cpu_lane_has_runner_image`` is a shell RE-IMPLEMENTATION of
+    ``hal0.runners.cpu_lane_has_runner_image`` — the tripwire that fires the day
+    somebody changes one and forgets the other."""
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import cpu_lane_has_runner_image
+
+    manifest = _manifest(tmp_path, standard=_pin_row("standard"), cpu=cpu_row)
+    table = pins_mod.load_runner_pins(manifest)
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    for key in _SEAMS:
+        monkeypatch.delenv(key, raising=False)
+
+    shell_says = _ask(_CPU_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(manifest)) == "yes"
+    assert shell_says is cpu_lane_has_runner_image()
+    assert shell_says is (expected == "yes")
+
+
+def test_cpu_mirror_honours_the_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``HAL0_RUNNER_IMAGE_CPU`` is the escape hatch the gate must never close:
+    an operator running their own CPU llama-server build names it and the
+    install proceeds, even while the ``cpu`` pin is unpublished."""
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import cpu_lane_has_runner_image
+
+    manifest = _manifest(tmp_path, standard=_pin_row("standard"), cpu=_pin_row("cpu"))
+    table = pins_mod.load_runner_pins(manifest)
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    monkeypatch.setenv("HAL0_RUNNER_IMAGE_CPU", "ghcr.io/example/llama-cpu:v1")
+
+    shell = _ask(
+        _CPU_ASK,
+        HAL0_MANIFEST_JSON_OVERRIDE=str(manifest),
+        HAL0_RUNNER_IMAGE_CPU="ghcr.io/example/llama-cpu:v1",
     )
-    env = {
-        **{k: v for k, v in os.environ.items() if k != "HAL0_GPU_VULKAN_LANE_OVERRIDE"},
-        "HAL0_SCHEMA_PY_OVERRIDE": str(tmp_path / "does-not-exist.py"),
-    }
-    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    assert proc.stdout.strip() == "no"
+    assert shell == "yes"
+    assert cpu_lane_has_runner_image() is True
+
+
+@pytest.mark.parametrize("body", ["not json at all", "{}", '{"runners": {}}'])
+def test_cpu_mirror_fails_closed_on_a_malformed_manifest(tmp_path: Path, body: str) -> None:
+    """A false "yes" ships #2126's broken box, a false "no" refuses an install
+    with the override that reopens it printed on screen. Anything unparseable
+    answers "no"."""
+    bad = tmp_path / "manifest.json"
+    bad.write_text(body, encoding="utf-8")
+    assert _ask(_CPU_ASK, HAL0_MANIFEST_JSON_OVERRIDE=str(bad)) == "no"
+
+
+def test_cpu_override_seam_decides_outright() -> None:
+    assert _ask(_CPU_ASK, HAL0_CPU_RUNNER_IMAGE_OVERRIDE="0") == "no"
+    assert _ask(_CPU_ASK, HAL0_CPU_RUNNER_IMAGE_OVERRIDE="1") == "yes"
+
+
+_GATE = "if _cpu_only_image_gate; then echo pass; else echo refused; fi"
+
+
+def test_cpu_only_image_gate_passes_with_a_cpu_image() -> None:
+    """With a ``cpu`` image available, `HAL0_ALLOW_CPU_ONLY=1` is a supported
+    path and the gate stands aside."""
+    proc = _run_preflight(_GATE, HAL0_CPU_RUNNER_IMAGE_OVERRIDE="1")
+    assert proc.stdout.strip() == "pass", proc.stderr
+
+
+def test_cpu_only_image_gate_refuses_and_says_why_without_a_cpu_image() -> None:
+    """If the CPU lane has no image, the install stops here with a message
+    naming the fault and the override that reopens the path."""
+    proc = _run_preflight(_GATE, HAL0_CPU_RUNNER_IMAGE_OVERRIDE="0")
+    assert proc.stdout.strip() == "refused", proc.stdout
+    assert "manifest.json pins no published image for the 'cpu' runner" in proc.stderr
+    assert "HAL0_RUNNER_IMAGE_CPU" in proc.stderr
+    assert "#2126" in proc.stderr
+    # It must not repeat the promise that got #2126's reporter here.
+    assert "To install CPU-only anyway" not in proc.stderr
+
+
+def test_cpu_only_image_gate_follows_the_manifest(tmp_path: Path) -> None:
+    """No override: the gate refuses on an unpublished ``cpu`` pin and passes
+    once manifest.json names a tag."""
+    unpublished = _manifest(tmp_path, standard=_pin_row("standard"), cpu=_pin_row("cpu"))
+    proc = _run_preflight(_GATE, HAL0_MANIFEST_JSON_OVERRIDE=str(unpublished))
+    assert proc.stdout.strip() == "refused", proc.stderr
+
+    published = _manifest(
+        tmp_path, standard=_pin_row("standard"), cpu=_pin_row("cpu", tag="b1-r1", digest=_DIGEST)
+    )
+    proc = _run_preflight(_GATE, HAL0_MANIFEST_JSON_OVERRIDE=str(published))
+    assert proc.stdout.strip() == "pass", proc.stderr
+
+
+def test_cpu_only_remedy_offers_the_flag_when_a_cpu_image_exists() -> None:
+    """The GPU-gate refusal's CPU-only remedy is honest only when following it
+    produces a working box."""
+    proc = _run_preflight("_cpu_only_remedy_lines", HAL0_CPU_RUNNER_IMAGE_OVERRIDE="1")
+    assert "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." in proc.stderr
+
+
+def test_cpu_only_remedy_is_honest_when_there_is_no_cpu_image() -> None:
+    """install.sh's GPU-gate refusals must never print "To install CPU-only
+    anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." while the CPU lane has no image
+    — following that printed remedy is exactly how #2126 happened."""
+    proc = _run_preflight("_cpu_only_remedy_lines", HAL0_CPU_RUNNER_IMAGE_OVERRIDE="0")
+    assert "To install CPU-only anyway" not in proc.stderr
+    assert "no working CPU-only path" in proc.stderr
+    assert "HAL0_RUNNER_IMAGE_CPU" in proc.stderr
+
+
+def test_every_cpu_only_optin_in_install_sh_runs_the_gate_first() -> None:
+    """Static-text pin (same technique as test_platform_gate_hardening.py):
+    each branch that proceeds CPU-only must call ``_cpu_only_image_gate``
+    BEFORE the reassuring warn, and each refusal must use the honest remedy
+    helper rather than a hard-coded HAL0_ALLOW_CPU_ONLY line."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    optins = [i for i, line in enumerate(lines) if 'HAL0_ALLOW_CPU_ONLY:-0}" == "1"' in line]
+    assert len(optins) == 2, "the CPU-only env opt-in branch count changed"
+
+    proceeds = [
+        i
+        for i, line in enumerate(lines)
+        if "proceeding CPU-only" in line or "confirmed at the prompt" in line
+    ]
+    assert len(proceeds) == 4, "the CPU-only proceed messages changed shape"
+    for i in proceeds:
+        assert "_cpu_only_image_gate || exit 1" in lines[i - 1], (
+            f"install.sh:{i + 1} announces a CPU-only install without gating on "
+            "there being a CPU runner image first (#2126)"
+        )
+
+    assert "To install CPU-only anyway" not in text
+    calls = [line for line in lines if line.strip() == "_cpu_only_remedy_lines"]
+    assert len(calls) == 2, "both GPU-gate refusals must print the honest CPU-only remedy"
 
 
 def test_gate_amd_render_node_with_kfd_proceeds(render_glob: str, tmp_path: Path) -> None:

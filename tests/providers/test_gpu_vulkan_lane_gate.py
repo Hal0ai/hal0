@@ -1,22 +1,22 @@
-"""#1948 Phase D — the Vulkan LLM lane is re-enabled, but only on a fixed image.
+"""#1948 Phase D — the Vulkan LLM lane is served only from a gated image.
 
-#1923 retired the lane outright: the release-pinned ROCmFPX runner
-(``ade07ba``) is a single HIP+Vulkan build whose Vulkan backend emits invalid
-tokens for every model (#1888), so ``gpu-vulkan`` named a lane no llama.cpp
-slot could validly run and the guard refused it on every AMD host.
+#1923 retired the lane outright: a runner whose Vulkan backend emits invalid
+tokens for every model (#1888) made ``gpu-vulkan`` name a lane no llama.cpp
+slot could validly run, and the guard refused it on every AMD host.
 
-``ghcr.io/hal0ai/hal0-combined:0822`` restores a correct Vulkan backend
-(validated on both a kfd-present and a kfd-ABSENT box — see the §3-C matrix on
-#1948), so the lane comes back. What must never come back is the ability to
-serve that lane from a KNOWN-BROKEN image: the guard is now device-aware —
+The lane is back, but what must never come back is the ability to serve it
+from an image whose digest has not passed the hardware gate's Vulkan lane.
+The guard is device-aware —
 
 * ``gpu-rocm``            → ``/dev/kfd`` required, semantics unchanged.
 * ``gpu-vulkan`` + llama  → a render node the runner can open, AND a resolved
-  image in :data:`VULKAN_CAPABLE_IMAGE_REFS`. No ``/dev/kfd`` requirement.
+  image in :func:`hal0.runners.pins.vulkan_capable_refs` (a pinned digest whose
+  ``manifest.json`` row lists ``vulkan`` in ``lanes_gated``). No ``/dev/kfd``
+  requirement.
 * ``gpu-vulkan`` + non-llama → untouched (#1941/#1952 semantics).
 
-The image gate is the half that makes the re-enable safe; the #1922
-output-sanity readiness gate (live on main) is the permanent net BEHIND it.
+The image gate is the half that makes the lane safe; the #1922 output-sanity
+readiness gate is the permanent net BEHIND it.
 """
 
 from __future__ import annotations
@@ -25,11 +25,7 @@ import os
 
 import pytest
 
-from hal0.config.schema import (
-    STALE_ROCMFPX_IMAGE_REFS,
-    VULKAN_CAPABLE_IMAGE_REFS,
-    VULKAN_FIXED_IMAGE,
-)
+import hal0.runners.pins as pins_mod
 from hal0.providers._gpu import (
     ENV_ALLOW_VULKAN_FALLBACK,
     GpuPreflightError,
@@ -37,17 +33,40 @@ from hal0.providers._gpu import (
     render_node_present,
     require_kfd_for_gpu_slot,
 )
+from hal0.runners import RUNNER_IMAGES
+from hal0.runners.pins import RunnerPin
 
-#: The image whose Vulkan backend carries #1888 — the stand-in for "a runner
-#: this lane must refuse", used everywhere below.
-#:
-#: A LITERAL, deliberately, and NOT ``DEFAULT_ROCMFPX_IMAGE``. The default pin
-#: is a moving target: it is this ref on main today and becomes
-#: ``VULKAN_FIXED_IMAGE`` the moment the repin lands, at which point every
-#: "stale image is refused" assertion written against the default would invert
-#: and start asserting that the fixed image is refused. The defect belongs to
-#: THIS ref, so this ref is what the tests name.
-ADE07BA_REF = "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba"
+_GATED_DIGEST = "sha256:" + "a" * 64
+
+#: The ``standard`` pin the Vulkan gate passed (``lanes_gated`` lists vulkan).
+GATED_PIN = RunnerPin(
+    key="standard",
+    image="ghcr.io/hal0ai/hal0-runner-standard",
+    tag="b11552-r1",
+    digest=_GATED_DIGEST,
+    lanes_gated=("rocm", "vulkan"),
+)
+
+#: An image no pin row names: the stand-in for "a runner this lane must
+#: refuse", used everywhere below. A LITERAL, deliberately: the defect belongs
+#: to this ref, whatever the pin table currently says.
+UNGATED_REF = "ghcr.io/hal0ai/hal0-runner-standard:b9999-r9"
+
+#: Aliases kept so the assertions below read as "the validated image" / "the
+#: refused image".
+VULKAN_FIXED_IMAGE = GATED_PIN.ref
+ADE07BA_REF = UNGATED_REF
+
+
+@pytest.fixture(autouse=True)
+def _gated_standard_pin(monkeypatch):
+    """Make ``standard`` a Vulkan-gated pin for every test in this module."""
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = GATED_PIN
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+    return table
 
 
 def _render_node(tmp_path):
@@ -68,43 +87,57 @@ def _render_node(tmp_path):
 
 
 class TestVulkanCapableImageSet:
-    """An explicit allowlist, deliberately — NOT a tag ordering comparison."""
+    """Membership in the gated pin set, deliberately — NOT a tag comparison."""
 
-    def test_the_fixed_pin_is_capable(self) -> None:
-        assert VULKAN_FIXED_IMAGE in VULKAN_CAPABLE_IMAGE_REFS
-        assert image_serves_vulkan_lane(VULKAN_FIXED_IMAGE) is True
+    def test_the_gated_pin_is_capable(self) -> None:
+        assert GATED_PIN.ref in pins_mod.vulkan_capable_refs()
+        assert image_serves_vulkan_lane(GATED_PIN.ref) is True
 
-    def test_the_ade07ba_lineage_pin_is_not_capable(self) -> None:
-        """#1888's carrier, named literally.
+    def test_every_spelling_of_the_gated_pin_is_capable(self) -> None:
+        """``repo:tag@digest``, ``repo:tag`` and ``repo@digest`` name the same bytes."""
+        for ref in GATED_PIN.spellings():
+            assert image_serves_vulkan_lane(ref) is True
 
-        This ref must never become capable, whatever the default pin is doing
-        — which is the whole reason the gate is an allowlist of validated refs
-        rather than a comparison against ``DEFAULT_ROCMFPX_IMAGE``.
-        """
-        assert ADE07BA_REF not in VULKAN_CAPABLE_IMAGE_REFS
-        assert image_serves_vulkan_lane(ADE07BA_REF) is False
+    def test_the_bare_repo_is_not_capable(self) -> None:
+        """The bare repo names whatever ``latest`` is, never a gated digest."""
+        assert image_serves_vulkan_lane(GATED_PIN.image) is False
 
-    def test_the_gate_does_not_key_off_the_moving_default_pin(self) -> None:
-        """Whatever ``DEFAULT_ROCMFPX_IMAGE`` happens to be, capability is
-        decided by membership and nothing else — so a pin bump can neither
-        silently grant the lane nor silently revoke it."""
-        from hal0.config import schema
+    def test_an_unnamed_ref_is_not_capable(self) -> None:
+        assert UNGATED_REF not in pins_mod.vulkan_capable_refs()
+        assert image_serves_vulkan_lane(UNGATED_REF) is False
 
-        for ref in (ADE07BA_REF, VULKAN_FIXED_IMAGE, "ghcr.io/hal0ai/whatever:next"):
-            assert image_serves_vulkan_lane(ref) is (ref in VULKAN_CAPABLE_IMAGE_REFS)
-        assert schema.DEFAULT_ROCMFPX_IMAGE  # the constant exists; it is just not consulted
+    def test_a_pin_row_that_did_not_pass_the_vulkan_gate_is_not_capable(self, monkeypatch) -> None:
+        """Admission is data next to the digest: ``lanes_gated`` without
+        ``vulkan`` (ROCm-only) admits nothing to the Vulkan lane."""
+        table = {
+            "standard": RunnerPin(
+                key="standard",
+                image=GATED_PIN.image,
+                tag=GATED_PIN.tag,
+                digest=GATED_PIN.digest,
+                lanes_gated=("rocm",),
+            )
+        }
+        monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+        assert image_serves_vulkan_lane(GATED_PIN.ref) is False
 
-    @pytest.mark.parametrize("ref", sorted(STALE_ROCMFPX_IMAGE_REFS))
-    def test_no_retired_runner_ref_can_serve_the_lane(self, ref: str) -> None:
-        assert image_serves_vulkan_lane(ref) is False
+    def test_a_runner_that_cannot_run_vulkan_never_admits_its_image(self, monkeypatch) -> None:
+        """``cpu`` has no vulkan backend: a ``vulkan`` entry in its row is ignored."""
+        cpu = RunnerPin(
+            key="cpu",
+            image="ghcr.io/hal0ai/hal0-runner-cpu",
+            tag="b11552-r1",
+            digest="sha256:" + "c" * 64,
+            lanes_gated=("cpu", "vulkan"),
+        )
+        table = {"cpu": cpu}
+        monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+        assert image_serves_vulkan_lane(cpu.ref) is False
 
     @pytest.mark.parametrize("ref", ["", None, "  ", "ghcr.io/someone/unknown:1"])
     def test_unknown_and_unresolved_refs_fail_closed(self, ref) -> None:
         """Fail-closed: an image nobody has validated is not a Vulkan image."""
         assert image_serves_vulkan_lane(ref) is False
-
-    def test_the_capable_set_and_the_stale_set_are_disjoint(self) -> None:
-        assert not (VULKAN_CAPABLE_IMAGE_REFS & STALE_ROCMFPX_IMAGE_REFS)
 
 
 class TestRenderNodePresent:
@@ -339,7 +372,7 @@ class TestVulkanLaneGuard:
 
     def test_a_stale_image_is_refused_at_preflight(self, tmp_path) -> None:
         """The whole point: a box with a perfectly good render node still may
-        NOT serve the Vulkan lane from the ade07ba lineage."""
+        NOT serve the Vulkan lane from an image that never passed the gate."""
         with pytest.raises(GpuPreflightError) as exc:
             require_kfd_for_gpu_slot(
                 "utility",
@@ -355,7 +388,7 @@ class TestVulkanLaneGuard:
         assert "utility" in msg
         assert "1888" in msg  # name the defect this refusal exists to prevent
         assert ADE07BA_REF in msg  # name the image actually resolved
-        assert VULKAN_FIXED_IMAGE in msg  # name the way out
+        assert "lanes_gated" in msg  # name the way out: the gate lives in manifest.json
 
     def test_an_unresolvable_image_is_refused(self, tmp_path) -> None:
         """Fail-closed, exactly like ``runtime_lane``'s ``"llama"`` default: a
@@ -624,13 +657,13 @@ class TestLoadSyncThreadsTheResolvedImage:
 
     def test_a_broken_family_override_is_refused_through_load_sync(self, monkeypatch) -> None:
         """Spec §1 Safety (runner-image-catalogue v2): "the Vulkan-lane gate
-        (VULKAN_CAPABLE_IMAGE_REFS) still applies at slot-load preflight — an
+        (``vulkan_capable_refs``) still applies at slot-load preflight — an
         override cannot silently re-arm #1888."
 
         A ``gpu-vulkan`` slot with NO pin resolves through the new
         ``[slots].default_images`` tier; when the operator points the
-        ``rocmfpx`` family (the collapsed key vulkan is served through, per
-        ``supported_backends``) at the ade07ba lineage, ``load_sync``'s
+        ``standard`` family (the runner vulkan is served through, per
+        ``supported_backends``) at an ungated image, ``load_sync``'s
         preflight must see THAT ref (it passes the raw ``_resolve_image_ref``
         result to ``require_kfd_for_gpu_slot``) and refuse with the typed
         error — never launch-and-emit-garbage. Verified red by reverting the
@@ -641,7 +674,7 @@ class TestLoadSyncThreadsTheResolvedImage:
 
         self._amd_box_without_kfd(monkeypatch)
         self._stub_unit_write(monkeypatch)
-        self._override(monkeypatch, "rocmfpx", ADE07BA_REF)
+        self._override(monkeypatch, "standard", ADE07BA_REF)
 
         with pytest.raises(GpuPreflightError) as exc:
             container_mod.ContainerProvider().load_sync(
@@ -657,7 +690,7 @@ class TestLoadSyncThreadsTheResolvedImage:
 
         self._amd_box_without_kfd(monkeypatch)
         written = self._stub_unit_write(monkeypatch)
-        self._override(monkeypatch, "rocmfpx", VULKAN_FIXED_IMAGE)
+        self._override(monkeypatch, "standard", VULKAN_FIXED_IMAGE)
 
         container_mod.ContainerProvider().load_sync(
             {"name": "utility", "device": "gpu-vulkan", "port": 8082},
@@ -679,7 +712,7 @@ class TestPreflightDoesNotDisplaceTheSanityGate:
         from hal0.slots import output_sanity
 
         source = inspect.getsource(output_sanity)
-        for token in ("gpu-vulkan", "VULKAN_CAPABLE_IMAGE_REFS", "vulkan_radv"):
+        for token in ("gpu-vulkan", "vulkan_capable_refs", "vulkan_radv"):
             assert token not in source, (
                 f"output_sanity references {token!r} — the readiness gate must stay "
                 "lane-blind so a re-enabled Vulkan slot is probed like any other"

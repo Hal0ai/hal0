@@ -1183,7 +1183,7 @@ def _unrouteable_model_error(tried_model: str) -> str:
 #
 # WHY THIS EXISTS. The shipped brain model is a ~1.1B SFT that CANNOT emit tool
 # calls the local runtime parses. Measured on a GPU box against the published
-# `hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf` in the pinned ROCmFPX runner:
+# `hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf` on the then-pinned ROCmFPX runner:
 #
 #   * WITH `--jinja` + native OpenAI `tools`: HTTP 200, `finish_reason: stop`,
 #     `tool_calls: null`, and `content` came back as the literal string
@@ -1203,41 +1203,26 @@ def _unrouteable_model_error(tried_model: str) -> str:
 #     when the output doesn't match. #1626 briefly stripped `tools` from the
 #     brain round because of this.
 #
-# ROOT CAUSE, RESOLVED BY RUNNER ade07ba (DEFAULT_ROCMFPX_IMAGE): all three
-# shapes were ONE bug — the MiniCPM5-family vocab carries the tool syntax as
-# CONTROL tokens (`<function`=18, `</function>`=19, `<param`=20,
-# `</param>`=21) and llama-server strips control pieces at decode, so the
-# parser never saw the openers the model actually emitted. The ade07ba
-# runner's MiniCPM5 specialized parser preserves those tokens and
-# grammar-locks the call shape, so the 1B DOES drive native tool calls now;
-# brain rounds carry `tools` again on that runner and everything below is the
-# FALLBACK for older runners and off-dialect models. `[brain_chat]
-# tool_model` (default "hal0/agent") is the documented mitigation, and this is
-# its implementation.
+# ROOT CAUSE: all three shapes were ONE bug — the MiniCPM5-family vocab
+# carries the tool syntax as CONTROL tokens (`<function`=18, `</function>`=19,
+# `<param`=20, `</param>`=21) and llama-server stripped control pieces at
+# decode, so the parser never saw the openers the model actually emitted.
+# Runners with the MiniCPM5 specialized parser preserve those tokens, so brain
+# rounds carry `tools` and everything below is the FALLBACK for off-dialect
+# models and runners that still reject tools. `[brain_chat] tool_model`
+# (default "hal0/agent") is the documented mitigation, and this is its
+# implementation.
 #
-# THAT ROOT-CAUSE FIX IS PER-RUNNER, NOT UNCONDITIONAL (#1655). ade07ba is the
-# GA default, but `_chat_stream` permits overrides (custom `model`/`image`,
-# or an intentional rollback via `image_pin`), and `retag_stale_slot_images`
-# only re-pins a stale image on `hal0 update run` — not preemptively, not on
-# every chat call. A brain round whose resolved slot is STILL on c077206 500s
-# on a `tools`-attached completion exactly as before.
+# THE CHECK IS A CAPABILITY QUESTION, NOT AN IMAGE-IDENTITY ONE (#1789).
 # `_resolved_slot_native_tools` checks the CHAT model's resolved slot before
-# every turn and `_tool_routing_llm` pops `tools` off just that round when the
-# check comes back negative — see `_call_chat_model` below.
-#
-# THE CHECK IS A CAPABILITY QUESTION, NOT AN IMAGE-IDENTITY ONE (#1789). Until
-# rc.4 that preflight was literally `image == DEFAULT_ROCMFPX_IMAGE`, so it
-# answered "no native tools" for every runner that simply is not the current
-# GPU default — including the plain upstream llama.cpp toolboxes a CPU-only or
-# CUDA box resolves to, which parse OpenAI `tools` fine. On those boxes tools
-# were stripped from every brain round and the steward answered "what slots are
-# loaded?" with invented slot names. So the gate now DENIES the known-bad
-# lineage (`NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS`) plus anything a live round has
-# been caught rejecting (`_LEARNED_TOOL_INCAPABLE_IMAGES`), and assumes every
-# other runner capable. And when tools genuinely cannot ride the turn at all —
-# incapable runner AND no `tool_model` to reroute to — the turn carries an
-# explicit "no live view" system notice plus a `tools_unavailable` SSE frame,
-# because a fabricated answer is worse than an admitted gap.
+# every turn: every runner is assumed capable unless a live round has been
+# caught rejecting tools (`_LEARNED_TOOL_INCAPABLE_IMAGES` — an operator
+# `image_pin` to an old build, say), and `_tool_routing_llm` pops `tools` off
+# just that round when the check comes back negative — see `_call_chat_model`
+# below. When tools genuinely cannot ride the turn at all — incapable runner
+# AND no `tool_model` to reroute to — the turn carries an explicit "no live
+# view" system notice plus a `tools_unavailable` SSE frame, because a
+# fabricated answer is worse than an admitted gap.
 #
 # ROUTING SEMANTICS — per ROUND, not per conversation.
 #
@@ -1549,37 +1534,17 @@ def _is_tool_format_failure(response: Any) -> bool:
 def _image_native_tools(image: str | None) -> bool:
     """Whether a runner ``image`` is expected to parse native OpenAI ``tools``.
 
-    CAPABILITY, not identity (#1789). The #1655 gate this replaces asked "is
-    the effective image exactly :data:`~hal0.config.schema.
-    DEFAULT_ROCMFPX_IMAGE`?", which answers "no native tools" for every runner
-    that merely is not the current GPU default — including the plain upstream
-    llama.cpp toolboxes a CPU-only or CUDA box resolves to
-    (:data:`~hal0.config.schema.FALLBACK_VULKAN_IMAGE` /
-    :data:`~hal0.config.schema.FALLBACK_CUDA_IMAGE`), which parse ``tools``
-    perfectly well. On those boxes the false negative stripped ``tools`` from
-    every brain round, so the steward answered platform questions from
-    imagination.
-
-    Two layers, in order:
-
-    1. the :data:`~hal0.config.schema.NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS` DENY
-       list — the pre-ade07ba ROCmFPX lineage that 500s the whole request;
-    2. :data:`_LEARNED_TOOL_INCAPABLE_IMAGES` — anything an actual round has
-       been observed to reject with a tool-format error this process.
-
-    Anything else is assumed CAPABLE. That default is safe precisely because of
-    layer 2: an unknown-bad runner degrades on its first tools-attached round
-    (retried tools-less in the same round, see ``_call_chat_model``) and is
-    remembered for every later turn, instead of the whole class of runners
-    being silently muted forever.
+    CAPABILITY, not identity (#1789): every runner hal0 ships parses OpenAI
+    ``tools``, so anything is assumed CAPABLE unless an actual round has been
+    observed to reject a tools-attached completion with a tool-format error
+    this process (:data:`_LEARNED_TOOL_INCAPABLE_IMAGES`). An unknown-bad
+    runner (an operator ``image_pin``) degrades on its first tools-attached
+    round — retried tools-less in the same round, see ``_call_chat_model`` —
+    and is remembered for every later turn.
     """
-    from hal0.config.schema import NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS
-
     ref = (image or "").strip()
     if not ref:
         return True  # unknown image — best-effort default, same as the rest of the preflight
-    if ref in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS:
-        return False
     return ref not in _LEARNED_TOOL_INCAPABLE_IMAGES
 
 
@@ -1678,9 +1643,8 @@ def _tool_routing_llm(
 
     ``chat_model_native_tools`` (see :func:`_resolved_slot_native_tools`,
     computed by the caller against the CHAT model's resolved slot) gates
-    whether native ``tools`` ride a ``chat_model`` round at all. A runner in
-    the known-incompatible set (the pre-ade07ba ROCmFPX lineage, see
-    :data:`~hal0.config.schema.NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS`) 500s the
+    whether native ``tools`` ride a ``chat_model`` round at all. A runner that
+    has been seen to reject tools (``_LEARNED_TOOL_INCAPABLE_IMAGES``) 500s the
     WHOLE completion on a tools-attached request ("peg-native format", #1626)
     before ``_tool_intent_artefact`` ever sees a reply. When ``False`` this
     wrapper pops ``tools`` off the ``chat_model`` round only — detection is
@@ -1764,18 +1728,12 @@ def _tool_routing_llm(
             return await _degrade(await llm(body))
 
         body["model"] = chat_model
-        # Brain rounds carry native `tools` again as of runner ade07ba
-        # (DEFAULT_ROCMFPX_IMAGE): llama.cpp's MiniCPM5 specialized parser
-        # preserves the vocab's tool-syntax control tokens and grammar-locks
-        # the call shape, so the 1B's attribute-XML dialect parses into real
-        # `tool_calls` — measured live (clean JSON args, no peg-format 500).
-        # On the PRIOR runner (c077206) a tools-attached request against the
-        # brain slot always 500'd, which is why #1626 briefly stripped tools
-        # from this round; the reroute below is now the fallback it was
-        # designed to be, not the only path. `_call_chat_model` re-applies
-        # that strip whenever the resolved slot's runner is known — or has
-        # been caught — rejecting tools (#1655/#1789): a rollback to c077206
-        # must degrade to the fallback, not 500.
+        # Brain rounds carry native `tools`: the runner's MiniCPM5 parser
+        # preserves the vocab's tool-syntax control tokens, so the 1B's
+        # attribute-XML dialect parses into real `tool_calls`. The reroute
+        # below is the fallback. `_call_chat_model` strips tools from this
+        # round whenever the resolved slot's runner has been caught rejecting
+        # them (#1655/#1789), so such a runner degrades instead of 500ing.
         response = await _call_chat_model(body)
         if not isinstance(response, dict) or response.get("error"):
             # A BRAIN-side failure keeps its documented contract exactly — the
@@ -2075,9 +2033,8 @@ async def _chat_stream(request: Request, payload: dict[str, Any]) -> AsyncIterat
     # comment above _tool_intent_artefact.
     tool_model = (cfg.tool_model or "").strip()
     # Preflight: does the CHAT model's resolved slot actually run a runner that
-    # parses native `tools` without 500ing? (#1655 — the reroute below assumed
-    # ade07ba unconditionally, with no check of the slot a stale or deliberate
-    # `image_pin` might still be pointed at. #1789 — asked as a CAPABILITY
+    # parses native `tools` without 500ing? (#1655 — a deliberate `image_pin`
+    # may point at a build that rejects tools. #1789 — asked as a CAPABILITY
     # question about the resolved image, not "is it the GPU default", which
     # answered False for every CPU-only/CUDA box and muted tools there.)
     chat_model_image = await _resolved_slot_image(request, model)

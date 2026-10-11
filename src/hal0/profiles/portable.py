@@ -109,11 +109,10 @@ def envelope_runner_status(profile: ProfileConfig) -> tuple[str | None, bool]:
     runner = profile.runner
     if runner is None:
         return None, False
-    from hal0.runners import RUNNER_IMAGES, canonical_runner_key
+    from hal0.runners import RUNNER_IMAGES
 
-    key = canonical_runner_key(runner)
-    if key in RUNNER_IMAGES:
-        return key, False
+    if runner in RUNNER_IMAGES:
+        return runner, False
     return None, True
 
 
