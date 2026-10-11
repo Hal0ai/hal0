@@ -44,6 +44,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
+  `chadrock-moe`) no longer pass `--reasoning-format none`. Upstream llama.cpp
+  answers HTTP 400 "Failed to initialize samplers" to every `response_format`
+  (`json_object` / `json_schema`) request when the server runs with that flag,
+  so any slot still on one of these profiles lost structured output once it
+  moved to an upstream runner. `--reasoning off` stays, so the profiles still
+  mean "no thinking". The published addon envelopes under `community/addons/`
+  are regenerated without the flag. `hal0 slot migrate-flags` also drops the
+  flag instead of folding it into a model's defaults (#2545).
+
 - The Runner Images page no longer lists niche runtimes (PromptForge,
   Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
   registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
@@ -107,6 +117,20 @@ applying. Add those subsections to a version's section to surface them; see
   not shipped (an agent holding the admin key can log in for a cookie, and an
   on-box caller passes the LAN gate); `tests/api/test_agent_self_approval.py`
   pins agent self-approval as a strict xfail until the v1.5 tier lands.
+
+### Migrations
+
+- **`--reasoning-format none` is stripped from existing config (#2545).** It
+  runs by itself on `hal0 update`, on an `install.sh` re-run and at `hal0-api`
+  start, with nothing for you to run. It removes the flag from the `flags` of
+  every profile in `/etc/hal0/profiles.toml`, from the `[server].extra_args` of
+  each slot file under `/etc/hal0/slots/`, and from each model's
+  `defaults.extra_args`. `--reasoning-format=none` is caught too;
+  `--reasoning-format deepseek` and every other value are left alone. Before
+  it rewrites anything it copies the file to `/var/lib/hal0/backups/`
+  (`profiles-<time>.toml`, `slot-<name>-<time>.toml`) and writes the old model
+  values to `model-extra-args-<time>.json`. Running slots keep their old
+  command line until their next restart.
 
 ## [1.4.0] — 2026-10-08
 

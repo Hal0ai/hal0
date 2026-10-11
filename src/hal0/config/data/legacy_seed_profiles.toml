@@ -26,6 +26,13 @@
 # comment. See seed_profiles.toml's header for the flag-ownership rules
 # (hardware/managed args are slot-owned, `-fa auto` over `-fa on`, …) that
 # these predate but still honour.
+#
+# One deliberate deviation from "byte-identical": `--reasoning-format none`
+# is gone from the five non-thinking blocks (#2545). Upstream llama.cpp
+# answers 400 "Failed to initialize samplers" to every response_format
+# request under it; `--reasoning off` alone already gives "no thinking".
+# The reasoning_format_none migration strips the pair from profiles that were
+# injected from the old text.
 
 [profile.chat-long-context]
 # Long-context chat variant (model-family defaults may override KV policy).
@@ -37,7 +44,7 @@ quant = ""
 [profile.dense]
 # Generic dense workload — model-agnostic. Family-specific kv-cache / sampler
 # overrides go in profile.<family>-dense (e.g. profile.chadrock-dense).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic dense workload · tuned for 128K ctx"
 quant = ""
@@ -45,7 +52,7 @@ quant = ""
 [profile.moe]
 # Generic MoE workload — model-agnostic. Family-specific overrides in
 # profile.<family>-moe (e.g. profile.chadrock-moe).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic MoE workload · tuned for 32K ctx"
 quant = ""
@@ -55,7 +62,7 @@ quant = ""
 # jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
 # launch card that the legacy profile.dense was distilled from). 27B
 # dense + ROCmFP4 + MTP-capable + mmproj (vision).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = true
 intent = "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx"
 quant = "ROCmFP4"
@@ -65,7 +72,7 @@ quant = "ROCmFP4"
 # jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
 # card that the legacy profile.moe was distilled from). 35B MoE A3B +
 # ROCmFPX MoEQuality + MTP draft heads.
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = true
 intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx"
 quant = "ROCmFP4"
@@ -84,7 +91,7 @@ quant = ""
 # Workload-level code-gen tuned profile. Use for the coder slot (port
 # 8082), qwen3-coder, qwopus-coder, Qwen3-Coder-30B-A3B. Higher temp
 # for code-gen creativity; no reasoning (coders are non-reasoning).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
 mtp = false
 intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
 quant = ""

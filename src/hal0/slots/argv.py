@@ -290,6 +290,42 @@ def strip_managed_flags(
     return clean, removed
 
 
+def strip_reasoning_format_none(tokens: list[str]) -> tuple[list[str], int]:
+    """Drop every ``--reasoning-format none`` (and ``--reasoning-format=none``).
+
+    Upstream llama.cpp answers HTTP 400 "Failed to initialize samplers" to every
+    ``response_format`` (json_object / json_schema) request when the server runs
+    with ``--reasoning-format none`` (#2545), so hal0 must never launch with it.
+    This is the one owner of that rule: the migration that heals
+    already-persisted profiles / slot flags / model ``defaults.extra_args``
+    and the ``slot_flags_fold`` fold path both call it.
+
+    Only the value ``none`` is removed. ``--reasoning-format deepseek`` / ``auto``
+    / any other value is a deliberate choice and is kept untouched.
+
+    Returns:
+        ``(clean_tokens, removed_count)`` — the surviving tokens in order, and
+        how many ``--reasoning-format none`` settings were dropped.
+    """
+    clean: list[str] = []
+    removed = 0
+    for pair in _split_pairs(tokens):
+        if pair.canon == "--reasoning-format" and pair.flag is not None:
+            joined = pair.flag.startswith("--reasoning-format=")
+            value = pair.flag.split("=", 1)[1] if joined else (pair.values or ("",))[0]
+            if value.strip().lower() == "none":
+                removed += 1
+                if joined:
+                    # `--flag=value` takes no separate value token; whatever
+                    # _split_pairs grouped after it is an unrelated token.
+                    clean.extend(pair.values)
+                continue
+        if pair.flag is not None:
+            clean.append(pair.flag)
+        clean.extend(pair.values)
+    return clean, removed
+
+
 def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
     """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a slot-hardware flag.
 
@@ -529,4 +565,5 @@ __all__ = [
     "normalize_argv",
     "resolve_argv",
     "strip_managed_flags",
+    "strip_reasoning_format_none",
 ]

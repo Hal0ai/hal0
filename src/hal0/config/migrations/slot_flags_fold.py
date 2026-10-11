@@ -81,7 +81,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from hal0.slots.argv import FLAG_ALIASES, normalize_argv
+from hal0.slots.argv import FLAG_ALIASES, normalize_argv, strip_reasoning_format_none
 
 # Canonical (long) spellings the fold routes into TYPED model.defaults fields
 # instead of the freeform extra_args string.
@@ -304,6 +304,15 @@ def compute_folded_tune(
     md_ngl = _int_or_none(md.get("n_gpu_layers"), floor=0)
     md_ctx = _int_or_none(md.get("context_size"), floor=1)
     slot_extra_tokens, slot_ngl, slot_ctx = _slot_flag_tokens(slot_cfg)
+
+    # `--reasoning-format none` makes upstream llama.cpp reject every
+    # response_format request (#2545). Drop it from each source BEFORE merging,
+    # so the fold never writes it into a model's defaults whether or not the
+    # reasoning_format_none migration has already run, and so a lower-precedence
+    # `--reasoning-format deepseek` is not shadowed by a stripped `none`.
+    prof_tokens, _ = strip_reasoning_format_none(prof_tokens)
+    md_extra_tokens, _ = strip_reasoning_format_none(md_extra_tokens)
+    slot_extra_tokens, _ = strip_reasoning_format_none(slot_extra_tokens)
 
     # Build the full precedence-ordered stream so normalize_argv's last-wins
     # picks the right ngl/ctx (e.g. a slot -ngl 30 beats a profile -ngl 999).
