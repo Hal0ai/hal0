@@ -280,16 +280,6 @@ if [[ "${DEV_MODE}" -eq 0 \
     fi
 fi
 
-# Heads-up if a legacy editable /opt/hal0 install is present (pre-#495).
-# This run installs the FHS layout under ${HAL0_FHS_ROOT} and rewrites the
-# systemd units to the shared venv, so the old tree is orphaned. We do NOT
-# auto-delete it (it may be a CT-105-style working checkout) — uninstall.sh
-# cleans /opt/hal0 if the operator later wants it gone.
-if [[ "${DEV_MODE}" -eq 0 && -e "/opt/hal0/.venv" && "${HAL0_FHS_ROOT}" != "/opt/hal0" ]]; then
-    warn "legacy install at /opt/hal0 detected — superseded by the FHS layout at ${HAL0_FHS_ROOT}"
-    warn "  the old tree is now orphaned; remove it with 'sudo bash installer/uninstall.sh' or 'sudo rm -rf /opt/hal0' once you've confirmed the new install works"
-fi
-
 # Resolve pull destination: explicit flag / env wins, then the FHS default.
 # On an interactive terminal the operator gets a chance to change it (see the
 # "Operator input" block after the pre-flight gates — it must run AFTER the
@@ -355,6 +345,77 @@ if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
 fi
 
 info "system: $(uname -srm)"
+
+# ── Upgrade floor ────────────────────────────────────────────────────────────
+# A run over an existing install is an upgrade in place, so it is held to the
+# same floor `hal0 update` enforces: manifest.json's `upgrade_from` (a PEP 440
+# specifier, checked by updater._enforce_upgrade_floor). The converters for
+# state older than the floor have been deleted, so a box below it must step
+# through a release inside the window, or be reinstalled, before this one.
+#
+# The installed version is `current/VERSION`, the same identity
+# updater.installed_version() reads. A nightly `X.Y.Z-nightly.<stamp>` is
+# compared as `X.Y.Z.dev<stamp>` (updater.floor_comparable_version). The check
+# runs under the existing install's venv, which carries `packaging` as a hard
+# dependency; when no interpreter can evaluate it the check fails open, as the
+# updater's does.
+check_upgrade_floor() {
+    [[ "${DEV_MODE}" -eq 0 ]] || return 0
+    [[ -e "${CURRENT_LINK}" ]] || return 0
+    local installed="" py="" verdict="" rc=0
+    installed="$(tr -d '[:space:]' < "${CURRENT_LINK}/VERSION" 2>/dev/null || true)"
+    if [[ -z "${installed}" ]]; then
+        installed="$(basename "$(readlink -f "${CURRENT_LINK}")")"
+        installed="${installed#hal0-}"
+    fi
+    [[ -n "${installed}" ]] || return 0
+    for py in "${VENV_DIR}/bin/python" "${PY}"; do
+        command -v "${py}" >/dev/null 2>&1 || continue
+        rc=0
+        verdict="$("${py}" -I - "${REPO_ROOT}/manifest.json" "${installed}" <<'PY' 2>/dev/null
+import json
+import re
+import sys
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    spec = (json.load(fh).get("upgrade_from") or "").strip()
+if not spec:
+    sys.exit(0)
+installed = sys.argv[2]
+m = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)-nightly\.([0-9]+)", installed)
+if m:
+    installed = f"{m.group(1)}.dev{m.group(2)}"
+try:
+    ok = SpecifierSet(spec).contains(Version(installed), prereleases=True)
+except InvalidVersion:
+    sys.exit(0)
+if not ok:
+    print(spec)
+    sys.exit(3)
+PY
+)" || rc=$?
+        case "${rc}" in
+            0) return 0 ;;
+            3)
+                local floor="${verdict#>=}"
+                floor="${floor%%,*}"
+                die "hal0 ${installed} is installed, and this release (${VERSION}) upgrades only from ${verdict}.
+
+  Upgrade to ${floor} first or reinstall. To step through ${floor} in place,
+  run its installer, then re-run this one:
+      curl -fsSL https://hal0.dev/install.sh | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v${floor}/stable.json bash
+  To reinstall from scratch, run 'sudo bash installer/uninstall.sh --purge'
+  first (it deletes /etc/hal0 and /var/lib/hal0, models included).
+  See 'Upgrading from an older release' in docs/guides/update-and-rollback.mdx."
+                ;;
+        esac
+    done
+    warn "could not evaluate the upgrade floor against installed hal0 ${installed}; continuing"
+}
+check_upgrade_floor
 
 # ── Bootstrap-prereq parity (#1098) ─────────────────────────────────────────
 # bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
@@ -1883,45 +1944,6 @@ if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
     info "wrote ${PODMAN_FWD_UNIT_DST}"
 fi
 
-# Legacy slot-unit cleanup (R3 quadlet migration). Pre-quadlet installs
-# shipped a static hal0-slot@.service template (+ per-slot drop-ins). Static
-# units in /etc/systemd/system SHADOW podman's generator units, so a leftover
-# template breaks every quadlet slot with "Failed to load environment files"
-# (halo150 Phase-2 finding: the generator accepted hal0-slot@qtest.container
-# and produced the service, but the docker-era template won the name).
-# Convergent: remove if present, no-op otherwise.
-LEGACY_SLOT_UNIT="${UNIT_DIR}/hal0-slot@.service"
-if [[ -f "${LEGACY_SLOT_UNIT}" ]]; then
-    rm -f "${LEGACY_SLOT_UNIT}"
-    info "removed legacy static ${LEGACY_SLOT_UNIT} (shadowed quadlet generator units)"
-fi
-for LEGACY_SLOT_DROPIN in "${UNIT_DIR}"/hal0-slot@*.service.d; do
-    if [[ -d "${LEGACY_SLOT_DROPIN}" ]]; then
-        rm -rf "${LEGACY_SLOT_DROPIN}"
-        info "removed legacy slot drop-in ${LEGACY_SLOT_DROPIN}"
-    fi
-done
-
-# Stale hal0-agent@ drop-in cleanup (RATIFIED 2026-07-18, halo150 O3). systemd
-# merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an OLD
-# installer left behind still applies after the current template overwrites
-# override.conf. A stale `ConfigurationDirectory=` fragment brick-loops the unit
-# with status=241/CONFIGURATION_DIRECTORY (the current template ships no such
-# directive). Convergent: remove non-shipped fragments carrying that directive,
-# report each, no-op on a clean box. `override.conf` (the shipped drop-in) is
-# rewritten from the template below and never removed here.
-for AGENT_DROPIN_DIR in "${UNIT_DIR}"/hal0-agent@*.service.d; do
-    [[ -d "${AGENT_DROPIN_DIR}" ]] || continue
-    for AGENT_DROPIN in "${AGENT_DROPIN_DIR}"/*.conf; do
-        [[ -f "${AGENT_DROPIN}" ]] || continue
-        [[ "$(basename "${AGENT_DROPIN}")" == "override.conf" ]] && continue
-        if grep -q "ConfigurationDirectory=" "${AGENT_DROPIN}" 2>/dev/null; then
-            rm -f "${AGENT_DROPIN}"
-            info "removed stale agent drop-in ${AGENT_DROPIN} (241/CONFIGURATION_DIRECTORY class)"
-        fi
-    done
-done
-
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
 # Lay them down whether or not bootstrap has been run — the shim's
@@ -1970,15 +1992,6 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         info "wrote ${LIB_DIR}/guards/run-as-hal0.sh"
     else
         warn "${GUARD_SRC} not found — run-as-hal0 guard not installed"
-    fi
-
-    # Slot privilege seam removed: hal0-api runs as root and writes per-slot
-    # units / runs systemctl directly (the ContainerProvider's former euid
-    # routing through hal0-slotctl is gone). Remove any stale helper + sudoers
-    # grant left by an older hardened-perms install.
-    rm -f "${LIB_DIR}/bin/hal0-slotctl" 2>/dev/null || true
-    if [[ "${DEV_MODE}" -eq 0 ]]; then
-        rm -f /etc/sudoers.d/hal0-slotctl 2>/dev/null || true
     fi
 
     # Privileged seam #2 (D hardened-perms): hal0-agentenv writes the per-agent
@@ -2043,13 +2056,6 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         install -d "${LIB_DIR}/bench"
         install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
-        # Upgrade path: remove the retired shell-harness copies an earlier
-        # install left behind (they are root-owned and would otherwise linger
-        # as a stale, unmaintained privileged surface).
-        rm -f "${LIB_DIR}/bench/config.sh" \
-              "${LIB_DIR}/bench/run_benchmarks.sh" \
-              "${LIB_DIR}/bench/generate_results_json.py" \
-              "${LIB_DIR}/bench/profile-matrix.sh" 2>/dev/null || true
         install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
         # P3-perms: benchmarks/ (+ runs/, logs/, server-ab/) is now a declared
         # OwnershipStore row (hal0:hal0 2775) — the `doctor perms --fix`
@@ -2369,14 +2375,8 @@ ui_step "Container slot seeds" "~1-2s"
 # two then fought: the scaffold wrote a generic model-less `agent`/`brain`
 # toml — `_build_slot_cfg`, which in v0.9.8 also stamped `enabled = false` —
 # and this loop's `[[ -f ]]` guard then said "exists — left alone" and
-# silently discarded the CURATED seeds. Net effect on every box installed
-# that way: agent.toml never got `profile = "chadrock-moe"`, and brain.toml
-# never got `profile = "brain"` — it kept the scaffold's derived profile
-# (plain "vulkan") and the scaffold's `enabled = false`.
-#
-# That is still the shape every stable-channel box carries into a 1.0
-# upgrade, and it is why the `enabled` sweep has to run before the brain
-# model step (#2131 — see the ordering note at that call site). The seeds
+# silently discarded the CURATED seeds: agent.toml never got its curated
+# profile, and brain.toml kept the scaffold's derived one. The seeds
 # themselves no longer pin a `[model].default` at all: the brain's is stamped
 # by the installer only once the bytes land (installer/etc-hal0/slots/
 # brain.toml, "WHO SETS [model].default"), so a missing default is no longer
@@ -2518,78 +2518,6 @@ else
     [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
     "${HAL0_BIN}" setup "${_setup_args[@]}" \
         || warn "first-run seeding failed — slots can still be created from the dashboard; see the output above"
-fi
-
-# ── SlotConfig.enabled sweep (#1369) ──────────────────────────────────────────
-# `enabled` is gone — a non-empty [model].default IS the activation signal — and
-# `enabled = false` alongside a bound model would silently switch a deliberately
-# disabled slot back ON, so for that shape the sweep clears the model instead.
-# The identical idempotent sweep runs at hal0-api boot, but only into
-# `journalctl -u hal0-api`, which nobody watching an install ever sees. Run it
-# here so the result lands in the install transcript.
-#
-# ORDERING IS LOAD-BEARING (#2131). This MUST run BEFORE the brain model step
-# below. It used to run with the config-convergence migrations further down,
-# and on every 0.9.8 upgrade the two fought:
-#
-#   * v0.9.8's install.sh ran `hal0 setup --auto` (:1249) BEFORE its seed loop
-#     (:1487), so the generic scaffold won and the curated brain seed was
-#     skipped as "already present". `_build_slot_cfg(..., enabled=False)` wrote
-#     the shape every stable box therefore carries: `enabled = false` with a
-#     model-less `[model]` table.
-#   * the brain step below then bound the freshly pulled default into it, and
-#     THIS sweep — reading `enabled = false` next to a now-bound model — did
-#     exactly what it is designed to do and cleared the model again. The box
-#     ended the install with the 2.87 GB on disk and a model-less brain slot.
-#
-# Sweeping first restores the migration's OWN semantics for that shape: a
-# `enabled = false` slot with no model bound "already said off with both
-# signals", so the sweep drops the stale key and touches nothing else. The
-# brain step then binds into a clean slot, and every later boot-time sweep
-# (hal0.api._boot_slot_reconcile) finds no `enabled` key and no-ops, so the
-# binding is stable rather than reverted on the next restart.
-#
-# A slot an operator DELIBERATELY disabled (`enabled = false` WITH a model
-# bound) still has its model cleared here, exactly as before — that is the
-# deactivation the migration exists to carry forward. For the brain slot
-# specifically that then reads as model-less, which the step below re-binds:
-# the steward is not a normal user slot (it must work out of the box), and
-# re-running install.sh has re-bound a model-less brain since v1.0.0 anyway.
-#
-# This file runs under `set -euo pipefail` (:17), so a bare heredoc aborts the
-# WHOLE install on any raise — before start_or_restart_api is ever reached.
-# hal0_migration_step contains that: report the failure, keep going, let the
-# service start (`if ! cmd` also suppresses `set -e` for the call itself).
-# Defined HERE rather than with the other convergence steps further down
-# because the sweep below is the first migration step in the script (#2131);
-# the rest of the rationale lives at the "config-convergence migrations"
-# banner. Every heredoc-fed migration in this file must go through it —
-# tests/installer/test_migration_step_containment.py pins that.
-hal0_migration_step() {
-    # $1 = human label for the warning; python source arrives on stdin.
-    local label="$1"
-    if "${VENV_DIR}/bin/python" -; then
-        return 0
-    fi
-    warn "${label}: migration step failed — continuing with the install"
-    warn "  this is non-fatal; hal0-api still starts. Re-run 'sudo bash install.sh'"
-    warn "  after fixing the reported problem, or check 'journalctl -u hal0-api'."
-    return 0
-}
-
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping slot 'enabled' sweep (no system writes)"
-else
-    hal0_migration_step "slot 'enabled' key sweep" <<'PYEOF'
-from hal0.updater.updater import sweep_slot_enabled_keys
-swept = sweep_slot_enabled_keys()
-if swept:
-    print(f"  swept the removed 'enabled' key off {len(swept)} slot(s): {', '.join(swept)}")
-    print("    (a slot that was 'enabled = false' WITH a bound model is now model-less,")
-    print("     which is how 'off' is expressed in v1.0 — re-bind a model to turn it on)")
-else:
-    print("  no slot carries the removed 'enabled' key")
-PYEOF
 fi
 
 # ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
@@ -2946,172 +2874,81 @@ else
 fi
 
 # ── config-convergence migrations ─────────────────────────────────────────────
-# Every step below is an upgrade migration over /etc/hal0. None of them is
-# required for hal0 to start, and every one of them can meet a config file that
-# an older hal0 wrote and today's validators reject.
+# Every step below is an upgrade migration over /etc/hal0 or the host. None of
+# them is required for hal0 to start, and any of them can meet a file that an
+# older hal0 wrote and today's validators reject.
 #
-# This file runs under `set -euo pipefail` (:17), so a bare heredoc here aborts
-# the WHOLE install on any raise — before start_or_restart_api is ever reached.
-# ensure_seed_profiles raises ConfigParseError on a profiles.toml that fails the
-# current extra="forbid" ProfileConfig, which is exactly the pre-v1.0 shape this
-# block exists to fix: the migration that repairs an old box was the one most
-# likely to brick its upgrade.
-#
-# Updater.commit() already wraps the identical calls in try/except-and-warn.
-# hal0_migration_step gives install.sh the same posture: report the failure,
-# keep going, let the service start.
-#
-# The helper itself is DEFINED EARLIER — just above the "Steward + agent
-# models" step — because the SlotConfig.enabled sweep has to run before the
-# brain model is bound (#2131) and needs the same containment. Every migration
-# heredoc in this file, there and here, goes through it; a stdin-fed python
-# invocation may appear exactly once in the whole script, inside the helper
-# body (tests/installer/test_migration_step_containment.py enforces that).
+# This file runs under `set -euo pipefail` (:17), so a bare heredoc aborts the
+# WHOLE install on any raise — before start_or_restart_api is ever reached.
+# hal0_migration_step contains that: report the failure, keep going, let the
+# service start (`if ! cmd` also suppresses `set -e` for the call itself).
+# Updater.commit() wraps the same calls in try/except-and-warn. Every migration
+# heredoc in this file goes through it; a stdin-fed python invocation may appear
+# exactly once in the whole script, inside the helper body
+# (tests/installer/test_migration_step_containment.py enforces that).
+hal0_migration_step() {
+    # $1 = human label for the warning; python source arrives on stdin.
+    local label="$1"
+    if "${VENV_DIR}/bin/python" -; then
+        return 0
+    fi
+    warn "${label}: migration step failed — continuing with the install"
+    warn "  this is non-fatal; hal0-api still starts. Re-run 'sudo bash install.sh'"
+    warn "  after fixing the reported problem, or check 'journalctl -u hal0-api'."
+    return 0
+}
 
-# ── profile catalog: one-shot v1.0 reset ──────────────────────────────────────
-# v1.0 makes profiles tuning-only. A pre-v1.0 /etc/hal0/profiles.toml can hold
-# shapes the v1.0 loader no longer accepts, so converging such a box means
-# deleting the file — the built-in catalog is virtual (overlaid from code on
-# every load), so the reseed is free.
-#
-# Gated on hal0.toml's [meta] schema_version, so it fires exactly once per box
-# and never again. A timestamped backup is written to /var/lib/hal0/backups/
-# before anything is removed. The prompt is asked ONLY when operator-authored
-# profiles would actually be lost; a fresh install (no profiles.toml) and a
-# `curl | bash` run therefore stay fully non-interactive. Set
-# HAL0_RESET_PROFILES=1 to pre-approve it in a script. MUST run before the
-# schema migration below: the reset's gate IS meta.schema_version, and letting
-# the migration stamp it forward first would make the gate unreadable on the
-# very box it exists for.
+# ── retired system artefacts ──────────────────────────────────────────────────
+# Root-owned files older releases installed and nothing replaces: the
+# hal0-slotctl wrapper, its sudoers grant, the retired ComfyUI restart grant,
+# and the pre-quadlet static hal0-slot@.service template, which shadows the
+# quadlet generator's units.
+# updater.remove_retired_artifacts is the one sweep; activate_release also runs
+# it on every `hal0 update`, so an update-only box converges the same way.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping profile catalog reset (no system writes)"
+    info "dev mode — skipping retired-artefact sweep (no system writes)"
 else
-    # Export so the heredoc's python child sees it (sudo strips a bare prefix).
-    export HAL0_RESET_PROFILES="${HAL0_RESET_PROFILES:-}"
-    hal0_migration_step "profile catalog reset" <<'PYEOF'
-import os
+    hal0_migration_step "retired-artefact sweep" <<'PYEOF'
+from hal0.updater.updater import remove_retired_artifacts
 
-from hal0.updater.updater import profile_reset_status, reset_profile_catalog
-
-status = profile_reset_status()
-approved = None
-
-if not status["due"]:
-    print(f"  profile catalog already at the v1.0 shape ({status['reason']})")
-elif status["unreadable"]:
-    # No prompt: there is no recoverable operator content to weigh, and the file
-    # is actively breaking this box. Say so anyway — a silent delete of a file
-    # the operator believes holds their work is indistinguishable from a bug.
-    print("  /etc/hal0/profiles.toml does NOT parse, so its whole contents — including")
-    print("  any profiles you authored — are removed by the v1.0 reset. The original")
-    print("  bytes are copied to /var/lib/hal0/backups/ first; that copy is the only")
-    print("  way to recover them.")
-elif status["needs_consent"]:
-    names = ", ".join(status["custom_profiles"])
-    if os.environ.get("HAL0_RESET_PROFILES") == "1":
-        approved = True
-        print(f"  HAL0_RESET_PROFILES=1 — resetting; custom profiles removed: {names}")
-    else:
-        # stdin is this heredoc, so a prompt has to read the controlling
-        # terminal directly (same reason as _confirm_cpu_only above). No tty
-        # (curl | bash, cron, CI) means no consent: leave them alone.
-        print("  hal0 v1.0 makes profiles tuning-only; /etc/hal0/profiles.toml is reset once.")
-        print(f"  These operator-authored profiles would be deleted: {names}")
-        # #1411: a pre-existing custom profile whose stored flags include hardware
-        # flags (-dev, --threads, -ngl) is rejected by the v1.0 hardware screen on
-        # PUT, so it cannot be edited or repaired through the UI. Those profiles
-        # are in the list above and are deleted like any other. An operator who
-        # has been fighting an un-editable profile must not discover that the
-        # upgrade quietly resolved it by destruction.
-        print("  This includes profiles the UI currently refuses to save (their stored")
-        print("  flags contain hardware flags v1.0 no longer accepts) — they are deleted,")
-        print("  not repaired.")
-        print("  A timestamped copy is written to /var/lib/hal0/backups/ first; it is the")
-        print("  only way to get any of them back.")
-        try:
-            with open("/dev/tty", "r+") as tty:
-                tty.write("Reset the profile catalog now? [Y/n] ")
-                tty.flush()
-                approved = (tty.readline().strip().lower() or "y") in ("y", "yes")
-        except OSError:
-            approved = None
-            print("  no terminal available — keeping them; re-run with HAL0_RESET_PROFILES=1.")
-
-if status["due"]:
-    result = reset_profile_catalog(approved=approved)
-    if result["performed"]:
-        print(f"  profile catalog reset (backup: {result['backup']})")
-    else:
-        print(f"  profile catalog NOT reset ({result['outcome']}) — still due on the next run")
+for path in remove_retired_artifacts():
+    print(f"  removed retired {path}")
 PYEOF
 fi
 
-# ── post-activation migrations (schema + seed-profile/mtp/vulkan/image-pin/extra-args) ─
+# ── post-activation migrations (schema + mtp/vulkan/image-pin/extra-args) ─────
 # One shared sequence with Updater.commit()'s self-update path (GH #1475):
-# hal0.toml schema migrations, profiles.toml virtual-seed pruning (seeds live
-# in code and are overlaid on every load — an older install that materialised
-# them into profiles.toml froze stale definitions; this prunes them so the
-# code definition wins again), stale mtp=true slot-override clearing (a
-# force-on pointing at a model with no MTP heads crashes llama-server at load
-# once the unit re-renders under post-separation code), retired
-# device="gpu-vulkan" slot relabeling (#1924 — llama.cpp-backed GPU slots
-# left over from before #1923 retired the Vulkan LLM lane now refuse to load
-# under the new /dev/kfd preflight guard; relabeled to gpu-rocm/cpu, AMD
-# hosts only, non-llama runtimes like Kokoro/ComfyUI left untouched), stale
-# runner-image pin retagging, and defaults.extra_args sanitizing. Every pass
-# after the schema migration is independently best-effort — a single pass
-# failing never aborts the others. Previously this block ran only the
-# seed-profile and stale-MTP passes directly, so a box upgraded by
-# re-running install.sh (the documented repair/upgrade path) kept a stale
-# meta.schema_version, stale runner-image pins, and unsanitised
-# defaults.extra_args that `hal0 update` would have fixed — two boxes on the
-# same version with different on-disk state. Operator edits and non-seed
-# profiles are always left untouched.
-#
-# Ran through hal0_migration_step (not a bare heredoc): the schema migration
-# used to be able to abort this whole script under set -euo pipefail before
-# start_or_restart_api was ever reached, on exactly the pre-v1.0 boxes this
-# repair path exists for. The ceiling mirrors Updater.commit(): re-derive
-# whether the profile-catalog reset above is still outstanding (its own gate
-# is meta.schema_version, re-read fresh here) and cap the migration target
-# below the watermark so an outright decline doesn't silently consume the
-# one-shot.
+# hal0.toml schema migrations, stale mtp=true slot-override clearing (a
+# force-on pointing at a model with no MTP heads crashes llama-server at load),
+# retired device="gpu-vulkan" slot relabeling (#1924 — llama.cpp-backed GPU
+# slots left over from before #1923 retired the Vulkan LLM lane refuse to load
+# under the /dev/kfd preflight guard; relabeled to gpu-rocm/cpu, AMD hosts only,
+# non-llama runtimes like Kokoro/ComfyUI left untouched), defaults.extra_args
+# sanitizing, --reasoning-format none stripping (#2545), and component
+# convergence (runner-image pin retagging, the
+# memory engine). Every pass after the schema migration is independently
+# best-effort — a single pass failing never aborts the others — so a box
+# upgraded by re-running install.sh ends in the same on-disk state as one
+# upgraded by `hal0 update`.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping post-activation migrations (no system writes)"
 else
-    info "running post-activation migrations (schema + seed-profile/mtp/vulkan-slot/image-pin/extra-args + memory-engine)"
-    # Export so the heredoc's python child sees them (same posture as
-    # HAL0_RESET_PROFILES above): the memory-engine pass honors the skip
-    # hatch and the interpreter override.
+    info "running post-activation migrations (schema + mtp/vulkan-slot/image-pin/extra-args + memory-engine)"
+    # Export so the heredoc's python child sees them: the memory-engine pass
+    # honors the skip hatch and the interpreter override.
     export HAL0_SKIP_HINDSIGHT="${HAL0_SKIP_HINDSIGHT:-}"
     export HAL0_HINDSIGHT_PYTHON="${HAL0_HINDSIGHT_PYTHON:-}"
     hal0_migration_step "post-activation migrations" <<'PYEOF'
-from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
 from hal0.updater.updater import run_post_activation_migrations
-from hal0.updater.updater import profile_reset_status
 
-status = profile_reset_status()
-reset_outstanding = bool(status["due"])
-ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
-source, target = run_post_activation_migrations(ceiling=ceiling)
+source, target = run_post_activation_migrations()
 if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
     print(f"  hal0.toml schema already at {target}")
-print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args / reasoning-format cleanup passes ran (see log for any per-item detail)")
+print("  stale-MTP / vulkan-slot / runner-image / extra-args / reasoning-format cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
-
-# The SlotConfig.enabled sweep (#1369) used to live HERE. It now runs in the
-# "Hardware probe" step, BEFORE the brain model is pulled and bound — see the
-# ordering note at that call site (#2131). Running it after the brain step is
-# what blanked the freshly bound brain model on every 0.9.8 upgrade.
-
-# Stale former-default runner-image pins and hal0-managed flags in model
-# defaults.extra_args (parity with Updater.commit() steps 7d/7e) are handled
-# by the consolidated "post-activation migrations" call above — it runs
-# retag_stale_slot_images and sanitize_model_extra_args itself, so a second
-# call here would just repeat the same passes.
 
 # ── hal0-api service start / restart ──────────────────────────────────────────
 # Deliberately NOT the same policy as the slot units below. A slot is a running
@@ -3177,9 +3014,6 @@ pending = report["ownership_migrations"]["pending"]
 if report["converged"]:
     print("  on-disk config is fully converged to the v1.0 shape")
 else:
-    if report["profile_reset"]["due"]:
-        print("  ! profile catalog reset is still outstanding "
-              "(re-run this installer on a terminal, or with HAL0_RESET_PROFILES=1)")
     if pending:
         print("  ! this box is still on the pre-v1.0 slot/model shape. hal0 works, but the")
         print("    per-slot launch tune, NGL/runner pins and mtp/vision/reasoning settings")
@@ -3417,33 +3251,6 @@ else
 fi
 
 ui_step "Service start" "~30-90s"
-
-# P4-model-layout backstop: the v0.1→v0.2 model-layout migration
-# (src/hal0/cli/migrate_commands.py) reads the model registry + the on-disk
-# store and plants the canonical <recipe>/<capability>/ symlink farm under
-# /var/lib/hal0/models. Nothing upstream of this point ever calls it, so a
-# fresh install that just pulled the brain/agent chat model (registry pass,
-# #1615) and/or ComfyUI checkpoints (on-disk pass, "comfyui" v0.1.x dir)
-# ends up with those links outstanding — `hal0 doctor migrations` then
-# opens day one with a spurious "N link(s) pending" warning on a box that
-# has never run anything but this installer. Ordering against the P3-perms
-# fix below no longer matters (#1739): the perms table deliberately SKIPS
-# symlinks — chown/chmod follow them, so sweeping the planted links into the
-# recursive re-chown, as this step originally intended, rewrote the
-# operator's real files under /mnt/ai-models. The links are left exactly as
-# migrate created them, which is also what migrate's "does not write to
-# /mnt/ai-models at all" invariant requires. Idempotent (a no-op on re-run)
-# and non-destructive: it only
-# ever creates symlinks or reports a conflict, never overwrites one it
-# doesn't own (no --force) — a genuine conflict just resurfaces via
-# `hal0 doctor migrations` after install instead of aborting it.
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    if "${HAL0_BIN}" migrate model-layout --apply >/dev/null 2>&1; then
-        info "model-layout migration applied — canonical symlink tree is current"
-    else
-        warn "'${HAL0_BIN} migrate model-layout --apply' reported issues — run 'hal0 doctor migrations' after install"
-    fi
-fi
 
 # P3-perms migration backstop: hal0-api ships User=hal0 (above), so /etc/hal0
 # + /var/lib/hal0 must already be hal0-owned (2775/setgid) BEFORE the unit's

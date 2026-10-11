@@ -157,7 +157,6 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot migrate-hw` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-caps` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
 | `slot migrate-flags` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
-| `slot migrate-enabled-removal` | — | `--apply` |
 
 <Aside type="note">
 `--provider` on `slot create`/`slot edit` selects the inference engine binary, **not** the
@@ -257,7 +256,6 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | `doctor toolbox-pull` | `--json`, `--manifest` |
 | `doctor perms` | `--fix`, `--force`/`-f`, `--table-root` (audit old root-era table), `--json` |
 | `doctor models` | `--fix`, `--force`/`-f`, `--json` |
-| `doctor migrations` | `--json` |
 | `doctor profiles` | `--json` |
 | `doctor ports` | `--fix` (delete stale netavark DNAT rules found by the audit; privileged) |
 | `doctor wrappers` | `--fix` (re-install `${LIB_DIR}/bin/hal0-*`, the matching `/etc/sudoers.d` drop-ins, and the `/usr/local/bin/hal0`(`-agent`) PATH links from the active tree; privileged) |
@@ -341,12 +339,6 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `app install <name>` | `name` (currently only `openwebui`) | — |
 | `app list` | — | — |
 | `app uninstall <name>` | `name` | `--force`/`-f` |
-
-## `hal0 migrate` — one-shot v0.2 layout migrations
-
-| Command | Flags |
-|---|---|
-| `migrate model-layout` | `--apply` (default: dry-run), `--force`/`-f`, `--mount-root` (default `/mnt/ai-models`), `--canonical-root` (default `/var/lib/hal0/models`). Classifies models from the SQLite model registry. |
 
 ## `hal0 runner-images` — manage the runner-image catalogue
 

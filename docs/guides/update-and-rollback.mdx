@@ -1,6 +1,6 @@
 ---
 title: Update and roll back
-description: "Cosign-verified, atomic self-update for hal0 — check channels, apply or pin a version, roll back to the previous tree. Read the profiles.toml reseed warning before your first v1.0 update."
+description: "Cosign-verified, atomic self-update for hal0 — check channels, apply or pin a version, roll back to the previous tree."
 sidebar:
   order: 110
 ---
@@ -13,13 +13,6 @@ trigger an update from the shell or the dashboard. The actual swap is a
 **cosign-verified, atomic symlink swap** of `/usr/lib/hal0/current` — your
 config (`/etc/hal0`) and state (`/var/lib/hal0`) are untouched by the swap
 itself.
-
-<Aside type="caution" title="Read this before your first v1.0 update">
-If you've hand-edited custom entries into `/etc/hal0/profiles.toml`, the
-first `hal0 update` that crosses the v1.0 schema boundary **wipes and
-reseeds that file**. Read "The profiles.toml reseed (a pre-v1.0 one-time
-wipe)", further down this page, before you run it.
-</Aside>
 
 ## Check for an update
 
@@ -58,21 +51,6 @@ To pin a specific version instead of the latest:
 hal0 update --target v1.0.0
 ```
 
-<Aside type="caution" title="Stuck on 1.0.0-rc.1? Use --target">
-A box still running `1.0.0-rc.1` can't see later releases as available: its
-CLI predates the prerelease-aware version comparison that shipped in `rc.2`
-(#1663), so the old fallback ranks `1.0.0rc1` above plain `1.0.0` and both
-`hal0 update --check` and a plain `hal0 update` report nothing to do. This
-only affects boxes that go straight from `rc.1` to a later release — updating
-`rc.1` → `rc.2` first works normally.
-
-`--target` bypasses the availability check entirely and pulls the requested
-release directly:
-
-```sh
-hal0 update --target 1.0.0
-```
-</Aside>
 
 <Aside type="note">
 `hal0 update` refuses outright on an editable/dev install (`pip install
@@ -157,15 +135,17 @@ Settings → Updates page shows next to the channel.
    identity declared in the manifest. A missing `cosign` binary or a
    failed verification aborts the update — nothing is swapped.
 
-4. **Extract** the tarball and run any forward config migrations the
-   release needs — including, on a pre-v1.0 box, the one-time
-   `profiles.toml` reseed described below.
+4. **Extract** the tarball into a versioned tree beside the running one.
 
 5. **Swap** the `/usr/lib/hal0/current` symlink atomically, then reinstall
    the code into the venv. A failed re-install rolls the symlink back so
    `current` and the venv never diverge. The activation then re-installs the
-   root-owned `hal0-*` sudo wrappers and re-asserts the `/usr/local/bin/hal0`
-   and `/usr/local/bin/hal0-agent` PATH links from the new tree.
+   root-owned `hal0-*` sudo wrappers, re-asserts the `/usr/local/bin/hal0`
+   and `/usr/local/bin/hal0-agent` PATH links from the new tree, and removes
+   root-owned files older releases installed and nothing replaces (the
+   `hal0-slotctl` wrapper, the `hal0-slotctl` and `hal0-comfyui` sudoers
+   grants, and a pre-quadlet `hal0-slot@.service` template). The new code
+   then runs the config migrations the release needs.
 
 6. **Re-render every slot's systemd unit** through the newly installed
    code. The re-render itself never bounces a running slot. Afterwards the
@@ -238,145 +218,35 @@ pass, but a few things are worth doing or checking. The full list is in the
   `profiles.toml` migration, and the migrated file does not parse on 1.1.0.
   Back up `/etc/hal0/profiles.toml` first if you may downgrade.
 
-## Upgrading from 0.9.8
+## Upgrading from an older release
 
-Every stable-channel box has been pinned at 0.9.8 since 2026-07-13, so this is
-the hop most existing installs make into 1.0. It works — with one prerequisite
-that is easy to miss.
+Upgrades start at **1.3.0**. Every release manifest declares the window it
+upgrades from (`upgrade_from: ">=1.3.0"`), and both upgrade paths enforce it:
 
-<Aside type="caution" title="0.9.8 boxes have no cosign">
-0.9.8's updater verifies the release tarball with `cosign verify-blob` and
-aborts when the binary is missing:
+- `hal0 update` on an older box stops before it downloads anything, with
+  `system.update_upgrade_path_unsupported` and both versions named.
+- Re-running the installer over an older install stops before it changes
+  anything.
 
-```
-Error: prepare failed: cosign is not installed
-```
+A nightly counts as a prerelease of its base version, so a `1.3.0` nightly is
+below the floor and a `1.4.0` nightly is inside it.
 
-`HAL0_UPDATE_SKIP_COSIGN=1` does not help — it is ignored on the stable
-channel. And nothing on a 0.9.8-era box ever installed cosign; hal0 only began
-persisting a verified one during install in `1.0.0-rc.10`.
-</Aside>
-
-### The short way: re-run the installer
+From an older box, step through 1.3.0 first. Its installer upgrades in place
+and keeps `/etc/hal0` and `/var/lib/hal0`:
 
 ```sh
-curl -fsSL https://hal0.dev/install.sh | bash
-```
-
-This is an **upgrade in place, not a reinstall**. `/etc/hal0` and
-`/var/lib/hal0` are carried across, your slot TOMLs stay as they are, and the
-installer adds what 1.0 needs rather than replacing what you had. It also
-resolves the dependencies 0.9.8 never installed — cosign among them — which is
-what makes it the path of least resistance from 0.9.8.
-
-Because its migrations run under the new code, the box also lands on
-`meta.schema_version = 2` in the same pass.
-
-### The long way: install cosign, then update
-
-```sh
-curl -fsSL -o /usr/local/bin/cosign \
-  https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
-chmod +x /usr/local/bin/cosign
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
 hal0 update -y
 ```
 
-Same destination, and it keeps you on the `hal0 update` flow described above.
+The first command installs 1.3.0 and runs its migrations. The second takes
+the box from 1.3.0 to the current release. Read "Upgrading to 1.3.0" above
+before you start.
 
-### Three things specific to leaving 0.9.8
-
-- **The CLI may exit 1 on an update that worked.** The 0.9.8 client polls the
-  API it is restarting and treats the mid-restart refusal as fatal. Check
-  `hal0 --version` before retrying — the update has usually applied.
-- **Your channel does not change.** 0.9.8 persisted `stable` and neither route
-  overwrites a channel already on disk, so `HAL0_CHANNEL=preview` on the
-  command line is ignored. Set it afterwards with `hal0 update --channel
-  preview` if you are deliberately tracking preview.
-- **Do not point `HAL0_RELEASES_URL` at a GitHub release-asset URL.** 0.9.8's
-  updater does not follow redirects and those URLs answer `302`, so it stops
-  with `release manifest fetch returned HTTP 302`. The default
-  (`releases.hal0.dev`) serves manifests directly.
-
-Rolling back afterwards works normally — the 0.9.8 tree is kept, not deleted.
-See the "Roll back" section below, and note that config migrations are
-forward-only:
-a rolled-back 0.9.8 daemon reads a `hal0.toml` that 1.0 already migrated.
-
-## The profiles.toml reseed (a pre-v1.0 one-time wipe)
-
-hal0's seed profile catalogue is baked into code, not into
-`/etc/hal0/profiles.toml` — the file only ever holds your own custom
-entries. Older (pre-v1.0) installs could accumulate stale materialized
-seed rows in that file alongside your custom ones. As part of crossing
-the v1.0 schema boundary (any config still at `schema_version < 2`),
-`hal0 update` runs a **one-time reset**: it deletes `profiles.toml`
-outright, so the next config load serves the catalogue purely from code.
-
-This is a real, destructive delete — not a merge — and it takes your
-custom profiles with it.
-
-<Steps>
-
-1. **Automatic backup, every time.** Before the file is touched, hal0
-   copies it to `/var/lib/hal0/backups/profiles-<UTC-timestamp>.toml`
-   (e.g. `profiles-20260731T120000Z.toml`). This backup is unconditional
-   — it happens whether or not you have custom profiles.
-
-2. **Consent, if you have custom profiles.** If the file contains only
-   materialized seed rows, the reset proceeds silently. If it contains
-   profiles that aren't part of the built-in catalogue, `hal0 update`
-   stops and lists the exact custom profile names at risk, asking you to
-   confirm before it deletes them.
-
-3. **Headless runs default to skip, never wipe.** Running non-interactively
-   without `--yes` skips the reset entirely rather than deleting anything
-   without a human present to confirm.
-
-4. **No restore command.** There is no `hal0 profile restore` or similar
-   — recovering a wiped custom profile means manually copying the
-   relevant `[[profile]]` block back out of the timestamped backup file
-   into `/etc/hal0/profiles.toml` yourself.
-
-</Steps>
-
-<Aside type="caution">
-**Rollback does not undo this.** `hal0 update --rollback` (below) only
-swaps the installed code tree back — it never touches `profiles.toml`.
-If the reset already ran and deleted your custom profiles, rolling back
-your hal0 *version* does not bring them back; you still have to restore
-from the timestamped backup by hand.
-</Aside>
-
-### Preserve your custom profiles before updating
-
-Belt-and-suspenders beyond the automatic backup — do this before your
-first update past the v1.0 boundary if you have any hand-written entries
-in `profiles.toml`:
-
-```sh
-sudo cp /etc/hal0/profiles.toml ~/profiles.toml.bak
-```
-
-Note the names and settings of anything custom in there. After the
-update, if the reset ran, restore what you need by hand — either from
-your own copy, or from
-`/var/lib/hal0/backups/profiles-<timestamp>.toml`, which hal0 wrote for
-you automatically:
-
-```sh
-sudo cat /var/lib/hal0/backups/profiles-*.toml
-```
-
-Then re-add the custom `[[profile]]` blocks you want back into
-`/etc/hal0/profiles.toml` with `hal0 config edit profiles` (or hand-edit
-and `hal0 config validate` before reloading).
-
-<Aside type="note">
-This reset only ever fires once, on a box crossing the `schema_version <
-2` boundary. Once your config is at v1.0's schema, later updates don't
-re-run it — this whole section is a one-time migration concern, not an
-ongoing behavior of `hal0 update`.
-</Aside>
+Or reinstall from scratch: `sudo bash installer/uninstall.sh --purge` deletes
+`/etc/hal0` and `/var/lib/hal0`, models included, and the normal one-liner
+then installs the current release.
 
 ## Component updates
 

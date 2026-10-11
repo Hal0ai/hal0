@@ -3,9 +3,8 @@
 Mirrors the intent of the existing ``hal0.mcp.installed._registry_lock``:
 an exclusive cross-process advisory lock on a sibling ``<target>.lock`` that
 serializes a read-modify-write. The lock is also re-entrant within a single
-process/thread so a locked outer writer (e.g. ``initialize_if_missing``) can
-call a locked inner writer (``auto_migrate_capabilities_file``) without a
-self-deadlock.
+process/thread so a locked outer writer can call a locked inner writer
+without a self-deadlock.
 """
 
 from __future__ import annotations

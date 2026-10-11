@@ -22,13 +22,12 @@ from several core call sites (``load``, ``status``, ``compute_config_drift``,
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.slot_config import slot_scalar_table, write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
-from hal0.slots.layout import is_id_stem, resolve_slot_stem
+from hal0.slots.layout import resolve_slot_stem
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,40 +47,6 @@ def _shadow_path(slots_dir: Path, name: str) -> Path | None:
     """
     stem = resolve_slot_stem(slots_dir, name)
     return None if stem is None else slots_dir / f"{stem}.toml"
-
-
-def _log_renamed(old: str, canon: str) -> None:
-    """One rename receipt, shared by the id-keyed and name-keyed branches."""
-    log.info("slot.trio_shadow_renamed", extra={"from": old, "to": canon})
-
-
-async def _relabel_shadow_in_place(mgr: NpuTrioHost, path: Path, old: str, canon: str) -> None:
-    """Relabel an id-keyed shadow: TOML body + identity row, no file moves.
-
-    Deliberately NOT :meth:`SlotManager.rename`. That guard rejects any slot
-    which is not OFFLINE, because a name-keyed slot's systemd unit still
-    carries its name — but a trio shadow is never independently loadable
-    (``load`` short-circuits it straight to READY, so a live box persists
-    exactly the state the guard rejects) and the reconcile would then fail on
-    every boot, which is the bug this lane is fixing.
-
-    An id-keyed slot's TOML, state record and unit are all addressed by the
-    stable id, so relabelling moves no file and touches no unit: the label
-    lives in the TOML body and the identity row, and this moves both. The
-    persisted state record's ``name`` is left alone — ``status`` reports the
-    name it was ASKED for, so that copy is a cosmetic echo.
-    """
-    import tomllib
-
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    slot_scalar_table(raw)["name"] = canon
-    write_slot_toml(path, raw)
-    identity = getattr(mgr, "_identity", None)
-    if identity is not None and is_id_stem(path.stem):
-        with contextlib.suppress(Exception):
-            identity.rename(int(path.stem), canon)
-    mgr._invalidate_cfg_cache(old)
-    mgr._invalidate_cfg_cache(canon)
 
 
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
@@ -131,17 +96,10 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
     (``{anchor}-stt`` / ``{anchor}-embed``) so they show on the slots
     page and gate trio dispatch (:func:`hal0.api.routes.v1._is_npu_trio_request`).
     This pass keeps them coherent on every API start — for fresh installs
-    (anchor present, shadows never seeded), existing installs (legacy
-    names / drifted fields), and post-upgrade:
+    (anchor present, shadows never seeded), existing installs (drifted
+    fields), and post-upgrade:
 
-      1. **Legacy rename.** ``stt-npu`` / ``embed-npu`` TOMLs — the old
-         naming that matched neither the occupancy pane's ``s.name+"-stt"``
-         synthesis nor the ``_touch_npu_shadow_count`` counters, and that
-         (ending ``-npu``, not ``-stt``/``-embed``) even leaked in as a
-         standalone occupancy tile — are moved to ``{anchor}-stt`` /
-         ``{anchor}-embed``. Skipped (and logged) when the canon target
-         already exists, so operator state is never clobbered.
-      2. **Ensure + normalize.** Each shadow is created if missing and its
+      1. **Ensure + normalize.** Each shadow is created if missing and its
          structural fields are forced to the coresident shape: ``device=npu``,
          ``profile=flm`` (so ``slot_view`` lifts ``device_class=npu`` — a
          shadow without a resolvable npu profile makes the edit drawer take
@@ -185,49 +143,16 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
     slots_dir = paths.slots_config_dir()
     for suffix, slot_type, default_model in _TRIO_SHADOW_SPEC:
         canon = f"{anchor_name}-{suffix}"
-        prior = f"{suffix}-npu"  # the pre-canon shadow name: stt-npu / embed-npu
         # Shadows are addressed by DISPLAY name, but the on-disk stem is this
         # box's storage detail: after ``hal0 slot migrate-id-keying`` the same
         # shadow lives at ``<id>.toml`` with the name in the body. Probing the
-        # literal ``<name>.toml`` (#1664) missed it on every boot, so step 2
+        # literal ``<name>.toml`` (#1664) missed it on every boot, so step 1
         # (structural normalization — the point of this routine) was skipped
-        # and step 3 re-attempted a create that ``SlotManager``'s bilingual
+        # and step 2 re-attempted a create that ``SlotManager``'s bilingual
         # clobber guard rejected. Resolve through the ONE layout seam instead.
         canon_path = _shadow_path(slots_dir, canon)
-        prior_path = _shadow_path(slots_dir, prior)
         try:
-            # 1. Legacy rename — only when the canon target is free.
-            if prior_path is not None:
-                if canon_path is not None:
-                    log.warning(
-                        "slot.trio_shadow_rename_skipped",
-                        extra={
-                            "legacy": prior,
-                            "canon": canon,
-                            "reason": "canon target already exists",
-                        },
-                    )
-                elif is_id_stem(prior_path.stem):
-                    # Id-keyed: a rename is a RELABEL of a stable id, so the
-                    # stem stays put and the identity row moves with the label.
-                    # A bare file move would strand the row under the old name
-                    # and leave the shadow unresolvable by its new one.
-                    canon_path = prior_path
-                    await _relabel_shadow_in_place(mgr, prior_path, prior, canon)
-                    _log_renamed(prior, canon)
-                else:
-                    raw_before = tomllib.loads(prior_path.read_text(encoding="utf-8"))
-                    slot_scalar_table(raw_before)["name"] = canon
-                    canon_path = slots_dir / f"{canon}.toml"
-                    write_slot_toml(canon_path, raw_before)
-                    with contextlib.suppress(FileNotFoundError):
-                        prior_path.unlink()
-                    mgr._invalidate_cfg_cache(prior)
-                    mgr._invalidate_cfg_cache(canon)
-                    _log_renamed(prior, canon)
-
-            # 2. Ensure + normalize the canon shadow record. After a rename
-            #    canon_path now exists, so the same iteration normalizes it.
+            # 1. Ensure + normalize the canon shadow record.
             if canon_path is not None:
                 raw = tomllib.loads(canon_path.read_text(encoding="utf-8"))
                 # Compare AND write in whichever table the file's scalars live
@@ -251,7 +176,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
                     log.info("slot.trio_shadow_normalized", extra={"slot": canon})
                 continue
 
-            # 3. Missing → create it. Dispatch eligibility is the anchor's
+            # 2. Missing → create it. Dispatch eligibility is the anchor's
             #    ``[npu]`` toggle, read at request time — not mirrored here.
             cfg_dict = {
                 "name": canon,

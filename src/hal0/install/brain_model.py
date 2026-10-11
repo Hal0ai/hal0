@@ -52,33 +52,7 @@ revert one. An EMPTY or absent one is not a pick at all: the seed ships
 model-less on purpose (``installer/etc-hal0/slots/brain.toml``, "WHO SETS
 [model].default"), so :func:`bind_brain_model` binds the default into it.
 
-THE ORDERING THIS DEPENDS ON — read before moving anything in install.sh.
-The 0.9.8 → 1.0.0 upgrade ended at "Verify FAILED: structured-output probe
-failed" on every stable-channel box, with the 2.87 GB on disk and the brain
-slot model-less. The binding was not missing; it was **reverted**:
-
-  * v0.9.8's install.sh ran ``hal0 setup --auto`` (:1249) BEFORE its curated
-    seed loop (:1487), so the generic scaffold won and the curated brain seed
-    was skipped as already-present. ``_build_slot_cfg(..., enabled=False)``
-    therefore left ``enabled = false`` next to a model-less ``[model]`` table
-    on every one of those boxes;
-  * install.sh bound the freshly pulled default into that slot, and the
-    ``SlotConfig.enabled`` sweep — which ran AFTER the brain step — read
-    ``enabled = false`` beside a now-bound model and did exactly what it is
-    designed to do (:mod:`hal0.config.migrations.slot_enabled_removal`,
-    ``out["model"] = {**model, "default": ""}``). The same sweep runs at every
-    hal0-api boot (``hal0.api._boot_slot_reconcile``), so even a hand-repaired
-    box lost the binding again on the next restart.
-
-install.sh now runs that sweep BEFORE this module. For a model-less
-``enabled = false`` slot the migration's own rule is "both signals already said
-off — only the key needs dropping", so the stale key goes and the model is
-untouched; this module then binds into a clean slot and every later boot-time
-sweep no-ops. A slot an operator DELIBERATELY disabled (``enabled = false``
-WITH a model bound) still has its model cleared by that sweep, which is the
-deactivation the migration exists to carry forward.
-
-**Reported, not assumed.** Independently of the ordering above, the activation
+**Reported, not assumed.** The activation
 gate is *best-effort by construction*:
 :func:`~hal0.install.orchestrate._activate_slot_model` wraps its write in
 ``contextlib.suppress(Exception)`` so a config-rewrite failure can never abort

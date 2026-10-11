@@ -108,4 +108,4 @@ post-install gate for scripting than `doctor verify`.
 - **First chat fails or times out** — check the slot: `hal0 slot status brain`, `hal0 slot logs brain`.
 - **Dashboard won't load** — same unit as health; a health failure explains a dashboard failure too.
 - **Logs show repeating tracebacks** — `hal0 doctor bundle` collects a redacted diagnostic archive to attach to a bug report.
-- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`); `hal0 doctor all` adds `auth`, `models`, `migrations`, `ports` and more. `doctor perms --fix` and `doctor models --fix` repair ownership drift directly; `doctor profiles` is audit-only.
+- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`); `hal0 doctor all` adds `auth`, `models`, `ports` and more. `doctor perms --fix` and `doctor models --fix` repair ownership drift directly; `doctor profiles` is audit-only.

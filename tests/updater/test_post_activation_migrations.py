@@ -2,13 +2,6 @@
 ``Updater.commit()`` (self-update) and ``install.sh``'s repair/upgrade-in-
 place re-run path call, so the two upgrade paths converge on the same
 on-disk state.
-
-Before this, install.sh's venv-python block called only two of the five
-post-swap passes ``Updater.commit()`` runs (``ensure_seed_profiles``,
-``clear_stale_mtp_overrides``) — a box upgraded by re-running install.sh
-kept a stale ``meta.schema_version``, stale runner-image pins, and
-unsanitised ``defaults.extra_args``, while a box upgraded via ``hal0
-update`` did not.
 """
 
 from __future__ import annotations
@@ -23,12 +16,11 @@ from hal0.updater.updater import check_outstanding_migrations, run_post_activati
 
 @pytest.fixture(autouse=True)
 def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
-    """Replace all five passes with recording stubs so tests assert call
+    """Replace every pass with recording stubs so tests assert call
     order/count without touching real config/registry state."""
     calls: dict[str, list[Any]] = {
         "config_migrations": [],
         "registry_toml": [],
-        "seed_profiles": [],
         "mtp": [],
         "vulkan_migration": [],
         "extra_args": [],
@@ -44,10 +36,6 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     def _registry_toml(*, job_id=None):
         calls["registry_toml"].append(job_id)
         return {"outcome": "absent"}
-
-    def _seed_profiles(*, job_id=None):
-        calls["seed_profiles"].append(job_id)
-        return 0
 
     def _mtp(*, job_id=None, registry=None):
         calls["mtp"].append(job_id)
@@ -85,7 +73,6 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
-    monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
     monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
@@ -97,12 +84,11 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     return calls
 
 
-def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
+def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
     assert _stub_every_pass["registry_toml"] == ["j1"]
-    assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
     assert _stub_every_pass["extra_args"] == ["j1"]
@@ -125,7 +111,6 @@ def test_skip_image_retag_omits_only_that_pass(_stub_every_pass: dict[str, list[
     still run unaffected."""
     result = run_post_activation_migrations(job_id="j1", skip_image_retag=True)
     assert result == (1, 2)
-    assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
     assert _stub_every_pass["extra_args"] == ["j1"]
@@ -160,7 +145,6 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
     result = run_post_activation_migrations(job_id="j2")
 
     assert result == (1, 2)  # schema migration still reported
-    assert _stub_every_pass["seed_profiles"] == ["j2"]
     assert _stub_every_pass["vulkan_migration"] == ["j2"]  # ran despite mtp's failure
     assert _stub_every_pass["extra_args"] == ["j2"]
     assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == [
@@ -171,7 +155,7 @@ def test_a_failing_non_fatal_pass_does_not_block_the_others(
 def test_schema_migration_failure_propagates(
     monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
 ) -> None:
-    """Unlike the five data-cleanup passes, a schema-migration failure is
+    """Unlike the data-cleanup passes, a schema-migration failure is
     NOT swallowed — the caller (commit()'s install_dir cleanup, or
     install.sh's `set -euo pipefail`) must see it and abort the
     activation rather than proceed on an unmigrated schema."""
@@ -184,8 +168,7 @@ def test_schema_migration_failure_propagates(
     with pytest.raises(Hal0Error):
         run_post_activation_migrations(job_id="j3")
 
-    # None of the five data-cleanup passes ran — the schema must land first.
-    assert _stub_every_pass["seed_profiles"] == []
+    # None of the data-cleanup passes ran — the schema must land first.
     assert _stub_every_pass["mtp"] == []
     assert _stub_every_pass["vulkan_migration"] == []
     assert _stub_every_pass["extra_args"] == []
@@ -212,7 +195,7 @@ def test_registry_toml_retirement_failure_never_blocks(
 
     assert run_post_activation_migrations(job_id="j4") == (1, 2)
 
-    assert _stub_every_pass["seed_profiles"] == ["j4"]
+    assert _stub_every_pass["mtp"] == ["j4"]
     assert _stub_every_pass["extra_args"] == ["j4"]
     assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == ["j4"]
 
@@ -247,7 +230,6 @@ def test_boot_safety_net_diagnoses_the_venv_without_installing(
     included. It still probes — the fault and its remedy get logged — but the
     repair itself waits for a real update.
     """
-    monkeypatch.setattr("hal0.updater.updater.profile_reset_status", lambda: {"due": False})
 
     check_outstanding_migrations(job_id="boot")
 

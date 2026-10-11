@@ -213,9 +213,9 @@ def doctor_verify_cmd(
 ) -> None:
     """Render the post-setup report card (checks + live URLs + doc links).
 
-    Like every other doctor audit (``perms``, ``models``, ``migrations``,
-    ``profiles``, ``toolbox-pull``) this is a discoverable subcommand. See the
-    module-level docstring for the health seams this composes.
+    Like every other doctor audit (``perms``, ``models``, ``profiles``,
+    ``toolbox-pull``) this is a discoverable subcommand. See the module-level
+    docstring for the health seams this composes.
     """
     from hal0.cli.doctor_verify import run_verify
 
@@ -1697,134 +1697,6 @@ def doctor_models(
     raise typer.Exit(1 if problems else 0)
 
 
-# ── hal0 doctor migrations ────────────────────────────────────────────────────
-
-
-def pending_layout_migration() -> tuple[int, int] | None:
-    """Dry-run the v0.1→v0.2 model-layout migration; return ``(create, overwrite)``.
-
-    Returns the count of symlinks the migration *would* write (``create`` +
-    ``would-overwrite`` kinds), or ``None`` when the migration machinery can't be
-    consulted at all (e.g. running from a build with no migrate module). A box
-    that is already on the canonical layout — or a fresh install with no v0.1.x
-    store — yields ``(0, 0)``: nothing pending. Never raises; a missing store or
-    registry degrades to an empty plan inside ``plan_migration``.
-    """
-    try:
-        from hal0.cli.migrate_commands import (
-            DEFAULT_CANONICAL_ROOT,
-            DEFAULT_MOUNT_ROOT,
-            _read_registry,
-            plan_migration,
-        )
-    except ImportError:
-        return None
-    try:
-        report = plan_migration(
-            registry=_read_registry(),
-            mount_root=DEFAULT_MOUNT_ROOT,
-            canonical_root=DEFAULT_CANONICAL_ROOT,
-            force=False,
-        )
-    except Exception:
-        return None
-    create = sum(1 for a in report.actions if a.kind == "create")
-    overwrite = sum(1 for a in report.actions if a.kind == "would-overwrite")
-    return (create, overwrite)
-
-
-def _diagnose_migration(pending: tuple[int, int] | None) -> list[Diagnosis]:
-    """One ``HAL0-MIGRATION-PENDING`` row (always ``warn`` — operator-initiated),
-    or ``HAL0-DOCTOR-OK``/``HAL0-DOCTOR-SKIPPED`` when there's nothing to do."""
-    if pending is None:
-        return [
-            Diagnosis(
-                id="HAL0-DOCTOR-SKIPPED",
-                severity="info",
-                confidence="high",
-                summary="model-layout migration planner unavailable — skipped",
-            )
-        ]
-    create, overwrite = pending
-    if not create and not overwrite:
-        return [
-            Diagnosis(
-                id="HAL0-DOCTOR-OK",
-                severity="info",
-                confidence="high",
-                summary="model layout is current — no migration pending",
-            )
-        ]
-    detail = f"{create} link(s) to create"
-    if overwrite:
-        detail += f", {overwrite} to overwrite (needs --force)"
-    return [
-        Diagnosis(
-            id="HAL0-MIGRATION-PENDING",
-            severity="warn",
-            confidence="high",
-            summary="v0.1→v0.2 model-layout migration pending",
-            detail=detail,
-            evidence=[
-                Evidence(
-                    kind="command",
-                    summary=detail,
-                    data={"create_count": create, "overwrite_count": overwrite},
-                )
-            ],
-            next_steps=[
-                NextStep(
-                    kind="command",
-                    label="hal0 migrate model-layout --apply",
-                    target="hal0 migrate model-layout --apply",
-                )
-            ],
-        )
-    ]
-
-
-@app.command("migrations")
-def doctor_migrations(
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit stable Diagnosis JSON (HAL0-MIGRATION-PENDING) instead of the human line.",
-    ),
-) -> None:
-    """Surface a pending v0.1→v0.2 model-layout migration (read-only).
-
-    The canonical ``<recipe>/<capability>/`` symlink farm is populated by
-    ``hal0 migrate model-layout --apply``, but nothing tells an upgrading
-    operator it's outstanding — so slots that expect the canonical paths quietly
-    find nothing. This dry-runs the same planner and reports how many links are
-    missing, pointing at the apply command. It never writes.
-
-    Exit codes:
-      0 — up to date (or nothing to migrate).
-      1 — links are pending (advisory; run the apply command to reconcile).
-    """
-    pending = pending_layout_migration()
-    if json_output:
-        console.print_json(render_json(_diagnose_migration(pending)))
-        raise typer.Exit(0 if pending is None or pending == (0, 0) else 1)
-    if pending is None:
-        console.print("[dim]model-layout migration: planner unavailable — skipped.[/dim]")
-        raise typer.Exit(0)
-    create, overwrite = pending
-    if not create and not overwrite:
-        console.print("[green]✓[/green]  model layout is current — no migration pending.")
-        raise typer.Exit(0)
-    detail = f"{create} link(s) to create"
-    if overwrite:
-        detail += f", {overwrite} to overwrite (needs --force)"
-    console.print(
-        f"[yellow]![/yellow]  model-layout migration pending: {detail}.\n"
-        "      Preview: hal0 migrate model-layout        (dry-run)\n"
-        "      Apply:   hal0 migrate model-layout --apply"
-    )
-    raise typer.Exit(1)
-
-
 # ── hal0 doctor profiles — the slot↔profile referential + fitness layer ────────
 #
 # Profiles sit between a slot and the runtime image/backend. Nothing validates
@@ -2386,9 +2258,8 @@ def doctor_ports(
 
 # ── hal0 doctor all — read-only evidence roll-up (§21.4) ──────────────────────
 #
-# Registered here (not decorated in doctor_all.py) so the aggregate module stays
-# import-cycle-free: it pulls `pending_layout_migration` from this module lazily,
-# inside its orchestration function, rather than at import time.
+# Registered here (not decorated in doctor_all.py) so the aggregate module never
+# imports this module's Typer app.
 from hal0.cli.doctor_all import doctor_all_cmd as _doctor_all_cmd  # noqa: E402
 
 app.command("all")(_doctor_all_cmd)

@@ -40,7 +40,6 @@ from hal0.slots.identity import SlotIdentityStore
 from hal0.slots.manager import SlotManager
 from hal0.slots.migrate_id_keying import RecordingSlotArtifactOps, migrate_slot_id_keying
 from hal0.slots.routing import loaded_slot_from_config
-from hal0.slots.state import SlotState
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -355,50 +354,6 @@ async def test_trio_reconcile_normalizes_id_keyed_shadow(tmp_hal0_home: str) -> 
     # The missing embed shadow is still created (name-keyed: it has no id yet).
     assert (_slots_dir(home) / "flm-embed.toml").exists()
     assert changed == 2
-
-
-@pytest.mark.usefixtures("container_stub")
-async def test_trio_reconcile_renames_id_keyed_legacy_shadow_in_place(tmp_hal0_home: str) -> None:
-    home = Path(tmp_hal0_home)
-    sm, ids = await _npu_box(home, shadow="stt-npu")
-    legacy_path = _slots_dir(home) / f"{ids['stt-npu']}.toml"
-
-    await sm.reconcile_npu_trio_slots()
-
-    # The legacy → canon rename must keep the id-keyed stem (renaming a slot
-    # is a relabel, not a re-key) and preserve the operator's model.
-    raw = _read(legacy_path)
-    assert raw["name"] == "flm-stt"
-    assert raw["type"] == "transcription"
-    assert raw["model"]["default"] == "operator-choice:v1"
-    assert not (_slots_dir(home) / "flm-stt.toml").exists()
-    assert not (_slots_dir(home) / "stt-npu.toml").exists()
-    # …and the identity row must move WITH the label, or the shadow is
-    # unresolvable by its new name (a bare file move would strand the row).
-    assert sm._identity.get_by_name("stt-npu") is None
-    row = sm._identity.get_by_name("flm-stt")
-    assert row is not None and row.id == ids["stt-npu"]
-    assert await sm.status("flm-stt") is not None
-
-
-@pytest.mark.usefixtures("container_stub")
-async def test_trio_reconcile_relabels_a_non_offline_id_keyed_shadow(tmp_hal0_home: str) -> None:
-    """A shadow is short-circuited to READY on load, so it is never OFFLINE.
-
-    Routing the relabel through ``SlotManager.rename`` would hit that method's
-    "must be offline to rename" guard (which exists for the name-keyed systemd
-    unit, and does not apply to a never-spawned, id-keyed shadow) and fail into
-    the per-shadow ``except`` on every single boot.
-    """
-    home = Path(tmp_hal0_home)
-    sm, ids = await _npu_box(home, shadow="stt-npu")
-    await sm.load("stt-npu")
-    assert sm.state("stt-npu") is not SlotState.OFFLINE
-
-    await sm.reconcile_npu_trio_slots()
-
-    assert _read(_slots_dir(home) / f"{ids['stt-npu']}.toml")["name"] == "flm-stt"
-    assert sm._identity.get_by_name("flm-stt") is not None
 
 
 @pytest.mark.usefixtures("container_stub")

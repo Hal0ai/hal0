@@ -144,7 +144,7 @@ def test_migration_heredocs_are_valid_python() -> None:
 def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
     """install.sh convergence must not be weaker than `hal0 update` convergence.
 
-    ``ensure_seed_profiles``, ``clear_stale_mtp_overrides``,
+    ``clear_stale_mtp_overrides``,
     ``retag_stale_slot_images`` and ``sanitize_model_extra_args`` run through
     the SAME shared ``run_post_activation_migrations`` sequence
     ``Updater.commit()`` calls (GH #1475), rather than being called
@@ -158,13 +158,11 @@ def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
     for fn in (
         "run_post_activation_migrations",
         "rerender_slot_units",
-        "sweep_slot_enabled_keys",
-        "reset_profile_catalog",
+        "remove_retired_artifacts",
         "convergence_report",
     ):
         # Match the name anywhere in an import list, not just directly after
-        # `import` — several of these are imported alongside a sibling
-        # (`import profile_reset_status, reset_profile_catalog`).
+        # `import` — some may be imported alongside a sibling.
         assert re.search(rf"^from hal0\.[\w.]+ import .*\b{fn}\b", text, re.M), (
             f"install.sh no longer imports {fn}"
         )

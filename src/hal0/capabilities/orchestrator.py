@@ -256,9 +256,7 @@ class CapabilityOrchestrator:
     async def initialize_if_missing(self) -> None:
         """Seed ``capabilities.toml`` from existing slot configs on first boot.
 
-        Idempotent: when the file already exists, this method first runs
-        :func:`auto_migrate_capabilities_file` so a stale v1 file is
-        promoted to v2 before any read. When the file is
+        Idempotent: an existing file is left alone. When the file is
         missing we walk ``/etc/hal0/slots/{embed,stt,tts,img}.toml`` and
         lift each slot's current device/provider/model into the matching
         child; ``enabled`` is derived from model-presence (#1369), which is
@@ -266,27 +264,13 @@ class CapabilityOrchestrator:
         empty selection so the dashboard can still render an "unset"
         picker.
         """
-        from hal0.capabilities.config import auto_migrate_capabilities_file
-
-        # SC-10: the exists-check + seed write (and the nested auto-migrate)
-        # are one read-modify-write that must not race a concurrent CLI/API
-        # writer. Hold the same capabilities.toml advisory lock every other
-        # writer uses; re-check existence INSIDE the lock so a writer that
-        # seeded the file while we blocked isn't overwritten. The lock is
-        # re-entrant, so the nested (also-locked) auto-migrate is safe.
+        # SC-10: the exists-check + seed write are one read-modify-write that
+        # must not race a concurrent CLI/API writer. Hold the same
+        # capabilities.toml advisory lock every other writer uses; re-check
+        # existence INSIDE the lock so a writer that seeded the file while we
+        # blocked isn't overwritten.
         with file_lock(self._config_path):
             if self._config_path.exists():
-                # Migrate v1 → v2 in place if needed. Idempotent on v2 files.
-                try:
-                    auto_migrate_capabilities_file(self._config_path)
-                except Exception as exc:
-                    # Don't let a migration crash block API startup — the
-                    # orchestrator already swallows initialise failures one
-                    # level up.
-                    log.warning(
-                        "capabilities.migrate.skipped",
-                        extra={"path": str(self._config_path), "error": str(exc)},
-                    )
                 return
 
             cfg = CapabilityConfig()

@@ -1,7 +1,7 @@
 """``hal0 doctor all`` — one read-only evidence pass over the box (§21.4).
 
 The individual ``doctor`` subcommands each audit one surface (``perms``,
-``models``, ``migrations``, ``profiles``) and ``doctor verify`` renders the
+``models``, ``profiles``) and ``doctor verify`` renders the
 live-API report card. ``doctor all`` composes the *read-only* evidence into a
 single roll-up so an operator (or a bug report) gets the whole picture in one
 command, with ``--json`` for machine consumers.
@@ -9,7 +9,7 @@ command, with ``--json`` for machine consumers.
 It re-uses the tested :class:`hal0.cli.doctor_verify.Check` row type and the
 verify report-card classifiers (API, runners, DNS, capabilities, memory,
 OpenWebUI, Hermes), then adds the broader health rows the retrofit calls for:
-auth posture, model-store integrity, pending migrations, a stale-dashboard
+auth posture, model-store integrity, a stale-dashboard
 ``HAL0_UI_DIST`` override (#1589), bound slot ports, the ``hal0.target``
 boot-enable anchor (r5-sync-assessment §6.1), the privileged sudo seams
 every slot op + self-update runs through (#1465), whether the bundled agent
@@ -768,31 +768,6 @@ def check_model_store(
     return Check("models", "Model store", _PASS, f"{len(local)} registered file(s) present")
 
 
-def check_migrations(pending: tuple[int, int] | None) -> Check:
-    """Pending v0.1→v0.2 model-layout migration (advisory warn).
-
-    ``pending`` is the ``(create, overwrite)`` tuple from
-    :func:`hal0.cli.doctor_commands.pending_layout_migration`, or ``None`` when
-    the planner could not be consulted (degrades to a skipped/pass note).
-    """
-    if pending is None:
-        return Check(
-            "migrations", "Migrations", _PASS, "layout migration planner unavailable — skipped"
-        )
-    create, overwrite = pending
-    if not create and not overwrite:
-        return Check("migrations", "Migrations", _PASS, "model layout current")
-    detail = f"{create} link(s) to create"
-    if overwrite:
-        detail += f", {overwrite} to overwrite"
-    return Check(
-        "migrations",
-        "Migrations",
-        _WARN,
-        f"model-layout migration pending: {detail} — run `hal0 migrate model-layout --apply`",
-    )
-
-
 def check_leftover_registry_toml(toml_file: Path | None = None) -> Check:
     """A TOML-era ``registry.toml`` the migrations could not retire (warn).
 
@@ -1509,8 +1484,6 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         services=payloads["services"],
     )
 
-    from hal0.cli.doctor_commands import pending_layout_migration
-
     auth_payload = _get_any("/api/auth/status", base)
     # One fetch, two rows: /api/slots container-probes every slot, so paying for
     # it twice would double the roll-up's slowest leg.
@@ -1518,7 +1491,6 @@ def build_all_checks(base: str | None = None) -> list[Check]:
     extra_rows = [
         check_auth_posture(auth_payload),
         check_model_store(_get_any("/api/models", base)),
-        check_migrations(pending_layout_migration()),
         check_leftover_registry_toml(),
         check_ui_dist(),
         check_ports(slots_payload),
@@ -1590,7 +1562,7 @@ def doctor_all_cmd(
 
     Composes the ``doctor verify`` report card (API, runners, DNS, capability
     slots, memory, OpenWebUI, Hermes) with auth posture, model-store integrity,
-    pending migrations, bound slot ports, the ``hal0.target`` boot-enable
+    bound slot ports, the ``hal0.target`` boot-enable
     anchor, and the privileged sudo seams. Read-only — use the per-surface subcommands (``perms``/``models``)
     for ``--fix``.
 
@@ -1625,7 +1597,6 @@ __all__ = [
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_engine_version",
-    "check_migrations",
     "check_model_store",
     "check_ports",
     "check_seams",

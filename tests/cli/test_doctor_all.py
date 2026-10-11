@@ -122,23 +122,6 @@ def test_model_store_bad_payload_warns() -> None:
     assert da.check_model_store(12345).status == "warn"
 
 
-# ── check_migrations ──────────────────────────────────────────────────────────
-
-
-def test_migrations_planner_unavailable_passes() -> None:
-    assert da.check_migrations(None).status == "pass"
-
-
-def test_migrations_current_passes() -> None:
-    assert da.check_migrations((0, 0)).status == "pass"
-
-
-def test_migrations_pending_warns() -> None:
-    c = da.check_migrations((5, 2))
-    assert c.status == "warn"
-    assert "5 link" in c.detail
-
-
 # ── check_leftover_registry_toml ───────────────────────────────────────────────
 
 
@@ -1159,7 +1142,6 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         }.get(path)
 
     monkeypatch.setattr(da, "_get_any", _fake_get)
-    monkeypatch.setattr("hal0.cli.doctor_commands.pending_layout_migration", lambda: (0, 0))
     # ui-dist (#1589) reads real api.env otherwise; neutralise it so this
     # composition test asserts the row list, not the host's api.env content.
     monkeypatch.setattr(
@@ -1228,11 +1210,10 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 21 extras.
-    assert keys[-21:] == [
+    # 7 verify rows + 20 extras.
+    assert keys[-20:] == [
         "auth",
         "models",
-        "migrations",
         "registry-toml",
         "ui-dist",
         "ports",

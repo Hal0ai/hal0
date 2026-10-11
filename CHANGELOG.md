@@ -41,6 +41,45 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Breaking
 
+- Upgrades now start at **1.3.0**. Every release manifest carries
+  `upgrade_from: ">=1.3.0"` (declared in `manifest.json`), so `hal0 update`
+  on a box below 1.3.0 stops with `system.update_upgrade_path_unsupported`
+  before it downloads anything. Re-running the installer over an existing
+  install below 1.3.0 stops the same way, before it changes anything. A
+  nightly counts as a prerelease of its base version. A box below the floor
+  steps through 1.3.0 by running its installer, or reinstalls; see
+  "Upgrading from an older release" in
+  `docs/guides/update-and-rollback.mdx`. The 0.9.8 upgrade guidance is gone.
+- `hal0 migrate model-layout`, `hal0 doctor migrations`, the `migrations`
+  row of `hal0 doctor all`, the `HAL0-MIGRATION-PENDING` diagnosis and the
+  bundle's `diagnostics/migrations.json` are removed. They converted a v0.1
+  `/mnt/ai-models` store into a `<recipe>/<capability>` symlink farm under
+  `/var/lib/hal0/models` that nothing reads: registered models point at
+  their real files. The installer no longer plants the farm on every
+  install. Links an earlier install planted are left in place and can be
+  deleted by hand.
+- The one-shot converters for state older than 1.3.0 are removed. A box on
+  1.3.0 or later has already been through each of them:
+  - The v1.0 profile-catalog reset is gone, with its prompt in
+    `hal0 update`, `POST /api/updates/converge-profiles`, the `reset_profiles`
+    field of `POST /api/updates/commit`, `HAL0_RESET_PROFILES`, and the
+    `profile_reset` fields of `/api/updates/check`, the prepare job and the
+    commit job's `convergence`. A box an operator kept at
+    `meta.schema_version = 1` by declining the reset keeps its
+    `profiles.toml` and is stamped 2 on its next migration run.
+  - `hal0 slot migrate-enabled-removal` and the boot-time sweep of the slot
+    `enabled` key are gone; the commit job's `convergence` loses
+    `slot_enabled_swept`. A stray `enabled` key is now ignored, never
+    acted on.
+  - Every boot no longer prunes materialised seed profiles, repairs the
+    pre-rc.11 Hermes MCP header, deletes a model-less slot named `vision`,
+    renames a slot named `stt-npu` or `embed-npu`, or converts a v1
+    `capabilities.toml`. Loading `profiles.toml` no longer injects the eight
+    demoted seed profiles into a file that lacks them, which removes one of
+    the two load-time writes #2489 describes.
+  - install.sh no longer warns about a pre-FHS `/opt/hal0`, deletes stale
+    `hal0-agent@` drop-ins (Hermes provisioning still does), or removes
+    retired bench scripts.
 - `DELETE /api/models/{id}` now deletes the model's files by default:
   the model file, any shards, the `mmproj` sidecar, and a pulled model's
   file set. Pass `delete_files=false` to remove only the registry entry,
@@ -51,10 +90,9 @@ applying. Add those subsections to a version's section to surface them; see
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
 - The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
-  backup restore), the whole `hal0 registry` group (`registry import`,
-  `registry export`, `registry import-sqlite`) and the `--registry` flag of
-  `hal0 migrate model-layout` (which now reads the SQLite registry) are
-  removed. `hal0 model list --json` shows the catalog. To keep a copy, take
+  backup restore) and the whole `hal0 registry` group (`registry import`,
+  `registry export`, `registry import-sqlite`) are removed.
+  `hal0 model list --json` shows the catalog. To keep a copy, take
   a consistent snapshot with SQLite's online backup, not a plain copy of the
   live WAL database:
   `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the
@@ -138,6 +176,16 @@ applying. Add those subsections to a version's section to surface them; see
   and the flag is dropped from the command line of every slot launch as a
   backstop for anything already saved (#2545).
 
+- `hal0 update` now removes root-owned files older releases installed and
+  nothing replaces: the `hal0-slotctl` wrapper and its sudoers grant
+  (installed by 0.8.0-beta.1 to beta.3; it let the `hal0` user write a
+  root-owned slot unit), the `hal0-comfyui` sudoers grant (dropped in #984),
+  and a pre-quadlet static `hal0-slot@.service` template with its drop-ins,
+  which shadows every quadlet slot unit. Only install.sh and uninstall.sh
+  removed them before, so a box that had only ever been updated kept them.
+  The sweep runs on the activation of the next update after this one.
+- `installer/uninstall.sh` now removes the `hal0-update` and `hal0-slotctl`
+  sudoers grants. It left both behind.
 - The Runner Images page no longer lists niche runtimes (PromptForge,
   Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
   registry tier — **Default runtimes**, **Optional runtimes**, **Frozen

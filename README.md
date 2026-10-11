@@ -44,9 +44,8 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
 > first. The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
-> notice. If you are still on 0.9.8, read
-> [Upgrading from 0.9.8](#upgrading-from-098) first — that hop has three
-> specific gotchas.
+> notice. Upgrades start at 1.3.0; on anything older, read
+> [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
@@ -662,7 +661,6 @@ Those follow-ups, and what each one is for:
 | `hal0 doctor models` | Registry paths vs disk, store/roots agreement, unregistered files in the store, FLM store ownership. | `--fix` (needs root), `--force`/`-f` |
 | `hal0 doctor ports` | Which port each slot bound, collisions, corrupt netavark DNAT rules. | `--fix` prunes stale DNAT rules |
 | `hal0 doctor profiles` | Dangling slot→profile references and un-pulled runner images. | — (read-only, `--json`) |
-| `hal0 doctor migrations` | A pending model-layout migration. | — (read-only, `--json`) |
 | `hal0 doctor toolbox-pull` | Every image pinned in `manifest.json` is anonymously pullable from ghcr.io. | — (`--json`, `--manifest PATH`) |
 | `hal0 doctor logs` | `hal0-api`'s own journal. | `--unit`, `--follow`/`-f`, `--lines`/`-n`, `--level`, `--since` |
 | `hal0 doctor bundle` | Writes a redacted support bundle (system / config / diagnostics / logs). | `--out DIR`, `--no-rocm-smi`, `--include-logs auto\|yes\|no` |
@@ -768,37 +766,9 @@ daemon, so the same code path runs whether you update from the shell or the
 dashboard. After a successful apply the daemon try-restarts `hal0-api`
 itself.
 
-**`Error: prepare failed: cosign is not installed`** — you are on 0.9.8,
-whose updater verifies with `cosign verify-blob` and aborts without it. Its
-`HAL0_UPDATE_SKIP_COSIGN` escape hatch is ignored on `stable`, so there is
-no bypass. Re-run the install one-liner (it installs cosign for you), or
-install cosign by hand and retry — see
-[Upgrading from 0.9.8](#upgrading-from-098).
-
-**`hal0 update` exits 1 but the update worked.** The 0.9.8 client polls job
-status through the API it just restarted and treats the mid-restart
-connection refusal as fatal (#1540, fixed in the 1.0 client — which by
-definition is not the one driving a 0.9.8 upgrade). Check the real outcome
-before retrying anything:
-
-```sh
-hal0 --version
-curl -s http://127.0.0.1:8080/api/health
-```
-
-**`release manifest fetch returned HTTP 302`** — `HAL0_RELEASES_URL` is
-pointed at a GitHub release-asset URL. 0.9.8's updater does not follow
-redirects. Leave it at the default; `releases.hal0.dev` serves manifests
-directly.
-
-**"Nothing to apply" when you know there is something.** Two known shapes:
-
-- You are on `1.0.0-rc.1`, whose venv predates prerelease-aware version
-  comparison and ranks `1.0.0rc1` above `1.0.0` (#1663/#1640). Bypass the
-  gate: `hal0 update --target 1.0.0`.
-- You came from 0.9.8 via `hal0 update` rather than the one-liner, so the
-  profile-catalog reset is still outstanding (#1585). Nothing is lost — it
-  applies on the next update run by 1.0 code.
+**`hal0 <version> supports upgrades from >=1.3.0; this box is on <older>`**
+(`system.update_upgrade_path_unsupported`) — the box is below the upgrade
+floor. See [Upgrading from an older release](#upgrading-from-an-older-release).
 
 **Something is wedged after an update.** Roll the tree back, then look:
 
@@ -830,45 +800,24 @@ PASSWORD / API_KEY / PRIVATE_KEY / ENCRYPTION_KEY / SALT-named keys). It is
 read-only and never uploads anything: `tar czf` it and attach it yourself.
 Exit `1` means some probe commands failed — see `commands.tsv` inside.
 
-## Upgrading from 0.9.8
+## Upgrading from an older release
 
-`hal0 update` supports any `1.0.0-rc` and **0.9.8**, the version every
-stable-channel box has been pinned at since 2026-07-13.
-
-**The one-liner is the supported 0.9.8 path.** It is an upgrade in place, not
-a reinstall: `/etc/hal0` and `/var/lib/hal0` carry across, your slot TOMLs
-stay where they are, and the installer adds what 1.0 needs rather than
-replacing what you had.
+Upgrades start at **1.3.0**. `hal0 update` on an older box stops before it
+downloads anything, and re-running the installer over an older install stops
+before it changes anything. Step through 1.3.0 first by running its
+installer in place, which keeps `/etc/hal0` and `/var/lib/hal0`:
 
 ```sh
-curl -fsSL https://hal0.dev/install.sh | sudo bash
-```
-
-It resolves the dependencies 0.9.8 never installed — **cosign included** —
-and that is the whole reason to prefer it. Its migrations also run under the
-*new* code, so the box lands on `meta.schema_version = 2` in the same pass.
-
-If you would rather drive the updater yourself, install cosign first:
-
-```sh
-curl -fsSL -o /usr/local/bin/cosign \
-  https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
-chmod +x /usr/local/bin/cosign
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
 hal0 update -y
 ```
 
-Three things to know before you start, all specific to being on 0.9.8:
+Or reinstall from scratch with `sudo bash installer/uninstall.sh --purge`,
+which deletes `/etc/hal0` and `/var/lib/hal0`, models included, followed by
+the normal one-liner.
 
-- **The CLI may exit 1 on a successful update** — the old client losing the
-  API across the restart it triggered. Check `hal0 --version` before you
-  retry anything.
-- **Your channel does not change.** 0.9.8 persisted `stable` and the
-  installer will not overwrite a channel already on disk, so
-  `HAL0_CHANNEL=preview` on the upgrade command is ignored. Stable is what
-  you want at 1.0; set preview afterwards with
-  `hal0 update --channel preview` if you are deliberately tracking it.
-- **Do not point `HAL0_RELEASES_URL` at a GitHub release-asset URL** — 0.9.8
-  does not follow the `302`.
+### Migrations left to you
 
 Two migrations are deliberately left to you, because both rewrite state in
 ways that want a human deciding when. The **slot-flag fold**
@@ -880,9 +829,9 @@ rather than write half of it — when slots share a model with divergent
 tunes. **Slot id-keying** (`hal0 slot migrate-id-keying`) is optional and
 reversible; the runtime reads either layout, so run it in a downtime window.
 
-Everything else — schema migrations, the one-shot `enabled` sweep at first
-v1.0 boot, the config-load repairs — runs itself. Full breaking-change,
-migration and known-issue detail is in [`CHANGELOG.md`](./CHANGELOG.md).
+Everything else — schema migrations and the config-load repairs — runs
+itself. Full breaking-change, migration and known-issue detail is in
+[`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Project layout
 

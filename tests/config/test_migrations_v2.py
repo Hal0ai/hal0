@@ -1,15 +1,10 @@
-"""v2 — the profile-catalog reset watermark.
+"""v2 — an identity step, once the watermark of the retired profile reset.
 
-The transform is the identity; the *version bump* is the payload. That makes the
-contract worth pinning explicitly, because everything about "the destructive
-profile wipe fires exactly once" hangs off it:
-
-  * v2 is registered, so ``latest_version()`` is 2 and the updater's schema
-    runner will stamp a converged box forward;
-  * the transform loses nothing from ``hal0.toml``;
-  * the constant the updater gates on and the version the runner stamps are the
-    same number — if those two ever drift, the wipe either never fires or fires
-    on every update.
+* v2 is registered, so ``latest_version()`` is 2 and the updater's schema
+  runner stamps a v1 box forward;
+* the transform loses nothing from ``hal0.toml``;
+* ``PROFILE_CATALOG_SCHEMA_VERSION`` stays importable from the updater for a
+  1.3.x updater's post-swap child script.
 """
 
 from __future__ import annotations

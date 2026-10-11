@@ -39,11 +39,8 @@ from hal0.updater.updater import (
     convergence_report,
     detect_pending_ownership_migrations,
     fetch_release_manifest,
-    profile_reset_status,
     releases_url,
     releases_url_override,
-    reset_profile_catalog,
-    sweep_slot_enabled_keys,
     validate_manifest_for_channel,
     validate_release_version,
 )
@@ -65,11 +62,8 @@ __all__ = [
     "convergence_report",
     "detect_pending_ownership_migrations",
     "fetch_release_manifest",
-    "profile_reset_status",
     "releases_url",
     "releases_url_override",
-    "reset_profile_catalog",
-    "sweep_slot_enabled_keys",
     "validate_manifest_for_channel",
     "validate_release_version",
 ]

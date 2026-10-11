@@ -45,7 +45,6 @@ import json
 import os
 import re
 import shutil
-import stat as stat_mod
 import subprocess
 import sys
 import tarfile
@@ -57,7 +56,6 @@ from typing import Any, BinaryIO, Literal
 from urllib.parse import urlparse
 
 import structlog
-import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -65,14 +63,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 import hal0
 from hal0.config import paths
 from hal0.config.loader import (
-    ConfigParseError,
     hal0_config_file_lock,
     load_hal0_config,
-    save_profiles_config,
     write_toml_atomic,
 )
 from hal0.config.migrations import latest_version, run_migrations
-from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
+
+# A 1.3.x updater's post-swap child script imports this name from here and
+# passes `ceiling=` to run_post_activation_migrations; both stay until no
+# supported box can run a 1.3.x updater. HAL0-SUNSET: v1.5.0
+from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION  # noqa: F401
 from hal0.errors import Hal0Error
 from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
@@ -206,8 +206,9 @@ class UpdateUpgradePathUnsupported(UpdateError):
     ``prepare()`` would attempt to converge it. Enforcing it makes "we support
     upgrades from >= X" a machine-checked claim instead of a docs claim.
 
-    Inert unless a manifest actually sets the field — the default is ``""``
-    (no floor), which is what every published manifest carries today.
+    Release manifests carry the floor that ``manifest.json``'s ``upgrade_from``
+    declares; ``release.yml`` copies it into every channel manifest. An empty
+    value means no floor.
     """
 
     code = "system.update_upgrade_path_unsupported"
@@ -663,6 +664,24 @@ def _is_newer(candidate: str, current: str) -> bool:
         return _naive_version_key(candidate) > _naive_version_key(current)
 
 
+_NIGHTLY_INSTALLED_VERSION_RE = re.compile(
+    r"^(?P<base>[0-9]+\.[0-9]+\.[0-9]+)-nightly\.(?P<stamp>[0-9]+)$"
+)
+
+
+def floor_comparable_version(installed: str) -> str:
+    """Map a nightly ``X.Y.Z-nightly.<stamp>`` onto PEP 440 ``X.Y.Z.dev<stamp>``.
+
+    A nightly is cut from main before its base version ships, so it orders
+    below ``X.Y.Z``. Every other string is returned unchanged. installer/install.sh
+    applies the same mapping in its own floor check.
+    """
+    m = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch(installed.strip())
+    if m is None:
+        return installed
+    return f"{m.group('base')}.dev{m.group('stamp')}"
+
+
 def _enforce_upgrade_floor(
     manifest: ReleaseManifest,
     *,
@@ -671,8 +690,13 @@ def _enforce_upgrade_floor(
 ) -> None:
     """Refuse to stage a release whose ``upgrade_from`` floor this box is below.
 
-    ``upgrade_from`` is a PEP 440 specifier set (e.g. ``">=0.9.8"``). An empty
-    value — every published manifest today — means no floor and this is a no-op.
+    ``upgrade_from`` is a PEP 440 specifier set (e.g. ``">=1.3.0"``). An empty
+    value means no floor and this is a no-op.
+
+    A nightly install reports ``X.Y.Z-nightly.<stamp>``, which is not PEP 440.
+    It is compared as ``X.Y.Z.dev<stamp>`` (:func:`floor_comparable_version`), so
+    a nightly cut before the floor's release is held to the floor instead of
+    failing open.
 
     Fail-open on anything unparseable: a malformed specifier or a non-PEP-440
     installed version must never block an otherwise
@@ -689,9 +713,9 @@ def _enforce_upgrade_floor(
     installed = current or installed_version()
     try:
         allowed = SpecifierSet(spec)
-        # prereleases=True: 1.0.0-alpha.2 is a real, supported baseline, and a
-        # bare ">=0.9.8" would otherwise exclude every prerelease.
-        ok = allowed.contains(Version(installed), prereleases=True)
+        # prereleases=True: an rc or nightly of a release above the floor is a
+        # supported baseline, and a bare ">=" would exclude every prerelease.
+        ok = allowed.contains(Version(floor_comparable_version(installed)), prereleases=True)
     except (InvalidSpecifier, InvalidVersion) as exc:
         log.warning(
             "updater.upgrade_floor_unparseable",
@@ -712,7 +736,8 @@ def _enforce_upgrade_floor(
             "upgrade_from": spec,
             "hint": (
                 "upgrade to a release inside the supported window first, or "
-                "re-install with installer/install.sh"
+                "reinstall; see 'Upgrading from an older release' in "
+                "docs/guides/update-and-rollback.mdx"
             ),
         },
     )
@@ -1548,13 +1573,10 @@ def _maybe_run_config_migrations(
     Args:
         min_data_version: the release manifest's floor.
         job_id: optional breadcrumb for structured-log tracing.
-        ceiling: hard cap on the target version for THIS run. A schema version
-            is a claim about what has already been converged, and v2 claims the
-            one-shot profile-catalog reset has run
-            (:mod:`hal0.config.migrations.v2`). When an operator declines that
-            reset, stamping v2 anyway would silently consume the one-shot, so
-            :meth:`Updater.commit` caps the target below it. Never clamps below
-            the on-disk version — that would be a downgrade, which
+        ceiling: hard cap on the target version for THIS run; only a 1.3.x
+            updater's post-swap child passes one (see
+            :func:`run_post_activation_migrations`). Never clamps below the
+            on-disk version — that would be a downgrade, which
             ``run_migrations`` rejects outright.
 
     Returns ``(source_version, target_version)`` for breadcrumb logging.
@@ -1591,9 +1613,17 @@ def _run_config_migrations_locked(
     *,
     job_id: str | None = None,
 ) -> tuple[int, int]:
-    """Body of :func:`_maybe_run_config_migrations`, run under the config lock."""
-    cfg = load_hal0_config(toml_path)
-    source = int(getattr(cfg.meta, "schema_version", 1) or 1)
+    """Body of :func:`_maybe_run_config_migrations`, run under the config lock.
+
+    A raw round-trip, not a load through ``Hal0Config``: dumping the validated
+    model would write every default into ``hal0.toml`` and pin it there, and
+    unknown keys would be dropped. The migrations are dict transforms, so they
+    need nothing the validator adds.
+    """
+    from hal0.config.loader import _read_toml
+
+    raw = _read_toml(toml_path)
+    source = _raw_schema_version(raw)
     if source >= target:
         log.info(
             "updater.migrations_noop",
@@ -1603,16 +1633,6 @@ def _run_config_migrations_locked(
         )
         return (source, source)
 
-    # ``exclude_none=True`` matches ``save_hal0_config``: None has no TOML
-    # representation and ``tomli_w`` raises TypeError on it (#1652).
-    # SecurityConfig.require_auth / trust_forwarded_for both default to
-    # None, so every config hit this before exclude_none was added here —
-    # masked only by version arithmetic (the only migration is v2, and the
-    # profile-catalog gate keeps source==target or ceiling==source, so this
-    # writer was never actually reached). Pydantic re-supplies the default
-    # on load, so dropping None on write is safe for any field whose
-    # default is None, same as save_hal0_config.
-    raw = cfg.model_dump(mode="python", exclude_none=True)
     new_raw, new_version = run_migrations(raw, target_version=target)
     write_toml_atomic(toml_path, new_raw)
     log.info(
@@ -1624,129 +1644,12 @@ def _run_config_migrations_locked(
     return (source, new_version)
 
 
-#: Where hermes' merged config lands. Mirrors ``HermesTarget.hermes_home``'s
-#: default in :mod:`hal0.agents.hermes_provision` — kept as a module constant
-#: rather than imported so this pass stays usable from the post-swap
-#: subprocess without dragging the provisioning module in.
-HERMES_CONFIG_PATH = Path("/var/lib/hal0/.hermes/config.yaml")
-
-
-def repair_hermes_mcp_headers(
-    *,
-    job_id: str | None = None,
-    config_path: Path | None = None,
-    restart_gateway: bool = True,
-) -> bool:
-    """Coerce every hermes MCP header to a string — heals pre-#2088 boxes (#2090).
-
-    #2088 made ``X-hal0-Private`` reach ``config.yaml`` as the string ``"1"``:
-    the unquoted YAML int wedges hermes' MCP client immediately after
-    ``initialize`` (a 40 s hang ending in ``CancelledError``), leaving the
-    agent holding zero memory tools while every server-side probe reports
-    healthy — ``provision.json``'s ``mcp_wire`` counts the SERVER's tools, not
-    the client's, so nothing keyed on it notices.
-
-    That fix lives in the config WRITE path, which only runs when hermes is
-    provisioned. ``hal0 update`` never re-provisions, so it reached fresh
-    installs only: measured on the fleet, a box upgraded rc.10 → rc.11 still
-    failed its live client at 41.6 s and prod on rc.9 at 40.7 s, while a fresh
-    rc.11 install connected in 51 ms with 26 tools. Hence this pass, in the one
-    sequence both upgrade paths already converge on.
-
-    Every header value is coerced, not just the known-poisonous key: HTTP
-    header values are strings by definition, so any YAML scalar that survives
-    as a non-string is the same latent wedge.
-
-    Idempotent by construction — a converged box parses the file, finds nothing
-    to change, and returns ``False`` without writing or bouncing anything.
-    Failure modes (absent file, unreadable YAML) are quiet no-ops: a box with
-    no hermes install, or one whose config an operator hand-edited into
-    something unparseable, must not have its update aborted by a repair pass.
-    """
-    path = config_path or HERMES_CONFIG_PATH
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        log.debug("updater.hermes_header_repair_unreadable", job_id=job_id, error=str(exc))
-        return False
-
-    try:
-        doc = yaml.safe_load(raw)
-    except yaml.YAMLError as exc:
-        log.warning("updater.hermes_header_repair_unparseable", job_id=job_id, error=str(exc))
-        return False
-
-    if not isinstance(doc, dict):
-        return False
-    servers = doc.get("mcp_servers")
-    if not isinstance(servers, dict):
-        return False
-
-    repaired: list[str] = []
-    for name, server in servers.items():
-        if not isinstance(server, dict):
-            continue
-        headers = server.get("headers")
-        if not isinstance(headers, dict):
-            continue
-        for key, value in list(headers.items()):
-            if isinstance(value, str):
-                continue
-            # Match the write path's coercion exactly (hermes_provision):
-            # bool renders lowercase so a YAML `true` does not become "True".
-            headers[key] = str(value).lower() if isinstance(value, bool) else str(value)
-            repaired.append(f"{name}.{key}")
-
-    if not repaired:
-        return False
-
-    rendered = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
-    try:
-        # Preserve mode AND ownership: this pass runs as root from the
-        # post-swap subprocess, and a plain tmp-write + rename would hand
-        # hermes' own config back to it root-owned, breaking the born-owned
-        # contract $HERMES_HOME writes are held to (and hermes' later writes).
-        st = path.stat()
-        tmp = path.with_suffix(path.suffix + ".2090.tmp")
-        tmp.write_text(rendered, encoding="utf-8")
-        with contextlib.suppress(OSError):
-            os.chmod(tmp, stat_mod.S_IMODE(st.st_mode))
-        with contextlib.suppress(OSError, PermissionError):
-            os.chown(tmp, st.st_uid, st.st_gid)
-        os.replace(tmp, path)
-    except OSError as exc:
-        log.warning("updater.hermes_header_repair_write_failed", job_id=job_id, error=str(exc))
-        with contextlib.suppress(OSError):
-            path.with_suffix(path.suffix + ".2090.tmp").unlink()
-        return False
-
-    log.info("updater.hermes_header_repaired", job_id=job_id, headers=repaired)
-
-    if restart_gateway:
-        # Hermes reads config.yaml at start, so the repair only reaches the
-        # running agent after a bounce. Best-effort: the post-swap migration
-        # subprocess runs as root and can do it, while the boot-time safety
-        # net runs as the hal0 user and cannot — there the rewritten file
-        # still takes effect at the gateway's next restart.
-        try:
-            subprocess.run(
-                ["systemctl", "restart", "hermes-gateway.service"],
-                check=False,
-                capture_output=True,
-                timeout=120,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("updater.hermes_gateway_bounce_failed", job_id=job_id, error=str(exc))
-
-    return True
-
-
 #: Where the managed hermes venv lives. Mirrors ``HERMES_VENV_DEFAULT`` in
-#: :mod:`hal0.agents.hermes_provision`, duplicated for the same reason
-#: :data:`HERMES_CONFIG_PATH` is: this pass must stay importable from the
-#: post-swap subprocess without pulling the provisioning module in at import
-#: time. The one place that module IS needed — an actual repair — imports it
-#: lazily, inside the branch that has already proven the box is broken.
+#: :mod:`hal0.agents.hermes_provision`, duplicated so this pass stays
+#: importable from the post-swap subprocess without pulling the provisioning
+#: module in at import time. The one place that module IS needed — an actual
+#: repair — imports it lazily, inside the branch that has already proven the
+#: box is broken.
 HERMES_VENV_PATH = Path("/var/lib/hal0/venvs/hermes")
 
 #: What an operator runs by hand when the automatic repair could not (no
@@ -1764,9 +1667,8 @@ def repair_hermes_mcp_client(
 ) -> bool:
     """Reinstall a hermes venv whose MCP client cannot import (#2102).
 
-    :func:`repair_hermes_mcp_headers` heals the YAML half of "the agent has no
-    memory tools". This is the other half, and it reaches the same population:
-    a venv that drifted off the vetted pin — no ``mcp`` package at all, the
+    Heals the venv half of "the agent has no memory tools": a venv that
+    drifted off the vetted pin — no ``mcp`` package at all, the
     residual of #2021 — survives every upgrade untouched, because nothing
     outside provisioning ever re-converges the venv and ``hal0 update`` never
     provisions. Measured on ct150 during the rc.12 lane: the #2090 header
@@ -1881,13 +1783,8 @@ def run_post_activation_migrations(
 
     The single sequence both :meth:`Updater.commit` (self-update) and
     ``install.sh``'s repair/upgrade-in-place re-run path call, so the two
-    upgrade paths converge on the same on-disk state (GH #1475). Before
-    this existed, install.sh's venv-python block called only two of these
-    five passes directly (``ensure_seed_profiles``,
-    ``clear_stale_mtp_overrides``) — a box upgraded by re-running
-    install.sh kept a stale ``meta.schema_version``, stale runner-image
-    pins, and unsanitised ``defaults.extra_args``, while a box upgraded
-    via ``hal0 update`` did not. There is no other caller of the
+    upgrade paths converge on the same on-disk state (GH #1475). There is
+    no other caller of the
     ``hal0.toml`` schema-migration chain outside this function and ``hal0
     config migrate`` (``cli/config_commands.py``).
 
@@ -1911,13 +1808,12 @@ def run_post_activation_migrations(
     non-zero exit). The data-cleanup passes after it, starting with the
     ``registry.toml`` retirement
     (:func:`hal0.registry.toml_retirement.retire_registry_toml`), are each
-    independently best-effort, exactly as before: one pass's exception is
-    logged and never blocks the others or the caller's activation.
+    independently best-effort: one pass's exception is logged and never
+    blocks the others or the caller's activation.
 
-    ``ceiling`` hard-caps the migration target for this run — see
-    :func:`_maybe_run_config_migrations` for why (the one-shot v1.0
-    profile-catalog reset gate). ``None`` (the default, and what
-    install.sh's caller always passes) applies no cap.
+    ``ceiling`` caps the schema-migration target. Only a 1.3.x updater passes
+    it: its post-swap child script still calls this with a ceiling derived
+    from the retired profile-catalog reset. ``None`` applies no cap.
 
     ``upgrade_memory_engine_venv`` gates the hindsight engine-venv
     convergence pass (:func:`hal0.memory.engine_upgrade.upgrade_memory_engine`).
@@ -1936,8 +1832,8 @@ def run_post_activation_migrations(
     remedy.
 
     ``skip_image_retag`` (#1960 N2) omits ``retag_stale_slot_images``.
-    Every OTHER pass here is either purely additive (seed profiles, mtp
-    clearing) or corrects a state that actively breaks something (a
+    Every OTHER pass here is either purely additive (mtp clearing) or
+    corrects a state that actively breaks something (a
     gpu-vulkan slot that refuses to load, an unsanitised managed flag) —
     running them outside an update is harmless or actively good.
     ``retag_stale_slot_images`` is different: it rewrites a slot's image
@@ -1987,26 +1883,11 @@ def run_post_activation_migrations(
         log.warning("updater.registry_toml_retire_failed", job_id=job_id, error=str(exc))
 
     try:
-        ensure_seed_profiles(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.seed_profiles_prune_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: a lingering materialised seed is harmless (the overlay
-        # overwrites it on load); don't abort the update.
-
-    try:
         clear_stale_mtp_overrides(job_id=job_id)
     except Exception as exc:
         log.warning("updater.mtp_migration_failed", job_id=job_id, error=str(exc))
         # Non-fatal: the affected slot simply fails to load until the
         # operator flips MTP to Auto/Off in the drawer.
-
-    try:
-        repair_hermes_mcp_headers(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.hermes_header_repair_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: hermes keeps its pre-#2088 header and the agent stays
-        # without memory tools until the next provision — no worse than
-        # before this pass existed, and never a reason to fail an update.
 
     try:
         repair_hermes_mcp_client(job_id=job_id, install=repair_hermes_venv)
@@ -2096,13 +1977,6 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
     a box that misses it there only waits until its next real update to
     converge, same as before this function existed.
 
-    Mirrors :meth:`Updater.commit`'s own ``ceiling`` derivation, using
-    :func:`profile_reset_status` — a pure read — so a box whose one-shot
-    profile-catalog reset is still outstanding does not have this safety net
-    race ``meta.schema_version`` past that gate. No ``reset_profile_catalog``
-    call happens here, only the read: this function never deletes
-    ``profiles.toml``.
-
     Never raises — a startup safety net that could itself fail startup would
     be worse than the staleness it exists to fix. Returns the ``(source,
     target)`` schema tuple on success, ``None`` on any failure (already
@@ -2111,11 +1985,8 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
     :meth:`Updater.commit` uses for the same failure).
     """
     try:
-        reset_outstanding = bool(profile_reset_status().get("due"))
-        ceiling = PROFILE_CATALOG_SCHEMA_VERSION - 1 if reset_outstanding else None
         return run_post_activation_migrations(
             job_id=job_id,
-            ceiling=ceiling,
             skip_image_retag=True,
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
@@ -2458,155 +2329,11 @@ def _read_release_notes(install_dir: Path) -> dict[str, Any]:
     }
 
 
-# ── Seed-profile merge helpers ─────────────────────────────────────────────────
-
-
-def ensure_seed_profiles(*, job_id: str | None = None) -> int:
-    """Prune materialised seed profiles from /etc/hal0/profiles.toml.
-
-    Seeds are **virtual** — overlaid from code (:data:`SEED_PROFILES`) on every
-    :func:`load_profiles_config` and never persisted (:func:`save_profiles_config`
-    strips them).  Older installers wrote every seed inline, which froze stale
-    seed definitions on upgrade (a re-tuned seed never reached an existing
-    install).  This migration rewrites the on-disk catalog to operator
-    (non-seed) profiles only, so the shipped seed definition is authoritative
-    again on the next load.  If the file is absent nothing is written (the
-    overlay serves the seeds in-memory).
-
-    Data-safety (this rewrite is the one destructive step of the virtual-seed
-    design, so it hedges):
-
-    * The pre-prune file is copied to ``profiles.toml.pre-virtual-seeds.bak``
-      once (never overwritten on re-runs), so nothing is unrecoverable.
-    * A seed-named entry whose content DIFFERS from the code seed is **rescued
-      to ``<name>-custom``**, not deleted.  Two real cases: an operator
-      hand-edited a seed table in the TOML (previously honoured by the #838
-      additive merge), or an operator created a profile under a name that only
-      became a seed in a later release (e.g. ``embed``/``rerank``).  Slots
-      keep referencing ``<name>`` (now the code seed) — the rescue preserves
-      the operator's content under the new name and the log says so loudly.
-    * A seed-named entry byte-identical to the code seed is just a stale
-      materialisation — pruned without rescue.
-
-    Args:
-        job_id: Optional breadcrumb for structured-log tracing.
-
-    Returns:
-        Number of materialised seed entries handled (pruned + rescued).
-    """
-    import shutil
-
-    from hal0.config.loader import _read_toml
-    from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
-
-    target = paths.profiles_toml()
-    if not target.exists():
-        # Fresh install — no on-disk file yet; load_profiles_config already
-        # returns the seeds in-memory on every call. No write needed.
-        log.info("updater.seed_profiles_noop", job_id=job_id, reason="profiles.toml absent")
-        return 0
-
-    # Load the raw on-disk catalog directly so we can detect exactly which
-    # seed keys are materialised before deciding whether to write anything.
-    raw = _read_toml(target)
-    try:
-        cfg = ProfilesConfig.model_validate(raw)
-    except Exception as exc:
-        raise ConfigParseError(
-            f"failed to validate profiles.toml during seed merge at {target}: {exc}",
-            details={"path": str(target), "reason": str(exc)},
-        ) from exc
-
-    stale = [key for key in cfg.profile if key in SEED_PROFILES]
-    if not stale:
-        log.info("updater.seed_profiles_noop", job_id=job_id, reason="no materialised seeds")
-        return 0
-
-    # One-time backup before the only destructive rewrite of this migration.
-    backup = target.with_name(target.name + ".pre-virtual-seeds.bak")
-    if not backup.exists():
-        try:
-            shutil.copy2(target, backup)
-            log.info("updater.seed_profiles_backup", job_id=job_id, path=str(backup))
-        except OSError as exc:
-            log.warning("updater.seed_profiles_backup_failed", job_id=job_id, error=str(exc))
-
-    pruned: list[str] = []
-    rescued: dict[str, str] = {}
-    for key in stale:
-        entry = cfg.profile[key]
-        seed = ProfileConfig.model_validate(SEED_PROFILES[key])
-        if entry == seed:
-            # Byte-identical stale materialisation — safe to drop.
-            pruned.append(key)
-            continue
-        # Divergent content: operator-authored (hand-edit, or a name that only
-        # later became a seed). Rescue under <name>-custom (suffix until free).
-        rescue = f"{key}-custom"
-        n = 2
-        while rescue in cfg.profile or rescue in SEED_PROFILES:
-            rescue = f"{key}-custom{n}"
-            n += 1
-        cfg.profile[rescue] = entry
-        rescued[key] = rescue
-
-    save_profiles_config(cfg, path=target)  # strips all seed-named keys
-    log.info(
-        "updater.seed_profiles_pruned",
-        job_id=job_id,
-        pruned=pruned,
-        rescued=rescued,
-        count=len(stale),
-        backup=str(backup),
-    )
-    if rescued:
-        log.warning(
-            "updater.seed_profiles_rescued_customs",
-            job_id=job_id,
-            rescued=rescued,
-            note=(
-                "profiles with seed names but non-seed content were renamed; "
-                "slots referencing the original name now use the built-in seed — "
-                "repoint them at the -custom profile if the old behaviour is wanted"
-            ),
-        )
-    return len(stale)
-
-
-# ── v1.0 profile-catalog reset (one-shot, schema-version gated) ────────────────
-#
-# Distinct from ensure_seed_profiles() above, deliberately. That function is the
-# *conservative* migration: it prunes materialised seeds and RESCUES anything
-# divergent under `<name>-custom`. Existing callers and
-# tests/updater/test_seed_profiles_migration.py depend on that prune-and-rescue
-# contract, so it is left exactly as it is.
-#
-# This is the *destructive* one. v1.0 made the profile catalog tuning-only, and
-# a pre-v1.0 profiles.toml can hold shapes the v1.0 loader no longer accepts
-# (hardware fields, stale seed materialisations, operator rows authored against
-# the old schema). Converging such a box means deleting the file — the built-in
-# catalog is virtual (load_profiles_config overlays SEED_PROFILES on every load;
-# save_profiles_config strips seed-named keys before writing), so the reseed is
-# free and needs no code here.
-#
-# Which contract applies is decided purely by the schema-version gate:
-#   meta.schema_version <  2  → this reset applies (pre-v1.0 box, converge once)
-#   meta.schema_version >= 2  → only ensure_seed_profiles() applies from here on
-#
-# Paranoia budget, because a gate bug here is shipped data loss:
-#   * an ABSENT hal0.toml means the gate can be neither read nor recorded, so
-#     the reset refuses outright rather than firing on every update;
-#   * every run that deletes writes a NEW timestamped backup first — unlike the
-#     write-once `.pre-virtual-seeds.bak` above, which goes stale;
-#   * a DECLINED reset does not stamp, and commit() clamps the schema-migration
-#     runner below v2 for that run so the one-shot is not silently consumed.
-
-
 def _raw_hal0_toml() -> dict[str, Any] | None:
     """Read ``hal0.toml`` as a raw dict, or ``None`` when absent/unreadable.
 
-    Deliberately raw: a pre-v1.0 ``hal0.toml`` may fail today's validators, and
-    the profile-catalog gate must still be readable on exactly those boxes.
+    Deliberately raw: :meth:`Updater.commit` reads the schema version from it
+    after a failed migration, when the file may not pass today's validators.
     """
     from hal0.config.loader import _read_toml
 
@@ -2630,286 +2357,6 @@ def _raw_schema_version(raw: dict[str, Any] | None) -> int:
         return int(meta.get("schema_version", 1) or 1)
     except (TypeError, ValueError):
         return 1
-
-
-def profile_reset_status() -> dict[str, Any]:
-    """Report whether the one-shot v1.0 profile-catalog reset is still due.
-
-    Pure read — touches nothing. Called from :meth:`Updater.prepare` (so the
-    CLI can prompt with real numbers before anything is activated), from
-    :func:`reset_profile_catalog` as its own gate, and from install.sh.
-
-    Returns a dict with:
-        ``due``: the reset has not run on this box yet.
-        ``reason``: why it is not due, when it is not.
-        ``schema_version``: ``hal0.toml``'s ``meta.schema_version`` (1 default).
-        ``path`` / ``exists``: the profiles.toml this would delete.
-        ``custom_profiles``: operator-authored (non-seed) profile names — the
-            only thing an operator can actually lose, and therefore the only
-            thing worth prompting about.
-        ``unreadable``: profiles.toml exists but does not parse. This is the
-            shape that makes ``ensure_seed_profiles`` raise ``ConfigParseError``
-            and (before the install.sh containment fix) aborted whole installs.
-        ``needs_consent``: True when the delete would destroy operator content.
-    """
-    from hal0.config.loader import _read_toml
-    from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
-    from hal0.config.schema import SEED_PROFILES
-
-    target = paths.profiles_toml()
-    raw_cfg = _raw_hal0_toml()
-    version = _raw_schema_version(raw_cfg)
-    exists = target.exists()
-
-    custom: list[str] = []
-    unreadable = False
-    if exists:
-        try:
-            raw = _read_toml(target)
-        except Exception:
-            unreadable = True
-        else:
-            table = raw.get("profile")
-            if isinstance(table, dict):
-                custom = sorted(k for k in table if k not in SEED_PROFILES)
-
-    if raw_cfg is None:
-        # No hal0.toml → the gate cannot be recorded, so a reset here would
-        # re-fire on every single update. Refuse; report why.
-        due, reason = False, "no_config"
-    elif version >= PROFILE_CATALOG_SCHEMA_VERSION:
-        due, reason = False, "already_reset"
-    else:
-        due, reason = True, ""
-
-    return {
-        "due": due,
-        "reason": reason,
-        "schema_version": version,
-        "target_schema_version": PROFILE_CATALOG_SCHEMA_VERSION,
-        "path": str(target),
-        "exists": exists,
-        "custom_profiles": custom,
-        "unreadable": unreadable,
-        # An unreadable file has no recoverable operator content to weigh (and
-        # is actively breaking this box), so it converges without a prompt —
-        # the timestamped backup still preserves the original bytes.
-        "needs_consent": bool(custom) and not unreadable,
-    }
-
-
-def _backup_profiles_toml(*, job_id: str | None = None) -> str | None:
-    """Copy profiles.toml to ``/var/lib/hal0/backups/profiles-<UTC>.toml``.
-
-    Timestamped on every run. The older ``profiles.toml.pre-virtual-seeds.bak``
-    convention (:func:`ensure_seed_profiles`) is deliberately write-once, so it
-    captures only the first migration a box ever ran and silently goes stale;
-    this one never clobbers and never lies about what it holds.
-
-    The stamp has one-second resolution, so a second reset inside the same
-    second would land on the same name — suffix until the name is free rather
-    than overwrite (same idiom ``ensure_seed_profiles`` uses for ``-custom{n}``).
-    A backup that silently replaces the backup it was meant to sit beside is the
-    write-once flaw wearing a different hat.
-    """
-    import shutil
-    from datetime import UTC, datetime
-
-    src = paths.profiles_toml()
-    if not src.exists():
-        return None
-    backup_root = paths.var_lib() / "backups"
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    dest = backup_root / f"profiles-{stamp}.toml"
-    n = 2
-    while dest.exists():
-        dest = backup_root / f"profiles-{stamp}-{n}.toml"
-        n += 1
-    try:
-        backup_root.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-    except OSError as exc:
-        log.warning("updater.profile_reset_backup_failed", job_id=job_id, error=str(exc))
-        return None
-    log.info("updater.profile_reset_backup", job_id=job_id, path=str(dest))
-    return str(dest)
-
-
-def _stamp_profile_catalog_version(*, job_id: str | None = None) -> bool:
-    """Advance ``hal0.toml``'s ``meta.schema_version`` to the reset watermark.
-
-    Raw round-trip on purpose (see :func:`_raw_hal0_toml`): the stamp has to
-    land on exactly the boxes whose config the current validators would reject,
-    and preserving unknown keys is strictly safer than dropping them.
-    """
-    from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION
-
-    # Same cross-process lock as every other hal0.toml read-modify-write
-    # (#1721) — the raw round-trip below is exactly the read → modify → write
-    # shape that loses a concurrent API writer's section.
-    #
-    # The lock ACQUIRE is inside the failure handler on purpose (#1721 review):
-    # this runs after ``reset_profile_catalog`` has already backed up and
-    # deleted profiles.toml, so an un-contained OSError here (an unwritable
-    # lock file left by an earlier root-run install, say) would escape as a
-    # generic reset error and leave the catalog deleted with no stamp and no
-    # honest report. A lock we cannot take is reported exactly like a write we
-    # cannot make: unstamped, logged, False.
-    try:
-        with hal0_config_file_lock():
-            raw = _raw_hal0_toml()
-            if raw is None:
-                log.warning(
-                    "updater.profile_reset_stamp_skipped", job_id=job_id, reason="hal0.toml absent"
-                )
-                return False
-            new_raw, version = run_migrations(raw, target_version=PROFILE_CATALOG_SCHEMA_VERSION)
-            write_toml_atomic(paths.hal0_toml(), new_raw)
-    except Exception as exc:
-        log.warning("updater.profile_reset_stamp_failed", job_id=job_id, error=str(exc))
-        return False
-    log.info("updater.profile_reset_stamped", job_id=job_id, schema_version=version)
-    return True
-
-
-def reset_profile_catalog(
-    *,
-    approved: bool | None = None,
-    job_id: str | None = None,
-) -> dict[str, Any]:
-    """One-shot destructive reset of ``/etc/hal0/profiles.toml`` (v1.0 convergence).
-
-    Deletes the on-disk profile catalog after a timestamped backup, then stamps
-    ``meta.schema_version = 2`` so it never fires again. The built-in catalog is
-    virtual, so the reseed happens for free on the next
-    :func:`~hal0.config.loader.load_profiles_config`.
-
-    Slots referencing a deleted operator profile fall back through the existing
-    ``providers.container._resolve_profile_or_base`` path — no new fallback is
-    introduced here, and nothing under ``providers/`` is touched.
-
-    Args:
-        approved: the operator's answer, when one was needed. ``True`` means
-            "delete my custom profiles". ``None``/``False`` mean no consent was
-            obtained — which is what a headless run (no TTY, no ``--yes``)
-            passes. Ignored when there is nothing to consent to.
-        job_id: optional breadcrumb for structured-log tracing.
-
-    Returns:
-        The :func:`profile_reset_status` dict plus ``performed`` (did we
-        delete/stamp), ``outcome`` (machine-readable), ``backup`` (path or
-        ``None``) and ``stamped``.
-    """
-    status = profile_reset_status()
-
-    if not status["due"]:
-        log.info("updater.profile_reset_skipped", job_id=job_id, reason=status["reason"])
-        return {
-            **status,
-            "performed": False,
-            "outcome": status["reason"],
-            "backup": None,
-            "stamped": False,
-        }
-
-    if status["needs_consent"] and approved is not True:
-        # Headless default is SKIP, never wipe: an unattended update must not
-        # destroy operator-authored profiles. The gate stays un-stamped so the
-        # next interactive `hal0 update` (or `sudo bash install.sh`) re-offers
-        # it, and the convergence report tells the operator it is outstanding.
-        log.warning(
-            "updater.profile_reset_declined",
-            job_id=job_id,
-            custom_profiles=status["custom_profiles"],
-            note=(
-                "profile-catalog reset not applied — operator consent absent "
-                "(declined, or headless). Re-run interactively or with --yes."
-            ),
-        )
-        return {
-            **status,
-            "performed": False,
-            "outcome": "declined",
-            "backup": None,
-            "stamped": False,
-        }
-
-    backup = _backup_profiles_toml(job_id=job_id)
-    if status["exists"]:
-        try:
-            paths.profiles_toml().unlink()
-        except OSError as exc:
-            log.warning("updater.profile_reset_failed", job_id=job_id, error=str(exc))
-            return {
-                **status,
-                "performed": False,
-                "outcome": "error",
-                "backup": backup,
-                "stamped": False,
-                "error": str(exc),
-            }
-
-    stamped = _stamp_profile_catalog_version(job_id=job_id)
-    log.warning(
-        "updater.profile_reset_applied",
-        job_id=job_id,
-        removed=status["exists"],
-        custom_profiles=status["custom_profiles"],
-        unreadable=status["unreadable"],
-        backup=backup,
-        stamped=stamped,
-    )
-    return {**status, "performed": True, "outcome": "reset", "backup": backup, "stamped": stamped}
-
-
-def _slot_display_name(config_dir: Any, stem: str) -> str:
-    """Resolve a slot TOML stem to the slot's ``name``, or the stem itself.
-
-    Both keying layouts are live in the wild: ``<name>.toml`` (pre-rework, and
-    what CT150 runs) and ``<id>.toml`` (post ``migrate_slot_id_keying``). Only
-    the second needs resolving, and only for display.
-    """
-    import tomllib
-
-    try:
-        raw = tomllib.loads((config_dir / f"{stem}.toml").read_text(encoding="utf-8"))
-    except Exception:
-        return stem
-    table = raw.get("slot") if isinstance(raw.get("slot"), dict) else raw
-    name = table.get("name") if isinstance(table, dict) else None
-    return str(name) if isinstance(name, str) and name.strip() else stem
-
-
-def sweep_slot_enabled_keys(*, job_id: str | None = None) -> list[str]:
-    """Run the ``SlotConfig.enabled`` removal sweep and report which slots moved.
-
-    The identical sweep already runs at hal0-api boot
-    (``hal0.api._boot_slot_reconcile``) where it logs only to
-    ``journalctl -u hal0-api`` — invisible in an install/update transcript.
-    Calling it here puts the same idempotent pass in front of the operator who
-    is actually watching the upgrade.
-
-    Returns the slot names that were rewritten (empty when already swept).
-
-    ``migrate_slot_dir`` reports each file's *stem*, which on an id-keyed box
-    (``1.toml`` carrying ``id = 1``, post ``migrate_slot_id_keying``) is ``"1"``
-    — a filename, not a slot. An operator reading an install transcript needs
-    the slot name, so the stem is resolved back through the rewritten TOML's
-    ``name`` field, falling back to the stem when there is none.
-    """
-    from hal0.config.migrations.slot_enabled_removal import migrate_slot_dir
-
-    try:
-        config_dir = paths.slots_config_dir()
-        swept = [_slot_display_name(config_dir, stem) for stem in migrate_slot_dir(config_dir)]
-    except Exception as exc:
-        log.warning("updater.slot_enabled_sweep_failed", job_id=job_id, error=str(exc))
-        return []
-    if swept:
-        log.warning("updater.slot_enabled_swept", job_id=job_id, slots=swept, count=len(swept))
-    else:
-        log.info("updater.slot_enabled_sweep_noop", job_id=job_id)
-    return swept
 
 
 #: The three spec-hw-slot-ownership / spec-flags-ownership folds that are
@@ -3002,12 +2449,10 @@ def convergence_report(*, job_id: str | None = None) -> dict[str, Any]:
     convergence verdict ``hal0 update`` prints, so both entry points tell an
     operator the same story about the same box.
     """
-    profile = profile_reset_status()
     ownership = detect_pending_ownership_migrations(job_id=job_id)
     return {
-        "profile_reset": profile,
         "ownership_migrations": ownership,
-        "converged": not ownership["pending"] and not profile["due"],
+        "converged": not ownership["pending"],
     }
 
 
@@ -3746,11 +3191,7 @@ async def stage_release(
     the bytes itself, so the only thing the caller controls is *which channel*
     and an optional exact-match version pin.
 
-    Returns ``{version, install_dir, cache_dir, notes, profile_reset}``.
-    ``profile_reset`` is a read-only :func:`profile_reset_status` snapshot so
-    the CLI can prompt about the one-shot profile-catalog reset with real
-    numbers *before* anything is activated (commit runs inside hal0-api,
-    where there is no TTY to prompt on).
+    Returns ``{version, install_dir, cache_dir, notes}``.
 
     Raises:
         UpdateUpgradePathUnsupported when this box is below the release's
@@ -3868,7 +3309,6 @@ async def stage_release(
         "install_dir": str(install_dir),
         "cache_dir": str(cache),
         "notes": notes,
-        "profile_reset": await asyncio.to_thread(profile_reset_status),
     }
 
 
@@ -3993,6 +3433,79 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
         return "failed"
     log.info("updater.gpu_perms_unit_installed", job_id=job_id, path=str(dst))
     return "unchanged" if up_to_date else "installed"
+
+
+#: Where systemd unit files live; a module constant so tests redirect it.
+SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+
+#: ``/etc/sudoers.d`` grants hal0 once installed and no longer ships. Every
+#: grant hal0 ever wrote came from ``packaging/sudoers/``; these are the two
+#: that left it. hal0-slotctl (v0.8.0-beta.1 to beta.3) let the hal0 user write
+#: unit text into a root-owned slot unit, which is root. hal0-comfyui let it
+#: restart ``hal0-slot@img.service`` and was dropped in #984.
+_RETIRED_SUDOERS: tuple[str, ...] = ("hal0-comfyui", "hal0-slotctl")
+
+#: ``/usr/lib/hal0/bin`` wrappers hal0 no longer ships.
+_RETIRED_WRAPPERS: tuple[str, ...] = ("hal0-slotctl",)
+
+
+def remove_retired_artifacts(*, job_id: str | None = None) -> list[str]:
+    """Delete root-owned files older releases installed and nothing replaces.
+
+    The one post-activation sweep for retired system artefacts. It runs as root
+    from :func:`activate_release` on every update, and ``install.sh`` calls it
+    too, so a box that has only ever been updated converges the same way as one
+    that re-ran the installer. Before this, ``install.sh`` was the only place
+    that removed them, so an update-only box kept them.
+
+    * The ``hal0-slotctl`` wrapper in ``/usr/lib/hal0/bin`` and the
+      ``hal0-slotctl`` and ``hal0-comfyui`` grants in ``/etc/sudoers.d``.
+    * The pre-quadlet static ``hal0-slot@.service`` template and any
+      ``hal0-slot@*.service.d`` drop-ins. A static unit in
+      ``/etc/systemd/system`` shadows the quadlet generator's unit of the same
+      name, which breaks every slot.
+
+    Privileged-side ONLY, like :func:`refresh_privileged_wrappers`: a no-op
+    unless ``os.geteuid() == 0``. Best-effort: a path that cannot be removed is
+    logged and skipped, never raised.
+
+    Returns the paths removed.
+    """
+    if os.geteuid() != 0:
+        return []
+
+    from hal0.system.seam_check import SEAM_BIN_DIR, SUDOERS_DIR
+
+    candidates: list[Path] = [SEAM_BIN_DIR / name for name in _RETIRED_WRAPPERS]
+    candidates += [SUDOERS_DIR / name for name in _RETIRED_SUDOERS]
+    units = [SYSTEMD_UNIT_DIR / "hal0-slot@.service"]
+    units += sorted(SYSTEMD_UNIT_DIR.glob("hal0-slot@*.service.d"))
+    candidates += units
+
+    removed: list[str] = []
+    for path in candidates:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+            else:
+                continue
+        except OSError as exc:
+            log.warning(
+                "updater.retired_artifact_remove_failed",
+                job_id=job_id,
+                path=str(path),
+                error=str(exc),
+            )
+            continue
+        removed.append(str(path))
+
+    if any(str(u) in removed for u in units):
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+    if removed:
+        log.warning("updater.retired_artifacts_removed", job_id=job_id, paths=removed)
+    return removed
 
 
 def refresh_privileged_wrappers(target: Path, *, job_id: str | None = None) -> dict[str, Any]:
@@ -4265,6 +3778,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
     path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
+    retired = remove_retired_artifacts(job_id=job_id)
 
     log.info(
         "updater.activate_ok",
@@ -4278,6 +3792,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "wrappers_refreshed": wrappers["refreshed"],
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
+        "retired_artifacts_removed": retired,
     }
 
 
@@ -4371,7 +3886,6 @@ _MIGRATION_RESULT_KEY = "hal0_migration_result"
 #: still surfaces in commit()'s convergence report.
 _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.registry_toml_retire_failed",
-    "updater.seed_profiles_prune_failed",
     "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",
     "updater.extra_args_sanitize_failed",
@@ -4384,7 +3898,6 @@ async def _run_post_activation_migrations_after_swap(
     min_data_version: int,
     *,
     job_id: str | None,
-    reset_outstanding: bool,
 ) -> dict[str, Any]:
     """Run :func:`run_post_activation_migrations` in a subprocess of the
     just-repipped venv, AFTER the ``current`` symlink swap (#1960).
@@ -4398,15 +3911,9 @@ async def _run_post_activation_migrations_after_swap(
     old call site (this function's replacement) ran BEFORE the swap. A
     subprocess of the just-repipped venv imports the NEW module instead.
 
-    ``reset_outstanding`` — a bool, not a pre-computed ``ceiling`` int
-    (#1960 N1): the ceiling is ``PROFILE_CATALOG_SCHEMA_VERSION - 1``, and
-    that constant has to be read from the INCOMING tree's code, not this
-    (still outgoing) process's. Passing an int computed here would bake the
-    OUTGOING tree's watermark into a call that runs the INCOMING tree's
-    migrations — inert today (the constant hasn't moved since it was
-    introduced), a version-skew bug the moment it does. The child script
-    re-derives the ceiling from its own import, exactly like
-    :func:`check_outstanding_migrations` already does for the same reason.
+    The child script is an ABI between this (outgoing) release and the
+    incoming one: it calls ``run_post_activation_migrations(min_data_version,
+    job_id=...)``, so every later release must keep that call shape.
 
     The child's structured log is pinned to stderr (mirrors
     :func:`hal0.updater.privileged._pin_logs_to_stderr` exactly) so stdout
@@ -4434,7 +3941,6 @@ async def _run_post_activation_migrations_after_swap(
         {
             "min_data_version": min_data_version,
             "job_id": job_id,
-            "reset_outstanding": reset_outstanding,
         }
     )
     envelope_line = (
@@ -4448,16 +3954,10 @@ async def _run_post_activation_migrations_after_swap(
         # Mirrors hal0.updater.privileged._pin_logs_to_stderr exactly: send
         # structured logs to stderr so stdout carries only the result line.
         "structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))\n"
-        "from hal0.updater.updater import (\n"
-        "    PROFILE_CATALOG_SCHEMA_VERSION,\n"
-        "    run_post_activation_migrations,\n"
-        ")\n"
+        "from hal0.updater.updater import run_post_activation_migrations\n"
         "args = json.loads(sys.argv[1])\n"
-        "ceiling = (PROFILE_CATALOG_SCHEMA_VERSION - 1) if args['reset_outstanding'] else None\n"
         "try:\n"
-        "    result = run_post_activation_migrations(\n"
-        "        args['min_data_version'], job_id=args['job_id'], ceiling=ceiling\n"
-        "    )\n"
+        "    result = run_post_activation_migrations(args['min_data_version'], job_id=args['job_id'])\n"
         "except Exception as exc:\n"
         "    print('hal0-migrate: ' + str(exc), file=sys.stderr)\n"
         "    raise SystemExit(1)\n" + envelope_line
@@ -4650,11 +4150,7 @@ class Updater:
         without a re-fetch, and release notes are read from the *verified* tree
         so what the operator reviews before commit is exactly what was signed.
 
-        Returns ``{version, install_dir, cache_dir, notes, profile_reset}``.
-        ``profile_reset`` is a read-only :func:`profile_reset_status` snapshot so
-        the CLI can prompt about the one-shot profile-catalog reset with real
-        numbers *before* anything is activated (commit runs inside hal0-api,
-        where there is no TTY to prompt on).
+        Returns ``{version, install_dir, cache_dir, notes}``.
 
         Raises:
             UpdateError + subclasses on any step failure. Partial-state
@@ -4673,12 +4169,12 @@ class Updater:
         seam.assert_privileges()
         return await seam.stage(self.channel, version)
 
-    async def commit(self, version: str, *, reset_profiles: bool | None = None) -> dict[str, Any]:
+    async def commit(self, version: str) -> dict[str, Any]:
         """Activate a previously :meth:`prepare`d ``version`` (§9 steps 7-9+).
 
-        Runs forward config migrations, prunes materialised seed profiles, clears
-        stale mtp overrides, atomic-swaps the ``current`` symlink, re-pips the
-        tree into the running venv, and re-renders slot units. Requires that
+        Atomic-swaps the ``current`` symlink, re-pips the tree into the running
+        venv, runs the post-activation migrations under the new code, and
+        re-renders slot units. Requires that
         :meth:`prepare` already staged this version (its ``install_dir`` and
         cached manifest must exist) — otherwise raises ``UpdateError``.
 
@@ -4690,12 +4186,6 @@ class Updater:
 
         Args:
             version: the version ``prepare()`` staged.
-            reset_profiles: the operator's answer to the one-shot
-                profile-catalog reset prompt (see :func:`reset_profile_catalog`).
-                ``None`` — the default, and what an unattended
-                ``POST /api/updates/commit`` or ``apply()`` passes — means "no
-                consent obtained", so a box with operator-authored profiles is
-                left alone and reported as outstanding.
         """
         _raise_if_editable_install()
         seam = self._seam()
@@ -4729,44 +4219,10 @@ class Updater:
             ) from exc
         log.info("updater.commit_start", job_id=self.job_id, version=target_version)
 
-        # Step 6b: the one-shot v1.0 profile-catalog reset, BEFORE the schema
-        # migrations below. Ordering is load-bearing, not stylistic: the reset's
-        # gate IS meta.schema_version, and step 7 would stamp it forward, so
-        # running the migrations first would make the gate unreadable on the
-        # very box it exists for. The reset owns its own stamp; when it does not
-        # fire (declined / no consent) the migration target is capped below the
-        # watermark so the one-shot is not silently consumed.
-        try:
-            profile_reset = await asyncio.to_thread(
-                reset_profile_catalog, approved=reset_profiles, job_id=self.job_id
-            )
-        except Exception as exc:
-            log.warning("updater.profile_reset_error", job_id=self.job_id, error=str(exc))
-            profile_reset = {
-                "performed": False,
-                "outcome": "error",
-                "error": str(exc),
-                "due": True,
-                "stamped": False,
-            }
-            # Non-fatal by design: a failed catalog reset leaves the pre-v1.0
-            # file in place (the overlay still serves the built-in seeds), and
-            # the un-stamped gate re-offers it next update.
-
-        # Step 7's CALL is moved below, to run AFTER seam.activate() (#1960) —
-        # see _run_post_activation_migrations_after_swap for why an in-process
-        # call here (the pre-fix behaviour) executed the OUTGOING version's
-        # migrations, never the incoming release's. What has to stay here,
-        # unchanged, is the `reset_outstanding` derivation: it decides whether
-        # the migration target must be capped below the profile-catalog
-        # watermark — an already converged box (or a future v3 migration)
-        # must not be held back — and it needs `profile_reset` (just computed
-        # above), so it is cheapest to compute right where the old call used
-        # to be. The INT ceiling itself is no longer derived here (#1960 N1) —
-        # only the bool crosses into the subprocess; see that function's
-        # docstring for why turning it into an int on this side would be a
-        # version-skew bug waiting to happen.
-        reset_outstanding = bool(profile_reset.get("due")) and not profile_reset.get("stamped")
+        # Step 7's CALL runs AFTER seam.activate() (#1960) — see
+        # _run_post_activation_migrations_after_swap for why an in-process call
+        # here executed the OUTGOING version's migrations, never the incoming
+        # release's.
 
         # spec-hw-slot-ownership §6 / spec-flags-ownership §5 one-shot folds are
         # still NOT auto-run here — see detect_pending_ownership_migrations()
@@ -4775,16 +4231,6 @@ class Updater:
         # they are no longer silently skipped: step 7f below runs each fold's
         # write-free planner and the result rides out on the job so an operator
         # is told, by name and with the exact command, what is still outstanding.
-
-        # Step 7c2: sweep the removed SlotConfig.enabled key. The identical
-        # idempotent pass already runs at hal0-api boot, where it logs only to
-        # journalctl and is invisible in an upgrade transcript. Running it here
-        # puts the result in the commit job → `hal0 update` output.
-        try:
-            enabled_swept = await asyncio.to_thread(sweep_slot_enabled_keys, job_id=self.job_id)
-        except Exception as exc:
-            log.warning("updater.slot_enabled_sweep_error", job_id=self.job_id, error=str(exc))
-            enabled_swept = []
 
         # Step 7f: write-free detection of the deploy-window ownership folds this
         # box still owes. Runs before the swap so the report describes the state
@@ -4828,7 +4274,6 @@ class Updater:
             migration_result = await _run_post_activation_migrations_after_swap(
                 manifest.min_data_version,
                 job_id=self.job_id,
-                reset_outstanding=reset_outstanding,
             )
             migration_info = (migration_result["from"], migration_result["to"])
             pass_warnings = list(migration_result.get("pass_warnings") or [])
@@ -4897,8 +4342,6 @@ class Updater:
         # journalctl; it is now visible here too, without reclassifying a
         # long-standing non-fatal outcome as a hard one.
         convergence = {
-            "profile_reset": profile_reset,
-            "slot_enabled_swept": enabled_swept,
             "ownership_migrations": pending_ownership,
             "post_activation_migrations": {
                 "ok": migrations_error is None,
@@ -4907,18 +4350,12 @@ class Updater:
                 "error": migrations_error,
                 "pass_warnings": pass_warnings,
             },
-            "converged": (
-                not pending_ownership.get("pending")
-                and profile_reset.get("outcome") in {"reset", "already_reset", "no_config"}
-                and migrations_error is None
-            ),
+            "converged": not pending_ownership.get("pending") and migrations_error is None,
         }
         log.info(
             "updater.convergence",
             job_id=self.job_id,
             converged=convergence["converged"],
-            profile_reset=profile_reset.get("outcome"),
-            slot_enabled_swept=len(enabled_swept),
             ownership_pending=pending_ownership.get("pending"),
             post_activation_migrations_ok=migrations_error is None,
             post_activation_migrations_pass_warnings=pass_warnings,
@@ -4934,9 +4371,7 @@ class Updater:
             "convergence": convergence,
         }
 
-    async def apply(
-        self, version: str | None = None, *, reset_profiles: bool | None = None
-    ) -> dict[str, Any]:
+    async def apply(self, version: str | None = None) -> dict[str, Any]:
         """Prepare + commit in one call — the back-compat single-step update.
 
         Equivalent to the pre-split ``apply()``: stages the release
@@ -4949,7 +4384,7 @@ class Updater:
         # route path is covered too).
         _raise_if_editable_install()
         prepared = await self.prepare(version)
-        return await self.commit(str(prepared["version"]), reset_profiles=reset_profiles)
+        return await self.commit(str(prepared["version"]))
 
     # ── rollback ───────────────────────────────────────────────────────────────
 
@@ -5095,18 +4530,15 @@ __all__ = [
     "convergence_report",
     "detect_pending_ownership_migrations",
     "discard_release",
-    "ensure_seed_profiles",
     "fetch_release_manifest",
-    "profile_reset_status",
     "refresh_gpu_perms_unit",
     "refresh_path_links",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",
-    "reset_profile_catalog",
+    "remove_retired_artifacts",
     "run_post_activation_migrations",
     "sanitize_model_extra_args",
     "stage_release",
-    "sweep_slot_enabled_keys",
     "validate_manifest_for_channel",
 ]

@@ -1,19 +1,11 @@
-"""#1652: ``_maybe_run_config_migrations`` dumps ``None`` into ``tomli_w``.
+"""The ``hal0.toml`` schema-migration writer (``_maybe_run_config_migrations``).
 
-``_maybe_run_config_migrations`` (``src/hal0/updater/updater.py``) does
-``cfg.model_dump(mode="python")`` -- unlike ``save_hal0_config``, which uses
-``exclude_none=True`` precisely because ``None`` has no TOML representation
-and ``tomli_w`` raises ``TypeError`` on it. ``SecurityConfig.require_auth``
-and ``trust_forwarded_for`` both default to ``None``, so any config that
-reaches this writer with a migration actually pending raises
-``TypeError: Object of type 'NoneType' is not TOML serializable``.
-
-Today this is masked by arithmetic: the only registered migration is v2,
-and the profile-catalog gate either stamps v2 first (source==target, a
-no-op) or caps the ceiling at 1 (target==source, also a no-op), so the
-real writer is never reached. The moment a v3 migration is registered --
-simulated here by monkeypatching the migrations registry -- this becomes
-a hard failure of every ``hal0 update``.
+#1652: it used to dump the validated model, and ``None`` (the default of
+``SecurityConfig.require_auth`` / ``trust_forwarded_for``) has no TOML
+representation. It now round-trips the raw file, which never holds ``None``,
+never writes model defaults into the file, and keeps keys the validator does
+not know. Since the retired profile-catalog reset no longer stamps v2 itself,
+a fresh install's v1 file reaches this writer on its first migration run.
 """
 
 from __future__ import annotations
@@ -64,3 +56,28 @@ def test_a_pending_migration_does_not_typeerror_on_none_fields(
     # some stringified crash artifact.
     assert reloaded.security.require_auth is None
     assert reloaded.security.trust_forwarded_for is None
+
+
+def test_a_fresh_v1_file_is_stamped_without_writing_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fresh-install case: install.sh writes a minimal v1 hal0.toml and the
+    first migration run stamps v2. The round-trip must not expand the file with
+    every model default (which would pin them) or drop an unknown key."""
+    import tomllib
+
+    toml_path = tmp_path / "hal0.toml"
+    toml_path.write_text(
+        "[meta]\nschema_version = 1\n\n[slots]\nport_range_start = 8081\n\n"
+        "[operator_notes]\nkept = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater_module.paths, "hal0_toml", lambda: toml_path)
+
+    assert updater_module._maybe_run_config_migrations(1) == (1, 2)
+    raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    assert raw == {
+        "meta": {"schema_version": 2},
+        "slots": {"port_range_start": 8081},
+        "operator_notes": {"kept": True},
+    }

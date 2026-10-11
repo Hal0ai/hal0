@@ -2,7 +2,7 @@
 
 ``migrate`` used to default to a live write of ``/etc/hal0/capabilities.toml``
 (``--dry-run`` was opt-in). That inverted the safety contract every sibling
-repair command uses (``hal0 migrate model-layout`` is dry-run by default,
+repair command uses (``hal0 slot migrate-flags`` is dry-run by default,
 ``--apply`` opts into the write). These tests pin the new default: no flags =
 preview only, ``--apply`` = write.
 """

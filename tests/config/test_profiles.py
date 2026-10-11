@@ -516,47 +516,28 @@ def test_no_seed_profile_carries_a_context_or_layer_flag() -> None:
             assert bad not in tokens, f"seed {name!r} carries {bad!r}: {profile.get('flags')!r}"
 
 
-# ── legacy-seed demotion (one-time) ───────────────────────────────────────────
+# ── legacy seeds on load ──────────────────────────────────────────────────────
 
 
 class TestLegacySeedDemotion:
-    """The 8 pruned seeds land ONCE in an existing install's profiles.toml.
+    """Loading never injects the 8 pruned seeds into an existing file.
 
-    They were seeds until the profile-system overhaul, so slots and models on
-    an upgraded box still reference them; injecting them as ordinary custom
-    entries keeps those references resolvable AND makes them editable (a seed
-    is not). ``legacy_seeds_migrated`` is what makes it once-only — without it
-    a delete would be undone on the next load, exactly the virtual-seed
-    behaviour the demotion exists to escape.
+    The one-time bulk demotion (1.2.0-1.3.x) is retired behind the 1.3.0
+    upgrade floor; every supported file has already been through it. A load is
+    therefore read-only with respect to the demoted names (#2489).
     """
 
-    def test_existing_install_demotes_legacy_seeds_once(self, tmp_path: Path) -> None:
-        from hal0.config.loader import save_profiles_config
+    def test_load_does_not_inject_or_rewrite_an_unmarked_file(self, tmp_path: Path) -> None:
         from hal0.config.schema import LEGACY_SEED_PROFILES
 
         p = tmp_path / "profiles.toml"
-        p.write_text('[profile.mine]\nflags = "-fa auto"\nmtp = false\n', encoding="utf-8")
+        body = '[profile.mine]\nflags = "-fa auto"\nmtp = false\n'
+        p.write_text(body, encoding="utf-8")
 
         cfg = load_profiles_config(path=p)
-        assert set(LEGACY_SEED_PROFILES) <= set(cfg.profile)
+        assert not set(LEGACY_SEED_PROFILES) & set(cfg.profile)
         assert cfg.profile["mine"].flags == "-fa auto"
-        assert cfg.legacy_seeds_migrated is True
-
-        # The migration was PERSISTED, so a later delete sticks.
-        del_cfg = load_profiles_config(path=p)
-        del del_cfg.profile["coding"]
-        save_profiles_config(del_cfg, path=p)
-        assert "coding" not in load_profiles_config(path=p).profile
-
-    def test_demoted_entries_match_the_shipped_definitions(self, tmp_path: Path) -> None:
-        from hal0.config.schema import LEGACY_SEED_PROFILES
-
-        p = tmp_path / "profiles.toml"
-        p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
-
-        cfg = load_profiles_config(path=p)
-        for name, entry in LEGACY_SEED_PROFILES.items():
-            assert cfg.profile[name] == ProfileConfig.model_validate(entry), name
+        assert p.read_text(encoding="utf-8") == body
 
     def test_migration_never_overwrites_an_operator_entry(self, tmp_path: Path) -> None:
         p = tmp_path / "profiles.toml"
@@ -591,20 +572,3 @@ class TestLegacySeedDemotion:
         reloaded = load_profiles_config(path=p)
         assert set(reloaded.profile) == set(SEED_PROFILES) | {"mine"}
         assert not set(LEGACY_SEED_PROFILES) & set(reloaded.profile)
-
-    def test_read_only_filesystem_does_not_block_the_load(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A migration that cannot be written still serves the merged catalog."""
-        from hal0.config import loader as loader_mod
-        from hal0.config.schema import LEGACY_SEED_PROFILES
-
-        p = tmp_path / "profiles.toml"
-        p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
-
-        def _boom(*args: object, **kwargs: object) -> None:
-            raise OSError("read-only file system")
-
-        monkeypatch.setattr(loader_mod, "save_profiles_config", _boom)
-        cfg = load_profiles_config(path=p)
-        assert set(LEGACY_SEED_PROFILES) <= set(cfg.profile)

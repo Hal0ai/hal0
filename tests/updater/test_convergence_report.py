@@ -1,9 +1,7 @@
 """Convergence detection — what an operator is told after an upgrade.
 
-Three pieces, all of which have to be right or the update lies about the box:
+Two pieces, both of which have to be right or the update lies about the box:
 
-  * ``sweep_slot_enabled_keys`` — the #1369 sweep, run somewhere an operator can
-    actually see it (it already runs at hal0-api boot, into journalctl only).
   * ``detect_pending_ownership_migrations`` — write-free planners for the three
     deploy-window folds. False positives are as bad as false negatives here: a
     converged box that keeps reporting "pending" trains operators to ignore it.
@@ -12,8 +10,6 @@ Three pieces, all of which have to be right or the update lies about the box:
 """
 
 from __future__ import annotations
-
-import tomllib
 
 import pytest
 
@@ -36,36 +32,6 @@ def _write_id_keyed_slot(slot_id: int, name: str, body: str = "") -> None:
     d = slots_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{slot_id}.toml").write_text(f'id = {slot_id}\nname = "{name}"\n{body}', encoding="utf-8")
-
-
-# ── the enabled sweep ─────────────────────────────────────────────────────────
-
-
-def test_sweep_reports_the_slots_it_rewrote(tmp_hal0_home: str) -> None:
-    _write_slot("chat", 'name = "chat"\nenabled = true\n\n[model]\ndefault = "qwen3-4b"\n')
-    swept = U.sweep_slot_enabled_keys()
-    assert swept == ["chat"]
-    raw = tomllib.loads((slots_config_dir() / "chat.toml").read_text(encoding="utf-8"))
-    assert "enabled" not in raw
-
-
-def test_sweep_is_idempotent_and_quiet_when_clean(tmp_hal0_home: str) -> None:
-    _write_slot("chat", 'name = "chat"\n\n[model]\ndefault = "qwen3-4b"\n')
-    assert U.sweep_slot_enabled_keys() == []
-    # And a second pass over an already-swept dir reports nothing new.
-    _write_slot("other", 'name = "other"\nenabled = false\n')
-    assert U.sweep_slot_enabled_keys() == ["other"]
-    assert U.sweep_slot_enabled_keys() == []
-
-
-def test_sweep_never_raises_on_a_broken_config_dir(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """It runs mid-commit; a config-dir problem must not fail the update."""
-    monkeypatch.setattr(
-        U, "paths", type("P", (), {"slots_config_dir": staticmethod(lambda: 1 / 0)})()
-    )
-    assert U.sweep_slot_enabled_keys() == []
 
 
 # ── ownership-fold detection ──────────────────────────────────────────────────
@@ -215,23 +181,12 @@ def test_detection_never_writes(tmp_hal0_home: str) -> None:
 # ── the aggregate ─────────────────────────────────────────────────────────────
 
 
-def test_report_is_not_converged_while_the_profile_reset_is_due(tmp_hal0_home: str) -> None:
-    hal0_toml = U.paths.hal0_toml()
-    hal0_toml.parent.mkdir(parents=True, exist_ok=True)
-    hal0_toml.write_text("[meta]\nschema_version = 1\n", encoding="utf-8")
-
-    report = U.convergence_report()
-    assert report["profile_reset"]["due"] is True
-    assert report["converged"] is False
-
-
-def test_report_is_converged_once_stamped(tmp_hal0_home: str) -> None:
+def test_report_is_converged_with_nothing_pending(tmp_hal0_home: str) -> None:
     hal0_toml = U.paths.hal0_toml()
     hal0_toml.parent.mkdir(parents=True, exist_ok=True)
     hal0_toml.write_text("[meta]\nschema_version = 2\n", encoding="utf-8")
 
     report = U.convergence_report()
-    assert report["profile_reset"]["due"] is False
     assert report["ownership_migrations"]["pending"] == []
     assert report["converged"] is True
 
@@ -249,57 +204,6 @@ def test_report_is_converged_once_stamped(tmp_hal0_home: str) -> None:
 # migration must stay off the auto-run path.
 
 
-def test_sweep_handles_an_id_keyed_layout(tmp_hal0_home: str) -> None:
-    _write_id_keyed_slot(1, "agent", 'enabled = true\n\n[model]\ndefault = "qwen3-4b"\n')
-    swept = U.sweep_slot_enabled_keys()
-    assert swept == ["agent"]
-    raw = tomllib.loads((slots_config_dir() / "1.toml").read_text(encoding="utf-8"))
-    assert "enabled" not in raw
-    # The id-keying is preserved — the sweep must not re-key anything.
-    assert raw["id"] == 1
-    assert raw["name"] == "agent"
-    assert not (slots_config_dir() / "agent.toml").exists()
-
-
-def test_sweep_reports_slot_names_not_id_stems(tmp_hal0_home: str) -> None:
-    """The transcript an operator reads must name slots, not filename stems.
-
-    ``migrate_slot_dir`` reports ``path.stem``, which on an id-keyed box is
-    ``"1"`` — meaningless in an install log. The updater resolves it back to the
-    slot's ``name``.
-    """
-    _write_id_keyed_slot(7, "coder", "enabled = false\n")
-    _write_id_keyed_slot(9, "embed", "enabled = true\n")
-    assert sorted(U.sweep_slot_enabled_keys()) == ["coder", "embed"]
-
-
-def test_sweep_falls_back_to_the_stem_when_a_slot_has_no_name(tmp_hal0_home: str) -> None:
-    d = slots_config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "3.toml").write_text("id = 3\nenabled = true\n", encoding="utf-8")
-    assert U.sweep_slot_enabled_keys() == ["3"]
-
-
-def test_sweep_is_idempotent_on_a_mixed_layout(tmp_hal0_home: str) -> None:
-    """The #1421 shape itself: id-keyed and name-keyed files side by side.
-
-    hal0 must not fall over on it, and the sweep must not silently reconcile the
-    duplication either — that is the id-keying migration's job, under an
-    operator, in a deploy window.
-    """
-    _write_id_keyed_slot(1, "agent", "enabled = true\nport = 8082\n")
-    _write_slot("agent", 'name = "agent"\nenabled = true\nport = 8081\n')
-
-    assert sorted(U.sweep_slot_enabled_keys()) == ["agent", "agent"]
-    assert U.sweep_slot_enabled_keys() == []
-    # Both files survive, untouched apart from the `enabled` drop. Nothing here
-    # is allowed to pick a winner.
-    assert (slots_config_dir() / "1.toml").exists()
-    assert (slots_config_dir() / "agent.toml").exists()
-    id_keyed = tomllib.loads((slots_config_dir() / "1.toml").read_text(encoding="utf-8"))
-    assert id_keyed["port"] == 8082
-
-
 def test_detection_never_writes_on_an_id_keyed_box(tmp_hal0_home: str) -> None:
     _write_id_keyed_slot(1, "agent", 'mtp = true\n\n[model]\ndefault = "qwen3-4b"\n')
     before = (slots_config_dir() / "1.toml").read_bytes()
@@ -315,7 +219,6 @@ def test_report_is_converged_on_a_stamped_id_keyed_box(tmp_hal0_home: str) -> No
     _write_id_keyed_slot(2, "brain", '\n[model]\ndefault = "hal0-brain"\n')
 
     report = U.convergence_report()
-    assert report["profile_reset"]["due"] is False
     assert report["ownership_migrations"]["pending"] == []
     assert report["converged"] is True
 

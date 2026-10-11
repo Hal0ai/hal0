@@ -8,7 +8,7 @@ Covers:
   * ``commit()`` applies drifted diffs and rolls back atomically on failure.
   * ``audit_rows`` renders the ok / drift / absent / symlink vocabulary.
   * Symlinks are never dereferenced by ``plan()``/``commit()`` (#1739) — the
-    model-layout links planted under ``models/`` must leave their targets
+    links under ``models/`` (the old model-layout farm, operator links) must leave their targets
     under ``/mnt/ai-models`` byte-for-byte untouched.
   * ``ownership_table()`` builds under HAL0_HOME so it is test-isolated.
 
@@ -652,7 +652,7 @@ def test_flip_honors_custom_service_group(tmp_hal0_home: str) -> None:
 def test_commit_never_dereferences_symlink_under_recursive_row(tmp_path: Path) -> None:
     """The #1739 repro: a symlink under a recursive row must not touch its target.
 
-    ``hal0 migrate model-layout --apply`` plants
+    The old ``hal0 migrate model-layout --apply`` planted
     ``/var/lib/hal0/models/<name> -> /mnt/ai-models/<name>`` links, which the
     recursive ``models/`` row matched. Because ``os.chown``/``os.chmod``
     follow symlinks, ``commit()`` rewrote the operator's REAL model file
@@ -685,7 +685,7 @@ def test_commit_never_dereferences_symlink_under_recursive_row(tmp_path: Path) -
 def test_plan_skips_paths_reached_through_a_symlinked_directory(tmp_path: Path) -> None:
     """Walking THROUGH a symlinked dir would chown real files directly.
 
-    Same #1739 hazard one level up: ``migrate model-layout`` links whole
+    Same #1739 hazard one level up: the old model-layout farm linked whole
     per-model DIRECTORIES, so a recursive glob that descends into the link
     yields real paths under ``/mnt/ai-models`` that are not themselves
     symlinks — ``_apply_one``'s link check would not save them. They must
