@@ -80,7 +80,7 @@ test.describe('Unified memory hero (dashboard)', () => {
       group: 'chat', state: 'ready', port: 8096,
       runtime: 'container',
       profile: 'rocm-mtp',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       image_status: 'present',
       container_status: 'running',
       container_health: true,

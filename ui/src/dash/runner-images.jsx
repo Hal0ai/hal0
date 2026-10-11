@@ -14,11 +14,16 @@
 // runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
 // FamilyStrip ("Launch images") driven straight by the server's `families`
 // summary (effective ref, source tier, store state, newer-release marker).
-// ADR-0027: the list groups by each row's runtime TIER (default / optional /
-// frozen, plus "Other images" for catalogued images no runtime ships) via
-// the pure groupRows() helper, and rows show the registry's title + blurb.
-// The per-runtime launch image is a separate marker ("launch image" chip),
-// worded so it cannot be mistaken for the tier.
+// ADR-0027: the list groups by each row's runtime TIER (default / optional,
+// plus "Other images" for rows no registry runner owns) via the pure
+// groupRows() helper, and rows show the registry's title + blurb. Rows are
+// one per runner (`id` = runner key). The per-runtime launch image is a
+// separate marker ("launch image" chip), worded so it cannot be mistaken for
+// the tier.
+//
+// Operators see runtime TITLES. Raw image refs, tags, digests and runner keys
+// appear only inside a row's collapsed "Image details" area (and the family
+// strip's equivalent), never in headings, search, toasts or confirm dialogs.
 
 import {
   useRunnerImages,
@@ -52,19 +57,18 @@ function fmtBytesRI(b) {
 // off `hal0.runners.Runner.tier` — the same field the slot drawer's runtime
 // picker sorts by). It is NOT derived from `is_default`: that marker says
 // which repo a family's slots launch, and every family has one, so grouping
-// by it put niche runtimes (Qwen3 TTS, Strix Halo Vulkan) under "Default".
-// A row no registry runner ships (`tier` null: a legacy toolbox or a
-// pin-only variant) is not a runtime at all and goes to `other`. Rows sort
-// by display title within each section.
+// by it put niche runtimes (Qwen3 TTS) under "Default". A row no registry
+// runner owns (`runner` null) is not a runtime at all and goes to `other`.
+// Rows sort by display title within each section.
 export function rowTitle(img) {
   return img?.title || img?.id || "";
 }
 
 export function groupRows(images) {
-  const out = { defaults: [], optional: [], frozen: [], other: [] };
-  const bucket = { default: out.defaults, optional: out.optional, frozen: out.frozen };
+  const out = { defaults: [], optional: [], other: [] };
+  const bucket = { default: out.defaults, optional: out.optional };
   for (const img of images || []) {
-    (bucket[img.tier] || out.other).push(img);
+    (img.runner === null ? out.other : bucket[img.tier] || out.other).push(img);
   }
   for (const list of Object.values(out)) {
     list.sort((a, b) => rowTitle(a).localeCompare(rowTitle(b)));
@@ -99,8 +103,7 @@ export function launchImageLabel(image, familyTitles = {}) {
 export const ROW_SECTIONS = [
   { key: "defaults", label: "Default runtimes", hint: "Every box is expected to have these." },
   { key: "optional", label: "Optional runtimes", hint: "Opt-in, for a specific model or device." },
-  { key: "frozen", label: "Frozen runtimes", hint: "Kept only for models already on slots; no updates." },
-  { key: "other", label: "Other images", hint: "Not a hal0 runtime; used only through a slot's image pin or a launch-image override." },
+  { key: "other", label: "Other images", hint: "Not a hal0 runtime." },
 ];
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
@@ -112,7 +115,7 @@ export const ROW_SECTIONS = [
 // tags can still sort ahead of the true headline on pure registry order.
 // Live examples that motivated this: comfyui headlined `latest` but the
 // chip read `newer: main` (main = CI branch tag re-pushed every build);
-// rocmfpx showed `newer: server` (an old floating dev tag). `latest` is
+// standard showed `newer: server` (an old floating dev tag). `latest` is
 // only "mutable" when it ISN'T itself the row's headline — a row
 // headlined `latest` must still be able to see a genuinely newer tag.
 export const MUTABLE_TAGS = new Set(["main", "master", "server", "edge", "nightly"]);
@@ -248,7 +251,7 @@ function provenancePatchSuffix(patchCount) {
 }
 
 // Compact provenance string for select options / fit-check lines, e.g.
-// `ROCmFPX @0a59add (+4 patches)` or `llama.cpp @c841aee`. Partial labels
+// `llama-fork @0a59add (+4 patches)` or `llama.cpp @c841aee`. Partial labels
 // degrade to whatever parts exist; null when nothing renders.
 export function formatProvenanceShort(prov) {
   if (!prov) return null;
@@ -296,8 +299,11 @@ export function RunnerImagesSyncButton() {
     try {
       const res = await sync.mutateAsync();
       const n = res.images?.length ?? 0;
-      const warn = res.images_json_ok === false ? " (images.json unreachable — GHCR data only)" : "";
-      window.__hal0Toast && window.__hal0Toast(`Runner image sync complete — ${n} image${n === 1 ? "" : "s"}${warn}`, res.images_json_ok === false ? "warn" : "info");
+      const skipped = Object.keys(res.skipped || {}).length;
+      const warn = res.images_json_ok === false ? " (catalogue unreachable — registry data only)" : "";
+      const skipNote = skipped > 0 ? ` — ${skipped} entr${skipped === 1 ? "y" : "ies"} skipped` : "";
+      const degraded = res.images_json_ok === false || skipped > 0;
+      window.__hal0Toast && window.__hal0Toast(`Runtime sync complete — ${n} runtime${n === 1 ? "" : "s"}${skipNote}${warn}`, degraded ? "warn" : "info");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Sync failed — ${e?.message || "see logs"}`, "err");
     }
@@ -326,13 +332,14 @@ export function RunnerImagesView() {
   const filtered = images.filter(img => {
     if (!q.trim()) return true;
     const needle = q.trim().toLowerCase();
-    const hay = `${img.title || ""} ${img.blurb || ""} ${img.id} ${img.image} ${img.tag} ${img.notes || ""}`.toLowerCase();
+    const hay = `${img.title || ""} ${img.blurb || ""}`.toLowerCase();
     return hay.includes(needle);
   });
 
   const grouped = groupRows(filtered);
   const selected = images.find(i => i.id === selId) || images[0];
   const familyTitles = familyTitleMap(families);
+  const titlesById = Object.fromEntries(images.map(i => [i.id, rowTitle(i)]));
 
   return (
     <div className="models-layout" style={{marginTop: 18}}>
@@ -341,7 +348,7 @@ export function RunnerImagesView() {
           <div className="mdl-toolbar">
             <input
               className="input mono mdl-search"
-              placeholder="search image, tag, notes…"
+              placeholder="search runtimes…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -351,7 +358,7 @@ export function RunnerImagesView() {
           </div>
 
           <div className="mdl-list-h">
-            <span>Runner Images {filtered.length ? `· ${filtered.length}` : ""}</span>
+            <span>Runtimes {filtered.length ? `· ${filtered.length}` : ""}</span>
             <span className="right mono">{images.length} total</span>
           </div>
 
@@ -366,8 +373,8 @@ export function RunnerImagesView() {
           {!imagesQuery.isPending && !imagesQuery.isError && filtered.length === 0 && (
             <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
               {images.length === 0
-                ? <>Nothing catalogued yet — click <b>Sync now</b> to discover published images.</>
-                : "No runner images match — adjust the search."}
+                ? <>Nothing catalogued yet — click <b>Sync now</b> to fetch the published runtime images.</>
+                : "No runtimes match — adjust the search."}
             </div>
           )}
 
@@ -392,17 +399,16 @@ export function RunnerImagesView() {
 
         <div className="models-sidebar">
           <RunnerCard image={selected} familyTitles={familyTitles} />
-          <RunnerDownloadsPane />
+          <RunnerDownloadsPane titles={titlesById} />
         </div>
     </div>
   );
 }
 
 // Source chip for a family row's effective ref (see FamilyStrip below):
-// override is the accent-colored chip with its clear button (unchanged from
-// the old DefaultsStrip); env/manifest are plain chips naming the tier;
-// release reads "release default" — the same label the strip has always
-// shown for a non-override default.
+// override is the accent-colored chip with its clear button; env is a plain
+// chip naming the tier; release reads "release" — the image this hal0
+// release pins.
 function familySourceChip(source) {
   if (source === "override") {
     return <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>;
@@ -410,7 +416,7 @@ function familySourceChip(source) {
   if (source === "release") {
     return <span className="chip" title="The image this hal0 release ships">release</span>;
   }
-  return <span className="chip">{source}</span>; // env | manifest
+  return <span className="chip" title="Set by an HAL0_RUNNER_IMAGE_<KEY> environment variable">{source}</span>; // env
 }
 
 // ── FamilyStrip ─────────────────────────────────────────────────────────
@@ -419,8 +425,8 @@ function familySourceChip(source) {
 // GET /api/runner-images `families` entry) instead of re-deriving it from
 // image rows' `is_default` markers — the effective ref, its source tier,
 // the store state of THAT ref, which slots launch it now vs. a different
-// tag of the same repo, and whether the registry already has a newer
-// release-shaped tag. The override clear-confirm flow moves in verbatim
+// tag of the same repo, and whether the runner-images repo's current pin
+// differs from what launches. The override clear-confirm flow moves in verbatim
 // from DefaultsStrip: clearing writes `{family: null}` through the settings
 // override map and falls back to the baked release default, so the confirm
 // names the slots that will drift — now sourced from the family's own
@@ -440,7 +446,7 @@ function FamilyStrip({ families }) {
     const name = clearTitle || fam;
     setClearFamily(null);
     setDefault.mutate({ family: fam, ref: null }, {
-      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name}: override cleared — the next source applies (env override, then manifest pin, then the release image)`, "info"),
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name}: override cleared — the next source applies (environment override, then the release image)`, "info"),
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Clear failed — ${e?.message || "see logs"}`, "err"),
     });
   };
@@ -453,13 +459,12 @@ function FamilyStrip({ families }) {
       {rows.map(f => (
         <div key={f.family} data-testid={`ri-family-${f.family}`} style={{padding: "3px 0"}}>
           <div style={{display: "flex", alignItems: "center", gap: 8, fontSize: 12}}>
-            <span style={{color: "var(--fg-2)", minWidth: 140}} title={`runner key: ${f.family}`}>{f.title || f.family}</span>
-            <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{f.effective_ref}</span>
+            <span style={{color: "var(--fg-2)", minWidth: 140}}>{f.title || f.family}</span>
             {familySourceChip(f.source)}
             <StoreStateChip image={{ store_state: f.store_state, downloaded: f.store_state === "present" }} />
             {f.update_available && f.newest_release && (
-              <span className="chip" data-testid="ri-family-newer" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-                newer: {f.newest_release.tag}
+              <span className="chip" data-testid="ri-family-newer" title="The runner-images repo has published a newer build than this box launches" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
+                update available
               </span>
             )}
             {f.source === "override" && (
@@ -468,10 +473,18 @@ function FamilyStrip({ families }) {
                 data-testid={`ri-clear-default-${f.family}`}
                 disabled={setDefault.isPending}
                 onClick={() => setClearFamily(f.family)}
-                title="Remove the operator override — the next source applies (env override, then manifest pin, then the release image)"
+                title="Remove the operator override — the next source applies (environment override, then the release image)"
               >clear</button>
             )}
           </div>
+          <details style={{marginTop: 2}} data-testid={`ri-family-details-${f.family}`}>
+            <summary className="mono" style={{fontSize: 10, color: "var(--fg-4)", cursor: "pointer"}}>Image details</summary>
+            <div className="mono" style={{fontSize: 10, color: "var(--fg-3)", marginTop: 2}}>
+              <div data-testid={`ri-family-ref-${f.family}`}>launches: {f.effective_ref}</div>
+              {f.newest_release && <div>current pin: {f.newest_release.tag}</div>}
+              <div>runner key: {f.family}</div>
+            </div>
+          </details>
           {(f.slots?.length > 0 || f.pinned_slots?.length > 0) && (
             <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginTop: 2}}>
               {f.slots?.length > 0 && `via slots: ${f.slots.join(", ")}`}
@@ -488,7 +501,7 @@ function FamilyStrip({ families }) {
         title={`Clear ${clearTitle} override`}
         message={
           clearRow
-            ? `Remove the ${clearTitle} override (${clearRow.effective_ref}) and fall back to the next source: an env override, then the manifest pin, then the image this release ships.` +
+            ? `Remove the ${clearTitle} override and fall back to the next source: an environment override, then the image this release pins.` +
               (drifters.length
                 ? ` Slots launching it now: ${drifters.join(", ")}. Those that follow the launch image pick up the fallback on their next restart; a slot with its own image pin stays where it is.`
                 : " No slot currently references it.")
@@ -501,12 +514,10 @@ function FamilyStrip({ families }) {
   );
 }
 
-// Badge chip color for a tag's validated/candidate/deprecated badge
-// (hal0.api.routes.runner_images._tag_badges).
+// Badge chip color for a tag's badge (hal0.api.routes.runner_images
+// ._tag_badges): the only value is "pinned" — the tag this hal0 release pins.
 const BADGE_COLOR = {
-  validated: "var(--ok)",
-  candidate: "var(--accent)",
-  deprecated: "var(--err)",
+  pinned: "var(--ok)",
 };
 
 function BadgeChip({ badge }) {
@@ -541,7 +552,7 @@ function RunnerImageRow({ image, familyTitles, selected, onSelect }) {
       </span>
       <span className="nm" title={image.blurb || undefined}>
         {rowTitle(image)}
-        <span className="sub">{image.image}:{image.tag}</span>
+        {image.blurb ? <span className="sub">{image.blurb}</span> : null}
       </span>
       <span className="mdl-row-tags">
         {launch && (
@@ -555,13 +566,11 @@ function RunnerImageRow({ image, familyTitles, selected, onSelect }) {
           </span>
         )}
         {newerTagAvailable(image) && (
-          <span className="chip" data-testid="ri-newer-tag" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
-            newer: {newerTagCandidate(image)}
+          <span className="chip" data-testid="ri-newer-tag" title="A newer build is published — pick it under Image details" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>
+            newer build
           </span>
         )}
         <BadgeChip badge={image.badges?.[image.tag]} />
-        {image.ownership && <span className="chip">{image.ownership}</span>}
-        {image.publish && <span className="chip">{image.publish}</span>}
         {(image.extra?.features || []).map(f => (
           <span key={f} className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>{f}</span>
         ))}
@@ -601,6 +610,7 @@ function RunnerCard({ image, familyTitles = {} }) {
     );
   }
 
+  const cardTitle = rowTitle(image);
   const lanes = tagLanes(image);
   const tagCount = lanes.releases.length + lanes.pins.length + lanes.other.length;
   const selTag = pickedTag ?? image.tag;
@@ -608,25 +618,25 @@ function RunnerCard({ image, familyTitles = {} }) {
   const onPull = async () => {
     try {
       await pull.start(image.id, selTag !== image.tag ? selTag : undefined);
-      window.__hal0Toast && window.__hal0Toast(`Pulling ${image.id}:${selTag}…`, "info");
+      window.__hal0Toast && window.__hal0Toast(`Pulling ${cardTitle}…`, "info");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Pull failed to start — ${e?.message || "see logs"}`, "err");
     }
   };
 
-  // Set-as-family-default: only offered when the backend already associates
-  // this row's image with a family (`is_default.family`) — for any other row
-  // there is no family key to write the override under.
-  const family = image.is_default?.family || null;
+  // Set-as-launch-image: rows are one per runner, so the override is written
+  // under the row's own runner key; a row no registry runner owns has no
+  // family key to write it under.
+  const family = image.runner || null;
   // The runtime's display name for the launch-image controls below.
-  const familyTitle = family ? (familyTitles[family] || family) : "";
+  const familyTitle = family ? (familyTitles[family] || cardTitle) : "";
   const defaultRef = `${image.image}:${selTag}`;
   const alreadyDefault = !!(image.is_default && selTag === image.tag && image.is_default.source);
   const inUseBy = Array.isArray(image.in_use_by) ? image.in_use_by : [];
   const onSetDefault = () => {
     setConfirmDefault(false);
     setDefault.mutate({ family, ref: defaultRef }, {
-      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${familyTitle} launch image → ${defaultRef}`, "info"),
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${familyTitle} launch image updated`, "info"),
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Set launch image failed — ${e?.message || "see logs"}`, "err"),
     });
   };
@@ -642,7 +652,7 @@ function RunnerCard({ image, familyTitles = {} }) {
     restartAffected.mutate({ ref: headlineRef }, {
       onSuccess: (res) => {
         const n = res?.restarted?.length ?? 0;
-        window.__hal0Toast && window.__hal0Toast(`Restarted ${n} slot${n === 1 ? "" : "s"}`, "info");
+        window.__hal0Toast && window.__hal0Toast(`Restarted ${n} slot${n === 1 ? "" : "s"} on ${cardTitle}`, "info");
       },
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Restart failed — ${e?.message || "see logs"}`, "err"),
     });
@@ -660,14 +670,14 @@ function RunnerCard({ image, familyTitles = {} }) {
     selTag === image.tag && inUseBy.length > 0
       ? `In use by ${inUseBy.join(", ")} — restart or repoint those slots first.`
       : null;
-  const deleteRef = `${image.image}:${selTag}`;
+
   const onDeleteTag = () => {
     setConfirmDelete(false);
     deleteTag.mutate({ id: image.id, tag: selTag }, {
       onSuccess: (res) => {
         const msg = res?.outcome === "missing"
-          ? `${deleteRef} was not on disk — catalogue entry cleared`
-          : `Removed ${deleteRef}`;
+          ? `That ${cardTitle} image version was not on disk — catalogue entry cleared`
+          : `Removed the selected ${cardTitle} image version`;
         window.__hal0Toast && window.__hal0Toast(msg, "info");
       },
       onError: (e) => {
@@ -688,61 +698,35 @@ function RunnerCard({ image, familyTitles = {} }) {
   };
 
   // Feature tags: the tag/pill component the Models page uses for capability
-  // tags, reused here — images.json carries no `features` field today, so
+  // tags, reused here — the catalogue carries no `features` field today, so
   // this reads from `extra.features` (forward-compat: renders once a future
-  // images.json revision adds it, degrades to nothing today).
+  // catalogue revision adds it, degrades to nothing today).
   const features = Array.isArray(image.extra?.features) ? image.extra.features : [];
 
   return (
     <div className="mdl-detail">
       <div className="mdl-detail-h">
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
-          <div className="nm" data-testid="ri-card-title">{rowTitle(image)}</div>
+          <div className="nm" data-testid="ri-card-title">{cardTitle}</div>
           {image.tier && <span className="chip" data-testid="ri-card-tier">{image.tier} runtime</span>}
           <span style={{marginLeft: "auto"}}>
             <StoreStateChip image={image} />
           </span>
         </div>
-        <div className="repo">{image.image}:{image.tag}</div>
-        {image.title && image.title !== image.id && (
-          <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginTop: 2}}>catalogue id: {image.id}</div>
-        )}
       </div>
 
       {image.blurb ? (
         <p data-testid="ri-card-blurb" style={{fontSize: 12.5, color: "var(--fg-2)", lineHeight: 1.5, padding: "0 16px"}}>{image.blurb}</p>
       ) : !image.tier && (
         <p data-testid="ri-card-blurb" style={{fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5, padding: "0 16px"}}>
-          Not a hal0 runtime. A slot uses this image only through its own image pin or a launch-image override.
+          Not a hal0 runtime.
         </p>
       )}
 
       <div className="mdl-detail-meta">
-        {image.digest && <div><div className="k">digest</div><div className="v mono">{image.digest.slice(0, 19)}…</div></div>}
         <div><div className="k">size</div><div className="v">{fmtBytesRI(image.size_bytes)}</div></div>
-        <div><div className="k">ownership</div><div className="v">{image.ownership || "—"}</div></div>
-        <div><div className="k">publish</div><div className="v">{image.publish || "—"}</div></div>
-        <div><div className="k">manifest key</div><div className="v">{image.manifest_key || "—"}</div></div>
         <div><div className="k">in use by</div><div className="v mono">{inUseBy.length ? inUseBy.join(", ") : "—"}</div></div>
-        {/* Build provenance (headline tag) — absent provenance renders
-            exactly what rendered before this line existed: nothing. */}
-        {formatProvenanceFull(image.provenance) && (
-          <div data-testid="ri-provenance">
-            <div className="k">build source</div>
-            <div className="v mono" title={image.provenance.revision || undefined}>{formatProvenanceFull(image.provenance)}</div>
-          </div>
-        )}
       </div>
-
-      {/* images.json `notes` are maintainer notes (build history, gate
-          runs), not operator copy — the registry's blurb above is. Kept
-          reachable, collapsed. */}
-      {image.notes && (
-        <details style={{margin: "4px 16px 8px"}} data-testid="ri-maintainer-notes">
-          <summary className="mono" style={{fontSize: 11, color: "var(--fg-4)", cursor: "pointer"}}>maintainer notes</summary>
-          <p style={{fontSize: 11.5, color: "var(--fg-3)", lineHeight: 1.5, margin: "6px 0 0"}}>{image.notes}</p>
-        </details>
-      )}
 
       {features.length > 0 && (
         <div className="mdl-detail-labels">
@@ -750,16 +734,27 @@ function RunnerCard({ image, familyTitles = {} }) {
         </div>
       )}
 
-      {image.build && Object.keys(image.build).length > 0 && (
-        <details style={{margin: "8px 16px"}}>
-          <summary className="mono" style={{fontSize: 11, color: "var(--fg-4)", cursor: "pointer"}}>build</summary>
-          <pre className="mono" style={{fontSize: 10, whiteSpace: "pre-wrap"}}>{JSON.stringify(image.build, null, 2)}</pre>
-        </details>
-      )}
+      {/* The only place raw image refs, tags, digests and the runner key
+          appear: collapsed by default, everything tag-specific (version
+          picker, set-as-launch-image, delete) lives here with them. */}
+      <details style={{margin: "8px 16px"}} data-testid="ri-image-details">
+        <summary className="mono" style={{fontSize: 11, color: "var(--fg-4)", cursor: "pointer"}}>Image details</summary>
+        <div className="mdl-detail-meta" style={{marginTop: 8}}>
+          <div><div className="k">image</div><div className="v mono" data-testid="ri-card-ref">{image.image}:{image.tag}</div></div>
+          {image.digest && <div><div className="k">digest</div><div className="v mono">{image.digest.slice(0, 19)}…</div></div>}
+          <div><div className="k">runner key</div><div className="v mono">{image.id}</div></div>
+          {/* Build provenance (headline tag) — absent provenance renders
+              nothing. */}
+          {formatProvenanceFull(image.provenance) && (
+            <div data-testid="ri-provenance">
+              <div className="k">build source</div>
+              <div className="v mono" title={image.provenance.revision || undefined}>{formatProvenanceFull(image.provenance)}</div>
+            </div>
+          )}
+        </div>
 
-      <div style={{padding: "0 16px 16px"}}>
         {tagCount > 1 && (
-          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap"}}>
+          <div style={{display: "flex", alignItems: "center", gap: 8, margin: "10px 0", flexWrap: "wrap"}}>
             <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>tag</span>
             <select
               className="input mono"
@@ -811,6 +806,29 @@ function RunnerCard({ image, familyTitles = {} }) {
           </div>
         )}
 
+        <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8}}>
+          {family && (
+            <button
+              className="btn ghost sm"
+              data-testid="ri-set-default"
+              disabled={setDefault.isPending || alreadyDefault}
+              title={alreadyDefault
+                ? `The selected version already is the ${familyTitle} launch image`
+                : `Make the selected version the image ${familyTitle} slots launch, via a settings override`}
+              onClick={() => setConfirmDefault(true)}
+            >Set as {familyTitle} launch image</button>
+          )}
+          <button
+            className="btn ghost sm"
+            data-testid="ri-delete-tag"
+            disabled={deleteTag.isPending || !!deleteDisabledReason}
+            title={deleteDisabledReason || `Delete the selected ${cardTitle} image version and reclaim its disk bytes`}
+            onClick={() => setConfirmDelete(true)}
+          >{Icons.trash} Delete <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span></button>
+        </div>
+      </details>
+
+      <div style={{padding: "0 16px 16px"}}>
         {inFlight ? (
           <div>
             <div className="mono" style={{fontSize: 11, color: "var(--fg-3)"}}>
@@ -824,37 +842,20 @@ function RunnerCard({ image, familyTitles = {} }) {
             <button
               className="btn"
               data-testid="ri-pull"
+              title={`Download the ${cardTitle} image to this box`}
               onClick={onPull}
             >
-              {Icons.download} {image.downloaded ? "Re-pull" : "Pull"} <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span>
+              {Icons.download} {image.downloaded ? "Re-pull" : "Pull"}
             </button>
-            {family && (
-              <button
-                className="btn ghost"
-                data-testid="ri-set-default"
-                disabled={setDefault.isPending || alreadyDefault}
-                title={alreadyDefault
-                  ? `${defaultRef} already is the ${familyTitle} launch image`
-                  : `Make ${defaultRef} the image ${familyTitle} slots launch, via a settings override`}
-                onClick={() => setConfirmDefault(true)}
-              >Set as {familyTitle} launch image</button>
-            )}
             {inUseBy.length > 0 && (
               <button
                 className="btn ghost"
                 data-testid="ri-restart-affected"
                 disabled={restartAffected.isPending}
-                title={`Restart the ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}`}
+                title={`Restart the ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} using ${cardTitle}`}
                 onClick={() => setConfirmRestart(true)}
               >Restart {inUseBy.length} affected slot{inUseBy.length === 1 ? "" : "s"}</button>
             )}
-            <button
-              className="btn ghost"
-              data-testid="ri-delete-tag"
-              disabled={deleteTag.isPending || !!deleteDisabledReason}
-              title={deleteDisabledReason || `Delete ${deleteRef} and reclaim its disk bytes`}
-              onClick={() => setConfirmDelete(true)}
-            >{Icons.trash} Delete <span className="mono" style={{fontSize: 10, opacity: .7}}>:{selTag}</span></button>
           </div>
         )}
         {pull.imageId === image.id && pull.error && (
@@ -868,10 +869,10 @@ function RunnerCard({ image, familyTitles = {} }) {
         onConfirm={onSetDefault}
         title={`Set ${familyTitle} launch image`}
         message={
-          `Make ${defaultRef} the image ${familyTitle} slots launch ([slots].default_images override).` +
+          `Make the version selected under Image details the image ${familyTitle} slots launch ([slots].default_images override).` +
           (inUseBy.length
-            ? ` Slots launching this image now: ${inUseBy.join(", ")}. Those that follow the launch image move to the new tag on their next restart; a slot with its own image pin stays where it is.`
-            : " No slot currently references this image.")
+            ? ` Slots using ${cardTitle} now: ${inUseBy.join(", ")}. Those that follow the launch image move to the new version on their next restart; a slot with its own image pin stays where it is.`
+            : " No slot currently uses this image.")
         }
         confirmLabel="Set launch image"
         footerNote="Applies on the next slot restart."
@@ -883,7 +884,7 @@ function RunnerCard({ image, familyTitles = {} }) {
         onConfirm={onRestartAffected}
         title="Restart affected slots"
         message={
-          `Restart ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} launching ${headlineRef}: ${inUseBy.join(", ")}.`
+          `Restart ${inUseBy.length} slot${inUseBy.length === 1 ? "" : "s"} using ${cardTitle}: ${inUseBy.join(", ")}.`
         }
         confirmLabel="Restart"
         footerNote="A slot that fails to restart is skipped and logged — the rest still restart."
@@ -893,8 +894,8 @@ function RunnerCard({ image, familyTitles = {} }) {
         open={confirmDelete}
         onCancel={() => setConfirmDelete(false)}
         onConfirm={onDeleteTag}
-        title={`Delete ${deleteRef}`}
-        message={`Delete tag "${selTag}" of ${image.image} and reclaim its bytes on this box's local store. This cannot be undone.`}
+        title={`Delete ${cardTitle} image version`}
+        message={`Delete the ${cardTitle} image version selected under Image details and reclaim its bytes on this box's local store. This cannot be undone.`}
         confirmLabel="Delete"
         destructive
         footerNote="The server still refuses if a slot or container is using this image."
@@ -905,7 +906,7 @@ function RunnerCard({ image, familyTitles = {} }) {
 
 // ── RunnerDownloadRow / RunnerDownloadsPane ─────────────────────────────
 // Mirrors DownloadRow/DownloadsPane in models.jsx (bytes → layers).
-function RunnerDownloadRow({ job }) {
+function RunnerDownloadRow({ job, titles = {} }) {
   const pct = job.layers_total ? Math.round((job.layers_done / job.layers_total) * 100) : 0;
   const isRunning = job.state === "running";
   const isQueued = job.state === "queued";
@@ -913,7 +914,7 @@ function RunnerDownloadRow({ job }) {
     <div style={{padding: "12px 16px", borderBottom: "1px solid var(--line-soft)"}}>
       <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 11.5, marginBottom: 6, alignItems: "center", gap: 8}}>
         <span style={{overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1}}>
-          {job.image_id}
+          {titles[job.image_id] || job.image_id}
         </span>
         <span style={{color: "var(--fg-3)", fontSize: 11}}>
           {isRunning && `${pct}% · ${job.layers_done}/${job.layers_total || "?"} layers`}
@@ -929,7 +930,7 @@ function RunnerDownloadRow({ job }) {
   );
 }
 
-function RunnerDownloadsPane() {
+function RunnerDownloadsPane({ titles = {} }) {
   const pullsList = useRunnerImagePullsList();
   // An error envelope (or proxy 5xx body) must not crash the whole tab.
   const jobs = Array.isArray(pullsList.data) ? pullsList.data : [];
@@ -941,7 +942,7 @@ function RunnerDownloadsPane() {
         <span>Runner image downloads</span>
         <span className="ct mono">{active.length}</span>
       </div>
-      {active.map(j => <RunnerDownloadRow key={j.id} job={j} />)}
+      {active.map(j => <RunnerDownloadRow key={j.id} job={j} titles={titles} />)}
     </div>
   );
 }

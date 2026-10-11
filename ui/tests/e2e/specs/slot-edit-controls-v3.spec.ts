@@ -267,7 +267,7 @@ test.describe('Slot edit controls (/slots)', () => {
           features: {},
           podman_context: 'rootless',
           backends: {
-            rocmfpx: {
+            standard: {
               image: 'ghcr.io/hal0ai/tb:dual',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -280,15 +280,15 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx' }, EMBED])
+    await seedSlots(page, [{ ...PRIMARY, binary: 'standard' }, EMBED])
     await page.goto('/#slots/primary')
-    // rocmfpx is a dual-lane runner (rocm + vulkan) — the Runtime select
+    // standard is a dual-lane runner (rocm + vulkan) — the Runtime select
     // already resolves to it (the slot's persisted binary), so the Lane
     // pills render immediately; picking the Vulkan lane derives
     // device=gpu-vulkan without touching Runtime at all. RichSelect's closed
     // trigger renders the selected option's title text (no declared `title`
     // on this backend row, so it falls back to the raw key).
-    await expect(page.getByTestId('slot-hw-runtime')).toContainText('rocmfpx')
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('standard')
     await page.getByTestId('slot-hw-lane').getByRole('button', { name: 'Vulkan' }).click()
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -320,8 +320,8 @@ test.describe('Slot edit controls (/slots)', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           backends: {
-            rocmfpx: {
-              title: 'ROCm FPX',
+            standard: {
+              title: 'Standard',
               backend: 'rocm',
               device_class: 'gpu',
               supported_backends: ['rocm'],
@@ -335,7 +335,7 @@ test.describe('Slot edit controls (/slots)', () => {
 
     await page.goto('/#slots/primary')
     // Pick the Runtime — a single-lane runner's device is derived from it.
-    await pickRichOption(page.getByTestId('slot-hw-runtime'), 'rocmfpx')
+    await pickRichOption(page.getByTestId('slot-hw-runtime'), 'standard')
     // Threads/NGL/the debug pin (a free-text escape hatch, never an
     // enumerated catalog dropdown) all live behind the single Advanced
     // disclosure now (Task 11a) — open it once before touching any of them.
@@ -351,7 +351,7 @@ test.describe('Slot edit controls (/slots)', () => {
       threads: 8,
       image_pin: 'ghcr.io/example/runner:test',
     })
-    expect(puts[0].binary).toBe('rocmfpx')
+    expect(puts[0].binary).toBe('standard')
   })
 
   // ADR-0006: every shipped runner image gets a RUNNER_IMAGES entry — the
@@ -369,8 +369,8 @@ test.describe('Slot edit controls (/slots)', () => {
           features: {},
           podman_context: 'rootless',
           backends: {
-            rocmfpx: {
-              title: 'ROCm FPX (default)',
+            standard: {
+              title: 'Standard (default)',
               image: 'ghcr.io/hal0ai/tb:dual',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -380,13 +380,13 @@ test.describe('Slot edit controls (/slots)', () => {
               state: 'installed',
               tier: 'default',
             },
-            strix: {
-              title: 'Strix (Vulkan optional)',
-              image: 'ghcr.io/hal0ai/tb:strix',
+            cuda: {
+              title: 'NVIDIA CUDA (optional)',
+              image: 'ghcr.io/hal0ai/tb:cuda',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
-              backend: 'vulkan',
-              supported_backends: ['vulkan'],
+              backend: 'cuda',
+              supported_backends: ['cuda'],
               format_arch: 'gguf',
               state: 'installed',
             },
@@ -394,7 +394,7 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    await seedSlots(page, [{ ...PRIMARY, binary: 'rocmfpx' }, EMBED])
+    await seedSlots(page, [{ ...PRIMARY, binary: 'standard' }, EMBED])
     await page.goto('/#slots/primary')
 
     const sel = page.getByTestId('slot-hw-runtime')
@@ -404,8 +404,8 @@ test.describe('Slot edit controls (/slots)', () => {
     // Image / Backend selects. RichSelect has no <optgroup>/<option> DOM —
     // open the listbox and read its rows instead.
     const listbox = await openRichSelect(sel)
-    await expect(listbox.getByText('ROCm FPX (default)')).toHaveCount(1)
-    await expect(listbox.getByText('Strix (Vulkan optional)')).toHaveCount(1)
+    await expect(listbox.getByText('Standard (default)')).toHaveCount(1)
+    await expect(listbox.getByText('NVIDIA CUDA (optional)')).toHaveCount(1)
     // No disabled-marker "group header" row either (Task 11c's stand-in for
     // <optgroup>, used only by the Profile select's cross-backend group) —
     // a plain Runtime list has nothing to group.
@@ -423,8 +423,8 @@ test.describe('Slot edit controls (/slots)', () => {
           features: {},
           podman_context: 'rootless',
           backends: {
-            rocmfpx: {
-              title: 'ROCm FPX',
+            standard: {
+              title: 'Standard',
               image: 'ghcr.io/hal0ai/tb:dual',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -437,29 +437,27 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    // #2118/ADR-0006: combined-upstream is a pin-only ref retired from the
-    // release catalogue — a slot still carrying it (an older TOML) must
-    // surface the Advanced debug warning + supersession banner, never an
-    // enumerated Backend/Runner-Image union.
+    // ADR-0006: an image_pin is a debug-only escape hatch — a slot carrying
+    // one must surface the Advanced debug warning, never an enumerated
+    // Backend/Runner-Image union.
     await seedSlots(page, [
-      { ...PRIMARY, binary: 'rocmfpx', image_pin: 'ghcr.io/hal0ai/hal0-combined-upstream:0829' },
+      { ...PRIMARY, binary: 'standard', image_pin: 'ghcr.io/hal0ai/hal0-runner-standard:2026.01.01' },
       EMBED,
     ])
     await page.goto('/#slots/primary')
 
-    await expect(page.getByTestId('slot-hw-runtime')).toContainText('ROCm FPX')
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('Standard')
     await openAdvanced(page)
     await expect(page.getByTestId('slot-hw-image-pin')).toHaveValue(
-      'ghcr.io/hal0ai/hal0-combined-upstream:0829',
+      'ghcr.io/hal0ai/hal0-runner-standard:2026.01.01',
     )
     await expect(page.getByTestId('slot-hw-debug-pin-warning')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-supersession-banner')).toBeVisible()
     // No enumerated Backend/Runner-Image union anywhere in the drawer.
     await expect(page.getByTestId('slot-hw-binary')).toHaveCount(0)
   })
 
   test('HW grid — an out-of-vocab persisted runtime keeps its own option instead of vanishing', async ({ page }) => {
-    // rocmfpx is gpu-only; a cpu-device slot pinned to it does not fit. The
+    // standard is gpu-only; a cpu-device slot pinned to it does not fit. The
     // cascade can no longer CREATE that state, but a persisted TOML can
     // still carry it — selectedRunnerKey() returns null and the Runtime
     // select renders the persisted binary as its own "· not in this
@@ -474,7 +472,7 @@ test.describe('Slot edit controls (/slots)', () => {
           features: {},
           podman_context: 'rootless',
           backends: {
-            rocmfpx: {
+            standard: {
               image: 'ghcr.io/hal0ai/tb:rocm',
               runtime_family: 'llamacpp',
               device_class: 'gpu',
@@ -487,15 +485,15 @@ test.describe('Slot edit controls (/slots)', () => {
         }),
       }),
     )
-    await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'rocmfpx' }, EMBED])
+    await seedSlots(page, [{ ...PRIMARY, device: 'cpu', binary: 'standard' }, EMBED])
     await page.goto('/#slots/primary')
     const sel = page.getByTestId('slot-hw-runtime')
     // The closed trigger renders the persisted binary's own "· not in this
     // catalog" row text directly (Task 11c) — no silent rewrite to auto.
-    await expect(sel).toContainText('rocmfpx')
+    await expect(sel).toContainText('standard')
     await expect(sel).toContainText('not in this catalog')
     const listbox = await openRichSelect(sel)
-    await expect(listbox.locator('[data-option-id="rocmfpx"]')).toContainText(
+    await expect(listbox.locator('[data-option-id="standard"]')).toContainText(
       'not in this catalog',
     )
   })

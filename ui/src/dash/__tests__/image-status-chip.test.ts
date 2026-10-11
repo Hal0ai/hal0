@@ -25,7 +25,7 @@ const UNKNOWN_SLOT: Slot = {
   metrics: {},
   runtime: 'container',
   container_status: 'running',
-  image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-server',
+  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   image_status: 'unknown',
 }
 

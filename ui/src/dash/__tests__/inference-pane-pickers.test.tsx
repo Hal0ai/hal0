@@ -182,7 +182,7 @@ const ALL_SLOTS = [
 // can move the slot's lane (Vulkan → ROCm) and the preview has a real lane
 // line to render.
 const BACKENDS = {
-  rocmfpx: {
+  standard: {
     title: 'Standard',
     blurb: 'Runs everything.',
     tier: 'default',
@@ -191,9 +191,9 @@ const BACKENDS = {
     runtime_family: 'llama-server',
     state: 'installed',
   },
-  promptforge: {
-    title: 'PromptForge',
-    blurb: 'Accelerated PF.',
+  qwen3tts: {
+    title: 'Qwen3 TTS',
+    blurb: 'Higher-quality TTS.',
     tier: 'optional',
     supported_backends: ['rocm'],
     device_class: 'gpu',
@@ -201,7 +201,7 @@ const BACKENDS = {
     state: 'installed',
   },
 }
-// P_CUR is the slot's persisted profile (no runner → AUTO chip); P_PF pins a
+// P_CUR is the slot's persisted profile (no runner → AUTO chip); P_Q3 pins a
 // single-lane ROCm runtime; P_TTS is type-fenced away from an llm slot.
 const P_CUR = {
   name: 'rocm',
@@ -209,10 +209,10 @@ const P_CUR = {
   intent: 'general chat tune',
   supported_slot_types: ['llm'],
 }
-const P_PF = {
+const P_Q3 = {
   name: 'brainy',
   flags: '--temp 0.2 --top-p 0.9 --jinja',
-  runner: 'promptforge',
+  runner: 'qwen3tts',
   intent: 'low-temp reasoning tune',
   supported_slot_types: ['llm'],
 }
@@ -314,7 +314,7 @@ function footButton(label: string) {
 beforeEach(() => {
   feasibilityCalls.length = 0
   feasibilityHandler.current = undefined
-  profilesBox.current = [P_CUR, P_PF, P_TTS]
+  profilesBox.current = [P_CUR, P_Q3, P_TTS]
   systemInfoBox.current = { backends: BACKENDS }
   editCalls.length = 0
   restartCalls.length = 0
@@ -470,7 +470,7 @@ describe('card profile picker + apply confirm (card-dropdowns Task 2)', () => {
     expect(box).not.toBeNull()
     const text = box.textContent || ''
     // runtime → the runner the profile pins, named by the system-info catalog.
-    expect(text).toContain('PromptForge')
+    expect(text).toContain('Qwen3 TTS')
     // lane → a single-lane ROCm runtime moves this Vulkan slot's lane.
     expect(text).toContain('Vulkan')
     expect(text).toContain('ROCm')

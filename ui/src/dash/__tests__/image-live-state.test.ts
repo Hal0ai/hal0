@@ -13,8 +13,8 @@ import { describe, expect, it } from 'vitest'
 
 import { imageLiveState } from '../slot-status.js'
 
-const REF = 'ghcr.io/hal0ai/hal0-promptforge@sha256:abc123'
-const OLD_REF = 'ghcr.io/hal0ai/hal0-promptforge@sha256:def456'
+const REF = 'ghcr.io/hal0ai/hal0-runner-standard@sha256:abc123'
+const OLD_REF = 'ghcr.io/hal0ai/hal0-runner-standard@sha256:def456'
 
 describe('imageLiveState', () => {
   it('is null when the slot is not running — nothing to compare against', () => {

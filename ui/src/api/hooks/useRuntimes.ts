@@ -27,14 +27,14 @@ import { useSlots } from './useSlots'
 export type RunnerState = 'installed' | 'installable' | 'unavailable'
 
 /** `hal0.runners.RunnerTier` (ADR-0027). */
-export type RunnerTier = 'default' | 'optional' | 'frozen'
+export type RunnerTier = 'default' | 'optional'
 
 export interface SystemInfoBackend {
   image: string
   runtime_family: string
   device_class: string
   backend: string
-  /** Operator-facing runtime name (Task 2/D3) — "ROCmFPX", "CPU", … —
+  /** Operator-facing runtime name (Task 2/D3) — "Standard", "CPU", … —
    *  the Runtime select's option label and the Profile row's apply-preview
    *  read this instead of the raw registry key. */
   title?: string
@@ -52,15 +52,11 @@ export interface SystemInfoBackend {
    *  Assumed surfaced alongside supported_backends; optional. */
   format_arch?: string | null
   /** Per-runner launch-capability metadata (UI-API-1 item 2 / spec §7),
-   *  read from `hal0.runners.RunnerSupports`. `specialties` (spec
-   *  2026-08-29 #1946) lists which specialty-distribution kinds (e.g.
-   *  "promptforge") this runner image serves ACCELERATED — empty when it
-   *  serves none (a specialty model still loads, degraded to GGUF-only). */
+   *  read from `hal0.runners.RunnerSupports`. */
   supports?: {
     mtp?: boolean
     jinja?: boolean
     mmproj?: boolean
-    specialties?: string[]
   }
   state: RunnerState
 }
@@ -151,16 +147,15 @@ export function useRuntimes() {
   }
 
   // Resolve a slot to its runner key. Primary: the slot's typed `binary` field
-  // (a RUNNER_IMAGES key). Fallback for slots not yet migrated (empty binary):
-  // the runner whose backend matches the slot's device backend — mirrors the
-  // backend's `runner_for_backend` HW-gated default.
+  // (a RUNNER_IMAGES key). Fallback for slots with an empty binary: the
+  // backend's `runner_for_backend` default (cuda → cuda, cpu → cpu, every
+  // other GPU lane → standard; an npu slot has no default).
   const slotRunnerKey = (s: any): string | undefined => {
     const explicit = s?.binary ? String(s.binary) : ''
     if (explicit) return explicit
     const be = deviceBackend(s?.device)
-    if (!be) return undefined
-    const match = Object.entries(backends).find(([, b]) => b.backend === be)
-    return match?.[0]
+    if (!be || be === 'npu') return undefined
+    return be === 'cuda' ? 'cuda' : be === 'cpu' ? 'cpu' : 'standard'
   }
 
   const rows: RuntimeRow[] = Object.entries(backends).map(([key, b]) => {

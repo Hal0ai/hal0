@@ -17,11 +17,11 @@ import { ENDPOINTS } from '../endpoints'
 import type { RunnerTier } from './useRuntimes'
 
 // Which family default (if any) resolves to this row's image, and where that
-// default comes from: the baked release constant or the operator's
-// [slots].default_images override (runner-catalogue-v2 contract).
+// default comes from: the release pin, an HAL0_RUNNER_IMAGE_<KEY> env
+// override, or the operator's [slots].default_images override.
 export interface RunnerImageDefault {
   family: string
-  source: 'override' | 'release'
+  source: 'override' | 'env' | 'release'
 }
 
 export interface RunnerImage {
@@ -30,22 +30,14 @@ export interface RunnerImage {
   tag: string
   digest: string | null
   size_bytes: number | null
-  manifest_key: string | null
-  ownership: 'owned' | 'referenced' | string | null
-  publish: 'ci' | 'external' | 'manual' | string | null
-  notes: string | null
-  build: Record<string, unknown> | null
-  // Catalogue runtime metadata (feat/catalogue-runtime-metadata): which
-  // runtime the image's entrypoint serves (backend RuntimeFamily vocabulary —
-  // "llama-server", "comfyui", …) and which backends its runner binary can
-  // execute ("rocm"/"vulkan"/"cpu"/…, [] = not declared). Optional so rows
-  // from a pre-contract backend still type-check. The runtime-gated
-  // consumers (runnerOptions() in dash/hw-cascade.js, profiles.jsx) read
-  // this same vocabulary off the system-info `backends` map, not off these
-  // catalogue rows — the image-first `cataloguePinOptions` cascade that
-  // once read it here was retired with the pin-only image shape (ADR-0006).
-  runtime_family?: string | null
-  supported_backends?: string[]
+  // Catalogue facts (hal0.runner-images.v2): `id` is the runner key, `image`
+  // the bare repo, `title`/`summary`/`family`/`tier` the published metadata,
+  // `backends` the lanes the runner serves and `lanes_gated` the lanes the
+  // runner-images repo has admitted for this digest.
+  summary?: string | null
+  family?: string | null
+  backends?: string[]
+  lanes_gated?: string[]
   local_path: string | null
   downloaded_at: string | null
   discovered_at: string | null
@@ -59,16 +51,16 @@ export interface RunnerImage {
   // this repo right now. Not the runtime tier (see `tier` below).
   is_default?: RunnerImageDefault | null
   in_use_by?: string[]
-  // ADR-0027: the registry runner that ships this image lineage, its
-  // operator-facing title + one-line description, and its tier. All null for
-  // a catalogued image no runner ships (legacy toolbox, pin-only variant).
+  // ADR-0027: the registry runner this row is (rows map to runners by id), its
+  // operator-facing title + one-line description, and its tier. `runner` is
+  // null for a row whose id is no registry runner.
   runner?: string | null
   title?: string | null
   blurb?: string | null
   tier?: RunnerTier | null
   // runner-catalogue-v3 enrichment: per-tag digest/store facts
-  // (tags[].{tag,digest,size_bytes,last_seen,downloaded}), validated/
-  // candidate/deprecated badges keyed by tag, and store-truth fields
+  // (tags[].{tag,digest,size_bytes,last_seen,provenance,downloaded}), the
+  // "pinned" badge keyed by tag, and store-truth fields
   // mirroring what StoreStateChip / tagLanes() in runner-images.jsx read.
   // Optional for the same pre-contract-backend reason as above — type-only,
   // no behavior change.
@@ -77,9 +69,12 @@ export interface RunnerImage {
     digest: string | null
     size_bytes: number | null
     last_seen: string | null
+    provenance?: Record<string, unknown> | null
     downloaded: boolean | null
   }>
-  badges?: Record<string, string>
+  /** Tag → badge. The only value is "pinned" (the tag this release pins). */
+  badges?: Record<string, 'pinned' | string>
+  provenance?: Record<string, unknown> | null
   store_state?: 'present' | 'missing' | 'unknown'
   downloaded?: boolean
   store_context?: 'rootful' | 'rootless' | null
@@ -91,18 +86,19 @@ const RUNNER_IMAGES_POLL_MS = 30_000
 // GET /api/runner-images `families` entry): the effective ref a family
 // resolves to right now, its source tier, the store state of that ref,
 // which slots launch it (`slots`) vs. a different tag of the same repo
-// (`pinned_slots`), and whether a newer release-shaped tag is catalogued.
+// (`pinned_slots`), and whether the runner-images repo's current gated pin
+// (`newest_release`) differs from what this box launches.
 export interface RunnerImageFamily {
   family: string
   /** The runtime's registry title and tier (ADR-0027). */
   title?: string
   tier?: RunnerTier | null
   effective_ref: string
-  source: 'override' | 'env' | 'manifest' | 'release'
+  source: 'override' | 'env' | 'release'
   store_state: 'present' | 'missing' | 'unknown'
   slots: string[]
   pinned_slots: string[]
-  newest_release: { tag: string; digest: string } | null
+  newest_release: { tag: string; digest: string | null } | null
   update_available: boolean
 }
 
@@ -150,6 +146,8 @@ export interface RunnerImageSyncResult {
   images_json_ok: boolean
   images_json_error: string | null
   probe_errors: Record<string, string>
+  /** Catalogue entries the sync refused: runner id → reason. */
+  skipped?: Record<string, string>
 }
 
 export function useRunnerImageSync() {

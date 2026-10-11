@@ -118,7 +118,7 @@ export const MOCK_DATA = {
       group: 'chat', state: 'ready', port: 8096,
       runtime: 'container',
       profile: 'rocm-mtp',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       image_status: 'present',
       container_status: 'running',
       container_health: true,
@@ -134,7 +134,7 @@ export const MOCK_DATA = {
       group: 'chat', state: 'ready', port: 8099,
       runtime: 'container',
       profile: 'rocm-mtp',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       image_status: 'present',
       container_status: 'running',
       container_health: true,
@@ -159,7 +159,7 @@ export const MOCK_DATA = {
       group: 'voice', state: 'ready', port: 8100,
       runtime: 'container',
       profile: 'tts',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      image: 'ghcr.io/hal0ai/hal0-runner-kokoro:2026.10.11',
       image_status: 'unknown',
       container_status: 'running',
       container_health: true,
@@ -174,7 +174,7 @@ export const MOCK_DATA = {
       group: 'npu', state: 'ready', port: 8098,
       runtime: 'container',
       profile: 'flm',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:flm-npu-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11',
       image_status: 'present',
       container_status: 'running',
       container_health: true,
@@ -189,7 +189,7 @@ export const MOCK_DATA = {
       group: 'chat', state: 'starting', port: 8097,
       runtime: 'container',
       profile: 'rocm-mtp',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       image_status: 'present',
       container_status: 'starting',
       container_health: false,
@@ -262,7 +262,7 @@ export const MOCK_DATA = {
   profiles: [
     {
       name: 'rocm',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '--flash-attn on',
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
@@ -277,7 +277,7 @@ export const MOCK_DATA = {
     },
     {
       name: 'rocm-mtp',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '--flash-attn on',
       mtp: true,
       resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
@@ -292,7 +292,7 @@ export const MOCK_DATA = {
     },
     {
       name: 'vulkan',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '--flash-attn on',
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
@@ -308,7 +308,7 @@ export const MOCK_DATA = {
     // Phase A seed — NPU container slot (FLM toolbox).
     {
       name: 'flm',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-flm:v1',
+      image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11',
       flags: '',
       mtp: false,
       resolved_flags: '',
@@ -324,7 +324,7 @@ export const MOCK_DATA = {
     // Phase B5 seed — TTS container slot (kokoro-onnx, CPU-only).
     {
       name: 'tts',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      image: 'ghcr.io/hal0ai/hal0-runner-kokoro:2026.10.11',
       flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
       mtp: false,
       resolved_flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
@@ -340,7 +340,7 @@ export const MOCK_DATA = {
     // ComfyUI image-generation seed (Phase D).
     {
       name: 'comfyui',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-comfyui:v1',
+      image: 'ghcr.io/hal0ai/hal0-runner-comfyui:2026.10.11',
       flags: '',
       mtp: false,
       resolved_flags: '',

@@ -242,7 +242,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   }
 
   test('MTP control is gone from the slot drawer, even for an MTP-tagged model', async ({ page }) => {
-    await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['rocmfp4', 'mtp'] }])
+    await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['mtp'] }])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
     const row = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
@@ -255,39 +255,6 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // per-slot template is inert at launch (`resolve_chat_template`: the key
   // "is no longer consulted"), and saving one fired a cold restart that
   // changed no argv. Template lives on the model drawer now.
-
-  test.skip('C7h — obsolete: model filtering no longer follows selected profile', async ({ page }) => {
-    // The dashboard uses mockFetch (VITE_MOCK_HAL0=1) which short-circuits
-    // page.route for allowlisted endpoints like /api/models — it reads
-    // HAL0_DATA.models directly. Seed both slots AND models in a single
-    // addInitScript so the setter patch covers both fields in one pass.
-    // NOTE: capabilities: ['chat'] is required for the lib normalizeApiModel
-    // to derive type='llm'; a bare type field is overwritten by deriveType().
-    const testModels = [
-      { id: 'qwen-fp4', name: 'qwen-fp4', capabilities: ['chat'], tags: ['rocmfp4'] },
-      { id: 'qwen-plain', name: 'qwen-plain', capabilities: ['chat'], tags: [] },
-    ]
-    await page.addInitScript(({ slots, models }: { slots: any[], models: any[] }) => {
-      let real: any
-      Object.defineProperty(window, 'HAL0_DATA', {
-        configurable: true,
-        get() { return real },
-        set(v) {
-          real = v
-          if (v && typeof v === 'object') {
-            v.slots = slots
-            v.models = models
-          }
-        },
-      })
-    }, { slots: [CHAT_CONTAINER], models: testModels })
-    await page.goto('/#slots/chat')
-    const modelSel = page.locator('.drawer .form-row', { hasText: 'Model' }).locator('select')
-    await expect(modelSel.locator('option[value="qwen-fp4"]')).toHaveCount(1)   // rocm profile → fp4 present
-    await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
-    await expect(modelSel.locator('option[value="qwen-fp4"]')).toHaveCount(0)   // vulkan → fp4 filtered out
-    await expect(modelSel.locator('option[value="qwen-plain"]')).toHaveCount(1)
-  })
 })
 
 // ─── #1636 — per-slot divergence: flag overlay + cross-device transition ────
@@ -404,27 +371,27 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
   // pre-existing #1636 cross-device profile-switch mechanism, which pivots
   // on `backend`/`device_class` instead.
   const RUNNER_PROFILE = {
-    name: 'promptforge-apply',
-    image: 'ghcr.io/hal0ai/promptforge:v1',
+    name: 'single-lane-apply',
+    image: 'ghcr.io/hal0ai/hal0-runner-qwen3tts:v1',
     flags: '', mtp: false, resolved_flags: '', seed: false, used_by: [],
-    intent: 'Promptforge — single-lane ROCm runtime',
+    intent: 'Qwen3 TTS — single-lane ROCm runtime',
     supported_slot_types: ['llm'],
-    runner: 'promptforge',
+    runner: 'qwen3tts',
   }
 
   const SYSTEM_INFO_BACKENDS = {
     // hw-cascade.js's runnerOptions() vetoes a runner only when hw is KNOWN
     // and none of its lanes are feasible (a bare `hardware: {}` — no
     // gpus[0] — reads as unknown, never a veto, since the Task 12 fix).
-    // Report rocm capable anyway so `promptforge`'s single lane resolves as
+    // Report rocm capable anyway so `qwen3tts`'s single lane resolves as
     // a real pick, not just "not vetoed", in both this cascade and the
     // Hardware group's own.
     hardware: { gpus: [{ compute_capable: true, vulkan_capable: true }] },
     features: {}, podman_context: 'rootless',
     backends: {
-      promptforge: {
-        title: 'Promptforge',
-        image: 'ghcr.io/hal0ai/promptforge:v1',
+      qwen3tts: {
+        title: 'Qwen3 TTS',
+        image: 'ghcr.io/hal0ai/hal0-runner-qwen3tts:v1',
         runtime_family: 'llamacpp',
         device_class: 'gpu',
         backend: 'rocm',
@@ -476,9 +443,7 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([RUNNER_PROFILE]) }),
     )
     // No models seeded — the slot's bound model_id is intentionally absent
-    // from the catalog so `curModelRow` never resolves and the #1636
-    // stranded-model Save guard (which only fires for a RESOLVED bound
-    // model) can't interfere with this test's own assertions.
+    // from the catalog.
     await seedSlotsAndModels(page, [VULKAN_SLOT], [])
     await page.goto('/#slots/vulkan-chat')
     await expect(page.locator('.drawer')).toBeVisible()
@@ -487,13 +452,13 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
     // no preview yet.
     await expect(page.getByTestId('slot-profile-preview')).toHaveCount(0)
 
-    await pickRichOption(page.getByTestId('slot-profile'), 'promptforge-apply')
+    await pickRichOption(page.getByTestId('slot-profile'), 'single-lane-apply')
 
     // Applying this profile previews the runtime it carries and that the
     // slot restarts on Save.
     const preview = page.getByTestId('slot-profile-preview')
     await expect(preview).toBeVisible()
-    await expect(preview).toContainText('Promptforge')
+    await expect(preview).toContainText('Qwen3 TTS')
     await expect(preview).toContainText('slot restarts on Save')
 
     // The Hardware group's Runtime select mirrors the SAME pick immediately
@@ -501,14 +466,14 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
     // isn't a display-only fiction. A RichSelect trigger isn't a <select>, so
     // this reads the closed trigger's rendered title text instead of
     // `.toHaveValue()`.
-    await expect(page.getByTestId('slot-hw-runtime')).toContainText('Promptforge')
+    await expect(page.getByTestId('slot-hw-runtime')).toContainText('Qwen3 TTS')
 
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({
-      binary: 'promptforge',
+      binary: 'qwen3tts',
       device: 'gpu-rocm',
-      profile: 'promptforge-apply',
+      profile: 'single-lane-apply',
     })
     // A runtime/device change is a hardware change — the cold restart fires
     // in the background after the config write lands.

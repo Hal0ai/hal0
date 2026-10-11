@@ -32,37 +32,37 @@ async function openRuntimes(page: import('@playwright/test').Page) {
 test.describe('Settings → Hardware & Runtimes (runner images)', () => {
   test('renders runner rows with status derived from system-info state', async ({ page }) => {
     await mockSystemInfo(page, {
-      rocmfpx: { image: 'ghcr.io/hal0ai/hal0-rocmfp4:v0.9.4', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', supported_backends: ['rocm', 'vulkan'], state: 'installed' },
-      cudafpx: { image: 'ghcr.io/ggml-org/llama.cpp:server-cuda', runtime_family: 'llama-server', device_class: 'gpu', backend: 'cuda', supported_backends: ['cuda'], state: 'installable' },
+      standard: { image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', supported_backends: ['rocm', 'vulkan'], state: 'installed' },
+      cuda: { image: 'ghcr.io/ggml-org/llama.cpp:server-cuda-b8120', runtime_family: 'llama-server', device_class: 'gpu', backend: 'cuda', supported_backends: ['cuda'], state: 'installable' },
     })
     await openRuntimes(page)
 
-    await expect(page.getByTestId('runtime-row-rocmfpx')).toBeVisible()
-    await expect(page.getByTestId('runtime-row-cudafpx')).toBeVisible()
+    await expect(page.getByTestId('runtime-row-standard')).toBeVisible()
+    await expect(page.getByTestId('runtime-row-cuda')).toBeVisible()
 
     // Status derives from state, not hardcoded.
-    await expect(page.getByTestId('runtime-status-rocmfpx')).toContainText(/installed/i)
-    await expect(page.getByTestId('runtime-status-cudafpx')).toContainText(/not pulled/i)
+    await expect(page.getByTestId('runtime-status-standard')).toContainText(/installed/i)
+    await expect(page.getByTestId('runtime-status-cuda')).toContainText(/not pulled/i)
 
     // Image ref is shown read-only.
-    await expect(page.getByTestId('runtime-image-rocmfpx')).toContainText('hal0-rocmfp4')
+    await expect(page.getByTestId('runtime-image-standard')).toContainText('hal0-runner-standard')
 
     // Evidence UI: nothing on the page edits an image string.
     await expect(page.getByTestId('hardware-page').locator('input, textarea')).toHaveCount(0)
 
     // The dead disabled "Pre-pull" placeholder is gone (no endpoint backs it).
-    await expect(page.getByTestId('runtime-prepull-cudafpx')).toHaveCount(0)
+    await expect(page.getByTestId('runtime-prepull-cuda')).toHaveCount(0)
   })
 
   test('degraded probe (all unavailable) shows a reason', async ({ page }) => {
     await mockSystemInfo(page, {
-      rocmfpx: { image: 'ghcr.io/hal0ai/hal0-rocmfp4:v0.9.4', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', state: 'unavailable' },
+      standard: { image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11', runtime_family: 'llama-server', device_class: 'gpu', backend: 'rocm', state: 'unavailable' },
     })
     await openRuntimes(page)
 
     const degraded = page.getByTestId('runtimes-degraded')
     await expect(degraded).toBeVisible()
     await expect(degraded).toContainText(/probe is unavailable/i)
-    await expect(page.getByTestId('runtime-status-rocmfpx')).toContainText(/probe unavailable/i)
+    await expect(page.getByTestId('runtime-status-standard')).toContainText(/probe unavailable/i)
   })
 })

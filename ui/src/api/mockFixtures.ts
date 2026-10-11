@@ -267,7 +267,7 @@ function buildProfiles() {
   return [
     {
       name: 'rocm',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
       mtp: false,
       resolved_flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
@@ -276,7 +276,7 @@ function buildProfiles() {
       seed: true,
       cloned_from: null,
       intent: 'MoE agents',
-      quant: 'FP4',
+      quant: 'Q4_K_M',
       tps: 52.8,
       rtf: null,
       // `used_by` cross-references slot NAMEs from HAL0_DATA.slots
@@ -290,7 +290,7 @@ function buildProfiles() {
     },
     {
       name: 'vulkan',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
       mtp: false,
       resolved_flags: '-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap',
@@ -306,7 +306,7 @@ function buildProfiles() {
     },
     {
       name: 'flm',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43',
+      image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11',
       flags: '',
       mtp: false,
       resolved_flags: '',
@@ -322,7 +322,7 @@ function buildProfiles() {
     },
     {
       name: 'tts',
-      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      image: 'ghcr.io/hal0ai/hal0-runner-kokoro:2026.10.11',
       flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
       mtp: false,
       resolved_flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
@@ -338,7 +338,7 @@ function buildProfiles() {
     },
     {
       name: 'cpu-llm',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-cpu:2026.10.11',
       flags: '--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
       mtp: false,
       resolved_flags: '--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
@@ -354,7 +354,7 @@ function buildProfiles() {
     },
     {
       name: 'comfyui',
-      image: 'ghcr.io/hal0ai/hal0-comfyui:latest',
+      image: 'ghcr.io/hal0ai/hal0-runner-comfyui:2026.10.11',
       flags: '--disable-mmap --bf16-vae --cache-none',
       mtp: false,
       resolved_flags: '--disable-mmap --bf16-vae --cache-none',
@@ -370,7 +370,7 @@ function buildProfiles() {
     },
     {
       name: 'rocm-fast',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '-fa on -b 8192 -ub 2048 --threads 16 --no-mmap',
       mtp: true,
       resolved_flags: '-fa on -b 8192 -ub 2048 --threads 16 --no-mmap',
@@ -379,7 +379,7 @@ function buildProfiles() {
       seed: false,
       cloned_from: 'rocm',
       intent: 'Dense + MTP · benched on this box',
-      quant: 'FP4',
+      quant: 'Q4_K_M',
       tps: null,
       rtf: null,
       used_by: [],
@@ -1447,76 +1447,93 @@ function buildMemoryGraphStatus() {
 }
 
 // ─── Runner Images (Slots → Runner Images tab) ────────────────────────────
-// Shape mirrors /api/runner-images (registry rows synced from
-// hal0-runner-images images.json + GHCR), including the runner-catalogue-v2
-// contract enrichment (available_tags newest-first, is_default, in_use_by)
-// AND the v3 per-tag/store-truth fields (tags[], badges, store_state,
-// downloaded) the page now reads directly instead of the retired
-// local_path/downloaded_at markers, plus the v3 `families` launch-truth
-// summary the FamilyStrip renders (Task 10 — DefaultsStrip used to derive
-// this from the row's `is_default` instead; the strip now reads the
-// server's `families` array only, so a row-only mock renders an empty
-// strip). One row is enough for the catalog list + card + FamilyStrip to
-// render; the pulls list must be an ARRAY — the downloads pane calls
+// Shape mirrors /api/runner-images (hal0.runner-images.v2 catalogue rows,
+// ONE ROW PER RUNNER — `id` is the runner key — enriched by the route's
+// enrich_row) plus the `families` launch-truth summary the FamilyStrip
+// renders (hal0.api.routes.runner_images._families_payload). Titles/blurbs/
+// tiers are copied from hal0.runners.RUNNER_IMAGES. `standard` headlines an
+// older tag than the newest available one so the "newer build" chip renders
+// in mock mode. The pulls list must be an ARRAY — the downloads pane calls
 // `.filter` on it directly.
+const RUNNER_IMAGE_ROWS = [
+  { id: 'standard', repo: 'hal0-runner-standard', title: 'Standard', tier: 'default', backends: ['rocm', 'vulkan'], lanes: ['rocm', 'vulkan'], size: 4_900_000_000,
+    blurb: 'llama.cpp for AMD GPUs, on ROCm or Vulkan. The default on AMD; runs plain GGUF models.', inUse: ['agent', 'utility'], newer: true },
+  { id: 'cpu', repo: 'hal0-runner-cpu', title: 'CPU', tier: 'default', backends: ['cpu'], lanes: ['cpu'], size: 310_000_000,
+    blurb: 'llama.cpp on the processor, no GPU needed. A slow fallback for boxes without a supported GPU.', inUse: [] },
+  { id: 'flm', repo: 'hal0-runner-flm', title: 'NPU (FastFlowLM)', tier: 'default', backends: ['npu'], lanes: [], size: 820_000_000,
+    blurb: 'Runs supported models on the AMD XDNA 2 NPU, leaving the GPU free.', inUse: ['stt-npu'] },
+  { id: 'kokoro', repo: 'hal0-runner-kokoro', title: 'Kokoro speech', tier: 'default', backends: ['cpu'], lanes: [], size: 560_000_000,
+    blurb: 'Text-to-speech on the CPU. Works on any box, no GPU needed.', inUse: ['tts'] },
+  { id: 'moonshine', repo: 'hal0-runner-moonshine', title: 'Moonshine transcription', tier: 'default', backends: ['cpu'], lanes: [], size: 430_000_000,
+    blurb: 'Speech-to-text on the CPU. Works on any box, no GPU or NPU needed.', inUse: [] },
+  { id: 'comfyui', repo: 'hal0-runner-comfyui', title: 'ComfyUI', tier: 'default', backends: ['rocm'], lanes: [], size: 9_200_000_000,
+    blurb: 'Image and video generation on the GPU (ROCm).', inUse: ['img'] },
+  { id: 'qwen3tts', repo: 'hal0-runner-qwen3tts', title: 'Qwen3 TTS', tier: 'optional', backends: ['rocm'], lanes: [], size: 10_400_000_000,
+    blurb: 'Higher-quality multilingual text-to-speech on the GPU (ROCm). Opt-in; a large download (about 10 GB).', inUse: [] },
+  { id: 'cuda', repo: 'llama.cpp', title: 'NVIDIA CUDA', tier: 'optional', backends: ['cuda'], lanes: ['cuda'], size: 3_100_000_000,
+    blurb: 'llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.', inUse: [] },
+]
+
+const MOCK_DIGEST = (n: number) => `sha256:${String(n).repeat(64)}`
+
 function buildRunnerImages() {
+  const images = RUNNER_IMAGE_ROWS.map((r, idx) => {
+    const image = r.id === 'cuda' ? 'ghcr.io/ggml-org/llama.cpp' : `ghcr.io/hal0ai/${r.repo}`
+    const headTag = r.id === 'cuda' ? 'server-cuda-b8120' : '2026.10.04'
+    const tags = r.newer
+      ? [
+          { tag: '2026.10.11', digest: MOCK_DIGEST(1), size_bytes: r.size, last_seen: '2026-10-11T00:00:00Z', provenance: null, downloaded: false },
+          { tag: headTag, digest: MOCK_DIGEST(0), size_bytes: r.size, last_seen: '2026-10-04T00:00:00Z', provenance: null, downloaded: true },
+        ]
+      : [{ tag: headTag, digest: MOCK_DIGEST(idx + 2), size_bytes: r.size, last_seen: '2026-10-04T00:00:00Z', provenance: null, downloaded: r.id !== 'qwen3tts' }]
+    const head = tags.find((t) => t.tag === headTag)!
+    return {
+      id: r.id,
+      image,
+      tag: headTag,
+      digest: head.digest,
+      size_bytes: r.size,
+      title: r.title,
+      summary: r.blurb,
+      family: r.id,
+      tier: r.tier,
+      backends: r.backends,
+      lanes_gated: r.lanes,
+      available_tags: tags.map((t) => t.tag),
+      tags,
+      local_path: null,
+      downloaded_at: null,
+      discovered_at: '2026-10-04T00:00:00Z',
+      updated_at: '2026-10-04T00:00:00Z',
+      extra: {},
+      // enrich_row's derived fields.
+      runner: r.id,
+      blurb: r.blurb,
+      is_default: { family: r.id, source: 'release' },
+      in_use_by: r.inUse,
+      store_state: head.downloaded ? 'present' : 'missing',
+      downloaded: head.downloaded,
+      store_context: 'rootful',
+      badges: { [headTag]: 'pinned' },
+      provenance: null,
+    }
+  })
   return {
-    images: [
-      {
-        id: 'rocmfpx-combined',
-        image: 'ghcr.io/hal0ai/hal0-combined',
-        tag: '0822',
-        digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-        size_bytes: 7_340_032_000,
-        manifest_key: null,
-        ownership: 'owned',
-        publish: 'external',
-        notes: 'Canonical ROCmFPX+Vulkan combined runner (mock fixture).',
-        build: null,
-        local_path: null,
-        downloaded_at: null,
-        discovered_at: '2026-08-08T00:00:00Z',
-        updated_at: '2026-08-08T00:00:00Z',
-        extra: {},
-        // Headline deliberately trails available_tags[0] so the "newer tag"
-        // chip surface renders in mock mode.
-        available_tags: ['0824', '0822'],
-        // v3 per-tag payload backing tagLanes()/newerTagAvailable() digest
-        // comparison — mirrors available_tags above.
-        tags: [
-          { tag: '0824', digest: 'sha256:1111111111111111111111111111111111111111111111111111111111111111', downloaded: false },
-          { tag: '0822', digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000', downloaded: true },
-        ],
-        badges: { '0824': 'candidate' },
-        store_state: 'present',
-        downloaded: true,
-        is_default: { family: 'rocmfpx', source: 'release' },
-        in_use_by: ['agent', 'utility'],
-        // ADR-0027 registry copy + tier (hal0.runners.RUNNER_IMAGES["rocmfpx"]).
-        runner: 'rocmfpx',
-        title: 'ROCmFPX',
-        blurb:
-          'llama.cpp build for AMD GPUs (ROCm or Vulkan) that also loads ROCmFPX/ROCmFP4-quantized models. The default on AMD.',
-        tier: 'default',
-      },
-    ],
-    // Launch-truth per-family summary (Task 9 contract) — kept in sync with
-    // the row above's is_default/in_use_by so mock mode renders the same
-    // family the row claims to default for.
-    families: [
-      {
-        family: 'rocmfpx',
-        title: 'ROCmFPX',
-        tier: 'default',
-        effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
-        source: 'release',
-        store_state: 'present',
-        slots: ['agent', 'utility'],
-        pinned_slots: [],
-        newest_release: null,
-        update_available: false,
-      },
-    ],
+    images,
+    // Launch-truth per-runner summary (_families_payload) — kept in sync with
+    // the rows above (is_default/in_use_by).
+    families: RUNNER_IMAGE_ROWS.map((r, idx) => ({
+      family: r.id,
+      title: r.title,
+      tier: r.tier,
+      effective_ref: `${images[idx].image}:${images[idx].tag}`,
+      source: 'release',
+      store_state: idx === 6 ? 'missing' : 'present',
+      slots: r.inUse,
+      pinned_slots: [],
+      newest_release: r.newer ? { tag: '2026.10.11', digest: MOCK_DIGEST(1) } : { tag: images[idx].tag, digest: images[idx].digest },
+      update_available: !!r.newer,
+    })),
   }
 }
 

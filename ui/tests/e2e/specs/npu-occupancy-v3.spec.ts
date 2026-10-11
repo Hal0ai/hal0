@@ -34,7 +34,7 @@ const NPU_SERVING_SLOT = {
   port: 8098,
   runtime: 'container',
   profile: 'flm',
-  image: 'ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43',
+  image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11',
   image_status: 'present',
   container_status: 'running',
   container_health: true,
