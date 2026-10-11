@@ -603,11 +603,14 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
     for _rt in podman docker; do
         command -v "${_rt}" >/dev/null 2>&1 || continue
         # Match hal0's images by repository substring so tag/digest pins and
-        # local dev builds (hal0-toolbox-*:dev) are all caught.
+        # local dev builds (hal0-toolbox-*:dev) are all caught. The optional
+        # cuda runner is ggml-org's image (manifest.json runners.cuda); only
+        # its server-cuda tags are hal0's, so other llama.cpp images an
+        # operator pulled themselves stay.
         while IFS= read -r _img; do
             [[ -n "${_img}" ]] || continue
             case "${_img}" in
-                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*)
+                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*|ghcr.io/ggml-org/llama.cpp:server-cuda*)
                     if "${_rt}" rmi -f "${_img}" &>/dev/null; then
                         info "Removed ${_rt} image ${_img}"
                     else
