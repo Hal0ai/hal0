@@ -5,7 +5,7 @@ by ``GET /api/comfyui/status``. That endpoint aggregates three sources, all of
 which degrade gracefully (the pane polls it every few seconds and must never
 crash on a dead container):
 
-  - docker container state (``comfyui`` running / exited / absent)
+  - systemd state of the img slot unit (running / absent)
   - systemd state of the agent stack (hermes) — to show which mode
     currently owns the single iGPU
   - ComfyUI's own HTTP API (``/system_stats`` + ``/queue``) for live telemetry
@@ -122,9 +122,9 @@ def test_status_starting_when_container_running_but_http_unreachable(client: Tes
 def test_status_engine_running_when_reachable_but_container_probe_blind(
     client: TestClient,
 ) -> None:
-    # Post-D9 the docker probe can't see the podman hal0-slot-img container
-    # ("absent" forever) — a reachable ComfyUI IS the engine truth. Without
-    # this, the resident container renders engine "stopped" 24/7 in the pane.
+    # The unit probe can read "absent" while ComfyUI answers — a reachable
+    # ComfyUI IS the engine truth. Without this, the resident container
+    # renders engine "stopped" in the pane.
     c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
@@ -542,14 +542,14 @@ def test_switchover_unwired_returns_503_not_501(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
 
 
-# ── _container_state: podman-first probe (#710) ──────────────────────────────
+# ── _container_state: systemd-unit probe (#710) ──────────────────────────────
 
 
 async def test_container_state_running_when_img_unit_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#710: post-Phase-D the img slot runs as podman hal0-slot@img — the
-    systemd unit probe is the truth; docker inspect is legacy fallback only."""
+    """#710: the img slot runs as podman hal0-slot@img — the systemd unit
+    probe is the truth."""
     from hal0.api.routes import comfyui as mod
 
     probed_units: list[str] = []
@@ -559,22 +559,27 @@ async def test_container_state_running_when_img_unit_active(
         return unit == "hal0-slot@img.service"
 
     monkeypatch.setattr(mod, "_systemd_active", fake_active)
-    # No docker binary at all — the podman path must not need it.
-    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
 
-    assert await mod._container_state("comfyui") == "running"
+    assert await mod._container_state() == "running"
     assert "hal0-slot@img.service" in probed_units
 
 
-async def test_container_state_absent_when_unit_inactive_and_no_docker(
+async def test_container_state_ignores_an_unrelated_docker_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unrelated docker container that happens to be named ``comfyui`` must
+    not read as the generation engine: with the img unit inactive the state is
+    'absent', and docker is never consulted."""
     from hal0.api.routes import comfyui as mod
 
     async def fake_active(unit: str) -> bool:
         return False
 
-    monkeypatch.setattr(mod, "_systemd_active", fake_active)
-    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    async def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("the ComfyUI state probe must not shell out to docker")
 
-    assert await mod._container_state("comfyui") == "absent"
+    monkeypatch.setattr(mod, "_systemd_active", fake_active)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", boom)
+
+    assert await mod._container_state() == "absent"

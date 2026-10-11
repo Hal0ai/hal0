@@ -128,7 +128,7 @@ def _reject_privileged_systemctl(argv: object) -> None:
     if program in _SEAM_BIN_NAMES:
         # Seam verbs are `<systemctl-verb>` (slot family) or
         # `<systemctl-verb>-agent` (agent family); both mutate. The
-        # non-systemctl file verbs (write-quadlet, remove-unit, ...) mutate
+        # non-systemctl file verbs (write-quadlet, remove-quadlet, ...) mutate
         # /etc as root, which a test must never do either.
         #
         # `help`, `check-dropin`, `check-quadlet` and `check-dnat` are the

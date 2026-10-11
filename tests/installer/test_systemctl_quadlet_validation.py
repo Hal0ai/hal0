@@ -99,6 +99,16 @@ def test_write_unit_verb_is_gone() -> None:
     assert not hasattr(SystemCtlSeam, "write_unit")
 
 
+def test_remove_unit_verb_is_gone() -> None:
+    """``remove-unit`` (rm -f of a legacy pre-quadlet ``.service``) had no
+    production caller; the verb and its ``SystemCtlSeam.remove_unit`` wrapper
+    are deleted."""
+    assert "\n  remove-unit)" not in WRAPPER.read_text()
+    from hal0.system.seam import SystemCtlSeam
+
+    assert not hasattr(SystemCtlSeam, "remove_unit")
+
+
 # ── the real renderer's output, byte-for-byte ──────────────────────────────
 #
 # One plan per shape the fleet actually renders. Every optional key in

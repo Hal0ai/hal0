@@ -641,13 +641,8 @@ case "$cmd" in
   # sole renderer of slot-unit text (_render_quadlet_from_plan) emits a
   # `.container`, written through write-quadlet. There is no render contract
   # left to derive an allow-list from, so the verb is deleted rather than
-  # guessed at. remove-unit stays: it only ever rm -f's a pinned name, and
-  # legacy pre-quadlet .service files still need cleaning up.
-
-  remove-unit)                # remove-unit <slot-id>   (rm -f semantics: ok if absent)
-    id="${1:-}"; validate_slot_id "$id"
-    rm -f "${UNIT_DIR}/${UNIT_PREFIX}${id}.service"
-    ;;
+  # guessed at. remove-unit (rm -f of a legacy pre-quadlet .service) was
+  # removed later: nothing in hal0 called it.
 
   write-quadlet)              # write-quadlet <slot-id>   (.container body on stdin)
     # #1740: the body is allow-listed BEFORE anything is created, and what
@@ -890,7 +885,6 @@ case "$cmd" in
   help|"")
     cat <<EOF
 usage: hal0-systemctl <command> [slot-id|agent-id]
-  remove-unit <slot-id>            rm -f ${UNIT_DIR}/${UNIT_PREFIX}<id>.service (legacy pre-quadlet)
   write-quadlet <slot-id>          write ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container (allow-listed body on stdin)
   remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)

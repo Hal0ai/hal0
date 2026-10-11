@@ -422,7 +422,7 @@ async def test_apply_gpu_device_for_stt_is_a_typed_error(
 def test_stt_engine_id_is_the_served_non_streaming_id(tmp_hal0_home: str) -> None:
     """The picker must advertise the id the server actually serves.
 
-    ``moonshine-small-streaming-en`` (the HaloaiModel seed id) names a
+    ``moonshine-small-streaming-en`` (a removed upstream seed id) names a
     streaming bundle the toolbox image cannot load — offering it would be a
     pick that never serves a request. The server advertises
     ``moonshine-<arch>-en`` for the loadable non-streaming bundle.

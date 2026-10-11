@@ -58,6 +58,8 @@ from urllib.parse import urlparse
 
 import structlog
 import yaml
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import hal0
@@ -600,13 +602,9 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
-# Best-effort prerelease recognizer used ONLY by the packaging-less fallback
-# below. ``packaging`` is now a hard runtime dependency (pyproject.toml), so
-# this path should only ever fire on a venv that predates that fix — the old
-# updater code downloads and runs the *new* tarball's installer, but the
-# version *comparison* that decides whether to offer an update at all runs in
-# the OLD, already-installed code. A box stuck on this fallback needs one
-# manual/self-update to get off it permanently.
+# Best-effort prerelease recognizer used ONLY for version strings that are not
+# valid PEP 440 (tag-derived forms such as ``1.0.0-rc.1`` or nightly timestamp
+# tags), where ``packaging.version.Version`` raises ``InvalidVersion``.
 _PRERELEASE_LABEL_RE = re.compile(
     r"^(?P<release>\d+(?:\.\d+)*)[-._]?(?P<label>a|alpha|b|beta|c|rc|pre|preview)[-._]?(?P<num>\d*)$",
     re.IGNORECASE,
@@ -624,7 +622,7 @@ _PRERELEASE_RANK = {
 
 
 def _naive_version_key(v: str) -> tuple[Any, int, int]:
-    """packaging-less sort key: (release_tuple_or_digit_tuple, pre_rank, pre_num).
+    """Sort key for non-PEP-440 version strings: (release_tuple_or_digit_tuple, pre_rank, pre_num).
 
     Recognises ``<release><a|alpha|b|beta|c|rc|pre|preview><N>`` (both the
     pip-normalised form, e.g. ``1.0.0rc1``, and the tag-derived form, e.g.
@@ -656,13 +654,9 @@ def _is_newer(candidate: str, current: str) -> bool:
     component (``0.8.0b3`` → ``(0, 8, 3)``), so every box on a ``0.8.0bN`` beta saw
     ``0.8.1-beta.1`` as "not newer" and ``hal0 update`` reported nothing to apply.
     Falls back to ``_naive_version_key`` only when a string is not valid PEP 440
-    or when ``packaging`` itself is unavailable (see its docstring for why that
-    fallback needs its own prerelease handling, not just a raw tuple compare).
+    (see its docstring for why that fallback needs its own prerelease handling,
+    not just a raw tuple compare).
     """
-    try:
-        from packaging.version import InvalidVersion, Version
-    except Exception:  # packaging absent — keep the best-effort key compare
-        return _naive_version_key(candidate) > _naive_version_key(current)
     try:
         return Version(candidate) > Version(current)
     except InvalidVersion:
@@ -680,8 +674,8 @@ def _enforce_upgrade_floor(
     ``upgrade_from`` is a PEP 440 specifier set (e.g. ``">=0.9.8"``). An empty
     value — every published manifest today — means no floor and this is a no-op.
 
-    Fail-open on anything unparseable: a malformed specifier, a non-PEP-440
-    installed version, or a missing ``packaging`` must never block an otherwise
+    Fail-open on anything unparseable: a malformed specifier or a non-PEP-440
+    installed version must never block an otherwise
     fully-verified update. The floor is a supportability statement, not a
     security control (cosign is the security control), so a broken statement
     degrades to "no statement".
@@ -693,11 +687,6 @@ def _enforce_upgrade_floor(
     if not spec:
         return
     installed = current or installed_version()
-    try:
-        from packaging.specifiers import InvalidSpecifier, SpecifierSet
-        from packaging.version import InvalidVersion, Version
-    except Exception:  # pragma: no cover — packaging is a hard dep in practice
-        return
     try:
         allowed = SpecifierSet(spec)
         # prereleases=True: 1.0.0-alpha.2 is a real, supported baseline, and a

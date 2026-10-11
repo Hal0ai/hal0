@@ -80,6 +80,24 @@ applying. Add those subsections to a version's section to surface them; see
   - `GET /api/slots/by-name/{name}` now returns exactly what
     `GET /api/slots/{name}` returns (it used to omit the config enrichment).
 
+- Removed dead and misleading code paths:
+  - The frozen haloai upstream seed (68 model ids routed into a predecessor
+    gateway, including `minimax` and `vibevoice` ids no hal0 provider can
+    serve) is gone. `GET /api/models/catalogue`, and the admin MCP
+    `model_catalogue` tool that wraps it, now return only
+    `{pullable, counts: {pullable, total}}`; the `upstream` list is removed.
+  - ComfyUI's `/api/comfyui/status` no longer falls back to `docker inspect`:
+    an unrelated docker container named `comfyui` used to flip the mode to
+    `generation`. The container state now comes only from the
+    `hal0-slot@img` unit, and the `COMFYUI_CONTAINER` environment variable is
+    gone (`container.name` always reads `hal0-slot-img`).
+  - The `hal0-systemctl remove-unit` verb and `SystemCtlSeam.remove_unit`
+    (nothing called them), `hal0.memory.migrate` (a Cognee dry-run with no
+    caller), the legacy `HAL0_DOCKER_REQUIRED` installer variable (use
+    `HAL0_CONTAINER_REQUIRED`), the dead `docs/operate/tls.md` references in
+    `install.sh`, and the copy of the version-compare helpers in the updater
+    API route (it now shares `hal0.updater.updater._is_newer`).
+
 ### Fixed
 
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
