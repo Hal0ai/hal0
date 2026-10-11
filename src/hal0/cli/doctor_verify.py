@@ -1,4 +1,4 @@
-"""``hal0 doctor --verify`` — the post-setup report card (WS-K, issue #1114).
+"""``hal0 doctor verify`` — the post-setup report card (WS-K, issue #1114).
 
 A single reusable verb that composes the *already-existing* health seams into
 one visual pass/warn/fail report card, then prints the live URLs the operator
@@ -20,7 +20,7 @@ running-hal0 API endpoint that already aggregates the underlying probe::
 The report is deliberately NON-BLOCKING: a warn never fails an install. Only two
 conditions are *critical* (rendered red): no reachable URL (the API/dashboard is
 down) and zero healthy runner slots. The guided setup auto-runs :func:`run_verify`
-at the very end; it is also runnable standalone anytime via ``hal0 doctor --verify``.
+at the very end; it is also runnable standalone anytime via ``hal0 doctor verify``.
 """
 
 from __future__ import annotations

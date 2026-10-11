@@ -10,11 +10,9 @@ from __future__ import annotations
 import io
 
 import pytest
-import typer
 from rich.console import Console
 
 from hal0.cli import doctor_verify as dv
-from hal0.cli.doctor_commands import doctor
 
 # ── individual classifiers ─────────────────────────────────────────────────────
 
@@ -262,24 +260,3 @@ def test_gather_payloads_tolerates_api_errors(monkeypatch: pytest.MonkeyPatch) -
     payloads = dv.gather_payloads()
     assert set(payloads) == {"health", "urls", "system", "capabilities", "memory", "services"}
     assert all(v is None for v in payloads.values())
-
-
-# ── CLI wiring ──────────────────────────────────────────────────────────────────
-
-
-class _FakeCtx:
-    invoked_subcommand = None
-
-
-def test_doctor_verify_flag_invokes_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: dict[str, bool] = {}
-
-    def _fake_run_verify(*, console=None, base=None):
-        called["ran"] = True
-        return 2
-
-    monkeypatch.setattr("hal0.cli.doctor_verify.run_verify", _fake_run_verify)
-    with pytest.raises(typer.Exit) as exc:
-        doctor(ctx=_FakeCtx(), verify=True, plain=False, ports=None)  # type: ignore[arg-type]
-    assert called.get("ran") is True
-    assert exc.value.exit_code == 2

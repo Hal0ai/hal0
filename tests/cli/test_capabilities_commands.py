@@ -79,19 +79,6 @@ def test_migrate_apply_writes(stub_config, monkeypatch: pytest.MonkeyPatch) -> N
     assert stub_config.saved["cfg"] is not None
 
 
-def test_migrate_deprecated_dry_run_flag_is_still_a_noop_preview(
-    stub_config, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The old ``--dry-run`` flag is hidden but harmless — still previews."""
-    stub_config(_illegal_selection())
-    monkeypatch.setattr(cc, "models_for_capability", lambda *_a, **_k: [])
-
-    result = runner.invoke(cc.app, ["migrate", "--dry-run"])
-
-    assert result.exit_code == 0, result.output
-    assert stub_config.saved["cfg"] is None
-
-
 def test_migrate_nothing_to_do(stub_config, monkeypatch: pytest.MonkeyPatch) -> None:
     stub_config({})
     result = runner.invoke(cc.app, ["migrate"])

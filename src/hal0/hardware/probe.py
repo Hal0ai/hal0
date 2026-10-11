@@ -2,7 +2,7 @@
 
 HardwareProbe.probe() writes a HardwareInfo snapshot to
 /etc/hal0/hardware.json on first install (via the installer), and can be
-re-triggered via `hal0 probe` or the "re-probe" button on the Hardware
+re-triggered via `hal0 config hardware --refresh` or the "re-probe" button on the Hardware
 dashboard view.
 
 Port target: haloai lib/hardware.py (split: probe + stats).
@@ -801,7 +801,7 @@ def _detect_aie_columns() -> int:
                             summed += max(int(p.get("num_cols") or 0), 0)
                 if summed > 0:
                     return summed
-        except Exception as exc:  # never let the optional probe break `hal0 probe`
+        except Exception as exc:  # the optional probe must never break the hardware probe
             log.debug("hardware.probe.aie_columns_fail", binary=candidate, error=str(exc))
         finally:
             if tmp:

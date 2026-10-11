@@ -134,12 +134,6 @@ def _locate_preflight() -> Path | None:
 @app.callback(invoke_without_command=True)
 def doctor(
     ctx: typer.Context,
-    verify: bool = typer.Option(
-        False,
-        "--verify",
-        hidden=True,
-        help="Deprecated — use `hal0 doctor verify`.",
-    ),
     plain: bool = typer.Option(
         False,
         "--plain",
@@ -156,8 +150,7 @@ def doctor(
     ``hal0 doctor verify`` instead renders the WS-K report card: a pass/warn/fail
     summary over the live health seams (API, runners, capability slots, hindsight,
     OpenWebUI, Hermes) plus the computed URLs + help links. Non-blocking; exits
-    2 only on a critical (no reachable URL / zero healthy runners). The bare
-    ``--verify`` flag on this callback still works as a deprecated pass-through.
+    2 only on a critical (no reachable URL / zero healthy runners).
     """
     # When a sub-command (e.g. ``toolbox-pull``) is invoked, Typer still
     # calls the callback first. Bail out without running preflight so the
@@ -165,10 +158,6 @@ def doctor(
     # "default" only when no sub-command is given.
     if ctx.invoked_subcommand is not None:
         return
-    if verify:
-        from hal0.cli.doctor_verify import run_verify
-
-        raise typer.Exit(run_verify(console=console))
     preflight = _locate_preflight()
     if preflight is None:
         console.print(
@@ -224,11 +213,9 @@ def doctor_verify_cmd(
 ) -> None:
     """Render the post-setup report card (checks + live URLs + doc links).
 
-    First-class home for what used to be reachable only via the hidden
-    ``hal0 doctor --verify`` flag — every other doctor audit (``perms``,
-    ``models``, ``migrations``, ``profiles``, ``toolbox-pull``) is a
-    discoverable subcommand, so this one is now too. See the module-level
-    docstring for the health seams this composes.
+    Like every other doctor audit (``perms``, ``models``, ``migrations``,
+    ``profiles``, ``toolbox-pull``) this is a discoverable subcommand. See the
+    module-level docstring for the health seams this composes.
     """
     from hal0.cli.doctor_verify import run_verify
 

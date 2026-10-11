@@ -42,6 +42,17 @@ applying. Add those subsections to a version's section to surface them; see
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
 
+- Removed the deprecated CLI aliases and no-op flags. Use the replacement
+  instead: `hal0 probe` -> `hal0 config hardware --refresh`;
+  `hal0 model register` -> `hal0 model add`; `hal0 model assign` ->
+  `hal0 slot edit --model`; `hal0 slot add` -> `hal0 slot create`;
+  `hal0 slot remove` -> `hal0 slot delete`; `hal0 upstream set-credentials`
+  -> `hal0 upstream credentials set`; `hal0 doctor --verify` ->
+  `hal0 doctor verify`. The `--backend`/`-b` flag on `slot create` and
+  `slot edit` (a stale alias for `--provider`) is gone, and so are the
+  no-op `--dry-run` flags on `capabilities migrate` and
+  `slot migrate-id-keying` (both already dry-run unless you pass `--apply`).
+
 ### Fixed
 
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,

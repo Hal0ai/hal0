@@ -507,7 +507,7 @@ def _host_has_capable_gpu() -> bool:
     Reads through :func:`hal0.hardware.freshness.resolve_fresh_hardware_info`
     rather than the cached ``/etc/hal0/hardware.json`` directly (#1862): a
     missing cache used to degrade straight to ``HardwareInfo(gpus=[])`` —
-    "no capable GPU" — on any install where ``hal0 probe`` had not run yet,
+    "no capable GPU" — on any install where ``hal0 config hardware --refresh`` had not run yet,
     and a cache that predated a kernel upgrade/reboot or the #1799 capability
     fields was trusted forever. Both booked a real GPU box's resident memory
     as RAM instead of VRAM. The freshness resolver falls back to a live probe

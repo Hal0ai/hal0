@@ -600,18 +600,6 @@ def slot_create(
         ),
         case_sensitive=False,
     ),
-    # HAL0-SUNSET: v2.0.0 — --backend renamed to --provider in v0.2; use --provider.
-    backend: str | None = typer.Option(
-        None,
-        "--backend",
-        "-b",
-        help=(
-            "[DEPRECATED] alias for --provider. "
-            "Note: this flag historically named the provider, NOT the hardware "
-            "backend. Use --provider / --hardware instead."
-        ),
-        hidden=True,
-    ),
     model: str = typer.Option(..., "--model", "-m", help="Initial model ref to assign."),
     port: int | None = typer.Option(
         None,
@@ -641,25 +629,6 @@ def slot_create(
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-
-    # Back-compat: --backend was historically the provider name. Translate
-    # with a deprecation warning so existing scripts keep working but the
-    # user is nudged toward the corrected flags. We emit to stderr via
-    # ``typer.echo(..., err=True)`` so stdout stays parseable for callers
-    # piping the success line into other tools.
-    if backend is not None:
-        typer.echo(
-            "[deprecated] --backend will be renamed to --provider in v0.2; use --provider",
-            err=True,
-        )
-        try:
-            provider = SlotProvider(backend)
-        except ValueError:
-            die(
-                f"--backend {backend!r} is not a valid provider; "
-                f"choose from {[p.value for p in SlotProvider]}"
-            )
-            return
 
     hw = hardware.value if hardware is not None else _detect_default_hardware()
     # npu has no v0.1 hardware equivalent (set --hardware via the legacy
@@ -725,34 +694,11 @@ def slot_edit(
             "created before the profile was inferred (#1830)."
         ),
     ),
-    # HAL0-SUNSET: v2.0.0 — --backend renamed to --provider in v0.2; use --provider.
-    backend: str | None = typer.Option(
-        None,
-        "--backend",
-        "-b",
-        hidden=True,
-        help="[DEPRECATED] alias for --provider (historic, see `slot create --help`).",
-    ),
 ) -> None:
     """Update one or more slot config fields (PUT /api/slots/{name}/config)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-
-    # Back-compat: --backend mapped to provider historically.
-    if backend is not None:
-        typer.echo(
-            "[deprecated] --backend will be renamed to --provider in v0.2; use --provider",
-            err=True,
-        )
-        try:
-            provider = SlotProvider(backend) if provider is None else provider
-        except ValueError:
-            die(
-                f"--backend {backend!r} is not a valid provider; "
-                f"choose from {[p.value for p in SlotProvider]}"
-            )
-            return
 
     if (
         model is None
@@ -831,52 +777,6 @@ def slot_delete(
         die(str(exc))
         return
     console.print(f"Deleted slot [bold]{name}[/bold].")
-
-
-# HAL0-SUNSET: v2.0.0 — alias for `slot create`; drop the alias.
-@app.command("add", hidden=True)
-def slot_add(
-    name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
-    type_: SlotType = typer.Option(SlotType.llm, "--type", "-t", case_sensitive=False),
-    provider: SlotProvider = typer.Option("llama-server", "--provider", case_sensitive=False),
-    hardware: SlotHardware | None = typer.Option(None, "--hardware", case_sensitive=False),
-    backend: str | None = typer.Option(None, "--backend", "-b", hidden=True),
-    model: str = typer.Option(..., "--model", "-m"),
-    port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
-    ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
-) -> None:
-    """[DEPRECATED] alias for `slot create`; use `slot create` instead."""
-    typer.echo(
-        "[deprecated] `slot add` is renamed to `slot create`; use `slot create`.",
-        err=True,
-    )
-    slot_create(
-        name=name,
-        type_=type_,
-        provider=provider,
-        hardware=hardware,
-        backend=backend,
-        model=model,
-        port=port,
-        ctx_size=ctx_size,
-        # Explicit: a direct Python call gets typer's OptionInfo sentinel for
-        # any omitted parameter, which would then be POSTed as the profile.
-        profile=None,
-    )
-
-
-# HAL0-SUNSET: v2.0.0 — alias for `slot delete`; drop the alias.
-@app.command("remove", hidden=True)
-def slot_remove(
-    name: str = typer.Argument(..., help="Slot name to delete"),
-    force: bool = typer.Option(False, "--force", "-f"),
-) -> None:
-    """[DEPRECATED] alias for `slot delete`; use `slot delete` instead."""
-    typer.echo(
-        "[deprecated] `slot remove` is renamed to `slot delete`; use `slot delete`.",
-        err=True,
-    )
-    slot_delete(name=name, force=force)
 
 
 @app.command("show")
@@ -1250,15 +1150,6 @@ def slot_migrate_id_keying(
             "Without this flag --apply only WARNS and refuses to run while any of those "
             "units is active."
         ),
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help=(
-            "Deprecated no-op: dry-run is now the bare default (see --apply). "
-            "Kept as a hidden alias so existing scripts keep working."
-        ),
-        hidden=True,
     ),
 ) -> None:
     """One-shot: flip every name-keyed slot artefact to id-keyed (P3-runtime-db §11.1 M5).

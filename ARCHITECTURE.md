@@ -649,7 +649,7 @@ Users adding custom slots pick which group to file under.
 #### user-defined slots
 
 Beyond the seeded catalog, the user can add named slots via the dashboard
-(`hal0 slot add NAME --type TYPE --model MODEL`). The new slot:
+(`hal0 slot create NAME --type TYPE --model MODEL`). The new slot:
 
 - Must have a unique kebab-case `name` (not in the reserved seeded set)
 - Must declare a `type` (see "slot type" below) — drives OmniRouter tool
@@ -660,7 +660,7 @@ Beyond the seeded catalog, the user can add named slots via the dashboard
   `selections.custom.<name>` if none chosen)
 
 Removing a user-defined slot is a no-side-effect operation
-(`hal0 slot remove NAME`) — the underlying model stays in the registry.
+(`hal0 slot delete NAME`) — the underlying model stays in the registry.
 
 ### FLM trio (NPU coresident slots)
 

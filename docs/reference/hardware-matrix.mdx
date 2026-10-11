@@ -17,7 +17,7 @@ There is no single "minimum RAM/VRAM" gate — see the decision tree below.
 
 `HardwareProbe.probe()` (`hal0.hardware.probe`) writes a snapshot to
 `/etc/hal0/hardware.json` on install, on `hal0 config hardware --refresh` (formerly
-`hal0 probe`), and from the dashboard's re-probe button. All probing is
+`hal0 config hardware --refresh`), and from the dashboard's re-probe button. All probing is
 subprocess/sysfs-based and never raises.
 
 | Signal | Source |

@@ -407,7 +407,7 @@ async def add_slot(
     device: str = "gpu-rocm",
     port: int | None = None,
 ) -> Slot:
-    """Programmatic ``hal0 slot add`` (plan §4.3).
+    """Programmatic ``hal0 slot create`` (plan §4.3).
 
     Validates kebab-case name, rejects seeded-name collisions,
     rejects unknown slot types. The SlotConfig schema requires a
@@ -481,7 +481,7 @@ async def add_slot(
 
 
 async def remove_slot(host: RoutingHost, name: str) -> None:
-    """Programmatic ``hal0 slot remove`` (plan §4.3).
+    """Programmatic ``hal0 slot delete`` (plan §4.3).
 
     Any slot is removable — capability slots are recreated on demand when
     their capability is re-enabled in settings, and a removed static seed

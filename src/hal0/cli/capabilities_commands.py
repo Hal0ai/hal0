@@ -235,12 +235,6 @@ def migrate(
         "--apply",
         help="Apply the migration. Without this, the command is a dry-run.",
     ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        hidden=True,
-        help="Deprecated no-op — dry-run is now the default; pass --apply to write.",
-    ),
 ) -> None:
     """Rewrite persisted selections that are illegal against the live catalog.
 
@@ -261,7 +255,6 @@ def migrate(
     skipped: a failed probe says nothing about whether the model is still
     served, so clearing them would lose the operator's bindings.
     """
-    del dry_run  # deprecated hidden flag — dry-run is the unconditional default now
     # SC-10: the load → diff → save is one read-modify-write. Hold the same
     # capabilities.toml advisory lock the running API uses so a ``migrate``
     # invoked while hal0-api is applying a selection cannot read a stale copy

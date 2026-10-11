@@ -2,7 +2,7 @@
 
 Split into two submodules:
   probe.py  — one-shot hardware detection (GPU, NPU, RAM, disk, CPU)
-              writes /etc/hal0/hardware.json at install time and on `hal0 probe`
+              writes /etc/hal0/hardware.json at install time and on `hal0 config hardware --refresh`
   stats.py  — live metrics polling (GPU util, VRAM used, RAM available)
               consumed by /api/stats/* and CapacitySnapshot
 

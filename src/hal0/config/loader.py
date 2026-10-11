@@ -1081,7 +1081,7 @@ def load_hardware_info(path: Path | None = None) -> HardwareInfo:
 
     Returns the all-defaults HardwareInfo if the file is absent — the
     hardware module owns probing; callers that need real data should run
-    `hal0 probe` first.
+    `hal0 config hardware --refresh` first.
 
     Raises:
         ConfigParseError: If the JSON cannot be parsed or fails validation.

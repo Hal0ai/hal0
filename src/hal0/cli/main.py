@@ -107,8 +107,8 @@ app.add_typer(board_app, name="board")
 # drives `hal0 setup --auto` itself (see the "First-run seeding" step there).
 # Registered — not deleted — because that install-time invocation, the
 # installer test harness, and support/debug runs all still need it; `hidden=True`
-# is the same convention the other internal verbs use (`hal0 model register`,
-# `hal0 slot add`, …). Do NOT re-advertise it in docs or the install banner.
+# is the same convention other internal verbs use. Do NOT re-advertise it in
+# docs or the install banner.
 app.add_typer(setup_app, name="setup", help="First-run setup (internal)", hidden=True)
 # `hal0 bench <verb>` — a single passthrough command (not a typer group): the
 # bench CLI is argparse-based (design §5), so the raw argv forwards to
@@ -230,20 +230,6 @@ def status() -> None:
             str(s.get("port") or "—"),
         )
     console.print(table)
-
-
-# HAL0-SUNSET: v2.0.0 — alias for `hal0 config hardware --refresh`; drop the alias.
-@app.command(hidden=True)
-def probe() -> None:
-    """[DEPRECATED] alias for `hal0 config hardware --refresh`; use that instead."""
-    typer.echo(
-        "[deprecated] `hal0 probe` is replaced by `hal0 config hardware --refresh`; "
-        "use `hal0 config hardware --refresh`.",
-        err=True,
-    )
-    from hal0.cli.config_commands import config_hardware
-
-    config_hardware(refresh=True)
 
 
 # ---------------------------------------------------------------------------

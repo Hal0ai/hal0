@@ -978,7 +978,7 @@ def _device_node_for_group(name: str, node_paths: list[str]) -> str | None:
 
 
 def _probed_gpu_group_gids() -> dict[str, int]:
-    """GIDs `hal0 probe` recorded in hardware.json (``gpu_group_gids``).
+    """GIDs `hal0 config hardware --refresh` recorded in hardware.json (``gpu_group_gids``).
 
     Raw-JSON read (no pydantic) so this stays cheap on every spec build and
     never raises: a missing / unparseable / pre-wave hardware.json simply
@@ -1020,7 +1020,7 @@ def resolve_gpu_group_ids(node_paths: list[str] | None = None) -> list[int]:
          only when the device node is absent (CI/no-GPU box) — still
          better than nothing when the name happens to line up;
       3. the probe-time record in hardware.json (``gpu_group_gids``, written
-         by ``hal0 probe``) — covers deployments where the API process runs
+         by ``hal0 config hardware --refresh``) — covers deployments where the API process runs
          in a context whose /etc/group lacks the entries the host actually
          uses for /dev/dri (e.g. minimal containers/chroots);
       4. the Linux-convention constants (render=993, video=44) — last resort

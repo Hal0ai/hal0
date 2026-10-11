@@ -14,7 +14,7 @@ Model hierarchy:
     UpstreamsConfig  — upstreams.toml (slot + remote upstream catalog)
     SlotConfig       — slots/<name>.toml
       ModelConfig      — [model] section within a slot config
-    HardwareInfo     — /etc/hal0/hardware.json (written by `hal0 probe`)
+    HardwareInfo     — /etc/hal0/hardware.json (written by `hal0 config hardware --refresh`)
 
 Port target: haloai lib/config.py (420 lines).
 See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
@@ -2106,7 +2106,7 @@ class NPUInfo(BaseModel):
 class HardwareInfo(BaseModel):
     """Pydantic model for /etc/hal0/hardware.json.
 
-    Written by `hal0 probe` (hal0.hardware.probe).  Read by the slot
+    Written by `hal0 config hardware --refresh` (hal0.hardware.probe).  Read by the slot
     config form and the dispatcher's "your hardware can run this" checks.
 
     See PLAN.md §2 (hardware.json) and §3 (hardware module port).

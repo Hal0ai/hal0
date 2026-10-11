@@ -6,7 +6,7 @@ into ``typer`` "no such command" errors. This test stops that drift from
 silently coming back:
 
 * Every full command path the live Typer app exposes (including hidden
-  deprecated aliases like ``slot add``) must appear somewhere in
+  commands) must appear somewhere in
   ``cli.mdx``. A new command that ships without a doc line fails here.
 * The handful of *intentionally* undocumented-in-the-grouped-sections
   helpers are listed in ``ALLOWED_MISSING`` with a reason, so the
@@ -47,11 +47,6 @@ _CLI_MDX = Path(__file__).resolve().parents[2] / "docs" / "reference" / "cli.mdx
 # grouped command sections. Each entry needs a reason so the exemption is a
 # decision, not an oversight.
 ALLOWED_MISSING: dict[str, str] = {
-    # Hidden deprecated aliases: documented as a *concept* (the
-    # "slot add / slot remove still work as deprecated aliases" note)
-    # rather than as their own command lines.
-    "slot add": "hidden deprecated alias of `slot create` (documented as a note)",
-    "slot remove": "hidden deprecated alias of `slot delete` (documented as a note)",
     # Pending hal0-web doc mirror — these commands exist in the CLI but
     # cli.mdx (mirrored from hal0-web) hasn't been updated yet.
     "doctor ports": "pending hal0-web doc update",

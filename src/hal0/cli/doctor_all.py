@@ -166,7 +166,7 @@ def check_hardware_freshness() -> Check:
     (:func:`hal0.hardware.freshness.staleness_reason`), so this row explains
     OUT LOUD, on every ``hal0 doctor`` run, why a box might be getting a
     live re-probe on every capacity read instead of the cheap cached one —
-    a missing probe (fresh install, ``hal0 probe`` never run), a cache that
+    a missing probe (fresh install, ``hal0 config hardware --refresh`` never run), a cache that
     predates a kernel upgrade/reboot, or one written before the #1799
     capability fields existed.
 

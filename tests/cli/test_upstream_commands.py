@@ -204,7 +204,7 @@ def test_delete_requires_confirm_and_force_skips(api: dict[str, Any]) -> None:
 def test_set_credentials_resolves_env_var_and_sends_key_value(api: dict[str, Any]) -> None:
     result = runner.invoke(
         upstream_commands.app,
-        ["set-credentials", "openrouter", "--key", "sk-test"],
+        ["credentials", "set", "openrouter", "--key", "sk-test"],
     )
     assert result.exit_code == 0, result.output
     # Resolved the env-var name from GET /api/upstreams/{name}.
@@ -217,7 +217,7 @@ def test_set_credentials_resolves_env_var_and_sends_key_value(api: dict[str, Any
 def test_set_credentials_explicit_env_var_skips_lookup(api: dict[str, Any]) -> None:
     result = runner.invoke(
         upstream_commands.app,
-        ["set-credentials", "corp", "--key", "sk-x", "--env-var", "CORP_KEY"],
+        ["credentials", "set", "corp", "--key", "sk-x", "--env-var", "CORP_KEY"],
     )
     assert result.exit_code == 0, result.output
     assert api["gets"] == []
@@ -225,12 +225,11 @@ def test_set_credentials_explicit_env_var_skips_lookup(api: dict[str, Any]) -> N
     assert body == {"key": "CORP_KEY", "value": "sk-x"}
 
 
-# ── `credentials set` (canonical) + `set-credentials` (deprecated alias) ──
+# ── `credentials set` (the flat `set-credentials` verb was removed) ──
 
 
 def test_credentials_set_is_the_canonical_command(api: dict[str, Any]) -> None:
-    """`upstream credentials set` — the noun-subgroup rename — behaves
-    identically to the old flat `set-credentials` verb."""
+    """`upstream credentials set` is the only spelling."""
     result = runner.invoke(
         upstream_commands.app,
         ["credentials", "set", "openrouter", "--key", "sk-test"],
@@ -240,27 +239,16 @@ def test_credentials_set_is_the_canonical_command(api: dict[str, Any]) -> None:
     path, body = api["posts"][0]
     assert path == "/api/providers/openrouter/credentials"
     assert body == {"key": "OPENROUTER_API_KEY", "value": "sk-test"}
-    # No deprecation notice on the canonical command.
     assert "deprecat" not in result.output.lower()
 
 
-def test_set_credentials_is_hidden_deprecated_alias(api: dict[str, Any]) -> None:
-    from hal0.cli.main import app as main_app
-
-    help_result = runner.invoke(main_app, ["upstream", "--help"])
-    assert help_result.exit_code == 0, help_result.output
-    assert "set-credentials" not in help_result.output
-
+def test_flat_set_credentials_verb_is_gone(api: dict[str, Any]) -> None:
     result = runner.invoke(
         upstream_commands.app,
         ["set-credentials", "openrouter", "--key", "sk-test"],
     )
-    assert result.exit_code == 0, result.output
-    assert "deprecat" in result.stderr.lower()
-    assert "credentials set" in result.stderr.lower()
-    path, body = api["posts"][0]
-    assert path == "/api/providers/openrouter/credentials"
-    assert body == {"key": "OPENROUTER_API_KEY", "value": "sk-test"}
+    assert result.exit_code != 0
+    assert api["posts"] == []
 
 
 def test_list_renders_url_and_filter_summary(api: dict[str, Any]) -> None:

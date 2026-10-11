@@ -6,7 +6,7 @@ trust the cached hardware fact blindly:
 
 * **File absent.** :func:`hal0.config.loader.load_hardware_info` returns an
   all-defaults ``HardwareInfo()`` (no ``gpus``) rather than raising, so any
-  install where ``hal0 probe``/``hal0 setup`` has not run yet reads as
+  install where ``hal0 config hardware --refresh``/``hal0 setup`` has not run yet reads as
   GPU-less.
 * **File stale.** A ``hardware.json`` written before a kernel upgrade + reboot
   (new driver, GPU added/removed) or before a schema field existed (e.g. a

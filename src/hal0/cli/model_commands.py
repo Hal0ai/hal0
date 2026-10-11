@@ -263,23 +263,6 @@ def model_update(
     _poll_pull_progress(ref, done_verb="Updated")
 
 
-# HAL0-SUNSET: v2.0.0 — alias for `model add`; drop the alias.
-@app.command("register", hidden=True)
-def model_register(
-    model_id: str = typer.Argument(..., help="Model id, e.g. 'qwen3-4b-q4_k_m'"),
-    path: str = typer.Option(..., "--path", "-p", help="Absolute path to the model file."),
-    name: str = typer.Option("", "--name", help="Display name."),
-    license_id: str = typer.Option("unknown", "--license", help="SPDX license id."),
-) -> None:
-    """[DEPRECATED] alias for `model add`; use `hal0 model add <path> --id --license` instead."""
-    typer.echo(
-        "[deprecated] `model register` is replaced by `model add`; "
-        "use `hal0 model add <path> --id <id> --license <license>`.",
-        err=True,
-    )
-    model_add(path=path, model_id=model_id, name=name, license_id=license_id, overwrite=False)
-
-
 #: ``hal0 model rm`` request timeout: above the server's 30 s pull-cancel wait.
 _RM_TIMEOUT_S = 60.0
 
@@ -368,32 +351,6 @@ def model_show(
     console.print(table)
 
 
-# HAL0-SUNSET: v2.0.0 — alias for `slot edit --model`; drop the alias.
-@app.command("assign", hidden=True)
-def model_assign(
-    ref: str = typer.Argument(..., help="Model ref to assign"),
-    slot: str = typer.Option(..., "--slot", "-s", help="Slot name to assign the model to"),
-) -> None:
-    """[DEPRECATED] alias for `slot edit --model`; use `hal0 slot edit <slot> --model` instead."""
-    typer.echo(
-        "[deprecated] `model assign` is replaced by `slot edit --model`; "
-        "use `hal0 slot edit <slot> --model <ref>`.",
-        err=True,
-    )
-    from hal0.cli.slot_commands import slot_edit
-
-    slot_edit(
-        name=slot,
-        model=ref,
-        port=None,
-        ctx_size=None,
-        provider=None,
-        hardware=None,
-        profile=None,
-        backend=None,
-    )
-
-
 @app.command("scan")
 def model_scan() -> None:
     """Walk the configured model roots + store and register new files.
@@ -457,8 +414,8 @@ def model_add(
     guess — watch for the confidence/warning line this command prints, and
     fix a wrong guess with ``PUT /api/models/<id>``
     (``{"capabilities": [...]}``). Folds in the explicit-metadata flags
-    (``--id``, ``--name``, ``--license``) that the old ``model register``
-    command exposed, so this command now covers both cases.
+    (``--id``, ``--name``, ``--license``), so one command covers both
+    cases.
     """
     url = _api_base()
     if _api_unreachable(url):

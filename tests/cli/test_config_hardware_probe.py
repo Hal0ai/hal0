@@ -54,27 +54,8 @@ def test_config_hardware_refresh_posts_a_fresh_probe(monkeypatch: pytest.MonkeyP
     assert "fresh-cpu" in result.output
 
 
-def test_probe_is_hidden_deprecated_alias_for_config_hardware_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_top_level_probe_alias_is_gone() -> None:
     from hal0.cli.main import app as main_app
 
-    help_result = runner.invoke(main_app, ["--help"])
-    assert help_result.exit_code == 0, help_result.output
-    assert "probe" not in help_result.output
-
-    calls: list[str] = []
-
-    def fake_post(path: str, **_kw: Any) -> dict[str, Any]:
-        calls.append(path)
-        return {"cpu_name": "fresh-cpu"}
-
-    import hal0.cli._shared as shared
-
-    monkeypatch.setattr(config_commands, "_api_unreachable", lambda _url: False)
-    monkeypatch.setattr(shared, "api_post", fake_post)
     result = runner.invoke(main_app, ["probe"])
-    assert result.exit_code == 0, result.output
-    assert calls == ["/api/hardware/probe"]
-    assert "deprecat" in result.stderr.lower()
-    assert "config hardware --refresh" in result.stderr.lower()
+    assert result.exit_code != 0
