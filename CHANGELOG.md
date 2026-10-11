@@ -90,7 +90,11 @@ applying. Add those subsections to a version's section to surface them; see
     an unrelated docker container named `comfyui` used to flip the mode to
     `generation`. The container state now comes only from the
     `hal0-slot@img` unit, and the `COMFYUI_CONTAINER` environment variable is
-    gone (`container.name` always reads `hal0-slot-img`).
+    gone (`container.name` always reads `hal0-slot-img`). The mode now comes
+    only from the GPU arbiter (the img unit stays up in inference mode too):
+    `/status` reports `mode: null` when the arbiter cannot answer, and
+    `POST /api/comfyui/switchover` answers 503 `comfyui.arbiter_unavailable`
+    instead of guessing "already there" from the unit.
   - The `hal0-systemctl remove-unit` verb and `SystemCtlSeam.remove_unit`
     (nothing called them), `hal0.memory.migrate` (a Cognee dry-run with no
     caller), the legacy `HAL0_DOCKER_REQUIRED` installer variable (use

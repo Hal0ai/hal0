@@ -211,13 +211,28 @@ def _install_arbiter(client: TestClient, mode: str = "llm") -> _StubArbiter:
     """Hang a stub manager+arbiter on app.state, the way the route finds it.
 
     ``mode`` is the arbiter's reported GPU mode ("llm" | "img"). The arbiter is
-    the source of truth for the current mode — the docker/systemd probes are
-    only a legacy fallback (post-D9 the docker container is gone while
-    the daemon era is over, so they lie).
+    the only source of truth for the current mode (the resident img unit stays
+    up in inference mode, so unit state says nothing about it).
     """
     arb = _StubArbiter(mode=mode)
     client.app.state.slot_manager = SimpleNamespace(arbiter=arb)
     return arb
+
+
+def test_switchover_503_when_arbiter_cannot_report_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The img unit is up in inference mode too: with a broken arbiter a running
+    # unit must NOT read as "already in generation" (200 noop). 503 instead.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    arb.status = Mock(side_effect=RuntimeError("state file corrupt"))
+    c, s, f = _patch(container="running", hermes=True, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
+    arb.ensure_img.assert_not_awaited()
 
 
 def test_switchover_generation_calls_arbiter(
@@ -379,14 +394,15 @@ def test_status_endpoint_exposed_in_inference_mode_when_reachable(client: TestCl
     assert body["endpoint"] == ":8188"
 
 
-def test_status_mode_legacy_fallback_when_arbiter_missing(client: TestClient) -> None:
-    # Arbiter unwired → fall back to the docker/systemd-derived mode.
+def test_status_mode_unknown_when_arbiter_missing(client: TestClient) -> None:
+    # Arbiter unwired → the mode is unknown. The resident img unit is up in
+    # inference mode too, so a running unit is NOT evidence of generation.
     client.app.state.slot_manager = None
     c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
-    assert body["mode"] == "generation"
-    assert body["endpoint"] == ":8188"
+    assert body["mode"] is None
+    assert body["endpoint"] == ":8188"  # reachable
     assert body["arbiter"] is None
 
 
@@ -526,16 +542,10 @@ def test_switchover_is_not_env_gated(client: TestClient) -> None:
 
 
 def test_switchover_unwired_returns_503_not_501(client: TestClient) -> None:
-    # No arbiter wired → the route falls back to the legacy docker/systemd
-    # probe to check "already there". That probe hits the REAL host (systemctl
-    # is-active hal0-slot@img / docker inspect) unless stubbed, so on a box
-    # that actually has ComfyUI running this would resolve "already in
-    # generation mode" and short-circuit to a 200 noop before ever reaching
-    # the arbiter-unavailable check. Stub it down to "absent" (mirrors
-    # test_switchover_503_when_arbiter_unwired above) so the assertion holds
-    # regardless of what's really running on this machine.
+    # No arbiter wired → the current mode is unknown, so the route answers 503
+    # instead of guessing "already there" from the (resident) img unit state.
     client.app.state.slot_manager = None
-    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="running", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 503

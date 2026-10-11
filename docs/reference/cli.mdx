@@ -160,9 +160,8 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot migrate-enabled-removal` | — | `--apply` |
 
 <Aside type="note">
-`--backend` on `slot create`/`slot edit` is a hidden, deprecated alias for `--provider`
-(the inference engine binary), **not** the hardware backend. The hardware backend is
-selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu-vulkan`,
+`--provider` on `slot create`/`slot edit` selects the inference engine binary, **not** the
+hardware backend. The hardware backend is selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, `npu`) — see [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 </Aside>
 
@@ -249,7 +248,7 @@ dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
 ## `hal0 doctor` — diagnostics and repair
 
 Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
-`--verify` (hidden, deprecated — use `doctor verify`), `--plain` (force ASCII, sets
+`--plain` (force ASCII, sets
 `HAL0_PLAIN=1`), `--ports` (space-separated TCP port list override).
 
 | Command | Flags |

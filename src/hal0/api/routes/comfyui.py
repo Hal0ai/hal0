@@ -345,8 +345,8 @@ _ARBITER_TO_API_MODE = {"img": "generation", "llm": "inference"}
 def _arbiter_api_mode(arbiter: Any) -> str | None:
     """Arbiter-truth current mode ("generation"|"inference"), or None.
 
-    None means "no arbiter / arbiter broken" — callers fall back to the img
-    unit probe, which the arbiter outranks whenever it answers.
+    None means "no arbiter / arbiter broken" — the mode is then unknown (the
+    resident img unit stays up in inference mode, so it cannot stand in).
     """
     if arbiter is None:
         return None
@@ -378,14 +378,14 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
             arbiter_block = arbiter.status()
     except Exception:
         arbiter_block = None
-    # Mode: arbiter is the source of truth (img → generation, llm → inference);
-    # the unit-derived mode is only the fallback for arbiter-less apps.
-    arb_mode = (
+    # Mode: the arbiter is the only source of truth (img → generation, llm →
+    # inference). The resident img unit stays up in inference mode too, so its
+    # state is NOT mode evidence: with no arbiter answer the mode is ``None``.
+    mode = (
         _ARBITER_TO_API_MODE.get(arbiter_block.get("mode"))
         if isinstance(arbiter_block, dict)
         else None
     )
-    mode = arb_mode or ("generation" if container == "running" else "inference")
     return {
         "mode": mode,
         "reachable": reachable,
@@ -480,17 +480,13 @@ async def comfyui_switchover(
             code="comfyui.switch_in_progress",
         )
     # Idempotency: the arbiter is the source of truth for the current mode
-    # (D7) — the unit probe is ONLY the fallback for arbiter-less apps (the
-    # img unit stays up in inference mode, so it cannot tell the modes apart);
-    # the arbiter wins whenever it answers.
+    # (D7). The img unit stays up in inference mode, so it cannot tell the
+    # modes apart: when the arbiter cannot answer, refuse rather than guess.
     arbiter = _get_arbiter(request)
     current = _arbiter_api_mode(arbiter)
-    if current is not None:
-        already_there = current == mode
-    else:
-        container = await _container_state()
-        already_there = container == "running" if mode == "generation" else container != "running"
-    if already_there:
+    if current is None:
+        return _arbiter_unavailable()
+    if current == mode:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference frees ComfyUI's models from GPU
     # memory, killing any running/pending renders (the container itself stays
@@ -507,8 +503,6 @@ async def comfyui_switchover(
                 code="comfyui.busy",
                 details={"queue": counts},
             )
-    if arbiter is None:
-        return _arbiter_unavailable()
     pin = body.pin
     # Dispatch in the background and answer 202 immediately — the drain/reload
     # takes seconds to tens of seconds (slot unloads, container boot) and the
