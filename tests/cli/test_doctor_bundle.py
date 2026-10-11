@@ -396,14 +396,16 @@ def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypat
     gone = tmp_path / "hal0-install-b.log"
     keep.write_text("x")
     gone.write_text("y")
-    real_stat = Path.stat
+    # Candidates are lstat()-ed. Patch lstat itself: from Python 3.14 it no
+    # longer goes through Path.stat, so patching stat stops reaching it.
+    real_lstat = Path.lstat
 
-    def flaky_stat(self, *a, **k):
+    def flaky_lstat(self, *a, **k):
         if self == gone:
             raise FileNotFoundError(self)
-        return real_stat(self, *a, **k)
+        return real_lstat(self, *a, **k)
 
-    monkeypatch.setattr(Path, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "lstat", flaky_lstat)
     assert db._latest_match(((str(tmp_path), "hal0-install-*.log"),)) == keep
 
 
