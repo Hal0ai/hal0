@@ -117,15 +117,8 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CURRENT_SCHEMA_VERSION = 1
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
-# ``meta.schema_version`` — capabilities.toml carries its own counter so
-# the v0.2 backend→device migration can be detected and
-# applied without coupling the two config files.
-#
-# - schema_version = 1 (or absent): legacy. CapabilitySelection uses
-#   ``backend`` field.
-# - schema_version = 2: post-v0.2 migration. CapabilitySelection
-#   uses ``device``; ``backend`` round-trips as a deprecated alias.
-CAPABILITIES_SCHEMA_VERSION_LEGACY = 1
+# ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
+# ``device``; every write stamps it.
 CAPABILITIES_SCHEMA_VERSION_CURRENT = 2
 
 
@@ -464,9 +457,8 @@ class SlotConfig(BaseModel):
     # ``[model].default`` IS the activation signal — boot autostart is the
     # Quadlet ``[Install] WantedBy=hal0.target`` stanza gated by
     # ``SlotManager.load()``'s empty-model guard, and every routability check
-    # already required a model id. Stale ``enabled`` keys from older installs
-    # round-trip harmlessly via ``extra="allow"`` until
-    # ``hal0.config.migrations.slot_enabled_removal`` sweeps them off disk.
+    # already required a model id. A stray ``enabled`` key round-trips
+    # harmlessly via ``extra="allow"`` and means nothing.
     # HAL0-SUNSET: v2.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
@@ -1517,13 +1509,10 @@ class ProfilesConfig(BaseModel):
     legacy_seeds_migrated: bool = Field(
         default=False,
         description=(
-            "Write-once marker for the one-time demotion of the 8 pruned seeds "
-            "(:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles. False "
-            "on a pre-demotion profiles.toml; ``loader.load_profiles_config`` "
-            "injects the missing definitions, flips this to True and persists. "
-            "Without the marker the injection would repeat on every load and a "
-            "delete could never stick — the virtual-seed behaviour the demotion "
-            "exists to escape."
+            "Write-once marker of the retired one-time demotion of the 8 pruned "
+            "seeds (:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles "
+            "(1.2.0-1.3.x). Read only by :meth:`adopted_legacy_names` for a file "
+            "that predates the adoption ledger."
         ),
     )
     legacy_seeds_adopted: list[str] | None = Field(
@@ -3816,7 +3805,6 @@ __all__ = [
     "AGENT_CONFIG_SCHEMA_VERSION",
     "BACKEND_TO_DEVICE",
     "CAPABILITIES_SCHEMA_VERSION_CURRENT",
-    "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",

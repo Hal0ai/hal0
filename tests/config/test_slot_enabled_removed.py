@@ -8,8 +8,7 @@ check that consulted it was immediately followed by a model-presence gate.
 
 ``SlotConfig`` is ``extra="allow"``, so a TOML written by an older hal0
 still validates — the stale key round-trips as an extra rather than
-failing the load. The one-shot migration
-(:mod:`hal0.config.migrations.slot_enabled_removal`) sweeps it off disk.
+failing the load, and means nothing.
 """
 
 from __future__ import annotations

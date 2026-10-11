@@ -18,11 +18,6 @@ TOML so operators can hand-edit the file::
     model    = "kokoro-v1"
     enabled  = false
 
-v0.1.x wrote the same shape but used ``backend`` instead of ``device``
-and omitted ``schema_version`` (implicit v1). The auto-migration in
-:func:`migrate_capabilities_v1_to_v2` reads a legacy file, snaps the
-field rename + value mapping, and stamps ``schema_version = 2``.
-
 The full file is rewritten atomically on every change via
 :func:`hal0.config.loader.write_toml_atomic` so an interrupted write
 leaves the prior file intact.
@@ -41,7 +36,6 @@ from hal0.config import paths
 from hal0.config.loader import write_toml_atomic
 from hal0.config.schema import (
     CAPABILITIES_SCHEMA_VERSION_CURRENT,
-    CAPABILITIES_SCHEMA_VERSION_LEGACY,
     map_backend_to_device,
 )
 
@@ -93,9 +87,7 @@ class CapabilitySelection(BaseModel):
         on-disk ``backend`` key, then drop ``backend`` from the dict.
 
         ``backend`` is no longer a model field (P2-device: ``device`` is
-        the sole persisted truth). The auto-migration
-        (:func:`migrate_capabilities_v1_to_v2`) is supposed to rewrite the
-        file before we get here, but this validator also defends against:
+        the sole persisted truth). This validator defends against:
 
           1. Hand-edited TOMLs that revert to the old shape.
           2. Programmatic call sites that still pass ``backend=...``.
@@ -127,8 +119,7 @@ class CapabilityConfig(BaseModel):
 
     ``schema_version`` independently tracks the on-disk shape (separate
     from ``hal0.toml``'s ``meta.schema_version``). New writes always
-    stamp the current version; reads of a legacy file trigger
-    :func:`migrate_capabilities_v1_to_v2`.
+    stamp the current version.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
@@ -136,11 +127,7 @@ class CapabilityConfig(BaseModel):
     schema_version: int = Field(
         default=CAPABILITIES_SCHEMA_VERSION_CURRENT,
         ge=1,
-        description=(
-            "Capabilities-file schema version. v1 used ``backend``; v2 "
-            "uses ``device``. Auto-migrated on hal0-api "
-            "boot via ``migrate_capabilities_v1_to_v2``."
-        ),
+        description=("Capabilities-file schema version. v1 used ``backend``; v2 uses ``device``."),
     )
 
     selections: dict[str, dict[str, CapabilitySelection]] = Field(
@@ -157,168 +144,6 @@ def capabilities_toml_path() -> Path:
     return paths.etc() / "capabilities.toml"
 
 
-def capabilities_v1_backup_path(path: Path | None = None) -> Path:
-    """Return the path to the pre-migration v1 backup.
-
-    The auto-migration on hal0-api boot renames the live
-    ``capabilities.toml`` to this path before rewriting in the v2 shape.
-    Kept around so the on-load auto-migration can preserve the v1 file
-    for revert/downgrade scenarios (per the issue body).
-    """
-    base = Path(path) if path is not None else capabilities_toml_path()
-    return base.with_name(base.name + ".v1.bak")
-
-
-# ── Migration ─────────────────────────────────────────────────────────────────
-
-
-def read_schema_version(raw: dict[str, Any]) -> int:
-    """Extract the ``schema_version`` from a raw capabilities dict.
-
-    Missing or non-integer values are treated as legacy v1 — matches the
-    behaviour of :class:`hal0.config.migrations.MigrationError`-style
-    walkers and keeps the read forgiving on hand-edited files.
-    """
-    v = raw.get("schema_version", CAPABILITIES_SCHEMA_VERSION_LEGACY)
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return CAPABILITIES_SCHEMA_VERSION_LEGACY
-
-
-def migrate_capabilities_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
-    """Pure-dict v1 → v2 migration. Idempotent on v2 inputs.
-
-    Transforms applied:
-
-      - For each ``selections[slot][child]`` entry, rename the
-        ``backend`` key to ``device``. The value is normalised through
-        :func:`hal0.config.schema.map_backend_to_device` so legacy
-        ``vulkan|rocm|flm|moonshine|kokoro|cpu`` collapse onto the v0.2
-        ``gpu-vulkan|gpu-rocm|npu|cpu`` enum.
-      - Stamp ``schema_version = 2``.
-      - Already-v2 inputs round-trip unchanged (the rename is a no-op
-        and the version stamp is overwritten with the same value).
-
-    Edge cases:
-
-      - A selection that already has ``device`` set keeps it and drops
-        any leftover ``backend`` key so the on-disk shape is clean.
-      - A selection with an unrecognised ``backend`` value (e.g. an
-        operator hand-edited ``backend = "rcom"``) is mapped to ``cpu``
-        by :func:`map_backend_to_device`. The function logs a warning
-        per unknown value so the demotion is visible.
-      - Non-dict ``selections`` or non-dict child entries pass through
-        verbatim — defensive against half-baked TOML hand edits.
-    """
-    # Shallow rebuild — never mutate the caller's dict.
-    out: dict[str, Any] = {k: v for k, v in raw.items() if k != "selections"}
-    out["schema_version"] = CAPABILITIES_SCHEMA_VERSION_CURRENT
-
-    selections_in = raw.get("selections")
-    if not isinstance(selections_in, dict):
-        out["selections"] = {}
-        return out
-
-    selections_out: dict[str, dict[str, Any]] = {}
-    for slot_name, children in selections_in.items():
-        if not isinstance(children, dict):
-            continue
-        slot_bucket: dict[str, Any] = {}
-        for child_name, sel in children.items():
-            if not isinstance(sel, dict):
-                continue
-            new_sel = dict(sel)
-            existing_device = (new_sel.get("device") or "").strip()
-            legacy_backend = (new_sel.get("backend") or "").strip()
-            if existing_device:
-                # Already in v2 shape. Drop any stray backend key so the
-                # on-disk shape is single-source-of-truth.
-                new_sel.pop("backend", None)
-            elif legacy_backend:
-                new_sel["device"] = map_backend_to_device(legacy_backend)
-                new_sel.pop("backend", None)
-            else:
-                # Unset selection (the "blank picker" state). Leave
-                # device empty so the dashboard still shows it unset.
-                new_sel.pop("backend", None)
-            slot_bucket[child_name] = new_sel
-        selections_out[slot_name] = slot_bucket
-
-    out["selections"] = selections_out
-    return out
-
-
-def auto_migrate_capabilities_file(path: Path | None = None) -> bool:
-    """Migrate ``capabilities.toml`` on disk if it's still schema_version=1.
-
-    Returns ``True`` when a migration was performed, ``False`` when the
-    file was already v2 (or absent — nothing to migrate).
-
-    Side effects:
-
-      1. Atomic rename live file → ``<path>.v1.bak`` (preserves the
-         original bytes for ``--revert`` and v0.1.x downgrade).
-      2. Apply :func:`migrate_capabilities_v1_to_v2` and write atomically
-         via :func:`hal0.config.loader.write_toml_atomic`.
-      3. Log one info-level line summarising the action.
-
-    Crash safety: the rename happens before the rewrite. If the rewrite
-    crashes, the next boot sees a missing live file + an intact
-    ``.v1.bak`` — the orchestrator's ``initialize_if_missing`` path will
-    re-seed from slot TOMLs, and the operator can restore by moving
-    ``capabilities.toml.v1.bak`` back over ``capabilities.toml``.
-    """
-    import os
-
-    from hal0.config.locking import file_lock
-
-    target = Path(path) if path is not None else capabilities_toml_path()
-
-    # SC-10: the read → rename-backup → replace → write is one read-modify-write
-    # that must not race a concurrent capabilities.toml writer (this runs at
-    # hal0-api boot AND from the CLI ``migrate*`` commands). Hold the same
-    # advisory lock every other writer uses; the check is re-done inside the
-    # lock so a peer that migrated while we blocked short-circuits. The lock is
-    # re-entrant, so calling this from an already-locked ``initialize_if_missing``
-    # does not self-deadlock.
-    with file_lock(target):
-        if not target.exists():
-            return False
-
-        with open(target, "rb") as f:
-            raw = tomllib.load(f)
-
-        current_version = read_schema_version(raw)
-        if current_version >= CAPABILITIES_SCHEMA_VERSION_CURRENT:
-            return False
-
-        backup = capabilities_v1_backup_path(target)
-        # Atomic-rename live → .v1.bak. If a stale backup exists (a prior
-        # migration that crashed mid-write), refuse to clobber it — the
-        # operator will see the live file untouched on next boot.
-        if backup.exists():
-            log.warning(
-                "capabilities.migrate.backup_exists",
-                extra={"path": str(backup)},
-            )
-        else:
-            os.replace(target, backup)
-
-        migrated = migrate_capabilities_v1_to_v2(raw)
-        # Validate before write — a malformed migration output should never
-        # land on disk. ``model_validate`` raises with the offending path.
-        CapabilityConfig.model_validate(migrated)
-        write_toml_atomic(target, migrated)
-
-    log.info(
-        "migrated capabilities.toml from schema_version=%d to %d",
-        current_version,
-        CAPABILITIES_SCHEMA_VERSION_CURRENT,
-    )
-    return True
-
-
 # ── Read / write ──────────────────────────────────────────────────────────────
 
 
@@ -327,11 +152,7 @@ def load_capabilities_config(path: Path | None = None) -> CapabilityConfig:
 
     Returns an empty :class:`CapabilityConfig` when the file does not
     exist — callers (notably :meth:`CapabilityOrchestrator.initialize_if_missing`)
-    detect that with :func:`exists` below and seed defaults.
-
-    Loading is read-only: callers that want to migrate a stale v1 file
-    on disk must call :func:`auto_migrate_capabilities_file` explicitly.
-    The orchestrator does this once at hal0-api startup.
+    detect that with :func:`exists` below and seed defaults. Read-only.
     """
     target = path if path is not None else capabilities_toml_path()
     if not Path(target).exists():
@@ -368,8 +189,7 @@ def capabilities_toml_payload(cfg: CapabilityConfig) -> dict[str, Any]:
     # leak the wrong version onto disk).
     data["schema_version"] = CAPABILITIES_SCHEMA_VERSION_CURRENT
     # Drop the deprecated ``backend`` field from each selection so the
-    # canonical persisted shape is single-source-of-truth. Operators who
-    # want to downgrade keep the ``.v1.bak`` produced at migration time.
+    # canonical persisted shape is single-source-of-truth.
     sels = data.get("selections")
     if isinstance(sels, dict):
         for _slot, children in sels.items():
@@ -388,10 +208,9 @@ def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) ->
     ``hal0.slot_config.SlotConfigStore`` instead (one ChangeSet covering
     both files). This helper remains for the NON-apply writers whose
     semantics don't fit a selection ChangeSet: the first-boot seed
-    (``CapabilityOrchestrator.initialize_if_missing``), the schema
-    migrations (``auto_migrate_capabilities_file`` + the
-    ``hal0 capabilities migrate*`` CLI with its ``.v1.bak`` backup
-    dance). Both serialise through :func:`capabilities_toml_payload`,
+    (``CapabilityOrchestrator.initialize_if_missing``) and the
+    ``hal0 capabilities migrate`` CLI. Both serialise through
+    :func:`capabilities_toml_payload`,
     so the on-disk shape cannot diverge from the store's.
     """
     target = path if path is not None else capabilities_toml_path()
@@ -400,15 +219,10 @@ def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) ->
 
 __all__ = [
     "CAPABILITIES_SCHEMA_VERSION_CURRENT",
-    "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CapabilityConfig",
     "CapabilitySelection",
-    "auto_migrate_capabilities_file",
     "capabilities_toml_path",
     "capabilities_toml_payload",
-    "capabilities_v1_backup_path",
     "load_capabilities_config",
-    "migrate_capabilities_v1_to_v2",
-    "read_schema_version",
     "save_capabilities_config",
 ]

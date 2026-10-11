@@ -829,9 +829,9 @@ rather than write half of it — when slots share a model with divergent
 tunes. **Slot id-keying** (`hal0 slot migrate-id-keying`) is optional and
 reversible; the runtime reads either layout, so run it in a downtime window.
 
-Everything else — schema migrations, the one-shot `enabled` sweep at first
-v1.0 boot, the config-load repairs — runs itself. Full breaking-change,
-migration and known-issue detail is in [`CHANGELOG.md`](./CHANGELOG.md).
+Everything else — schema migrations and the config-load repairs — runs
+itself. Full breaking-change, migration and known-issue detail is in
+[`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Project layout
 

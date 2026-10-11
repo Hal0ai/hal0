@@ -1409,11 +1409,9 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
 
     ORDERING: ``_start_model_cache_refresher`` (#2442) →
     ``check_outstanding_migrations`` (#1960, safety net) →
-    ``migrate_slot_dir`` (#1369) → ``reconcile_unconfigured_slots`` →
+    ``retire_model_type_tags`` → ``reconcile_unconfigured_slots`` →
     ``reconcile_npu_trio_slots`` → ``fold_identity`` (folds identity for the
-    trio shadows just reconciled) → ``start_idle_monitor``. Everything from
-    ``migrate_slot_dir`` on is otherwise preserved exactly from the
-    monolithic boot.
+    trio shadows just reconciled) → ``start_idle_monitor``.
     """
     # #2442: listen for READY events before anything can adopt and promote.
     await _start_model_cache_refresher(ctx)
@@ -1436,22 +1434,6 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("slot.outstanding_migrations_check_failed", error=str(exc))
 
-    # #1369 one-shot sweep, next: every pass below reads ``model.default`` to
-    # decide what is configured, so a slot the operator had switched off with
-    # ``enabled = false`` (whose model is therefore still bound on disk) would
-    # be reconciled as live for one boot. Idempotent — after the first sweep
-    # there is no ``enabled`` key left to find. Best-effort: a config-dir
-    # problem must not block startup.
-    try:
-        from hal0.config import paths as _enabled_sweep_paths
-        from hal0.config.migrations.slot_enabled_removal import migrate_slot_dir
-
-        migrated = migrate_slot_dir(_enabled_sweep_paths.slots_config_dir())
-        if migrated:
-            log.info("slot.enabled_removal_swept", slots=migrated)
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("slot.enabled_removal_failed", error=str(exc))
-
     # One-shot: fold retired behaviour tags (mtp/vision → typed fields) and
     # strip the curated "type" chips' tags from registry rows — nothing
     # routes on Model.tags any more (see hal0.registry.tag_retirement).
@@ -1464,18 +1446,6 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("registry.type_tags_retirement_failed", error=str(exc))
 
-    # Retire the pre-1.0 ``vision`` scaffold slot (untouched scaffolds only —
-    # vision is a model property now, served by any llm slot). Routed through
-    # SlotManager.delete so identity row, port claim, and state go with the
-    # TOML on id-keyed boxes; see hal0.config.migrations.vision_slot_retirement.
-    try:
-        from hal0.config.migrations.vision_slot_retirement import retire_vision_scaffold
-
-        if await retire_vision_scaffold(ctx.slot_manager):
-            log.info("slot.vision_scaffold_retired")
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("slot.vision_retirement_failed", error=str(exc))
-
     # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
     # only problem was an empty model.default. After fix(slots): empty
     # default is OFFLINE+CTA, not ERROR; this pass migrates existing
@@ -1484,8 +1454,7 @@ async def _boot_slot_reconcile(app: FastAPI, ctx: BootState) -> None:
     await ctx.slot_manager.reconcile_unconfigured_slots()
 
     # Reconcile the FLM-trio shadow slots (flm-stt / flm-embed) to canon:
-    # rename legacy stt-npu/embed-npu records, normalize device/profile/port/
-    # served_by/type, and seed any missing shadow so the slots page + trio
+    # normalize device/profile/port/served_by/type, and seed any missing shadow so the slots page + trio
     # dispatch are coherent on fresh installs and after upgrades. No-op when
     # there is no container NPU anchor; best-effort so it never blocks startup.
     try:

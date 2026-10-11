@@ -602,7 +602,7 @@ Logs come from the slot's `hal0-slot@<name>.service` journal.
 A handful of one-shot `hal0 slot migrate-*` commands exist for bringing
 older on-disk slot config forward through the v1.0 field-ownership
 changes: `migrate-id-keying`, `migrate-hw`, `migrate-caps`,
-`migrate-flags`, `migrate-enabled-removal`. These are **manual, operator-run**
+`migrate-flags`. These are **manual, operator-run**
 migrations — `hal0 update` only *detects* which ones a box still needs and
 prints the exact command to run; it never applies one for you. `hal0 slot
 migrate-hw --apply` (and its siblings) also refuse to run while `hal0-api`

@@ -68,17 +68,10 @@ def test_lifespan_slot_seed_converges_old_box_without_touching_edits(
 ) -> None:
     """The upgrade case: an old box has agent (operator-edited), no
     brain — startup adds the missing seed and leaves the edit alone.
-
-    The pre-#1369 ``enabled`` key is the one exception: the boot sweep
-    (``migrate_slot_dir``) removes it, because leaving a dead key on disk is
-    what lets an operator believe it still does something. Nothing else in the
-    file moves.
     """
     slots_dir = _slots_dir(tmp_hal0_home)
     slots_dir.mkdir(parents=True)
-    (slots_dir / "agent.toml").write_text(
-        'name = "agent"\nport = 9999\nenabled = true\n', encoding="utf-8"
-    )
+    (slots_dir / "agent.toml").write_text('name = "agent"\nport = 9999\n', encoding="utf-8")
 
     with TestClient(create_app()):
         pass
@@ -87,5 +80,3 @@ def test_lifespan_slot_seed_converges_old_box_without_touching_edits(
     # Operator edit survives untouched.
     edited = (slots_dir / "agent.toml").read_text(encoding="utf-8")
     assert "port = 9999" in edited
-    # …and the removed key is swept (#1369).
-    assert "enabled" not in edited

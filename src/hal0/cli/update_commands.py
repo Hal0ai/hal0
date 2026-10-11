@@ -260,131 +260,11 @@ def _render_notes(notes: dict | None) -> None:
         console.print(Markdown(markdown))
 
 
-def _decide_profile_reset(status: dict | None, *, yes: bool) -> bool | None:
-    """Decide whether to consent to the one-shot v1.0 profile-catalog reset.
-
-    v1.0 made profiles tuning-only, so a pre-v1.0 ``/etc/hal0/profiles.toml`` is
-    reset exactly once (backed up first; the built-in catalog is virtual, so the
-    reseed is free). ``commit()`` runs inside hal0-api and has no TTY, so the
-    decision is made here and posted with the commit.
-
-    Policy — deliberately three-way, and biased against destroying operator work:
-
-    * Nothing to lose (fresh box, seeds only, or an unparseable file that is
-      already breaking this install) → converge silently, ``None`` is enough;
-      ``reset_profile_catalog`` proceeds on its own when ``needs_consent`` is
-      false. Nothing is prompted for a no-op.
-    * ``--yes`` → explicit operator consent, wipe.
-    * Interactive TTY → prompt, naming the exact profiles at risk. Defaults to
-      yes: convergence is the point of the upgrade and a timestamped backup is
-      written first, but the operator can decline and keep them.
-    * Headless without ``--yes`` → **skip**. An unattended cron update must
-      never delete operator-authored profiles. The gate stays unstamped and the
-      post-update convergence banner says it is still outstanding.
-
-    Returns True (consent), or None (no consent — never a hard "no", because the
-    reset itself distinguishes "declined" from "nothing to consent to").
-    """
-    if not isinstance(status, dict) or not status.get("due"):
-        return None
-    if not status.get("needs_consent"):
-        return None
-    names = [str(n) for n in (status.get("custom_profiles") or [])]
-    if yes:
-        return True
-    if not _interactive():
-        console.print(
-            "[yellow]![/yellow] the one-shot profile-catalog reset is due but needs consent "
-            f"({len(names)} custom profile(s)); skipping in a non-interactive run.\n"
-            "[dim]  re-run on a terminal, or pass --yes, to converge.[/dim]"
-        )
-        return None
-    console.print(
-        Panel(
-            "[bold]hal0 v1.0 makes profiles tuning-only.[/bold]\n"
-            "Converging this box resets /etc/hal0/profiles.toml. The 16 built-in "
-            "profiles are re-seeded from code automatically, but these "
-            "operator-authored profiles would be deleted:\n\n"
-            + "\n".join(f"  • {n}" for n in names)
-            + "\n\nThis includes any profile the UI currently refuses to save — a stored "
-            "hardware flag (-dev, --threads, -ngl) makes v1.0 reject it on edit (#1411). "
-            "Those are deleted here, not repaired.\n\n"
-            "[dim]A timestamped copy is written to /var/lib/hal0/backups/ first, and it is "
-            "the only way to get any of them back. Slots pointing at a deleted profile fall "
-            "back to their base config.[/dim]",
-            title="Profile catalog reset",
-            border_style="yellow",
-        )
-    )
-    if typer.confirm("Reset the profile catalog now?", default=True):
-        return True
-    console.print("[dim]profile catalog kept — the reset stays due on the next update.[/dim]")
-    return None
-
-
-def _maybe_converge_profiles(status: dict | None, *, yes: bool) -> bool:
-    """Converge an outstanding v1.0 profile-catalog reset when no update is due.
-
-    #1585: the reset rides ``commit()``, but a box updated 0.9.8→1.0 ran commit
-    under the old daemon (no reset), so it lands converged-except-for-this and
-    the up-to-date path used to print "nothing to apply" and hide it. When the
-    ``/check`` snapshot says a reset is still due, converge it here — a local
-    ``/converge-profiles`` call, no download or swap.
-
-    Returns True when it handled the situation (converged, or raised ``Exit(2)``
-    because a consent-needing reset is outstanding). Returns False when there is
-    nothing due — the caller then prints its usual "nothing to apply".
-    """
-    if not isinstance(status, dict) or not status.get("due"):
-        return False
-
-    reset_profiles = _decide_profile_reset(status, yes=yes)
-
-    # Consent needed but not given (headless, or interactively declined): honor
-    # the half-converged contract — name it as outstanding and exit 2, distinct
-    # from a clean "up to date" (0).
-    if status.get("needs_consent") and reset_profiles is not True:
-        console.print(
-            Panel(
-                "[yellow]up to date, but this install is NOT fully converged.[/yellow]\n"
-                "The one-shot v1.0 profile-catalog reset is still outstanding.\n"
-                "[dim]Re-run `hal0 update --yes` on a terminal to converge. "
-                "(exit 2 = up to date, convergence outstanding)[/dim]",
-                border_style="yellow",
-            )
-        )
-        raise typer.Exit(2)
-
-    convergence_body: dict[str, object] = {}
-    if reset_profiles is True:
-        convergence_body["reset_profiles"] = True
-    try:
-        result = api_post("/api/updates/converge-profiles", json=convergence_body)
-    except CliApiError as exc:
-        die(str(exc))
-        return True
-
-    if result.get("performed"):
-        backup = result.get("backup")
-        console.print(
-            Panel(
-                "[green]profile catalog converged.[/green]"
-                + (f"\n[dim]backup: {backup}[/dim]" if backup else ""),
-                border_style="green",
-            )
-        )
-    else:
-        # already_reset / no_config — nothing was outstanding after all.
-        console.print("[dim]nothing to apply.[/dim]")
-    return True
-
-
 #: Human labels for the non-fatal per-pass failure events
 #: run_post_activation_migrations can log (#1960 B2) — keys must match
 #: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
 _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.registry_toml_retire_failed": "registry.toml retirement (see hal0 doctor all)",
-    "updater.seed_profiles_prune_failed": "seed-profile cleanup",
     "updater.mtp_migration_failed": "mtp override cleanup",
     "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",
     "updater.extra_args_sanitize_failed": "managed extra_args sanitisation",
@@ -402,29 +282,6 @@ def _print_convergence(convergence: dict | None) -> bool:
     """
     if not isinstance(convergence, dict):
         return True
-
-    swept = convergence.get("slot_enabled_swept") or []
-    if swept:
-        console.print(
-            f"[green]✓[/green] swept the removed [b]enabled[/b] key off {len(swept)} slot(s): "
-            f"[dim]{', '.join(str(s) for s in swept)}[/dim]"
-        )
-
-    reset = convergence.get("profile_reset") or {}
-    outcome = reset.get("outcome")
-    if outcome == "reset":
-        backup = reset.get("backup")
-        console.print(
-            "[green]✓[/green] profile catalog reset to the v1.0 tuning-only shape"
-            + (f" [dim](backup: {backup})[/dim]" if backup else "")
-        )
-    elif outcome == "declined":
-        console.print(
-            "[yellow]![/yellow] profile catalog NOT reset — "
-            f"{len(reset.get('custom_profiles') or [])} operator profile(s) kept."
-        )
-    elif outcome == "error":
-        console.print(f"[yellow]![/yellow] profile catalog reset failed: {reset.get('error')}")
 
     # #1960: post-activation migrations (schema + slot/registry cleanup
     # sweeps) now run in a subprocess AFTER the symlink swap, so a failure
@@ -883,12 +740,6 @@ def update(
 
     target_version = (target or "").lstrip("v") or None
     if not body.get("update_available") and not target_version:
-        # No new version — but a v1.0 profile-catalog reset may still be
-        # outstanding (#1585): it runs in commit(), which on the 0.9.8→1.0
-        # update ran under the old daemon that had no reset. Converge it here
-        # rather than going silent.
-        if _maybe_converge_profiles(body.get("profile_reset"), yes=yes):
-            return
         console.print("[dim]nothing to apply.[/dim]")
         return
 
@@ -931,14 +782,7 @@ def update(
         )
         return
 
-    # The one-shot v1.0 profile-catalog reset needs a decision from a human, and
-    # this is the only process in the chain that has one. Asked AFTER the apply
-    # confirm so a declined update never prompts about a wipe that will not run.
-    reset_profiles = _decide_profile_reset(prepared.get("profile_reset"), yes=yes)
-
     commit_body: dict[str, object] = {"version": resolved}
-    if reset_profiles is True:
-        commit_body["reset_profiles"] = True
     try:
         cjob = api_post("/api/updates/commit", json=commit_body)
     except CliApiError as exc:

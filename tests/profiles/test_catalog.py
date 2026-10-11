@@ -427,8 +427,22 @@ def test_runtime_family_no_runner_unchanged() -> None:
 
 def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
     """'coding' is no longer in SEED_PROFILES, so _guard_custom lets it through."""
+    from hal0.config.loader import save_profiles_config
+    from hal0.config.schema import LEGACY_SEED_PROFILES, ProfilesConfig
+
+    # The shape a 1.3.x box carries: the demoted names written into the file
+    # by the retired bulk demotion, with the ledger settled.
     p = tmp_path / "profiles.toml"
-    p.write_text('[profile.mine]\nflags = ""\nmtp = false\n', encoding="utf-8")
+    save_profiles_config(
+        ProfilesConfig.model_validate(
+            {
+                "profile": {"coding": LEGACY_SEED_PROFILES["coding"]},
+                "legacy_seeds_migrated": True,
+                "legacy_seeds_adopted": sorted(LEGACY_SEED_PROFILES),
+            }
+        ),
+        path=p,
+    )
     catalog = ProfileCatalog(path=p)
 
     updated = catalog.update("coding", ProfilePatch(intent="mine now"))
@@ -437,7 +451,7 @@ def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
 
     catalog.delete("coding")
     assert all(profile.name != "coding" for profile in catalog.list())
-    # The delete sticks — the migration marker stops the re-injection.
+    # The delete sticks — the settled ledger stops a re-adoption.
     assert "coding" not in load_profiles_config(p).profile
 
 

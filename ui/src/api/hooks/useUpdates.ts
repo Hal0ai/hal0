@@ -52,7 +52,6 @@ export interface OwnershipMigrations {
 }
 
 export interface ConvergenceReport {
-  profile_reset?: { due: boolean; outcome?: string; backup?: string | null }
   ownership_migrations: OwnershipMigrations
   converged: boolean
 }

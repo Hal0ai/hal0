@@ -65,9 +65,7 @@ from hal0.install.static_seeds import STATIC_SEED_SLOTS as SEEDED_SLOTS  # noqa:
 #: Named ``{anchor}-stt`` / ``{anchor}-embed`` (anchor is ``flm``) to match
 #: the occupancy-pane virtual sub-cards (:mod:`hal0.api.routes.npu` synthesises
 #: ``s.name + "-stt"``) and the ``_touch_npu_shadow_count`` activity counters
-#: (:mod:`hal0.api.routes.v1`), which both key off that convention. The legacy
-#: ``stt-npu`` / ``embed-npu`` names never matched either surface and are
-#: migrated forward by :meth:`hal0.slots.npu.trio.reconcile_trio_slots`.
+#: (:mod:`hal0.api.routes.v1`), which both key off that convention.
 NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
 
 #: Back-compat alias map: old slot names → canonical new names.

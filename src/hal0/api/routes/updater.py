@@ -52,10 +52,8 @@ from hal0.release.policy import ReleaseKind
 from hal0.updater import (
     Updater,
     fetch_release_manifest,
-    profile_reset_status,
     releases_url,
     releases_url_override,
-    reset_profile_catalog,
     validate_release_version,
 )
 from hal0.updater.updater import _is_newer
@@ -350,10 +348,6 @@ async def _run_prepare_job(
     else:
         job["resolved_version"] = result.get("version")
         job["notes"] = result.get("notes")
-        # Read-only gate snapshot for the one-shot profile-catalog reset.
-        # commit() runs in this daemon, which has no TTY, so the CLI has to be
-        # told *here* whether a prompt is owed and what it would destroy.
-        job["profile_reset"] = result.get("profile_reset")
         job["state"] = "prepared"
     finally:
         job["updated_at"] = time.time()
@@ -365,7 +359,6 @@ async def _run_commit_job(
     job_id: str,
     channel: str,
     version: str,
-    reset_profiles: bool | None = None,
 ) -> None:
     """Background task that ACTIVATES a prepared version via ``Updater.commit()``.
 
@@ -373,11 +366,6 @@ async def _run_commit_job(
     ``hal0-api.service`` fail-soft (same policy as ``_run_apply_job``). Requires
     that ``/prepare`` staged ``version`` first; ``commit()`` raises otherwise and
     the job goes to ``failed``.
-
-    ``reset_profiles`` carries the operator's answer to the one-shot
-    profile-catalog reset prompt from the CLI (this daemon has no TTY of its
-    own). ``None`` — the default for any caller that does not ask — means "no
-    consent", which leaves operator-authored profiles untouched.
 
     The commit result's ``convergence`` block is attached to the job so the CLI
     can refuse to report a clean success on a box that is still on the pre-v1.0
@@ -389,7 +377,7 @@ async def _run_commit_job(
     _persist_job(job)
     try:
         updater = Updater(channel=channel, job_id=job_id)
-        result = await updater.commit(version, reset_profiles=reset_profiles)
+        result = await updater.commit(version)
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
@@ -628,11 +616,6 @@ async def check_updates(request: Request) -> dict[str, Any]:
         except Exception:
             return 0  # courtesy field — never fail /check over it
 
-    # #1585: the one-shot v1.0 profile-catalog reset runs inside commit(), so a
-    # box updated 0.9.8→1.0 by the OLD daemon (which had no reset) lands
-    # converged-except-for-this and then goes silent — `hal0 update` says
-    # "nothing to apply" and never mentions it. Surfacing the read-only status
-    # here lets the up-to-date CLI path converge it locally without an update.
     return {
         "current": __version__,
         "latest": latest or None,
@@ -645,7 +628,6 @@ async def check_updates(request: Request) -> dict[str, Any]:
         # consulted — this field lets every surface disclose the bypass.
         "releases_url_override": url_override,
         "manifest": manifest if isinstance(manifest, dict) else {},
-        "profile_reset": await asyncio.to_thread(profile_reset_status),
         "components_pending": await asyncio.to_thread(_components_pending),
     }
 
@@ -770,12 +752,6 @@ async def commit_update(request: Request) -> dict[str, Any]:
     by the prepare job. Returns a queued-job snapshot (202); poll
     ``/status/{job_id}`` until ``applied`` | ``failed``. The daemon try-restarts
     hal0-api fail-soft after a successful commit.
-
-    Body (optional): ``{"reset_profiles": true}`` — the operator's explicit
-    consent to the one-shot v1.0 profile-catalog reset that the prepare job
-    reported as due (``profile_reset.needs_consent``). Omitted / false means no
-    consent: operator-authored profiles are left in place and the reset stays
-    outstanding. There is no way to consent implicitly — this daemon has no TTY.
     """
     try:
         body = await request.json()
@@ -794,8 +770,6 @@ async def commit_update(request: Request) -> dict[str, Any]:
             "commit version must be an exact supported release version",
             details={"version": version, "error": str(exc)},
         ) from exc
-    reset_profiles = body.get("reset_profiles") if isinstance(body, dict) else None
-    reset_profiles = True if reset_profiles is True else None
     channel = _current_channel(request)
     jobs = _update_jobs(request)
     job_id = uuid.uuid4().hex[:12]
@@ -805,44 +779,13 @@ async def commit_update(request: Request) -> dict[str, Any]:
         "phase": "commit",
         "channel": channel,
         "version": version,
-        "reset_profiles": reset_profiles,
         "created_at": time.time(),
         "updated_at": time.time(),
         "error": None,
     }
     _persist_job(jobs[job_id])
-    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version, reset_profiles))
+    _spawn_update_task(request, _run_commit_job(jobs, job_id, channel, version))
     return dict(jobs[job_id])
-
-
-@router.post("/converge-profiles")
-async def converge_profiles(request: Request) -> dict[str, Any]:
-    """Run the one-shot v1.0 profile-catalog reset as a standalone convergence.
-
-    #1585: the reset normally rides ``commit()``, but a box updated 0.9.8→1.0
-    ran commit under the *old* daemon, which had no reset — so it lands
-    converged-except-for-this and the up-to-date ``hal0 update`` path used to go
-    silent. This endpoint converges it without an update: no download, no
-    staging, no symlink swap — a purely local read-modify-write of
-    ``/etc/hal0``. It is idempotent (a stamped box reports ``already_reset`` and
-    changes nothing) and synchronous (the op is a backup + unlink + stamp, not a
-    job worth polling).
-
-    Body (optional): ``{"reset_profiles": true}`` — the operator's explicit
-    consent, exactly as ``/commit`` takes it. Omitted / false means no consent:
-    if the reset would destroy operator-authored profiles it is left outstanding
-    (``outcome: "declined"``); a no-op reset (fresh box, seeds only, or an
-    unparseable file) converges regardless. This daemon has no TTY, so consent
-    is always the caller's to supply.
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    reset_profiles = body.get("reset_profiles") if isinstance(body, dict) else None
-    approved = True if reset_profiles is True else None
-    result = await asyncio.to_thread(reset_profile_catalog, approved=approved)
-    return dict(result)
 
 
 @router.get("/status/{job_id}")

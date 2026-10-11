@@ -205,11 +205,10 @@ class ProfileCatalog:
     def _materialize_legacy(self, name: str) -> ProfileConfig | None:
         """Adopt a demoted (ex-seed) definition on first reference, or None.
 
-        ``loader._demote_legacy_seeds`` covers every install that HAS a
-        profiles.toml. This is for the one state it structurally cannot: a
-        FRESH install, where there is no file at all and the migration is a
-        deliberate no-op, yet the shipped configuration still names demoted
-        profiles — install.sh copies
+        Installs upgraded through 1.2.0-1.3.x already had the demoted names
+        written into profiles.toml by the retired bulk demotion. This covers a
+        FRESH install, where there is no file at all, yet the shipped
+        configuration still names demoted profiles — install.sh copies
         ``installer/etc-hal0/slots/agent.toml`` (``chadrock-moe``) and
         ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
         agent slot asks for ``moe``. Without this the curated slots on a
@@ -227,8 +226,9 @@ class ProfileCatalog:
         saber stack → moe), so the outcome depended on launch order.
 
         ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
-        a fresh install (adopt freely, once each), every demoted name after the
-        bulk demotion has run (adopt nothing — absence is a deletion), and
+        a fresh install (adopt freely, once each), every demoted name on a file
+        the retired bulk demotion settled (adopt nothing — absence is a
+        deletion), and
         growing by one on each adoption here.
 
         Materializing (rather than answering read-only) is what leaves the

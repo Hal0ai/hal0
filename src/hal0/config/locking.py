@@ -22,8 +22,8 @@ Two properties the callers rely on:
   - **Same-thread re-entrancy.** ``flock`` on a fresh descriptor is NOT
     recursive: two open descriptions of the same inode contend even within one
     process, so a naive nested acquire would self-deadlock. A locked outer
-    writer (``initialize_if_missing``) legitimately calls a locked inner writer
-    (``auto_migrate_capabilities_file``); to keep that safe we track a
+    writer may legitimately call a locked inner writer; to keep that safe we
+    track a
     per-thread recursion depth and only take/release the OS lock on the
     outermost acquire. Different threads still serialize — each takes its own
     descriptor and the second ``flock`` blocks.

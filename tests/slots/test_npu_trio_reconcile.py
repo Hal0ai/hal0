@@ -83,40 +83,8 @@ async def test_creates_missing_shadows_with_placeholder_models(tmp_hal0_home: st
     assert "enabled" not in embed
 
 
-async def test_renames_and_normalizes_legacy_shadow(tmp_hal0_home: str) -> None:
-    root = _slots_dir(tmp_hal0_home)
-    _anchor(root)
-    # Legacy stt-npu with a distinct (wrong) port and no profile/served_by,
-    # plus an operator-set model that must survive the rename.
-    _write(
-        root,
-        "stt-npu",
-        [
-            'name = "stt-npu"',
-            'device = "npu"',
-            'type = "transcription"',
-            "port = 8084",
-            "[model]",
-            'default = "whisper-v3:turbo"',
-        ],
-    )
-
-    sm = SlotManager()
-    await sm.reconcile_npu_trio_slots()
-
-    assert not (root / "stt-npu.toml").exists()
-    stt = tomllib.loads((root / "flm-stt.toml").read_text())
-    assert stt["name"] == "flm-stt"
-    assert stt["device"] == "npu"
-    assert stt["profile"] == "flm"
-    assert stt["served_by"] == "flm"
-    assert stt["port"] == 8088  # normalized to the anchor port
-    assert stt["type"] == "transcription"
-    # Operator state preserved across the rename.
-    assert stt["model"]["default"] == "whisper-v3:turbo"
-
-
-async def test_rename_skipped_when_canon_exists(tmp_hal0_home: str) -> None:
+async def test_a_slot_named_stt_npu_is_left_alone(tmp_hal0_home: str) -> None:
+    """The pre-v0.9.7 shadow names are not reserved; nothing renames them."""
     root = _slots_dir(tmp_hal0_home)
     _anchor(root)
     _write(
@@ -142,7 +110,7 @@ async def test_rename_skipped_when_canon_exists(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     await sm.reconcile_npu_trio_slots()
 
-    # Both remain — the legacy file is left in place, never clobbering canon.
+    # Both remain — reconcile only manages the canon shadow names.
     assert (root / "stt-npu.toml").exists()
     assert (root / "flm-stt.toml").exists()
 
