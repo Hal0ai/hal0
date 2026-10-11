@@ -30,14 +30,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Fixed
-
-- The Runner Images page no longer lists niche runtimes (PromptForge,
-  Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
-  registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
-  runtimes** (when any) and **Other images** for catalogued images no
-  runtime ships — instead of by which image a runtime currently launches
-  (ADR-0027).
 ### Breaking
 
 - `DELETE /api/models/{id}` now deletes the model's files by default:
@@ -51,6 +43,13 @@ applying. Add those subsections to a version's section to surface them; see
   in the response with its reason (ADR-0026).
 
 ### Fixed
+
+- The Runner Images page no longer lists niche runtimes (PromptForge,
+  Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
+  registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
+  runtimes** (when any) and **Other images** for catalogued images no
+  runtime ships — instead of by which image a runtime currently launches
+  (ADR-0027).
 
 - A deleted model no longer reappears after a restart. Files kept on disk
   (by opting out, or because a safety check refused to remove them) are
