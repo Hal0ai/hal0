@@ -20,7 +20,7 @@
  *   - the header no longer carries the `hermes chat` terminal hint (copy-only
  *     removal, 2026-08-22 — web chat is still replaced by the TUI; only the
  *     visible reminder string was dropped, not the underlying behavior)
- *   - hash routes #agent/memory + legacy #peers land on the Memory tab
+ *   - hash route #agent/memory lands on the Memory tab
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -118,13 +118,5 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
   test('#agent/memory hash routes to the Memory tab', async ({ page }) => {
     await page.goto('/#agent/memory')
     await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible({ timeout: FIVE_S })
-  })
-
-  test('legacy #peers route redirects to #agent/memory?subsection=peer', async ({ page }) => {
-    await page.goto('/#peers')
-    // The redirect happens client-side via hashchange handling inside
-    // agent-view.jsx. Wait for the URL to land on the new shape.
-    await expect(page).toHaveURL(/#agent\/memory\?subsection=peer/, { timeout: FIVE_S })
-    await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible()
   })
 })

@@ -5,7 +5,7 @@ by ``GET /api/comfyui/status``. That endpoint aggregates three sources, all of
 which degrade gracefully (the pane polls it every few seconds and must never
 crash on a dead container):
 
-  - docker container state (``comfyui`` running / exited / absent)
+  - systemd state of the img slot unit (running / absent)
   - systemd state of the agent stack (hermes) — to show which mode
     currently owns the single iGPU
   - ComfyUI's own HTTP API (``/system_stats`` + ``/queue``) for live telemetry
@@ -122,9 +122,9 @@ def test_status_starting_when_container_running_but_http_unreachable(client: Tes
 def test_status_engine_running_when_reachable_but_container_probe_blind(
     client: TestClient,
 ) -> None:
-    # Post-D9 the docker probe can't see the podman hal0-slot-img container
-    # ("absent" forever) — a reachable ComfyUI IS the engine truth. Without
-    # this, the resident container renders engine "stopped" 24/7 in the pane.
+    # The unit probe can read "absent" while ComfyUI answers — a reachable
+    # ComfyUI IS the engine truth. Without this, the resident container
+    # renders engine "stopped" in the pane.
     c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
@@ -211,13 +211,28 @@ def _install_arbiter(client: TestClient, mode: str = "llm") -> _StubArbiter:
     """Hang a stub manager+arbiter on app.state, the way the route finds it.
 
     ``mode`` is the arbiter's reported GPU mode ("llm" | "img"). The arbiter is
-    the source of truth for the current mode — the docker/systemd probes are
-    only a legacy fallback (post-D9 the docker container is gone while
-    the daemon era is over, so they lie).
+    the only source of truth for the current mode (the resident img unit stays
+    up in inference mode, so unit state says nothing about it).
     """
     arb = _StubArbiter(mode=mode)
     client.app.state.slot_manager = SimpleNamespace(arbiter=arb)
     return arb
+
+
+def test_switchover_503_when_arbiter_cannot_report_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The img unit is up in inference mode too: with a broken arbiter a running
+    # unit must NOT read as "already in generation" (200 noop). 503 instead.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    arb.status = Mock(side_effect=RuntimeError("state file corrupt"))
+    c, s, f = _patch(container="running", hermes=True, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
+    arb.ensure_img.assert_not_awaited()
 
 
 def test_switchover_generation_calls_arbiter(
@@ -379,14 +394,15 @@ def test_status_endpoint_exposed_in_inference_mode_when_reachable(client: TestCl
     assert body["endpoint"] == ":8188"
 
 
-def test_status_mode_legacy_fallback_when_arbiter_missing(client: TestClient) -> None:
-    # Arbiter unwired → fall back to the docker/systemd-derived mode.
+def test_status_mode_unknown_when_arbiter_missing(client: TestClient) -> None:
+    # Arbiter unwired → the mode is unknown. The resident img unit is up in
+    # inference mode too, so a running unit is NOT evidence of generation.
     client.app.state.slot_manager = None
     c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
-    assert body["mode"] == "generation"
-    assert body["endpoint"] == ":8188"
+    assert body["mode"] is None
+    assert body["endpoint"] == ":8188"  # reachable
     assert body["arbiter"] is None
 
 
@@ -526,30 +542,24 @@ def test_switchover_is_not_env_gated(client: TestClient) -> None:
 
 
 def test_switchover_unwired_returns_503_not_501(client: TestClient) -> None:
-    # No arbiter wired → the route falls back to the legacy docker/systemd
-    # probe to check "already there". That probe hits the REAL host (systemctl
-    # is-active hal0-slot@img / docker inspect) unless stubbed, so on a box
-    # that actually has ComfyUI running this would resolve "already in
-    # generation mode" and short-circuit to a 200 noop before ever reaching
-    # the arbiter-unavailable check. Stub it down to "absent" (mirrors
-    # test_switchover_503_when_arbiter_unwired above) so the assertion holds
-    # regardless of what's really running on this machine.
+    # No arbiter wired → the current mode is unknown, so the route answers 503
+    # instead of guessing "already there" from the (resident) img unit state.
     client.app.state.slot_manager = None
-    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="running", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
 
 
-# ── _container_state: podman-first probe (#710) ──────────────────────────────
+# ── _container_state: systemd-unit probe (#710) ──────────────────────────────
 
 
 async def test_container_state_running_when_img_unit_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#710: post-Phase-D the img slot runs as podman hal0-slot@img — the
-    systemd unit probe is the truth; docker inspect is legacy fallback only."""
+    """#710: the img slot runs as podman hal0-slot@img — the systemd unit
+    probe is the truth."""
     from hal0.api.routes import comfyui as mod
 
     probed_units: list[str] = []
@@ -559,22 +569,27 @@ async def test_container_state_running_when_img_unit_active(
         return unit == "hal0-slot@img.service"
 
     monkeypatch.setattr(mod, "_systemd_active", fake_active)
-    # No docker binary at all — the podman path must not need it.
-    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
 
-    assert await mod._container_state("comfyui") == "running"
+    assert await mod._container_state() == "running"
     assert "hal0-slot@img.service" in probed_units
 
 
-async def test_container_state_absent_when_unit_inactive_and_no_docker(
+async def test_container_state_ignores_an_unrelated_docker_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unrelated docker container that happens to be named ``comfyui`` must
+    not read as the generation engine: with the img unit inactive the state is
+    'absent', and docker is never consulted."""
     from hal0.api.routes import comfyui as mod
 
     async def fake_active(unit: str) -> bool:
         return False
 
-    monkeypatch.setattr(mod, "_systemd_active", fake_active)
-    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    async def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("the ComfyUI state probe must not shell out to docker")
 
-    assert await mod._container_state("comfyui") == "absent"
+    monkeypatch.setattr(mod, "_systemd_active", fake_active)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", boom)
+
+    assert await mod._container_state() == "absent"

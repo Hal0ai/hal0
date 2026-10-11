@@ -92,7 +92,6 @@ def test_factory_seeds_hindsight_graph_gate_from_config():
     assert isinstance(provider, HindsightProvider)
     status = provider.graph_status()
     assert status["enabled"] is True
-    # ADR-0023: the configured extraction_slot reaches the provider (and is
-    # mirrored on the deprecated ``route`` key for the old dashboard).
+    # ADR-0023: the configured extraction_slot reaches the provider.
     assert status["extraction_slot"] == "utility"
-    assert status["route"] == "utility"
+    assert "route" not in status

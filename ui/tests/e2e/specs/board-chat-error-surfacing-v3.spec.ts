@@ -5,7 +5,7 @@
  * Prior behaviour: useBoard.ts's `send()` swallowed every HTTP-level
  * failure silently —
  *   `if (!res.ok || !res.body) { setStreaming(false); return }`
- * after the POST to ENDPOINTS.boardChat, and the network-error `.catch`
+ * after the POST to ENDPOINTS.brainChat, and the network-error `.catch`
  * was equally silent for non-abort errors. Only in-stream SSE `error`
  * frames got a bubble. A pre-stream 503 (slot warming), 502 (crash-loop),
  * 401, or a dead gateway vanished — the operator's composed message
@@ -52,7 +52,7 @@ test.describe('BoardView — agent chat error surfacing (#1452)', () => {
   test('A — pre-stream 503 slot.loading envelope surfaces an error bubble with the retry hint, and the composed message is preserved', async ({
     page,
   }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return
@@ -95,7 +95,7 @@ test.describe('BoardView — agent chat error surfacing (#1452)', () => {
   test('B — a network-level failure (connection reset) also surfaces an error bubble, not silence', async ({
     page,
   }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return
@@ -122,7 +122,7 @@ test.describe('BoardView — agent chat error surfacing (#1452)', () => {
 
   test('C — clicking Retry on an error bubble resends the original composed text', async ({ page }) => {
     let attempts = 0
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return
@@ -163,7 +163,7 @@ test.describe('BoardView — agent chat error surfacing (#1452)', () => {
   })
 
   test('D — stopping an in-flight turn does NOT produce an error bubble', async ({ page }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return

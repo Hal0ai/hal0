@@ -73,8 +73,8 @@ behaviors:
   mid-restore starts the same queue-aware restore in the background; a pinned
   image mode or a queue still busy past the budget leaves the caller
   unavailable until the idle window or a manual switchover.
-- **`model` may be a chat-slot alias** — `agent`, `utility`, any enabled LLM slot name,
-  or the legacy `agent-hermes` — rewritten to the slot's configured model id before
+- **`model` may be a chat-slot alias** — `agent`, `utility`, or any enabled LLM slot name
+  — rewritten to the slot's configured model id before
   dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized
   to the native FLM-served tag (e.g. `gemma4-it:e2b`), since `flm serve` only
   advertises the native tag.

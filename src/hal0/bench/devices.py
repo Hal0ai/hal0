@@ -21,7 +21,7 @@ This module is the ONE resolver both paths share. It does **not** probe the
 host itself — it delegates to the production slot-container helpers in
 :mod:`hal0.providers._gpu` (:func:`~hal0.providers._gpu.resolve_gpu_device_paths`,
 :func:`~hal0.providers._gpu.resolve_gpu_group_ids`,
-:func:`~hal0.providers._gpu.nvidia_cdi_devices`) plus the ``hal0 probe``
+:func:`~hal0.providers._gpu.nvidia_cdi_devices`) plus the ``hal0 config hardware --refresh``
 snapshot in ``hardware.json``, so a benchmark container sees exactly what a
 production slot container sees.
 
@@ -292,7 +292,7 @@ def _override_group_ids(env: Mapping[str, str]) -> list[int] | None:
 
 
 def _probe_snapshot() -> dict[str, object]:
-    """The ``hal0 probe`` hardware.json payload, or ``{}``.
+    """The ``hal0 config hardware --refresh`` hardware.json payload, or ``{}``.
 
     Raw-JSON read (no pydantic) for the same reason
     :func:`hal0.providers._gpu._probed_gpu_group_gids` does it: a missing or

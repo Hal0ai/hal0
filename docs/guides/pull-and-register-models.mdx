@@ -87,10 +87,7 @@ auto-detect capabilities and backends — when the header doesn't carry
 enough signal (no `pooling_type`, say) it falls back to a filename guess
 and prints a confidence/warning line; fix a wrong guess with
 `PUT /api/models/{id}` (`{"capabilities": [...]}`). Pass `--overwrite` to
-replace an existing entry at the same id. The old `hal0 model register`
-name is a deprecated alias with the *old* argument order —
-`hal0 model register <id> --path <path> --name … --license …` — kept
-only for scripts that haven't moved to `model add` yet. The API also
+replace an existing entry at the same id. The API also
 exposes a directory scan that registers every new file it finds:
 
 ```sh
@@ -234,10 +231,8 @@ hal0 model run qwen3-4b --slot agent --timeout 120
 ```
 
 Assigns the model to a slot, loads it, and polls until it's ready — the
-fastest path from "I have an id" to "it's serving." The old
-`hal0 model assign` name is a deprecated alias for
-`hal0 slot edit --model`, which only sets the slot's default without
-loading it.
+fastest path from "I have an id" to "it's serving." To only set a
+slot's default model without loading it, use `hal0 slot edit agent --model qwen3-4b`.
 
 ## Restore a pre-registry backup
 

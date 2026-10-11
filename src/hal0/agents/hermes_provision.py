@@ -1425,10 +1425,10 @@ def _resolve_primary_slot(
     warming = [s for s in candidates if _slot_state(s) == SlotState.WARMING and _slot_model_id(s)]
 
     def _pick(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
-        # ADR-0023: the canonical primary is the `agent` slot; prefer legacy
-        # `chat`/`primary` names too, but only within a residency tier —
-        # never let the name match override readiness.
-        named = next((s for s in pool if s.get("name") in ("agent", "chat", "primary")), None)
+        # ADR-0023: the canonical primary is the `agent` slot; prefer it, but
+        # only within a residency tier — never let the name match override
+        # readiness.
+        named = next((s for s in pool if s.get("name") == "agent"), None)
         return named or next(iter(pool), None)
 
     primary = _pick(wired) or _pick(warming)

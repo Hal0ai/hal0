@@ -80,7 +80,7 @@ async def test_graph_status_shape(conformant):
     status = conformant.graph_status()
     assert set(status) >= {
         "enabled",
-        "route",
+        "extraction_slot",
         "in_flight",
         "builds_ok",
         "errors",
@@ -103,7 +103,7 @@ async def test_pgvector_conforms():
     assert set(res) == {"id", "timestamp"}
     out = await p.search("pg", dataset="private:bob", client_id="bob")
     assert out == []
-    assert set(p.graph_status()) >= {"enabled", "route"}
+    assert set(p.graph_status()) >= {"enabled", "extraction_slot"}
 
 
 def _hindsight_factory():
@@ -135,6 +135,6 @@ async def test_hindsight_conforms_to_contract():
     # Foreign-private read → empty.
     out = await p.search("note", dataset="private:bob", client_id="bob")
     assert out == []
-    assert set(p.graph_status()) >= {"enabled", "route"}
+    assert set(p.graph_status()) >= {"enabled", "extraction_slot"}
     d = await p.delete([res["id"]])
     assert "deleted" in d

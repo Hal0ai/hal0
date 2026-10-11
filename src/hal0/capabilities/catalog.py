@@ -32,7 +32,7 @@ from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.providers._gpu import host_is_amd_gpu, rocm_lane_present
-from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
+from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.store import ModelRegistry
 from hal0.runners import RUNNER_IMAGES
 
@@ -491,11 +491,10 @@ def get_backend(backend_id: str) -> dict[str, Any] | None:
 # ── Models per capability ─────────────────────────────────────────────────────
 
 
-def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
+def _model_capabilities(entry: CuratedModel | Any) -> list[str]:
     """Best-effort capability extraction across the catalog shapes.
 
-    Curated entries expose a single ``capability`` string; haloai-seeded
-    entries do the same. Registry-loaded :class:`~hal0.registry.model.Model`
+    Curated entries expose a single ``capability`` string. Registry-loaded :class:`~hal0.registry.model.Model`
     rows carry a ``capabilities`` list. Either shape works.
 
     Vision (#515) is a secondary capability: the curated multimodal MoE
@@ -539,7 +538,7 @@ _NPU_FANOUT_CAPS: frozenset[str] = frozenset({"chat", "embed", "stt"})
 def _backend_variants(entry: Any) -> list[str]:
     """Return the canonical backend ids this entry can run under.
 
-    Curated and haloai entries carry a single ``backend`` string tag
+    Curated entries carry a single ``backend`` string tag
     (e.g. ``"flm"`` or ``"llamacpp"``). Registry entries may carry a
     ``backends`` list. We map those to the stable backend ids used by
     :func:`available_backends`. Llama.cpp-compatible entries fan out
@@ -773,17 +772,13 @@ def _entry_to_row(
 
     ``downloaded`` reflects whether the on-disk weights are actually
     present. For registry-derived entries we trust the stored path. For
-    curated entries (CURATED + haloai seed) we look the id up in the
+    curated entries (CURATED_MODELS) we look the id up in the
     registry — a curated row is "downloaded" iff a registry entry with
     that id has a path that exists on disk.
 
     ``pullable`` reflects whether ``POST /api/models/{id}/pull`` can
     actually fetch the file. CuratedModel entries (hand-curated Python
-    list) carry hf_repo + hf_file and are pullable. HaloaiModel seed
-    entries are routes into an existing upstream service — there's
-    nothing to download, so the dashboard should not render a ⬇ chip
-    against them and the handler should short-circuit before issuing
-    the pull. Registry entries with hf_repo + hf_filename are pullable
+    list) carry hf_repo + hf_file and are pullable. Registry entries with hf_repo + hf_filename are pullable
     too (the user can re-pull a previously-pulled model).
     """
     raw_backend = getattr(entry, "backend", "") or ""
@@ -804,8 +799,7 @@ def _is_pullable(entry: Any, *, registry: ModelRegistry | None) -> bool:
     Mirrors :func:`_resolve_pull_source` in routes/models.py — checks
     the entry itself first (curated CuratedModels carry hf_repo +
     hf_file) and falls back to the registry (user-added entries with
-    HF coords). HaloaiModel seed rows never have hf_repo and are
-    intentionally not pullable.
+    HF coords).
     """
     repo = (getattr(entry, "hf_repo", "") or "").strip()
     filename = (getattr(entry, "hf_file", "") or "").strip() or (
@@ -890,14 +884,6 @@ def _flat_rows_for_capability(
     model emits one row per backend it can run on; FLM/NPU rows are
     appended after the curated / registry / llama-server fan-out.
 
-    HaloaiModel entries (the upstream-routed seed in
-    ``seeds/haloai_models.json``) are intentionally skipped here even
-    though they're still part of :data:`CURATED`. They surface no
-    download path and no working route on a standalone hal0 install, so
-    listing them in the capability dropdowns just produced rows the
-    user couldn't actually pick. They remain visible through
-    ``/api/models/catalogue`` so the Models view's "upstream" tab and
-    any future "wire up an upstream" UX still has them in reach.
     """
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -911,10 +897,7 @@ def _flat_rows_for_capability(
     # surfaces a real, already-curated multimodal pick.
     allow_bundle_only = capability == "vision"
     curated_only = [
-        e
-        for e in CURATED
-        if not isinstance(e, HaloaiModel)
-        and (allow_bundle_only or not getattr(e, "bundle_only", False))
+        e for e in CURATED_MODELS if allow_bundle_only or not getattr(e, "bundle_only", False)
     ]
     candidates: list[Any] = curated_only + _iter_registry_models(registry)
 
@@ -1034,7 +1017,7 @@ def _registry_downloaded(model_id: str, *, registry: ModelRegistry | None) -> bo
 #: The id is what ``moonshine_server`` actually advertises on ``/v1/models``
 #: for the bundle hal0 can load: ``moonshine-<arch>-en`` with the default
 #: ``base`` arch. It deliberately does NOT reuse the
-#: ``moonshine-small-streaming-en`` HaloaiModel seed row — that id names a
+#: ``moonshine-small-streaming-en`` id — that id names a
 #: STREAMING bundle, whose file set this toolbox image cannot load at all
 #: (see ``providers.moonshine._ENCODER_STEMS``), so advertising it would
 #: hand the operator a pick that can never serve a request.

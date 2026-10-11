@@ -117,7 +117,7 @@ def test_a_starved_request_reaches_the_slot_with_the_floor(app_client) -> None:
     stub = _StubLLM([_final_response("hi")])
     _app, client = app_client(stub)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"max_tokens": 80, "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls, "the LLM was never called"
@@ -127,7 +127,7 @@ def test_a_starved_request_reaches_the_slot_with_the_floor(app_client) -> None:
 def test_an_unspecified_request_still_gets_the_default_cap(app_client) -> None:
     stub = _StubLLM([_final_response("hi")])
     _app, client = app_client(stub)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert stub.calls[0]["max_tokens"] == _MAX_COMPLETION_TOKENS
 
 
@@ -139,7 +139,7 @@ def test_reasoning_content_is_surfaced_as_a_collapsed_thinking_frame(app_client)
     stub = _StubLLM([_final_response("the answer", reasoning="let me think about it")])
     _app, client = app_client(stub)
     r = client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"max_tokens": 80, "messages": [{"role": "user", "content": "x"}]},
     )
     events = _sse_events(r.text)

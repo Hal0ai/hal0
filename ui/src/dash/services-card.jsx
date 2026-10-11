@@ -348,12 +348,12 @@ export function ServicesCard() {
       id: 'comfyui',
       name: 'ComfyUI',
       up: comfySt.engine !== 'stopped' && comfySt.engine !== 'error',
-      detail: `generation engine · ${comfySt.mode}`,
+      detail: `generation engine · ${comfySt.mode ?? "mode unknown"}`,
       url: `http://${typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'}:8188`,
       stat:
         comfySt.queue.running + comfySt.queue.pending > 0
           ? { label: 'jobs', value: String(comfySt.queue.running + comfySt.queue.pending) }
-          : { label: 'mode', value: comfySt.mode },
+          : { label: 'mode', value: comfySt.mode ?? 'unknown' },
     }
     rows = [synth, ...rows]
   }

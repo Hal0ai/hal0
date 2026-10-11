@@ -39,7 +39,6 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         return {
             "enabled": False,
             "extraction_slot": "utility",
-            "route": "utility",  # deprecated mirror
             "slot_resolves": True,
             "available_slots": ["agent", "utility"],
             "in_flight": 0,

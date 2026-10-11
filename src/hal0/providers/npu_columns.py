@@ -69,7 +69,7 @@ def aie_total_columns() -> int:
 
     Fallback chain (hardware-generalization wave):
 
-      1. hardware.json ``npu.aie_columns`` — the count ``hal0 probe``
+      1. hardware.json ``npu.aie_columns`` — the count ``hal0 config hardware --refresh``
          discovered via xrt-smi at probe time (>0 = known);
       2. the Strix Halo constant 8 — used when the snapshot is missing,
          pre-wave (field absent/0), or unreadable.

@@ -76,18 +76,6 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     dismissable: false,
   },
   {
-    id: 'catalog-drift',
-    scope: 'slots',
-    kind: 'warn',
-    eyebrow: 'Catalog · drift',
-    heading: 'registry.toml is newer than server_models.json',
-    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart the affected slots.",
-    actions: [
-      { label: 'Sync now', primary: true },
-      { label: 'Diff catalog' },
-    ],
-  },
-  {
     id: 'all-slots-disabled',
     scope: 'slots',
     kind: 'warn',

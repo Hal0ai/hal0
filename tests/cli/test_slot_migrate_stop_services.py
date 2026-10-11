@@ -133,8 +133,6 @@ def _without_preflight(log: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
 
 
 def _invoke(command: Any, module: str | None, **kwargs: Any) -> None:
-    if module is None:
-        kwargs["dry_run"] = False
     command(**kwargs)
 
 
@@ -213,8 +211,6 @@ def test_declined_prompt_stops_nothing(
     monkeypatch.setattr(slot_commands.typer, "confirm", _decline)
 
     kwargs: dict[str, Any] = {"apply": True, "yes": False, "stop_services": True}
-    if module is None:
-        kwargs["dry_run"] = False
     with pytest.raises(typer.Abort):
         command(**kwargs)
 
@@ -237,7 +233,6 @@ def test_exception_mid_run_restarts_stopped_units(
     kwargs: dict[str, Any] = {"apply": True, "yes": True, "stop_services": True}
     if module is None:
         _install_id_keying(monkeypatch, log, apply_raises=boom)
-        kwargs["dry_run"] = False
     else:
         _install_fold(monkeypatch, module, _fake_fold(log, apply_raises=boom))
 

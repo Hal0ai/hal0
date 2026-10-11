@@ -190,7 +190,7 @@ WantedBy=multi-user.target
 ### Health endpoint
 
 `GET http://127.0.0.1:9177/health` — polled by the installer after start (up
-to 40 × 3s) and by `hal0 doctor --verify`'s memory-engine check. If
+to 40 × 3s) and by `hal0 doctor verify`'s memory-engine check. If
 unreachable while the memory feature is enabled, hal0's own health report
 degrades to `WARN "engine enabled but :9177 unreachable"` rather than
 failing hard.

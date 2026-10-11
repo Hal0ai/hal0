@@ -15,61 +15,24 @@ without touching the curated list.
 # pick list. v0.2 may introduce a remote-fetched manifest with signed
 # releases; for v1 a frozen-at-build-time list is plenty.
 
-# TODO(stt/tts curated picks): the FirstRun wizard's STT and TTS
-# dropdowns currently fall back on HaloaiModel seed rows (moonshine,
-# kokoro, vibevoice), which the capability catalog intentionally
-# filters out — they're upstream-routed, not pullable. The blocker for
-# adding real CuratedModel picks is the upstream file shape:
+# TODO(stt/tts curated picks): the catalogue has no STT or TTS picks because
+# the upstream weight shapes do not fit the single-file pull layer
+# (registry/pull.py streams one ``hf_repo/resolve/main/<file>`` URL and the
+# curated schema validation in tests/registry/test_curated.py restricts
+# ``hf_file`` to ``.gguf``/``.safetensors``/``.ckpt``):
 #
-#   * Moonshine ships its weights as a multi-file ONNX bundle
-#     (``encode_model.ort`` + ``decode_model.ort`` + tokenizer JSON
-#     under ``quantized/<variant>/``). The pull engine (registry/pull.py)
-#     streams a single ``hf_repo/resolve/main/<file>`` URL, and the
-#     curated-model schema validation (tests/registry/test_curated.py)
-#     restricts ``hf_file`` to ``.gguf``/``.safetensors``/``.ckpt``.
-#     ``.ort`` files don't fit either constraint.
-#   * Whisper.cpp GGUF mirrors exist (``oxide-lab/whisper-tiny-GGUF``,
-#     ``xkeyC/whisper-large-v3-turbo-gguf``) but hal0's STT runtime is
-#     the Moonshine toolbox (``_RUNTIME_TO_HOST_BACKENDS["moonshine"]``
-#     in capabilities/catalog.py), which can't load whisper GGUFs.
-#     Surfacing a whisper.cpp pick needs either a whisper-cpp toolbox
-#     image or routing whisper-ggufs through llama-server (which 0.1.x
-#     llama-server doesn't support for transcription).
-#   * Kokoro's only public weight is ``hexgrad/Kokoro-82M/kokoro-v1_0.pth``
-#     — a PyTorch pickle. The ONNX mirror
-#     (``onnx-community/Kokoro-82M-v1.0-ONNX``) ships only ``.onnx`` +
-#     ``voices/*.bin``. Neither fits the allowed suffix list.
-#   * VibeVoice is similarly multi-file safetensors but lives in a
-#     diffusers-style repo (config + multiple shards), not a single
-#     pullable file.
+#   * Moonshine ships a multi-file ONNX bundle (``.ort`` files + tokenizer).
+#   * Whisper.cpp GGUF mirrors exist, but hal0's STT runtime is the Moonshine
+#     toolbox, which cannot load them.
+#   * Kokoro's public weight is a PyTorch pickle or ONNX + ``voices/*.bin``.
+#   * VibeVoice is a multi-file diffusers-style safetensors repo.
 #
-# Resolutions to unblock (any one is enough):
-#   1. Add a multi-file pull mode to ``registry/pull.py`` that snapshots
-#      a HF repo dir into the model store, and relax the curated
-#      ``hf_file`` validator to allow a directory glob.
-#      (Partially landed: pull.py now handles a fixed two-file shape —
-#      main GGUF + ``mmproj_file`` vision sidecar — but not arbitrary
-#      repo-dir snapshots, so the ONNX/PyTorch bundles above are still
-#      blocked.)
-#   2. Ship a whisper-cpp toolbox image and add a ``whisper`` entry to
-#      ``_RUNTIME_TO_HOST_BACKENDS``, then surface whisper.cpp GGUFs
-#      under stt.
-#   3. Keep the HaloaiModel seed rows visible in the wizard but mark
-#      them clearly as "needs upstream routing" — would require
-#      narrowing the ``HaloaiModel`` filter in
-#      ``capabilities/catalog._flat_rows_for_capability`` (NOT the call
-#      this PR makes — that filter is load-bearing).
-#
-# Until one of those lands, the wizard's STT and TTS dropdowns will
-# stay empty on a standalone install and the operator falls back on the
-# "skip this capability" path or the post-install Models view.
+# Either a multi-file pull mode in ``registry/pull.py`` or a whisper-cpp
+# toolbox image would unblock them. Until then the STT and TTS dropdowns come
+# from the engines surfaced directly in capabilities/catalog.py.
 """
 
 from __future__ import annotations
-
-import json
-from functools import lru_cache
-from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -908,10 +871,7 @@ CURATED_MODELS: list[CuratedModel] = [
     # ── STT / TTS picks ────────────────────────────────────────────────────
     # Intentionally empty — see the module docstring TODO. The blocker is
     # the pull layer's single-file shape vs. moonshine/kokoro's multi-file
-    # ONNX/PyTorch bundles. The HaloaiModel seed rows
-    # (moonshine-small-streaming-en, tts-1, kokoro, vibevoice-realtime-0.5b)
-    # remain visible through the /api/models/catalogue surface but are
-    # filtered out of the capability dropdowns by design.
+    # ONNX/PyTorch bundles.
     # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
     #
     # Curated picks intentionally span the licensing spectrum:
@@ -1215,85 +1175,9 @@ def get_curated(model_id: str) -> CuratedModel | None:
     return CURATED_BY_ID.get(model_id)
 
 
-# ── haloai upstream seed ───────────────────────────────────────────────────
-# The haloai LXC exposes a large /v1/models surface (FastFlowLM NPU
-# models, llamacpp chat, kokoro/vibevoice/moonshine voice, minimax). A
-# frozen snapshot of the curated subset lives at
-# ``seeds/haloai_models.json`` so the UI's Models view and ``hal0 model
-# list`` can show real upstream model ids without hitting the network at
-# import time. Refresh with ``scripts/import_haloai_models.py``.
-
-
-class HaloaiModel(BaseModel):
-    """One upstream-routed model imported from the haloai catalogue.
-
-    Unlike :class:`CuratedModel` (which describes a pullable GGUF/safetensors
-    file with HF coordinates), a HaloaiModel is a route into an existing
-    upstream service. There is no file to download — the id is what the
-    upstream's OpenAI-compatible API answers to.
-    """
-
-    model_config = {"populate_by_name": True, "str_strip_whitespace": True}
-
-    id: str = Field(..., description="OpenAI-compatible model id the upstream answers to.")
-    owned_by: str = Field(..., description="Upstream's owned_by tag (FastFlowLM, llamacpp, …).")
-    upstream: str = Field(default="", description="Logical upstream/slot name (npu, primary, …).")
-    capability: str = Field(
-        default="chat",
-        description="Primary capability: chat | embed | rerank | asr | tts | vision | image.",
-    )
-    backend: str = Field(
-        default="llamacpp",
-        description="Backend runtime: flm | llamacpp | kokoro | moonshine | vibevoice | minimax.",
-    )
-    size_bytes: int | None = Field(
-        default=None, description="On-disk size if reported by upstream."
-    )
-    params: int | None = Field(default=None, description="Parameter count if reported by upstream.")
-    context_size: int | None = Field(default=None, description="Native context window if known.")
-
-
-_HALOAI_SEED_PATH = Path(__file__).parent / "seeds" / "haloai_models.json"
-
-
-@lru_cache(maxsize=1)
-def _load_haloai_seed() -> list[HaloaiModel]:
-    """Read the frozen haloai snapshot from disk. Cached after first call."""
-    if not _HALOAI_SEED_PATH.is_file():
-        return []
-    with _HALOAI_SEED_PATH.open("rb") as f:
-        raw = json.load(f)
-    return [HaloaiModel.model_validate(entry) for entry in raw]
-
-
-def _build_curated() -> list[CuratedModel | HaloaiModel]:
-    """Merge the hand-rolled curated list with the haloai seed.
-
-    Local :data:`CURATED_MODELS` entries win on id collision — their
-    fields are intentionally tuned for the FirstRun wizard's UX and must
-    not be clobbered by a seed refresh.
-    """
-    seen: set[str] = {m.id for m in CURATED_MODELS}
-    merged: list[CuratedModel | HaloaiModel] = list(CURATED_MODELS)
-    for entry in _load_haloai_seed():
-        if entry.id in seen:
-            continue
-        seen.add(entry.id)
-        merged.append(entry)
-    return merged
-
-
-#: Merged catalogue surfaced by ``hal0 model list`` and the UI's Models view.
-#: Built lazily on first access; safe to import at module load time because
-#: no network call is made — the haloai entries come from a frozen JSON seed.
-CURATED: list[CuratedModel | HaloaiModel] = _build_curated()
-
-
 __all__ = [
-    "CURATED",
     "CURATED_BY_ID",
     "CURATED_MODELS",
     "CuratedModel",
-    "HaloaiModel",
     "get_curated",
 ]

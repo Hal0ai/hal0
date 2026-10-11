@@ -2,9 +2,8 @@
  * settings-connected-accounts-v3 — the OAuth "Connected accounts" pane is
  * reachable from the dashboard (#2267).
  *
- * #2252 shipped ConnectedAccountsPanel, but only the legacy ConnectionsView
- * rendered it, and main.jsx redirects #connections to #slots/endpoints, so no
- * navigation path reached it. It now lives at Settings ▸ Integrations ▸
+ * #2252 shipped ConnectedAccountsPanel, but only a Connections page the nav
+ * no longer reaches rendered it, so no navigation path reached it. It now lives at Settings ▸ Integrations ▸
  * Connected Accounts (#settings/accounts). GET /api/oauth/providers is stubbed
  * with the shape `_serialize_provider` returns (src/hal0/api/routes/oauth.py).
  */
@@ -59,11 +58,5 @@ test.describe('Settings ▸ Integrations ▸ Connected Accounts (#2267)', () => 
     await expect(
       page.locator('.oarow', { hasText: 'Spotify' }).getByRole('button', { name: 'Set client secret' }),
     ).toBeVisible()
-  })
-
-  test('the #settings/oauth alias deep-links to the same pane', async ({ page }) => {
-    await page.goto('/#settings/oauth', { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.settings-nav .nav-item.active')).toHaveText('Connected Accounts')
-    await expect(page.locator('.cpane-title', { hasText: 'Connected accounts' })).toBeVisible()
   })
 })

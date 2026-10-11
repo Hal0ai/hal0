@@ -115,18 +115,18 @@ if [[ ! -r "${TEST_MODEL_PATH}" ]]; then
     harness_write_report || true
     exit 0
 fi
-if "${HAL0_BIN}" model register "${TEST_MODEL_ID}" --path "${TEST_MODEL_PATH}" \
+if "${HAL0_BIN}" model add "${TEST_MODEL_PATH}" --id "${TEST_MODEL_ID}" \
     --license apache-2.0 --name "Harness Qwen" >/dev/null 2>&1; then
     add_row "runtime-model-register" "pass" "$(since_ms "${start}")" "${TEST_MODEL_ID} registered"
 else
-    add_row "runtime-model-register" "fail" "$(since_ms "${start}")" "model register exited non-zero"
+    add_row "runtime-model-register" "fail" "$(since_ms "${start}")" "model add exited non-zero"
 fi
 
 # ── ROW: runtime-slot-create ────────────────────────────────────────────────
 log_step "Row: runtime-slot-create"
 start=$(start_ms)
 if "${HAL0_BIN}" slot create "${TEST_SLOT}" \
-    --backend llama-server --port 8093 \
+    --provider llama-server --port 8093 \
     --model "${TEST_MODEL_ID}" >/dev/null 2>&1; then
     add_row "runtime-slot-create" "pass" "$(since_ms "${start}")" "${TEST_SLOT} created (port 8093, llama-server/vulkan)"
 else

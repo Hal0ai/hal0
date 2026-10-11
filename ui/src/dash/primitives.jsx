@@ -422,21 +422,6 @@ const BANNER_CATALOG = [
       { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
     ],
   },
-  {
-    // D5 (post-R3 surface rework): flag-migration refusal. The live surface is
-    // <MigrationBanner> (reads useMigrationReport); this catalog entry is the
-    // Tweaks-panel demo toggle, and its Resolve fires the window event
-    // <MigrationResolveHost> listens for to open the resolution view off the
-    // demo report. Carries the same HAL0 id as the doctor diagnosis.
-    id: "migration-unresolved", scope: "global", kind: "warn",
-    eyebrow: "Migration · needs resolution",
-    heading: "2 models need flag-migration resolution",
-    body: "Slots shared them with different launch overrides. They keep their old behavior until you resolve. (HAL0-0142)",
-    actions: [
-      { label: "Resolve", primary: true, onClick: () => window.dispatchEvent(new CustomEvent("hal0:migration-resolve")) },
-      { label: "Snooze" },
-    ],
-  },
   // Slots view
   {
     id: "npu-swap", scope: "slots", kind: "warn",
@@ -444,16 +429,6 @@ const BANNER_CATALOG = [
     heading: "Swapping NPU chat: gemma3:1b → llama-3.2-3b-npu",
     body: "Voice + embed paused for ~14s while FLM restarts. Coresident slots will resume automatically.",
     dismissable: false,
-  },
-  {
-    id: "catalog-drift", scope: "slots", kind: "warn",
-    eyebrow: "Catalog · drift",
-    heading: "registry.toml is newer than server_models.json",
-    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart the affected slots.",
-    actions: [
-      { label: "Sync now", primary: true },
-      { label: "Diff catalog" },
-    ],
   },
   {
     id: "all-slots-disabled", scope: "slots", kind: "warn",

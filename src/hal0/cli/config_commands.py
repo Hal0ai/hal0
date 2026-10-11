@@ -430,7 +430,7 @@ def config_hardware(
         False,
         "--refresh",
         help="Force a fresh hardware probe (POST /api/hardware/probe) instead "
-        "of showing the cached payload. Equivalent to the deprecated `hal0 probe`.",
+        "of showing the cached payload.",
     ),
 ) -> None:
     """Show the cached hardware probe payload (or force a fresh one with --refresh)."""

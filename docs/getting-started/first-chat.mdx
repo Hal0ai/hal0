@@ -88,9 +88,8 @@ The response is a Server-Sent Events stream of OpenAI-shaped chunks.
 hal0's two canonical seeded roles are `agent` (the capable default, and
 the fallback anchor for every other role) and `utility` (a cheaper model
 for lightweight/background work). Both are valid `model` ids, as is the
-name of any other slot you've created yourself. The legacy alias
-`agent-hermes` still resolves to `agent`; `chat` and `primary` were
-retired as slot names/aliases. Passing the underlying model id directly
+name of any other slot you've created yourself. The old aliases
+`agent-hermes`, `chat` and `primary` were retired as slot names/aliases. Passing the underlying model id directly
 works too, and so do the live-resolving virtual names `hal0/agent`,
 `hal0/utility`, and `hal0/npu`.
 </Aside>

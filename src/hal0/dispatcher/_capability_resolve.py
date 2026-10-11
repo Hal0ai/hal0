@@ -152,7 +152,7 @@ def resolve_by_capability(  # TIER1
          raises the typed 409 before any upstream call — #1894.)
       8. Model id exactly matches a registered slot upstream name (other
          than the default ``agent`` anchor) → that slot.  Back-compat alias
-         (``agent-hermes`` → ``agent``) is resolved first.
+         (``embed-rerank`` → ``rerank``) is resolved first.
       9. Fallback → ``agent`` slot (ADR-0023 default anchor).
 
     Args:
@@ -232,7 +232,7 @@ def resolve_by_capability(  # TIER1
                 candidate = "embed"
             else:
                 # Rule 8 — explicit slot-name addressing.
-                # Resolve back-compat aliases (agent-hermes→agent) before the
+                # Resolve back-compat aliases (embed-rerank→rerank) before the
                 # upstream lookup so old callers still land correctly.
                 m_resolved = SLOT_ALIASES.get(m, m)
                 slot_match = upstreams.get(m_resolved)

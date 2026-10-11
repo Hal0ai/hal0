@@ -1709,30 +1709,7 @@ function UpstreamProvidersPanel() {
   )
 }
 
-// ─── the view (legacy #connections → redirected to #slots/endpoints) ──
-// Kept as a composed fallback so any direct render still works; the route
-// alias in main.jsx means users no longer land here. Each pane has a live
-// home: Slots ▸ Endpoints (local + upstream), Agent ▸ MCP, and
-// Settings ▸ Integrations ▸ Connected Accounts (#2267).
-function ConnectionsView() {
-  return (
-    <div className="view">
-      <div className="vh">
-        <span className="vh-eye mono">Network</span>
-        <h1>Connections</h1>
-      </div>
-      <div className="conn">
-        <LocalEndpointsPanel />
-        <ConnectedAccountsPanel />
-        <UpstreamProvidersPanel />
-        <McpServersPanel />
-      </div>
-    </div>
-  )
-}
-
 Object.assign(window, {
-  ConnectionsView,
   LocalEndpointsPanel,
   ConnectedAccountsPanel,
   UpstreamProvidersPanel,

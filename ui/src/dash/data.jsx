@@ -52,10 +52,10 @@ const HAL0_DATA = {
   // "primary"/"legacy" entries are conventional built-in-slot names used
   // across the mock harness (mockFixtures.ts, tests/e2e/fixtures/mock-data.ts),
   // NOT display names an operator would confuse for a real slot. This array
-  // is NOT a fallback for the live dashboard: DashboardView/SlotsView read
+  // is NOT a fallback for the live dashboard: the dashboard and SlotsView read
   // exclusively from `useSlots()` and render a loading state (never a
   // fixture row) until that query resolves — the `slots` prop main.jsx still
-  // threads through to the legacy views is intentionally ignored by both.
+  // threads through to SlotsView is intentionally ignored.
   // See tests/e2e/specs/dashboard-names-live-v3.spec.ts for the regression
   // that pins this down against a live-shaped (non-HAL0_DATA) mock.
   slots: [

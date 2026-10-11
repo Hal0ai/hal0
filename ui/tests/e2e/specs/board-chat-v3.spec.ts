@@ -5,14 +5,14 @@
  *   - Open chat via board-action-chat → board-chat visible
  *   - Chat input + send button present
  *   - Suggestion chips (board-chat-suggest-<i>)
- *   - Sending a message via send button → POST /api/board/chat
+ *   - Sending a message via send button → POST /api/brain/chat
  *   - SSE stream: mocked fetch POST with chunked data: lines → assistant msg appears
  *   - WS /api/board/events: task.updated frame → board query invalidated → card moves lane
  *   - task ref chip (board-chat-ref-<id>) click opens drawer
  *   - Close chat via Escape
  *
  * SSE mock: useBoardChat reads response via fetch ReadableStream; we mock the
- * POST /api/board/chat route to return SSE lines in the REAL backend contract
+ * POST /api/brain/chat route to return SSE lines in the REAL backend contract
  * (see src/hal0/api/routes/board_chat.py — the frame `type` is authoritative):
  *   data: {"type":"token","text":"Hello"}\n\n
  *   data: {"type":"tool_call","name":"move_task","arguments":{"task_id":"<id>","status":"done"}}\n\n
@@ -90,7 +90,7 @@ test.describe('BoardView — agent chat', () => {
   })
 
   test('chat thread persists across close + reopen', async ({ page }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') { await route.fallback(); return }
       await route.fulfill({
         status: 200,
@@ -146,10 +146,10 @@ test.describe('BoardView — agent chat', () => {
 
   // ── SSE streaming path ────────────────────────────────────────────────
 
-  test('send message → POST /api/board/chat → assistant tokens stream in', async ({ page }) => {
+  test('send message → POST /api/brain/chat → assistant tokens stream in', async ({ page }) => {
     let postBody: any = null
     // Mock chat SSE endpoint with proper streaming body
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return
@@ -196,7 +196,7 @@ test.describe('BoardView — agent chat', () => {
 
   test('send via Enter key fires chat POST', async ({ page }) => {
     let chatCalled = false
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() === 'POST') {
         chatCalled = true
         await route.fulfill({
@@ -222,7 +222,7 @@ test.describe('BoardView — agent chat', () => {
   test('SSE tool_call frame invalidates board and assistant msg shows', async ({ page }) => {
     const targetTask = BOARD_TASKS.find(t => t.status === 'todo')!
 
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') { await route.fallback(); return }
       const sseBody = [
         'data: {"type":"token","text":"Moving task for you..."}\n\n',
@@ -249,7 +249,7 @@ test.describe('BoardView — agent chat', () => {
   // ── Reply formatting: thinking fold, markdown, structured tool card ────
 
   test('thinking frame folds away, markdown renders, tool card shows result', async ({ page }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') { await route.fallback(); return }
       const sseBody = [
         'data: {"type":"thinking","text":"checking the slots first"}\n\n',
@@ -290,7 +290,7 @@ test.describe('BoardView — agent chat', () => {
   })
 
   test('inline <think> tags in token stream never render raw', async ({ page }) => {
-    await page.route('**/api/board/chat', async (route) => {
+    await page.route('**/api/brain/chat', async (route) => {
       if (route.request().method() !== 'POST') { await route.fallback(); return }
       await route.fulfill({
         status: 200,

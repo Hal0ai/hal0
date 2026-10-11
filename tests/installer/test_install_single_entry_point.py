@@ -50,8 +50,7 @@ def test_setup_is_hidden_from_the_user_facing_command_list() -> None:
 
     v1.0 makes the installer the only way an operator provisions a box;
     ``setup`` survives purely as the internal verb install.sh drives, so it is
-    registered with ``hidden=True`` (the same convention ``hal0 model
-    register`` / ``hal0 slot add`` use).
+    registered with ``hidden=True``.
     """
     from typer.testing import CliRunner
 

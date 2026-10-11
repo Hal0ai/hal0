@@ -3,8 +3,8 @@
 Regression coverage for the hal0 v1 harness finding #2 / task #20:
 ``--backend`` historically named the *provider* but the slot's actual
 hardware backend was hardcoded to "vulkan". Fix split the flag into
-``--provider`` (engine) and ``--hardware`` (vulkan / rocm / cpu), with
-``--backend`` kept as a hidden deprecated alias for provider.
+``--provider`` (engine) and ``--hardware`` (vulkan / rocm / cpu); the old
+``--backend`` alias has since been removed.
 
 These tests poke the Typer command via ``CliRunner`` and monkeypatch
 the API client + hardware-probe defaults so they don't hit network or
@@ -108,35 +108,13 @@ def test_hardware_flag_overrides_default(captured_post: dict[str, Any]) -> None:
     assert captured_post["body"]["provider"] == "llama-server"
 
 
-def test_legacy_backend_flag_translates_to_provider(
-    captured_post: dict[str, Any],
-) -> None:
-    """Deprecated ``--backend flm`` is translated to provider=flm + warns on stderr."""
+def test_backend_flag_is_gone(captured_post: dict[str, Any]) -> None:
+    """The historic ``--backend`` alias for ``--provider`` was removed."""
     result = runner.invoke(
         slot_commands.app,
         ["create", "primary", "--backend", "flm", "--model", "demo"],
     )
-    assert result.exit_code == 0, result.output
-    assert captured_post["body"]["provider"] == "flm"
-    # The hardware device must NOT be conflated with the deprecated flag.
-    assert captured_post["body"]["device"] == "gpu-vulkan"
-    # Deprecation warning goes to stderr so stdout stays parseable for
-    # scripts piping the success line elsewhere.
-    assert "deprecated" in result.stderr.lower()
-    assert "--provider" in result.stderr
-
-
-def test_legacy_backend_with_invalid_value_errors(
-    captured_post: dict[str, Any],
-) -> None:
-    """``--backend vulkan`` (hardware-shaped) is rejected as not-a-provider."""
-    result = runner.invoke(
-        slot_commands.app,
-        ["create", "primary", "--backend", "vulkan", "--model", "demo"],
-    )
-    # ``die()`` calls typer.Exit(1) — non-zero is the contract.
     assert result.exit_code != 0
-    # No API call should have been made.
     assert "body" not in captured_post
 
 
@@ -408,21 +386,6 @@ def test_profile_flag_is_forwarded(captured_post: dict[str, Any]) -> None:
     )
     assert result.exit_code == 0, result.output
     assert captured_post["body"]["profile"] == "reranking"
-
-
-def test_deprecated_add_alias_sends_no_profile(captured_post: dict[str, Any]) -> None:
-    """``slot add`` calls ``slot_create`` in-process — no OptionInfo leak.
-
-    A direct Python call to a Typer command binds the ``typer.Option(...)``
-    sentinel for every omitted parameter, so a new parameter that the alias
-    forgets to pass gets POSTed as that sentinel object.
-    """
-    result = runner.invoke(
-        slot_commands.app,
-        ["add", "rr", "--type", "reranking", "--model", "demo"],
-    )
-    assert result.exit_code == 0, result.output
-    assert "profile" not in captured_post["body"]
 
 
 def test_profile_omitted_leaves_the_key_absent(captured_post: dict[str, Any]) -> None:

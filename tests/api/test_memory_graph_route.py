@@ -4,8 +4,7 @@ Builds a bare FastAPI app + a stub wrapper so we don't have to spin up a full
 hal0 lifespan or a real memory engine. Pins the contract the
 ``hal0 memory graph`` CLI + the dashboard Memory tab depend on:
 
-  - ``GET /graph/status`` returns ``extraction_slot`` (+ deprecated ``route``
-    mirror), ``slot_resolves``, and ``available_slots``.
+  - ``GET /graph/status`` returns ``extraction_slot`` , ``slot_resolves``, and ``available_slots``.
   - ``PUT /graph`` validates ``extraction_slot`` against the live enabled-llm
     slot set, rejecting an unknown slot with 422 and NOT flipping the gate.
   - ``PUT /graph`` propagates a slot change to hindsight-api (drop-in + restart)
@@ -43,7 +42,6 @@ class StubWrapper:
         return {
             "enabled": self.enabled,
             "extraction_slot": self.extraction_slot,
-            "route": self.extraction_slot,  # deprecated mirror
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,
@@ -115,8 +113,7 @@ def test_graph_status_default_returns_off(client: TestClient, stub_wrapper: Stub
     body = r.json()
     assert body["enabled"] is False
     assert body["extraction_slot"] == "utility"
-    # Deprecated mirror still present for the old dashboard.
-    assert body["route"] == "utility"
+    assert "route" not in body
     assert body["builds_ok"] == 0
 
 

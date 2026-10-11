@@ -327,37 +327,15 @@ class SystemCtlSeam:
     def _seam_argv(self, *parts: str) -> list[str]:
         return ["sudo", "-n", self._seam_bin, *parts]
 
-    # ``write_unit`` (and the wrapper's ``write-unit`` verb) were REMOVED in
-    # #1740. It shipped an unvalidated body to a root-owned
+    # ``write_unit`` and ``remove_unit`` (and the wrapper's ``write-unit`` /
+    # ``remove-unit`` verbs) are gone. ``write_unit`` was REMOVED in #1740: it
+    # shipped an unvalidated body to a root-owned
     # ``/etc/systemd/system/hal0-slot@<id>.service`` — an unconditional root
     # exec primitive reachable from the unprivileged hal0 account — and
     # P3-quadlet had already left it with no producer: the sole renderer of
     # slot-unit text (``_render_quadlet_from_plan``) emits a ``.container``,
-    # written via :meth:`write_quadlet`. ``remove_unit`` stays for legacy
-    # pre-quadlet ``.service`` cleanup.
-
-    def remove_unit(self, unit_path: Path, *, timeout: float | None = None) -> None:
-        """Delete a ``hal0-slot@<id>.service`` unit file (no-op if absent).
-
-        ``timeout`` (seconds, ``None`` = unbounded) bounds the seam child on
-        the hal0-service-user route, like :meth:`systemctl`'s (#1869) — a
-        wedged sudo/root-side ``rm`` on this path is otherwise indistinguishable
-        from a slow one.
-        """
-        if not self._is_hal0_user():
-            unit_path.unlink(missing_ok=True)
-            return
-        slot_id = _slot_id_from_unit(unit_path.name)
-        if slot_id is None:
-            raise ValueError(f"not a hal0-slot@ unit: {unit_path.name!r}")
-        # Mirrors the direct path's tolerance of "already gone" (missing_ok):
-        # the wrapper's remove-unit is idempotent (rm -f semantics).
-        bounded_call(
-            self._seam_argv("remove-unit", slot_id),
-            timeout=timeout,
-            run=self._run,
-            check=False,
-        )
+    # written via :meth:`write_quadlet`. ``remove_unit`` (legacy pre-quadlet
+    # ``.service`` cleanup) had no production caller either.
 
     def write_quadlet(
         self, quadlet_path: Path, unit_text: str, *, timeout: float | None = None

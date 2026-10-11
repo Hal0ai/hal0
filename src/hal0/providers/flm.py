@@ -645,7 +645,7 @@ def _npu_device_nodes() -> list[str]:
     Fallback chain (documented per the hardware-generalization wave):
 
       1. hardware.json ``npu.accel_path`` / ``npu.render_path`` — the actual
-         nodes ``hal0 probe`` detected on this host (a second accel device or
+         nodes ``hal0 config hardware --refresh`` detected on this host (a second accel device or
          a non-renderD128 iGPU node lands here);
       2. the Strix Halo constants ``/dev/accel/accel0`` +
          ``/dev/dri/renderD128`` — today's behaviour, used when the snapshot

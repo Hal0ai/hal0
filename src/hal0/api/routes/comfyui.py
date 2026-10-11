@@ -5,7 +5,8 @@ of per-model slots (a single run loads many cooperating models at once, and it
 is mutually exclusive with the LLM stack on the single iGPU). The Image-Gen tab
 renders that engine pane from ``GET /api/comfyui/status``, which folds together:
 
-  - **docker** container state (``comfyui`` running / exited / absent),
+  - **systemd** state of the ``hal0-slot@img`` unit (the podman container
+    that runs ComfyUI: running / absent),
   - **systemd** state of the Hermes agent (``hal0-agent@hermes``) so the pane
     can show which mode currently owns the GPU, and
   - **ComfyUI's own HTTP API** (``/system_stats`` for GTT/RAM, ``/queue`` for the
@@ -94,8 +95,9 @@ def _comfyui_base_url() -> str:
     return os.environ.get("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
 
 
-def _comfyui_container() -> str:
-    return os.environ.get("COMFYUI_CONTAINER", "comfyui")
+#: The podman container the ``hal0-slot@img`` unit runs (reported as
+#: ``container.name`` on ``/status``; the state comes from the unit).
+_IMG_CONTAINER = "hal0-slot-img"
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -143,39 +145,14 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
         return None
 
 
-async def _container_state(name: str) -> str:
-    """Return the generation container state: 'running', 'exited', or 'absent'.
+async def _container_state() -> str:
+    """Return the generation container state: 'running' or 'absent'.
 
-    Podman-first (#710): post-Phase-D the img slot runs as the
-    ``hal0-slot@img`` systemd unit — probe it the way the slots page
-    does. ``docker inspect`` survives only as the legacy fallback for
-    pre-migration installs. 'absent' also covers "docker not installed"
-    and any inspect failure — the pane treats all non-running states as
-    stopped.
+    The img slot runs as the ``hal0-slot@img`` systemd unit (podman), so the
+    unit's state is the truth. Any non-active state reads as 'absent' — the
+    pane treats it as stopped.
     """
-    if await _systemd_active(_IMG_UNIT):
-        return "running"
-    docker = shutil.which("docker")
-    if not docker:
-        return "absent"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            docker,
-            "inspect",
-            "-f",
-            "{{.State.Status}}",
-            name,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-    except (TimeoutError, OSError):
-        return "absent"
-    if proc.returncode != 0:
-        return "absent"
-    state = out.decode("utf-8", "replace").strip()
-    return state or "absent"
+    return "running" if await _systemd_active(_IMG_UNIT) else "absent"
 
 
 async def _systemd_active(unit: str) -> bool:
@@ -346,9 +323,8 @@ def _model_inventory() -> dict[str, int] | None:
 
 
 def _engine_state(container: str, reachable: bool, running_jobs: int) -> str:
-    # A reachable ComfyUI IS the engine truth — the docker name probe can't
-    # see the podman hal0-slot-img container (post-D9 it reports "absent"
-    # forever), and the resident container must not render as "stopped".
+    # A reachable ComfyUI IS the engine truth — the resident container must
+    # not render as "stopped".
     if reachable:
         return "generating" if running_jobs > 0 else "running"
     if container == "running":
@@ -369,9 +345,8 @@ _ARBITER_TO_API_MODE = {"img": "generation", "llm": "inference"}
 def _arbiter_api_mode(arbiter: Any) -> str | None:
     """Arbiter-truth current mode ("generation"|"inference"), or None.
 
-    None means "no arbiter / arbiter broken" — callers fall back to the legacy
-    docker container probe. Post-migration (D9 removed the docker container)
-    the legacy probe lies, so the arbiter wins whenever it answers.
+    None means "no arbiter / arbiter broken" — the mode is then unknown (the
+    resident img unit stays up in inference mode, so it cannot stand in).
     """
     if arbiter is None:
         return None
@@ -383,10 +358,9 @@ def _arbiter_api_mode(arbiter: Any) -> str | None:
 
 @router.get("/status")
 async def comfyui_status(request: Request) -> dict[str, Any]:
-    """Aggregate docker + systemd + ComfyUI HTTP into one engine-status object."""
-    container_name = _comfyui_container()
+    """Aggregate systemd + ComfyUI HTTP into one engine-status object."""
     container, hermes, stats, queue = await asyncio.gather(
-        _container_state(container_name),
+        _container_state(),
         _systemd_active(_HERMES_UNIT),
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
@@ -404,19 +378,19 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
             arbiter_block = arbiter.status()
     except Exception:
         arbiter_block = None
-    # Mode: arbiter is the source of truth (img → generation, llm → inference);
-    # the docker-derived mode is only the legacy fallback for arbiter-less apps.
-    arb_mode = (
+    # Mode: the arbiter is the only source of truth (img → generation, llm →
+    # inference). The resident img unit stays up in inference mode too, so its
+    # state is NOT mode evidence: with no arbiter answer the mode is ``None``.
+    mode = (
         _ARBITER_TO_API_MODE.get(arbiter_block.get("mode"))
         if isinstance(arbiter_block, dict)
         else None
     )
-    mode = arb_mode or ("generation" if container == "running" else "inference")
     return {
         "mode": mode,
         "reachable": reachable,
         "engine": engine,
-        "container": {"name": container_name, "state": container},
+        "container": {"name": _IMG_CONTAINER, "state": container},
         # Resident container: the web UI is usable whenever ComfyUI answers,
         # regardless of which mode owns the GPU memory.
         "endpoint": ":8188" if (reachable or mode == "generation") else None,
@@ -497,7 +471,7 @@ async def comfyui_switchover(
             "body must be {'mode': 'generation' | 'inference'}",
             code="comfyui.invalid_mode",
         )
-    # One switch at a time — racing systemctl/docker pairs is never right. Checked
+    # One switch at a time — racing systemctl calls is never right. Checked
     # before the noop probe so a mid-flight flip is reported as in-progress, not
     # as "already there" based on a half-transitioned snapshot.
     if _switch["active"]:
@@ -506,19 +480,13 @@ async def comfyui_switchover(
             code="comfyui.switch_in_progress",
         )
     # Idempotency: the arbiter is the source of truth for the current mode
-    # (D7) — the docker-era container probe is ONLY the legacy fallback for
-    # arbiter-less apps. Post-migration the docker container is gone, so the
-    # fallback would report "already in inference" forever (= restore_llm
-    # never invokable, pinned img mode would be a permanent lockout) — hence
-    # the arbiter wins whenever it answers.
+    # (D7). The img unit stays up in inference mode, so it cannot tell the
+    # modes apart: when the arbiter cannot answer, refuse rather than guess.
     arbiter = _get_arbiter(request)
     current = _arbiter_api_mode(arbiter)
-    if current is not None:
-        already_there = current == mode
-    else:
-        container = await _container_state(_comfyui_container())
-        already_there = container == "running" if mode == "generation" else container != "running"
-    if already_there:
+    if current is None:
+        return _arbiter_unavailable()
+    if current == mode:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference frees ComfyUI's models from GPU
     # memory, killing any running/pending renders (the container itself stays
@@ -535,8 +503,6 @@ async def comfyui_switchover(
                 code="comfyui.busy",
                 details={"queue": counts},
             )
-    if arbiter is None:
-        return _arbiter_unavailable()
     pin = body.pin
     # Dispatch in the background and answer 202 immediately — the drain/reload
     # takes seconds to tens of seconds (slot unloads, container boot) and the

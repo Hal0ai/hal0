@@ -904,7 +904,7 @@ regressions:
       under `ui-polish-rollup-rc5` / `known-issues: slots-gpu-telemetry-on-vulkan-box-is-correct`
       — do not file it here. Upgrade nuance worth one line in the post-upgrade lane: an old
       hardware.json lacking the capability keys degrades the gate to RAM booking until the next
-      `hal0 probe`.
+      `hal0 config hardware --refresh`.
 
   - id: cli-api-polish-rollup-rc5
     issue: 1840

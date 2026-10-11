@@ -36,17 +36,10 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
   })
 
-  // Legacy deep links from before the settings-panel cleanup must still land
-  // on the page that absorbed their content (SECTION_ALIASES).
-  test('legacy ids resolve via aliases', async ({ page }) => {
+  // An id that is not a settings page falls back to Overview.
+  test('unknown ids fall back to Overview', async ({ page }) => {
     await page.goto('/#settings/health')
     await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
-    await page.goto('/#settings/about')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
-    await page.goto('/#settings/runtimes')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Hardware & Runtimes')
-    await page.goto('/#settings/library')
-    await expect(page.locator('.settings-content h2').first()).toHaveText('Loaded Models')
   })
 
   test('clicking Updates swaps the section', async ({ page }) => {

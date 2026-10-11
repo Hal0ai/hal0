@@ -42,6 +42,66 @@ applying. Add those subsections to a version's section to surface them; see
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
 
+- Removed the deprecated CLI aliases and no-op flags. Use the replacement
+  instead: `hal0 probe` -> `hal0 config hardware --refresh`;
+  `hal0 model register` -> `hal0 model add`; `hal0 model assign` ->
+  `hal0 slot edit --model`; `hal0 slot add` -> `hal0 slot create`;
+  `hal0 slot remove` -> `hal0 slot delete`; `hal0 upstream set-credentials`
+  -> `hal0 upstream credentials set`; `hal0 doctor --verify` ->
+  `hal0 doctor verify`. The `--backend`/`-b` flag on `slot create` and
+  `slot edit` (a stale alias for `--provider`) is gone, and so are the
+  no-op `--dry-run` flags on `capabilities migrate` and
+  `slot migrate-id-keying` (both already dry-run unless you pass `--apply`).
+
+- Removed dead dashboard surfaces. The flag-migration banner and resolution
+  view (their `GET /api/migrations/flag-report` endpoint was never built) are
+  gone, along with the unreachable old dashboard grid, the `ConnectionsView`
+  wrapper and the `#connections`, `#profiles`, `#slots/profiles`, `#peers`,
+  `#memory/graph` and `#memory/tools` hash redirects. Legacy
+  `#settings/<id>` section ids (`general`, `health`, `library`, `backend`,
+  `runtimes`, `hwtuning`, `about`, `voice`, `imagegen`, `npu`, `oauth`) no
+  longer resolve and fall back to Overview; use `#settings/capabilities`,
+  `#settings/accounts` and so on. `GET /api/user/dashboard-layout` now answers
+  `{}` for a pre-#1061 (v2) layout file left on disk instead of returning it
+  reconciled; the dashboard shows its default bands until the next save.
+
+- Removed deprecated API fields and aliases. The dashboard and the bundled
+  agents are updated in the same release; external clients must follow:
+  - `POST /api/board/chat` is gone; use `POST /api/brain/chat` (same SSE
+    contract). The dashboard's Board chat now calls the brain route.
+  - `GET /api/memory/graph/status` no longer returns the `route` mirror of
+    `extraction_slot`.
+  - `GET /api/meta/enums` no longer returns the deprecated `backends` list
+    (use `devices`, `selectable_backends` and `model_backends`).
+  - The `agent-hermes` slot alias no longer resolves to `agent`, and the
+    `chat` / `primary` slot-name fallbacks are gone from the first-run check
+    (`has_default_slot` looks for `agent.toml` only), the `hal0/*` fallback
+    anchor and the Hermes chat-model pick. Use `agent`.
+  - `GET /api/slots/by-name/{name}` now returns exactly what
+    `GET /api/slots/{name}` returns (it used to omit the config enrichment).
+
+- Removed dead and misleading code paths:
+  - The frozen haloai upstream seed (68 model ids routed into a predecessor
+    gateway, including `minimax` and `vibevoice` ids no hal0 provider can
+    serve) is gone. `GET /api/models/catalogue`, and the admin MCP
+    `model_catalogue` tool that wraps it, now return only
+    `{pullable, counts: {pullable, total}}`; the `upstream` list is removed.
+  - ComfyUI's `/api/comfyui/status` no longer falls back to `docker inspect`:
+    an unrelated docker container named `comfyui` used to flip the mode to
+    `generation`. The container state now comes only from the
+    `hal0-slot@img` unit, and the `COMFYUI_CONTAINER` environment variable is
+    gone (`container.name` always reads `hal0-slot-img`). The mode now comes
+    only from the GPU arbiter (the img unit stays up in inference mode too):
+    `/status` reports `mode: null` when the arbiter cannot answer, and
+    `POST /api/comfyui/switchover` answers 503 `comfyui.arbiter_unavailable`
+    instead of guessing "already there" from the unit.
+  - The `hal0-systemctl remove-unit` verb and `SystemCtlSeam.remove_unit`
+    (nothing called them), `hal0.memory.migrate` (a Cognee dry-run with no
+    caller), the legacy `HAL0_DOCKER_REQUIRED` installer variable (use
+    `HAL0_CONTAINER_REQUIRED`), the dead `docs/operate/tls.md` references in
+    `install.sh`, and the copy of the version-compare helpers in the updater
+    API route (it now shares `hal0.updater.updater._is_newer`).
+
 ### Fixed
 
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,

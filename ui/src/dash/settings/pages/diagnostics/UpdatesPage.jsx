@@ -1,8 +1,7 @@
 // SYSTEM ▸ Updates — signed self-update (updates = E(/api/updater/*)),
 // plus the About panel (version identity, license, links) absorbed from the
 // former DIAGNOSTICS ▸ About page (settings-panel cleanup). The `id` stays
-// "updates" (unchanged) so #settings/updates deep links keep working;
-// #settings/about aliases here.
+// "updates" (unchanged) so #settings/updates deep links keep working.
 import { useState, useRef, useEffect } from 'react'
 import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel, useUpdateRollback } from '@/api/hooks/useUpdates'
 import { useComponents } from '@/api/hooks/useComponents'

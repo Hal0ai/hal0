@@ -13,8 +13,7 @@ CLI consolidation (2026-07): ``hal0 upstream set-credentials`` is renamed to
 ``hal0 upstream credentials set`` — every other multi-facet resource in this
 cluster (``agent bootstrap``, ``mcp catalog``, ``memory graph``) uses a
 noun-subgroup, and the flat verb left no home for a future ``credentials
-show``/``credentials clear``. ``set-credentials`` remains as a hidden
-deprecated alias.
+show``/``credentials clear``. The old flat verb has been removed.
 """
 
 from __future__ import annotations
@@ -480,8 +479,7 @@ app.add_typer(credentials_app, name="credentials")
 
 
 def _do_set_credentials(name: str, key: str, env_var: str | None) -> None:
-    """Shared implementation behind ``upstream credentials set`` and the
-    deprecated ``upstream set-credentials`` alias."""
+    """Implementation behind ``upstream credentials set``."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -534,30 +532,4 @@ def credentials_set(
     ),
 ) -> None:
     """Set an API key for a provider (writes to api.env)."""
-    _do_set_credentials(name, key, env_var)
-
-
-# HAL0-SUNSET: v2.0.0 — alias for `upstream credentials set`; drop the alias.
-@app.command("set-credentials", hidden=True)
-def set_credentials(
-    name: str = typer.Argument(..., help="Provider name."),
-    key: str = typer.Option(
-        ...,
-        "--key",
-        prompt="API key",
-        hide_input=True,
-        help="API key VALUE (secret; prompted securely if omitted).",
-    ),
-    env_var: str = typer.Option(
-        None,
-        "--env-var",
-        help="Env-var name to write (defaults to the upstream's declared auth_value_env).",
-    ),
-) -> None:
-    """[DEPRECATED] alias for `upstream credentials set`; use that instead."""
-    typer.echo(
-        "[deprecated] `upstream set-credentials` is renamed to "
-        "`upstream credentials set`; use `hal0 upstream credentials set`.",
-        err=True,
-    )
     _do_set_credentials(name, key, env_var)

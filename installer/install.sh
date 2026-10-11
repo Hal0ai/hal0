@@ -137,7 +137,7 @@ NO_START=0
 # TLS posture: hal0-api binds 0.0.0.0:8080 directly. TLS termination,
 # DNS, and any per-host certs are the responsibility of an upstream
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
-# an edge terminator. See docs/operate/tls.md for example proxies.
+# an edge terminator.
 # Pull destination for `hal0 model pull` and the dashboard's pull buttons.
 # Empty → prompt on an interactive terminal, else default to <var-lib>/models.
 # The chosen path is written to hal0.toml as [models].store (+ the deprecated
@@ -210,8 +210,8 @@ PY="${HAL0_PYTHON:-python3}"
 #             port can drive the API.
 #
 # To expose hal0 externally, put a reverse proxy (Traefik / nginx /
-# Cloudflare Tunnel) in FRONT of it for TLS + auth — see docs/operate/tls.md
-# — and firewall :8080 off from the public interface. Do NOT flip this to a
+# Cloudflare Tunnel) in FRONT of it for TLS + auth, and firewall :8080 off
+# from the public interface. Do NOT flip this to a
 # loopback-only bind: 127.0.0.1 breaks the zero-config LAN dashboard.
 # ==========================================================================
 API_BIND_HOST="0.0.0.0"
@@ -1676,8 +1676,7 @@ fi
 
 # TLS termination is upstream's job — hal0 no longer ships an edge
 # proxy. The API binds 0.0.0.0:8080 directly and any TLS / certs are
-# handled by Traefik / nginx / Cloudflare Tunnel in front of it. See
-# docs/operate/tls.md for example proxy configs.
+# handled by Traefik / nginx / Cloudflare Tunnel in front of it.
 # OpenWebUI prewire env. Rendered via the just-installed venv so the
 # defaults live in exactly one place (src/hal0/openwebui/env_writer.py).
 # In dev mode we point HAL0_HOME at the prefix so the file lands under

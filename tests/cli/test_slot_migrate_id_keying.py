@@ -181,7 +181,7 @@ def test_command_migrates_tree_and_writes_backup(
     # Exercise the filesystem migration independently of host systemd state.
     # The safety gate keeps its dedicated coverage above.
     monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
-    slot_migrate_id_keying(apply=True, yes=True, stop_services=False, dry_run=False)
+    slot_migrate_id_keying(apply=True, yes=True, stop_services=False)
 
     remaining = sorted(p.name for p in config_dir.glob("*.toml"))
     assert remaining != ["chat.toml"]  # migrated to <id>.toml
@@ -217,30 +217,3 @@ def test_apply_false_previews_and_writes_nothing(
     # (a real run would have written a timestamped tarball first).
     assert (config_dir / "chat.toml").exists()
     assert list((paths.var_lib() / "backups").glob("*.tar.gz")) == []
-
-
-def test_dry_run_flag_is_a_no_op_alias_that_apply_overrides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``--dry-run`` still parses (old scripts keep working) but is now a
-    no-op: ``--apply`` alone decides, so ``--apply --dry-run`` still writes."""
-    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
-
-    from hal0.slots.migrate_id_keying import RecordingSlotArtifactOps
-
-    monkeypatch.setattr(
-        "hal0.slots.migrate_id_keying.SubprocessSlotArtifactOps", RecordingSlotArtifactOps
-    )
-
-    from hal0.config import paths
-
-    config_dir = paths.slots_config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "chat.toml").write_text('[slot]\nname = "chat"\nport = 8081\n')
-
-    monkeypatch.setattr("hal0.cli.slot_commands.active_hal0_units", lambda: [])
-    slot_migrate_id_keying(apply=True, yes=True, stop_services=False, dry_run=True)
-
-    remaining = sorted(p.name for p in config_dir.glob("*.toml"))
-    assert remaining != ["chat.toml"]  # migrated to <id>.toml despite --dry-run
-    assert len(remaining) == 1

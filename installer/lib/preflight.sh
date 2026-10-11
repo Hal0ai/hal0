@@ -102,7 +102,6 @@
 #                        auto-installs podman (via the detected package
 #                        manager) and hard-fails (returns non-zero) when it
 #                        can't. Default empty → soft mode for `hal0 doctor`.
-#                        Legacy HAL0_DOCKER_REQUIRED is still honoured.
 #   HAL0_GIT_REQUIRED  — when "1", preflight_git auto-installs git (via the
 #                        detected package manager) and returns non-zero when
 #                        it can't. Default empty → soft mode for `hal0
@@ -706,7 +705,7 @@ _container_runtime_gate() {
 }
 
 preflight_container_runtime() {
-    local required="${HAL0_CONTAINER_REQUIRED:-${HAL0_DOCKER_REQUIRED:-0}}"
+    local required="${HAL0_CONTAINER_REQUIRED:-0}"
 
     # Fast path: a runtime is already installed and working per `<rt> info`.
     local rt
@@ -724,15 +723,14 @@ preflight_container_runtime() {
 
     # No usable runtime. Two modes:
     #
-    #   HAL0_CONTAINER_REQUIRED=1 (set by install.sh; legacy HAL0_DOCKER_REQUIRED
-    #     honoured) — install podman, hard-fail with remediation if that's not
-    #     possible. Every inference slot runs in a container; letting the install
+    #   HAL0_CONTAINER_REQUIRED=1 (set by install.sh) — install podman, hard-fail
+    #     with remediation if that's not possible. Every inference slot runs in a container; letting the install
     #     finish "successfully" only to have every slot sit in `error` with
     #     "no container runtime found" is worse than refusing to proceed.
     #
     #   Unset (default, e.g. `hal0 doctor`) — soft: warn and return 0 so the
     #     rest of the report runs.
-    if [[ "${HAL0_CONTAINER_REQUIRED:-${HAL0_DOCKER_REQUIRED:-0}}" != "1" ]]; then
+    if [[ "${required}" != "1" ]]; then
         warn "no container runtime (podman/docker) — slot launches will fail until one is installed"
         return 0
     fi

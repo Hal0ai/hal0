@@ -30,7 +30,6 @@ export interface MetaDevice {
 
 export interface MetaEnums {
   devices: MetaDevice[]
-  backends: string[]
   selectable_backends: string[]
   device_classes: string[]
   slot_types: string[]
@@ -101,7 +100,6 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
       description: 'ComfyUI image generation (GPU held via the arbiter)',
     },
   ],
-  backends: ['rocm', 'vulkan', 'cpu', 'flm', 'moonshine', 'kokoro'],
   selectable_backends: ['rocm', 'vulkan', 'cpu', 'auto'],
   device_classes: ['gpu', 'cpu', 'npu', 'img'],
   slot_types: ['llm', 'embedding', 'reranking', 'transcription', 'tts', 'image'],
@@ -209,7 +207,6 @@ export function resolveMetaEnums(data?: Partial<MetaEnums> | null): MetaEnums {
   const f = META_ENUMS_FALLBACK
   return {
     devices: _isFilledArray(data.devices) ? (data.devices as MetaDevice[]) : f.devices,
-    backends: _isFilledArray(data.backends) ? (data.backends as string[]) : f.backends,
     selectable_backends: _isFilledArray(data.selectable_backends)
       ? (data.selectable_backends as string[])
       : f.selectable_backends,

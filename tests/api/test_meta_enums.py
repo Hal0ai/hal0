@@ -13,7 +13,6 @@ from hal0 import model_meta
 
 _EXPECTED_KEYS = {
     "devices",
-    "backends",
     "selectable_backends",
     "device_classes",
     "slot_types",
@@ -50,7 +49,6 @@ def test_contract_shape(client: TestClient) -> None:
     assert set(body.keys()) == _EXPECTED_KEYS
     # List-valued vocabularies.
     for key in (
-        "backends",
         "selectable_backends",
         "device_classes",
         "slot_types",
@@ -90,7 +88,7 @@ def test_gpu_rocm_is_the_only_recommended_device(client: TestClient) -> None:
 
 def test_payload_matches_canonical_taxonomy(client: TestClient) -> None:
     body = _get_enums(client)
-    assert body["backends"] == list(model_meta.LEGACY_BACKENDS)
+    assert "backends" not in body
     assert body["selectable_backends"] == ["rocm", "vulkan", "cpu", "auto"]
     assert body["device_classes"] == list(model_meta.DEVICE_CLASSES)
     assert body["slot_types"] == list(model_meta.SLOT_TYPES)

@@ -161,19 +161,8 @@ function writeMemHash(section, bank, fact) {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 function MemoryView({ param } = {}) {
-  // param contract: null → overview; 'bank' → the Bank workspace. Legacy
-  // `#memory/graph` and `#memory/tools` (both folded into the new Bank
-  // workspace's list/inspector/ego/web views) redirect to `#memory/bank`.
-  const isLegacySection = param === 'graph' || param === 'tools';
-  const section = param === 'bank' || isLegacySection ? 'bank' : 'overview';
-
-  useEffectMem(() => {
-    if (!isLegacySection) return;
-    const hash = window.location.hash || '';
-    const qIdx = hash.indexOf('?');
-    const qs = qIdx >= 0 ? hash.slice(qIdx) : '';
-    window.location.hash = memHashPrefix() + '/bank' + qs;
-  }, [param]);
+  // param contract: null → overview; 'bank' → the Bank workspace.
+  const section = param === 'bank' ? 'bank' : 'overview';
 
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;

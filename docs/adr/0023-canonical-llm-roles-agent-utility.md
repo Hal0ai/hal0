@@ -68,10 +68,10 @@ the normal slot-alias machinery.**
   (`src/hal0/memory/hindsight_provider.py:479`) but routes through the
   same live-slot resolution every other virtual model name uses — no
   parallel routing table to keep in sync.
-- Every `route: self._extraction_slot` field left in
+- The deprecated `route` mirror of `extraction_slot` that
   `src/hal0/memory/provider.py` / `hindsight_provider.py` /
-  `pgvector_provider.py` is explicitly marked a deprecated mirror kept
-  for backward-compatible API responses, not a second source of truth.
+  `pgvector_provider.py` once emitted in `GET /api/memory/graph/status` has
+  been removed; `extraction_slot` is the only field.
 - This ADR's scope touches an unusually large number of call sites
   (dispatcher, resolver, CLI, config schema, UI) because it retired two
   overlapping naming systems at once; that breadth is why it is cited

@@ -1208,8 +1208,8 @@ export function useBoardChat(board?: string): UseBoardChatResult {
     setStreaming(true)
 
     const url = board
-      ? `${ENDPOINTS.boardChat}?board=${encodeURIComponent(board)}`
-      : ENDPOINTS.boardChat
+      ? `${ENDPOINTS.brainChat}?board=${encodeURIComponent(board)}`
+      : ENDPOINTS.brainChat
 
     // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
     // carries `messages` (OpenAI format) and optional `board`; the response

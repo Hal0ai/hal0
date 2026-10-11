@@ -18,16 +18,16 @@
 #   cli-config-hardware     hal0 config hardware
 #   cli-config-reload       hal0 config reload
 #   cli-status              hal0 status
-#   cli-probe               hal0 probe
+#   cli-probe               hal0 config hardware --refresh
 #   cli-slot-list           hal0 slot list
 #   cli-model-list          hal0 model list
-#   cli-model-register      hal0 model register <id> --path <local-gguf>
+#   cli-model-register      hal0 model add <local-gguf> --id <id>
 #   cli-model-show          hal0 model show <id>
 #   cli-update-check        hal0 update --check
-#   cli-capabilities-migrate-dry  hal0 capabilities migrate --dry-run (asserts catalog invariant)
+#   cli-capabilities-migrate-dry  hal0 capabilities migrate (dry-run by default; asserts catalog invariant)
 #   cli-slot-show-primary   hal0 slot show primary (expected: 404-equivalent before create)
-#   cli-slot-create-test    hal0 slot create <test-slot> --provider llama-server --backend vulkan --model <id>
-#   cli-model-assign        hal0 model assign <id> --slot <test-slot>
+#   cli-slot-create-test    hal0 slot create <test-slot> --provider llama-server --model <id>
+#   cli-model-assign        hal0 slot edit <test-slot> --model <id>
 #   cli-slot-show-after     hal0 slot show <test-slot>
 #   cli-slot-delete         hal0 slot delete <test-slot> --force
 #   cli-model-rm            hal0 model rm <id> --force
@@ -145,7 +145,7 @@ run_row "cli-config-validate" 0 "hal0 config validate" -- "${HAL0_BIN}" config v
 run_row "cli-config-hardware" 0 "hal0 config hardware (cached)" -- "${HAL0_BIN}" config hardware
 run_row "cli-config-reload"   0 "hal0 config reload"   -- "${HAL0_BIN}" config reload
 run_row "cli-status"  0 "hal0 status" -- "${HAL0_BIN}" status
-run_row "cli-probe"   0 "hal0 probe"  -- "${HAL0_BIN}" probe
+run_row "cli-probe"   0 "hal0 config hardware --refresh" -- "${HAL0_BIN}" config hardware --refresh
 run_row "cli-slot-list"   0 "hal0 slot list"   -- "${HAL0_BIN}" slot list
 run_row "cli-model-list"  0 "hal0 model list"  -- "${HAL0_BIN}" model list
 # hal0 update --check needs releases.hal0.dev DNS-resolvable; on a
@@ -171,14 +171,14 @@ run_update_check_row
 
 # Catalog invariant: every persisted capability selection must be a legal
 # (model, backend) pair against the live catalog. `hal0 capabilities
-# migrate --dry-run` exits 0 in both clean and dirty cases — distinguish
+# migrate` (dry-run unless --apply) exits 0 in both clean and dirty cases — distinguish
 # by parsing for the "nothing to migrate" sentinel; finding it means the
 # orchestrator's pair-validation is doing its job and no drift escaped.
 run_capabilities_migrate_dry_row() {
     local log="${SCRIPT_DIR}/reports/cli-cli-capabilities-migrate-dry.log"
     local start; start=$(start_ms)
     set +e
-    "${HAL0_BIN}" capabilities migrate --dry-run >"${log}" 2>&1
+    "${HAL0_BIN}" capabilities migrate >"${log}" 2>&1
     local rc=$?
     set -e
     if [[ "${rc}" -ne 0 ]]; then
@@ -222,8 +222,8 @@ else
     log_info "using test model: ${TEST_MODEL_PATH}"
 
     run_row "cli-model-register" 0 "register on-disk gguf" -- \
-        "${HAL0_BIN}" model register "${TEST_MODEL_ID}" \
-        --path "${TEST_MODEL_PATH}" --license apache-2.0 --name "Qwen3.5 0.8B (harness)"
+        "${HAL0_BIN}" model add "${TEST_MODEL_PATH}" --id "${TEST_MODEL_ID}" \
+        --license apache-2.0 --name "Qwen3.5 0.8B (harness)"
 
     run_row "cli-model-show" 0 "model show ${TEST_MODEL_ID}" -- \
         "${HAL0_BIN}" model show "${TEST_MODEL_ID}"
@@ -232,17 +232,14 @@ else
     run_row "cli-slot-show-missing" nonzero "slot show on absent name returns non-zero" -- \
         "${HAL0_BIN}" slot show "${TEST_SLOT_NAME}"
 
-    # `hal0 slot create --backend` is actually the *provider* knob
-    # (slot_commands.py:204-229 passes --backend as provider and
-    # hardcodes SlotConfig.backend = "vulkan" at line 228). Port 8093
-    # is in valid range (schema.py:40-41).
+    # Port 8093 is in the valid slot port range (schema.py:40-41).
     run_row "cli-slot-create" 0 "slot create ${TEST_SLOT_NAME}" -- \
         "${HAL0_BIN}" slot create "${TEST_SLOT_NAME}" \
-        --backend llama-server --port 8093 \
+        --provider llama-server --port 8093 \
         --model "${TEST_MODEL_ID}"
 
     run_row "cli-model-assign" 0 "assign model to slot" -- \
-        "${HAL0_BIN}" model assign "${TEST_MODEL_ID}" --slot "${TEST_SLOT_NAME}"
+        "${HAL0_BIN}" slot edit "${TEST_SLOT_NAME}" --model "${TEST_MODEL_ID}"
 
     run_row "cli-slot-show-after" 0 "slot show after create" -- \
         "${HAL0_BIN}" slot show "${TEST_SLOT_NAME}"

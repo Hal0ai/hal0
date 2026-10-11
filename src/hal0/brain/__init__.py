@@ -11,8 +11,7 @@ only through ``app.state`` handles injected at runtime. Importing this
 package never pulls in a board/Hermes dependency.
 
 :func:`run_brain_chat` is the primary entry point, mounted at
-``POST /api/brain/chat``; ``POST /api/board/chat`` is a thin back-compat
-alias (:mod:`hal0.api.routes.board_chat`) that delegates here.
+``POST /api/brain/chat``.
 """
 
 from __future__ import annotations

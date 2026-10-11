@@ -30,7 +30,6 @@ from hal0.model_meta import (
     CURATED_MODEL_TAGS,
     DEVICE_CLASSES,
     DEVICE_TO_DEFAULT_PROFILE,
-    LEGACY_BACKENDS,
     MODEL_BACKENDS,
     MODEL_CAPABILITIES,
     RUNTIME_FAMILIES,
@@ -67,7 +66,6 @@ async def get_enums(request: Request, response: Response) -> Any:
       default_profile, legacy_backend, recommended, description}``.
       ``gpu-rocm`` carries ``recommended: true`` (ARCHITECTURE.md: best
       throughput on Strix Halo; ``gpu-vulkan`` is the slower fallback).
-    - ``backends``: DEPRECATED v0.1 ``SlotConfig.backend`` tokens.
     - ``selectable_backends``: what POST /api/slots/{name}/backend accepts.
     - ``device_classes`` / ``slot_types`` / ``runtime_families``: the
       profile + dispatcher vocabularies.
@@ -97,7 +95,6 @@ async def get_enums(request: Request, response: Response) -> Any:
     response.headers.update(cache_headers)
     return {
         "devices": [asdict(d) for d in CANONICAL_DEVICES],
-        "backends": list(LEGACY_BACKENDS),
         "selectable_backends": list(SELECTABLE_BACKENDS),
         "device_classes": list(DEVICE_CLASSES),
         "slot_types": list(SLOT_TYPES),

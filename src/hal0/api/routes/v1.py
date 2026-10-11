@@ -303,9 +303,8 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
 
     hermes-role-slots: a request may address a co-resident llm slot by
     its **alias** (the slot name — ADR-0023 canonical: ``agent`` / ``utility``,
-    plus any other enabled llm slot by name; legacy ``agent-hermes`` accepted
-    via back-compat alias) instead of the underlying model id. We rewrite the
-    alias to the
+    plus any other enabled llm slot by name) instead of the underlying model
+    id. We rewrite the alias to the
     slot's configured model id HERE, at the route layer, before the
     dispatcher routes it. After the rewrite, both ``model==alias`` and
     ``model==model_id`` carry the correct distinct model name down the
@@ -693,7 +692,7 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
-    # Translate an llm-slot alias (agent/utility/any enabled llm slot; also agent-hermes) → model id
+    # Translate an llm-slot alias (agent/utility/any enabled llm slot) → model id
     # before routing so the dispatcher sees the real model name.
     body = await _rewrite_chat_slot_alias(request, body)
     # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
@@ -778,8 +777,8 @@ async def list_models(
 
     * **Per-slot alias entries** (``hermes-role-slots``). Every chat slot
       (``type == "llm"``) **with a bound model** surfaces as one model
-      object whose ``id`` is the slot **alias = slot name** (``primary``,
-      ``agent-hermes``, ``utility``), carrying a human ``name``
+      object whose ``id`` is the slot **alias = slot name** (``agent``,
+      ``utility``), carrying a human ``name``
       (``"<slot> · <model display name>"``) and the slot's
       ``context_length``/``max_context_window``. Built by
       :func:`hal0.api.hal0_slot_alias_models`. **Both warm and cold slots

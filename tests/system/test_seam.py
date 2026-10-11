@@ -5,7 +5,7 @@ Covers:
   * Direct passthrough (today's exact behaviour) when NOT running as the hal0
     service user — the dev/CI/test-suite default, and every pre-flip install.
   * Seam routing (``sudo -n hal0-systemctl ...``) when running as hal0,
-    for write_unit / remove_unit / systemctl verbs / restart_self.
+    for the systemctl verbs / restart_self.
   * Read-only queries (``is-active``) and non-slot units never route through
     the seam even when running as hal0.
   * Bad slot-unit names raise instead of silently mis-routing.
@@ -53,6 +53,7 @@ def test_write_unit_is_removed() -> None:
     ``_render_quadlet_from_plan`` emits a ``.container`` — so there was no
     render contract to allow-list against and the verb was deleted outright."""
     assert not hasattr(SystemCtlSeam, "write_unit")
+    assert not hasattr(SystemCtlSeam, "remove_unit")
 
 
 # ── write_quadlet / remove_quadlet (P3-quadlet) ──────────────────────────────
@@ -163,43 +164,6 @@ def test_remove_quadlet_routes_through_seam_when_hal0_user(tmp_path: Path) -> No
     seam.remove_quadlet(quadlet)
 
     assert calls == [["sudo", "-n", SEAM_BIN, "remove-quadlet", "chat"]]
-
-
-# ── remove_unit ────────────────────────────────────────────────────────────
-
-
-def test_remove_unit_direct_when_not_hal0_user(tmp_path: Path) -> None:
-    unit = tmp_path / "hal0-slot@chat.service"
-    unit.write_text("[Unit]\n")
-    calls, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
-
-    seam.remove_unit(unit)
-
-    assert not unit.exists()
-    assert calls == []
-
-
-def test_remove_unit_direct_noop_when_absent(tmp_path: Path) -> None:
-    unit = tmp_path / "hal0-slot@chat.service"
-    calls, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
-
-    seam.remove_unit(unit)  # must not raise
-
-    assert calls == []
-
-
-def test_remove_unit_routes_through_seam_when_hal0_user(tmp_path: Path) -> None:
-    unit = tmp_path / "hal0-slot@chat.service"
-    unit.write_text("[Unit]\n")  # present locally, but the seam path never touches it
-    calls, run = _recorder()
-    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
-
-    seam.remove_unit(unit)
-
-    assert unit.exists()  # untouched by this process — the seam owns the real path
-    assert calls == [["sudo", "-n", SEAM_BIN, "remove-unit", "chat"]]
 
 
 # ── systemctl() verb routing ───────────────────────────────────────────────

@@ -44,6 +44,7 @@ from hal0.updater.updater import (
     _atomic_symlink_swap,
     _current_symlink,
     _is_newer,
+    _naive_version_key,
     _parse_manifest,
     _previous_record,
     _read_release_notes,
@@ -2303,69 +2304,34 @@ def test_is_newer_falls_back_to_tuple_for_nightly() -> None:
     assert _is_newer("0.5.1-nightly.20260615", "0.5.0-nightly.20260615") is True
 
 
-# ── _is_newer — packaging-absent fallback (production venvs without dev extras) ──
+# ── _naive_version_key — the non-PEP-440 fallback ordering ───────────────────
 #
-# ``packaging`` is a hard runtime dependency now (pyproject.toml), but a venv
-# built before that fix still has to compare versions correctly using ONLY the
-# naive fallback — that's exactly the box that needs this fix the most. These
-# tests force the ``except Exception`` branch in ``_is_newer`` by making the
-# ``packaging.version`` import fail, independent of whether ``packaging`` is
-# actually installed in the test environment.
+# ``_is_newer`` uses ``packaging`` and only drops to ``_naive_version_key`` for
+# strings that are not valid PEP 440 (nightly timestamp tags). The key still has
+# to order a prerelease before its own GA when one side is such a string, so
+# pin its ordering directly.
 
 
-def _block_packaging_version_import(monkeypatch) -> None:
-    import builtins
-
-    real_import = builtins.__import__
-
-    def _fake_import(name, *args, **kwargs):
-        if name == "packaging.version" or name.startswith("packaging.version"):
-            raise ImportError("packaging is not installed (simulated)")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _fake_import)
+def test_naive_key_orders_rc_before_its_own_ga() -> None:
+    """``1.0.0rc1`` (pip-normalised) sorts below ``1.0.0`` GA and ``1.0.1``."""
+    assert _naive_version_key("1.0.0") > _naive_version_key("1.0.0rc1")
+    assert _naive_version_key("1.0.1") > _naive_version_key("1.0.0rc1")
 
 
-def test_is_newer_fallback_orders_rc_before_its_own_ga(monkeypatch) -> None:
-    """Regression for the release blocker: a box on ``1.0.0rc1`` (the
-    pip-normalised form ``importlib.metadata.version`` reports for an
-    installed ``1.0.0-rc.1``) must see ``1.0.0`` GA as newer even when
-    ``packaging`` can't be imported at all.
-    """
-    _block_packaging_version_import(monkeypatch)
-    assert _is_newer("1.0.0", "1.0.0rc1") is True
-    assert _is_newer("1.0.0rc1", "1.0.0") is False
+def test_naive_key_handles_tag_derived_rc_form() -> None:
+    """Same orderings against the tag-derived manifest form (``1.0.0-rc.1``)."""
+    assert _naive_version_key("1.0.0") > _naive_version_key("1.0.0-rc.1")
+    assert _naive_version_key("1.0.1") > _naive_version_key("1.0.0-rc.1")
+    assert _naive_version_key("1.0.0-rc.2") > _naive_version_key("1.0.0-rc.1")
 
 
-def test_is_newer_fallback_orders_next_patch_ga_above_rc(monkeypatch) -> None:
-    """A box on ``1.0.0rc1`` must also see the *next* patch's GA (``1.0.1``,
-    not just ``1.0.0``) as newer — the naive digit-tuple compare tied these
-    because ``rc1``'s stripped digit was read as an extra ``.1`` component.
-    """
-    _block_packaging_version_import(monkeypatch)
-    assert _is_newer("1.0.1", "1.0.0rc1") is True
-    assert _is_newer("1.0.0rc1", "1.0.1") is False
-
-
-def test_is_newer_fallback_handles_tag_derived_rc_form(monkeypatch) -> None:
-    """Same orderings, but against the tag-derived manifest form
-    (``1.0.0-rc.1``) instead of the pip-normalised installed form."""
-    _block_packaging_version_import(monkeypatch)
-    assert _is_newer("1.0.0", "1.0.0-rc.1") is True
-    assert _is_newer("1.0.1", "1.0.0-rc.1") is True
-    assert _is_newer("1.0.0-rc.1", "1.0.0") is False
-    # Advancing within the rc line still counts as newer.
-    assert _is_newer("1.0.0-rc.2", "1.0.0-rc.1") is True
-    assert _is_newer("1.0.0-rc.1", "1.0.0-rc.2") is False
-
-
-def test_is_newer_fallback_still_handles_nightly_without_packaging(monkeypatch) -> None:
-    """The packaging-absent fallback must not regress the pre-existing nightly
-    timestamp monotonicity behavior covered by
-    ``test_is_newer_falls_back_to_tuple_for_nightly`` above."""
-    _block_packaging_version_import(monkeypatch)
-    assert _is_newer("0.5.1-nightly.20260615120000", "0.5.1-nightly.20260615") is True
-    assert _is_newer("0.5.1-nightly.20260615", "0.5.0-nightly.20260615") is True
+def test_naive_key_keeps_nightly_timestamp_monotonicity() -> None:
+    assert _naive_version_key("0.5.1-nightly.20260615120000") > _naive_version_key(
+        "0.5.1-nightly.20260615"
+    )
+    assert _naive_version_key("0.5.1-nightly.20260615") > _naive_version_key(
+        "0.5.0-nightly.20260615"
+    )
 
 
 class TestVenvRefreshIsCommitAgnostic:

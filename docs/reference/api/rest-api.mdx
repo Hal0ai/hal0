@@ -108,8 +108,8 @@ silently paper over.
 | `/api/comfyui` | ADMIN | ComfyUI generation-engine status and image-gen slot control. |
 | `/api/install` | BOOTSTRAP | First-run wizard endpoints, including `GET /api/install/curated-models`. Open until an admin key is configured, then treated as ADMIN. |
 | `/api/memory` | ADMIN | Two routers share this prefix: the `[memory.graph]` gate/status, and the Hindsight engine admin surface (banks, graph, recall/reflect, mental models, directives, async operations). Every `DELETE` under this prefix is pinned ADMIN by an explicit rule independent of the generic one (issues #1024/#1302 — a prior unauthenticated bank-delete cascade-dropped ~632 live records); bank-scoped deletes additionally require a `?confirm=` echo + dry-run preview. |
-| `/api/board` | ADMIN | Operator Board — task/board CRUD, links, dispatch, `WS /api/board/events`, and the `POST /api/board/chat` orchestrator alias. Frozen FE↔BE contract (`ui/CONTRACTS.md` §4). |
-| `/api/brain` | ADMIN | `POST /api/brain/chat` (SSE) — the primary hal0-brain platform-steward chat surface. Drives the full admin tool surface (slot mutations, model pulls, board writes), hence ADMIN. `/api/board/chat` is a thin alias into the same engine. |
+| `/api/board` | ADMIN | Operator Board — task/board CRUD, links, dispatch, and `WS /api/board/events`. Frozen FE↔BE contract (`ui/CONTRACTS.md` §4). |
+| `/api/brain` | ADMIN | `POST /api/brain/chat` (SSE) — the primary hal0-brain platform-steward chat surface. Drives the full admin tool surface (slot mutations, model pulls, board writes), hence ADMIN. |
 | `/api/updates` | ADMIN | Self-update: release-manifest check, prepare/commit/apply/rollback, channel get/set, post-update slot-drift report + restart. |
 | `/api/events` | ADMIN | Dashboard footer event feed — backfill + `GET /api/events/stream` (SSE). See the auth-tier note above. |
 | `/api/activity` | ADMIN | Durable audit surface (SQLite-backed) — the slots-page ActivityLog's source of truth, with `/export` (csv/json) and `/stream` (SSE). See the auth-tier note above. |

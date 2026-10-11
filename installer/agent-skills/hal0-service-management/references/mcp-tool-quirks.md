@@ -6,8 +6,8 @@ API surface facts that differ from what the tool signatures suggest.
 ## hal0-admin tools
 
 ### `slot_status`
-- **Requires `name`, not `slot_name`.** The JSON arg is `{"name": "agent-hermes"}`.
-  Passing `{"slot_name": "agent-hermes"}` succeeds but returns `{"status":"error"}`.
+- **Requires `name`, not `slot_name`.** The JSON arg is `{"name": "agent"}`.
+  Passing `{"slot_name": "agent"}` succeeds but returns `{"status":"error"}`.
 - Occasionally returns empty error (`"Error executing tool slot_status: "`) with
   no structured payload — treat as transient, retry once before giving up.
 
@@ -33,7 +33,7 @@ API surface facts that differ from what the tool signatures suggest.
 
 ### `hardware_probe` / `version_info`
 - Can fail with empty error when slots are evicted/offline. Retry after warming
-  a slot (send a request to the agent-hermes or primary endpoint first).
+  a slot (send a request to the agent slot first).
 
 ### `provider_list`
 - Returns empty array `[]` when no remote providers are configured. This is

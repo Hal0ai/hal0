@@ -45,7 +45,6 @@ global flag is controlled per-command via environment variables instead — see
 | Command | Purpose | Flags |
 |---|---|---|
 | `hal0 status` | System + slot summary. | — |
-| `hal0 probe` | **Deprecated**, hidden. Alias for `hal0 config hardware --refresh`. | — |
 | `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`, env `HAL0_BIND_HOST`), `--port` (default `8080`, env `HAL0_PORT`), `--reload` |
 | `hal0 uninstall` | Uninstall hal0. Conservative by default. | `--purge` (alias `--clean-slate`), `--keep-data`, `--force`/`-f` (honors `HAL0_FORCE=1`), `--dev` (tears down a dev install at `$PWD/.hal0ai`) |
 | `hal0 bench ...` | Benchmark pipeline. Raw argparse passthrough (`allow_extra_args`), see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). | verbs: `plan, run, worker, status, results, history, reindex, devices, publish, eval, bundle, upload` |
@@ -148,11 +147,9 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f`, `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--backend`/`-b` (hidden, deprecated alias for `--provider`), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`), `--profile` (default: inferred from `--type`/`--hardware`) |
-| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--profile`, `--backend`/`-b` (hidden, deprecated) |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`), `--profile` (default: inferred from `--type`/`--hardware`) |
+| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--profile` |
 | `slot delete <name>` | `name` | `--force`/`-f` |
-| `slot add <name>` | `name` | hidden, deprecated alias for `slot create` |
-| `slot remove <name>` | `name` | hidden, deprecated alias for `slot delete` |
 | `slot show <name>` | `name` | `--json` |
 | `slot metrics [name]` | optional `name` | `--json` |
 | `slot capacity` | — | `--json` |
@@ -163,9 +160,8 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot migrate-enabled-removal` | — | `--apply` |
 
 <Aside type="note">
-`--backend` on `slot create`/`slot edit` is a hidden, deprecated alias for `--provider`
-(the inference engine binary), **not** the hardware backend. The hardware backend is
-selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu-vulkan`,
+`--provider` on `slot create`/`slot edit` selects the inference engine binary, **not** the
+hardware backend. The hardware backend is selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, `npu`) — see [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 </Aside>
 
@@ -177,10 +173,8 @@ selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu
 | `model pull <ref>` | `ref` | `--cancel` |
 | `model default <ref>` | `ref` | `--clear` |
 | `model update [ref]` | optional `ref` | `--check`, `--refresh` (only meaningful with `--check`) |
-| `model register <model_id>` | `model_id` | hidden, deprecated alias for `model add`: `--path`/`-p` (required), `--name`, `--license` (default `unknown`) |
 | `model rm <ref>` | `ref` | `--force`/`-f`, `--keep-files` (remove only the registry entry; files stay on disk, hidden from scans) |
 | `model show <ref>` | `ref` | `--json` |
-| `model assign <ref>` | `ref` | hidden, deprecated alias for `slot edit --model`: `--slot`/`-s` (required) |
 | `model scan` | — | — |
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
 | `model store [path]` | optional `path` | `--migrate` |
@@ -249,12 +243,12 @@ dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
 | `config migrate` | — | — |
 | `config validate` | — | — |
 | `config reload` | — | — |
-| `config hardware` | — | `--refresh` — equivalent to the deprecated `hal0 probe` |
+| `config hardware` | — | `--refresh` |
 
 ## `hal0 doctor` — diagnostics and repair
 
 Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
-`--verify` (hidden, deprecated — use `doctor verify`), `--plain` (force ASCII, sets
+`--plain` (force ASCII, sets
 `HAL0_PLAIN=1`), `--ports` (space-separated TCP port list override).
 
 | Command | Flags |
@@ -299,7 +293,6 @@ disambiguation.
 | `upstream delete <name>` | `name` | `--force`/`-f` |
 | `upstream test <name>` | `name` | — |
 | `upstream credentials set <name>` | `name` | `--key` (required, prompts securely if omitted), `--env-var` |
-| `upstream set-credentials <name>` | `name` | hidden, deprecated alias for `upstream credentials set` |
 
 <Aside type="note">
 `google_query` is a retired `--auth-style`. The valid values are `bearer`, `anthropic`,
@@ -314,7 +307,7 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 |---|---|---|
 | `capabilities list` | — | — |
 | `capabilities set <slot> <child>` | `slot`, `child` | `--model`, `--backend`, `--provider`, `--enabled`/`--disabled` |
-| `capabilities migrate` | — | `--apply` (default: dry-run), `--dry-run` (hidden, deprecated no-op) |
+| `capabilities migrate` | — | `--apply` (default: dry-run) |
 
 ## `hal0 comfyui`
 
@@ -474,17 +467,11 @@ scripting against them (CI, smoke tests), wrap the call in your own
 
 ## Deprecated aliases
 
-All hidden and tagged `HAL0-SUNSET: v1.0.0` — still work, but don't script against them:
+Hidden and tagged `HAL0-SUNSET` — still work, but don't script against them:
 
 | Deprecated | Use instead |
 |---|---|
-| `hal0 probe` | `hal0 config hardware --refresh` |
-| `hal0 model register` | `hal0 model add` |
-| `hal0 model assign` | `hal0 slot edit --model` |
-| `hal0 slot add` | `hal0 slot create` |
-| `hal0 slot remove` | `hal0 slot delete` |
 | `hal0 registry import` | `hal0 model import-backup` |
-| `hal0 upstream set-credentials` | `hal0 upstream credentials set` |
 
 ## `hal0-agent` (separate binary)
 

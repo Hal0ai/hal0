@@ -51,7 +51,8 @@ export interface ComfyuiArbiter {
 }
 
 export interface ComfyuiStatus {
-  mode: ComfyuiMode
+  // null when the GPU arbiter cannot report the mode (unwired / unreadable)
+  mode: ComfyuiMode | null
   reachable: boolean
   engine: ComfyuiEngineState
   container: { name: string; state: string }

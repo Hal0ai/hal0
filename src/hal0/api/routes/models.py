@@ -26,7 +26,7 @@ from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
 from hal0.profiles import ProfileCatalog
 from hal0.registry import pull_jobs as _pull_jobs
-from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
+from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.pull import PullInvalidSource
 from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
@@ -186,27 +186,14 @@ async def list_models(request: Request) -> dict[str, Any]:
 
 @router.get("/catalogue")
 async def list_catalogue() -> dict[str, Any]:
-    """Curated catalogue split into pullable (HF) and upstream-routed entries."""
-    pullable: list[dict[str, Any]] = []
-    upstream: list[dict[str, Any]] = []
-    for entry in CURATED:
-        if isinstance(entry, CuratedModel):
-            # Only HF-coordinate entries are pullable. FLM/NPU-served curated
-            # entries (empty hf_repo, recommended_slot="flm") are neither
-            # HF-pullable nor haloai-upstream — the FLM slot serves them
-            # locally — so they don't appear in this pull/upstream split.
-            if entry.hf_repo:
-                pullable.append(entry.model_dump(mode="json"))
-        elif isinstance(entry, HaloaiModel):
-            upstream.append(entry.model_dump(mode="json"))
+    """The curated catalogue of pullable (HuggingFace-coordinate) models."""
+    # Only HF-coordinate entries are pullable. FLM/NPU-served curated entries
+    # (empty hf_repo, recommended_slot="flm") are not HF-pullable — the FLM
+    # slot serves them locally — so they don't appear here.
+    pullable = [e.model_dump(mode="json") for e in CURATED_MODELS if e.hf_repo]
     return {
         "pullable": pullable,
-        "upstream": upstream,
-        "counts": {
-            "pullable": len(pullable),
-            "upstream": len(upstream),
-            "total": len(pullable) + len(upstream),
-        },
+        "counts": {"pullable": len(pullable), "total": len(pullable)},
     }
 
 
