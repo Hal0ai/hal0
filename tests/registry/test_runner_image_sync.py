@@ -655,11 +655,12 @@ async def test_sync_prunes_every_row_not_in_the_catalogue(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_skipped_entry_is_pruned_when_a_row_exists(tmp_path: Path) -> None:
-    """A row for an id the catalogue now carries only as an invalid entry is
-    not kept alive by the old copy."""
+async def test_a_skipped_entry_stops_the_prune(tmp_path: Path) -> None:
+    """A catalogue with an entry this code could not read is a partial answer:
+    nothing is pruned, so the row for that entry (and any other) survives."""
     store = _store(tmp_path)
     store.upsert(RunnerImage(id="flm", image="ghcr.io/hal0ai/hal0-runner-flm", tag="v0"))
+    store.upsert(RunnerImage(id="rocmfpx", image="ghcr.io/hal0ai/hal0-rocmfpx", tag="c077206"))
     images_json = {
         "schema": "hal0.runner-images.v2",
         "images": [_CPU_ENTRY, {**_FLM_ENTRY, "image": "ghcr.io/hal0ai/hal0-runner-flm:bad"}],
@@ -667,7 +668,22 @@ async def test_skipped_entry_is_pruned_when_a_row_exists(tmp_path: Path) -> None
     result = await _sync(store, _route_handler(images_json=images_json))
 
     assert "flm" in result.skipped
-    assert store.get("flm") is None
+    assert result.prune_skipped is True
+    assert store.get("flm") is not None
+    assert store.get("rocmfpx") is not None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalogue_prunes_nothing(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(_cpu_row())
+    result = await _sync(
+        store, _route_handler(images_json={"schema": "hal0.runner-images.v2", "images": []})
+    )
+
+    assert result.images_json_ok is True
+    assert result.prune_skipped is True
+    assert store.get("cpu") is not None
 
 
 # ── sync: size ──────────────────────────────────────────────────────────────

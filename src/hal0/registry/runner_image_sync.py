@@ -70,6 +70,9 @@ class SyncResult:
     probe_errors: dict[str, str] = field(default_factory=dict)
     #: Catalogue entries ignored: ``id`` -> reason (unknown runner, bad shape).
     skipped: dict[str, str] = field(default_factory=dict)
+    #: True when the prune of absent rows was skipped (empty catalogue, or
+    #: an entry was skipped), so a partial answer never deletes a row.
+    prune_skipped: bool = False
 
 
 def _strip_registry_host(image_ref: str) -> str:
@@ -495,7 +498,9 @@ async def sync_runner_images(
 
     A failed ``images.json`` fetch changes nothing. A successful one writes a
     row per valid entry (GHCR-enriched when the probe answers) and prunes
-    every row the catalogue no longer lists, downloaded or not.
+    every row the catalogue no longer lists, downloaded or not, unless the
+    catalogue came back empty or with an entry it skipped (then nothing is
+    pruned and :attr:`SyncResult.prune_skipped` is set).
     """
     owns_client = client is None
     client = client or httpx.AsyncClient(follow_redirects=True)
@@ -543,9 +548,18 @@ async def sync_runner_images(
             store.set_tags(row.id, row.tags)
             result.images.append(stored.model_copy(update={"tags": row.tags}))
 
-        pruned = store.prune_absent(set(rows))
-        if pruned:
-            log.info("runner_images.pruned_rows count=%d", pruned)
+        # Prune only on a complete answer: an empty catalogue or one with an
+        # entry this code could not read (a newer schema field, a typo
+        # upstream) must not delete rows, downloaded ones included.
+        if rows and not result.skipped:
+            pruned = store.prune_absent(set(rows))
+            if pruned:
+                log.info("runner_images.pruned_rows count=%d", pruned)
+        else:
+            result.prune_skipped = True
+            log.warning(
+                "runner_images.prune_skipped rows=%d skipped=%d", len(rows), len(result.skipped)
+            )
     finally:
         if owns_client:
             await client.aclose()
