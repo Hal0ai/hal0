@@ -1778,6 +1778,7 @@ def run_post_activation_migrations(
     repair_hermes_venv: bool = True,
     upgrade_memory_engine_venv: bool = True,
     converge_companions: bool = True,
+    honour_restore_marker: bool = False,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1842,6 +1843,12 @@ def run_post_activation_migrations(
     :func:`check_outstanding_migrations` passes ``True`` here; an actual
     update passes the default ``False``.
 
+    ``honour_restore_marker`` makes the runner-system conversion stand down
+    after an operator restored its backup (a downgrade).
+    :func:`check_outstanding_migrations`, the API's boot-time safety net,
+    passes ``True``; an actual update passes the default ``False`` and
+    converts again.
+
     ``converge_companions`` gates whether the component catalog
     (:func:`hal0.components.runner.converge_components`, the final pass
     below) is even allowed to mutate. It maps straight to that call's
@@ -1865,7 +1872,7 @@ def run_post_activation_migrations(
     # here leaves the box exactly as it was and the caller reports it.
     from hal0.config.migrations.runner_system import migrate_runner_system
 
-    migrate_runner_system(job_id=job_id)
+    migrate_runner_system(job_id=job_id, honour_restore_marker=honour_restore_marker)
 
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
 
@@ -1988,6 +1995,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
         return run_post_activation_migrations(
             job_id=job_id,
             skip_catalogue_sync=True,
+            honour_restore_marker=True,
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
             converge_companions=False,

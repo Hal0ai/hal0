@@ -92,7 +92,7 @@ named (ADR-0028). One row per runner key:
 | Field | Meaning |
 |---|---|
 | `image` | The bare registry repo — no tag or digest. |
-| `tag` | The immutable tag. `null` marks an image that is not published yet; its ref is the bare repo and a pull fails until a pin lands. |
+| `tag` | The immutable tag. `null` marks an image that is not published yet: the runner has no image and cannot launch unless `HAL0_RUNNER_IMAGE_<KEY>` names one. hal0 never falls back to the bare repo, which would pull `latest`. |
 | `digest` | The `sha256:` content digest. `null` pulls by tag. A digest requires a tag. |
 | `lanes_gated` | The backends that passed the hardware gate for exactly this digest. |
 
@@ -461,9 +461,9 @@ Releases before the fresh runner system shipped different runners (a
 `rocmfpx` default, `strix`, `promptforge`) with images under other package
 names, named in `HAL0_TOOLBOX_IMAGE_*` variables. `hal0 update` converts an
 install onto the current system once, automatically, before it validates
-config. The same conversion runs on an `install.sh` re-run and first thing when
-`hal0-api` starts, before it reads `hal0.toml`. You can also run or preview it
-yourself:
+config. The same conversion runs on an `install.sh` re-run and when
+`hal0 serve` starts `hal0-api`, before the API reads `hal0.toml`. It never runs
+from a read-only command. You can also run or preview it yourself:
 
 ```sh
 hal0 runner-images migrate            # dry run: print the plan, touch nothing
@@ -475,27 +475,40 @@ What it changes (`hal0.config.migrations.runner_system`):
 
 | Found | Becomes |
 |---|---|
-| Slot `binary` of `rocmfpx`, `vulkanfpx`, `strix`, `promptforge`, `upstream`, `vulkan` or `rocm` | `binary = "standard"` |
-| Slot `binary` that names no runner | Cleared; the slot's `device` picks the runner |
-| Slot `image_pin` / `image` naming a retired hal0 image (`hal0-combined*`, `hal0-rocmfpx`, `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui`, `amd-strix-halo-toolboxes`, kyuz0 builds) | Removed; the slot runs its runner's pinned image |
+| Slot `binary` of an old default key: `rocmfpx`, `vulkanfpx`, `vulkan` or `rocm` | `binary = "standard"` |
+| Slot `binary` of a removed optional runner (`strix`, `promptforge`, `upstream`), or one that names no runner | Cleared with a warning; the slot's `device` picks the runner |
+| Slot `image_pin` / `image` naming an image hal0 shipped and retired: `ghcr.io/hal0ai/` `hal0-combined*`, `hal0-rocmfpx` (and `localhost/hal0-rocmfpx`), `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui` and `amd-strix-halo-toolboxes`, the two kyuz0 Strix Halo images (`amd-strix-halo-toolboxes`, `amd-strix-halo-comfyui`), and the floating `ghcr.io/ggml-org/llama.cpp:server-cuda` tag | Removed; the slot runs its runner's pinned image |
 | Slot `image_pin` / `image` naming any other image (your own build) | Kept, and listed as `kept:` in the report |
 | A slot whose model is a fork-only quant (ROCmFPX family, IU4, ActiveFPX) | Model unassigned, rest of the slot kept; reported as a warning |
-| `[slots].default_images` keys | Renamed the same way as `binary`; entries naming no runner, or a retired hal0 image, dropped; your own images are kept |
-| Profile `runner` | Renamed the same way; unknown values dropped. A profile `image` naming a retired image is removed |
-| A model's `preferred_runner` | Renamed the same way; unknown values become empty |
-| `HAL0_TOOLBOX_IMAGE_<KEY>` in `api.env` | `HAL0_RUNNER_IMAGE_<NEWKEY>`, or dropped when the key or image is retired |
+| `[slots].default_images` keys | Old default keys renamed to `standard` (an explicit `standard` entry wins); entries for a removed optional runner or no runner, and retired hal0 images, dropped with a warning; your own images are kept |
+| Profile `runner` | Renamed the same way; removed or unknown values cleared. A profile `image` naming a retired image is removed |
+| A model's `preferred_runner` | Renamed the same way; removed or unknown values become empty |
+| `HAL0_TOOLBOX_IMAGE_<KEY>` in `api.env` | `HAL0_RUNNER_IMAGE_<NEWKEY>` for a current or old default key, unless the file already sets it (a conflicting value is reported); dropped with a warning for a removed optional runner, an unknown key or a retired image |
 
 The runner-image catalogue table is recreated by a SQL migration and refilled
 by the next sync.
 
-The conversion is safe to repeat. A dry run changes nothing. With `--apply`,
-every file it will change (and the registry database when a column changes)
-is first archived to `/var/lib/hal0/backups/runners-<ts>.tar.gz`; if the
-backup cannot be written, nothing is written. If any write fails, it restores
-the files it already wrote, rolls back the database change and exits with an
-error (`config.runner_migration_failed`). `--restore <archive>` puts an
-archive's files back. A converted install plans nothing, so re-running it is a
-no-op.
+The conversion is safe to repeat. A dry run changes nothing. A slot or
+profile file that does not parse is skipped with a warning and every other
+file still converts. With `--apply`, every file it will change, plus the old
+`preferred_runner` values, is first archived to
+`/var/lib/hal0/backups/runners-<ts>.tar.gz` (mode 0600, in a 0700
+directory); the registry database itself is never copied. If the backup
+cannot be written, nothing is written. If a later write fails, it restores the
+files it already wrote and exits with an error
+(`config.runner_migration_failed`), but keeps `hal0.toml` converted, because
+an unconverted `hal0.toml` is what stops `hal0-api` from starting. A converted
+install plans nothing, so re-running it is a no-op.
+
+`--restore <archive>` is for a downgrade. Stop `hal0-api` first; restore
+refuses to run while it is active. It writes back only the files the
+conversion owns (`hal0.toml`, `slots/*.toml`, `profiles.toml`, `api.env`) and
+sets the old `preferred_runner` values again with `UPDATE` statements. It
+refuses an archive that is a symlink, is not owned by root or you, is group-
+or world-writable, or holds any other member. It then leaves
+`/var/lib/hal0/runner-migration.restored`, so `hal0-api` does not convert
+again when it starts. The next `hal0 update`, or `--apply`, converts again and
+removes the marker.
 
 Models it unassigns are not deleted. Replace them with a plain GGUF build of
 the same model; hal0 refuses to add, pull, scan or launch a fork-only quant

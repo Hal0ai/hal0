@@ -1544,11 +1544,16 @@ regressions:
       grep -n 'binary\|image_pin' /etc/hal0/slots/*.toml
       hal0 runner-images migrate            # must report "nothing to convert"
     expect: >-
-      Every old runner key reads `standard`, every pin to a retired image is gone, the env
-      override reads `HAL0_RUNNER_IMAGE_<KEY>`, a slot bound to a ROCmFP4/IU4/ActiveFPX model
+      Every old default runner key (rocmfpx / vulkanfpx / vulkan / rocm) reads `standard`; a
+      slot or override for strix / promptforge / upstream is cleared or dropped with a WARNING
+      and never becomes `standard`'s image; every pin to a retired image is gone, the env
+      override reads `HAL0_RUNNER_IMAGE_<KEY>` with no duplicate line, a slot bound to a ROCmFP4/IU4/ActiveFPX model
       keeps its settings with an empty model and a WARNING line naming it, a backup tarball
       exists, `hal0 settings` shows the operator's real config (not defaults), and a second run
-      converts nothing.
+      converts nothing. The backup tarball is mode 0600 and holds only `hal0.toml`,
+      `slots/*.toml`, `profiles.toml`, `api.env` and `preferred_runner.json` (never
+      `hal0.db`). `hal0 runner-images ls` on an unconverted box changes nothing under
+      /etc/hal0.
 
   - id: vulkan-lane-stale-image-preflight-refusal
     issue: 1973   # lane re-enable PR (3474ec03) — implements the checked gate

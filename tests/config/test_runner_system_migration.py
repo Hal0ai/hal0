@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
+import stat
 import tarfile
 import tomllib
 from pathlib import Path
@@ -25,6 +28,7 @@ from hal0.config.migrations.runner_system import (
     plan_profiles,
     plan_slot,
     restore_backup,
+    restore_marker,
 )
 from hal0.runners import RUNNER_IMAGES
 
@@ -58,9 +62,12 @@ def _slot(raw: dict[str, Any], *, fork: Any = _no_fork) -> tuple[dict | None, li
     [
         ("rocmfpx", "standard"),
         ("vulkanfpx", "standard"),
-        ("strix", "standard"),
-        ("promptforge", "standard"),
-        ("upstream", "standard"),
+        ("vulkan", "standard"),
+        ("rocm", "standard"),
+        # Retired OPTIONAL runners never become the default runner.
+        ("strix", None),
+        ("promptforge", None),
+        ("upstream", None),
         ("standard", "standard"),
         ("cpu", "cpu"),
         ("cuda", "cuda"),
@@ -85,8 +92,21 @@ def test_map_runner_key(key: str, new: str | None) -> None:
         ("ghcr.io/hal0ai/hal0-comfyui:latest", True),
         ("ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server", True),
         ("docker.io/kyuz0/amd-strix-halo-comfyui:latest", True),
+        ("kyuz0/amd-strix-halo-toolboxes:vulkan-radv", True),
+        ("index.docker.io/kyuz0/amd-strix-halo-toolboxes:rocm", True),
         ("ghcr.io/hal0ai/hal0-runner-standard:b11552-r1@sha256:" + "a" * 64, False),
-        ("ghcr.io/ggml-org/llama.cpp:server-cuda", False),
+        # The floating CUDA tag the old default used is retired; a release tag
+        # or a digest is a fixed image and is kept.
+        ("ghcr.io/ggml-org/llama.cpp:server-cuda", True),
+        ("ghcr.io/ggml-org/llama.cpp", True),
+        ("ghcr.io/ggml-org/llama.cpp:server-cuda-b11541", False),
+        ("ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:" + "b" * 64, False),
+        # Only the exact repos hal0 shipped: the same names elsewhere are the
+        # operator's.
+        ("docker.io/kyuz0/some-other-image:1", False),
+        ("ghcr.io/someone/amd-strix-halo-toolboxes:vulkan", False),
+        ("ghcr.io/someone/hal0-rocmfpx:mine", False),
+        ("docker.io/someone/hal0-toolbox-cpu:v1", False),
         ("docker.io/someone/custom:1", False),
         ("localhost/my-llama:dev", False),
     ],
@@ -110,11 +130,19 @@ def test_image_is_hal0_runner(ref: str, runner: bool) -> None:
 # ── slots ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("old", ["rocmfpx", "vulkanfpx", "strix", "promptforge"])
-def test_retired_slot_runtime_becomes_standard(old: str) -> None:
+@pytest.mark.parametrize("old", ["rocmfpx", "vulkanfpx", "vulkan", "rocm"])
+def test_retired_default_slot_runtime_becomes_standard(old: str) -> None:
     out, actions, warnings = _slot({"name": "s", "binary": old, "device": "gpu-rocm"})
     assert out is not None and out["binary"] == "standard"
     assert actions and not warnings
+
+
+@pytest.mark.parametrize("old", ["strix", "promptforge", "upstream"])
+def test_retired_optional_slot_runtime_is_cleared_loudly(old: str) -> None:
+    out, actions, warnings = _slot({"name": "s", "binary": old, "device": "gpu-rocm"})
+    assert out is not None and "binary" not in out
+    assert not actions
+    assert any(f"optional {old!r} runner was removed" in w for w in warnings)
 
 
 def test_unknown_slot_runtime_is_cleared_loudly() -> None:
@@ -206,8 +234,36 @@ def test_default_images_are_renamed_and_pruned() -> None:
         "kokoro": "docker.io/someone/kokoro:dev",
     }
     assert out["other"] == {"x": 1}
-    assert len(warnings) == 4  # duplicate standard, strix image, cpu image, bogus key
+    # duplicate standard, strix (optional runner), cpu image, bogus key
+    assert len(warnings) == 4
     assert plan_hal0_toml(out, known=KNOWN, actions=[], warnings=[]) is None
+
+
+@pytest.mark.parametrize("optional", ["strix", "promptforge", "upstream"])
+def test_optional_runner_override_never_becomes_the_default_image(optional: str) -> None:
+    """A custom image an operator set for a retired optional runner is
+    dropped loudly; it must not become every default slot's image."""
+    raw = {"slots": {"default_images": {optional: "docker.io/me/special-build:1"}}}
+    warnings: list[str] = []
+    out = plan_hal0_toml(raw, known=KNOWN, actions=[], warnings=warnings)
+    assert out is not None and out["slots"]["default_images"] == {}
+    assert any("special-build" in w and "was removed" in w for w in warnings)
+
+
+def test_current_key_wins_over_a_renamed_one() -> None:
+    raw = {
+        "slots": {
+            "default_images": {
+                "rocmfpx": "docker.io/me/old:1",
+                "standard": "docker.io/me/new:1",
+            }
+        }
+    }
+    warnings: list[str] = []
+    out = plan_hal0_toml(raw, known=KNOWN, actions=[], warnings=warnings)
+    assert out is not None
+    assert out["slots"]["default_images"] == {"standard": "docker.io/me/new:1"}
+    assert any("old:1" in w for w in warnings)
 
 
 def test_profiles_runner_and_image() -> None:
@@ -250,6 +306,38 @@ def test_env_overrides_are_renamed_or_dropped() -> None:
     assert plan_env(out, known=KNOWN, actions=[], warnings=[]) is None
 
 
+def test_env_optional_runner_override_is_dropped() -> None:
+    warnings: list[str] = []
+    out = plan_env(
+        "HAL0_TOOLBOX_IMAGE_STRIX=docker.io/me/strix:1\n",
+        known=KNOWN,
+        actions=[],
+        warnings=warnings,
+    )
+    assert out == ""
+    assert any("strix" in w and "was removed" in w for w in warnings)
+
+
+def test_env_converted_lines_are_deduped() -> None:
+    text = (
+        "HAL0_RUNNER_IMAGE_STANDARD=docker.io/me/a:1\n"
+        "HAL0_TOOLBOX_IMAGE_ROCMFPX=docker.io/me/a:1\n"
+        "HAL0_TOOLBOX_IMAGE_VULKAN=docker.io/me/b:1\n"
+        "HAL0_TOOLBOX_IMAGE_CPU=docker.io/me/c:1\n"
+        "HAL0_TOOLBOX_IMAGE_CPU=docker.io/me/c:1\n"
+    )
+    actions: list[str] = []
+    warnings: list[str] = []
+    out = plan_env(text, known=KNOWN, actions=actions, warnings=warnings)
+    assert out == (
+        "HAL0_RUNNER_IMAGE_STANDARD=docker.io/me/a:1\nHAL0_RUNNER_IMAGE_CPU=docker.io/me/c:1\n"
+    )
+    # The identical duplicates go quietly; the conflicting VULKAN value loudly.
+    assert [w for w in warnings if "b:1" in w]
+    assert len(warnings) == 1
+    assert plan_env(out, known=KNOWN, actions=[], warnings=[]) is None
+
+
 # ── end to end ────────────────────────────────────────────────────────────────
 
 
@@ -260,6 +348,14 @@ def _write_toml(path: Path, data: dict[str, Any]) -> None:
 
 def _read_toml(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _preferred_runners() -> dict[str, str | None]:
+    conn = sqlite3.connect(str(paths.db_path()))
+    try:
+        return dict(conn.execute("SELECT id, preferred_runner FROM model").fetchall())
+    finally:
+        conn.close()
 
 
 def _seed_db(models: list[tuple[str, str, str | None, str | None]]) -> Path:
@@ -305,7 +401,9 @@ def old_box(tmp_hal0_home: str) -> dict[str, Path]:
         slots / "cpu.toml",
         {"name": "cpu", "port": 8083, "binary": "cpu", "model": {"default": "plain"}},
     )
-    _write_toml(paths.profiles_toml(), {"profile": {"p": {"runner": "strix"}}})
+    _write_toml(
+        paths.profiles_toml(), {"profile": {"p": {"runner": "rocmfpx"}, "q": {"runner": "strix"}}}
+    )
     paths.api_env().write_text(
         "HAL0_TOOLBOX_IMAGE_ROCMFPX=ghcr.io/hal0ai/hal0-combined:0826\n", encoding="utf-8"
     )
@@ -313,6 +411,7 @@ def old_box(tmp_hal0_home: str) -> dict[str, Path]:
         [
             ("plain", "/m/plain-Q4_K_M.gguf", "Q4_K_M", None),
             ("fpx", "/m/Qwen-ROCmFP4-STRIX.gguf", "ROCmFP4", "rocmfpx"),
+            ("forge", "/m/forge-Q4_K_M.gguf", "Q4_K_M", "promptforge"),
         ]
     )
     return {"hal0_toml": hal0_toml, "slots": slots}
@@ -338,18 +437,34 @@ def test_apply_converts_everything_with_a_backup(old_box: dict[str, Path]) -> No
     assert "image_pin" not in agent
     assert agent["model"]["default"] == ""
     assert any("'fpx'" in w and "unassigned" in w for w in report.warnings)
-    assert _read_toml(paths.profiles_toml())["profile"]["p"] == {"runner": "standard"}
+    assert _read_toml(paths.profiles_toml())["profile"] == {"p": {"runner": "standard"}, "q": {}}
     assert paths.api_env().read_text() == ""
-    conn = sqlite3.connect(str(paths.db_path()))
-    assert conn.execute("SELECT preferred_runner FROM model WHERE id='fpx'").fetchone() == (
-        "standard",
-    )
-    conn.close()
+    assert _preferred_runners() == {"plain": None, "fpx": "standard", "forge": None}
 
     with tarfile.open(report.backup) as tar:
-        names = tar.getnames()
-    assert any(n.endswith("slots/agent.toml") for n in names)
-    assert any(n.endswith("hal0.db") for n in names)
+        names = set(tar.getnames())
+        runners = json.loads(tar.extractfile("preferred_runner.json").read())  # type: ignore[union-attr]
+    # Owned files by role, plus the old preferred runners; never the DB.
+    assert names == {
+        "hal0.toml",
+        "slots/chat.toml",
+        "slots/agent.toml",
+        "profiles.toml",
+        "api.env",
+        "preferred_runner.json",
+    }
+    assert sorted(runners, key=lambda r: r["id"]) == [
+        {"id": "forge", "preferred_runner": "promptforge"},
+        {"id": "fpx", "preferred_runner": "rocmfpx"},
+    ]
+
+
+def test_backup_is_private(old_box: dict[str, Path]) -> None:
+    report = migrate_runner_system()
+    assert report.backup
+    backup = Path(report.backup)
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o700
 
 
 def test_converted_config_validates(old_box: dict[str, Path]) -> None:
@@ -371,32 +486,47 @@ def test_second_run_is_a_noop(old_box: dict[str, Path]) -> None:
     assert again.backup is None
 
 
-def test_failure_restores_every_write(old_box: dict[str, Path], monkeypatch) -> None:
+def test_failure_restores_every_write_but_keeps_hal0_toml(
+    old_box: dict[str, Path], monkeypatch
+) -> None:
+    """hal0.toml is what stops hal0-api from starting, so it stays converted;
+    every later write is rolled back."""
     originals = {p: p.read_bytes() for p in old_box["slots"].glob("*.toml")}
-    originals[old_box["hal0_toml"]] = old_box["hal0_toml"].read_bytes()
-    real = rs._atomic_write
+    originals[paths.profiles_toml()] = paths.profiles_toml().read_bytes()
+    real = rs._replace_file
     calls = {"n": 0}
 
-    def flaky(path: Path, data: bytes) -> None:
+    def flaky(path: Path, data: bytes, **kw: Any) -> None:
         calls["n"] += 1
         if calls["n"] == 3:
             raise OSError("disk full")
-        real(path, data)
+        real(path, data, **kw)
 
-    monkeypatch.setattr(rs, "_atomic_write", flaky)
-    with pytest.raises(RunnerMigrationError, match="rolled back"):
+    monkeypatch.setattr(rs, "_replace_file", flaky)
+    with pytest.raises(RunnerMigrationError, match=r"hal0\.toml stays converted"):
         migrate_runner_system()
-    monkeypatch.setattr(rs, "_atomic_write", real)
+    monkeypatch.setattr(rs, "_replace_file", real)
     for path, data in originals.items():
         assert path.read_bytes() == data, path
+    assert _read_toml(old_box["hal0_toml"])["slots"]["default_images"] == {}
+    assert _preferred_runners()["fpx"] == "rocmfpx"
 
 
-def test_unparseable_toml_fails_before_any_write(old_box: dict[str, Path]) -> None:
-    (old_box["slots"] / "broken.toml").write_text("name = [", encoding="utf-8")
-    before = (old_box["slots"] / "agent.toml").read_bytes()
-    with pytest.raises(RunnerMigrationError, match=r"broken\.toml"):
-        migrate_runner_system()
-    assert (old_box["slots"] / "agent.toml").read_bytes() == before
+def test_unparseable_file_is_skipped_and_the_rest_converted(old_box: dict[str, Path]) -> None:
+    broken = old_box["slots"] / "broken.toml"
+    broken.write_text("name = [", encoding="utf-8")
+    report = migrate_runner_system()
+    assert any("broken.toml" in w and "skipped" in w for w in report.warnings)
+    assert broken.read_text() == "name = ["
+    assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
+    assert _read_toml(old_box["hal0_toml"])["slots"]["default_images"] == {}
+
+
+def test_unparseable_hal0_toml_still_converts_the_slots(old_box: dict[str, Path]) -> None:
+    old_box["hal0_toml"].write_text("[slots", encoding="utf-8")
+    report = migrate_runner_system()
+    assert any("hal0.toml" in w for w in report.warnings)
+    assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
 
 
 def test_no_backup_no_write(old_box: dict[str, Path], monkeypatch) -> None:
@@ -411,13 +541,112 @@ def test_no_backup_no_write(old_box: dict[str, Path], monkeypatch) -> None:
     assert (old_box["slots"] / "agent.toml").read_bytes() == before
 
 
-def test_restore_backup_puts_the_old_files_back(old_box: dict[str, Path], tmp_path: Path) -> None:
-    before = (old_box["slots"] / "agent.toml").read_bytes()
+@pytest.fixture
+def api_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rs, "_api_is_active", lambda: False)
+
+
+def test_restore_backup_puts_the_old_state_back(old_box: dict[str, Path], api_down: None) -> None:
+    before = {p: p.read_bytes() for p in old_box["slots"].glob("*.toml")}
+    before[old_box["hal0_toml"]] = old_box["hal0_toml"].read_bytes()
     report = migrate_runner_system()
     assert report.backup
     restored = restore_backup(report.backup)
     assert any(r.endswith("agent.toml") for r in restored)
-    assert (old_box["slots"] / "agent.toml").read_bytes() == before
+    for path, data in before.items():
+        assert path.read_bytes() == data, path
+    assert _preferred_runners() == {"plain": None, "fpx": "rocmfpx", "forge": "promptforge"}
+
+
+def test_restore_leaves_a_marker_the_boot_conversion_honours(
+    old_box: dict[str, Path], api_down: None
+) -> None:
+    report = migrate_runner_system()
+    assert report.backup
+    restore_backup(report.backup)
+    assert restore_marker().is_file()
+
+    boot = migrate_runner_system(honour_restore_marker=True)
+    assert boot.skipped_for_restore and not boot.changed
+    assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "rocmfpx"
+
+    # An update (or --apply) converts again and clears the marker.
+    again = migrate_runner_system()
+    assert again.changed
+    assert not restore_marker().exists()
+
+
+def test_restore_refuses_while_the_api_runs(old_box: dict[str, Path], monkeypatch) -> None:
+    report = migrate_runner_system()
+    assert report.backup
+    monkeypatch.setattr(rs, "_api_is_active", lambda: True)
+    with pytest.raises(RunnerMigrationError, match="hal0-api is running"):
+        restore_backup(report.backup)
+    assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
+
+
+def _archive(tmp_path: Path, members: dict[str, bytes], *, mode: int = 0o600) -> Path:
+    target = tmp_path / "runners-evil.tar.gz"
+    with tarfile.open(target, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    target.chmod(mode)
+    return target
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "etc/sudoers.d/hal0",
+        "/etc/passwd",
+        "slots/../../etc/cron.d/x.toml",
+        "slots/nested/x.toml",
+        "hal0.db",
+        "var/lib/hal0/hal0.db",
+    ],
+)
+def test_restore_refuses_members_it_does_not_own(
+    tmp_hal0_home: str, tmp_path: Path, api_down: None, member: str
+) -> None:
+    archive = _archive(tmp_path, {"hal0.toml": b"", member: b"pwned"})
+    with pytest.raises(RunnerMigrationError, match="refusing"):
+        restore_backup(archive)
+    assert not paths.hal0_toml().exists()
+
+
+def test_restore_refuses_a_writable_archive(
+    tmp_hal0_home: str, tmp_path: Path, api_down: None
+) -> None:
+    archive = _archive(tmp_path, {"hal0.toml": b""}, mode=0o666)
+    with pytest.raises(RunnerMigrationError, match="writable"):
+        restore_backup(archive)
+
+
+def test_restore_refuses_a_symlinked_archive(
+    tmp_hal0_home: str, tmp_path: Path, api_down: None
+) -> None:
+    real = _archive(tmp_path, {"hal0.toml": b""})
+    link = tmp_path / "link.tar.gz"
+    link.symlink_to(real)
+    with pytest.raises(RunnerMigrationError, match="regular file"):
+        restore_backup(link)
+
+
+def test_restore_replaces_a_symlink_instead_of_following_it(
+    tmp_hal0_home: str, tmp_path: Path, api_down: None
+) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    slots = paths.slots_config_dir()
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / "chat.toml").symlink_to(victim)
+    archive = _archive(tmp_path, {"slots/chat.toml": b'name = "chat"\n'})
+    restore_backup(archive)
+    assert victim.read_text() == "untouched"
+    assert not (slots / "chat.toml").is_symlink()
+    assert (slots / "chat.toml").read_text() == 'name = "chat"\n'
 
 
 def test_fresh_box_has_nothing_to_convert(tmp_hal0_home: str) -> None:
@@ -444,9 +673,21 @@ def test_cli_dry_run_then_apply(old_box: dict[str, Path]) -> None:
     assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
 
 
-def test_cli_reports_failure(old_box: dict[str, Path]) -> None:
+def test_cli_reports_failure(old_box: dict[str, Path], monkeypatch) -> None:
     from hal0.cli.runner_image_commands import app
 
-    (old_box["slots"] / "broken.toml").write_text("name = [", encoding="utf-8")
+    def boom(*_a: Any, **_k: Any) -> Path:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(rs, "_write_backup", boom)
     result = CliRunner().invoke(app, ["migrate", "--apply"])
     assert result.exit_code == 1
+
+
+def test_cli_restore_refusal_exits_1(old_box: dict[str, Path], tmp_path: Path) -> None:
+    from hal0.cli.runner_image_commands import app
+
+    archive = _archive(tmp_path, {"hal0.toml": b""}, mode=0o666)
+    result = CliRunner().invoke(app, ["migrate", "--restore", str(archive)])
+    assert result.exit_code == 1
+    assert "writable" in result.output

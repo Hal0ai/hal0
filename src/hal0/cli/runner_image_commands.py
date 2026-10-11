@@ -366,7 +366,10 @@ def migrate(
     restore: Path | None = typer.Option(
         None,
         "--restore",
-        help="Restore a runners-<ts>.tar.gz backup an earlier --apply wrote, then exit.",
+        help=(
+            "For a downgrade: put back the files and model runner choices a "
+            "runners-<ts>.tar.gz backup holds, then exit. Stop hal0-api first."
+        ),
     ),
 ) -> None:
     """Convert this install onto the fresh runner system (ADR-0028).
@@ -387,10 +390,18 @@ def migrate(
     )
 
     if restore is not None:
-        restored = restore_backup(restore)
+        try:
+            restored = restore_backup(restore)
+        except RunnerMigrationError as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(1) from exc
         for path in restored:
             console.print(f"restored {path}")
-        console.print(f"[green]✓[/green] restored {len(restored)} file(s) from {restore}")
+        console.print(f"[green]✓[/green] restored {len(restored)} item(s) from {restore}")
+        console.print(
+            "The API will not convert again on boot. Install the older release now; "
+            "`hal0 update` or `hal0 runner-images migrate --apply` converts again."
+        )
         return
     try:
         report = migrate_runner_system(dry_run=not apply)

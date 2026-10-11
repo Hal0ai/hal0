@@ -1,8 +1,8 @@
 """One-shot conversion of an install onto the fresh runner system (ADR-0028).
 
 The runner registry was rebuilt from scratch: ``standard`` replaced the
-``rocmfpx`` default (and its ``vulkanfpx`` alias), ``strix`` and
-``promptforge`` were removed, every image moved to
+``rocmfpx`` default (and its ``vulkanfpx`` alias), the optional ``strix``,
+``promptforge`` and ``upstream`` runners were removed, every image moved to
 ``ghcr.io/hal0ai/hal0-runner-<key>`` pinned in ``manifest.json``, and
 ROCmFPX/ROCmFP4/IU4/ActiveFPX GGUFs are no longer loadable. This module moves
 an existing install onto that system, once, generically:
@@ -10,22 +10,27 @@ an existing install onto that system, once, generically:
 ==============================================  ==========================================
 on-disk state                                   becomes
 ==============================================  ==========================================
-slot ``binary`` = rocmfpx / vulkanfpx / strix /  ``binary = "standard"``
-promptforge / upstream / vulkan / rocm
-slot ``binary`` naming no runner                cleared (the device picks the runner)
-slot ``image_pin`` / ``image`` (top level or    removed when it names a retired hal0
-``[slot]``)                                     image; any other image (an operator's own
-                                                build) is kept and reported
+slot ``binary`` = a retired DEFAULT key          ``binary = "standard"``
+(rocmfpx, vulkanfpx, vulkan, rocm)
+slot ``binary`` = a retired OPTIONAL runner      cleared, loudly (the device picks the
+(strix, promptforge, upstream) or no runner     runner)
+slot ``image_pin`` / ``image`` (top level or    removed when it names an image hal0
+``[slot]``)                                     shipped and retired; any other image (an
+                                                operator's own build) is kept and reported
 slot whose ``[model].default`` is a fork-only   model unassigned; the rest of the slot
 quant (ROCmFPX family, IU4, ActiveFPX)          config is kept; reported as a WARNING
-``[slots].default_images``                      keys renamed as for ``binary``; entries
-                                                naming no runner, or a retired hal0
-                                                image, dropped
-profile ``runner``                              renamed as for ``binary``; unknown dropped
+``[slots].default_images``                      retired DEFAULT keys renamed to
+                                                ``standard``; overrides for retired
+                                                optional runners, unknown keys and
+                                                retired images dropped, loudly
+profile ``runner``                              as for slot ``binary``
 profile ``image`` naming a retired image        removed
-model ``preferred_runner`` (registry column)    renamed as for ``binary``; unknown → NULL
-``HAL0_TOOLBOX_IMAGE_<KEY>`` in ``api.env``     ``HAL0_RUNNER_IMAGE_<NEWKEY>``, or dropped
-                                                when the key or the image is retired
+model ``preferred_runner`` (registry column)    as for slot ``binary``; gone → NULL
+``HAL0_TOOLBOX_IMAGE_<KEY>`` in ``api.env``     ``HAL0_RUNNER_IMAGE_<NEWKEY>`` for a
+                                                current or retired DEFAULT key, deduped
+                                                against existing lines; dropped, loudly,
+                                                for a retired optional runner, an
+                                                unknown key or a retired image
 ==============================================  ==========================================
 
 The runner-image catalogue table is recreated by SQL migration
@@ -33,33 +38,47 @@ The runner-image catalogue table is recreated by SQL migration
 
 Contract:
 
-* **Runs before config validation.** It reads and writes raw TOML / env / SQL,
-  never the pydantic models: a removed runner key in ``[slots].default_images``
-  would otherwise fail config load before the conversion could run. It runs
-  first in :func:`hal0.updater.updater.run_post_activation_migrations` (the
-  ``hal0 update`` post-swap step and ``install.sh`` re-runs) and first thing
-  in :func:`hal0.api.create_app`, before it reads ``hal0.toml``.
-* **Backup first, fail loudly.** Before the first write, every file it will
-  change (and the registry DB when a column changes) goes into
-  ``/var/lib/hal0/backups/runners-<ts>.tar.gz``. No backup, no write. Any
-  failure while applying restores every file already written, rolls back the
-  DB transaction and raises :class:`RunnerMigrationError`.
+* **Runs before config validation, never at import.** It reads and writes raw
+  TOML / env / SQL, never the pydantic models: a removed runner key in
+  ``[slots].default_images`` would otherwise fail config load. It runs first
+  in :func:`hal0.updater.updater.run_post_activation_migrations` (the ``hal0
+  update`` post-swap step, ``install.sh`` re-runs, and the API's boot-time
+  safety net) and in ``hal0 serve`` before the API module is imported.
+  Importing :mod:`hal0.api` or running a read-only CLI command never runs it.
+* **Each file on its own.** A slot or profile file that does not parse is
+  skipped with a WARNING and every other file is still converted.
+  ``hal0.toml`` is written first and kept when a later write fails, because it
+  is the file that stops ``hal0-api`` from starting; every later write is
+  rolled back on failure.
+* **Backup first, fail loudly.** Before the first write, the original of every
+  file it changes, plus the ``(model id, old preferred_runner)`` pairs it
+  changes, goes into ``/var/lib/hal0/backups/runners-<ts>.tar.gz`` (mode 0600,
+  directory 0700). No backup, no write. The registry DB itself is never
+  copied.
 * **Idempotent.** Every rule is "old shape? convert : leave", so a converted
   install plans nothing and writes nothing.
 * **Dry run.** ``dry_run=True`` plans and reports without touching disk
   (``hal0 runner-images migrate`` without ``--apply``).
+* **Restore is for downgrades.** :func:`restore_backup` puts the owned files
+  and the ``preferred_runner`` values back, then leaves a marker so the
+  API's own boot-time conversion does not immediately redo the conversion.
+  The next ``hal0 update`` or an explicit ``--apply`` converts again and
+  clears the marker.
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
+import stat
+import subprocess
 import tarfile
-import tempfile
 import time
 import tomllib
 from collections.abc import Callable, Iterable
@@ -74,43 +93,63 @@ from hal0.errors import Hal0Error
 
 log = structlog.get_logger(__name__)
 
-#: Runner keys the fresh system removed or renamed, and what they become.
-#: Every GPU llama.cpp key of the old system maps to ``standard``.
-RETIRED_RUNNER_KEYS: dict[str, str] = {
+#: The old system's DEFAULT llama.cpp runner keys. An override or a pin on one
+#: of them was an override of the default runner, which is now ``standard``.
+RETIRED_DEFAULT_KEYS: dict[str, str] = {
     "rocmfpx": "standard",
     "vulkanfpx": "standard",
-    "strix": "standard",
-    "promptforge": "standard",
-    "upstream": "standard",
     "vulkan": "standard",
     "rocm": "standard",
 }
 
-#: Image repository names hal0 used to ship and no longer does. A pin to any
-#: of them is debris from the old runner system and is removed. Matched on the
-#: repository name, whatever registry or owner prefix it carries.
-_RETIRED_IMAGE_NAMES = frozenset(
+#: Retired OPTIONAL runners. They map to nothing: an image override for one of
+#: them named a special build, and turning it into ``standard``'s override
+#: would make every default slot run it.
+RETIRED_OPTIONAL_KEYS = frozenset({"strix", "promptforge", "upstream"})
+
+#: The exact repositories hal0 shipped and retired (normalized, see
+#: :func:`normalize_repo`). A pin to one of them is debris from the old runner
+#: system and is removed. An image under any other name or owner is the
+#: operator's and is kept.
+_RETIRED_REPOS = frozenset(
     {
-        "hal0-combined",
-        "hal0-combined-upstream",
-        "hal0-rocmfpx",
-        "hal0-strix-vulkan",
-        "hal0-promptforge",
-        "hal0-comfyui",
-        "amd-strix-halo-toolboxes",
+        "ghcr.io/hal0ai/hal0-combined",
+        "ghcr.io/hal0ai/hal0-combined-upstream",
+        "ghcr.io/hal0ai/hal0-rocmfpx",
+        "localhost/hal0-rocmfpx",
+        "ghcr.io/hal0ai/hal0-strix-vulkan",
+        "ghcr.io/hal0ai/hal0-promptforge",
+        "ghcr.io/hal0ai/hal0-comfyui",
+        "ghcr.io/hal0ai/amd-strix-halo-toolboxes",
+        "docker.io/kyuz0/amd-strix-halo-toolboxes",
+        "docker.io/kyuz0/amd-strix-halo-comfyui",
     }
 )
-_RETIRED_IMAGE_PREFIXES = ("hal0-toolbox-",)
-#: Image owners whose images hal0 used to ship (the kyuz0 Strix Halo builds).
-_RETIRED_IMAGE_OWNERS = frozenset({"kyuz0"})
+_RETIRED_REPO_PREFIXES = ("ghcr.io/hal0ai/hal0-toolbox-",)
+_CUDA_REPO = "ghcr.io/ggml-org/llama.cpp"
+#: Floating ggml-org tags the old ``cuda`` default used. Without a digest
+#: they name whatever was pushed last, never a fixed image.
+_CUDA_FLOATING_TAGS = frozenset({None, "server-cuda", "latest"})
 
 _ENV_OLD_RE = re.compile(
     r"^(?P<export>export\s+)?HAL0_TOOLBOX_IMAGE_(?P<key>[A-Z0-9_]+)=(?P<value>.*)$"
 )
+_ENV_NEW_RE = re.compile(r"^(?:export\s+)?HAL0_RUNNER_IMAGE_(?P<key>[A-Z0-9_]+)=(?P<value>.*)$")
+
+#: Archive member names of a backup, mapped by :func:`_owned_paths`.
+_BACKUP_TOML = "hal0.toml"
+_BACKUP_PROFILES = "profiles.toml"
+_BACKUP_ENV = "api.env"
+_BACKUP_RUNNERS = "preferred_runner.json"
+_BACKUP_SLOT_RE = re.compile(r"^slots/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*\.toml)$")
+_BACKUP_MEMBER_MAX = 4 * 1024 * 1024
+
+#: Left by :func:`restore_backup`; the boot-time conversion honours it.
+RESTORE_MARKER_NAME = "runner-migration.restored"
 
 
 class RunnerMigrationError(Hal0Error):
-    """The runner-system conversion failed; every write it made was restored."""
+    """The runner-system conversion or a restore failed."""
 
     code = "config.runner_migration_failed"
     status = 500
@@ -122,12 +161,15 @@ class RunnerMigrationReport:
 
     dry_run: bool
     actions: list[str] = field(default_factory=list)
-    #: Loud lines an operator must see: unassigned models, dropped pins.
+    #: Loud lines an operator must see: unassigned models, dropped pins,
+    #: files that could not be read.
     warnings: list[str] = field(default_factory=list)
     #: Operator images left in place (not hal0's to manage). Reported, but
     #: not a change: they do not make the report "changed".
     kept: list[str] = field(default_factory=list)
     backup: str | None = None
+    #: True when a restore marker made the boot-time conversion stand down.
+    skipped_for_restore: bool = False
 
     @property
     def changed(self) -> bool:
@@ -158,11 +200,22 @@ def _known_runner_keys() -> frozenset[str]:
 
 
 def map_runner_key(key: str, known: frozenset[str]) -> str | None:
-    """The fresh-system key for ``key``; ``None`` when it names no runner."""
+    """The fresh-system key for ``key``; ``None`` when it maps to no runner.
+
+    Only current keys and the old DEFAULT keys map; a retired optional runner
+    maps to ``None`` like an unknown key.
+    """
     key = key.strip()
     if key in known:
         return key
-    return RETIRED_RUNNER_KEYS.get(key)
+    return RETIRED_DEFAULT_KEYS.get(key)
+
+
+def _gone(key: str) -> str:
+    """Why ``key`` maps to nothing, for a warning."""
+    if key.strip() in RETIRED_OPTIONAL_KEYS:
+        return f"the optional {key!r} runner was removed"
+    return f"{key!r} names no runner"
 
 
 def split_image_ref(ref: str) -> tuple[str, str | None, str | None]:
@@ -174,30 +227,50 @@ def split_image_ref(ref: str) -> tuple[str, str | None, str | None]:
     return body, None, digest or None
 
 
+def normalize_repo(repo: str) -> str:
+    """``repo`` with the registry spelled out, lowercased.
+
+    ``kyuz0/x`` and ``index.docker.io/kyuz0/x`` are ``docker.io/kyuz0/x``; a
+    single component is ``docker.io/library/<name>``.
+    """
+    parts = [p for p in repo.strip().lower().split("/") if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return f"docker.io/library/{parts[0]}"
+    first = parts[0]
+    if first in {"index.docker.io", "registry-1.docker.io"}:
+        parts[0] = "docker.io"
+    elif "." not in first and ":" not in first and first != "localhost":
+        parts.insert(0, "docker.io")
+    return "/".join(parts)
+
+
 def image_is_retired(ref: str) -> bool:
     """Does ``ref`` name an image the old runner system shipped?
 
-    The retired packages are ``hal0-combined`` (and ``-upstream``),
-    ``hal0-rocmfpx``, ``hal0-strix-vulkan``, ``hal0-promptforge``,
-    ``hal0-toolbox-*``, ``hal0-comfyui``, ``amd-strix-halo-toolboxes`` and
-    the kyuz0 builds, under any registry. Everything else, including an
-    operator's own build, is not.
+    True for the exact repositories hal0 published or built and has retired
+    (``hal0-combined``, ``-upstream``, ``hal0-rocmfpx``, ``hal0-strix-vulkan``,
+    ``hal0-promptforge``, ``hal0-comfyui``, ``hal0-toolbox-*``, hal0's
+    ``amd-strix-halo-toolboxes`` mirror, and the two kyuz0 Strix Halo images),
+    and for the floating ggml-org ``server-cuda`` tag the old ``cuda`` default
+    used. Everything else, including an operator's own build under any of
+    those names at another owner, is not.
     """
-    repo, _tag, _digest = split_image_ref(ref)
-    parts = [p for p in repo.lower().split("/") if p]
-    if not parts:
+    repo, tag, digest = split_image_ref(ref)
+    norm = normalize_repo(repo)
+    if not norm:
         return False
-    name = parts[-1]
-    if name in _RETIRED_IMAGE_NAMES or name.startswith(_RETIRED_IMAGE_PREFIXES):
+    if norm in _RETIRED_REPOS or norm.startswith(_RETIRED_REPO_PREFIXES):
         return True
-    return any(owner in _RETIRED_IMAGE_OWNERS for owner in parts[:-1])
+    return norm == _CUDA_REPO and digest is None and tag in _CUDA_FLOATING_TAGS
 
 
 def image_is_hal0_runner(ref: str) -> bool:
     """Does ``ref`` name one of the current runner packages?"""
     repo, _tag, _digest = split_image_ref(ref)
-    name = repo.lower().rsplit("/", 1)[-1]
-    return name.startswith("hal0-runner-") or repo.lower().endswith("ggml-org/llama.cpp")
+    norm = normalize_repo(repo)
+    return norm.startswith("ghcr.io/hal0ai/hal0-runner-") or norm == _CUDA_REPO
 
 
 # ── plans (pure dict transforms) ──────────────────────────────────────────────
@@ -232,8 +305,7 @@ def plan_slot(
             if new is None:
                 del table["binary"]
                 warnings.append(
-                    f"slot {name}: runtime {binary!r} no longer exists; cleared so the "
-                    "device picks the runner"
+                    f"slot {name}: runtime cleared ({_gone(binary)}); the device picks the runner"
                 )
                 changed = True
             elif new != binary:
@@ -278,17 +350,24 @@ def plan_hal0_toml(
     warnings: list[str],
     kept: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """The converted ``hal0.toml``, or ``None`` when nothing changes."""
+    """The converted ``hal0.toml``, or ``None`` when nothing changes.
+
+    A current key wins over a renamed one: ``standard`` set explicitly beats a
+    leftover ``rocmfpx`` entry.
+    """
     slots = _as_table(raw.get("slots"))
     images = _as_table(slots.get("default_images")) if slots is not None else None
     if not images:
         return None
     converted: dict[str, Any] = {}
     changed = False
-    for key, ref in images.items():
+    ordered = sorted(images.items(), key=lambda kv: str(kv[0]) not in known)
+    for key, ref in ordered:
         new = map_runner_key(str(key), known)
         if new is None:
-            warnings.append(f"[slots].default_images: dropped {key!r} (no such runner)")
+            warnings.append(
+                f"[slots].default_images: dropped {key!r} = {ref!r} ({_gone(str(key))})"
+            )
             changed = True
             continue
         if not isinstance(ref, str) or not ref.strip() or image_is_retired(ref):
@@ -297,14 +376,15 @@ def plan_hal0_toml(
             )
             changed = True
             continue
-        if kept is not None and not image_is_hal0_runner(ref):
-            kept.append(f"[slots].default_images: custom image {key!r} = {ref!r}")
         if new in converted:
             warnings.append(
-                f"[slots].default_images: dropped {key!r} (another entry already sets {new!r})"
+                f"[slots].default_images: dropped {key!r} = {ref!r} "
+                f"(another entry already sets {new!r})"
             )
             changed = True
             continue
+        if kept is not None and not image_is_hal0_runner(ref):
+            kept.append(f"[slots].default_images: custom image {new!r} = {ref!r}")
         if new != key:
             actions.append(f"[slots].default_images: renamed {key!r} -> {new!r}")
             changed = True
@@ -337,7 +417,7 @@ def plan_profiles(
             new = map_runner_key(runner, known)
             if new is None:
                 del prof["runner"]
-                warnings.append(f"profile {name}: runtime {runner!r} no longer exists; cleared")
+                warnings.append(f"profile {name}: runtime cleared ({_gone(runner)})")
                 changed = True
             elif new != runner:
                 prof["runner"] = new
@@ -351,6 +431,10 @@ def plan_profiles(
     return out if changed else None
 
 
+def _env_value(raw: str) -> str:
+    return raw.strip().strip("'\"")
+
+
 def plan_env(
     text: str,
     *,
@@ -358,8 +442,19 @@ def plan_env(
     actions: list[str],
     warnings: list[str],
 ) -> str | None:
-    """``api.env`` with ``HAL0_TOOLBOX_IMAGE_*`` converted, or ``None``."""
+    """``api.env`` with ``HAL0_TOOLBOX_IMAGE_*`` converted, or ``None``.
+
+    A converted line never duplicates a ``HAL0_RUNNER_IMAGE_<KEY>`` the file
+    already sets, nor another converted line: the first setting wins, an
+    identical duplicate is dropped quietly, a conflicting one loudly.
+    """
     lines = text.splitlines(keepends=True)
+    present: dict[str, str] = {}
+    for line in lines:
+        match = _ENV_NEW_RE.match(line.rstrip("\r\n"))
+        if match is not None:
+            present.setdefault(match.group("key"), _env_value(match.group("value")))
+
     out: list[str] = []
     changed = False
     for line in lines:
@@ -369,19 +464,29 @@ def plan_env(
             continue
         changed = True
         old_key = match.group("key")
-        value = match.group("value").strip().strip("'\"")
+        old_name = f"HAL0_TOOLBOX_IMAGE_{old_key}"
+        value = _env_value(match.group("value"))
         new = map_runner_key(old_key.lower(), known)
         if new is None:
-            warnings.append(f"api.env: dropped HAL0_TOOLBOX_IMAGE_{old_key} (no such runner)")
+            warnings.append(f"api.env: dropped {old_name}={value} ({_gone(old_key.lower())})")
             continue
         if not value or image_is_retired(value):
-            warnings.append(
-                f"api.env: dropped HAL0_TOOLBOX_IMAGE_{old_key}={value} (a retired hal0 image)"
-            )
+            warnings.append(f"api.env: dropped {old_name}={value} (a retired hal0 image)")
             continue
-        newline = f"{match.group('export') or ''}HAL0_RUNNER_IMAGE_{new.upper()}={value}\n"
-        out.append(newline)
-        actions.append(f"api.env: HAL0_TOOLBOX_IMAGE_{old_key} -> HAL0_RUNNER_IMAGE_{new.upper()}")
+        new_key = new.upper()
+        new_name = f"HAL0_RUNNER_IMAGE_{new_key}"
+        if new_key in present:
+            if present[new_key] == value:
+                actions.append(f"api.env: dropped {old_name} (duplicates {new_name})")
+            else:
+                warnings.append(
+                    f"api.env: dropped {old_name}={value} ({new_name} is already set to "
+                    f"{present[new_key]})"
+                )
+            continue
+        present[new_key] = value
+        out.append(f"{match.group('export') or ''}{new_name}={value}\n")
+        actions.append(f"api.env: {old_name} -> {new_name}")
     return "".join(out) if changed else None
 
 
@@ -436,13 +541,20 @@ def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
     return lookup
 
 
+@dataclass(frozen=True)
+class _RunnerChange:
+    model_id: str
+    old: str
+    new: str | None
+
+
 def _plan_preferred_runner(
     db_path: Path, known: frozenset[str], actions: list[str], warnings: list[str]
-) -> list[tuple[str, str | None]]:
-    """``[(model_id, new_value)]`` for leftover ``preferred_runner`` values."""
+) -> list[_RunnerChange]:
+    """Leftover ``preferred_runner`` values to rename or clear."""
     if not db_path.is_file():
         return []
-    changes: list[tuple[str, str | None]] = []
+    changes: list[_RunnerChange] = []
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
@@ -455,11 +567,9 @@ def _plan_preferred_runner(
                 new = map_runner_key(str(value), known)
                 if new == value:
                     continue
-                changes.append((str(mid), new))
+                changes.append(_RunnerChange(str(mid), str(value), new))
                 if new is None:
-                    warnings.append(
-                        f"model {mid}: cleared preferred runner {value!r} (no such runner)"
-                    )
+                    warnings.append(f"model {mid}: cleared preferred runner ({_gone(str(value))})")
                 else:
                     actions.append(f"model {mid}: preferred runner {value!r} -> {new!r}")
         finally:
@@ -472,43 +582,86 @@ def _plan_preferred_runner(
     return changes
 
 
+def _set_preferred_runners(db_path: Path, pairs: Iterable[tuple[str, str | None]]) -> None:
+    """``UPDATE model SET preferred_runner`` for each ``(model id, value)``, one transaction."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        with conn:
+            conn.executemany(
+                "UPDATE model SET preferred_runner = ? WHERE id = ?",
+                [(value, mid) for mid, value in pairs],
+            )
+    finally:
+        conn.close()
+
+
 # ── IO ────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class _FileWrite:
     path: Path
+    member: str
     original: bytes
     new: bytes
 
 
-def _read_toml(path: Path) -> tuple[bytes, dict[str, Any]] | None:
+def _read_toml(path: Path, warnings: list[str]) -> tuple[bytes, dict[str, Any]] | None:
+    """``(bytes, parsed)``; ``None`` when absent or unreadable (with a WARNING)."""
     try:
         data = path.read_bytes()
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        warnings.append(f"{path}: not readable ({exc}); skipped, not converted")
+        return None
     try:
         return data, tomllib.loads(data.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        warnings.append(
+            f"{path}: does not parse ({exc}); skipped, not converted. Fix it, then "
+            "re-run `hal0 runner-images migrate --apply`"
+        )
+        return None
+
+
+def _refuse_symlink_dir(directory: Path) -> None:
+    st = os.lstat(directory)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         raise RunnerMigrationError(
-            f"cannot parse {path}: {exc}; fix or remove it, then re-run "
-            "`hal0 runner-images migrate --apply`",
-            details={"path": str(path)},
-        ) from exc
+            f"{directory} is not a plain directory; refusing to write into it",
+            details={"path": str(directory)},
+        )
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    """Replace ``path`` atomically, keeping its mode and (when allowed) owner."""
-    st = path.stat()
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+def _replace_file(path: Path, data: bytes, *, default_mode: int = 0o640) -> None:
+    """Replace ``path`` atomically without following a symlink at any step.
+
+    The temp file is created ``O_EXCL | O_NOFOLLOW`` next to ``path``, given
+    the existing file's mode and (when allowed) owner through its descriptor,
+    and renamed over ``path``. A symlink at ``path`` is replaced, never
+    followed.
+    """
+    _refuse_symlink_dir(path.parent)
+    try:
+        st: os.stat_result | None = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and stat.S_ISREG(st.st_mode):
+        mode, uid, gid = st.st_mode & 0o7777, st.st_uid, st.st_gid
+    else:
+        parent = os.lstat(path.parent)
+        mode, uid, gid = default_mode, parent.st_uid, parent.st_gid
+    tmp = path.parent / f".{path.name}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
+            with contextlib.suppress(PermissionError, OSError):
+                os.fchown(f.fileno(), uid, gid)
+            os.fchmod(f.fileno(), mode)
             os.fsync(f.fileno())
-        os.chmod(tmp, st.st_mode & 0o7777)
-        with contextlib.suppress(PermissionError, OSError):
-            os.chown(tmp, st.st_uid, st.st_gid)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -516,36 +669,68 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def _write_backup(writes: Iterable[_FileWrite], db_path: Path | None) -> Path:
+def _backups_dir() -> Path:
     from hal0.config import paths
 
     backup_dir = paths.var_lib() / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _refuse_symlink_dir(backup_dir)
+    os.chmod(backup_dir, 0o700)
+    return backup_dir
+
+
+def _write_backup(writes: Iterable[_FileWrite], runner_changes: list[_RunnerChange]) -> Path:
+    """Write the restore point: owned files by role, plus the old preferred runners."""
+    backup_dir = _backups_dir()
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    target = backup_dir / f"runners-{stamp}.tar.gz"
-    n = 1
-    while target.exists():  # never overwrite an earlier restore point
-        target = backup_dir / f"runners-{stamp}-{n}.tar.gz"
-        n += 1
-    with tarfile.open(target, "w:gz") as tar:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for w in writes:
-            info = tarfile.TarInfo(name=str(w.path).lstrip("/"))
+            info = tarfile.TarInfo(name=w.member)
             info.size = len(w.original)
-            info.mode = w.path.stat().st_mode & 0o7777
+            info.mode = 0o600
+            info.mtime = int(time.time())
             tar.addfile(info, io.BytesIO(w.original))
-        if db_path is not None and db_path.is_file():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                snap = Path(tmpdir) / db_path.name
-                src = sqlite3.connect(str(db_path))
-                dst = sqlite3.connect(str(snap))
-                try:
-                    src.backup(dst)
-                finally:
-                    dst.close()
-                    src.close()
-                tar.add(str(snap), arcname=str(db_path).lstrip("/"))
-    os.chmod(target, 0o600)
+        if runner_changes:
+            payload = json.dumps(
+                [{"id": c.model_id, "preferred_runner": c.old} for c in runner_changes],
+                indent=2,
+            ).encode()
+            info = tarfile.TarInfo(name=_BACKUP_RUNNERS)
+            info.size = len(payload)
+            info.mode = 0o600
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(payload))
+    n = 0
+    while True:  # never overwrite an earlier restore point
+        suffix = f"-{n}" if n else ""
+        target = backup_dir / f"runners-{stamp}{suffix}.tar.gz"
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            n += 1
+            continue
+        break
+    with os.fdopen(fd, "wb") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(buf.getvalue())
+        f.flush()
+        os.fsync(f.fileno())
     return target
+
+
+# ── restore marker ────────────────────────────────────────────────────────────
+
+
+def restore_marker() -> Path:
+    from hal0.config import paths
+
+    return paths.var_lib() / RESTORE_MARKER_NAME
+
+
+def _clear_restore_marker() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        restore_marker().unlink()
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -555,15 +740,31 @@ def migrate_runner_system(
     *,
     dry_run: bool = False,
     job_id: str | None = None,
+    honour_restore_marker: bool = False,
 ) -> RunnerMigrationReport:
     """Convert this install onto the fresh runner system. See the module docstring.
 
-    Raises :class:`RunnerMigrationError` after restoring every write on any
-    failure.
+    ``honour_restore_marker`` is for the boot-time callers (``hal0 serve`` and
+    the API's safety net): after an operator restored a backup, they stand
+    down instead of converting again. ``hal0 update`` and an explicit
+    ``--apply`` pass ``False``, convert, and clear the marker.
+
+    Raises :class:`RunnerMigrationError` on a failed write, after rolling back
+    every write except an already converted ``hal0.toml``.
     """
     from hal0.config import paths
     from hal0.config.loader import hal0_config_file_lock
     from hal0.slot_config import slot_write_lock
+
+    if honour_restore_marker and restore_marker().exists():
+        report = RunnerMigrationReport(dry_run=True, skipped_for_restore=True)
+        log.warning(
+            "migrate.runner_system.skipped_after_restore",
+            job_id=job_id,
+            marker=str(restore_marker()),
+            remedy="run `hal0 runner-images migrate --apply` (or `hal0 update`) to convert again",
+        )
+        return report
 
     with contextlib.ExitStack() as locks:
         # Serialize against the API's own config writers (a live hal0-api may be
@@ -576,33 +777,32 @@ def migrate_runner_system(
         return _migrate(dry_run=dry_run, job_id=job_id)
 
 
-def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
+def _plan_files(
+    report: RunnerMigrationReport, known: frozenset[str], fork_quant_of: Callable[[str], str | None]
+) -> tuple[_FileWrite | None, list[_FileWrite]]:
+    """``(hal0.toml write, every other file write)``; each file planned on its own."""
     from hal0.config import paths
 
-    known = _known_runner_keys()
-    report = RunnerMigrationReport(dry_run=dry_run)
     actions, warnings = report.actions, report.warnings
+    toml_write: _FileWrite | None = None
+    rest: list[_FileWrite] = []
 
     hal0_toml = paths.hal0_toml()
-    slots_dir = paths.slots_config_dir()
-    profiles_toml = paths.profiles_toml()
-    api_env = paths.api_env()
-    db_path = paths.db_path()
-
-    writes: list[_FileWrite] = []
-    fork_quant_of = _fork_quant_lookup(db_path)
-
-    loaded = _read_toml(hal0_toml)
+    loaded = _read_toml(hal0_toml, warnings)
     if loaded is not None:
         new = plan_hal0_toml(
             loaded[1], known=known, actions=actions, warnings=warnings, kept=report.kept
         )
         if new is not None:
-            writes.append(_FileWrite(hal0_toml, loaded[0], tomli_w.dumps(new).encode()))
+            toml_write = _FileWrite(hal0_toml, _BACKUP_TOML, loaded[0], tomli_w.dumps(new).encode())
 
+    slots_dir = paths.slots_config_dir()
     if slots_dir.is_dir():
         for slot_path in sorted(slots_dir.glob("*.toml")):
-            loaded = _read_toml(slot_path)
+            if _BACKUP_SLOT_RE.match(f"slots/{slot_path.name}") is None:
+                warnings.append(f"{slot_path}: unexpected slot file name; skipped")
+                continue
+            loaded = _read_toml(slot_path, warnings)
             if loaded is None:
                 continue
             new = plan_slot(
@@ -615,42 +815,67 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
                 kept=report.kept,
             )
             if new is not None:
-                writes.append(_FileWrite(slot_path, loaded[0], tomli_w.dumps(new).encode()))
+                rest.append(
+                    _FileWrite(
+                        slot_path, f"slots/{slot_path.name}", loaded[0], tomli_w.dumps(new).encode()
+                    )
+                )
 
-    loaded = _read_toml(profiles_toml)
+    profiles_toml = paths.profiles_toml()
+    loaded = _read_toml(profiles_toml, warnings)
     if loaded is not None:
         new = plan_profiles(loaded[1], known=known, actions=actions, warnings=warnings)
         if new is not None:
-            writes.append(_FileWrite(profiles_toml, loaded[0], tomli_w.dumps(new).encode()))
+            rest.append(
+                _FileWrite(profiles_toml, _BACKUP_PROFILES, loaded[0], tomli_w.dumps(new).encode())
+            )
 
+    api_env = paths.api_env()
     if api_env.is_file():
         try:
             original = api_env.read_bytes()
-        except OSError as exc:
+            text = original.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
             # The old env names are simply no longer read, so an api.env this
             # process cannot open is reported, never a reason to block the
             # config conversion.
             warnings.append(f"api.env: not readable here ({exc}); HAL0_TOOLBOX_IMAGE_* not checked")
         else:
-            new_text = plan_env(
-                original.decode("utf-8"),
-                known=known,
-                actions=actions,
-                warnings=warnings,
-            )
+            new_text = plan_env(text, known=known, actions=actions, warnings=warnings)
             if new_text is not None:
-                writes.append(_FileWrite(api_env, original, new_text.encode("utf-8")))
+                rest.append(_FileWrite(api_env, _BACKUP_ENV, original, new_text.encode("utf-8")))
+    return toml_write, rest
 
-    runner_changes = _plan_preferred_runner(db_path, known, actions, warnings)
+
+def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
+    from hal0.config import paths
+
+    known = _known_runner_keys()
+    report = RunnerMigrationReport(dry_run=dry_run)
+    db_path = paths.db_path()
+
+    try:
+        fork_quant_of = _fork_quant_lookup(db_path)
+        runner_changes = _plan_preferred_runner(db_path, known, report.actions, report.warnings)
+    except RunnerMigrationError as exc:
+        # An unreadable registry only costs the model checks; the config
+        # files still convert.
+        report.warnings.append(f"{exc}; model checks skipped")
+        fork_quant_of, runner_changes = (lambda _mid: None), []
+
+    toml_write, rest = _plan_files(report, known, fork_quant_of)
+    writes = ([toml_write] if toml_write else []) + rest
 
     if dry_run or not (writes or runner_changes):
         if report.changed:
             for line in report.lines():
                 log.info("migrate.runner_system.plan", job_id=job_id, line=line)
+        if not dry_run:
+            _clear_restore_marker()
         return report
 
     try:
-        backup = _write_backup(writes, db_path if runner_changes else None)
+        backup = _write_backup(writes, runner_changes)
     except Exception as exc:
         raise RunnerMigrationError(
             f"could not write the runner-migration backup ({exc}); nothing was changed",
@@ -658,25 +883,30 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
         ) from exc
     report.backup = str(backup)
 
+    # hal0.toml on its own: it is what stops hal0-api from starting, so it is
+    # kept even when a later write fails.
+    if toml_write is not None:
+        try:
+            _replace_file(toml_write.path, toml_write.new)
+        except Exception as exc:
+            raise RunnerMigrationError(
+                f"could not convert {toml_write.path} ({exc}); nothing was changed "
+                f"(backup: {backup})",
+                details={"error": str(exc), "backup": str(backup)},
+            ) from exc
+
     done: list[_FileWrite] = []
     try:
-        for w in writes:
-            _atomic_write(w.path, w.new)
+        for w in rest:
+            _replace_file(w.path, w.new)
             done.append(w)
         if runner_changes:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                with conn:
-                    conn.executemany(
-                        "UPDATE model SET preferred_runner = ? WHERE id = ?",
-                        [(new, mid) for mid, new in runner_changes],
-                    )
-            finally:
-                conn.close()
+            _set_preferred_runners(db_path, [(c.model_id, c.new) for c in runner_changes])
     except Exception as exc:
         for w in reversed(done):
             with contextlib.suppress(Exception):
-                _atomic_write(w.path, w.original)
+                _replace_file(w.path, w.original)
+        kept_toml = " (hal0.toml stays converted)" if toml_write is not None else ""
         log.error(
             "migrate.runner_system.failed_restored",
             job_id=job_id,
@@ -684,56 +914,177 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
             backup=str(backup),
         )
         raise RunnerMigrationError(
-            f"runner-system migration failed and was rolled back: {exc} (backup: {backup})",
+            f"runner-system migration failed and was rolled back{kept_toml}: {exc} "
+            f"(backup: {backup})",
             details={"error": str(exc), "backup": str(backup)},
         ) from exc
 
+    _clear_restore_marker()
     for line in report.lines():
         log.warning("migrate.runner_system.applied", job_id=job_id, line=line)
     return report
 
 
-def restore_backup(archive: Path | str, *, root: Path = Path("/")) -> list[str]:
-    """Extract a ``runners-<ts>.tar.gz`` backup over ``root``. Returns the paths.
+# ── restore ───────────────────────────────────────────────────────────────────
 
-    The operator's undo for an applied conversion (``hal0 runner-images migrate
-    --restore <archive>``). Members are written back to their original
-    absolute paths; nothing outside the archive is touched.
+
+def _api_is_active() -> bool:
+    """Is ``hal0-api`` running? ``False`` when systemd cannot be asked."""
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [systemctl, "is-active", "--quiet", "hal0-api"],
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _check_archive(archive: Path) -> None:
+    """Refuse an archive another user could have planted or edited."""
+    try:
+        st = os.lstat(archive)
+    except OSError as exc:
+        raise RunnerMigrationError(f"cannot read {archive}: {exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise RunnerMigrationError(f"{archive} is not a regular file; refusing to restore it")
+    if st.st_uid not in {0, os.getuid()}:
+        raise RunnerMigrationError(
+            f"{archive} is owned by uid {st.st_uid}, not root or you; refusing to restore it"
+        )
+    if st.st_mode & 0o022:
+        raise RunnerMigrationError(f"{archive} is group- or world-writable; refusing to restore it")
+
+
+def _owned_paths(member: str) -> Path | None:
+    """The file a backup member restores to; ``None`` for anything else."""
+    from hal0.config import paths
+
+    fixed = {
+        _BACKUP_TOML: paths.hal0_toml(),
+        _BACKUP_PROFILES: paths.profiles_toml(),
+        _BACKUP_ENV: paths.api_env(),
+    }
+    if member in fixed:
+        return fixed[member]
+    match = _BACKUP_SLOT_RE.match(member)
+    if match is not None:
+        return paths.slots_config_dir() / match.group("name")
+    return None
+
+
+def _read_archive(archive: Path) -> tuple[dict[Path, bytes], list[tuple[str, str]]]:
+    """``({destination: bytes}, [(model id, preferred_runner)])``, all validated.
+
+    Every member must be a regular file this migration owns; anything else
+    refuses the whole archive before a single write.
     """
+    files: dict[Path, bytes] = {}
+    runners: list[tuple[str, str]] = []
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    raise RunnerMigrationError(
+                        f"{archive}: member {member.name!r} is not a regular file; refusing"
+                    )
+                if member.size > _BACKUP_MEMBER_MAX:
+                    raise RunnerMigrationError(f"{archive}: member {member.name!r} is too large")
+                src = tar.extractfile(member)
+                data = src.read() if src is not None else b""
+                if member.name == _BACKUP_RUNNERS:
+                    rows = json.loads(data.decode("utf-8"))
+                    if not isinstance(rows, list):
+                        raise RunnerMigrationError(f"{archive}: {member.name} is not a list")
+                    for row in rows:
+                        if not (
+                            isinstance(row, dict)
+                            and isinstance(row.get("id"), str)
+                            and isinstance(row.get("preferred_runner"), str)
+                        ):
+                            raise RunnerMigrationError(
+                                f"{archive}: {member.name} has a malformed row"
+                            )
+                        runners.append((row["id"], row["preferred_runner"]))
+                    continue
+                dest = _owned_paths(member.name)
+                if dest is None:
+                    raise RunnerMigrationError(
+                        f"{archive}: unknown member {member.name!r}; this is not a "
+                        "runner-migration backup, refusing"
+                    )
+                files[dest] = data
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise RunnerMigrationError(f"cannot read {archive}: {exc}") from exc
+    return files, runners
+
+
+def restore_backup(archive: Path | str) -> list[str]:
+    """Put a ``runners-<ts>.tar.gz`` backup back. Returns what it restored.
+
+    For a downgrade: it writes back only the files the conversion owns
+    (``hal0.toml``, ``slots/*.toml``, ``profiles.toml``, ``api.env``) and the
+    old ``preferred_runner`` values, through ``UPDATE`` statements, never a
+    database copy. It refuses an archive not owned by root or the caller, a
+    group- or world-writable one, any member it does not own, and to run
+    while ``hal0-api`` is active. It takes the config and slot locks, and
+    leaves a marker so the API's boot-time conversion does not redo the
+    conversion; ``hal0 update`` or ``--apply`` converts again.
+    """
+    from hal0.config import paths
+    from hal0.config.loader import hal0_config_file_lock
+    from hal0.slot_config import slot_write_lock
+
     archive = Path(archive)
+    _check_archive(archive)
+    if _api_is_active():
+        raise RunnerMigrationError(
+            "hal0-api is running; stop it first (`sudo systemctl stop hal0-api`) so it "
+            "does not convert or overwrite the restored files"
+        )
+    files, runners = _read_archive(archive)
+
     restored: list[str] = []
-    with tarfile.open(archive, "r:gz") as tar:
-        for member in tar.getmembers():
-            if (
-                not member.isfile()
-                or member.name.startswith("/")
-                or ".." in Path(member.name).parts
-            ):
-                continue
-            dest = root / member.name
-            src = tar.extractfile(member)
-            if src is None:
-                continue
+    with contextlib.ExitStack() as locks:
+        if paths.etc().is_dir():
+            locks.enter_context(hal0_config_file_lock(paths.hal0_toml()))
+            if paths.slots_config_dir().is_dir():
+                locks.enter_context(slot_write_lock())
+        for dest, data in files.items():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
-            os.chmod(dest, member.mode & 0o7777)
+            _replace_file(dest, data)
             restored.append(str(dest))
+        db_path = paths.db_path()
+        if runners and db_path.is_file():
+            _set_preferred_runners(db_path, runners)
+            restored.append(f"{db_path} (preferred_runner for {len(runners)} model(s))")
+
+    marker = restore_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    _replace_file(marker, f"{archive}\n".encode(), default_mode=0o644)
     return restored
 
 
 __all__ = [
-    "RETIRED_RUNNER_KEYS",
+    "RESTORE_MARKER_NAME",
+    "RETIRED_DEFAULT_KEYS",
+    "RETIRED_OPTIONAL_KEYS",
     "RunnerMigrationError",
     "RunnerMigrationReport",
     "image_is_hal0_runner",
     "image_is_retired",
     "map_runner_key",
     "migrate_runner_system",
+    "normalize_repo",
     "plan_env",
     "plan_hal0_toml",
     "plan_profiles",
     "plan_slot",
     "restore_backup",
+    "restore_marker",
     "split_image_ref",
 ]

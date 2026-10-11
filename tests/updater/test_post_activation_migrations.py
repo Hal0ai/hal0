@@ -30,8 +30,9 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "converge_components": [],
     }
 
-    def _runner_system(*, dry_run=False, job_id=None):
+    def _runner_system(*, dry_run=False, job_id=None, honour_restore_marker=False):
         calls["runner_system"].append(job_id)
+        calls.setdefault("restore_marker", []).append(honour_restore_marker)
 
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
@@ -100,7 +101,9 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
     order: list[str] = []
     monkeypatch.setattr(
         "hal0.config.migrations.runner_system.migrate_runner_system",
-        lambda *, dry_run=False, job_id=None: order.append("runner_system"),
+        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: order.append(
+            "runner_system"
+        ),
     )
     monkeypatch.setattr(
         "hal0.updater.updater._maybe_run_config_migrations",
@@ -112,6 +115,13 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
     )
     run_post_activation_migrations(job_id="j0")
     assert order == ["runner_system", "schema", "registry_toml"]
+
+
+def test_an_update_converts_even_after_a_restore(_stub_every_pass: dict[str, list[Any]]) -> None:
+    """An actual update ignores the restore marker; only boot honours it."""
+    run_post_activation_migrations(job_id="j1")
+    run_post_activation_migrations(job_id="j2", honour_restore_marker=True)
+    assert _stub_every_pass["restore_marker"] == [False, True]
 
 
 def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
@@ -165,7 +175,9 @@ def test_runner_system_conversion_runs_before_the_schema_migration(
     order: list[str] = []
     monkeypatch.setattr(
         "hal0.config.migrations.runner_system.migrate_runner_system",
-        lambda *, dry_run=False, job_id=None: order.append("runner_system"),
+        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: order.append(
+            "runner_system"
+        ),
     )
     monkeypatch.setattr(
         "hal0.updater.updater._maybe_run_config_migrations",
@@ -181,7 +193,7 @@ def test_runner_system_failure_is_fatal(
     """The conversion restores its own writes before raising; the update must
     see the failure and nothing after it may run on a half-converted box."""
 
-    def _boom(*, dry_run=False, job_id=None):
+    def _boom(*, dry_run=False, job_id=None, honour_restore_marker=False):
         raise Hal0Error("runner conversion failed", code="test.boom")
 
     monkeypatch.setattr("hal0.config.migrations.runner_system.migrate_runner_system", _boom)
