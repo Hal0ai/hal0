@@ -22,15 +22,11 @@ never removes one. ``_activate_slot_model``'s failure path writes
 0.9.8-scaffold case, and the only one this module ever binds into — does stay
 model-less, which is where the shorter phrasing came from.
 
-**One default, hardware-blind (rc.10).** The default is
-:data:`BRAIN_MODEL_DEFAULT` (LFM2.5-2.6B Q8_0) on every box: plain GGUF, no
-custom tensor types, loadable by the FPX runner and stock llama.cpp alike.
-The hardware fork only survives for ``HAL0_BRAIN_MODEL`` overrides naming an
-sft build — the sft Q8/Q4 files carry custom GGML tensor type ids (103 / 100)
-that **stock llama.cpp rejects at load** (ROCmFPX runner only,
-``DEFAULT_ROCMFPX_IMAGE``); the sft F16 is the plain-GGUF one. An operator
-forcing an FPX-only quant onto a CPU box gets the crash-loop they asked for —
-the default can no longer produce it.
+**One default, hardware-blind.** The default is :data:`BRAIN_MODEL_DEFAULT`
+(LFM2.5-2.6B Q8_0) on every box: plain GGUF, loadable by every llama.cpp
+runner. ``HAL0_BRAIN_MODEL`` may name the plain-GGUF sft F16 build instead;
+the sft repo's ROCmFPX quants need a fork hal0 no longer ships (ADR-0028), so
+they are not offered.
 
 **Reuses the existing activation gate.** The pull runs through
 :func:`~hal0.install.orchestrate.run_pull_and_activate`, which stamps
@@ -94,39 +90,23 @@ BRAIN_HF_REPO = "Hal0ai/hal0-brain-sft-ROCmFPX-GGUF"
 #: older image pins.
 BRAIN_MODEL_DEFAULT = "lfm2.5-2.6b"
 
-#: hal0-brain-sft Q8_0 agent/tool-use preset — the pre-rc.10 GPU default,
-#: kept as an override. Custom GGML tensor type 103 — ROCmFPX runner ONLY.
-BRAIN_MODEL_ROCMFPX = "hal0-brain-sft-q8-rocmfpx"
-
-#: hal0-brain-sft plain F16 GGUF — the pre-rc.10 CPU default, kept as an
-#: override. Loadable by a stock llama.cpp image.
+#: hal0-brain-sft plain F16 GGUF — an override, loadable on every runner.
 BRAIN_MODEL_PORTABLE = "hal0-brain-sft-f16"
-
-#: Smallest variant. Custom GGML tensor type 100 — ROCmFPX runner ONLY. NOT
-#: auto-selected: an operator switches to it by hand when memory is tight.
-BRAIN_MODEL_SMALL = "hal0-brain-sft-q4-rocmfp4"
 
 #: Every brain variant, for callers that want to validate an override.
 BRAIN_MODEL_IDS = (
     BRAIN_MODEL_DEFAULT,
-    BRAIN_MODEL_ROCMFPX,
-    BRAIN_MODEL_SMALL,
     BRAIN_MODEL_PORTABLE,
 )
 
 
-def rocmfpx_capable(hw: HardwareInfo) -> bool:
-    """True when this box can run the ROCmFPX runner (custom tensor types).
+def gpu_capable(hw: HardwareInfo) -> bool:
+    """True when this box derives a GPU llama.cpp lane (``gpu-rocm``/``gpu-vulkan``).
 
     Mirrors the GPU branch of
     :func:`~hal0.install.profile_derive.derive_device`: a Strix-Halo platform,
     any compute-capable GPU (ROCm/CUDA runtime detected), or any Vulkan-capable
-    GPU lands on ``gpu-rocm``/``gpu-vulkan``, and BOTH of those device classes
-    resolve to a runner row whose image is ``DEFAULT_ROCMFPX_IMAGE``
-    (``rocmfpx`` in :data:`hal0.runners.RUNNER_IMAGES`, vulkan served via
-    ``supported_backends``).
-    Anything else derives ``cpu``, whose runner is a stock llama.cpp image that
-    rejects tensor types 100/103.
+    GPU. Anything else derives ``cpu``.
     """
     if hw.platform == "strix-halo":
         return True
@@ -137,8 +117,8 @@ def brain_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
     """Return the curated brain model id to pull on this box.
 
     *override* (``HAL0_BRAIN_MODEL`` at the install.sh call site) wins when it
-    names a known variant, so an operator can force an sft build (mind the
-    ROCmFPX-only quants on a CPU box). An unrecognised override is ignored
+    names a known variant, so an operator can force the sft F16 build. An
+    unrecognised override is ignored
     with a warning rather than honoured — a typo must not turn into a 404
     pull.
 

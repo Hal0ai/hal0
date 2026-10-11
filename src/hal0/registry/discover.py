@@ -1082,8 +1082,16 @@ def _scan_and_register_locked(
     # Idempotent (a row with coords is left alone) and never changes the id.
     backfilled.extend(backfill_coordless(registry))
 
+    from hal0.registry.detect import unsupported_quant
+
     for cand in candidates:
         existing_id = cand.curated_match.id if cand.curated_match else cand.suggested_id
+        # Fork-only quants (ROCmFPX family, IU4, ActiveFPX) have no runner to
+        # load them (ADR-0028); a scan never registers one.
+        fork_quant = unsupported_quant(None, cand.path.name)
+        if fork_quant is not None:
+            skipped.append({"path": str(cand.path), "reason": f"unsupported_quant:{fork_quant}"})
+            continue
         if registry.has(existing_id):
             existing = registry.get(existing_id)
             if existing.path == str(cand.path):

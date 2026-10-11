@@ -11,6 +11,9 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
+import hal0.runners.pins as pins_mod
 from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.hardware.recommend import (
     _PRIMARY_TIERS,
@@ -18,6 +21,31 @@ from hal0.hardware.recommend import (
     recommend_primary_slot,
 )
 from hal0.registry.curated import CURATED_BY_ID
+from hal0.runners import RUNNER_IMAGES
+from hal0.runners.pins import RunnerPin
+
+
+@pytest.fixture(autouse=True)
+def _vulkan_gated_standard_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give ``standard`` a Vulkan-gated pin, as a promoted release has.
+
+    The shipped manifest.json carries placeholder pins that gate no lane, under
+    which an AMD box with no ROCm derives ``cpu``. The RAM-gating tests below
+    are about which model a GPU box gets, so they run against a pin whose
+    digest passed the hardware gate's Vulkan lane. Tests of the gate itself
+    patch ``default_image_serves_vulkan_lane`` explicitly.
+    """
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b1-r1",
+        digest="sha256:" + "a" * 64,
+        lanes_gated=("rocm", "vulkan"),
+    )
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
 
 
 def _amd_uma_host(unified_gb: int, *, compute_capable: bool = True) -> HardwareInfo:

@@ -197,6 +197,51 @@ def quant_from_rocmfpx_filename(name: str) -> str | None:
     return None
 
 
+#: Fork-only weight formats no runner hal0 ships can load (ADR-0028): the
+#: ROCmFPX family above, CIRU's IU4 integer quant and the ActiveFPX
+#: (PromptForge) repacks. Stock llama.cpp either rejects their custom GGML
+#: tensor types or SIGSEGVs on them (#1790).
+_UNSUPPORTED_QUANT_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(IU4|ActiveFPX)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def unsupported_quant(quant: str | None = None, *names: str | None) -> str | None:
+    """The fork-only quant label a model carries, or ``None`` when loadable.
+
+    Checks the registry ``quant`` label first (``ROCmFP4``, ``ROCmFPX``, …,
+    as :func:`quant_from_rocmfpx_filename` stamps it) and then every given
+    filename / repo id / model id for a ROCmFPX family token, ``IU4`` or
+    ``ActiveFPX``. Used to refuse such models at add, pull and load with one
+    message (:func:`unsupported_quant_message`).
+    """
+    label = (quant or "").strip()
+    if label.upper().startswith("ROCMFP"):
+        return quant_from_rocmfpx_filename(label) or label
+    if _UNSUPPORTED_QUANT_TOKEN_RE.search(label):
+        return label
+    for name in names:
+        if not name:
+            continue
+        family = quant_from_rocmfpx_filename(name)
+        if family:
+            return family
+        match = _UNSUPPORTED_QUANT_TOKEN_RE.search(name)
+        if match:
+            return "IU4" if match.group(1).upper() == "IU4" else "ActiveFPX"
+    return None
+
+
+def unsupported_quant_message(model: str, quant: str) -> str:
+    """The one operator-facing refusal for a fork-only quant."""
+    return (
+        f"model {model!r} is a {quant} build. {quant} GGUFs need a llama.cpp fork "
+        "that hal0 no longer ships; no hal0 runner can load them. Use a plain GGUF "
+        "build of the same model (for example a Q4_K_M or UD-Q4_K_XL file)."
+    )
+
+
 def quant_from_file_type(code: Any) -> str | None:
     """Map a GGUF ``general.file_type`` value to a quant label.
 
@@ -576,4 +621,6 @@ __all__ = [
     "quant_from_file_type",
     "quant_from_filename",
     "quant_from_rocmfpx_filename",
+    "unsupported_quant",
+    "unsupported_quant_message",
 ]

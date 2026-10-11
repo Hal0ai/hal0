@@ -13,7 +13,7 @@ hardware derivation the rest of the platform uses
 (:func:`hal0.install.profile_derive.derive_device`), so the seeded device can
 never contradict the host:
 
-* kfd-less render-node box → ``gpu-vulkan`` (VULKAN_CAPABLE_IMAGE_REFS-gated),
+* kfd-less render-node box → ``gpu-vulkan`` (gated on the pinned digest's lanes_gated),
 * no-GPU box (the ct163 shape) → ``cpu``,
 * kfd-present box → still ``gpu-rocm`` (operator ruling: ROCm stays the
   default when the compute node is there).

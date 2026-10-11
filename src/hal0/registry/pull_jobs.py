@@ -653,6 +653,11 @@ async def enqueue(
     hf_repo, hf_file, mmproj_file, from_body = resolve_pull_source_with_body(
         request, model_id, body
     )
+    # Fork-only quants (ROCmFPX family, IU4, ActiveFPX) have no runner to load
+    # them (ADR-0028): refuse before seeding a row or downloading a byte.
+    from hal0.services.models_service import refuse_unsupported_quant
+
+    refuse_unsupported_quant(model_id, None, hf_file, model_id)
     if from_body:
         labels = body.get("labels") if isinstance(body, dict) else None
         if not isinstance(labels, list):

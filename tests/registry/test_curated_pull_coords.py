@@ -1,7 +1,8 @@
 """Tests for the custom-GGUF curated coords added in fix/stack-model-pull-coords.
 
 These ids are referenced by exported stacks but were originally auto-scanned
-into the registry with EMPTY hf_repo/hf_file. Registering their HF coordinates
+into the registry with EMPTY hf_repo/hf_file. (The ROCmFP4 chadrock/halostrix
+rows are gone: no hal0 runner can load them, ADR-0028.) Registering their HF coordinates
 in the curated catalogue makes pull-by-id (via ``get_curated`` fallback in
 ``_resolve_pull_source``), scan-backfill, and stack export all resolve.
 """
@@ -13,33 +14,8 @@ import pytest
 from hal0.registry.curated import get_curated
 from hal0.registry.discover import _match_curated
 
-# (registry id, hf_repo, hf_file) for each of the 10 added entries.
+# (registry id, hf_repo, hf_file) for each of the plain-GGUF custom entries.
 _EXPECTED: list[tuple[str, str, str]] = [
-    (
-        "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
-        "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
-        "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf",
-    ),
-    (
-        "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
-        "jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp",
-        "CHADROCK3.6-27B-Pi-Agent-MTP-ROCmFP4-STRIX_LEAN.gguf",
-    ),
-    (
-        "chadrock3-6-35b-uncensored-mtp-strix-lean",
-        "jcbtc/CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN",
-        "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN.gguf",
-    ),
-    (
-        "qwen3-6-35b-a3b-halostrix-dyn-mtp-v7",
-        "jcbtc/qwen3.6-35b-a3b-crown-halo-mtp-dynamic",
-        "Qwen3.6-35B-A3B-HaloStrix-Dyn-MTP-v7.gguf",
-    ),
-    (
-        "qwopus3-6-27b-v2-mtp-bf16-to-rocmfp4-strix-lean",
-        "jcbtc/qwopus3.6-27b-v2-chadrock-rocmfp4-mtp",
-        "Qwopus3.6-27B-v2-MTP-BF16-to-ROCmFP4-STRIX_LEAN.gguf",
-    ),
     (
         "qwopus3-6-27b-coder-mtp-q6-k",
         "Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF",
@@ -92,18 +68,48 @@ def test_match_curated_by_filename(model_id: str, hf_repo: str, hf_file: str) ->
 
 
 def test_match_curated_seed_stack_files() -> None:
-    """The three seed-stack files match their curated entries by filename."""
-    saber = _match_curated("Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf")
+    """The seed-stack models match their curated entries by filename."""
+    saber = _match_curated("Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")
     assert saber is not None
-    assert saber.id == "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+    assert saber.id == "Qwen3.6-35B-A3B-MTP-GGUF"
 
-    pi_agent = _match_curated("CHADROCK3.6-27B-Pi-Agent-MTP-ROCmFP4-STRIX_LEAN.gguf")
-    assert pi_agent is not None
-    assert pi_agent.id == "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean"
+    pi_utility = _match_curated("Qwen3.8-27B-UD-Q4_K_XL.gguf")
+    assert pi_utility is not None
+    assert pi_utility.id == "qwen3.8-27b"
 
     coder = _match_curated("Qwopus3.6-27B-Coder-MTP-Q6_K.gguf")
     assert coder is not None
     assert coder.id == "qwopus3-6-27b-coder-mtp-q6-k"
+
+
+_RETIRED: list[tuple[str, str]] = [
+    (
+        "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
+        "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf",
+    ),
+    (
+        "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
+        "CHADROCK3.6-27B-Pi-Agent-MTP-ROCmFP4-STRIX_LEAN.gguf",
+    ),
+    (
+        "chadrock3-6-35b-uncensored-mtp-strix-lean",
+        "CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN.gguf",
+    ),
+    ("qwen3-6-35b-a3b-halostrix-dyn-mtp-v7", "Qwen3.6-35B-A3B-HaloStrix-Dyn-MTP-v7.gguf"),
+    (
+        "qwopus3-6-27b-v2-mtp-bf16-to-rocmfp4-strix-lean",
+        "Qwopus3.6-27B-v2-MTP-BF16-to-ROCmFP4-STRIX_LEAN.gguf",
+    ),
+]
+
+
+@pytest.mark.parametrize(("model_id", "hf_file"), _RETIRED)
+def test_retired_rocmfp4_rows_are_not_curated(model_id: str, hf_file: str) -> None:
+    """The fork-only ROCmFP4 rows left the catalogue: neither the id nor the
+    on-disk filename resolves, so pull-by-id and scan-backfill cannot offer a
+    model no runner can load."""
+    assert get_curated(model_id) is None
+    assert _match_curated(hf_file) is None
 
 
 def test_no_duplicate_ids() -> None:

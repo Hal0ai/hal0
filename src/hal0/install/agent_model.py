@@ -2,11 +2,9 @@
 
 Why this exists — the fallback gap it closes
 --------------------------------------------
-:mod:`hal0.install.brain_model` makes the steward work out of the box: as of
-runner ade07ba (``DEFAULT_ROCMFPX_IMAGE``) the brain models are NATIVE
-tool-callers, so the steward chats AND executes its own calls on the brain
-slot (``installer/etc-hal0/slots/brain.toml``, verified live on the SFT
-quants and the MiniCPM5 base). The ``[brain_chat] tool_model`` reroute
+:mod:`hal0.install.brain_model` makes the steward work out of the box: the
+brain models are NATIVE tool-callers, so the steward chats AND executes its
+own calls on the brain slot (``installer/etc-hal0/slots/brain.toml``). The ``[brain_chat] tool_model`` reroute
 (:class:`~hal0.config.schema.BrainChatConfig`, default ``"hal0/agent"``)
 remains as the FALLBACK: it catches artefact rounds and covers older runner
 images or off-dialect models — and a bound agent model is also simply a much
@@ -22,7 +20,7 @@ upgrade, until an operator picks something.
 This module is the bridge, and the shape of it is the whole point:
 
 **Opt-in, size disclosed, default SKIP.** Unlike the brain pull (which is
-unconditional and ~1-2 GB), the agent anchor is 15-31 GB. install.sh asks
+unconditional and ~1-3 GB), the agent anchor is about 18.5 GB. install.sh asks
 once, on a terminal only, printing the exact size first, and Enter means no.
 
 **A headless install must never block and never pull.** The prompt sits behind
@@ -44,7 +42,7 @@ import os
 import sys
 
 from hal0.config.schema import HardwareInfo
-from hal0.install.brain_model import already_pulled, rocmfpx_capable
+from hal0.install.brain_model import already_pulled, gpu_capable
 
 log = logging.getLogger(__name__)
 
@@ -52,20 +50,15 @@ log = logging.getLogger(__name__)
 #: ``[brain_chat] tool_model`` resolves to by default (``hal0/agent``).
 AGENT_SLOT_NAME = "agent"
 
-#: The anchor ladder, LARGEST FIRST. Every entry is a chadrock/Ace-Saber
-#: ROCmFPX+MTP build — the family ``installer/etc-hal0/slots/agent.toml``'s
-#: seeded ``profile = "chadrock-moe"`` recipe is tuned for, and the family
-#: ``brain.toml`` records as "confirmed clean native tool-callers on this
-#: runtime". Sizes and thresholds live on the curated rows
+#: The anchor ladder, LARGEST FIRST. One rung (ADR-0027 decision 6): Qwen3.8
+#: 27B on the Standard runner. Sizes and thresholds live on the curated row
 #: (:mod:`hal0.registry.curated`), not here, so the consent prompt and the
 #: catalogue can never disagree.
-AGENT_MODEL_QUALITY = "chadrock-35b-ace-saber-moequality-7bpw"
-AGENT_MODEL_ANCHOR = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
-AGENT_MODEL_LEAN = "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean"
+AGENT_MODEL_ANCHOR = "qwen3.8-27b"
 
 #: Ladder order. ``agent_model_for_hardware`` walks it largest-first and takes
 #: the first rung whose ``vram_gb_min`` fits the detected pool.
-AGENT_MODEL_IDS = (AGENT_MODEL_QUALITY, AGENT_MODEL_ANCHOR, AGENT_MODEL_LEAN)
+AGENT_MODEL_IDS = (AGENT_MODEL_ANCHOR,)
 
 #: Printed verbatim by install.sh whenever the anchor does NOT land — declined,
 #: skipped, headless, no fitting rung, or a failed pull. The one thing an
@@ -95,12 +88,11 @@ def agent_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
 
     ``None`` — never an error — is returned when:
 
-    * the box has no ROCm/Vulkan device. Every rung is a ROCmFPX/MTP repack;
-      on a stock-llama.cpp CPU lane they are the wrong build entirely, and
-      offering a 15 GB download that then refuses to load is worse than
-      offering nothing.
-    * nothing fits. The smallest rung wants ~15 GB; a 16 GB box that just
-      spent some of it on the brain has no business being offered one.
+    * the box has no ROCm/Vulkan device. A 27B dense model on the CPU lane
+      is too slow to anchor tool calls, and offering an 18 GB download that
+      then crawls is worse than offering nothing.
+    * nothing fits. The rung wants ~25 GB of pool; a box that cannot spare
+      that next to the brain has no business being offered one.
 
     *override* (``HAL0_AGENT_MODEL``) wins when it names a known rung, so an
     operator can force the quality build on a box the ladder would have put on
@@ -116,7 +108,7 @@ def agent_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
         log.warning(
             "install.agent_model_override_unknown id=%s known=%s", override, AGENT_MODEL_IDS
         )
-    if not rocmfpx_capable(hw):
+    if not gpu_capable(hw):
         return None
     pool = _pool_gb(hw)
     for model_id in AGENT_MODEL_IDS:  # largest first
@@ -194,7 +186,7 @@ async def provision_agent_model(
         registry.ensure(model_id)
 
     # Already on disk? Bind and stop — see brain_model.already_pulled. This
-    # matters more here than for the brain: re-downloading 15-31 GB because an
+    # matters more here than for the brain: re-downloading ~18.5 GB because an
     # operator re-ran install.sh and said yes twice is not a small mistake.
     existing = already_pulled(model_id)
     if existing is not None:
