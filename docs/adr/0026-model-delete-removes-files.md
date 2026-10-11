@@ -45,11 +45,17 @@ Operators deleted models in the dashboard and saw them come back.
    `metadata["shards"]`, the `mmproj` sidecar, and every `model_file`
    row's `dest`. The `model_file` rows cascade away with the row, which is
    why the set is captured first. The order is:
-   1. Cancel any queued or running pull or update job for the model, and
-      wait up to 30 s for it to stop. If it doesn't stop, the delete
+   1. Mark the id as deleting. Until the delete finishes, a new pull or
+      update job for it is refused with 409 `model.deleting`. The check is
+      atomic with the job insert on the event loop. Then cancel any queued
+      or running pull or update job for the model, and wait up to 30 s for
+      it to stop. If it doesn't stop, the delete
       returns 409 `model.pull_active` before touching anything. The pull
-      layer re-checks the cancel flag right before it registers, so a
-      cancelled pull never re-adds the row.
+      layer re-checks right before it registers, and skips registration
+      when the job was cancelled or when the model's row was removed after
+      the job started (a deleted-at time recorded at row removal). A
+      cancelled or raced pull never re-adds the row. A pull started after
+      the delete finished registers normally.
    2. Unload referencing slots and clear their slot defaults.
    3. Remove the row and call `delete_model_files_on_disk`.
 
@@ -77,6 +83,10 @@ Operators deleted models in the dashboard and saw them come back.
    - the row belongs to FLM (`runtime_managed`). FLM manages its model
      directory itself.
    - the OS refuses the unlink (`unlink_failed:<error>`).
+   - the remaining rows, or their `model_file` rows, could not be read
+     (`owner_check_failed`). Sharing can't be ruled out, so the delete
+     fails closed: no file is removed, every planned file is kept and
+     tombstoned, and a warning says so. The row delete still goes through.
    - a path component changed between the checks and the unlink
      (`path_changed`). For example, another account swapped a directory
      for a symlink.
@@ -92,7 +102,8 @@ Operators deleted models in the dashboard and saw them come back.
    freed. Directories left empty are removed up to, but not including,
    the deepest root that holds the file. With overlapping roots such as
    `/` and `/mnt/models`, the walk stops at `/mnt/models`. A remaining
-   row's model directory is never removed. `store_blob` refcounts are released through
+   row's model directory, and a directory the delete itself reported as
+   kept (`directory`), are never removed. `store_blob` refcounts are released through
    `hal0.registry.gc.release_blob_ref`, the logic `delete_model_files`
    already used. This covers every planned pulled file, not only the ones
    removed. A kept file's reference is dropped too, because its
@@ -168,7 +179,10 @@ Operators deleted models in the dashboard and saw them come back.
    path would be skipped as an `id_collision`, and the model would be
    missing until the next scan. The scan result, and the startup log line,
    report `missing_unverified` next to `pruned` and `missing_referenced`.
-   An operator can then tell that reconciliation was incomplete.
+   An operator can then tell that reconciliation was incomplete. The prune
+   preview (`POST /api/models/scan/preview`, `missing`) uses the same
+   predicate (`discover.miss_checker`) and leaves those rows out, so it
+   lists exactly what a prune would remove.
 
 6. **Scanner fixes.** The scanner does not descend into any directory below
    a root whose name starts with `.`. It walks with `os.walk` and prunes
