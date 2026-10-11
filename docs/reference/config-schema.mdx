@@ -105,7 +105,7 @@ clock: a healthy long generation on slow hardware that outlives it is also cut.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `roots` | list[str] | `[models_dir()]` = `["/var/lib/hal0/models"]` | each entry non-empty and absolute |
-| `auto_scan_on_start` | bool | `true` | — |
+| `auto_scan_on_start` | bool | `true` | — (the startup scan also prunes rows whose file is gone, except rows a slot, stack or `hal0.toml` field references, rows with a pending pull, FLM rows, and rows under an empty or missing root such as an unmounted share) |
 | `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | — |
 | `pull_root` | str | `"/var/lib/hal0/models"` | **deprecated**; must be non-empty and absolute |
 | `store` | str | `""` | absolute if set, else empty |

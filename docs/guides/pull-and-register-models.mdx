@@ -198,13 +198,28 @@ hal0 model show qwen3-4b --json
 <TabItem label="Remove">
 
 ```sh
-hal0 model rm qwen3-4b
+hal0 model rm qwen3-4b               # remove the model and its files
+hal0 model rm qwen3-4b --keep-files  # remove only the registry entry
 ```
 
-Removes the registry row (confirm prompt; `--force` to skip). The bytes
-on disk are never touched — that's your call. If a slot has this model as
-its default, the API cascades: it unloads the slot and clears the
-default.
+Removes the registry row and the model's files on disk: the model file,
+any shards, and its vision (`mmproj`) sidecar. There is a confirm prompt;
+`--force` skips it. hal0 leaves some files alone and prints each one with
+the reason:
+
+- files outside the configured model roots and the model store
+- files another registered model also uses
+- directories, including FLM model directories
+
+A file with other hardlinks is removed, but its space is not freed.
+
+`--keep-files` leaves every file where it is. hal0 also hides those files
+from future scans, so the model does not come back on the next restart.
+`hal0 model add <path>` brings one back.
+
+If a slot has this model as its default, the API cascades: it unloads the
+slot and clears the default. See [ADR-0026](/docs/adr/0026-model-delete-removes-files)
+for the full rules.
 
 </TabItem>
 </Tabs>
