@@ -82,7 +82,7 @@ the model that seeds the primary chat slot, ordered largest-to-smallest and RAM-
 
 | Curated id | Min RAM | Class | Approx throughput |
 |---|---|---|---|
-| `Qwen3.6-35B-A3B-MTP-GGUF` | ≥ 48 GB | Hybrid MoE | ~45 tok/s |
+| `qwen3.8-27b` | ≥ 32 GB | Dense, vision, MTP | — |
 | `qwen3.5-9b` | ≥ 16 GB | Dense | — |
 | `qwen3-4b` | 0 GB (always downloadable) | Dense | — |
 | `llama32-3b` | CPU fallback | Dense | — |
@@ -92,9 +92,9 @@ Every id in this tier list must exist in the curated catalogue — enforced by t
 (`tests/registry/test_curation_drift.py`, `tests/hardware/test_recommend.py`), so this
 table can drift only if both source and its tests change together.
 
-Context-window resolution for the seeded primary slot: MoE/MTP models get the full
-architecture-max window (their KV cache is tiny relative to a hybrid model); dense
-models are capped at 32768 tokens; if neither applies, the fallback is 8192.
+Context-window resolution for the seeded primary slot: MoE and MTP models get their
+full curated window (for `qwen3.8-27b` that is the shipped 98,304-token default); other
+dense models are capped at 32768 tokens; if neither applies, the fallback is 8192.
 
 See [Hardware matrix](/docs/reference/hardware-matrix/) for the backend (ROCm/Vulkan/
 CUDA/CPU) selection logic this recommendation composes with.
