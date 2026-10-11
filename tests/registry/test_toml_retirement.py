@@ -244,3 +244,35 @@ def test_undeletable_lock_only_warns(
     assert not _toml_path().exists()
     assert _lock_path().exists()
     assert "registry.toml_lock_unlink_failed" in caplog.text
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_repeated_rename_failures_keep_one_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rename that fails on every boot must not pile up identical copies."""
+    path = _write_toml("a")
+
+    def _no_rename(self: Path, target):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "rename", _no_rename)
+    outcomes = {retire_registry_toml()["outcome"] for _ in range(3)}
+
+    assert outcomes == {"failed"}
+    backups = sorted((paths.var_lib() / "backups").glob("registry-toml-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "registry.toml").read_bytes() == path.read_bytes()
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_changed_content_gets_a_fresh_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_toml("a")
+
+    def _no_rename(self: Path, target):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "rename", _no_rename)
+    retire_registry_toml()
+    _write_toml("a", "b")
+    retire_registry_toml()
+
+    assert len(list((paths.var_lib() / "backups").glob("registry-toml-*"))) == 2

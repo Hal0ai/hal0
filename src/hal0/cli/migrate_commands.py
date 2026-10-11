@@ -225,10 +225,30 @@ def _read_registry() -> dict[str, dict[str, Any]]:
     model then falls into the "imported, classify manually" bucket. A
     registry that cannot be READ raises: planning against ``{}`` would
     misclassify every registered model by its source directory.
-    """
-    from hal0.registry.store import ModelRegistry
 
-    return {m.id: m.model_dump(mode="python") for m in ModelRegistry().list()}
+    Strictly read-only (``mode=ro``): this backs a doctor dry-run, which must
+    never create ``hal0.db`` or apply schema migrations to it. No database
+    file yet means no registered models.
+    """
+    import sqlite3
+
+    from hal0.config import paths
+    from hal0.db import repository
+
+    db = paths.db_path()
+    if not db.exists():
+        return {}
+    with contextlib.closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        backends: dict[str, list[str]] = {}
+        for r in conn.execute("SELECT model_id, backend FROM model_backend ORDER BY rowid"):
+            backends.setdefault(r["model_id"], []).append(r["backend"])
+        return {
+            row["id"]: repository.row_to_model(
+                row, backends=backends.get(row["id"], [])
+            ).model_dump(mode="python")
+            for row in conn.execute("SELECT * FROM model ORDER BY id")
+        }
 
 
 def _pick_capability(caps: Iterable[Any]) -> str | None:

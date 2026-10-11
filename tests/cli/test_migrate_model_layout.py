@@ -717,3 +717,35 @@ def test_action_dataclass_is_frozen() -> None:
     # frozen dataclass → FrozenInstanceError (subclass of AttributeError)
     with pytest.raises(AttributeError):
         action.kind = "skip-exists"  # type: ignore[misc]
+
+
+# ── _read_registry: read-only against hal0.db ────────────────────────────────
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_read_registry_never_creates_the_database() -> None:
+    from hal0.cli.migrate_commands import _read_registry
+    from hal0.config import paths
+
+    assert _read_registry() == {}
+    assert not paths.db_path().exists()
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_read_registry_reads_models_and_backends_read_only() -> None:
+    from hal0.cli.migrate_commands import _read_registry
+    from hal0.config import paths
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    ModelRegistry().add(
+        Model(id="m", path="/models/m.gguf", capabilities=["chat"], backends=["vulkan", "cpu"])
+    )
+    before = paths.db_path().stat().st_mtime_ns
+
+    reg = _read_registry()
+
+    assert reg["m"]["path"] == "/models/m.gguf"
+    assert reg["m"]["backends"] == ["vulkan", "cpu"]
+    assert _classify_registry_entry(reg["m"]) is not None
+    assert paths.db_path().stat().st_mtime_ns == before

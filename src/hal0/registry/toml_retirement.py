@@ -29,6 +29,7 @@ database is never touched.
 from __future__ import annotations
 
 import contextlib
+import filecmp
 import logging
 import os
 import shutil
@@ -69,6 +70,22 @@ def _drop_stale_lock(lock_file: Path, job_id: str | None) -> None:
         )
 
 
+def _existing_backup(toml_file: Path) -> Path | None:
+    """A ``registry-toml-*`` backup dir already holding ``toml_file``'s bytes."""
+    try:
+        size = toml_file.stat().st_size
+        for candidate in sorted((paths.var_lib() / "backups").glob("registry-toml-*")):
+            copy = candidate / _TOML_NAME
+            with contextlib.suppress(OSError):
+                if copy.stat().st_size == size and filecmp.cmp(copy, toml_file, shallow=False):
+                    return candidate
+    except OSError:
+        # Unreadable file or backups dir: fall through to a fresh copy, which
+        # reports the real error.
+        return None
+    return None
+
+
 def _failed(toml_file: Path, job_id: str | None, reason: str) -> dict[str, Any]:
     log.warning(
         "registry.toml_retire_failed job_id=%s path=%s reason=%s — nothing reads this "
@@ -96,15 +113,19 @@ def retire_registry_toml(*, job_id: str | None = None) -> dict[str, Any]:
         return {"outcome": "absent"}
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = _free_path(paths.var_lib() / "backups" / f"registry-toml-{stamp}")
-    try:
-        backup_dir.mkdir(parents=True)
-        shutil.copy2(toml_file, backup_dir / _TOML_NAME)
-    except OSError as exc:
-        # Leave no empty backup dir behind for a copy that never landed.
-        with contextlib.suppress(OSError):
-            backup_dir.rmdir()
-        return _failed(toml_file, job_id, f"cannot back it up: {exc}")
+    # A rename that keeps failing (every boot) must not pile up one identical
+    # copy per attempt: reuse a backup that already holds these exact bytes.
+    backup_dir = _existing_backup(toml_file)
+    if backup_dir is None:
+        backup_dir = _free_path(paths.var_lib() / "backups" / f"registry-toml-{stamp}")
+        try:
+            backup_dir.mkdir(parents=True)
+            shutil.copy2(toml_file, backup_dir / _TOML_NAME)
+        except OSError as exc:
+            # Leave no empty backup dir behind for a copy that never landed.
+            with contextlib.suppress(OSError):
+                backup_dir.rmdir()
+            return _failed(toml_file, job_id, f"cannot back it up: {exc}")
 
     target = _free_path(toml_file.with_name(f"{_TOML_NAME}.retired-{stamp}"))
     archived: Path | None = target
