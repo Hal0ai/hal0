@@ -18,6 +18,7 @@ from hal0.runners import (
     CANONICAL_FAMILY,
     FPX_RUNNER_KEYS,
     RUNNER_IMAGES,
+    RUNNER_TIERS,
     STALE_RUNNER_IMAGE_REFS,
     Runner,
     RunnerSupports,
@@ -272,7 +273,7 @@ def test_arch_alternative_images_pair_with_a_denylist_entry() -> None:
 
 
 def test_single_backend_invariant():
-    """D2: the dual-lane privilege belongs solely to the combined default."""
+    """D2: the dual-lane privilege belongs solely to the AMD GPU default."""
     for key, runner in RUNNER_IMAGES.items():
         if key == "rocmfpx":
             assert len(runner.supported_backends) == 2
@@ -282,15 +283,59 @@ def test_single_backend_invariant():
         )
 
 
-def test_llama_server_entries_have_display_metadata():
-    """D5: every llama-server runtime needs an operator-facing name + blurb."""
+@pytest.mark.parametrize("key", sorted(RUNNER_IMAGES))
+def test_every_runner_has_display_metadata(key: str) -> None:
+    """D5 + ADR-0026: every runtime (not only llama-server ones) carries an
+    operator-facing title and a one-line description, because the Runner
+    Images page shows both for every row a registry runner owns."""
+    runner = RUNNER_IMAGES[key]
+    assert runner.title, f"{key} has no title"
+    assert runner.blurb, f"{key} has no blurb"
+    assert "\n" not in runner.blurb, f"{key} blurb must be one line"
+
+
+@pytest.mark.parametrize("key", sorted(RUNNER_IMAGES))
+def test_runner_naming_rule(key: str) -> None:
+    """ADR-0026 naming rule: no title or description says "combined" (how
+    the image was assembled is not what it is), and "Standard" is reserved
+    for the pristine-upstream runner ADR-0025 proposes."""
+    runner = RUNNER_IMAGES[key]
+    assert "combined" not in runner.title.lower()
+    assert "combined" not in runner.blurb.lower()
+    if key != "upstream":
+        assert runner.title != "Standard", f"{key} may not use the reserved title"
+
+
+def test_tiers_are_the_operator_decided_sets() -> None:
+    """ADR-0026: the default set is one runtime per family every box should
+    have; everything else is opt-in. The registry's ``tier`` is the only
+    place this is written down."""
+    by_tier: dict[str, set[str]] = {t: set() for t in RUNNER_TIERS}
     for key, runner in RUNNER_IMAGES.items():
-        if runner.runtime_family != "llama-server":
+        assert runner.tier in RUNNER_TIERS, f"{key}: unknown tier {runner.tier!r}"
+        by_tier[runner.tier].add(key)
+    assert by_tier["default"] == {"rocmfpx", "cpu", "flm", "kokoro", "moonshine", "comfyui"}
+    assert by_tier["optional"] == {"strix", "qwen3tts", "cuda", "promptforge"}
+    assert by_tier["frozen"] == set()
+
+
+def test_at_most_one_default_per_family_and_device_class() -> None:
+    """Two default-tier runtimes competing for one (family, device class)
+    would make "the default" ambiguous for a slot of that shape."""
+    seen: dict[tuple[str, str], str] = {}
+    for key, runner in RUNNER_IMAGES.items():
+        if runner.tier != "default":
             continue
-        assert runner.title, f"{key} has no title"
-        assert runner.blurb, f"{key} has no blurb"
+        shape = (runner.runtime_family, runner.device_class)
+        assert shape not in seen, f"{key} and {seen[shape]} are both default for {shape}"
+        seen[shape] = key
 
 
-def test_exactly_one_default_gpu_runtime():
-    defaults = [k for k, r in RUNNER_IMAGES.items() if r.is_default]
-    assert defaults == ["rocmfpx"]
+@pytest.mark.parametrize(
+    ("backend", "device_class"),
+    [("rocm", "gpu"), ("vulkan", "gpu"), (None, "gpu"), (None, "cpu"), ("cpu", None)],
+)
+def test_hw_gate_lands_on_a_default_runtime(backend: str | None, device_class: str | None) -> None:
+    """A slot with no ``binary`` on AMD or CPU hardware launches a default-tier
+    runtime; only the explicit ``cuda`` backend reaches an optional one."""
+    assert runner_for_backend(backend, device_class).tier == "default"

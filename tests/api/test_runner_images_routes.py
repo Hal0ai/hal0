@@ -349,6 +349,63 @@ class TestEnrichRow:
         )
         assert row["is_default"] is None
 
+    @pytest.mark.parametrize(
+        ("image", "runner", "tier"),
+        [
+            ("ghcr.io/hal0ai/hal0-combined", "rocmfpx", "default"),
+            ("ghcr.io/hal0ai/hal0-toolbox-cpu", "cpu", "default"),
+            ("ghcr.io/hal0ai/hal0-comfyui", "comfyui", "default"),
+            ("ghcr.io/hal0ai/hal0-strix-vulkan", "strix", "optional"),
+            ("ghcr.io/hal0ai/hal0-toolbox-qwen3tts", "qwen3tts", "optional"),
+            ("ghcr.io/hal0ai/hal0-promptforge", "promptforge", "optional"),
+        ],
+    )
+    def test_row_carries_registry_runner_tier_and_copy(
+        self, image: str, runner: str, tier: str
+    ) -> None:
+        """ADR-0026: a row owned by a registry runner carries that runner's
+        key, title, blurb and tier — the page groups by ``tier`` and shows the
+        registry copy, never a tier of its own derivation."""
+        from hal0.api.routes.runner_images import enrich_row
+        from hal0.runners import RUNNER_IMAGES
+
+        row = enrich_row(_row(image, "x"), defaults={}, slot_usage={}, local=None)
+        assert row["runner"] == runner
+        assert row["tier"] == tier
+        assert row["title"] == RUNNER_IMAGES[runner].title
+        assert row["blurb"] == RUNNER_IMAGES[runner].blurb
+
+    def test_tier_does_not_follow_the_launch_image(self) -> None:
+        """The family launch image (``is_default``) and the runtime tier are
+        different facts: an optional runtime's image stays optional even
+        though it is its own family's launch image."""
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-strix-vulkan", "0831"),
+            defaults={"strix": ("ghcr.io/hal0ai/hal0-strix-vulkan:0831", "release")},
+            slot_usage={},
+            local=None,
+        )
+        assert row["is_default"] == {"family": "strix", "source": "release"}
+        assert row["tier"] == "optional"
+
+    def test_row_without_registry_runner_has_no_tier(self) -> None:
+        """A catalogued image no runner ships (legacy toolbox, pin-only
+        variant) is not a runtime: no runner, title, blurb or tier."""
+        from hal0.api.routes.runner_images import enrich_row
+
+        row = enrich_row(
+            _row("ghcr.io/hal0ai/hal0-toolbox-rocm", "v1"),
+            defaults={},
+            slot_usage={},
+            local=None,
+        )
+        assert row["runner"] is None
+        assert row["title"] is None
+        assert row["blurb"] is None
+        assert row["tier"] is None
+
     def test_in_use_by_matches_exact_image_tag(self) -> None:
         from hal0.api.routes.runner_images import enrich_row
 
@@ -1099,6 +1156,18 @@ class TestFamiliesPayload:
         assert fam["update_available"] is False
         assert fam["slots"] == []
         assert fam["pinned_slots"] == []
+
+    def test_families_carry_registry_title_and_tier(self, client: TestClient) -> None:
+        """ADR-0026: every family row names its runtime and tier straight from
+        the registry, so the launch-image strip and the grouped list agree."""
+        from hal0.runners import RUNNER_IMAGES
+
+        body = client.get("/api/runner-images").json()
+        assert body["families"]
+        for fam in body["families"]:
+            runner = RUNNER_IMAGES[fam["family"]]
+            assert fam["title"] == runner.title
+            assert fam["tier"] == runner.tier
 
     def test_families_digest_pinned_ref_present_and_update_available(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

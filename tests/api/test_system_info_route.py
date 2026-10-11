@@ -100,15 +100,23 @@ def test_system_info_backends_expose_fit_check_metadata(
 def test_system_info_backend_display_metadata(
     isolated_client: TestClient,
 ) -> None:
-    """runtime-cascade D2/D5: each backend exposes the runner registry's
-    operator-facing title/blurb/is_default so the dashboard can present
-    runtimes by human name instead of the registry key."""
+    """runtime-cascade D2/D5 + ADR-0026: each backend exposes the runner
+    registry's operator-facing title/blurb and its tier, so the dashboard
+    presents runtimes by human name and sorts them by the same tier the
+    Runner Images page groups by."""
+    from hal0.runners import RUNNER_IMAGES
+
     payload = isolated_client.get("/api/system-info").json()
     rocmfpx = payload["backends"]["rocmfpx"]
-    assert rocmfpx["title"] == "Standard"
+    assert rocmfpx["title"] == "ROCmFPX"
     assert rocmfpx["blurb"]
-    assert rocmfpx["is_default"] is True
-    assert payload["backends"]["promptforge"]["is_default"] is False
+    assert rocmfpx["tier"] == "default"
+    assert payload["backends"]["promptforge"]["tier"] == "optional"
+    # The payload is a projection of the registry, never its own opinion;
+    # the pre-tier `is_default` flag survives only as a projection of tier.
+    for key, runner in RUNNER_IMAGES.items():
+        assert payload["backends"][key]["tier"] == runner.tier, key
+        assert payload["backends"][key]["is_default"] is (runner.tier == "default"), key
 
 
 def test_system_info_matches_hardware_and_features_endpoints(

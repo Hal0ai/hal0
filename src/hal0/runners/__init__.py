@@ -91,6 +91,11 @@ def _warn_once(surface: str, key: str, message: str, *args: object) -> None:
 #: set is the same vocabulary as ``hal0.profiles.RuntimeFamily``.
 RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
 
+#: Runtime tier vocabulary — see :attr:`Runner.tier`. Tuple order is display
+#: order: the Runner Images page and the runtime pickers list tiers this way.
+RunnerTier = Literal["default", "optional", "frozen"]
+RUNNER_TIERS: tuple[RunnerTier, ...] = ("default", "optional", "frozen")
+
 #: Bundled default image tags for the single-purpose runtimes. Literal
 #: constants live HERE (not duplicated in each provider module) — a
 #: provider that needs its old ``_DEFAULT_*_IMAGE`` name for back-compat
@@ -169,15 +174,27 @@ class Runner:
     #: image bump that removes it. Empty ``()`` = no known gaps (which is
     #: NOT a support guarantee — the fit-check stays a WARN, never a block).
     unsupported_archs: tuple[str, ...] = ()
-    #: Operator-facing display name ("Standard", "PromptForge") — D5 of the
+    #: Operator-facing display name ("ROCmFPX", "CPU") — D5 of the
     #: runtime-cascade spec. UI copy speaks "Runtime <title>", never the key.
+    #: Naming rule (ADR-0026): a title says what the runtime is, never how its
+    #: image was assembled ("combined"), and "Standard" is reserved for the
+    #: pristine-upstream llama.cpp runner ADR-0025 proposes.
     title: str = ""
-    #: One plain-language line answering "why would I pick this" — never a
-    #: git revision (provenance stays its own field on the API payload).
+    #: One plain-language line saying what the runtime runs on and when you
+    #: would pick it, written for an operator who has never heard of the fork
+    #: behind it. Never a git revision (provenance stays its own field on the
+    #: API payload) and never a maintainer note.
     blurb: str = ""
-    #: True for the ONE combined default runtime (rocmfpx) — the only entry
-    #: allowed >1 supported_backends (test-enforced invariant).
-    is_default: bool = False
+    #: The ONE owner of "is this a default runtime" (ADR-0026). ``default``:
+    #: in the set every box is expected to have; ``optional``: opt-in, picked
+    #: deliberately for a specific model or device; ``frozen``: kept only to
+    #: load models already on slots, never bumped. The slot runtime pickers
+    #: (``/api/system-info`` ``backends[].tier``) and the Runner Images page
+    #: grouping (``/api/runner-images`` rows and families ``tier``) both read
+    #: this field; neither derives "default" on its own. Which TAG of a
+    #: runtime launches is a different fact: the per-family launch image,
+    #: owned by ``hal0.api.routes.runner_images._effective_defaults``.
+    tier: RunnerTier = "optional"
 
 
 RUNNER_IMAGES: dict[str, Runner] = {
@@ -199,9 +216,12 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # strix runner (Vulkan-only, see ARCH_ALTERNATIVE_IMAGES).
         # DELETE this entry when the fork syncs qwen4exp (#2118's checklist).
         unsupported_archs=("qwen4exp",),
-        title="Standard",
-        blurb="Runs every model type, including FPX quants.",
-        is_default=True,
+        title="ROCmFPX",
+        blurb=(
+            "llama.cpp build for AMD GPUs (ROCm or Vulkan) that also loads"
+            " ROCmFPX/ROCmFP4-quantized models. The default on AMD."
+        ),
+        tier="default",
     ),
     "promptforge": Runner(
         "promptforge",
@@ -224,8 +244,11 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # vulkan — the existing (device, BINARY) fit-check refuses a
         # gpu-vulkan pairing with no new code.
         format_arch="gguf",
-        title="PromptForge",
-        blurb="Accelerated PromptForge model distributions. ROCm only.",
+        title="PromptForge (legacy)",  # scar-ok: operator-facing title, not a shim
+        blurb=(
+            "ROCm-only build for the PromptForge Qwen3.8 quant. Slated for"
+            " removal; pick it only to keep an existing PromptForge slot running."
+        ),
     ),
     "strix": Runner(
         "strix",
@@ -257,8 +280,11 @@ RUNNER_IMAGES: dict[str, Runner] = {
         # correctness claim.
         supported_backends=("vulkan",),
         format_arch="gguf",
-        title="Strix",
-        blurb=("Qwen4 experimental support + MTP speculative decode. Vulkan only. No FPX quants."),
+        title="Strix Halo Vulkan",
+        blurb=(
+            "Vulkan-only llama.cpp from a Strix Halo community build. Opt-in:"
+            " runs Qwen3.8-Flash-Next, which ROCmFPX cannot; no ROCmFPX quants."
+        ),
     ),
     "cuda": Runner(
         "cuda",
@@ -270,8 +296,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         None,
         supported_backends=("cuda",),
         format_arch="gguf",
-        title="CUDA",
-        blurb="NVIDIA GPUs.",
+        title="NVIDIA CUDA",
+        blurb="llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.",
     ),
     "cpu": Runner(
         "cpu",
@@ -300,7 +326,11 @@ RUNNER_IMAGES: dict[str, Runner] = {
         supported_backends=("cpu",),
         format_arch="gguf",
         title="CPU",
-        blurb="Runs on the host CPU — no GPU required.",
+        blurb=(
+            "llama.cpp on the processor, no GPU needed. A slow fallback for"
+            " boxes without a supported GPU."
+        ),
+        tier="default",
     ),
     "flm": Runner(
         "flm",
@@ -312,7 +342,9 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "flm",
         supported_backends=("npu",),
         format_arch="flm",
-        title="FastFlowLM",
+        title="NPU (FastFlowLM)",
+        blurb="Runs supported models on the AMD XDNA 2 NPU, leaving the GPU free.",
+        tier="default",
     ),
     "kokoro": Runner(
         "kokoro",
@@ -324,7 +356,9 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "kokoro",
         supported_backends=("cpu",),
         format_arch="kokoro",
-        title="Kokoro",
+        title="Kokoro speech",
+        blurb="Text-to-speech on the CPU. Works on any box, no GPU needed.",
+        tier="default",
     ),
     "moonshine": Runner(
         "moonshine",
@@ -336,7 +370,9 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "moonshine",
         supported_backends=("cpu",),
         format_arch="onnx",
-        title="Moonshine",
+        title="Moonshine transcription",
+        blurb="Speech-to-text on the CPU. Works on any box, no GPU or NPU needed.",
+        tier="default",
     ),
     "qwen3tts": Runner(
         "qwen3tts",
@@ -348,7 +384,11 @@ RUNNER_IMAGES: dict[str, Runner] = {
         "qwen3tts",
         supported_backends=("rocm",),
         format_arch="qwen3tts",
-        title="Qwen3-TTS",
+        title="Qwen3 TTS",
+        blurb=(
+            "Higher-quality multilingual text-to-speech on the GPU (ROCm)."
+            " Opt-in; a large download (about 10 GB)."
+        ),
     ),
     "comfyui": Runner(
         "comfyui",
@@ -361,6 +401,8 @@ RUNNER_IMAGES: dict[str, Runner] = {
         supported_backends=("rocm",),
         format_arch="safetensors",
         title="ComfyUI",
+        blurb="Image and video generation on the GPU (ROCm).",
+        tier="default",
     ),
 }
 
@@ -576,9 +618,11 @@ __all__ = [
     "FPX_RUNNER_KEYS",
     "RUNNER_ALIASES",
     "RUNNER_IMAGES",
+    "RUNNER_TIERS",
     "STALE_RUNNER_IMAGE_REFS",
     "Runner",
     "RunnerSupports",
+    "RunnerTier",
     "RuntimeFamily",
     "canonical_family",
     "canonical_runner_key",

@@ -931,7 +931,14 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "backend": runner.backend,
             "title": runner.title,
             "blurb": runner.blurb,
-            "is_default": runner.is_default,
+            # ADR-0026: the runtime tier ("default" | "optional" | "frozen"),
+            # read straight off the registry — the one owner the Runner
+            # Images page grouping reads too. Pickers sort by it.
+            "tier": runner.tier,
+            # HAL0-SUNSET: v2.0.0 — `is_default` predates `tier`; kept for
+            # API/MCP readers of this payload (semver: no field removal in
+            # a minor). A projection of `tier`, never its own fact.
+            "is_default": runner.tier == "default",
             # Fit-check metadata (spec-hw-slot-ownership §4): the backends this
             # runner image can serve + the GGUF/format arch it accepts (the
             # lxc105 "forks reject newer GGUFs" finding). RUNNER_IMAGES now
