@@ -131,6 +131,33 @@ export function deviceBackend(device?: string | null): string {
   return d.startsWith('gpu-') ? d.slice(4) : d
 }
 
+/**
+ * Resolve a slot to its runner key.
+ *
+ * 1. The slot's typed `binary` field (a RUNNER_IMAGES key), when set.
+ * 2. A fixed-family slot (Kokoro, Moonshine, ComfyUI, Qwen3-TTS, FLM: its
+ *    `provider` is not llama-server) runs the one runner of that family,
+ *    whatever its device — a `tts` slot on `cpu` is Kokoro, not the cpu
+ *    llama runner.
+ * 3. Otherwise the backend's `runner_for_backend` default (cuda → cuda,
+ *    cpu → cpu, every other GPU lane → standard; an npu slot has no default).
+ */
+export function slotRunnerKey(
+  s: any,
+  backends: Record<string, { runtime_family?: string }>,
+): string | undefined {
+  const explicit = s?.binary ? String(s.binary) : ''
+  if (explicit) return explicit
+  const family = String(s?.provider || '').toLowerCase()
+  if (family && family !== 'llama-server') {
+    const match = Object.entries(backends).find(([, b]) => b?.runtime_family === family)
+    return match ? match[0] : undefined
+  }
+  const be = deviceBackend(s?.device)
+  if (!be || be === 'npu') return undefined
+  return be === 'cuda' ? 'cuda' : be === 'cpu' ? 'cpu' : 'standard'
+}
+
 export function useRuntimes() {
   const sys = useSystemInfo()
   const models = useModels()
@@ -146,18 +173,6 @@ export function useRuntimes() {
     if (m?.id) modelLabel.set(m.id, m.longName || m.name || m.id)
   }
 
-  // Resolve a slot to its runner key. Primary: the slot's typed `binary` field
-  // (a RUNNER_IMAGES key). Fallback for slots with an empty binary: the
-  // backend's `runner_for_backend` default (cuda → cuda, cpu → cpu, every
-  // other GPU lane → standard; an npu slot has no default).
-  const slotRunnerKey = (s: any): string | undefined => {
-    const explicit = s?.binary ? String(s.binary) : ''
-    if (explicit) return explicit
-    const be = deviceBackend(s?.device)
-    if (!be || be === 'npu') return undefined
-    return be === 'cuda' ? 'cuda' : be === 'cpu' ? 'cpu' : 'standard'
-  }
-
   const rows: RuntimeRow[] = Object.entries(backends).map(([key, b]) => {
     const { repo, tag, digest } = parseImageRef(b.image)
     const supportedBackends =
@@ -166,11 +181,11 @@ export function useRuntimes() {
         : b.backend
           ? [b.backend]
           : []
-    // Slots resolve to this runner via `binary` (or the device-backend default).
+    // Slots resolve to this runner via slotRunnerKey() above.
     const slotNames: string[] = []
     const modelSet = new Set<string>()
     for (const s of slotRows) {
-      if (slotRunnerKey(s) !== key) continue
+      if (slotRunnerKey(s, backends) !== key) continue
       slotNames.push(s.name)
       // Models column is transitive — the models bound to those slots.
       const mid = s?.model_id || s?.model
