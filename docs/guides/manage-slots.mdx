@@ -133,8 +133,8 @@ hal0 slot create embed \
    `hal0 slot edit <name> --profile <profile>` or the slot drawer.
 
    A profile can also pin a **runtime** — one of hal0's runner-registry
-   entries (ROCmFPX, Strix Halo Vulkan, PromptForge (legacy), NVIDIA CUDA,
-   CPU) — instead of just flags.
+   entries (Standard, NVIDIA CUDA,
+   CPU, …) — instead of just flags.
    Naming such a profile at create time sets the new slot's `binary` (and, for
    a single-backend runtime, its `device`) to match, so the profile decides
    the runtime and not only the tune. A ROCm-only runtime profile on a host
@@ -169,7 +169,7 @@ does **not** mean compute hardware. Use `--hardware` for the device.
 ```sh
 hal0 slot load agent
 # or assign a model at load time:
-hal0 slot load agent --model qwen3.6-27b
+hal0 slot load agent --model qwen3.8-27b
 ```
 
 Loads the slot's container and waits for it to go healthy. A bad
@@ -322,12 +322,10 @@ same checks.
 
 ### Why you might
 
-On Strix Halo, the Vulkan lane currently measures **faster than ROCm on both
-metrics** on the validated runner image: **+13.96% prefill** and **+20.45%
-decode**, with noticeably tighter run-to-run variance
-([the numbers](/docs/reference/hardware-matrix)). It also needs only a render
-node, so it is the only GPU lane available on a box where `/dev/kfd` was never
-forwarded — an unprivileged LXC, typically.
+The Vulkan lane needs only a render node, so it is the only GPU lane available
+on a box where `/dev/kfd` was never forwarded — an unprivileged LXC, typically.
+Measure both lanes on your own box with `hal0 bench` before switching for
+speed.
 
 hal0 still *seeds* `gpu-rocm` where the box can run it. That is a maturity
 preference, not a performance one: the ROCm lane carries hal0's release
@@ -341,11 +339,12 @@ Two gates, and both are the point:
 
 1. **Preflight.** The target lane's devices must be present — `/dev/kfd` for
    ROCm, `/dev/dri/renderD*` for Vulkan — and, for Vulkan, the slot's runner
-   image must be one whose Vulkan backend has been validated. Older runner
-   images (the `ade07ba` lineage) emitted invalid tokens for every model on
-   Vulkan while every health surface read green, so they are refused by name
-   with the reason. If you see that refusal, update hal0 rather than working
-   around it.
+   image must be one whose digest has passed the hardware gate's Vulkan lane
+   (`"vulkan"` in its `lanes_gated` pin in `manifest.json`). An ungated Vulkan
+   backend can emit invalid tokens for every model while every health surface
+   reads green, so such an image is refused by name with the reason. If you
+   see that refusal, clear the slot's `image_pin` so it runs the pinned
+   Standard image, or move the slot to ROCm; don't work around it.
 2. **Output sanity.** After preflight, the slot must answer a fixed prompt
    correctly before it is marked ready. A lane that emits nonsense fails in
    about a second instead of serving it for hours.
@@ -405,15 +404,12 @@ the runtime you pick rather than an independently editable value:
 - **Runtime** lists hal0's runner-registry entries, filtered to what this
   slot's type and this box's detected hardware can actually run. Each option
   shows the runtime's name, its lane(s) when it offers more than one (e.g.
-  "ROCmFPX · ROCm + Vulkan"), and a "· not pulled" suffix when its image
+  "Standard · ROCm + Vulkan"), and a "· not pulled" suffix when its image
   hasn't been downloaded yet; picking one shows its one-line description
   underneath. Default-tier runtimes are listed first (ADR-0027). The
-  llama.cpp runtimes as of this release: **ROCmFPX** (default; ROCm or
-  Vulkan on AMD GPUs, and the only one that loads ROCmFPX/ROCmFP4 quants),
-  **CPU** (default; no GPU needed), and the optional **Strix Halo Vulkan**
-  (Vulkan only — loads Qwen3.8-Flash-Next, no FPX quants), **NVIDIA CUDA**
-  (CUDA only) and **PromptForge (legacy)** (ROCm only, slated for removal) —
-  plus the engines for other slot types: **NPU (FastFlowLM)**, **Kokoro speech**,
+  llama.cpp runtimes as of this release: **Standard** (default; ROCm or
+  Vulkan on AMD GPUs), **CPU** (default; no GPU needed) and the optional
+  **NVIDIA CUDA** (CUDA only) — plus the engines for other slot types: **NPU (FastFlowLM)**, **Kokoro speech**,
   **Moonshine transcription**, **ComfyUI** and the optional **Qwen3 TTS**.
   A persisted `binary` this box no longer offers for the slot (older
   release, hand-edited TOML) stays selectable as its own "‹binary› · not in
@@ -421,10 +417,9 @@ the runtime you pick rather than an independently editable value:
   runtime shows an inline note that Save will move the slot to that lane and
   restart it.
 - **Lane** — Auto / ROCm / Vulkan pills — only appears when the picked
-  runtime actually offers more than one backend. Today that's ROCmFPX
-  alone; every other GPU runtime (Strix Halo Vulkan, NVIDIA CUDA,
-  PromptForge (legacy)) declares exactly one backend, so it has nothing to
-  pick between.
+  runtime actually offers more than one backend. Today that's Standard
+  alone; every other GPU runtime (NVIDIA CUDA, Qwen3 TTS) declares exactly
+  one backend, so it has nothing to pick between.
 
 **Threads** is the CPU thread count (`0` = runtime default); **NGL** is GPU
 layers to offload (`-1` = all). Every field here needs a restart to take
@@ -440,12 +435,7 @@ management, and a **Debug pin** behind a "Pin a custom image ref…" button —
 opening it shows the warning "Debug-only. hal0 can't verify what a custom
 ref ships — the slot keeps its current runtime binary and may fail at
 spawn." and a "Use release image" button to clear it. A pin never widens or
-narrows the Runtime/Lane options above it. If the pin still references the
-retired `hal0-combined-upstream` image, a "Superseded by the Strix runtime"
-banner appears with a one-click switch — the button itself only renders when
-Strix actually resolves for this slot (right hardware, right slot type);
-otherwise the banner reads "…available after the next update" with no
-button.
+narrows the Runtime/Lane options above it.
 
 ### Profile: same-device tuning, or a cross-device switch
 
@@ -488,14 +478,11 @@ so it can raise the effective window (still bounded by the model's native
 GGUF context) — see [Slots](/docs/concepts/slots) for the mechanics. Leave
 it unset to just follow the model.
 
-Binding a model whose detected GGUF architecture isn't loadable by the
-slot's current runtime (today: `qwen4exp`, which the default ROCmFPX build
-predates) shows a non-blocking notice by the Model select instead of
-crash-looping silently at launch. When a catalogued runtime can serve it,
-the notice names it directly — "switch this slot's Runtime to \"Strix Halo
-Vulkan\" to serve it" — rather than pointing at the `image_pin` debug hatch. Nothing is
-blocked and nothing is auto-switched; the notice just tells you which
-Runtime pick to make.
+Binding a model that is a fork-only quantization (ROCmFPX-family, IU4 or
+ActiveFPX) is refused rather than left to crash-loop: launching the slot
+answers 422 `slot.unsupported_quant`, and adding or pulling such a file
+answers 422 `models.unsupported_quant`. Use a plain GGUF build of the same
+model.
 
 ### Advanced: eviction priority and the resolved command
 
@@ -559,9 +546,12 @@ plan/converge phases, drift states, export/import/snapshot.
 A slot's systemd unit bakes its launch flags in **at load time** —
 updating hal0 changes the code that *would* render that unit, not the
 unit file itself. `hal0 update` re-renders every existing slot unit
-afterward, but never bounces an already-running container — a slot that
+afterward, but never bounces a container for an argv change — a slot that
 was serving when the update landed keeps running its old argv until its
-*next* load, swap, or restart.
+*next* load, swap, or restart. The one exception is a runner-image change:
+`hal0 update` (and `hal0-api` at start) restarts idle slots whose running
+image differs from the one a fresh render would pick, and skips slots with a
+request in flight — see [Manage runner images](/docs/guides/manage-runner-images/#what-happens-to-a-running-slot-when-its-image-changes).
 
 `hal0 slot status <name>` is how you check whether a running slot is in
 that stale window — it prints `WARN config drift: ...` when the
@@ -598,6 +588,11 @@ hal0 slot logs agent --lines 1000  # -n, more history
 Logs come from the slot's `hal0-slot@<name>.service` journal.
 
 ## Migration helpers
+
+Slot runtimes and image pins are converted onto the current runner system by
+`hal0 migrate runners`, which `hal0 update` runs for you before it validates
+config; see [Manage runner images → Upgrading an older
+install](/docs/guides/manage-runner-images/#upgrading-an-older-install).
 
 A handful of one-shot `hal0 slot migrate-*` commands exist for bringing
 older on-disk slot config forward through the v1.0 field-ownership

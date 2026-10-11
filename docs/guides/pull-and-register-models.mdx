@@ -57,7 +57,7 @@ filename in the body:
 ```sh
 curl -X POST http://localhost:8080/api/models/my-qwen-build/pull \
   -H 'content-type: application/json' \
-  -d '{"hf_repo":"unsloth/Qwen3.6-27B-GGUF","hf_filename":"Qwen3.6-27B-UD-Q5_K_XL.gguf","labels":["chat"]}'
+  -d '{"hf_repo":"unsloth/Qwen3.8-27B-GGUF","hf_filename":"Qwen3.8-27B-UD-Q4_K_XL.gguf","labels":["chat"]}'
 ```
 
 ## Check for and apply weight updates
@@ -93,6 +93,15 @@ exposes a directory scan that registers every new file it finds:
 ```sh
 hal0 model scan
 ```
+
+<Aside type="note" title="Fork-only quantizations are refused">
+ROCmFPX-family (ROCmFP4, …), IU4 and ActiveFPX GGUFs need a llama.cpp fork
+that hal0 does not ship, so no runner can load them. `hal0 model add` and a
+pull answer 422 `models.unsupported_quant`; a scan skips the file with reason
+`unsupported_quant:<label>`; and a slot bound to one fails to launch with 422
+`slot.unsupported_quant`. Use a plain GGUF build of the same model (for
+example a `Q4_K_M` or `UD-Q4_K_XL` file).
+</Aside>
 
 ## Generate a draft profile from a model
 

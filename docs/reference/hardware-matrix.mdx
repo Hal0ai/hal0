@@ -40,7 +40,7 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 | Device id | Label | Recommended | Default profile | Notes |
 |---|---|---|---|---|
 | `gpu-rocm` | GPU (ROCm) | ✅ | `chat` | Best throughput on Strix Halo — the recommended default. |
-| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — so it is the lane for a box with no `/dev/kfd`. **Measures faster than ROCm on Strix Halo** (+13.96% prefill, +20.45% decode — see the lane comparison below); it is not the seeded default for maturity reasons, not speed ones. LLM slots on this device are gated on a Vulkan-validated runner image (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, whisper.cpp, ComfyUI). |
+| `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — so it is the lane for a box with no `/dev/kfd`. It is not the seeded default for maturity reasons, not speed ones. LLM slots on this device are gated on a runner image whose digest is Vulkan-gated in `manifest.json` (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, whisper.cpp, ComfyUI). |
 | `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
 | `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
@@ -62,9 +62,10 @@ dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
    preference, not a throughput one — see the lane comparison below.
 2. **AMD**, no ROCm compute node but a Vulkan-capable GPU → **Vulkan**. This
    is the unprivileged-LXC shape: a working iGPU with no `/dev/kfd` forwarded.
-   The lane is real, but an LLM slot on it must resolve a Vulkan-validated
-   runner image or slot load refuses it by name (#1888/#1948) — the `ade07ba`
-   lineage's Vulkan backend emitted invalid tokens for every model.
+   The lane is real, but an LLM slot on it must resolve a runner image whose
+   digest has `"vulkan"` in its `lanes_gated` pin in `manifest.json`, or slot
+   load refuses it by name (#1888/#1948) — an ungated Vulkan backend can emit
+   invalid tokens for every model.
 3. **AMD**, neither ROCm compute nor a usable Vulkan device → **CPU**.
 4. **NVIDIA**, NVIDIA Container Toolkit present (`nvidia-ctk` on `PATH` or a CDI spec
    under `/etc/cdi`/`/var/run/cdi`) → **CUDA**.
@@ -73,20 +74,11 @@ dashboard use to pick a device for a new slot, given a probed `HardwareInfo`:
 7. **No GPU detected** → **CPU** ("no GPU detected — CPU inference only, slow but
    correct").
 
-### ROCm vs Vulkan on AMD — what the numbers actually say
+### ROCm vs Vulkan on AMD
 
-Measured on the validated runner (`ghcr.io/hal0ai/hal0-combined:0822`) on a
-Strix Halo box, `-r 3`, otherwise idle:
-
-| Lane | pp512 (prefill, t/s) | tg128 (decode, t/s) |
-|---|---|---|
-| `ROCm0` | 8263.63 ± 775.88 | 192.19 ± 1.03 |
-| **`Vulkan0`** | **9417.36 ± 113.42** | **231.50 ± 0.23** |
-
-Vulkan is **+13.96% on prefill** and **+20.45% on decode**, and its run-to-run
-variance is far tighter. This inverts the pre-#1948 assumption, which was
-formed against a runner image whose Vulkan backend did not produce valid
-output at all — those numbers were never a fair comparison.
+Both lanes run the same Standard runner image. Throughput figures for a pinned
+digest come from the runner-images hardware gate that admits it; measure your
+own box with `hal0 bench`.
 
 hal0 still **seeds** `gpu-rocm` on a box that can run it. The reasons are
 maturity, not speed:
@@ -95,7 +87,7 @@ maturity, not speed:
   candidate has been exercised on it;
 - MTP / speculative-decode profiles are tuned against the ROCm lane, and those
   gains are not represented in a plain pp512/tg128 comparison;
-- the Vulkan lane's clean record is one image on one hardware class.
+- the Vulkan lane is admitted per digest by the hardware gate.
 
 **The seeded default is an open question, revisited at GA against a broader
 matrix.** If your workload is plain prefill/decode on Strix Halo, switching is

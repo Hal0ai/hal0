@@ -66,14 +66,16 @@ longer part of `hal0-benchctl`'s job.
 ## Backend/lane matrix
 
 Lives ONLY in `hal0.bench.harness.lane_specs()` (a pure dict of `LaneSpec`) — not in a
-shell config file. Images come from `hal0.config.schema` (`DEFAULT_ROCMFPX_IMAGE`,
-`FALLBACK_VULKAN_IMAGE`).
+shell config file. Images come from the runner registry (`hal0.runners.resolve_runner_image`:
+the `HAL0_RUNNER_IMAGE_<KEY>` override, else the `manifest.json` `runners` pin), so a bench
+measures exactly what an unpinned slot launches. The bench binary is `/opt/hal0/bin/llama-bench`
+on every lane.
 
-- `rocm` — rocmfpx image, `/opt/rocmfpx/bin/llama-bench`,
-  `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`, `-ngl 99 -dev ROCm0`.
-- `vulkan_radv` — same rocmfpx image + binary, `-ngl 99 -dev Vulkan0`.
-- `cpu` — the lean Vulkan/CPU toolbox image, `/usr/local/bin/llama-bench`,
-  `-ngl 0`, no device flags.
+- `rocm` — the `standard` runner image, `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`,
+  `-ngl 99 -dev ROCm0`.
+- `vulkan_radv` — the same `standard` image, `-ngl 99 -dev Vulkan0`. Admitted only when that
+  pinned digest has `"vulkan"` in `lanes_gated`.
+- `cpu` — the `cpu` runner image, `-ngl 0`, no device flags.
 
 No lane sets `-ub`: every cell runs at llama-bench's own internal ubatch default (a suite's
 `[[matrix.configs]]` can still pass an explicit `-ub` tuning flag through the whitelist above

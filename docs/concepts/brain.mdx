@@ -58,18 +58,14 @@ not the persona. Don't confuse the two.
 Every fresh v1.0 install pulls the same brain model unconditionally, before
 any hardware fork: **LFM2.5-2.6B, Q8_0** (curated id `lfm2.5-2.6b`,
 `LiquidAI/LFM2.5-2.6B-GGUF`, 2.87 GB), bound to the `brain` slot. It's a
-plain GGUF with no custom tensor types, so it loads on the ROCmFPX runner
-and on stock llama.cpp alike — unlike the earlier `hal0-brain-sft` family it
-replaced as the default, whose Q8/Q4 quants carry custom GGML tensor types
-that only the ROCmFPX runner accepts.
+plain GGUF with no custom tensor types, so it loads on every llama.cpp
+runner hal0 ships.
 
 <Steps>
 1. **At install time**: set `HAL0_BRAIN_MODEL` before running `install.sh` to
-   pull a different curated id instead — `hal0-brain-sft-q8-rocmfpx` (1.1 GB,
-   ROCm/Vulkan boxes only), `hal0-brain-sft-q4-rocmfp4` (0.65 GB, smallest,
-   ROCm/Vulkan only), or `hal0-brain-sft-f16` (2.0 GB, portable, runs on a
-   CPU-only box too). An unrecognized id is ignored with a warning and the
-   default is pulled instead.
+   pull the other curated id instead — `hal0-brain-sft-f16` (2.0 GB, plain
+   GGUF, runs on a CPU-only box too). An unrecognized id is ignored with a
+   warning and the default is pulled instead.
 2. **After install, per-turn**: point `[brain_chat] model` in `hal0.toml` (or
    the "Model / slot override" field on the dashboard's Agent Chat settings
    page) at any `hal0/<slot>` — e.g. `hal0/npu` to run the steward on the NPU
@@ -137,24 +133,15 @@ already loaded).
 
 Whether a round can carry OpenAI-style `tools` at all depends on the
 **runner** behind the resolved slot, checked as a capability — not by
-comparing the image to one known-good tag. An older gate asked "is this
-exactly the current default ROCmFPX image?", which answered "no" for every
-runner that simply wasn't that one release — including the plain upstream
-llama.cpp toolboxes a CPU-only or CUDA box resolves to by default, which
-parse `tools` perfectly well. That false negative silently stripped tools
-from every brain round on those boxes, and the steward answered platform
-questions from imagination instead of admitting it couldn't look.
-
-The fix, as shipped: a short deny list of runner images known to reject a
-`tools`-attached request outright (the pre-`ade07ba` ROCmFPX lineage, which
-500s with a "peg-native format" parser error), plus a small in-process
-learned set — if an unlisted image's first tools-attached round *does* get
-rejected, that round is retried without `tools` and the image is remembered
-as incapable for the rest of the process. Everything else is assumed
-capable by default.
+comparing the image to one known-good tag. Every runner hal0 ships parses
+`tools`, so any runner is assumed capable by default. The only exception is
+a small in-process learned set: if a slot on an unusual image (an operator
+`image_pin` to an old build, say) rejects its first tools-attached round,
+that round is retried without `tools` and the image is remembered as
+incapable for the rest of the process.
 
 For an operator, this means: if tools look silently unavailable on a chat
-model whose runner isn't on the deny list, the most likely explanation is
+model, the most likely explanation is
 that the runner rejected a tools round once already and got learned as
 incapable for this process — the learned set lives in the hal0-api process,
 not the slot's container, so restarting the slot's backend does *not* clear

@@ -25,7 +25,7 @@ The installer's pre-flight verifies each of these and installs what it can:
 
 | Requirement | Notes |
 |---|---|
-| **x86_64 / amd64** | Hard requirement — the toolbox images and FastFlowLM `.deb` are amd64-only. |
+| **x86_64 / amd64** | Hard requirement — the runner images and FastFlowLM `.deb` are amd64-only. |
 | **systemd** | `systemctl` must be on `PATH`. Pre-flight fails hard without it. |
 | **Ubuntu 24.04+ or Debian 13** | Stock **Debian 12** and **Ubuntu 22.04** ship Python 3.11, which fails the installer's Python ≥ 3.12 preflight. On those releases, either point at a newer interpreter with `HAL0_PYTHON=python3.12`, or set `HAL0_PY_AUTOINSTALL=1` to let the installer provision one. |
 | **Python ≥ 3.12** | `pip install` of the release tree hard-requires 3.12+. Missing Python is fatal. |

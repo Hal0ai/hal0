@@ -2,7 +2,14 @@
 
 ## Status
 
-**PROPOSED (2026-10-08).** Target: the next minor after v1.4.0. Owner
+**Runner parts superseded by ADR-0028 (2026-10-11).** The default runner is
+`standard` (not `upstream`), `rocmfpx` is removed rather than frozen, ROCmFPX
+quants are refused rather than kept on a frozen loader, and the
+FPX-stamping migration, `draft_file` plumbing and Flash-Next row are not
+built. Decision 4 (Qwen3.8-27B as the default model, 96K context) and the
+agent-lane answer stand.
+
+Originally **PROPOSED (2026-10-08).** Target: the next minor after v1.4.0. Owner
 decision of 2026-10-08: this round of runner work is not bound by what was
 built before; current model availability, popularity, stability and
 maintainability decide. Nothing here lands in hal0 before the hardware

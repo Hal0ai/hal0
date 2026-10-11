@@ -39,7 +39,7 @@ Accepted values: `stable` (default), `preview`, `nightly`.
   ship without either: `apt-get install -y curl ca-certificates` (or the
   equivalent for your distro).
 - **Linux, x86_64** — hal0 ships amd64-only binaries (the FastFlowLM
-  `.deb` and the toolbox container images). ARM and macOS/Windows are not
+  `.deb` and the runner container images). ARM and macOS/Windows are not
   supported.
 - **systemd** — `systemctl` must be on `PATH` (outside `--dev` mode).
 - **Python ≥ 3.12** — `pip install` of the release tree hard-requires
@@ -187,7 +187,7 @@ binaries, and every hal0 podman container, but keeps `/etc/hal0` (config)
 and the data directory (models, registry, OpenWebUI state) so a re-install
 reuses them. `--purge` (alias `--clean-slate`) additionally removes the
 config and data directories, the `hal0` system user and group, and all
-hal0/toolbox podman images — it prompts for a typed `DELETE` confirmation
+hal0 runner and OpenWebUI podman images — it prompts for a typed `DELETE` confirmation
 unless you pass `--force` (or set `HAL0_FORCE=1`).
 
 ## Next steps

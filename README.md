@@ -234,7 +234,7 @@ within a tier, and `pinned` still exempts a slot entirely.
 
 ### Voice is a device-keyed switch
 
-Moonshine is back as the CPU STT engine in its own toolbox image. `cpu` runs
+Moonshine is back as the CPU STT engine in its own runner image. `cpu` runs
 Moonshine, `npu` runs whisper-v3:turbo, and a GPU device resolves to *no* STT
 engine instead of silently picking up a llama chat profile.
 
@@ -326,7 +326,7 @@ dashboard only labels memory "unified" when it actually is. Slot-fit
 warnings size against the real unified pool, not a BAR carve-out.
 
 **NPU multi-role via the FLM trio.** On Strix Halo with FastFlowLM
-installed, a single FLM process inside the `hal0-toolbox-flm` container
+installed, a single FLM process inside the `hal0-runner-flm` container
 hosts chat + transcription + embedding concurrently on one AMDXDNA hardware
 context — ~2 GB NPU memory, gemma3:1b at ~38.6 tok/s + Whisper-V3-Turbo +
 Embedding-Gemma all coresident. hal0 exposes this as one seeded `flm` slot
@@ -495,16 +495,16 @@ See [docs/concepts/agents.mdx](./docs/concepts/agents.mdx),
 
 Each capability runs in its own container, supervised by
 `hal0-slot@<name>.service`. Two things compose to launch a slot: the
-**runner image** (slot-owned — `image` plus `binary`) supplies the engine,
+**runner image** (slot-owned — `binary` plus the optional `image_pin`; each runner's image is pinned in `manifest.json`) supplies the engine,
 and the **profile** in the catalog supplies the bench-tuned flag bundle.
 Profiles are device-agnostic tune templates; they no longer carry an image.
 
 | Capability | Runner (binary) | Device | Profile |
 |---|---|---|---|
-| chat | `rocmfpx`, `vulkanfpx` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `chat`, `chat-long-context`, `dense`, `moe`, `thinking`, `coding`, `brain` |
+| chat | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `chat`, `chat-long-context`, `dense`, `moe`, `thinking`, `coding`, `brain` |
 | chat (NVIDIA, experimental) | `cuda` (`llama-server`) | `gpu-cuda` | `chat` |
 | chat (fallback) | `cpu` (`llama-server`) | `cpu` | `cpu-chat` |
-| embeddings / rerank | `rocmfpx`, `vulkanfpx` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `embedding`, `reranking` |
+| embeddings / rerank | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `embedding`, `reranking` |
 | chat + STT + embed (NPU) | `flm` | `npu` | `flm` |
 | transcription | `moonshine` / the FLM trio above | `cpu` / `npu` | `moonshine` / `flm` |
 | TTS | `kokoro` / `qwen3tts` | `cpu` / `gpu-rocm` | `kokoro` / `qwen3-tts` |
@@ -513,7 +513,7 @@ Profiles are device-agnostic tune templates; they no longer carry an image.
 A device also has a *default* profile it resolves to when a slot names none —
 `gpu-rocm`, `gpu-vulkan` and `gpu-cuda` resolve to `chat`, `cpu` to
 `cpu-chat`, `npu` to `flm`. The seeded slots override that where it matters:
-`agent` ships on `chadrock-moe`, `coder` on `coding`, `brain` on `brain`,
+`agent` ships on `dense`, `coder` on `coding`, `brain` on `brain`,
 `utility` on `chat`.
 
 The seeded profile catalog is virtual — it lives in code
@@ -538,7 +538,7 @@ own `defaults.extra_args`.
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on the host
 (SHA-pinned per distro — Ubuntu 24.04/25.10/26.04 and Debian 13) for
 device-sanity probes (`flm validate`); inference runs inside the
-`hal0-toolbox-flm` container. With FLM present the installer seeds the `flm`
+`hal0-runner-flm` container. With FLM present the installer seeds the `flm`
 slot, and the NPU trio activates once `flm validate` passes.
 
 For the container-runtime operator reference — service layout, slot TOML
@@ -556,9 +556,9 @@ Linux + systemd is the only hard requirement
 |-----------------|---------------------------------------------------------------------------|--------|
 | **First-class** | AMD Ryzen AI Max+ 395 ("Strix Halo") with iGPU + XDNA NPU + 128 GB unified | Reference deployment. All published perf numbers come from this box. |
 | **First-class** | AMD Ryzen AI Max 385 / 390 with 64 GB unified                              | Same path; small + mid tiers fit, 70B Q4 with shorter context. |
-| **Experimental** | NVIDIA RTX 30/40/50 (10–32 GB)                                           | Dedicated `cuda` runner — upstream `ghcr.io/ggml-org/llama.cpp:server-cuda` via CDI (`nvidia-container-toolkit`), with multi-GPU `gpu_index` pinning on the `gpu-cuda` device. Auto-falls back to the Vulkan runner when CDI isn't present. `/api/backends` doesn't yet auto-advertise `gpu-cuda`. |
+| **Experimental** | NVIDIA RTX 30/40/50 (10–32 GB)                                           | Dedicated `cuda` runner — upstream `ghcr.io/ggml-org/llama.cpp` `server-cuda-b<N>` image via CDI (`nvidia-container-toolkit`), with multi-GPU `gpu_index` pinning on the `gpu-cuda` device. Auto-falls back to the Vulkan runner when CDI isn't present. `/api/backends` doesn't yet auto-advertise `gpu-cuda`. |
 | **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm or Vulkan runner images; same `hal0-slot@<name>` lifecycle. |
-| **Fallback**    | CPU-only x86_64                                                            | `cpu` runner + `cpu-chat` profile — the Vulkan toolbox image run CPU-only (no GPU passed to the container). Usable for tiny models / smoke tests, not the headline experience. |
+| **Fallback**    | CPU-only x86_64                                                            | `cpu` runner + `cpu-chat` profile — the `cpu` runner image, a CPU-only llama.cpp build (no GPU passed to the container). Usable for tiny models / smoke tests, not the headline experience. |
 
 ## Day-2 operation
 
@@ -661,7 +661,7 @@ Those follow-ups, and what each one is for:
 | `hal0 doctor models` | Registry paths vs disk, store/roots agreement, unregistered files in the store, FLM store ownership. | `--fix` (needs root), `--force`/`-f` |
 | `hal0 doctor ports` | Which port each slot bound, collisions, corrupt netavark DNAT rules. | `--fix` prunes stale DNAT rules |
 | `hal0 doctor profiles` | Dangling slot→profile references and un-pulled runner images. | — (read-only, `--json`) |
-| `hal0 doctor toolbox-pull` | Every image pinned in `manifest.json` is anonymously pullable from ghcr.io. | — (`--json`, `--manifest PATH`) |
+| `hal0 doctor toolbox-pull` | Every runner image pinned in `manifest.json` is anonymously pullable from ghcr.io, and its digest matches the pin. | — (`--json`, `--manifest PATH`) |
 | `hal0 doctor logs` | `hal0-api`'s own journal. | `--unit`, `--follow`/`-f`, `--lines`/`-n`, `--level`, `--since` |
 | `hal0 doctor bundle` | Writes a redacted support bundle (system / config / diagnostics / logs). | `--out DIR`, `--no-rocm-smi`, `--include-logs auto\|yes\|no` |
 
@@ -829,7 +829,10 @@ rather than write half of it — when slots share a model with divergent
 tunes. **Slot id-keying** (`hal0 slot migrate-id-keying`) is optional and
 reversible; the runtime reads either layout, so run it in a downtime window.
 
-Everything else — schema migrations and the config-load repairs — runs
+Everything else — schema migrations, the config-load repairs, and the
+runner-system conversion (`hal0 runner-images migrate`, which archives every
+file it changes under `/var/lib/hal0/backups/` first; see
+[Manage runner images](./docs/guides/manage-runner-images.mdx)) — runs
 itself. Full breaking-change, migration and known-issue detail is in
 [`CHANGELOG.md`](./CHANGELOG.md).
 

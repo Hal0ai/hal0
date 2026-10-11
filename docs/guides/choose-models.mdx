@@ -13,7 +13,7 @@ specific GGUF (or safetensors) file in a Hugging Face repo. Pull any of
 them by id:
 
 ```sh
-hal0 model pull qwen3.6-27b
+hal0 model pull qwen3.8-27b
 ```
 
 The catalogue ships *with* each release (`GET /api/models/catalogue`,
@@ -32,7 +32,7 @@ own unified-memory pool before pulling.
 | Id | Notes |
 |---|---|
 | `qwen3-coder-next` | Frontier coding model; needs a large memory pool. |
-| `qwen3.6-27b` | General-purpose default with MTP and vision support. |
+| `qwen3.8-27b` | General-purpose default with MTP, vision and tool calling (Unsloth `UD-Q4_K_XL` plus the `mmproj-F16` vision projector; 98,304-token default context). |
 | `gpt-oss-20b` | OpenAI open-weights 20B. |
 | `qwen3.5-9b` | Lean default; fits alongside embed + voice slots. |
 | `qwen3.5-0.8b` | Tiny; sub-second cold start. |
@@ -229,8 +229,8 @@ type can hold it — promoting one demotes whichever model currently holds
 it. Set or clear it from the drawer, or from the CLI:
 
 ```sh
-hal0 model default qwen3.6-27b          # promote (demotes the current holder)
-hal0 model default qwen3.6-27b --clear  # clear — the type is left with no default
+hal0 model default qwen3.8-27b          # promote (demotes the current holder)
+hal0 model default qwen3.8-27b --clear  # clear — the type is left with no default
 ```
 
 ## Preferred profile
@@ -239,7 +239,7 @@ A registry model can declare a **preferred profile** — the runtime
 profile it wants loaded alongside it — under `defaults.profile`:
 
 ```sh
-curl -X PUT http://localhost:8080/api/models/qwen3.6-27b \
+curl -X PUT http://localhost:8080/api/models/qwen3.8-27b \
   -H 'content-type: application/json' \
   -d '{"defaults": {"profile": "rocm-moe"}}'
 ```

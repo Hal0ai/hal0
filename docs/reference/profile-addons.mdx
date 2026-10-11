@@ -30,13 +30,13 @@ An addon is **a portable profile envelope and nothing else**:
 - **`runner` is a registry KEY, never an image ref.** When present it must be a
   key of `RUNNER_IMAGES` (`src/hal0/runners/`). Keys survive image and tag
   updates; image strings rot, which is why profiles stopped carrying them.
-  A superseded alias is folded to its canonical key on the way in
+  The key is checked against the registry on the way in
   (`hal0.profiles.screen_profile_runner`).
 
 <Aside type="note">
-The addons hal0 publishes itself are the eight tunes pruned out of the seed
-core — `chat-long-context`, `dense`, `moe`, `thinking`, `coding`,
-`chadrock-dense`, `chadrock-moe`, `promptforge`. All eight are llama-server
+The addons hal0 publishes itself are the five tunes pruned out of the seed
+core — `chat-long-context`, `dense`, `moe`, `thinking`, `coding`. All five
+are llama-server
 tunes and ship `runner` **unset**, so the runtime the slot already resolves
 (Auto) is the one-click correct answer for every one of them.
 </Aside>
@@ -82,7 +82,7 @@ A real published addon, `community/addons/coding.hal0profile.json`, verbatim:
 ## The `index.json` catalog
 
 One index per addon directory. It exists so a catalog UI can render the whole
-listing without fetching eight envelopes, and so a client can tell **before
+listing without fetching every envelope, and so a client can tell **before
 downloading** whether it can install a row.
 
 ```json
