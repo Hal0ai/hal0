@@ -354,6 +354,13 @@ pull of the same tag can race it.
 | `runner-images sync` | — | — |
 | `runner-images pull <id>` | `id` (catalogue id) | `--tag` (default: the row's headline tag) |
 | `runner-images rm <id>` | `id` (catalogue id) | `--tag` (required) |
+| `runner-images migrate` | — | `--apply`, `--restore <archive>` |
+
+`runner-images migrate` previews the one-shot conversion onto the fresh
+runner system (ADR-0028). `hal0 update` runs it automatically. `--apply`
+runs it, backing up every file it changes to
+`/var/lib/hal0/backups/runners-<ts>.tar.gz` first, and `--restore <archive>`
+puts such a backup back.
 
 ## `hal0 profile` — inspect launch-flag profiles
 

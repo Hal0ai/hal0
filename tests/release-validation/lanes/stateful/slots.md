@@ -89,8 +89,8 @@ immediately before you name a new throwaway resource, not only at lane start.
      (`providers/_gpu.py`) delegates the `llama` runtime lane on an AMD host to
      `_require_vulkan_lane_prerequisites`, which does NOT consult `/dev/kfd` at all — it checks
      (1) `image_serves_vulkan_lane()`, membership of the slot's resolved image in the
-     `VULKAN_CAPABLE_IMAGE_REFS` allowlist (`config/schema.py`, currently just
-     `VULKAN_FIXED_IMAGE = ghcr.io/hal0ai/hal0-combined:0822`), and (2) `render_node_present()`
+     Vulkan-gated pins (`hal0.runners.pins.vulkan_capable_refs`: a runner that runs on Vulkan
+     whose `manifest.json` pin lists `vulkan` in `lanes_gated`), and (2) `render_node_present()`
      for the runner identity (uid 0, the rootful `hal0-slot@` container). Record the resolved
      image ref (`systemctl cat hal0-slot@<slot> | grep '^Image='`) alongside the pass. The #1922
      sanity gate (check 8b) must run and pass before `ready`. Confirm output is coherent past the
@@ -99,12 +99,12 @@ immediately before you name a new throwaway resource, not only at lane start.
 
    * **8d. gpu-vulkan LLM lane, negative case — a stale/broken image must be REFUSED at
      preflight.** Force (or simulate, if the box cannot hold two runner images at once — say so
-     either way) a `gpu-vulkan` slot's resolved image onto a ref NOT in `VULKAN_CAPABLE_IMAGE_REFS`
-     (the outgoing `ghcr.io/hal0ai/hal0-rocmfpx:ade07ba` pin — a member of
-     `STALE_ROCMFPX_IMAGE_REFS` — is the concrete example, #1888's defect). Loading it must raise
-     `GpuPreflightError` from `_require_vulkan_lane_prerequisites`'s image gate (`providers/
-     _gpu.py`), citing #1888 by number and naming `VULKAN_FIXED_IMAGE` as the repin target —
-     confirm both appear in the CLI/API error text, not just the journal. This gate fires BEFORE
+     either way) a `gpu-vulkan` slot's resolved image onto a ref that is NOT a Vulkan-gated pin
+     (an `image_pin` to any other build is the concrete example, #1888's defect). Loading it
+     must raise `GpuPreflightError` from `_require_vulkan_lane_prerequisites`'s image gate
+     (`providers/_gpu.py`), citing #1888 by number and telling the operator to clear the pin
+     or move to `gpu-rocm` — confirm it appears in the CLI/API error text, not just the
+     journal. This gate fires BEFORE
      the render-node check, so a box with no render node at all still gets the image-specific
      message when the image is also bad. Grep to confirm the call site:
      `grep -n '_require_vulkan_lane_prerequisites\|image_serves_vulkan_lane' providers/_gpu.py`.

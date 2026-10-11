@@ -71,19 +71,15 @@ the fact otherwise:
    record the digest and signer identity.
 5. **Migrations.** Which migrations ran? Do they log what they changed? Re-run the upgrade (or
    the activation step) and confirm migrations are idempotent.
-   * **5b. The rc.7 image-pin retag (#1959 B1).** Before upgrading, record every slot's image
-     pin under BOTH the legacy `image` key AND the newer `image_pin` key
-     (`grep -n 'image_pin\|^image\b' /var/lib/hal0/slots/*.toml`, plus any custom entry in
-     `profiles.toml`) — `hal0 slot migrate-hw --apply` folds an old `image` pin into `image_pin`
-     and drops the bare key, so a box that ran that migration carries `image_pin` only. After
-     the upgrade, every SERVED pin (`image_pin` if present, else `image`) that exactly equalled
-     a known former default must read `ghcr.io/hal0ai/hal0-combined:0822`, with a matching
-     `updater.slot_image_retagged` journal line. On any slot carrying BOTH keys, confirm
-     `image_pin` — not `image` — is the one actually judged and rewritten (`_resolve_image_ref`
-     reads `image_pin` first and no longer reads the bare key at all; the retag sweep binds in
-     the same order after the B1 review's precedence fix). A pin that was a deliberate operator
-     override (not an exact former default, under either key) must be byte-identical before and
-     after. See `regressions.yaml: updater-image-pin-retag-blind-spot`.
+   * **5b. The runner-system conversion (ADR-0028).** Before upgrading from a release older
+     than the fresh runner system, record every slot's `binary`, `image_pin` and `image`, the
+     `[slots].default_images` table, profile `runner` keys and any `HAL0_TOOLBOX_IMAGE_*` line
+     in `api.env`. After the upgrade, old runner keys read `standard`, pins to retired images
+     are gone, env overrides read `HAL0_RUNNER_IMAGE_<KEY>`, a slot bound to a ROCmFP4/IU4/
+     ActiveFPX model keeps its settings with an empty model, every change is in the
+     `migrate.runner_system` journal lines, a `runners-<ts>.tar.gz` backup exists under
+     `/var/lib/hal0/backups/`, and `hal0 migrate runners` then reports nothing to convert. See
+     `regressions.yaml: runner-system-conversion`.
    * **5c. Perf-row reference envelope, now inverted.** If bench numbers are captured for this
      upgrade (`hal0 bench` or the #1948 §3-C matrix commands), record decode/prefill for BOTH
      `gpu-rocm` and `gpu-vulkan` on this box (kfd present, so both lanes are reachable — Vulkan

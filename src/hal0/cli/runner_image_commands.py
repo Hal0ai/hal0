@@ -1,4 +1,4 @@
-"""CLI implementation for ``hal0 runner-images ls|sync|pull`` (#2106).
+"""CLI implementation for ``hal0 runner-images ls|sync|pull|rm|migrate`` (#2106).
 
 Closes the CLI-absence gap on the runner-image catalogue: the catalogue
 has had a full API surface (``hal0.api.routes.runner_images``) and a
@@ -17,6 +17,9 @@ store writes) is identical either way.
 ``rm`` mirrors ``DELETE /api/runner-images/{id}/tags/{tag}`` (spec D2):
 same store, same seam, same guard order — see the ``rm`` command below for
 the one guard the CLI cannot offer (pull-in-progress).
+
+``migrate`` previews, applies or undoes the one-shot conversion onto the
+fresh runner system (ADR-0028, :mod:`hal0.config.migrations.runner_system`).
 """
 
 from __future__ import annotations
@@ -348,6 +351,56 @@ def rm(
         console.print(f"[green]✓[/green]  removed {ref}")
     else:  # "missing"
         console.print(f"[green]✓[/green]  {ref} was not on disk — catalogue entry cleared")
+
+
+# ── hal0 runner-images migrate (ADR-0028) ──────────────────────────────────────
+
+
+@app.command("migrate")
+def migrate(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply the conversion. Without this, the command is a dry run.",
+    ),
+    restore: Path | None = typer.Option(
+        None,
+        "--restore",
+        help="Restore a runners-<ts>.tar.gz backup an earlier --apply wrote, then exit.",
+    ),
+) -> None:
+    """Convert this install onto the fresh runner system (ADR-0028).
+
+    Rewrites slot runtimes, image pins, ``[slots].default_images``, profile
+    runtimes, leftover model ``preferred_runner`` values and
+    ``HAL0_TOOLBOX_IMAGE_*`` env overrides to the new runner keys, and
+    unassigns models no runner can load (ROCmFPX family, IU4, ActiveFPX).
+    ``hal0 update`` runs this automatically; run it by hand to preview the
+    plan (default) or to retry after fixing a file it named. ``--apply``
+    backs up every file it changes under ``/var/lib/hal0/backups/`` first and
+    restores them itself if any write fails.
+    """
+    from hal0.config.migrations.runner_system import (
+        RunnerMigrationError,
+        migrate_runner_system,
+        restore_backup,
+    )
+
+    if restore is not None:
+        restored = restore_backup(restore)
+        for path in restored:
+            console.print(f"restored {path}")
+        console.print(f"[green]✓[/green] restored {len(restored)} file(s) from {restore}")
+        return
+    try:
+        report = migrate_runner_system(dry_run=not apply)
+    except RunnerMigrationError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from exc
+    for line in report.lines():
+        console.print(line, markup=False, highlight=False)
+    if report.changed and not apply:
+        console.print("Re-run with --apply to convert.")
 
 
 __all__ = ["app"]
