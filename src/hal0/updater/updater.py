@@ -1907,6 +1907,14 @@ def run_post_activation_migrations(
         # preflight guard) until the operator manually relabels its device.
 
     try:
+        from hal0.agents.bundled_skills import prune_retired_skills
+
+        prune_retired_skills(ship_root=None)
+    except Exception as exc:
+        log.warning("updater.retired_skills_prune_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: a retired skill stays offered until the next install.sh.
+
+    try:
         sanitize_model_extra_args(job_id=job_id)
     except Exception as exc:
         log.warning("updater.extra_args_sanitize_failed", job_id=job_id, error=str(exc))
@@ -3703,6 +3711,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",
     "updater.extra_args_sanitize_failed",
+    "updater.retired_skills_prune_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",
 )

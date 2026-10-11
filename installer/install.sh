@@ -3240,6 +3240,13 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     if [[ -d "${SKILLS_SRC}" ]] && compgen -G "${SKILLS_SRC}/*" >/dev/null; then
         cp -rf "${SKILLS_SRC}"/* "${SKILLS_SHIP}/"
         info "shipped $(find "${SKILLS_SRC}" -mindepth 1 -maxdepth 1 -type d | wc -l) hal0 skill(s) → ${SKILLS_SHIP}"
+        # cp -rf never removes a skill an older release shipped and this one
+        # dropped; prune the explicit retired list (hal0.agents.bundled_skills),
+        # never an operator's own skill.
+        "${VENV_DIR}/bin/python" -m hal0.agents.bundled_skills \
+            --ship-root "${SKILLS_SHIP}" --mirror-root "${AGENT_SKILLS_MIRROR}" \
+            --shipped-from "${SKILLS_SRC}" \
+            || warn "could not prune retired bundled skills — they stay until the next install"
     else
         info "no bundled skills at ${SKILLS_SRC} — drop-in dirs still created"
     fi
