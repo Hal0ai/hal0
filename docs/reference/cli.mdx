@@ -9,7 +9,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 The `hal0` CLI is built with [Typer](https://typer.tiangolo.com/). The entry point is
 `hal0 = "hal0.cli.main:app"`. Most subcommands are thin HTTP clients over the `hal0-api`
-daemon; a few (`config show/edit/migrate/validate`, `registry import`, `agent install`,
+daemon; a few (`config show/edit/migrate/validate`, `agent install`,
 `memory migrate`, `capabilities migrate`, the `slot migrate-*` family) read or write
 on-disk state directly and work without a running daemon.
 
@@ -179,7 +179,6 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
 | `model store [path]` | optional `path` | `--migrate` |
 | `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see "Slot lifecycle timeouts" below) |
-| `model import-backup <path>` | `path` (required) | `--force`/`-f`, `--dest` (default `/var/lib/hal0/registry/registry.toml`) |
 
 ## `hal0 memory` — manage hal0 memory (Hindsight engine)
 
@@ -347,15 +346,7 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 
 | Command | Flags |
 |---|---|
-| `migrate model-layout` | `--apply` (default: dry-run), `--force`/`-f`, `--registry` (default `/var/lib/hal0/registry/registry.toml`), `--mount-root` (default `/mnt/ai-models`), `--canonical-root` (default `/var/lib/hal0/models`) |
-
-## `hal0 registry` — inspect and repair the model registry
-
-| Command | Args | Flags |
-|---|---|---|
-| `registry import <path>` | `path` | hidden, deprecated alias for `model import-backup`: `--force`/`-f`, `--dest` |
-| `registry export` | — | `--out` (default: canonical registry path) |
-| `registry import-sqlite` | — | `--registry-file` (default: canonical registry path) |
+| `migrate model-layout` | `--apply` (default: dry-run), `--force`/`-f`, `--mount-root` (default `/mnt/ai-models`), `--canonical-root` (default `/var/lib/hal0/models`). Classifies models from the SQLite model registry. |
 
 ## `hal0 runner-images` — manage the runner-image catalogue
 
@@ -464,14 +455,6 @@ answers `504 slot.seam_timeout` — but a genuinely stuck slot can still hold th
 terminal for the full budget. If you are
 scripting against them (CI, smoke tests), wrap the call in your own
 `timeout(1)` rather than relying on the CLI to give up first.
-
-## Deprecated aliases
-
-Hidden and tagged `HAL0-SUNSET` — still work, but don't script against them:
-
-| Deprecated | Use instead |
-|---|---|
-| `hal0 registry import` | `hal0 model import-backup` |
 
 ## `hal0-agent` (separate binary)
 

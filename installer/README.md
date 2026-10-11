@@ -28,8 +28,8 @@ runs as its own podman container supervised by a per-slot systemd unit
 (`/etc/hal0/profiles.toml`), installs `hal0-api.service` (the control
 plane + dashboard on `:8080`), and installs the FastFlowLM host `.deb`
 on AMDXDNA NPU hosts for device sanity probes. The model catalog is
-`/var/lib/hal0/registry/registry.toml` — there is no separate runtime
-catalog to sync.
+the SQLite registry in `/var/lib/hal0/hal0.db` — there is no separate
+runtime catalog to sync.
 
 ### Supported distributions
 

@@ -54,7 +54,7 @@ key layout.
 ├── .first-run.lock          # 0600, single-use OTP for first-run claim
 ├── .first_run_done          # first-run completion sentinel
 ├── registry/
-│   └── registry.toml(+.lock) # model registry
+│   └── ignored-paths.json   # model paths the discovery scan skips (deleted models' kept files)
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/
@@ -116,7 +116,6 @@ hal0 uses a generic sibling-lock pattern (`hal0.config.locking.file_lock()`):
 |---|---|
 | `/etc/hal0/*.lock` | Advisory read-modify-write locks on config writes. |
 | `/var/lib/hal0/*.lock` | Advisory read-modify-write locks on state writes. |
-| `/var/lib/hal0/registry/registry.toml.lock` | Registry cross-process write lock (sidecar file). |
 | `<slots_dir>.lock` | Slot-config directory-level lock. |
 | `<record>.lock` | Per-record lock for MCP `installed.py` read-modify-write. |
 

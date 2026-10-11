@@ -654,7 +654,7 @@ Beyond the seeded catalog, the user can add named slots via the dashboard
 - Must have a unique kebab-case `name` (not in the reserved seeded set)
 - Must declare a `type` (see "slot type" below) — drives OmniRouter tool
   routing and (for NPU) the single-context exclusivity rule
-- Picks a `model` from `registry.toml` OR pulls fresh via `/v1/pull` under
+- Picks a `model` from the model registry OR pulls fresh via `/v1/pull` under
   the `user.*` namespace
 - Lives in `capabilities.toml` under whichever group the user picks (or
   `selections.custom.<name>` if none chosen)
@@ -771,8 +771,11 @@ requested). The set is always derived from slot enablement.
 
 ### model namespace
 
-`registry.toml` (under `/var/lib/hal0/registry/`) is the **sole** model
-catalog — there is no second loader process to keep in sync (the Lemonade
+The SQLite model registry (the `model` tables in `/var/lib/hal0/hal0.db`,
+`hal0.registry.sqlite_store`) is the **sole** model catalog. A TOML-era
+`registry.toml` is converted once by `hal0.registry.toml_conversion` during
+the post-activation migrations and renamed; nothing reads it afterwards.
+There is no second loader process to keep in sync (the Lemonade
 `server_models.json` / `user_models.json` / `extra.*` split was removed
 with the runtime, #687). Every slot's `--model` path is a registry-backed
 file under the model store `/mnt/ai-models`.
@@ -843,9 +846,10 @@ Or read the v0.2 migration notes: https://hal0.dev/docs/v0.2-upgrade
 
 Driver: v0.1.x audience is single-digit alpha users; migration script ROI
 is bad. The backup-and-wipe instruction takes 30 seconds; users who want
-their configs back later run `hal0 registry import
-hal0-v0.1-backup.tar.gz` (single command we ship in v0.2 to restore
-`registry.toml` only — slot selections must be redone via bundle picker).
+their configs back could run `hal0 registry import
+hal0-v0.1-backup.tar.gz` (shipped in v0.2 to restore `registry.toml` only —
+slot selections had to be redone via bundle picker). That command was
+removed once the registry moved to SQLite.
 
 ### fresh install
 

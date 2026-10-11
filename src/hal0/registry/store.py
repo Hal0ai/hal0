@@ -1,73 +1,31 @@
-"""TomlModelRegistry — atomic TOML-backed model catalog, plus the
-``ModelRegistry`` public name.
+"""Model registry public surface: ``ModelRegistry``, its typed errors, and
+the field-level merge every ``update()`` applies.
 
-Historically this module's ``ModelRegistry`` class WAS the registry: an
-atomic TOML file at ``/var/lib/hal0/registry/registry.toml``, mtime-
-polled to invalidate an in-memory cache. ML-1 (the SQLite pilot,
-hal0-specs/spec-ml1-sqlite.final.md) moves the source of truth to SQLite
-behind the identical §0.2 interface — see
-:class:`hal0.registry.sqlite_store.SqliteModelRegistry` — and rebinds the
-public ``ModelRegistry`` name to it at the bottom of this module. The
-class defined here is renamed ``TomlModelRegistry`` and kept alive for
-the import/export path (``hal0 registry export`` / ``import-sqlite``)
-and as an explicit escape hatch; every call site that only uses the
-§0.2 methods (list/get/has/add/remove/update/route_for/reload/on_change)
-needs zero edits for the swap.
+The registry is SQLite-backed (:class:`hal0.registry.sqlite_store.SqliteModelRegistry`,
+in the shared ``hal0.db`` file). This module owns the names callers import —
+``ModelRegistry``, ``RegistryError``, ``ModelNotFound``, ``ModelAlreadyExists``
+and :func:`merge_update` — so call sites never depend on the storage module.
 
-Port target: haloai lib/registry.py.
-See PLAN.md §3, §7.5, §8 and ARCHITECTURE.md §Key boundaries ("registry
-is the only source of truth for what models exist").
+The TOML-backed store that preceded SQLite is gone. A ``registry.toml`` left
+on an upgraded box is converted once and renamed by
+:func:`hal0.registry.toml_conversion.convert_registry_toml`; nothing reads
+that file afterwards.
 
-# NOTE: haloai used a single ``registry.toml`` file under the registry
-# directory.  We keep that shape — one file with all entries keyed by
-# model id — rather than one file per model.  Rationale:
-#   * Atomic batch updates are simpler (one tmpfile + rename vs N files).
-#   * mtime-cache invalidation is one stat() call.
-#   * The directory is still future-proof for sidecar files (e.g.
-#     download progress, hash manifests) that PLAN.md hints at.
-
-# NOTE: typed errors live here (not in api/middleware/error_codes.py)
-# because the locked subtree for Agent I is config/ + registry/.  They
-# subclass ``Hal0Error`` so the API middleware reshapes them into the
-# structured envelope automatically.
+The typed errors subclass ``Hal0Error`` so the API middleware reshapes them
+into the structured error envelope automatically.
 """
 
 from __future__ import annotations
 
-import contextlib
-import logging
-import os
-import tempfile
-import threading
-import tomllib
-from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import Any
 
-import tomli_w
-
-from hal0.config import paths
 from hal0.errors import Hal0Error
-from hal0.install.perms import ensure_shared_dir
 from hal0.registry.model import Model
-
-try:  # POSIX advisory file locking. Absent on Windows; repo targets Linux.
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None  # type: ignore[assignment]
-
-log = logging.getLogger(__name__)
-
-# MR-5: sidecar lockfile guarding cross-process registry writes. It has a
-# STABLE inode — unlike registry.toml, which _atomic_write swaps via
-# os.replace, so a flock on the .toml would guard a now-unlinked inode.
-_PROCESS_LOCK_FILENAME = "registry.toml.lock"
 
 # #1413: the nested `Model` tables `merge_update` merges ONE level deep instead
 # of replacing wholesale. Deliberately NOT `metadata` — that one is a freeform
 # bag with no schema, so "absent = keep" would leave callers no way to drop a
-# key; it stays replace-only. Same pair `_model_to_toml` special-cases for the
-# None-leaf strip, and for the same reason: they are the schema'd subtables.
+# key; it stays replace-only.
 _MERGED_SUBTABLES = frozenset({"defaults", "capability_flags"})
 
 
@@ -95,417 +53,14 @@ class ModelAlreadyExists(RegistryError):
     status = 409
 
 
-# ── cross-process write lock (MR-5) ───────────────────────────────────────────
-
-
-@contextlib.contextmanager
-def registry_write_lock(registry_dir: str | Path) -> Iterator[None]:
-    """Hold an exclusive POSIX advisory lock on the registry sidecar lockfile.
-
-    Serializes registry read-modify-write critical sections ACROSS processes
-    (each open file description gets its own ``fcntl.flock`` slot, so this is
-    mutually exclusive between separate processes and separate open fds).
-    Composes with the in-process ``threading.RLock``: the RLock serializes
-    threads inside one instance, this flock serializes across processes.
-
-    The lock is taken on a dedicated sidecar (``registry.toml.lock``) with a
-    stable inode, NOT on ``registry.toml`` itself — the atomic-write path
-    swaps ``registry.toml``'s inode via ``os.replace``, so a lock on the old
-    inode would not guard the freshly-written file.
-
-    Gracefully degrades to a no-op when ``fcntl`` is unavailable (non-POSIX);
-    the repo targets Linux, so the real path is always POSIX.
-    """
-    lock_dir = Path(registry_dir)
-    if fcntl is None:  # pragma: no cover - non-POSIX fallback
-        yield
-        return
-    ensure_shared_dir(lock_dir)  # 2775, umask-proof (#1896)
-    lock_path = lock_dir / _PROCESS_LOCK_FILENAME
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
-# ── Durability helper (MR-13) ─────────────────────────────────────────────────
-
-
-def _fsync_dir(dir_path: Path) -> None:
-    """Best-effort fsync of a directory so a just-renamed entry is durable.
-
-    An atomic ``os.replace`` only guarantees the rename is visible to later
-    ``open`` calls; the directory entry itself is not on stable storage until
-    the parent directory is fsynced. This is best-effort — any OSError (e.g. a
-    platform without ``O_DIRECTORY``) is suppressed so it can never break the
-    write it is meant to harden.
-    """
-    with contextlib.suppress(OSError):
-        dfd = os.open(dir_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-
-
-# ── ModelRegistry ─────────────────────────────────────────────────────────────
-
-
-_DEFAULT_REGISTRY_FILENAME = "registry.toml"
-
-
-class TomlModelRegistry:
-    """Atomic TOML-backed model registry.
-
-    Thread-safety: a per-instance ``threading.RLock`` guards all reads
-    and writes.  FastAPI sync routes run on the threadpool; the
-    Dispatcher runs on the event loop.  Both paths share a single
-    registry instance, so the lock has to be threading-aware.
-
-    The mtime cache invalidates itself when the registry file changes on
-    disk, allowing direct file edits to take effect on the next access.
-    """
-
-    # Optional post-mutation callback. When set (e.g. by create_app), every
-    # successful add/update/remove invokes it AFTER the lock is released so
-    # downstream catalog artifacts can be regenerated
-    # from the freshly-written registry. Best-effort by design: a failing hook
-    # is logged and swallowed, never propagated — a catalog-regen failure must
-    # not roll back or mask a successful registry write.
-    on_change: Callable[[], None] | None = None
-
-    def __init__(self, registry_dir: str | Path | None = None) -> None:
-        """Initialise the registry.
-
-        Args:
-            registry_dir: Override the registry directory.  If ``None``,
-                resolves from ``hal0.config.paths.registry_dir()`` at
-                call time (so ``HAL0_HOME`` changes during tests are
-                always reflected).
-        """
-        self._registry_dir_override: Path | None = (
-            Path(registry_dir) if registry_dir is not None else None
-        )
-        self._lock = threading.RLock()
-        self._cache_mtime: float = -1.0
-        self._cache: dict[str, Model] = {}
-
-    # ── path resolution ───────────────────────────────────────────────────
-
-    @property
-    def registry_dir(self) -> Path:
-        """Resolved registry directory (override or paths.registry_dir())."""
-        if self._registry_dir_override is not None:
-            return self._registry_dir_override
-        return paths.registry_dir()
-
-    @property
-    def registry_file(self) -> Path:
-        """Path to ``registry.toml`` under the registry directory."""
-        return self.registry_dir / _DEFAULT_REGISTRY_FILENAME
-
-    # ── mtime cache ───────────────────────────────────────────────────────
-
-    def _stat_mtime(self) -> float:
-        """Return the registry file's mtime, or -1.0 if missing."""
-        try:
-            return os.stat(self.registry_file).st_mtime
-        except FileNotFoundError:
-            return -1.0
-
-    def _read_locked(self) -> dict[str, Model]:
-        """Re-parse ``registry.toml`` under the held lock.
-
-        TIER1: never silently return ``{}`` on parse failure.  If the
-        file exists but is malformed, log at WARN and keep the prior
-        cache view (better than blanking it).  haloai
-        ``lib/registry.py``'s ``_read_locked`` did the same in spirit;
-        we make the rationale explicit.
-        """
-        mt = self._stat_mtime()
-        if mt < 0:
-            self._cache_mtime = -1.0
-            self._cache = {}
-            return self._cache
-        try:
-            with open(self.registry_file, "rb") as f:
-                data = tomllib.load(f)
-        except tomllib.TOMLDecodeError as exc:
-            log.warning(
-                "registry parse failed at %s: %s — keeping stale cache",
-                self.registry_file,
-                exc,
-            )
-            return self._cache
-        except OSError as exc:
-            log.warning(
-                "registry read failed at %s: %s — keeping stale cache",
-                self.registry_file,
-                exc,
-            )
-            return self._cache
-
-        raw = data.get("models", {}) if isinstance(data, dict) else {}
-        out: dict[str, Model] = {}
-        if isinstance(raw, dict):
-            for mid, entry in raw.items():
-                if not isinstance(entry, dict):
-                    log.warning(
-                        "registry entry %r at %s is not a table; skipping",
-                        mid,
-                        self.registry_file,
-                    )
-                    continue
-                try:
-                    out[mid] = Model.model_validate({**entry, "id": mid})
-                except Exception as exc:
-                    log.warning(
-                        "registry entry %r failed validation: %s — skipping",
-                        mid,
-                        exc,
-                    )
-                    continue
-        elif isinstance(raw, list):
-            # haloai accepted both shapes; we mirror that for backcompat.
-            for entry in raw:
-                if not isinstance(entry, dict):
-                    continue
-                mid = entry.get("id")
-                if not isinstance(mid, str) or not mid:
-                    continue
-                try:
-                    out[mid] = Model.model_validate(entry)
-                except Exception as exc:
-                    log.warning(
-                        "registry list-entry %r failed validation: %s — skipping",
-                        mid,
-                        exc,
-                    )
-                    continue
-
-        self._cache_mtime = mt
-        self._cache = out
-        return out
-
-    def _ensure_fresh(self) -> dict[str, Model]:
-        """Re-read if the file's mtime advanced; return the cached map."""
-        mt = self._stat_mtime()
-        with self._lock:
-            if mt != self._cache_mtime:
-                return self._read_locked()
-            return self._cache
-
-    # ── atomic write ─────────────────────────────────────────────────────
-
-    def _atomic_write(self, models: dict[str, Model]) -> None:
-        """Write ``registry.toml`` with tmpfile + fsync + os.replace().
-
-        Mirrors hal0.config.env.write_env_atomic — tmpfile in the same
-        directory, fsync after write, atomic rename.  On rename failure
-        the original file is left intact.
-        """
-        target = self.registry_file
-        ensure_shared_dir(target.parent)  # 2775, umask-proof (#1896)
-
-        payload = {"models": {mid: _model_to_toml(m) for mid, m in sorted(models.items())}}
-
-        tmp_path: Path | None = None
-        try:
-            fd, tmp_str = tempfile.mkstemp(
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-                dir=target.parent,
-            )
-            tmp_path = Path(tmp_str)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    tomli_w.dump(payload, f)
-                    f.flush()
-                    os.fsync(f.fileno())
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.close(fd)
-                raise
-            os.replace(tmp_path, target)
-            _fsync_dir(target.parent)
-            tmp_path = None
-        finally:
-            if tmp_path is not None:
-                with contextlib.suppress(OSError):
-                    tmp_path.unlink(missing_ok=True)
-
-    def _invalidate(self) -> None:
-        """Clear the mtime tag so the next read re-parses."""
-        self._cache_mtime = -1.0
-
-    def _process_lock(self) -> contextlib.AbstractContextManager[None]:
-        """Cross-process exclusive lock guarding this registry's writes (MR-5).
-
-        Thin wrapper over :func:`registry_write_lock` bound to this instance's
-        ``registry_dir``. Held for the duration of a mutator's read-modify-write
-        so a second process cannot interleave its ``os.replace`` and drop rows.
-        """
-        return registry_write_lock(self.registry_dir)
-
-    # ── public reads ─────────────────────────────────────────────────────
-
-    def list(self) -> list[Model]:
-        """Return all registered models, sorted by id."""
-        models = self._ensure_fresh()
-        return [models[mid] for mid in sorted(models)]
-
-    def get(self, model_id: str) -> Model:
-        """Return a single model by id.
-
-        Raises:
-            ModelNotFound: If the model is not in the registry.
-        """
-        models = self._ensure_fresh()
-        if model_id not in models:
-            raise ModelNotFound(
-                f"model {model_id!r} not in registry",
-                details={"model_id": model_id},
-            )
-        return models[model_id]
-
-    def has(self, model_id: str) -> bool:
-        """Return True if ``model_id`` is registered."""
-        return model_id in self._ensure_fresh()
-
-    # ── public writes ────────────────────────────────────────────────────
-
-    def _notify_change(self) -> None:
-        """Invoke the post-mutation hook, if any. Best-effort.
-
-        Called after every successful add/update/remove, OUTSIDE ``self._lock``
-        (the hook reads ``registry.toml`` from disk, not the locked in-memory
-        map, so there's no re-entrancy). A hook that raises is logged and
-        swallowed — the registry write has already committed.
-        """
-        cb = self.on_change
-        if cb is None:
-            return
-        try:
-            cb()
-        except Exception:
-            log.warning("registry.on_change_failed", exc_info=True)
-
-    def add(self, model: Model) -> None:
-        """Add a new model to the registry.
-
-        Writes atomically using tempfile + fsync + os.replace.
-
-        Raises:
-            ModelAlreadyExists: If the model id is already present.
-        """
-        with self._lock, self._process_lock():
-            # Re-read UNDER the flock so we observe any writer that committed
-            # just before we acquired it (MR-5).
-            self._invalidate()
-            models = dict(self._ensure_fresh())
-            if model.id in models:
-                raise ModelAlreadyExists(
-                    f"model {model.id!r} already in registry",
-                    details={"model_id": model.id},
-                )
-            models[model.id] = model
-            self._atomic_write(models)
-            self._invalidate()
-        self._notify_change()
-
-    def remove(self, model_id: str) -> bool:
-        """Remove a model from the registry.
-
-        Returns:
-            ``True`` if the model was present and removed, ``False`` if absent.
-        """
-        with self._lock, self._process_lock():
-            self._invalidate()
-            models = dict(self._ensure_fresh())
-            if model_id not in models:
-                return False
-            del models[model_id]
-            self._atomic_write(models)
-            self._invalidate()
-        self._notify_change()
-        return True
-
-    def update(self, model_id: str, updates: dict[str, Any]) -> Model:
-        """Partially update a model entry.
-
-        ``updates`` is a flat field-level merge: any key present in
-        ``updates`` overwrites the same field on the stored ``Model``.
-        Keys not in ``updates`` are preserved.  The ``id`` field is
-        never changeable through update (use remove + add).
-
-        Raises:
-            ModelNotFound: If the model is not in the registry.
-            RegistryError: If ``updates`` produces an invalid Model.
-        """
-        if not isinstance(updates, dict):
-            raise RegistryError(
-                "updates must be a dict",
-                details={"got": type(updates).__name__},
-            )
-        with self._lock, self._process_lock():
-            self._invalidate()
-            models = dict(self._ensure_fresh())
-            if model_id not in models:
-                raise ModelNotFound(
-                    f"model {model_id!r} not in registry",
-                    details={"model_id": model_id},
-                )
-            new_model = merge_update(models[model_id], model_id, updates)
-            models[model_id] = new_model
-            self._atomic_write(models)
-            self._invalidate()
-        self._notify_change()
-        return new_model
-
-    def route_for(self, model_id: str) -> str | None:
-        """Return the upstream URL for a model, or ``None`` if not assigned.
-
-        Used by the Dispatcher to resolve registry bindings.  The wire
-        format is::
-
-            metadata = { "upstream_url": "http://127.0.0.1:8081" }
-
-        # NOTE: haloai's registry stored ``upstream`` as a name that the
-        # dispatcher cross-resolved against upstreams.toml.  hal0 keeps
-        # the same shape but exposes a `route_for()` helper that returns
-        # the resolved URL string (or None).  The cross-resolution lives
-        # in the dispatcher (Agent G's subtree); the registry only
-        # surfaces the raw ``upstream_url`` from ``metadata``.
-        """
-        try:
-            model = self.get(model_id)
-        except ModelNotFound:
-            return None
-        url = model.metadata.get("upstream_url")
-        if isinstance(url, str) and url.strip():
-            return url
-        return None
-
-    def reload(self) -> None:
-        """Force-invalidate the mtime cache; next access re-reads from disk."""
-        with self._lock:
-            self._invalidate()
-
-
 def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Model:
     """Field-level merge shared by every ``update()`` implementation.
 
     ``updates`` overwrites matching top-level fields on ``existing``; the
     ``id`` key in ``updates`` is always ignored (``model_id`` wins) — the
     id is immutable through ``update()`` by design (use remove + add to
-    rename). Used by both :meth:`TomlModelRegistry.update` and
-    :meth:`hal0.registry.sqlite_store.SqliteModelRegistry.update` so the
-    two stores can never drift on merge semantics or error shape.
+    rename). Used by
+    :meth:`hal0.registry.sqlite_store.SqliteModelRegistry.update`.
 
     The two NESTED tables in :data:`_MERGED_SUBTABLES` — ``defaults`` and
     ``capability_flags`` — merge ONE level deep (#1413). The merge used to
@@ -547,68 +102,16 @@ def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Mod
         ) from exc
 
 
-def model_to_toml_dict(m: Model) -> dict[str, Any]:
-    """Public alias for :func:`_model_to_toml`.
-
-    Exposed so out-of-tree callers (migration scripts, archival tools)
-    use the same None-stripping logic as the registry's atomic write
-    path. Otherwise pydantic v2's ``model_dump`` emits ``defaults=None``
-    for unset ``ModelDefaults``, which ``tomli_w`` refuses to serialise.
-    """
-    return _model_to_toml(m)
-
-
-def _model_to_toml(m: Model) -> dict[str, Any]:
-    """Serialise a Model to the TOML-friendly dict.
-
-    Drops the synthetic ``id`` (it's the table key on disk) and any
-    top-level ``None`` values (TOML has no null). For the nested
-    ``defaults`` / ``capability_flags`` tables we also strip ``None``
-    leaves so optional fields aren't written as empty entries that would
-    fail TOML serialisation (§7.1d added ``capability_flags`` — same
-    "collapse to no key when nothing is set" rule as ``defaults``).
-    """
-    data = m.model_dump(mode="python", exclude_none=False)
-    data.pop("id", None)
-
-    # Top-level None → drop. Nested 'defaults'/'capability_flags' tables:
-    # drop None leaves too, and collapse to no key at all when nothing is
-    # set.
-    cleaned: dict[str, Any] = {}
-    for k, v in data.items():
-        if v is None:
-            continue
-        if k in ("defaults", "capability_flags") and isinstance(v, dict):
-            sub = {sk: sv for sk, sv in v.items() if sv is not None}
-            if not sub:
-                continue
-            cleaned[k] = sub
-            continue
-        if k == "metadata" and isinstance(v, dict):
-            cleaned[k] = {mk: mv for mk, mv in v.items() if mv is not None}
-            continue
-        cleaned[k] = v
-    return cleaned
-
-
-# ── ML-1 cutover: SQLite is now the source of truth ─────────────────────────
-#
 # Imported at the BOTTOM of the module, not the top: `sqlite_store` imports
-# `RegistryError`/`ModelNotFound`/`ModelAlreadyExists`/`model_to_toml_dict`/
-# `merge_update` FROM this module, so importing it any earlier would be a
-# genuine circular import. By deferring to here, everything `sqlite_store`
-# needs already exists as a module attribute by the time it runs. This is
-# safe regardless of which of the two modules an external caller imports
-# first: Python always initialises the `hal0.registry` PACKAGE (running
-# `registry/__init__.py`, which imports `store` before anything can reach
-# `sqlite_store` directly) ahead of either submodule's own body.
+# the typed errors and `merge_update` FROM this module, so importing it any
+# earlier would be a circular import. By deferring to here, everything
+# `sqlite_store` needs already exists as a module attribute by the time it
+# runs.
 from hal0.registry.sqlite_store import SqliteModelRegistry  # noqa: E402
 
-#: Public entry point. Every one of the ~60 call sites across `src/hal0`
-#: constructs `ModelRegistry()` / `ModelRegistry(registry_dir=...)` and only
-#: touches the §0.2 interface, so rebinding the name here is the entire
-#: cutover — zero caller edits. `TomlModelRegistry` (above) stays reachable
-#: under its own name for the TOML import/export path.
+#: Public entry point. Every call site constructs `ModelRegistry()` /
+#: `ModelRegistry(registry_dir=...)` and only touches the §0.2 interface
+#: (list/get/has/add/remove/update/route_for/reload/on_change).
 ModelRegistry = SqliteModelRegistry
 
 __all__ = [
@@ -617,8 +120,5 @@ __all__ = [
     "ModelRegistry",
     "RegistryError",
     "SqliteModelRegistry",
-    "TomlModelRegistry",
     "merge_update",
-    "model_to_toml_dict",
-    "registry_write_lock",
 ]

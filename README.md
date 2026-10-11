@@ -208,7 +208,7 @@ curl http://<box>:8080/v1/chat/completions \
   -d '{"model":"<id>","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-`hal0 model pull` streams from Hugging Face into `registry.toml` under the
+`hal0 model pull` streams from Hugging Face into the model registry under the
 `user.*` namespace — a disk-space preflight fails fast before a multi-GB
 pull, and an interrupted pull resumes via HTTP `Range` instead of restarting
 from zero.
@@ -903,8 +903,8 @@ hal0/
 ├── docs/             # user docs (mirrored to hal0.dev/docs) + docs/adr/
 ```
 
-The model catalog lives at `/var/lib/hal0/registry/registry.toml` — the
-single source of truth for HuggingFace coordinates, SHA-256 digests and
+The model catalog lives in the SQLite registry in `/var/lib/hal0/hal0.db` —
+the single source of truth for HuggingFace coordinates, SHA-256 digests and
 curated filenames. Per-leaf symlinks under the models directory redirect to
 a separate storage volume when one is in use.
 
@@ -969,7 +969,7 @@ running on your box. Full version at
   with the verified digest pinned to the extraction handle
 - **Installer-owned first-run provisioning** — `install.sh` is the single
   entry point: curated slot seeds, brain steward pull, service start
-- **`registry.toml` as sole model catalog**, slot-state Prometheus +
+- **One model catalog (the SQLite registry)**, slot-state Prometheus +
   EventBus journal, `hal0 mcp` CLI with two-way MCP, cosign-keyless
   self-update with rollback, bundled agents (pi-coder / Hermes-Agent)
 

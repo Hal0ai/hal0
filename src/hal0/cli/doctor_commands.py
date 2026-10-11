@@ -1714,14 +1714,14 @@ def pending_layout_migration() -> tuple[int, int] | None:
         from hal0.cli.migrate_commands import (
             DEFAULT_CANONICAL_ROOT,
             DEFAULT_MOUNT_ROOT,
-            DEFAULT_REGISTRY_PATH,
+            _read_registry,
             plan_migration,
         )
     except ImportError:
         return None
     try:
         report = plan_migration(
-            registry_path=DEFAULT_REGISTRY_PATH,
+            registry=_read_registry(),
             mount_root=DEFAULT_MOUNT_ROOT,
             canonical_root=DEFAULT_CANONICAL_ROOT,
             force=False,

@@ -41,6 +41,27 @@ applying. Add those subsections to a version's section to surface them; see
   outside the model roots and the store, files another model uses,
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
+- The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
+  backup restore), the whole `hal0 registry` group (`registry import`,
+  `registry export`, `registry import-sqlite`) and the `--registry` flag of
+  `hal0 migrate model-layout` (which now reads the SQLite registry) are
+  removed. `hal0 model list --json` shows the catalog; back up
+  `/var/lib/hal0/hal0.db` to keep a copy. A `registry.toml` left over from
+  before the SQLite registry is converted once on update (see Migrations).
+
+### Migrations
+
+- **A leftover `/var/lib/hal0/registry/registry.toml` is converted once.**
+  The first update or `hal0-api` start on this release backs up the file and
+  `hal0.db` to `/var/lib/hal0/backups/registry-toml-<UTC>/`, imports the
+  file's models only if this database was never initialised from it (a
+  database that already holds models was, by the old first-boot import), and
+  renames it to `registry.toml.imported-<UTC>` (or `.retired-<UTC>` when
+  nothing was imported). A marker row in `hal0.db` makes the step one-shot.
+  Rows already in SQLite are never overwritten. If the backup, the parse or
+  the rename fails, the update reports the error and the file stays in place
+  so the next start retries; entries that fail validation are skipped, named
+  in the log, and kept in both copies of the file.
 
 - Removed the deprecated CLI aliases and no-op flags. Use the replacement
   instead: `hal0 probe` -> `hal0 config hardware --refresh`;
@@ -125,6 +146,11 @@ applying. Add those subsections to a version's section to surface them; see
   runtime ships — instead of by which image a runtime currently launches
   (ADR-0027).
 
+- Deleting every model no longer brings them all back. The registry
+  re-imported `registry.toml` whenever its model table was empty, and
+  `hal0 registry export` and `hal0 model import-backup` wrote that same
+  file, so the next registry open after deleting the last model restored
+  every model in it. Nothing reads `registry.toml` now.
 - A deleted model no longer reappears after a restart. Files kept on disk
   (by opting out, or because a safety check refused to remove them) are
   recorded in `<var_lib>/registry/ignored-paths.json`, and the discovery

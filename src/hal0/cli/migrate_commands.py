@@ -10,8 +10,8 @@ Design contract (from plan §11 PR-7):
 
 * **Default is dry-run.** Mutations only happen on explicit ``--apply``.
 * **Idempotent.** A second ``--apply`` after the first is a no-op.
-* **Classification by registry.** ``registry.toml`` is the source of
-  truth for capability + recipe selection. Models on disk that aren't
+* **Classification by registry.** The model registry (SQLite) is the
+  source of truth for capability + recipe selection. Models on disk that aren't
   in the registry are classified by the directory of origin (the v0.1.x
   layout described in the ``hal0_model_store_layout`` memory) and
   reported as "imported, classify manually" warnings.
@@ -42,8 +42,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -92,7 +91,6 @@ CANONICAL_LEAVES: tuple[tuple[str, str], ...] = (
 )
 
 # Default paths. Override via CLI flags in tests + dev installs.
-DEFAULT_REGISTRY_PATH = Path("/var/lib/hal0/registry/registry.toml")
 DEFAULT_MOUNT_ROOT = Path("/mnt/ai-models")
 DEFAULT_CANONICAL_ROOT = Path("/var/lib/hal0/models")
 
@@ -220,34 +218,19 @@ class MigrationReport:
 # ── Registry reading ───────────────────────────────────────────────────────────
 
 
-def _read_registry(path: Path) -> dict[str, dict[str, Any]]:
-    """Parse registry.toml into ``{model_id: entry}`` or return ``{}``.
+def _read_registry() -> dict[str, dict[str, Any]]:
+    """Return the model registry as ``{model_id: entry}``, or ``{}``.
 
-    Empty / missing / malformed registry yields ``{}`` so a fresh-install
-    box (registry not yet populated) still runs cleanly — every on-disk
-    model just falls into the "imported, classify manually" bucket.
+    An unreadable registry yields ``{}`` so a fresh-install box still runs
+    cleanly — every on-disk model just falls into the "imported, classify
+    manually" bucket.
     """
-    if not path.exists():
-        return {}
     try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except (tomllib.TOMLDecodeError, OSError):
-        return {}
+        from hal0.registry.store import ModelRegistry
 
-    raw = data.get("models", {}) if isinstance(data, dict) else {}
-    out: dict[str, dict[str, Any]] = {}
-    if isinstance(raw, dict):
-        for mid, entry in raw.items():
-            if isinstance(entry, dict):
-                out[str(mid)] = entry
-    elif isinstance(raw, list):
-        for entry in raw:
-            if isinstance(entry, dict):
-                mid = entry.get("id")
-                if isinstance(mid, str) and mid:
-                    out[mid] = entry
-    return out
+        return {m.id: m.model_dump(mode="python") for m in ModelRegistry().list()}
+    except Exception:
+        return {}
 
 
 def _pick_capability(caps: Iterable[Any]) -> str | None:
@@ -259,7 +242,7 @@ def _pick_capability(caps: Iterable[Any]) -> str | None:
     return None
 
 
-def _classify_registry_entry(entry: dict[str, Any]) -> tuple[str, str] | None:
+def _classify_registry_entry(entry: Mapping[str, Any]) -> tuple[str, str] | None:
     """Return ``(recipe, capability)`` for a registry entry, or ``None``.
 
     Resolution order matches the production path the dispatcher takes:
@@ -298,7 +281,7 @@ def _classify_registry_entry(entry: dict[str, Any]) -> tuple[str, str] | None:
     return recipe, leaf_cap
 
 
-def _entry_disk_path(entry: dict[str, Any]) -> Path | None:
+def _entry_disk_path(entry: Mapping[str, Any]) -> Path | None:
     """Best-effort absolute path to the entry's on-disk file."""
     p = entry.get("path") or ""
     if isinstance(p, str) and p:
@@ -383,7 +366,7 @@ def _iter_files(root: Path) -> Iterable[Path]:
 
 def plan_migration(
     *,
-    registry_path: Path,
+    registry: Mapping[str, Mapping[str, Any]],
     mount_root: Path,
     canonical_root: Path,
     force: bool,
@@ -411,7 +394,6 @@ def plan_migration(
     planned_links: set[Path] = set()
 
     # ── Pass 1: registry-driven ──────────────────────────────────────────
-    registry = _read_registry(registry_path)
     for mid, entry in registry.items():
         disk = _entry_disk_path(entry)
         if disk is None:
@@ -649,11 +631,6 @@ def model_layout(
         "-f",
         help="Overwrite canonical symlinks that already point elsewhere.",
     ),
-    registry_path: Path = typer.Option(
-        DEFAULT_REGISTRY_PATH,
-        "--registry",
-        help="Path to hal0 registry.toml.",
-    ),
     mount_root: Path = typer.Option(
         DEFAULT_MOUNT_ROOT,
         "--mount-root",
@@ -669,7 +646,7 @@ def model_layout(
 
     Reads the v0.1.x layout under ``--mount-root`` and produces a
     per-leaf symlink farm under ``--canonical-root`` pointing at it.
-    Classification is driven by ``--registry`` first; on-disk entries
+    Classification is driven by the model registry first; on-disk entries
     not in the registry are placed by source-directory convention (the
     v0.1.x layout described in the ``hal0_model_store_layout`` memory)
     and reported as warnings for manual review.
@@ -683,7 +660,7 @@ def model_layout(
     _safe_canonical_root(canonical_root)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=_read_registry(),
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=force,

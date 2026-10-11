@@ -234,23 +234,17 @@ Assigns the model to a slot, loads it, and polls until it's ready — the
 fastest path from "I have an id" to "it's serving." To only set a
 slot's default model without loading it, use `hal0 slot edit agent --model qwen3-4b`.
 
-## Restore a pre-registry backup
+## A leftover `registry.toml`
 
-```sh
-hal0 model import-backup /path/to/backup [--dest /var/lib/hal0/registry/registry.toml] [--force]
-```
-
-Disaster-recovery import for a v0.1.x model store backup — restores only
-`registry.toml` from the archive, then syncs its entries into the SQLite
-registry (`INSERT OR IGNORE`, so anything already present in SQLite is left
-alone). It does **not** restore model bytes, `capabilities.toml`, or
-per-slot TOML files — redo slot selection with `hal0 slot create` (or the
-bundle picker) after importing. `--dest` is the destination *registry.toml
-path*, not a model directory; it defaults to
-`/var/lib/hal0/registry/registry.toml` and exists mainly as a test/dev
-escape hatch. `--force` overwrites an existing `registry.toml` at that
-destination — without it, the command refuses to clobber one that may
-already hold current selections.
+The registry lives in SQLite (`/var/lib/hal0/hal0.db`). Releases before the
+SQLite registry kept it in `/var/lib/hal0/registry/registry.toml`. If that
+file is still there, the post-update migrations (and the same pass at every
+`hal0-api` start) convert it once: they back up the file and `hal0.db` to
+`/var/lib/hal0/backups/registry-toml-<UTC>/`, import its models only when
+this database was never initialised from it, and rename it to
+`registry.toml.imported-<UTC>` or `registry.toml.retired-<UTC>`. hal0 never
+reads the renamed file. To keep a copy of the catalog, back up `hal0.db`;
+`hal0 model list --json` prints it.
 
 ## The registry on disk
 

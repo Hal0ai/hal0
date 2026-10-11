@@ -1908,9 +1908,13 @@ def run_post_activation_migrations(
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
-    non-zero exit). The five data-cleanup passes after it are each
-    independently best-effort, exactly as before: one pass's exception is
-    logged and never blocks the others or the caller's activation.
+    non-zero exit). The one-shot ``registry.toml`` conversion
+    (:func:`hal0.registry.toml_conversion.convert_registry_toml`) runs
+    second and is not swallowed either: it renames a file after importing
+    it, so a half-done run must surface rather than hide. The data-cleanup
+    passes after it are each independently best-effort, exactly as before:
+    one pass's exception is logged and never blocks the others or the
+    caller's activation.
 
     ``ceiling`` hard-caps the migration target for this run — see
     :func:`_maybe_run_config_migrations` for why (the one-shot v1.0
@@ -1967,6 +1971,14 @@ def run_post_activation_migrations(
     logging, the same shape ``commit()`` already returned.
     """
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
+
+    # One-shot registry.toml -> SQLite conversion. NOT swallowed, like the
+    # schema migration above: it backs up, imports at most once per database,
+    # then renames the file, and a failure must stay visible until it is
+    # fixed (the file is left in place so the next run retries).
+    from hal0.registry.toml_conversion import convert_registry_toml
+
+    convert_registry_toml(job_id=job_id)
 
     try:
         ensure_seed_profiles(job_id=job_id)

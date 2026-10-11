@@ -1,31 +1,24 @@
-"""SqliteModelRegistry — SQLite-backed model catalog (ML-1 pilot).
+"""SqliteModelRegistry — the model catalog, stored in the shared ``hal0.db``.
 
-Drop-in replacement for the TOML-backed store (now
-:class:`hal0.registry.store.TomlModelRegistry`) behind the unchanged §0.2
-interface: ``list``/``get``/``has``/``add``/``remove``/``update``/
-``route_for``/``reload``/``on_change``, plus the three typed errors
-(``RegistryError``/``ModelNotFound``/``ModelAlreadyExists``). Every one of
-the ~60 call sites across ``src/hal0`` constructs ``ModelRegistry()`` or
-``ModelRegistry(registry_dir=...)`` and only ever touches that surface —
-see ``hal0.registry.store`` for where the public ``ModelRegistry`` name is
-rebound to this class.
+Exposes the §0.2 interface every caller uses: ``list``/``get``/``has``/
+``add``/``remove``/``update``/``route_for``/``reload``/``on_change``, plus
+the three typed errors (``RegistryError``/``ModelNotFound``/
+``ModelAlreadyExists``) defined in :mod:`hal0.registry.store`, which also
+binds the public ``ModelRegistry`` name to this class.
 
-What SQLite deletes from the TOML store (plan §7.5): the hand-rolled
-``_atomic_write`` (tempfile + fsync + ``os.replace``), the mtime cache
-(``_stat_mtime``/``_read_locked``/``_ensure_fresh``/``_invalidate``), the
-per-instance ``threading.RLock``, and the cross-process sidecar
-``fcntl.flock`` (``registry_write_lock``). ``BEGIN IMMEDIATE`` (see
-:func:`hal0.db.connection.tx`) gives the same cross-process write
-serialization the flock gave, natively, plus cross-thread safety the flock
-alone did not provide.
+Concurrency: ``BEGIN IMMEDIATE`` (see :func:`hal0.db.connection.tx`) gives
+cross-process write serialization natively, and a fresh connection per call
+keeps it thread-safe.
 
-``registry_dir`` stays a constructor parameter for signature
-compatibility — dozens of tests and CLI/setup code pass it — but it now
-only selects where this instance's SQLite file lives (for test/dev
-isolation), not a TOML source of truth. ``registry_file`` is retained too,
-as the *derived* TOML export path (see ``hal0.registry.import_toml`` /
-``hal0 registry export``) — ``registry.toml`` is no longer read on every
-access, only written to on request.
+SQLite is the only store. Nothing reads or writes ``registry.toml`` here: a
+file left over from the TOML era is converted once by
+:func:`hal0.registry.toml_conversion.convert_registry_toml`, which runs with
+the post-activation migrations, and renamed so it is never read again.
+Deleted models therefore stay deleted across restarts.
+
+``registry_dir`` stays a constructor parameter because tests and setup code
+pass it: it selects where this instance's SQLite file lives
+(``registry_dir/hal0.db``) for test/dev isolation.
 """
 
 from __future__ import annotations
@@ -50,12 +43,11 @@ from hal0.registry.store import (
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_REGISTRY_FILENAME = "registry.toml"
 _DB_FILENAME = "hal0.db"
 
 
 class SqliteModelRegistry:
-    """SQLite-backed model registry — the ML-1 pilot store.
+    """SQLite-backed model registry.
 
     Thread/process-safety: none of it is this class's job any more.
     :func:`hal0.db.connection.connect` opens a fresh connection per call
@@ -65,8 +57,7 @@ class SqliteModelRegistry:
     about.
     """
 
-    # Optional post-mutation callback — identical contract to
-    # `TomlModelRegistry.on_change`: invoked after every successful
+    # Optional post-mutation callback: invoked after every successful
     # add/update/remove, best-effort (a raising hook is logged and
     # swallowed, never allowed to undo an already-committed write).
     on_change: Callable[[], None] | None = None
@@ -80,15 +71,10 @@ class SqliteModelRegistry:
         """Initialise the registry.
 
         Args:
-            registry_dir: Kept for signature compatibility with the TOML
-                store — dozens of call sites pass it. When given, this
-                instance's SQLite file lives at ``registry_dir/hal0.db``
-                (test/dev isolation); ``registry_dir`` itself is also
-                where ``registry_file`` (the TOML export target) lands.
+            registry_dir: When given, this instance's SQLite file lives at
+                ``registry_dir/hal0.db`` (test/dev isolation).
             db_path: Explicit override for the SQLite file location,
-                taking precedence over ``registry_dir``. Mainly useful
-                when a caller wants export-path isolation independent of
-                the database location.
+                taking precedence over ``registry_dir``.
         """
         self._registry_dir_override: Path | None = (
             Path(registry_dir) if registry_dir is not None else None
@@ -106,17 +92,6 @@ class SqliteModelRegistry:
         return paths.registry_dir()
 
     @property
-    def registry_file(self) -> Path:
-        """Derived TOML export path.
-
-        ``registry.toml`` is no longer the source of truth once SQLite is
-        in place — this is only where ``hal0 registry export`` (and any
-        ``on_change``-driven mirror write) lands a read-only snapshot for
-        grep/git/manual inspection.
-        """
-        return self.registry_dir / _DEFAULT_REGISTRY_FILENAME
-
-    @property
     def db_path(self) -> Path:
         """Resolved SQLite database path for this instance."""
         if self._db_path_override is not None:
@@ -129,45 +104,15 @@ class SqliteModelRegistry:
         return connect(self.db_path)
 
     def _ensure_migrated(self, conn: sqlite3.Connection) -> None:
-        """Run the schema migrator + one-shot TOML import, once per instance.
+        """Run the schema migrator, once per instance.
 
-        Both are idempotent on their own (``migrate()`` checks
-        ``schema_migrations``; the import uses ``INSERT OR IGNORE`` and
-        only fires when the ``model`` table is empty), so the per-instance
-        ``self._migrated`` guard is purely an optimisation, not a
-        correctness requirement — a second instance pointed at the same
-        database re-runs both checks safely.
+        ``migrate()`` is idempotent (it checks ``schema_migrations``), so the
+        per-instance ``self._migrated`` guard is purely an optimisation.
         """
         if self._migrated:
             return
         migrate(conn)
-        self._maybe_first_boot_import(conn)
         self._migrated = True
-
-    def _maybe_first_boot_import(self, conn: sqlite3.Connection) -> None:
-        """Import ``registry.toml`` on the very first boot against an empty DB.
-
-        Deliberately self-contained here (rather than wired into the API
-        lifespan) so the drop-in swap needs no changes to shared startup
-        code: any process that constructs a `SqliteModelRegistry` against
-        a fresh database transparently picks up an existing TOML registry
-        exactly once.
-        """
-        # Local import: avoids a top-level import cycle (import_toml also
-        # depends on `hal0.db.repository`/`connection`/`migrate`, none of
-        # which touch this module).
-        from hal0.registry.import_toml import import_toml_to_sqlite
-
-        (count,) = conn.execute("SELECT COUNT(*) FROM model").fetchone()
-        if count:
-            return
-        rfile = self.registry_file
-        if not rfile.exists():
-            return
-        try:
-            import_toml_to_sqlite(registry_file=rfile, conn=conn)
-        except Exception:
-            log.warning("registry.first_boot_import_failed", exc_info=True)
 
     # ── row/model mapping ────────────────────────────────────────────────
 
@@ -217,8 +162,8 @@ class SqliteModelRegistry:
     # ── public writes ─────────────────────────────────────────────────────
 
     def _notify_change(self) -> None:
-        """Invoke the post-mutation hook, if any. Best-effort — identical
-        contract to `TomlModelRegistry._notify_change`."""
+        """Invoke the post-mutation hook, if any. Best-effort: a raising
+        hook is logged and swallowed."""
         cb = self.on_change
         if cb is None:
             return
@@ -278,9 +223,7 @@ class SqliteModelRegistry:
         """Partially update a model entry.
 
         ``updates`` is a flat field-level merge — see
-        :func:`hal0.registry.store.merge_update` (shared with the TOML
-        store so both implementations can never drift on merge semantics
-        or error shape). The ``id`` field is never changeable through
+        :func:`hal0.registry.store.merge_update`. The ``id`` field is never changeable through
         update (use remove + add).
 
         Raises:
@@ -321,8 +264,7 @@ class SqliteModelRegistry:
     def route_for(self, model_id: str) -> str | None:
         """Return the upstream URL for a model, or ``None`` if not assigned.
 
-        Identical wire format/behaviour to the TOML store:
-        ``metadata = {"upstream_url": "http://127.0.0.1:8081"}``.
+        Wire format: ``metadata = {"upstream_url": "http://127.0.0.1:8081"}``.
         """
         try:
             model = self.get(model_id)
@@ -334,11 +276,9 @@ class SqliteModelRegistry:
         return None
 
     def reload(self) -> None:
-        """No-op: SQLite has no mtime cache to invalidate.
+        """No-op: SQLite has no cache to invalidate.
 
-        Kept as a method so the §0.2 interface is identical to the TOML
-        store's — callers that call ``reload()`` defensively keep working
-        unchanged.
+        Part of the §0.2 interface; callers invoke it defensively.
         """
         return None
 

@@ -27,6 +27,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     order/count without touching real config/registry state."""
     calls: dict[str, list[Any]] = {
         "config_migrations": [],
+        "registry_toml": [],
         "seed_profiles": [],
         "mtp": [],
         "vulkan_migration": [],
@@ -39,6 +40,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
         return (1, 2)
+
+    def _registry_toml(*, job_id=None):
+        calls["registry_toml"].append(job_id)
+        return {"outcome": "absent"}
 
     def _seed_profiles(*, job_id=None):
         calls["seed_profiles"].append(job_id)
@@ -79,6 +84,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         return {}
 
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
+    monkeypatch.setattr("hal0.registry.toml_conversion.convert_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
@@ -95,6 +101,7 @@ def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
+    assert _stub_every_pass["registry_toml"] == ["j1"]
     assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
@@ -182,6 +189,28 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["mtp"] == []
     assert _stub_every_pass["vulkan_migration"] == []
     assert _stub_every_pass["extra_args"] == []
+    assert _stub_every_pass["converge_components"] == []
+
+
+def test_registry_toml_conversion_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """The one-shot registry.toml conversion fails loud, like the schema
+    migration: it renames a file after importing it, so a half-done run
+    must reach the caller (commit() logs it at ERROR and reports the update
+    unconverged; the boot safety net retries next start)."""
+    from hal0.registry.toml_conversion import RegistryConversionError
+
+    def _boom(*, job_id=None):
+        raise RegistryConversionError("rename failed")
+
+    monkeypatch.setattr("hal0.registry.toml_conversion.convert_registry_toml", _boom)
+
+    with pytest.raises(RegistryConversionError):
+        run_post_activation_migrations(job_id="j4")
+
+    assert _stub_every_pass["config_migrations"] == [(1, "j4")]
+    assert _stub_every_pass["seed_profiles"] == []
     assert _stub_every_pass["converge_components"] == []
 
 
