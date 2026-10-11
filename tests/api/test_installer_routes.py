@@ -82,10 +82,10 @@ def test_install_state_first_run_false_after_sentinel(
     assert body["first_run"] is False
 
 
-def test_install_state_has_default_slot_when_primary_toml_exists(
+def test_install_state_ignores_legacy_primary_toml(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """A primary.toml on disk flips has_default_slot to True."""
+    """Only agent.toml counts as the default slot; primary.toml no longer does."""
     slots = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slots.mkdir(parents=True, exist_ok=True)
     (slots / "primary.toml").write_text(
@@ -94,7 +94,7 @@ def test_install_state_has_default_slot_when_primary_toml_exists(
     )
     r = isolated_client.get("/api/install/state")
     assert r.status_code == 200
-    assert r.json()["has_default_slot"] is True
+    assert r.json()["has_default_slot"] is False
 
 
 def test_install_state_has_default_slot_when_agent_toml_exists(

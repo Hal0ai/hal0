@@ -22,8 +22,8 @@ Shape (unchanged from the proxy era):
 * ``WS /events`` streams the local ``card_event`` feed (see
   :mod:`hal0.api.routes.board_ws`) so every mutation — operator's, the agent
   chat's, a worker's — reflects live on the board through the one transport.
-* ``POST /chat`` (SSE) is the hal0-native orchestrator — see
-  :mod:`hal0.api.routes.board_chat` (a separate lane; unchanged here).
+* The hal0-native orchestrator chat is ``POST /api/brain/chat`` (see
+  :mod:`hal0.api.routes.brain`); there is no chat route under ``/api/board``.
 
 First-boot import: the first request per process runs
 :meth:`BoardStore.ensure_initialized`, which imports the live Hermes board when
@@ -446,20 +446,6 @@ async def board_events_ws(websocket: WebSocket) -> None:
 
     await websocket.accept()
     await proxy_board_events(websocket)
-
-
-# ── chat orchestrator (SSE, audited per tool call) ──────────────────────────
-
-
-@router.post("/chat")
-async def board_chat(request: Request):
-    """hal0-native board orchestrator. SSE stream. SPEC §2.D / §4.
-
-    Delegates to :mod:`hal0.api.routes.board_chat` (a separate lane; unchanged).
-    """
-    from hal0.api.routes.board_chat import run_board_chat
-
-    return await run_board_chat(request)
 
 
 __all__ = ["router"]

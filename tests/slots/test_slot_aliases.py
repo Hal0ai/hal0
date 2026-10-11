@@ -2,16 +2,16 @@
 
 ADR-0023 retired ``chat``/``primary`` as slot/role names. The canonical llm
 roles are now ``agent`` (default/anchor, replaces ``chat``) + ``utility`` (cheap
-helper, now seeded). ``SLOT_ALIASES`` keeps only ``agent-hermes → agent``.
+helper, now seeded). The Hermes-era ``agent-hermes → agent`` alias is gone too.
 
 Verifies:
   1. SEEDED_SLOTS carries ``utility`` + ``agent`` and NOT ``chat``/``primary``.
-  2. SLOT_ALIASES is exactly ``{"agent-hermes": "agent"}``.
+  2. SLOT_ALIASES carries only the rerank rename and the NPU curated-model routes.
   3. Aliases do NOT appear in SlotManager.list() or iter_configs().
   4. DEFAULT_CHAINS advertises agent/utility/npu (NOT hal0/chat) and ends every
      chain in ``agent``.
-  5. dispatcher/router resolves the renamed anchor + the agent-hermes alias.
-  6. hal0_chat_slot_alias_map injects the agent-hermes back-compat alias.
+  5. dispatcher/router resolves the renamed anchor; agent-hermes is not an alias.
+  6. hal0_chat_slot_alias_map no longer injects an agent-hermes entry.
 """
 
 from __future__ import annotations
@@ -42,13 +42,11 @@ def test_agent_is_gpu_seeded_not_npu():
 
 
 def test_slot_aliases_map():
-    """ADR-0023: SLOT_ALIASES drops ``primary`` — only agent-hermes → agent.
-
-    Also carries the rerank capability slot's retired ``embed-rerank`` name
-    (split-brain fix, 2026-08) and the NPU FLM curated-model routes.
+    """SLOT_ALIASES carries the rerank capability slot's retired ``embed-rerank``
+    name (split-brain fix, 2026-08) and the NPU FLM curated-model routes.
+    ``primary``/``chat`` (ADR-0023) and ``agent-hermes`` are no longer aliases.
     """
     assert SLOT_ALIASES == {
-        "agent-hermes": "agent",
         "embed-rerank": "rerank",
         "qwen3-4b": "flm",
         "qwen3:4b": "flm",
@@ -58,8 +56,8 @@ def test_slot_aliases_map():
 # ── 2. _resolve_alias static method ──────────────────────────────────────────
 
 
-def test_resolve_alias_agent_hermes_to_agent():
-    assert SlotManager._resolve_alias("agent-hermes") == "agent"
+def test_resolve_alias_agent_hermes_is_passthrough_now():
+    assert SlotManager._resolve_alias("agent-hermes") == "agent-hermes"
 
 
 def test_resolve_alias_primary_is_passthrough_now():
@@ -133,13 +131,6 @@ def mock_slot_manager(tmp_slots_dir: Path):
         mgr._fail_watchers = {}
         mgr._idle_monitor_tasks = {}
         yield mgr
-
-
-def test_manager_resolve_alias_agent_hermes_maps_to_agent(tmp_slots_dir):
-    """_resolve_alias("agent-hermes") == "agent" and the agent TOML exists."""
-    resolved = SlotManager._resolve_alias("agent-hermes")
-    assert resolved == "agent"
-    assert (tmp_slots_dir / "slots" / "agent.toml").exists()
 
 
 # ── 4. list() and iter_configs() do NOT expose aliases ───────────────────────
@@ -238,17 +229,6 @@ def test_proxy_primary_falls_through_to_agent_anchor():
     assert upstream.name == "agent"
 
 
-def test_proxy_agent_hermes_alias_resolves_to_agent():
-    """model=agent-hermes resolves to the agent slot via alias."""
-    from hal0.dispatcher.router import resolve_by_capability
-    from hal0.upstreams.registry import Upstream, UpstreamRegistry
-
-    reg = UpstreamRegistry()
-    reg.add(Upstream(name="agent", kind="slot", url="http://127.0.0.1:13305/v1"))
-    upstream = resolve_by_capability("/v1/chat/completions", {"model": "agent-hermes"}, reg)
-    assert upstream.name == "agent"
-
-
 # ── 7. hal0_chat_slot_alias_map injects back-compat entries ──────────────────
 
 
@@ -269,14 +249,12 @@ async def test_chat_slot_alias_map_includes_agent_canonical():
     )
     result = await hal0_chat_slot_alias_map(slot_manager)
     assert result.get("agent") == "qwen3-8b"
-    # back-compat alias present
-    assert result.get("agent-hermes") == "qwen3-8b"
+    assert "agent-hermes" not in result
 
 
 @pytest.mark.asyncio
 async def test_chat_slot_alias_map_utility_no_alias_injection():
-    """A utility-only slot set carries `utility` but injects no extra alias
-    (agent-hermes only fires when an `agent` slot is present)."""
+    """A utility-only slot set carries `utility` but injects no extra alias."""
     from hal0.api import hal0_chat_slot_alias_map
 
     slot_manager = MagicMock()
@@ -295,8 +273,8 @@ async def test_chat_slot_alias_map_utility_no_alias_injection():
 
 
 @pytest.mark.asyncio
-async def test_chat_slot_alias_map_alias_does_not_override_explicit():
-    """If a literal 'agent-hermes' slot still exists on disk, it takes precedence."""
+async def test_chat_slot_alias_map_keeps_a_literal_agent_hermes_slot():
+    """A slot that happens to be named 'agent-hermes' is just a slot by that name."""
     from hal0.api import hal0_chat_slot_alias_map
 
     slot_manager = MagicMock()
@@ -308,6 +286,6 @@ async def test_chat_slot_alias_map_alias_does_not_override_explicit():
         ]
     )
     result = await hal0_chat_slot_alias_map(slot_manager)
-    # The on-disk "agent-hermes" entry wins (setdefault)
+    # The on-disk "agent-hermes" entry is carried verbatim
     assert result.get("agent-hermes") == "old-model"
     assert result.get("agent") == "qwen3-8b"

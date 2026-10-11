@@ -510,5 +510,5 @@ export const ENDPOINTS = {
   boardConfig: '/api/board/config',          // GET (read-only orchestration knobs)
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
   boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
-  boardChat: '/api/board/chat',              // POST (SSE)
+  brainChat: '/api/brain/chat',              // POST (SSE) — hal0-brain steward chat
 } as const

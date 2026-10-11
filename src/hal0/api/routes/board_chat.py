@@ -1,11 +1,9 @@
-"""Thin back-compat alias for the first-class hal0-brain chat engine.
+"""Thin import alias for the first-class hal0-brain chat engine.
 
 The brain logic moved to :mod:`hal0.brain.chat` (SPEC §G / R4): the brain is
 now a first-class module with ZERO Hermes/board import dependency, and
-``POST /api/brain/chat`` is its PRIMARY route. ``POST /api/board/chat`` stays
-as a byte-for-byte compatible alias so the dashboard's slide-out chat and the
-frozen FE↔BE contract keep working unchanged — its auth gating (KB-1: the
-``/api/board`` prefix is ADMIN in :mod:`hal0.security.exposure`) is untouched.
+``POST /api/brain/chat`` is its only route (the old ``POST /api/board/chat``
+alias was removed).
 
 This module DELEGATES rather than duplicates: it rebinds itself to the brain
 module object in ``sys.modules`` so ``from hal0.api.routes.board_chat import

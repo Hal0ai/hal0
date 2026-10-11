@@ -986,15 +986,12 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
 
 @router.get("/by-name/{name}")
 async def get_slot_by_name(name: str, request: Request) -> dict[str, object]:
-    """Canonical name-keyed lookup (rework §11.1).
+    """Name-keyed lookup (rework §11.1): the same payload as ``GET /api/slots/{name}``.
 
-    The documented go-forward name path — identical payload to the existing
-    ``GET /api/slots/{name}`` (kept for one release). Resolves through the
-    SlotManager so aliases + drift reconcile apply.
+    ``GET /api/slots/{name}`` stays — the dashboard, the CLI and the admin MCP
+    ``slot_status`` tool all read it — so this route simply delegates to it.
     """
-    sm = _get_slot_manager(request)
-    snap = await sm.status(name, include_config_drift=True)
-    return _slot_to_dict(snap, request)
+    return await get_slot(name, request)
 
 
 @router.get("/by-id/{slot_id}")

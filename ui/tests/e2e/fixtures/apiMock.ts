@@ -281,9 +281,9 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     return json(route, makeBoardLanesResponse(includeArchived))
   })
 
-  // POST /api/board/chat (SSE stub — returns a minimal SSE body)
+  // POST /api/brain/chat (SSE stub — returns a minimal SSE body)
   // Note: real SSE not feasible in page.route; return a minimal done frame.
-  await page.route('**/api/board/chat', (route) =>
+  await page.route('**/api/brain/chat', (route) =>
     route.fulfill({
       status: 200,
       contentType: 'text/event-stream',

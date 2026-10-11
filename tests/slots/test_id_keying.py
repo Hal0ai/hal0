@@ -221,7 +221,7 @@ def test_bare_manager_key_is_negative_surrogate_bijection() -> None:
     assert sm._name_for_key(k_chat) == "chat"
     assert sm._name_for_key(k_agent) == "agent"
     # aliases collapse onto the canonical name's handle.
-    assert sm._key("agent-hermes") == sm._key("agent")
+    assert sm._key("embed-rerank") == sm._key("rerank")
 
 
 async def test_surrogate_rebinds_to_durable_id_when_row_appears(hal0_home: Path) -> None:

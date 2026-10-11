@@ -102,8 +102,7 @@ class GraphStatus:
     """Return shape of ``graph_status``.
 
     ADR-0023: ``extraction_slot`` is the local llm slot the engine uses for graph
-    extraction. ``to_dict`` also emits a deprecated ``route`` mirror so the existing
-    dashboard (separate repo) keeps rendering during the cutover.
+    extraction.
     """
 
     enabled: bool
@@ -118,7 +117,6 @@ class GraphStatus:
         return {
             "enabled": self.enabled,
             "extraction_slot": self.extraction_slot,
-            "route": self.extraction_slot,  # deprecated mirror (ADR-0023)
             "in_flight": self.in_flight,
             "builds_ok": self.builds_ok,
             "errors": self.errors,

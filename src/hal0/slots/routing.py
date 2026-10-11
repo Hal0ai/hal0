@@ -73,14 +73,12 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("flm-stt", "flm-embed")
 #: Back-compat alias map: old slot names → canonical new names.
 #: Aliases resolve transparently for dispatch and config lookup but are
 #: NEVER stored on disk and NEVER appear in list() / iter_configs() /
-#: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
-#: so no new TOML is created — the alias just redirects old references.
-#: ADR-0023 retired the `primary` and `chat` aliases. The canonical roles are
-#: `agent` (default anchor) + `utility` (helper); a lingering operator-custom `chat`
-#: slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an
-#: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
+#: /api/slots. ADR-0023 retired the `primary` and `chat` aliases, and the
+#: Hermes-era `agent-hermes` → `agent` redirect has been removed too. The
+#: canonical roles are `agent` (default anchor) + `utility` (helper); an
+#: operator-custom slot is reachable by its own name via generalized
+#: `hal0/<slot>` resolution, not an alias.
 SLOT_ALIASES: dict[str, str] = {
-    "agent-hermes": "agent",
     # The rerank capability slot was briefly created as ``embed-rerank``
     # while the dispatcher routed /v1/rerankings to ``rerank`` (split-brain,
     # fixed 2026-08). Old references resolve to the canonical name.

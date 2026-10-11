@@ -62,8 +62,23 @@ applying. Add those subsections to a version's section to surface them; see
   `runtimes`, `hwtuning`, `about`, `voice`, `imagegen`, `npu`, `oauth`) no
   longer resolve and fall back to Overview; use `#settings/capabilities`,
   `#settings/accounts` and so on. `GET /api/user/dashboard-layout` now answers
-  `{}` for a pre-v1.1 layout file left on disk (v2) instead of returning it
+  `{}` for a pre-#1061 (v2) layout file left on disk instead of returning it
   reconciled; the dashboard shows its default bands until the next save.
+
+- Removed deprecated API fields and aliases. The dashboard and the bundled
+  agents are updated in the same release; external clients must follow:
+  - `POST /api/board/chat` is gone; use `POST /api/brain/chat` (same SSE
+    contract). The dashboard's Board chat now calls the brain route.
+  - `GET /api/memory/graph/status` no longer returns the `route` mirror of
+    `extraction_slot`.
+  - `GET /api/meta/enums` no longer returns the deprecated `backends` list
+    (use `devices`, `selectable_backends` and `model_backends`).
+  - The `agent-hermes` slot alias no longer resolves to `agent`, and the
+    `chat` / `primary` slot-name fallbacks are gone from the first-run check
+    (`has_default_slot` looks for `agent.toml` only), the `hal0/*` fallback
+    anchor and the Hermes chat-model pick. Use `agent`.
+  - `GET /api/slots/by-name/{name}` now returns exactly what
+    `GET /api/slots/{name}` returns (it used to omit the config enrichment).
 
 ### Fixed
 

@@ -545,7 +545,7 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
 
     The slot **alias** is the slot name. ADR-0023: the canonical llm roles
     are ``agent`` (default anchor) + ``utility`` (helper); any other bound
-    llm slot is included by its own name (back-compat alias: ``agent-hermes``).
+    llm slot is included by its own name.
     Used by the ``/v1`` route layer to translate an alias-addressed request
     into the slot's configured model id before routing, so dispatch resolves
     the correct distinct model. This is a thin translation map, not a routing
@@ -570,10 +570,11 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
         model_id = _slot_model_id(cfg)
         if model_id:
             out.setdefault(slot_name, model_id)
-    # Inject back-compat aliases (ADR-0023: only agent-hermes → agent's model_id
-    # remains) so requests using old slot names still reach the right model.
-    # A literal slot still named like an alias on-disk takes precedence (it was
-    # added above via setdefault, so the alias injection below is skipped).
+    # Inject the remaining slot aliases (SLOT_ALIASES: embed-rerank, the NPU
+    # curated-model ids) so requests using those names still reach the right
+    # model. A literal slot still named like an alias on-disk takes precedence
+    # (it was added above via setdefault, so the alias injection below is
+    # skipped).
     from hal0.slots.manager import SLOT_ALIASES
 
     for old_name, new_name in SLOT_ALIASES.items():
@@ -2694,16 +2695,15 @@ def create_app() -> FastAPI:
         tags=["memory"],
     )
 
-    # Operator Board (#board) — thin AUDITED proxy to the Hermes kanban plugin
-    # + a hal0-native chat orchestrator. FROZEN FE↔BE contract (SPEC §4).
-    # Mounted PRE-dashboard so /api/board/* (incl. the /events WS + /chat SSE)
-    # is not shadowed by the SPA fallback.
+    # Operator Board (#board) — thin AUDITED proxy to the Hermes kanban plugin.
+    # FROZEN FE↔BE contract (SPEC §4). Mounted PRE-dashboard so /api/board/*
+    # (incl. the /events WS) is not shadowed by the SPA fallback.
     app.include_router(board_routes.router, prefix="/api/board", tags=["board"])
 
     # hal0-brain steward chat (SPEC §G / R4) — PRIMARY route. First-class
-    # brain engine (hal0.brain.chat) with zero Hermes/board import dependency;
-    # /api/board/chat is a thin alias into the same engine. Mounted PRE-dashboard
-    # so /api/brain/chat (SSE) is not shadowed by the SPA fallback. ADMIN-gated
+    # brain engine (hal0.brain.chat) with zero Hermes/board import dependency.
+    # Mounted PRE-dashboard so /api/brain/chat (SSE) is not shadowed by the SPA
+    # fallback. ADMIN-gated
     # (deny-by-default) via hal0.security.exposure's /api/brain rule.
     app.include_router(brain_routes.router, prefix="/api/brain", tags=["brain"])
 

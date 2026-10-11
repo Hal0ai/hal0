@@ -215,7 +215,7 @@ def test_representative_admin_routes_are_admin() -> None:
         ("DELETE", "/api/slots/{name}"),
         ("POST", "/api/models/{model_id}/pull"),
         ("POST", "/api/updates/apply"),
-        ("POST", "/api/board/chat"),
+        ("POST", "/api/brain/chat"),
         ("PUT", "/api/settings"),
         ("GET", "/api/settings"),
         ("POST", "/api/secrets/{name}"),

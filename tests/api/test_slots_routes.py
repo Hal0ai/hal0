@@ -435,17 +435,14 @@ def test_load_success_path_dispatches_via_container(
     assert load_calls[0]["model_info"]["_model_key"] == "qwen3-4b-q4_k_m"
 
 
-def test_agent_hermes_slot_name_resolves_to_agent(
+def test_agent_hermes_is_no_longer_an_alias_for_agent(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """ADR-0023: POST /api/slots/agent-hermes/load resolves via the surviving
-    hidden alias to the ``agent`` slot (agent.toml) and loads its model.
-
-    Under ADR-0023 ``primary`` is no longer an alias (it passes through and
-    404s when no ``primary`` slot exists). The one remaining back-compat alias
-    is ``agent-hermes`` → ``agent``."""
+    """POST /api/slots/agent-hermes/load 404s: neither ``primary`` (ADR-0023)
+    nor the Hermes-era ``agent-hermes`` redirects to the ``agent`` slot any
+    more, and nothing is loaded."""
     _seed_slot_toml(
         tmp_hal0_home,
         "agent",
@@ -461,13 +458,8 @@ def test_agent_hermes_slot_name_resolves_to_agent(
         ],
     )
     r = isolated_client.post("/api/slots/agent-hermes/load")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    # The alias resolved to the canonical agent slot.
-    assert body["name"] == "agent"
-    assert body["state"] == "ready"
-    load_calls = container_stub["load_calls"]
-    assert load_calls and load_calls[0]["model_info"]["_model_key"] == "qwen3-4b-q4_k_m"
+    assert r.status_code == 404, r.text
+    assert not container_stub["load_calls"]
 
 
 def test_load_unknown_slot_returns_typed_envelope(
@@ -2187,6 +2179,19 @@ def test_get_slot_includes_config_enrichment(
     assert body["coresident_group"] == "npu-flm-trio"
     assert body["type"] == "llm"
     assert body["model_default"] == "gemma3-1b"
+
+
+def test_get_slot_by_name_matches_get_slot(
+    npu_trio_slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """GET /api/slots/by-name/{name} serves the same payload as GET /api/slots/{name}."""
+    plain = isolated_client.get("/api/slots/agent")
+    by_name = isolated_client.get("/api/slots/by-name/agent")
+    assert by_name.status_code == 200, by_name.text
+    assert by_name.json() == plain.json()
+    assert by_name.json()["coresident_group"] == "npu-flm-trio"
 
 
 class _FakeCtxDefaults:

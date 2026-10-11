@@ -88,14 +88,14 @@ def test_state_unknown_slot_returns_offline(tmp_hal0_home: str) -> None:
 
 
 def test_state_resolves_alias(tmp_hal0_home: str) -> None:
-    """state() transparently resolves back-compat aliases (agent-hermes → agent)."""
+    """state() transparently resolves back-compat aliases (embed-rerank → rerank)."""
     sm = _manager(tmp_hal0_home)
     import time
 
     from hal0.slots.state import SlotStateRecord
 
     rec = SlotStateRecord(
-        name="agent",
+        name="rerank",
         state=SlotState.SERVING,
         model_id="m",
         port=8081,
@@ -103,8 +103,8 @@ def test_state_resolves_alias(tmp_hal0_home: str) -> None:
         message="",
         extra={},
     )
-    sm._states[sm._key("agent")] = rec
-    assert sm.state("agent-hermes") is SlotState.SERVING
+    sm._states[sm._key("rerank")] = rec
+    assert sm.state("embed-rerank") is SlotState.SERVING
 
 
 # ── is_ready_for_dispatch() ───────────────────────────────────────────────────

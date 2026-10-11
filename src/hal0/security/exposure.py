@@ -333,9 +333,9 @@ RULES: tuple[_Rule, ...] = (
     _Rule("memory namespace bulk delete", _exact("/api/memory/delete"), AuthClass.ADMIN, _POST),
     _Rule("memory", _prefix("/api/memory"), AuthClass.ADMIN, None),
     _Rule("board", _prefix("/api/board"), AuthClass.ADMIN, None),
-    # hal0-brain steward chat (R4 §G): primary /api/brain/chat surface, sibling
-    # of the /api/board/chat alias. Admin-only — it drives the full platform
-    # admin tool surface (slot mutations, model pulls, board writes).
+    # hal0-brain steward chat (R4 §G): the /api/brain/chat surface. Admin-only —
+    # it drives the full platform admin tool surface (slot mutations, model
+    # pulls, board writes).
     _Rule("brain (hal0-brain steward chat)", _prefix("/api/brain"), AuthClass.ADMIN, None),
     _Rule("providers", _prefix("/api/providers"), AuthClass.ADMIN, None),
     _Rule("upstreams", _prefix("/api/upstreams"), AuthClass.ADMIN, None),

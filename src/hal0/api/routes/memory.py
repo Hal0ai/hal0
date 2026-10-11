@@ -10,7 +10,7 @@ The actual graph-extraction dispatch lives in the active memory provider
 (:class:`hal0.memory.MemoryProvider`); this module is the thin HTTP
 veneer that:
 
-  - Returns ``graph_status()`` (enabled / route / counters / last-built).
+  - Returns ``graph_status()`` (enabled / extraction_slot / counters / last-built).
   - Validates the toggle payload against :class:`MemoryGraphConfig`.
   - Persists to ``hal0.toml`` via the existing atomic writer.
   - Flips the live wrapper so callers don't need a restart.
@@ -258,7 +258,6 @@ async def graph_status(request: Request) -> dict[str, Any]:
         {
           "enabled":         bool,
           "extraction_slot": str,            # the local llm slot used for extraction
-          "route":           str,            # deprecated mirror of extraction_slot
           "slot_resolves":   bool,           # does extraction_slot match an enabled llm slot?
           "available_slots": [str, ...],     # enabled llm slots the operator can pick
           "in_flight":       int,

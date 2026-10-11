@@ -113,18 +113,12 @@ def _models_dir_populated() -> bool:
 
 
 def _has_default_slot() -> bool:
-    """True if the canonical agent slot TOML exists, or a legacy fallback.
+    """True if the canonical agent slot TOML exists.
 
     Per ADR-0023 the default anchor slot is ``agent`` (SEED_STACKS bind
-    ``slot=agent``); ``chat`` and ``primary`` are retained as legacy
-    fallbacks for boxes that pre-date the rename.
+    ``slot=agent``).
     """
-    slots_dir = paths.slots_config_dir()
-    return (
-        (slots_dir / "agent.toml").exists()
-        or (slots_dir / "chat.toml").exists()
-        or (slots_dir / "primary.toml").exists()
-    )
+    return (paths.slots_config_dir() / "agent.toml").exists()
 
 
 async def _openwebui_running() -> bool:

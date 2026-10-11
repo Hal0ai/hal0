@@ -243,9 +243,6 @@ export interface MemoryGraphStatus {
   enabled: boolean
   // The local llm slot used for extraction (e.g. "utility").
   extraction_slot: string
-  // DEPRECATED mirror of extraction_slot (will be removed). Prefer reading
-  // extraction_slot.
-  route?: string
   // Does extraction_slot match an enabled llm slot right now?
   slot_resolves: boolean
   // Enabled llm slot names the operator may pick.

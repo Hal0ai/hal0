@@ -93,13 +93,10 @@ def _slot_matches_name(slot: SlotView, name: str) -> bool:
 
 
 def _configured_primary(slots: list[SlotView]) -> SlotView | None:
-    # ADR-0023: the anchor is the `agent` slot. (`chat`/`primary` are retired;
-    # kept here only as a transition courtesy for a box mid-migration whose
-    # canonical slot hasn't been reseeded yet.)
-    for name in (_ANCHOR_NAME, "chat", "primary"):
-        for s in slots:
-            if _slot_matches_name(s, name):
-                return s
+    # ADR-0023: the anchor is the `agent` slot.
+    for s in slots:
+        if _slot_matches_name(s, _ANCHOR_NAME):
+            return s
     # last-resort: first enabled llm slot if none is named agent.
     return slots[0] if slots else None
 

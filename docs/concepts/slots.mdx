@@ -326,9 +326,9 @@ have a cheap local model to target).
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, or `npu` — `gpu-cuda` is the experimental path for
-non-Strix-Halo NVIDIA hosts). hal0 keeps back-compat **aliases** so older
-callers keep working: `agent-hermes` resolves to `agent`, and `embed-rerank`
-(the rerank capability slot's briefly-used old name) resolves to `rerank`.
+non-Strix-Halo NVIDIA hosts). hal0 keeps one back-compat **alias** so older
+callers keep working: `embed-rerank` (the rerank capability slot's
+briefly-used old name) resolves to `rerank`.
 Aliases are never written to disk and never appear in slot listings —
 they're a transparent translation at dispatch time.
 

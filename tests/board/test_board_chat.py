@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from hal0.activity import AuditStore
 from hal0.api.middleware import error_codes
-from hal0.api.routes import board
+from hal0.api.routes import board, brain
 from hal0.api.routes.board_chat import (
     _SYSTEM_PROMPT,
     BRAIN_SLOT_MODEL,
@@ -177,6 +177,7 @@ def _make_app(
     app = FastAPI()
     error_codes.install(app)
     app.include_router(board.router, prefix="/api/board")
+    app.include_router(brain.router, prefix="/api/brain")
     # hal0 owns the board: the chat's board tools and /api/board/* share ONE
     # store, and no Hermes client is wired at all (#1829).
     app.state.board_store = _spy_store(recorder, tmp_path / "board.db")
@@ -220,7 +221,7 @@ def test_sse_framing_tool_then_token_then_done(tmp_path) -> None:
         ]
     )
     _app, client = _make_app(rec, stub, tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     assert resp.status_code == 200
     events = _sse_events(resp.text)
     types = [e["type"] for e in events]
@@ -255,7 +256,7 @@ def _tool_mutation_case(
     stub = _StubLLM([_tool_call_response(tool, args, "c_mut"), _final_response("ok")])
     _app, client = _make_app(rec, stub, tmp_path)
     rec.calls.clear()
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "do"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "do"}]})
     assert resp.status_code == 200
     hits = rec.recorded(expected_call)
     assert len(hits) >= 1, f"Expected store.{expected_call}(), got {rec.names()}"
@@ -383,7 +384,7 @@ def test_audit_per_tool_call(tmp_path) -> None:
     )
     app, client = _make_app(rec, stub, tmp_path)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"messages": [{"role": "user", "content": "go"}]},
         headers={"X-hal0-Agent": "claude-dev"},
     )
@@ -405,7 +406,7 @@ def test_board_threading_in_tool_dispatch(tmp_path) -> None:
     )
     _app, client = _make_app(rec, stub, tmp_path)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"board": "alpha", "messages": [{"role": "user", "content": "go"}]},
     )
     assert rec.recorded("create_task")[0][1]["board"] == "alpha"
@@ -426,7 +427,7 @@ def test_multi_tool_one_response(tmp_path) -> None:
         ]
     )
     app, client = _make_app(rec, stub, tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)
     results = [e for e in events if e["type"] == "tool_result"]
     assert len(results) == 2
@@ -451,7 +452,7 @@ def test_read_tool_get_board_reads_the_store_and_is_not_audited(tmp_path) -> Non
     rec.calls.clear()
 
     resp = client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"messages": [{"role": "user", "content": "what's up"}]},
     )
     assert resp.status_code == 200
@@ -477,7 +478,7 @@ def test_read_tool_get_task_reads_the_store(tmp_path) -> None:
         [_tool_call_response("get_task", {"task_id": task_id}, "c_gt"), _final_response("ok")]
     )
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert rec.recorded("get_task")[0][0] == (task_id,)
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
@@ -493,7 +494,7 @@ def test_read_tool_get_assignees_reads_the_store(tmp_path) -> None:
     _seed_card(app.state.board_store, title="assigned", assignee="scout")
     rec.calls.clear()
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert len(rec.recorded("list_assignees")) == 1
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
@@ -509,7 +510,7 @@ def test_platform_list_slots_forwards_and_is_not_audited(tmp_path) -> None:
     plat.respond("GET", "/api/slots", [{"name": "agent", "state": "serving"}])
     stub = _StubLLM([_tool_call_response("list_slots", {}, "c_ls"), _final_response("ok")])
     app, client = _make_app(rec, stub, tmp_path, platform=plat)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert len(plat.recorded("GET", "/api/slots")) == 1
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
@@ -526,7 +527,7 @@ def test_platform_slot_restart_forwards_and_audits(tmp_path) -> None:
     )
     app, client = _make_app(rec, stub, tmp_path, platform=plat)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"messages": [{"role": "user", "content": "restart img"}]},
         headers={"X-hal0-Agent": "op"},
     )
@@ -544,7 +545,7 @@ def test_platform_error_becomes_tool_result(tmp_path) -> None:
     plat.respond("GET", "/api/slots", {"error": "nope"}, status=500)
     stub = _StubLLM([_tool_call_response("list_slots", {}, "c_e"), _final_response("ok")])
     _app, client = _make_app(rec, stub, tmp_path, platform=plat)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
     assert "HTTP 500" in result["result"]["error"]
@@ -562,7 +563,7 @@ def test_orchestration_tools_route_through_the_store(tmp_path) -> None:
         ]
     )
     app, client = _make_app(rec, stub, tmp_path)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert len(rec.recorded("get_orchestration")) >= 1
     updates = rec.recorded("update_orchestration")
     assert len(updates) == 1
@@ -581,7 +582,7 @@ def test_system_prompt_injected_when_absent(tmp_path) -> None:
     rec = _Recorder()
     stub = _StubLLM([_final_response("hi")])
     _app, client = _make_app(rec, stub, tmp_path)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "hello"}]})
     sent = stub.calls[0]["messages"]
     assert sent[0]["role"] == "system"
     assert sent[0]["content"] == _SYSTEM_PROMPT
@@ -593,7 +594,7 @@ def test_system_prompt_not_duplicated_when_client_sends_one(tmp_path) -> None:
     stub = _StubLLM([_final_response("hi")])
     _app, client = _make_app(rec, stub, tmp_path)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={
             "messages": [
                 {"role": "system", "content": "custom"},
@@ -613,7 +614,7 @@ def test_default_model_is_brain_slot(tmp_path) -> None:
     rec = _Recorder()
     stub = _StubLLM([_final_response("hi")])
     _app, client = _make_app(rec, stub, tmp_path)
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "hello"}]})
     assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
 
 
@@ -622,7 +623,7 @@ def test_payload_model_overrides_default(tmp_path) -> None:
     stub = _StubLLM([_final_response("hi")])
     _app, client = _make_app(rec, stub, tmp_path)
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"messages": [{"role": "user", "content": "hello"}], "model": "hal0/utility"},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
@@ -643,7 +644,7 @@ def test_hal0_brain_persona_overrides_prompt_and_model(tmp_path) -> None:
         ),
         root=app.state.brain_persona_root,
     )
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "hello"}]})
     sent = stub.calls[0]
     assert sent["model"] == "hal0/custom-brain"
     assert sent["messages"][0] == {"role": "system", "content": "operator-tuned steward prompt"}
@@ -670,7 +671,7 @@ def test_reasoning_content_streams_as_thinking_frame(tmp_path) -> None:
         ]
     )
     _app, client = _make_app(rec, stub, tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     events = _sse_events(resp.text)
     thinking = next(e for e in events if e["type"] == "thinking")
     assert thinking["text"] == "let me check the slots"
@@ -683,7 +684,7 @@ def test_inline_think_tags_split_into_thinking_frame(tmp_path) -> None:
     rec = _Recorder()
     stub = _StubLLM([_final_response("<think>ponder ponder</think>the reply")])
     _app, client = _make_app(rec, stub, tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     events = _sse_events(resp.text)
     thinking = next(e for e in events if e["type"] == "thinking")
     assert thinking["text"] == "ponder ponder"
@@ -722,7 +723,7 @@ def test_loop_budget_exhausted(tmp_path) -> None:
             return _tool_call_response("move_task", {"task_id": "t1", "status": "done"}, "c")
 
     _app, client = _make_app(rec, _InfiniteLLM(), tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)
     assert any(e["type"] == "error" and "budget" in e["message"] for e in events)
     assert events[-1]["type"] == "done"
@@ -736,7 +737,7 @@ def test_llm_error_surfaces(tmp_path) -> None:
             return {"error": "boom"}
 
     _app, client = _make_app(rec, _ErrLLM(), tmp_path)
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)
     assert any(e["type"] == "error" and "boom" in e["message"] for e in events)
     assert events[-1]["type"] == "done"
@@ -753,7 +754,7 @@ def test_chat_serves_with_no_hermes_client(tmp_path) -> None:
     task_id = _seed_card(app.state.board_store, title="local card")
     rec.calls.clear()
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)
     assert [e for e in events if e["type"] == "error"] == []
     result = next(e for e in events if e["type"] == "tool_result")
@@ -936,7 +937,7 @@ def test_kill_switch_disables_chat_before_any_llm_call(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, enabled=False)
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "go"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     assert resp.status_code == 200
     events = _sse_events(resp.text)
     err = next(e for e in events if e["type"] == "error")
@@ -959,7 +960,7 @@ def test_read_only_refuses_board_mutation_no_request_sent(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, read_only=True)
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "do"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "do"}]})
     assert resp.status_code == 200
     events = _sse_events(resp.text)
     result = next(e for e in events if e["type"] == "tool_result")
@@ -975,7 +976,7 @@ def test_read_only_still_allows_reads(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, read_only=True)
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert resp.status_code == 200
     # The read passed straight through — one store read, no refusal on it.
     assert len(rec.recorded("get_board")) == 1
@@ -992,7 +993,7 @@ def test_max_rounds_from_config_bounds_the_loop(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, max_rounds=2)
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert resp.status_code == 200
     # The loop ran exactly max_rounds times, not the stub's 10.
     assert len(stub.calls) == 2
@@ -1016,7 +1017,7 @@ def test_model_override_from_config_drives_target_slot(tmp_path) -> None:
     # Operator points the steward at the NPU chat slot.
     _set_brain_chat_config(app, model="hal0/npu")
 
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert stub.calls[0]["model"] == "hal0/npu"
 
 
@@ -1026,7 +1027,7 @@ def test_empty_model_override_keeps_default(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, model="")  # explicit empty → persona/default
 
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert stub.calls[0]["model"] == BRAIN_SLOT_MODEL == "hal0/brain"
 
 
@@ -1037,7 +1038,7 @@ def test_explicit_request_model_wins_over_config_override(tmp_path) -> None:
     _set_brain_chat_config(app, model="hal0/npu")
 
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
@@ -1070,7 +1071,7 @@ def test_plain_chat_stays_on_the_brain_model(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, read_only=False, model="hal0/brain", tool_model="hal0/agent")
 
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert stub.models == ["hal0/brain"]
 
 
@@ -1086,7 +1087,7 @@ def test_a_tool_round_routes_to_the_tool_model(tmp_path) -> None:
     app, client = _make_app(rec, stub, tmp_path)
     _set_brain_chat_config(app, read_only=False, model="hal0/brain", tool_model="hal0/agent")
 
-    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert resp.status_code == 200
     # Round 0 decides on the brain; the round that READS the tool result runs
     # on the tool model.
@@ -1102,7 +1103,7 @@ def test_explicit_request_model_wins_over_tool_model(tmp_path) -> None:
     _set_brain_chat_config(app, tool_model="hal0/agent")
 
     client.post(
-        "/api/board/chat",
+        "/api/brain/chat",
         json={"model": "hal0/utility", "messages": [{"role": "user", "content": "x"}]},
     )
     assert stub.calls[0]["model"] == "hal0/utility"
@@ -1118,5 +1119,5 @@ def test_no_tool_model_keeps_brain_model(tmp_path) -> None:
     # tests/config/test_brain_tool_model_empty.py).
     _set_brain_chat_config(app, model="hal0/brain", tool_model="off")
 
-    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "x"}]})
     assert stub.calls[0]["model"] == "hal0/brain"

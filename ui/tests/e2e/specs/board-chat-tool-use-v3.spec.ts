@@ -42,7 +42,7 @@ function sse(frames: object[]): string {
 }
 
 async function mockChat(page: any, frames: object[]) {
-  await page.route('**/api/board/chat', async (route: any) => {
+  await page.route('**/api/brain/chat', async (route: any) => {
     if (route.request().method() !== 'POST') {
       await route.fallback()
       return
@@ -201,7 +201,7 @@ test('new session clears the thread', async ({ page }) => {
 test('Stop appears while streaming and aborts the turn', async ({ page }) => {
   // Stall the response: streaming stays true while the fetch is pending,
   // which is the window the Stop button exists for.
-  await page.route('**/api/board/chat', async (route: any) => {
+  await page.route('**/api/brain/chat', async (route: any) => {
     if (route.request().method() !== 'POST') {
       await route.fallback()
       return

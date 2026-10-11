@@ -638,7 +638,7 @@ class SlotManager:
     def _resolve_alias(name: str) -> str:
         """Map a back-compat alias to its canonical slot name.
 
-        Aliases (``primary`` → ``chat``, ``agent-hermes`` → ``agent``) are
+        Aliases (``embed-rerank`` → ``rerank``) are
         accepted by every public method but never stored on disk and never
         returned by :meth:`list` or :meth:`iter_configs`.  Callers that
         want to know whether the name was remapped can compare
@@ -3777,7 +3777,7 @@ class SlotManager:
         except ImportError:  # py<3.11
             import tomli as tomllib  # type: ignore[no-redef]
 
-        # Resolve back-compat aliases (primary→chat, agent-hermes→agent) so a
+        # Resolve back-compat aliases (embed-rerank→rerank) so a
         # config read by an old slot name lands on the canonical TOML. This is
         # the single chokepoint for config reads; callers that already resolved
         # are unaffected (canonical names pass through unchanged).

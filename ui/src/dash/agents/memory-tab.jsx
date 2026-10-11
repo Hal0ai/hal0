@@ -145,9 +145,8 @@ function MemoryGraphPanel() {
   const update = useUpdate ? useUpdate() : { mutate: () => {}, isPending: false };
   const data = status.data;
   const enabled = !!(data && data.enabled);
-  // ADR-0023: prefer extraction_slot; fall back to the deprecated `route`
-  // mirror only if the new field is absent.
-  const extractionSlot = (data && (data.extraction_slot || data.route)) || "utility";
+  // ADR-0023: extraction_slot is the local llm slot used for graph extraction.
+  const extractionSlot = (data && data.extraction_slot) || "utility";
   const slotResolves = !!(data && data.slot_resolves);
   const availableSlots = (data && data.available_slots) || [];
 

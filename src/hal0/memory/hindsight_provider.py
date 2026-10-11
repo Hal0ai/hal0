@@ -2204,7 +2204,6 @@ class HindsightProvider(MemoryProvider):
         return {
             "enabled": self._graph_enabled,
             "extraction_slot": self._extraction_slot,
-            "route": self._extraction_slot,  # deprecated mirror (ADR-0023)
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,

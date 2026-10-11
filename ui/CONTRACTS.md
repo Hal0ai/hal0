@@ -247,7 +247,6 @@ Move a task = `PATCH /api/board/tasks/{id} {status}`. `done` completes; `blocked
 | `/config` | GET | — (read-only knobs: tick-interval/failure-limit/claim-TTL/max-in-flight) |
 | `/orchestration` | GET / PUT | — / board.orchestration.update (4 knobs: orchestrator_profile, default_assignee, auto_decompose, auto_promote_children) |
 | `/events` | WS ?since=&board= | — |
-| `/chat` | POST(SSE) | board.chat.turn per board mutation · platform.chat.turn per slot mutation (reads unaudited) |
 
 `/profiles/{name}` (PATCH) and `/diagnostics` (GET) are live routes with no
 `endpoints.ts` constant yet — genuinely unconsumed backend surface (route
@@ -272,7 +271,7 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 - Orchestration popover: only the 4 PUT knobs are editable (no auto/manual "mode" — the
   server has no such field). tick-interval / failure-limit / claim-TTL / max-in-flight are
   read from `/config` and rendered **read-only with a note**.
-- The `/chat` agent is the hal0-brain PLATFORM steward (profile `hal0-brain`, default
+- The `POST /api/brain/chat` agent (board chat moved off `/api/board/chat`) is the hal0-brain PLATFORM steward (profile `hal0-brain`, default
   model `hal0/brain` → falls back to the `agent` slot via the resolver chain): board
   tools (reads + audited mutations, incl. get/update_orchestration) plus hal0-api
   self-HTTP tools (slots list/get/load/unload/restart, models, hardware stats,

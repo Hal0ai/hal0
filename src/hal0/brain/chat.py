@@ -15,8 +15,7 @@ OpenAI tool-calling loop whose LLM is the hal0 ``brain`` slot, falling back to
 ``agent`` via the resolver chain (reached via hal0-api's own
 ``/v1/chat/completions`` surface, mirroring :class:`hal0.omni_router.OmniRouter`).
 
-``/api/brain/chat`` is the PRIMARY route; ``/api/board/chat`` is a thin
-back-compat alias (see :mod:`hal0.api.routes.board_chat`). Three tool families:
+``/api/brain/chat`` is the chat route. Three tool families:
 
 * **Board reads** (unaudited, against the hal0-owned ``BoardStore`` — the
   SAME store ``/api/board/*`` answers from, resolved through
@@ -2288,8 +2287,8 @@ async def run_brain_chat(request: Request) -> StreamingResponse:
     return StreamingResponse(_chat_stream(request, payload), media_type="text/event-stream")
 
 
-#: Back-compat alias for the historical ``/api/board/chat`` entry-point name.
-#: ``hal0.api.routes.board.board_chat`` and older imports still call this.
+#: Alias for the historical ``board_chat`` entry-point name; the
+#: ``hal0.api.routes.board_chat`` import shim and its tests still use it.
 run_board_chat = run_brain_chat
 
 

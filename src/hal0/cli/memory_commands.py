@@ -221,7 +221,7 @@ def graph_status_cmd(
         help="Emit raw JSON instead of the human-readable panel.",
     ),
 ) -> None:
-    """Show the live graph-extraction status (enabled / route / counters)."""
+    """Show the live graph-extraction status (enabled / extraction slot / counters)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -239,7 +239,7 @@ def graph_status_cmd(
 
     enabled = bool(s.get("enabled"))
     state = "[bold green]ON[/bold green]" if enabled else "[bold]OFF[/bold]"
-    slot = s.get("extraction_slot", s.get("route", "—"))
+    slot = s.get("extraction_slot", "—")
     resolves = s.get("slot_resolves")
     if resolves is True:
         slot_line = f"[bold]{slot}[/bold] [green](resolves)[/green]"

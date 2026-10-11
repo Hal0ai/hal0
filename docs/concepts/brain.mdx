@@ -10,8 +10,7 @@ import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components'
 **hal0-brain** is hal0's own resident operator — a small, always-on model whose
 job is chatting with you and driving hal0's own admin tool catalog: slots,
 models, hardware, the Operator Board, orchestration settings. It is mounted at
-`POST /api/brain/chat` (`POST /api/board/chat` is a thin back-compat alias for
-the same route) and is a first-class module in its own right: it carries
+`POST /api/brain/chat` and is a first-class module in its own right: it carries
 **no import dependency on Hermes** at all, and works whether or not a
 bundled agent is installed.
 
