@@ -164,8 +164,11 @@ versioned, signed repository. The new recipe pins the exact NEVR
    **Answered 2026-10-11 (ADR-0027 decision 6):** the agent slot moves to
    Qwen3.8-27B on `upstream`. It still ships behind the gate's
    tool-calling probe, as decision 6 above says.
-2. Default context for `qwen3.8-27b`: 64K (safe with the brain + voice
-   slots resident) or 128K (fit-tested)?
+2. ~~Default context for `qwen3.8-27b`: 64K (safe with the brain + voice
+   slots resident) or 128K (fit-tested)?~~
+   **Answered 2026-10-11:** 96K (98,304 tokens). The PR #14 hardware gate
+   measured resident memory with MTP at about 25 GiB for 64K and about
+   29 GiB for 128K on both lanes; 96K sits between the two.
 
 ## References
 
