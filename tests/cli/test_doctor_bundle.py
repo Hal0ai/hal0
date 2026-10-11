@@ -387,7 +387,8 @@ def test_bundle_returns_nonzero_failed_count_when_probes_missing(
 
 
 def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypatch) -> None:
-    """A log deleted between glob() and stat() is skipped, not fatal."""
+    """A log deleted between glob() and lstat() is skipped, not fatal."""
+    import os
     from pathlib import Path
 
     import hal0.cli.doctor_bundle as db
@@ -396,14 +397,21 @@ def test_latest_match_skips_a_file_that_vanishes_before_stat(tmp_path, monkeypat
     gone = tmp_path / "hal0-install-b.log"
     keep.write_text("x")
     gone.write_text("y")
-    real_stat = Path.stat
+    # The vanishing file is the newer one, so selecting it is a visible bug
+    # rather than an mtime tie that glob order happens to break.
+    os.utime(keep, (1_000_000_000, 1_000_000_000))
+    os.utime(gone, (2_000_000_000, 2_000_000_000))
+    real_lstat = Path.lstat
 
-    def flaky_stat(self, *a, **k):
+    # Patch lstat, the call _latest_candidate makes. Patching Path.stat only
+    # worked up to Python 3.13, where Path.lstat delegates to self.stat();
+    # from 3.14 it calls os.lstat directly and bypassed the patch.
+    def flaky_lstat(self):
         if self == gone:
             raise FileNotFoundError(self)
-        return real_stat(self, *a, **k)
+        return real_lstat(self)
 
-    monkeypatch.setattr(Path, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "lstat", flaky_lstat)
     assert db._latest_match(((str(tmp_path), "hal0-install-*.log"),)) == keep
 
 
