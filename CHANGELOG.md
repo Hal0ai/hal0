@@ -118,8 +118,9 @@ applying. Add those subsections to a version's section to surface them; see
 - `manifest.json` replaces `toolbox_images` and `_legacy_toolboxes` with the
   `runners` pin table (`_schema` `hal0.manifest.v2`).
 - The default curated chat model is `qwen3.8-27b` (Qwen3.8 27B, UD-Q4_K_XL
-  with vision, 96K default context), and the install-time agent offer is that
-  model.
+  with vision, 96K default context). A fresh install seeds it as the primary
+  chat model on a box with a 32 GB or larger memory pool (smaller boxes keep
+  `qwen3.5-9b` / `qwen3-4b`), and the install-time agent offer is that model.
 
 ### Migrations
 
@@ -141,6 +142,10 @@ applying. Add those subsections to a version's section to surface them; see
   box as it was and `hal0 update` reports it. Preview it with
   `hal0 migrate runners`, run it with `--apply`, and undo it with
   `hal0 migrate runners --restore <backup>`.
+- Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
+  from `/usr/share/hal0/skills` by `install.sh` and unlinked from
+  `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list
+  are touched; your own skills are not.
 - The runner-image catalogue table is recreated (database migration 011) and
   refilled by the next sync. Images already pulled into podman are not
   touched; old packages stay in podman's store until you remove them.
