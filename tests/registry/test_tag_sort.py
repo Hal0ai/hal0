@@ -72,3 +72,26 @@ def test_cosign_regex_requires_full_64_hex_digest() -> None:
 def test_ci_commit_regex_rejects_uppercase_and_short_runs() -> None:
     assert is_noise_tag("sha-ABC1234") is False
     assert is_noise_tag("sha-abc12") is False
+
+
+def test_runner_release_tags_sort_newest_first() -> None:
+    from hal0.registry.runner_image_sync import runner_release_key, sort_tags_newest_first
+
+    tags = [
+        "latest",
+        "b11541-r1111111",
+        "b11600-r2222222",
+        "0.9.44-re14329d",
+        "0.9.45-r6996d85",
+        "server-cuda-b11541",
+        "server-cuda-b11600",
+    ]
+    out = sort_tags_newest_first(tags)
+    assert out[-1] == "latest"
+    assert out.index("b11600-r2222222") < out.index("b11541-r1111111")
+    assert out.index("0.9.45-r6996d85") < out.index("0.9.44-re14329d")
+    assert out.index("server-cuda-b11600") < out.index("server-cuda-b11541")
+    assert runner_release_key("b11552-re14329d") == (11552,)
+    assert runner_release_key("0.28.0-r6996d85") == (0, 28, 0)
+    assert runner_release_key("20251121-re14329d") == (20251121,)
+    assert runner_release_key("server-cuda") is None

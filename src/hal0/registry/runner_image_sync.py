@@ -20,6 +20,7 @@ demand (``POST /api/runner-images/sync``, ``hal0 runner-images sync``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -41,6 +42,13 @@ _EXPECTED_SCHEMA = "hal0.runner-images.v2"
 #: picker; the cap keeps a large upstream repo (ggml-org/llama.cpp carries
 #: thousands of tags) to a bounded number of registry calls.
 _MAX_EXTRA_TAGS = 10
+#: At most this many GHCR requests in flight per runner (extra-tag probes),
+#: and at most this many runners probed at once.
+_PROBE_CONCURRENCY = 4
+#: The whole GHCR probe phase of one sync gets this long. A runner still
+#: being probed then keeps its last good registry facts, so a slow registry
+#: cannot hold `hal0 update`'s component convergence for many minutes.
+SYNC_PROBE_DEADLINE_S = 120.0
 
 _GHCR_TOKEN_URL = "https://ghcr.io/token"
 _OCI_MANIFEST_ACCEPT = (
@@ -70,8 +78,8 @@ class SyncResult:
     probe_errors: dict[str, str] = field(default_factory=dict)
     #: Catalogue entries ignored: ``id`` -> reason (unknown runner, bad shape).
     skipped: dict[str, str] = field(default_factory=dict)
-    #: True when the prune of absent rows was skipped (empty catalogue, or
-    #: an entry was skipped), so a partial answer never deletes a row.
+    #: True when the prune of absent rows was skipped (empty catalogue, or an
+    #: entry could not be read), so a partial answer never deletes a row.
     prune_skipped: bool = False
 
 
@@ -95,6 +103,26 @@ def _strip_registry_host(image_ref: str) -> str:
 
 #: ``v?1.2.3``-shaped tags — the "semver" bucket of :func:`sort_tags_newest_first`.
 _SEMVER_TAG_RE = re.compile(r"^v?\d+(\.\d+)+$")
+
+#: Runner release tags (ADR-0028): an upstream release (``b11552``,
+#: ``0.9.44``, ``20251121``) plus the runner-images build suffix
+#: ``-r<recipe revision>``, and ggml-org's ``server-cuda-b<N>``.
+_RUNNER_RELEASE_TAG_RE = re.compile(
+    r"^(?:b(?P<build>\d+)|v?(?P<version>\d+(?:\.\d+)*))-r[0-9a-f]{7,40}$"
+    r"|^server-cuda-b(?P<cuda>\d+)$"
+)
+
+
+def runner_release_key(tag: str) -> tuple[int, ...] | None:
+    """The sort key of a runner release tag, or ``None`` for any other tag."""
+    match = _RUNNER_RELEASE_TAG_RE.match(tag)
+    if match is None:
+        return None
+    number = match.group("build") or match.group("cuda")
+    if number is not None:
+        return (int(number),)
+    return tuple(int(p) for p in match.group("version").split("."))
+
 
 #: Cosign signature/attestation objects — ``cosign sign``/``cosign attest``
 #: pushes these into the SAME GHCR repo as the image itself, as an ordinary
@@ -126,8 +154,11 @@ def is_noise_tag(tag: str) -> bool:
 def sort_tags_newest_first(tags: list[str]) -> list[str]:
     """Order GHCR ``tags/list`` output newest-first (catalogue-v2 contract).
 
-    Three buckets, concatenated in this order:
+    Four buckets, concatenated in this order:
 
+    0. runner release tags (``b11552-re14329d``, ``0.9.44-re14329d``,
+       ``server-cuda-b11541``; see :func:`runner_release_key`) — release
+       descending, builds of one release in registry order;
     1. all-digit tags (the CI date/short-SHA-free shape, e.g. ``0824``) —
        numeric descending, so the freshest date-tag leads;
     2. semver-shaped tags (``v1.10.0`` / ``1.2.3``) — version-tuple
@@ -138,19 +169,24 @@ def sort_tags_newest_first(tags: list[str]) -> list[str]:
     Pure and exported: the sync path uses it for ``available_tags`` and the
     unpinned headline tag, and tests/UI helpers can call it directly.
     """
+    runner: list[str] = []
     numeric: list[str] = []
     semver: list[str] = []
     rest: list[str] = []
     for tag in tags:
-        if tag.isdigit():
+        if runner_release_key(tag) is not None:
+            runner.append(tag)
+        elif tag.isdigit():
             numeric.append(tag)
         elif _SEMVER_TAG_RE.match(tag):
             semver.append(tag)
         else:
             rest.append(tag)
+    # Stable: two builds of the same release keep the registry's order.
+    runner.sort(key=lambda t: runner_release_key(t) or (), reverse=True)
     numeric.sort(key=int, reverse=True)
     semver.sort(key=lambda t: tuple(int(p) for p in t.lstrip("v").split(".")), reverse=True)
-    return numeric + semver + rest
+    return runner + numeric + semver + rest
 
 
 async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, Any]], str | None]:
@@ -467,20 +503,24 @@ async def probe_ghcr_package(row: RunnerImage, *, client: httpx.AsyncClient) -> 
             provenance=await _ghcr_tag_provenance(repo, config_digest, token=token, client=client),
         )
     ]
-    for t in [t for t in available if t != row.tag][:_MAX_EXTRA_TAGS]:
-        try:
-            t_digest, t_size, t_config = await _ghcr_manifest_info(
-                repo, t, token=token, client=client
-            )
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-            log.warning("runner_images.tag_probe_failed repo=%s tag=%s error=%s", repo, t, exc)
-            t_digest, t_size, t_config = None, None, None
-        t_prov = await _ghcr_tag_provenance(repo, t_config, token=token, client=client)
-        tag_rows.append(
-            RunnerImageTag(
-                tag=t, digest=t_digest, size_bytes=t_size, last_seen=now, provenance=t_prov
-            )
+    limit = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def _probe_tag(t: str) -> RunnerImageTag:
+        async with limit:
+            try:
+                t_digest, t_size, t_config = await _ghcr_manifest_info(
+                    repo, t, token=token, client=client
+                )
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                log.warning("runner_images.tag_probe_failed repo=%s tag=%s error=%s", repo, t, exc)
+                t_digest, t_size, t_config = None, None, None
+            t_prov = await _ghcr_tag_provenance(repo, t_config, token=token, client=client)
+        return RunnerImageTag(
+            tag=t, digest=t_digest, size_bytes=t_size, last_seen=now, provenance=t_prov
         )
+
+    extra = [t for t in available if t != row.tag][:_MAX_EXTRA_TAGS]
+    tag_rows.extend(await asyncio.gather(*(_probe_tag(t) for t in extra)))
     return row.model_copy(
         update={
             "digest": row.digest or digest,
@@ -499,8 +539,10 @@ async def sync_runner_images(
     A failed ``images.json`` fetch changes nothing. A successful one writes a
     row per valid entry (GHCR-enriched when the probe answers) and prunes
     every row the catalogue no longer lists, downloaded or not, unless the
-    catalogue came back empty or with an entry it skipped (then nothing is
-    pruned and :attr:`SyncResult.prune_skipped` is set).
+    catalogue came back empty or with an entry it could not read (then nothing
+    is pruned and :attr:`SyncResult.prune_skipped` is set). GHCR probes run a
+    few at a time under :data:`SYNC_PROBE_DEADLINE_S`; a runner the deadline
+    cuts off keeps its last good registry facts.
     """
     owns_client = client is None
     client = client or httpx.AsyncClient(follow_redirects=True)
@@ -513,19 +555,31 @@ async def sync_runner_images(
             log.warning("runner_images.catalogue_fetch_failed error=%s", err)
             return result
 
+        from hal0.runners import RUNNER_IMAGES
+
         rows: dict[str, RunnerImage] = {}
+        malformed = 0
         for entry in entries:
             row, reason = catalogue_row(entry)
             if row is None:
-                result.skipped[str(entry.get("id") or "?")] = reason or "invalid"
+                entry_id = entry.get("id")
+                result.skipped[str(entry_id or "?")] = reason or "invalid"
+                # A runner a newer catalogue lists and this hal0 does not ship
+                # is expected; only an entry this code cannot read makes the
+                # answer partial.
+                if not (isinstance(entry_id, str) and entry_id.strip()) or (
+                    entry_id.strip() in RUNNER_IMAGES
+                ):
+                    malformed += 1
                 continue
             rows[row.id] = row
 
+        probed = await _probe_all(rows, client=client)
         for key, row in rows.items():
-            try:
-                row = await probe_ghcr_package(row, client=client)
-            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                result.probe_errors[key] = str(exc)
+            outcome = probed.get(key)
+            if not isinstance(outcome, RunnerImage):
+                exc = outcome if outcome is not None else TimeoutError("probe deadline")
+                result.probe_errors[key] = str(exc) or type(exc).__name__
                 log.warning(
                     "runner_images.probe_failed id=%s repo=%s error=%s", key, row.image, exc
                 )
@@ -541,6 +595,7 @@ async def sync_runner_images(
                     )
                 result.images.append(store.upsert(row))
                 continue
+            row = outcome
             # Persist the fresh tags first, then stamp them onto the row this
             # call reports (upsert's read-back would carry the previous sync's
             # tags otherwise).
@@ -550,8 +605,9 @@ async def sync_runner_images(
 
         # Prune only on a complete answer: an empty catalogue or one with an
         # entry this code could not read (a newer schema field, a typo
-        # upstream) must not delete rows, downloaded ones included.
-        if rows and not result.skipped:
+        # upstream) must not delete rows, downloaded ones included. An unknown
+        # runner id from a newer catalogue does not block it.
+        if rows and not malformed:
             pruned = store.prune_absent(set(rows))
             if pruned:
                 log.info("runner_images.pruned_rows count=%d", pruned)
@@ -564,6 +620,41 @@ async def sync_runner_images(
         if owns_client:
             await client.aclose()
     return result
+
+
+async def _probe_all(
+    rows: dict[str, RunnerImage], *, client: httpx.AsyncClient
+) -> dict[str, RunnerImage | BaseException | None]:
+    """Probe every row, a few at a time, under :data:`SYNC_PROBE_DEADLINE_S`.
+
+    Returns ``key -> enriched row``, ``key -> the exception``, or
+    ``key -> None`` when the deadline cut the probe off.
+    """
+    limit = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def _one(row: RunnerImage) -> RunnerImage:
+        async with limit:
+            return await probe_ghcr_package(row, client=client)
+
+    tasks = {key: asyncio.ensure_future(_one(row)) for key, row in rows.items()}
+    if not tasks:
+        return {}
+    _done, pending = await asyncio.wait(tasks.values(), timeout=SYNC_PROBE_DEADLINE_S)
+    for task in pending:
+        task.cancel()
+    out: dict[str, RunnerImage | BaseException | None] = {}
+    for key, task in tasks.items():
+        if task in pending:
+            out[key] = None
+            continue
+        exc = task.exception()
+        if exc is not None and not isinstance(exc, (httpx.HTTPError, RuntimeError, ValueError)):
+            raise exc
+        out[key] = exc if exc is not None else task.result()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        log.warning("runner_images.probe_deadline runners=%d", len(pending))
+    return out
 
 
 def sync_catalogue_blocking(store: RunnerImageStore | None = None) -> SyncResult:

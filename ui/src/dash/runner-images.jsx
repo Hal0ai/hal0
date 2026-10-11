@@ -137,9 +137,14 @@ export function newestComparableTag(image) {
   return tags.find(t => !isMutablePointerTag(t, image.tag));
 }
 
-// Release-shaped tag names (bare or `v`-prefixed dotted version numbers,
-// e.g. "0824", "v1.2.3") — the "releases" lane in tagLanes() below.
-const RELEASE_TAG_RE = /^(v?\d+(\.\d+)*)$/;
+// Release-shaped tag names — the "releases" lane in tagLanes() below:
+// bare or `v`-prefixed dotted version numbers ("0824", "v1.2.3"), the runner
+// release tags (ADR-0028: an upstream release plus the runner-images build
+// suffix, "b11552-re14329d", "0.9.44-re14329d", "20251121-re14329d"), and
+// ggml-org's "server-cuda-b11541". Mirrors runner_release_key() in
+// hal0/registry/runner_image_sync.py, which sorts them newest-first.
+export const RELEASE_TAG_RE =
+  /^(?:(?:v?\d+(?:\.\d+)*|b\d+)(?:-r[0-9a-f]{7,40})?|server-cuda-b\d+)$/;
 
 // Lane buckets over the v3 per-tag payload (Task 5: `image.tags[].{tag,
 // digest,downloaded}` + `image.badges`) for the card's three-lane tag

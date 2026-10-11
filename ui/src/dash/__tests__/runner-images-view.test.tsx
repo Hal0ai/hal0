@@ -154,6 +154,7 @@ const {
   newerTagCandidate,
   newestComparableTag,
   tagLanes,
+  RELEASE_TAG_RE,
   MUTABLE_TAGS,
   RunnerImagesView,
   provenanceRepoName,
@@ -521,6 +522,53 @@ describe('tagLanes', () => {
   it('collapses digest aliases', () => {
     const lanes = tagLanes(V3_IMG) as any
     expect(lanes.other.find((t: any) => t.tag === 'latest')?.aliasOf).toBe('0826')
+  })
+})
+
+describe('runner release tags (ADR-0028)', () => {
+  const RUNNER_IMG = {
+    id: 'standard',
+    image: 'ghcr.io/hal0ai/hal0-runner-standard',
+    tag: 'b11552-re14329d',
+    tags: [
+      { tag: 'b11600-r1234abc', digest: 'sha256:n', downloaded: false },
+      { tag: 'b11552-re14329d', digest: 'sha256:h', downloaded: true },
+      { tag: 'latest', digest: 'sha256:n', downloaded: false },
+    ],
+  }
+
+  it.each([
+    'b11552-re14329d',
+    '0.9.44-re14329d',
+    '20251121-re14329d',
+    '0.28.0-r6996d85',
+    'server-cuda-b11541',
+    '0826',
+    'v1.2.3',
+  ])('%s is a release tag', (tag) => {
+    expect(RELEASE_TAG_RE.test(tag)).toBe(true)
+  })
+
+  it.each(['latest', 'main', 'server-cuda', 'b11552-rnothex', 'sha-1234567'])(
+    '%s is not a release tag',
+    (tag) => {
+      expect(RELEASE_TAG_RE.test(tag)).toBe(false)
+    },
+  )
+
+  it('buckets runner tags as releases and finds the newer build', () => {
+    const lanes = tagLanes(RUNNER_IMG)
+    expect(lanes.releases.map((t: { tag: string }) => t.tag)).toEqual([
+      'b11600-r1234abc',
+      'b11552-re14329d',
+    ])
+    expect(newerTagCandidate(RUNNER_IMG)).toBe('b11600-r1234abc')
+    expect(newerTagAvailable(RUNNER_IMG)).toBe(true)
+  })
+
+  it('has no newer candidate when the headline is the newest build', () => {
+    const current = { ...RUNNER_IMG, tags: RUNNER_IMG.tags.slice(1) }
+    expect(newerTagCandidate(current)).toBeUndefined()
   })
 })
 

@@ -674,6 +674,51 @@ async def test_a_skipped_entry_stops_the_prune(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unknown_runner_from_a_newer_catalogue_does_not_block_the_prune(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.upsert(RunnerImage(id="rocmfpx", image="ghcr.io/hal0ai/hal0-rocmfpx", tag="c077206"))
+    images_json = {
+        "schema": "hal0.runner-images.v2",
+        "images": [_CPU_ENTRY, {**_CPU_ENTRY, "id": "npu2", "image": "ghcr.io/hal0ai/x"}],
+    }
+    result = await _sync(store, _route_handler(images_json=images_json))
+
+    assert "npu2" in result.skipped
+    assert result.prune_skipped is False
+    assert store.get("rocmfpx") is None
+
+
+@pytest.mark.asyncio
+async def test_the_probe_deadline_keeps_the_last_good_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry that hangs cannot hold the sync past its deadline: the slow
+    runner keeps what the last good probe recorded and is reported."""
+    import asyncio
+
+    import hal0.registry.runner_image_sync as sync_mod
+
+    store = _store(tmp_path)
+    store.upsert(_cpu_row(size_bytes=1234, available_tags=["b11552-r1"]))
+
+    async def _slow(row: RunnerImage, *, client: Any) -> RunnerImage:
+        if row.id == "cpu":
+            await asyncio.sleep(30)
+        return row
+
+    monkeypatch.setattr(sync_mod, "probe_ghcr_package", _slow)
+    monkeypatch.setattr(sync_mod, "SYNC_PROBE_DEADLINE_S", 0.2)
+    result = await _sync(store, _route_handler(images_json=_IMAGES_JSON))
+
+    assert "cpu" in result.probe_errors
+    assert "flm" not in result.probe_errors
+    cpu = store.get("cpu")
+    assert cpu is not None and cpu.size_bytes == 1234
+
+
+@pytest.mark.asyncio
 async def test_an_empty_catalogue_prunes_nothing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.upsert(_cpu_row())
