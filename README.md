@@ -661,7 +661,6 @@ Those follow-ups, and what each one is for:
 | `hal0 doctor models` | Registry paths vs disk, store/roots agreement, unregistered files in the store, FLM store ownership. | `--fix` (needs root), `--force`/`-f` |
 | `hal0 doctor ports` | Which port each slot bound, collisions, corrupt netavark DNAT rules. | `--fix` prunes stale DNAT rules |
 | `hal0 doctor profiles` | Dangling slot→profile references and un-pulled runner images. | — (read-only, `--json`) |
-| `hal0 doctor migrations` | A pending model-layout migration. | — (read-only, `--json`) |
 | `hal0 doctor toolbox-pull` | Every image pinned in `manifest.json` is anonymously pullable from ghcr.io. | — (`--json`, `--manifest PATH`) |
 | `hal0 doctor logs` | `hal0-api`'s own journal. | `--unit`, `--follow`/`-f`, `--lines`/`-n`, `--level`, `--since` |
 | `hal0 doctor bundle` | Writes a redacted support bundle (system / config / diagnostics / logs). | `--out DIR`, `--no-rocm-smi`, `--include-logs auto\|yes\|no` |

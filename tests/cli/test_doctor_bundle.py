@@ -144,7 +144,7 @@ def test_bundle_diagnostics_section_writes_expected_files(
     out = tmp_path / "bundle"
     build_bundle(out, include_rocm_smi=False)
     diag_dir = out / "diagnostics"
-    for name in ("perms.json", "migrations.json", "profiles.json", "verify.json", "models.json"):
+    for name in ("perms.json", "profiles.json", "verify.json", "models.json"):
         assert (diag_dir / name).is_file(), name
     perms = jsonlib.loads((diag_dir / "perms.json").read_text())
     assert isinstance(perms, list) and perms  # never empty — HAL0-DOCTOR-OK at minimum

@@ -47,9 +47,10 @@ Design notes:
   - SYMLINKS ARE NEVER FOLLOWED, AND NEVER WRITTEN TO (#1739). ``os.chown`` /
     ``os.chmod`` dereference by default, so a symlink matched by a row would
     have rewritten its TARGET's owner+mode — a file that by definition lives
-    OUTSIDE hal0's declared tree. ``hal0 migrate model-layout`` plants exactly
+    OUTSIDE hal0's declared tree. The old model-layout migration planted exactly
     such links (``/var/lib/hal0/models/... -> /mnt/ai-models/...``) under the
-    recursive ``models/`` row, so every install/upgrade re-chowned the
+    recursive ``models/`` row, and operators add their own (a ``models/comfyui``
+    link, for one). Every install/upgrade used to re-chown the
     operator's real model store. A link target's ownership is not hal0's
     concern; symlinks are therefore dropped during glob expansion, never
     counted as drift, and hard-refused in :func:`_apply_one`.
@@ -999,7 +1000,7 @@ def _is_or_is_under_symlink(child: Path, base: Path) -> bool:
     tree" (#1739): the link itself dereferences on ``chown``/``chmod``, and a
     path found by walking THROUGH a symlinked directory is a real file in
     someone else's tree (e.g. ``/mnt/ai-models/...`` reached via the
-    ``models/`` links planted by ``hal0 migrate model-layout``). Checked
+    a symlink under ``models/``). Checked
     explicitly rather than relying on ``Path.rglob``'s no-follow behaviour, so
     the guarantee does not depend on the pathlib version.
     """

@@ -25,8 +25,7 @@ backend (or vice-versa) became illegal. The runtime orchestrator now
 rejects such writes, but already-on-disk selections survive until a
 write touches them. ``migrate`` walks the file, snaps illegal pairs to a
 legal one (or clears the selection when the model is gone entirely), and
-writes back atomically. Default is dry-run (matching
-``hal0 migrate model-layout``'s contract) — pass ``--apply`` to write.
+writes back atomically. Default is dry-run — pass ``--apply`` to write.
 """
 
 from __future__ import annotations
@@ -246,7 +245,7 @@ def migrate(
     intact so the dashboard can still show what was previously chosen).
 
     Default is dry-run (no flags = safe preview); pass ``--apply`` to
-    write, matching ``hal0 migrate model-layout --apply``'s contract.
+    write.
     Idempotent — running ``--apply`` twice is a no-op once everything is
     legal.
 

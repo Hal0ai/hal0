@@ -125,8 +125,6 @@ DIAGNOSIS_IDS: frozenset[str] = frozenset(
         "HAL0-MODEL-FLM-STORE-DIVERGED",
         "HAL0-MODEL-FLM-STORE-UNMOUNTED",
         "HAL0-MODEL-FLM-STORE-NOT-WRITABLE",
-        # doctor migrations
-        "HAL0-MIGRATION-PENDING",
         # doctor profiles
         "HAL0-PROFILE-REF-DANGLES",
         "HAL0-PROFILE-IMAGE-MISSING",

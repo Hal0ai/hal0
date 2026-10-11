@@ -14,7 +14,7 @@ Layout (see the module's :func:`build_bundle` docstring + spec-21-4-doctor.md
     ├── system/            # uname, os-release, cmdline, rocminfo, rocm-smi, ...
     ├── config/            # hal0.toml / api.env / slots/*.toml / profiles.toml
     │                      # / capabilities.toml — every dump REDACTED
-    ├── diagnostics/       # doctor {perms,migrations,profiles,verify}.json +
+    ├── diagnostics/       # doctor {perms,profiles,verify}.json +
     │                      # best-effort GET /api/{models,slots,hardware,
     │                      # system-info,stats}
     ├── logs/              # journalctl captures (best-effort; absent on a
@@ -389,7 +389,6 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
     from hal0.cli.doctor_commands import (
         _dangling_registry_entries,
         _diagnose_audit_rows,
-        _diagnose_migration,
         _diagnose_models,
         _diagnose_profiles,
         _local_image_repos,
@@ -398,7 +397,6 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
         check_slot_profile_refs,
         check_tree_group_share,
         detect_editable_root,
-        pending_layout_migration,
     )
     from hal0.cli.doctor_diagnosis import render_json, to_diagnosis
     from hal0.cli.doctor_verify import build_checks, gather_payloads
@@ -456,12 +454,6 @@ def _write_diagnostics_section(out: Path, *, base: str | None = None) -> None:
         ok_summary="editable checkout group-share clean",
     )
     _write_json(out / "diagnostics" / "perms.json", jsonlib.loads(render_json(perms_diagnoses)))
-
-    # migrations — local planner, no API.
-    migration_diagnoses = _diagnose_migration(pending_layout_migration())
-    _write_json(
-        out / "diagnostics" / "migrations.json", jsonlib.loads(render_json(migration_diagnoses))
-    )
 
     # profiles — local catalog + slot TOMLs, no API.
     try:

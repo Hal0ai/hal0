@@ -40,7 +40,6 @@ from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
 from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
-from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.oauth_commands import app as oauth_app
 from hal0.cli.ports_command import ports_cmd
@@ -84,7 +83,6 @@ app.add_typer(agent_app, name="agent")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps
 # skipped via HAL0_SKIP_OPENWEBUI=1 at install time; Q9 skip/defer parity).
 app.add_typer(app_ext_app, name="app")
-app.add_typer(migrate_app, name="migrate")
 # Issue #2106 — ``hal0 runner-images {ls,sync,pull}``: the CLI-absence gap
 # on the runner-image catalogue (API + dashboard existed, no CLI verb at
 # all). `rm` deliberately absent pending spec D2.

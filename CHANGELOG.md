@@ -50,6 +50,14 @@ applying. Add those subsections to a version's section to surface them; see
   steps through 1.3.0 by running its installer, or reinstalls; see
   "Upgrading from an older release" in
   `docs/guides/update-and-rollback.mdx`. The 0.9.8 upgrade guidance is gone.
+- `hal0 migrate model-layout`, `hal0 doctor migrations`, the `migrations`
+  row of `hal0 doctor all`, the `HAL0-MIGRATION-PENDING` diagnosis and the
+  bundle's `diagnostics/migrations.json` are removed. They converted a v0.1
+  `/mnt/ai-models` store into a `<recipe>/<capability>` symlink farm under
+  `/var/lib/hal0/models` that nothing reads: registered models point at
+  their real files. The installer no longer plants the farm on every
+  install. Links an earlier install planted are left in place and can be
+  deleted by hand.
 - `DELETE /api/models/{id}` now deletes the model's files by default:
   the model file, any shards, the `mmproj` sidecar, and a pulled model's
   file set. Pass `delete_files=false` to remove only the registry entry,
@@ -60,10 +68,9 @@ applying. Add those subsections to a version's section to surface them; see
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
 - The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
-  backup restore), the whole `hal0 registry` group (`registry import`,
-  `registry export`, `registry import-sqlite`) and the `--registry` flag of
-  `hal0 migrate model-layout` (which now reads the SQLite registry) are
-  removed. `hal0 model list --json` shows the catalog. To keep a copy, take
+  backup restore) and the whole `hal0 registry` group (`registry import`,
+  `registry export`, `registry import-sqlite`) are removed.
+  `hal0 model list --json` shows the catalog. To keep a copy, take
   a consistent snapshot with SQLite's online backup, not a plain copy of the
   live WAL database:
   `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the

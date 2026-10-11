@@ -10,11 +10,9 @@ from __future__ import annotations
 
 from hal0.cli.doctor_commands import (
     _diagnose_audit_rows,
-    _diagnose_migration,
     _diagnose_models,
     _diagnose_profiles,
 )
-from hal0.diagnostics import overall_verdict
 
 # ── _diagnose_audit_rows (doctor perms — Hermes / tree-share / path-ownership) ─
 
@@ -224,30 +222,6 @@ def test_diagnose_models_flm_not_writable_is_fixable() -> None:
     assert diagnoses[0].id == "HAL0-MODEL-FLM-STORE-NOT-WRITABLE"
     assert diagnoses[0].fixable is True
     assert diagnoses[0].next_steps[0].target == "hal0 doctor models --fix"
-
-
-# ── _diagnose_migration (doctor migrations) ─────────────────────────────────
-
-
-def test_diagnose_migration_none_is_skipped() -> None:
-    diagnoses = _diagnose_migration(None)
-    assert diagnoses[0].id == "HAL0-DOCTOR-SKIPPED"
-
-
-def test_diagnose_migration_nothing_pending_is_ok() -> None:
-    diagnoses = _diagnose_migration((0, 0))
-    assert diagnoses[0].id == "HAL0-DOCTOR-OK"
-
-
-def test_diagnose_migration_pending_is_warn() -> None:
-    diagnoses = _diagnose_migration((3, 1))
-    assert len(diagnoses) == 1
-    d = diagnoses[0]
-    assert d.id == "HAL0-MIGRATION-PENDING"
-    assert d.severity == "warn"
-    assert d.evidence[0].data == {"create_count": 3, "overwrite_count": 1}
-    assert d.next_steps[0].target == "hal0 migrate model-layout --apply"
-    assert overall_verdict(diagnoses) == "warn"
 
 
 # ── _diagnose_profiles (doctor profiles) ────────────────────────────────────
