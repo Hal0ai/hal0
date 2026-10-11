@@ -182,24 +182,27 @@ only through the `image_pin` escape hatch. A pin-only image, catalogued for
 discovery but not offered anywhere a slot's Runtime is picked, is retired as
 a shipping shape (ADR-0006).
 
-| Runtime (title) | Registry key | Lane(s) | Notes |
-|---|---|---|---|
-| Standard | `rocmfpx` | ROCm + Vulkan | The default. Runs every model type, including FPX quants — the only runtime allowed both lanes. |
-| PromptForge | `promptforge` | ROCm | Optional. Accelerated PromptForge model distributions. |
-| Strix | `strix` | Vulkan | Optional. `qwen4exp`-class models with MTP speculative decode; no FPX quants. |
-| CUDA | `cuda` | CUDA | NVIDIA GPUs. |
-| CPU | `cpu` | — | Runs on the host CPU, no GPU required. |
+| Runtime (title) | Registry key | Tier | Lane(s) | Notes |
+|---|---|---|---|---|
+| ROCmFPX | `rocmfpx` | default | ROCm + Vulkan | llama.cpp for AMD GPUs; the only runtime allowed both lanes and the only one that loads ROCmFPX/ROCmFP4 quants. |
+| CPU | `cpu` | default | — | llama.cpp on the processor, no GPU needed; a slow fallback. |
+| Strix Halo Vulkan | `strix` | optional | Vulkan | Loads `qwen4exp`-class models (Qwen3.8-Flash-Next) with MTP speculative decode; no FPX quants. |
+| NVIDIA CUDA | `cuda` | optional | CUDA | llama.cpp for NVIDIA GPUs. |
+| PromptForge (legacy) | `promptforge` | optional | ROCm | Build for the PromptForge Qwen3.8 quant; slated for removal. |
 
-(The non-llama-server runtimes — FastFlowLM, Kokoro, Moonshine, Qwen3-TTS,
-ComfyUI — are `RUNNER_IMAGES` entries too, but each is fixed to its own slot
-type rather than offered as a pick in the Runtime select.)
+The tier is the registry's `Runner.tier` (ADR-0026): default runtimes are
+the set every box is expected to have and are listed first; optional ones
+are opt-in. (The non-llama-server runtimes — NPU (FastFlowLM), Kokoro
+speech, Moonshine transcription and ComfyUI, all default, and the optional
+Qwen3 TTS — are `RUNNER_IMAGES` entries too, but each is fixed to its own
+slot type rather than offered as a pick in the Runtime select.)
 
 In the slot drawer's Hardware group, this registry drives one **Runtime**
 select — each option showing its title, a one-line blurb, and an
 install-state chip, filtered to what the slot's type and this host's
 hardware can actually run — plus a **Lane** pill row (Auto / ROCm / Vulkan)
 that only appears when the selected runtime supports more than one backend
-(today, only Standard). Picking a single-lane runtime derives the slot's
+(today, only ROCmFPX). Picking a single-lane runtime derives the slot's
 device directly; picking a lane on a dual-lane runtime does the same thing
 the CLI's `hal0 slot edit <name> --hardware <rocm|vulkan>` does. Either way,
 switching restarts the slot on save. An "Advanced — image & version"
@@ -227,7 +230,7 @@ runtime badge chip on its card.
 Applying a runtime-carrying profile to a slot is **profile wins**: on save,
 the slot's `binary` switches to the profile's runtime key, and — for a
 single-lane runtime — its `device` follows to the matching lane (a
-combined, multi-lane runtime like Standard only flips `binary` and leaves
+multi-lane runtime like ROCmFPX only flips `binary` and leaves
 the current lane alone). The slot drawer's Profile row previews this before
 you save. The same rule governs swapping a slot onto a different model whose
 preferred profile carries a runtime. Either path is blocked only when it's
@@ -239,7 +242,7 @@ written, rather than partially applying.
 
 hal0 detects a GGUF model's `general.architecture` at registration, and a
 runtime can denylist archs its llama.cpp build is known to reject
-(`Runner.unsupported_archs`) — today just `qwen4exp` on Standard, whose
+(`Runner.unsupported_archs`) — today just `qwen4exp` on ROCmFPX, whose
 build predates that architecture's upstream merge. Binding such a model to a
 slot (create, config change, or model swap) never blocks: it **warns**
 (`model_fit_warning` in the API response, a notice by the slot drawer's

@@ -71,7 +71,7 @@ meantime switching is a supported, one-command operation — see below.
 <Aside type="caution">
 **The Vulkan LLM lane is gated on the runner image, by design.**
 
-hal0's default LLM runtime (`rocmfpx`, titled **Standard** in the dashboard)
+hal0's default LLM runtime (`rocmfpx`, titled **ROCmFPX** in the dashboard)
 is a single HIP + Vulkan build that serves both lanes. On the `ade07ba`
 lineage that image's Vulkan backend emitted invalid tokens for every model it
 served, at full nominal speed, while HTTP 200, container health, `hal0
@@ -83,7 +83,7 @@ The image was fixed, and the lane came back with two permanent guards:
 1. A `gpu-vulkan` LLM slot may only launch from a runner image whose Vulkan
    backend has been validated. Anything else — including the old lineage — is
    refused at slot load, by name, with the ticket number. Today that
-   validated set holds the fixed Standard image and the Vulkan-only **Strix**
+   validated set holds the fixed ROCmFPX image and the Vulkan-only **Strix Halo Vulkan**
    runtime (built for `qwen4exp`-class models); a new Vulkan-capable image
    earns membership the same way, one ref at a time.
 2. Every LLM slot, on every lane, must pass an output-sanity probe before it
@@ -105,7 +105,7 @@ hal0 slot edit agent --hardware vulkan     # gpu-rocm -> gpu-vulkan
 hal0 slot edit agent --hardware rocm       # and back
 ```
 
-In the dashboard, open the slot's drawer: with the **Standard** runtime
+In the dashboard, open the slot's drawer: with the **ROCmFPX** runtime
 selected — the only one offering both lanes — a **Lane** pill row (Auto /
 ROCm / Vulkan) appears; picking a lane there does the same thing as the CLI's
 `--hardware` flag (there's no separate Device select any more — the slot's
