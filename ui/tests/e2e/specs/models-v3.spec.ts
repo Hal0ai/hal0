@@ -211,10 +211,11 @@ test.describe('Models v3 (/models)', () => {
   })
 
   test('Delete cascade reads affected_slots from DELETE response', async ({ page }) => {
-    let deleted = false
-    await page.route('**/api/models/qwen3.6-27b-mtp', async (route) => {
+    let deleteUrl = ''
+    // `*` covers the ?delete_files= query string (ADR-0026).
+    await page.route('**/api/models/qwen3.6-27b-mtp*', async (route) => {
       if (route.request().method() === 'DELETE') {
-        deleted = true
+        deleteUrl = route.request().url()
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -222,6 +223,11 @@ test.describe('Models v3 (/models)', () => {
             id: 'qwen3.6-27b-mtp',
             deleted: true,
             affected_slots: ['primary'],
+            files_removed: [{ path: '/mnt/ai-models/q.gguf', size_bytes: 1024 }],
+            files_kept: [],
+            bytes_freed: 1024,
+            tombstoned: [],
+            warnings: [],
           }),
         })
       }
@@ -230,10 +236,45 @@ test.describe('Models v3 (/models)', () => {
 
     await page.goto('/#models')
     await page.locator('button.danger:has-text("Delete")').click()
+    // Files are deleted by default.
+    await expect(page.getByTestId('model-delete-files')).toBeChecked()
     const confirmInput = page.locator('input.input.mono').last()
     await confirmInput.fill('qwen3.6-27b-mtp')
     await page.locator('button:has-text("Delete model")').click()
-    await expect.poll(() => deleted).toBe(true)
+    await expect.poll(() => deleteUrl).toContain('delete_files=true')
+  })
+
+  test('Unticking "Also delete files" sends delete_files=false', async ({ page }) => {
+    let deleteUrl = ''
+    await page.route('**/api/models/qwen3.6-27b-mtp*', async (route) => {
+      if (route.request().method() === 'DELETE') {
+        deleteUrl = route.request().url()
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            id: 'qwen3.6-27b-mtp',
+            deleted: true,
+            affected_slots: [],
+            files_removed: [],
+            files_kept: [{ path: '/mnt/ai-models/q.gguf', reason: 'kept_by_request' }],
+            bytes_freed: 0,
+            tombstoned: ['/mnt/ai-models/q.gguf'],
+            warnings: [],
+          }),
+        })
+      }
+      return route.fallback()
+    })
+
+    await page.goto('/#models')
+    await page.locator('button.danger:has-text("Delete")').click()
+    await page.getByTestId('model-delete-files').uncheck()
+    await expect(page.getByText('hides them from future scans')).toBeVisible()
+    const confirmInput = page.locator('input.input.mono').last()
+    if (await confirmInput.isVisible()) await confirmInput.fill('qwen3.6-27b-mtp')
+    await page.locator('button:has-text("Delete model")').click()
+    await expect.poll(() => deleteUrl).toContain('delete_files=false')
   })
 
   test('Check updates affordance forces a refresh when nothing is outdated', async ({ page }) => {

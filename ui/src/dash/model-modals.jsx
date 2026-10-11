@@ -282,8 +282,15 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 // HardwareRuntimesPage.jsx, ModelDefaultsPage.jsx — not in this file.
 
 // ─── Delete model confirm ───────────────────────────────────────
+// DELETE /api/models/{id}?delete_files=… (ADR-0026). Files are removed by
+// default; unticking the box removes only the registry row and the server
+// tombstones the files so the next scan doesn't re-add them. The server
+// refuses files outside the scan/store roots, files another model uses and
+// directories — those come back in `files_kept` and the toast says so.
 function DeleteModelDialog({ open, onClose, model }) {
   const del = useModelDelete();
+  const [deleteFiles, setDeleteFiles] = useStateMM(true);
+  useEffectMM(() => { if (open) setDeleteFiles(true); }, [open, model?.id]);
   // Live affected_slots — prefer the cascade response when the user
   // has already attempted a force_cascade=false dry-run (not yet
   // wired in B2); for the default flow we fall back to the live
@@ -293,17 +300,23 @@ function DeleteModelDialog({ open, onClose, model }) {
   const slots = slotsQuery.data ?? [];
   const slotsUsing = slots.filter(s => s.model_id === model.id || s.model === model.id);
   const hasUsers = slotsUsing.length > 0;
+  const label = model.longName || model.id;
+  const sizeText = model.size || fmtBytes(model.size_bytes || 0);
 
   const onConfirm = async () => {
     try {
-      const res = await del.mutateAsync(model.id);
+      const res = await del.mutateAsync({ id: model.id, deleteFiles });
       const cascaded = res?.affected_slots?.length || 0;
-      window.__hal0Toast && window.__hal0Toast(
-        cascaded
-          ? `Deleted ${model.longName || model.id} (cascaded ${cascaded} slot${cascaded > 1 ? "s" : ""})`
-          : `Deleted ${model.longName || model.id}`,
-        "ok",
-      );
+      const kept = res?.files_kept?.length || 0;
+      const parts = [];
+      if (deleteFiles) {
+        parts.push(`Deleted ${label} — freed ${fmtBytes(res?.bytes_freed || 0)}`);
+        if (kept) parts.push(`${kept} file${kept > 1 ? "s" : ""} kept on disk`);
+      } else {
+        parts.push(`Removed ${label} from the registry — files kept on disk`);
+      }
+      if (cascaded) parts.push(`cascaded ${cascaded} slot${cascaded > 1 ? "s" : ""}`);
+      window.__hal0Toast && window.__hal0Toast(parts.join(" · "), "ok");
       onClose();
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(
@@ -320,7 +333,25 @@ function DeleteModelDialog({ open, onClose, model }) {
       title={`Delete ${model.longName || model.name || model.id}?`}
       message={
         <span>
-          This removes <span className="mono" style={{color: "var(--fg)"}}>{model.size || fmtBytes(model.size_bytes || 0)}</span> from <span className="mono">/var/lib/hal0/models</span>.{" "}
+          <span style={{display: "block"}}>
+            {model.path
+              ? <>Model file <span className="mono" style={{color: "var(--fg)", wordBreak: "break-all"}} data-testid="model-delete-path">{model.path}</span> (<span className="mono" style={{color: "var(--fg)"}}>{sizeText}</span>).</>
+              : <>Model size <span className="mono" style={{color: "var(--fg)"}}>{sizeText}</span>.</>}
+          </span>
+          <label className="checkbox-row" style={{display: "flex", gap: 8, alignItems: "center", marginTop: 10}}>
+            <input
+              type="checkbox"
+              checked={deleteFiles}
+              onChange={e => setDeleteFiles(e.target.checked)}
+              data-testid="model-delete-files"
+            />
+            <span>Also delete files from disk</span>
+          </label>
+          <span style={{display: "block", marginTop: 6, fontSize: 12, color: "var(--fg-4)"}}>
+            {deleteFiles
+              ? "Removes the model file plus any shards and vision sidecar. Files outside your model folders or used by another model are left alone."
+              : "Only the registry entry is removed. The files stay on disk, and hal0 hides them from future scans so the model doesn't come back."}
+          </span>
           {hasUsers && (
             <span style={{display: "block", marginTop: 10, padding: "10px 12px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: "var(--rad-sm)", color: "var(--warn)", fontFamily: "var(--jbm)", fontSize: 12}}>
               ⚠ {slotsUsing.length} slot{slotsUsing.length > 1 ? "s" : ""} reference this model: <b>{slotsUsing.map(s => s.name).join(", ")}</b>. They'll move to <span className="mono">empty</span> state. Re-configure with a different model first if you need them live.
@@ -329,6 +360,7 @@ function DeleteModelDialog({ open, onClose, model }) {
         </span>
       }
       confirmLabel={del.isPending ? "Deleting…" : "Delete model"}
+      confirmDisabled={del.isPending}
       destructive
       typeToConfirm={hasUsers ? model.id : null}
     />
