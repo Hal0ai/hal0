@@ -47,21 +47,19 @@ applying. Add those subsections to a version's section to surface them; see
   `hal0 migrate model-layout` (which now reads the SQLite registry) are
   removed. `hal0 model list --json` shows the catalog; back up
   `/var/lib/hal0/hal0.db` to keep a copy. A `registry.toml` left over from
-  before the SQLite registry is converted once on update (see Migrations).
+  before the SQLite registry is retired on update (see Migrations).
 
 ### Migrations
 
-- **A leftover `/var/lib/hal0/registry/registry.toml` is converted once.**
-  The first update or `hal0-api` start on this release backs up the file and
-  `hal0.db` to `/var/lib/hal0/backups/registry-toml-<UTC>/`, imports the
-  file's models only if this database was never initialised from it (a
-  database that already holds models was, by the old first-boot import), and
-  renames it to `registry.toml.imported-<UTC>` (or `.retired-<UTC>` when
-  nothing was imported). A marker row in `hal0.db` makes the step one-shot.
-  Rows already in SQLite are never overwritten. If the backup, the parse or
+- **A leftover `/var/lib/hal0/registry/registry.toml` is retired, not
+  imported.** Every box at the 1.3.0 upgrade floor already runs the SQLite
+  registry and already imported that file on its first boot, so the file
+  holds nothing the database needs. The first update or `hal0-api` start on
+  this release copies it to `/var/lib/hal0/backups/registry-toml-<UTC>/`,
+  renames it to `registry.toml.retired-<UTC>` and deletes the
+  `registry.toml.lock` sidecar. `hal0.db` is not touched. If the backup or
   the rename fails, the update reports the error and the file stays in place
-  so the next start retries; entries that fail validation are skipped, named
-  in the log, and kept in both copies of the file.
+  so the next start retries.
 
 - Removed the deprecated CLI aliases and no-op flags. Use the replacement
   instead: `hal0 probe` -> `hal0 config hardware --refresh`;

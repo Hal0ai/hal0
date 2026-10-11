@@ -1908,10 +1908,10 @@ def run_post_activation_migrations(
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
-    non-zero exit). The one-shot ``registry.toml`` conversion
-    (:func:`hal0.registry.toml_conversion.convert_registry_toml`) runs
-    second and is not swallowed either: it renames a file after importing
-    it, so a half-done run must surface rather than hide. The data-cleanup
+    non-zero exit). The ``registry.toml`` retirement
+    (:func:`hal0.registry.toml_retirement.retire_registry_toml`) runs
+    second and is not swallowed either: a file it could not back up or
+    rename must surface rather than hide. The data-cleanup
     passes after it are each independently best-effort, exactly as before:
     one pass's exception is logged and never blocks the others or the
     caller's activation.
@@ -1972,13 +1972,14 @@ def run_post_activation_migrations(
     """
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
 
-    # One-shot registry.toml -> SQLite conversion. NOT swallowed, like the
-    # schema migration above: it backs up, imports at most once per database,
-    # then renames the file, and a failure must stay visible until it is
-    # fixed (the file is left in place so the next run retries).
-    from hal0.registry.toml_conversion import convert_registry_toml
+    # Retire a leftover registry.toml: back it up, rename it, never import
+    # it (every box at the 1.3.0 floor already did its first-boot import).
+    # NOT swallowed, like the schema migration above: a failure must stay
+    # visible until fixed (the file is left in place so the next run
+    # retries).
+    from hal0.registry.toml_retirement import retire_registry_toml
 
-    convert_registry_toml(job_id=job_id)
+    retire_registry_toml(job_id=job_id)
 
     try:
         ensure_seed_profiles(job_id=job_id)

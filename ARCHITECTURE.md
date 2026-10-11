@@ -773,8 +773,9 @@ requested). The set is always derived from slot enablement.
 
 The SQLite model registry (the `model` tables in `/var/lib/hal0/hal0.db`,
 `hal0.registry.sqlite_store`) is the **sole** model catalog. A TOML-era
-`registry.toml` is converted once by `hal0.registry.toml_conversion` during
-the post-activation migrations and renamed; nothing reads it afterwards.
+`registry.toml` is backed up and renamed (never imported) by
+`hal0.registry.toml_retirement` during the post-activation migrations;
+nothing reads it afterwards.
 There is no second loader process to keep in sync (the Lemonade
 `server_models.json` / `user_models.json` / `extra.*` split was removed
 with the runtime, #687). Every slot's `--model` path is a registry-backed

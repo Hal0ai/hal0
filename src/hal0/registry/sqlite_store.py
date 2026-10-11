@@ -11,9 +11,9 @@ cross-process write serialization natively, and a fresh connection per call
 keeps it thread-safe.
 
 SQLite is the only store. Nothing reads or writes ``registry.toml`` here: a
-file left over from the TOML era is converted once by
-:func:`hal0.registry.toml_conversion.convert_registry_toml`, which runs with
-the post-activation migrations, and renamed so it is never read again.
+file left over from the TOML era is backed up and renamed, never imported, by
+:func:`hal0.registry.toml_retirement.retire_registry_toml`, which runs with
+the post-activation migrations, so it is never read again.
 Deleted models therefore stay deleted across restarts.
 
 ``registry_dir`` stays a constructor parameter because tests and setup code

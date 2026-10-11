@@ -84,7 +84,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         return {}
 
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
-    monkeypatch.setattr("hal0.registry.toml_conversion.convert_registry_toml", _registry_toml)
+    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
@@ -192,19 +192,19 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["converge_components"] == []
 
 
-def test_registry_toml_conversion_failure_propagates(
+def test_registry_toml_retirement_failure_propagates(
     monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
 ) -> None:
-    """The one-shot registry.toml conversion fails loud, like the schema
-    migration: it renames a file after importing it, so a half-done run
-    must reach the caller (commit() logs it at ERROR and reports the update
-    unconverged; the boot safety net retries next start)."""
-    from hal0.registry.toml_conversion import RegistryConversionError
+    """The registry.toml retirement fails loud, like the schema migration:
+    a file it could not back up or rename must reach the caller (commit()
+    logs it at ERROR and reports the update unconverged; the boot safety
+    net retries next start)."""
+    from hal0.registry.toml_retirement import RegistryConversionError
 
     def _boom(*, job_id=None):
         raise RegistryConversionError("rename failed")
 
-    monkeypatch.setattr("hal0.registry.toml_conversion.convert_registry_toml", _boom)
+    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _boom)
 
     with pytest.raises(RegistryConversionError):
         run_post_activation_migrations(job_id="j4")

@@ -239,11 +239,10 @@ slot's default model without loading it, use `hal0 slot edit agent --model qwen3
 The registry lives in SQLite (`/var/lib/hal0/hal0.db`). Releases before the
 SQLite registry kept it in `/var/lib/hal0/registry/registry.toml`. If that
 file is still there, the post-update migrations (and the same pass at every
-`hal0-api` start) convert it once: they back up the file and `hal0.db` to
-`/var/lib/hal0/backups/registry-toml-<UTC>/`, import its models only when
-this database was never initialised from it, and rename it to
-`registry.toml.imported-<UTC>` or `registry.toml.retired-<UTC>`. hal0 never
-reads the renamed file. To keep a copy of the catalog, back up `hal0.db`;
+`hal0-api` start) retire it without importing it — every supported release
+already imported it into SQLite on first boot. They copy it to
+`/var/lib/hal0/backups/registry-toml-<UTC>/` and rename it to
+`registry.toml.retired-<UTC>`. hal0 never reads the renamed file. To keep a copy of the catalog, back up `hal0.db`;
 `hal0 model list --json` prints it.
 
 ## The registry on disk

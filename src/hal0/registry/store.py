@@ -7,8 +7,8 @@ in the shared ``hal0.db`` file). This module owns the names callers import —
 and :func:`merge_update` — so call sites never depend on the storage module.
 
 The TOML-backed store that preceded SQLite is gone. A ``registry.toml`` left
-on an upgraded box is converted once and renamed by
-:func:`hal0.registry.toml_conversion.convert_registry_toml`; nothing reads
+on an upgraded box is backed up and renamed (never imported) by
+:func:`hal0.registry.toml_retirement.retire_registry_toml`; nothing reads
 that file afterwards.
 
 The typed errors subclass ``Hal0Error`` so the API middleware reshapes them

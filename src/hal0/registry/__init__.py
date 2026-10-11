@@ -2,8 +2,8 @@
 
 The registry is the single source of truth for "what models exist on this
 host": the ``model`` tables of the shared SQLite database (see ``hal0.db``).
-A TOML-era ``registry.toml`` is converted once and renamed by
-:mod:`hal0.registry.toml_conversion`; nothing reads it afterwards.
+A TOML-era ``registry.toml`` is backed up and renamed, never imported, by
+:mod:`hal0.registry.toml_retirement`; nothing reads it afterwards.
 
 Slot configs reference model IDs from the registry.  If a model is deleted,
 any slot referencing it fails to load with a structured error
