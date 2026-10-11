@@ -308,3 +308,67 @@ def test_hal0_state_files_are_never_removed_even_under_a_broad_root(
 
     assert slot_toml.exists()
     assert _kept(out) == {str(slot_toml): "hal0_state"}
+
+
+# ── PR #2543 review follow-ups ───────────────────────────────────────────────
+
+
+def test_parent_pruning_stops_at_the_deepest_overlapping_root(
+    registry: ModelRegistry, root: Path
+) -> None:
+    """With roots ``/x`` and ``/x/models-root``, emptied dirs are removed only
+    up to ``models-root`` — never the more specific root itself."""
+    f = _write(root / "sub" / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+
+    out = _delete(registry, "m", [root.parent, root])
+
+    assert {e["path"] for e in out["files_removed"]} == {str(f)}
+    assert not (root / "sub").exists()
+    assert root.is_dir()
+
+
+def test_missing_file_at_delete_is_tombstoned_and_not_rediscovered(
+    registry: ModelRegistry, root: Path
+) -> None:
+    """An unmounted share at delete time: the row goes, the path is tombstoned,
+    and the file is not re-registered when the storage comes back."""
+    f = root / "share" / "m.gguf"
+    registry.add(Model(id="m", path=str(f)))
+
+    out = _delete(registry, "m", [root])
+
+    assert out["deleted"] is True
+    assert _kept(out) == {str(f): "missing_at_delete"}
+    assert out["tombstoned"] == [str(f)]
+    _write(f)  # the share is back
+    assert scan_and_register(registry, ModelsConfig(roots=[str(root)]))["added"] == []
+
+
+def test_dangling_symlink_target_is_tombstoned(registry: ModelRegistry, root: Path) -> None:
+    target = root / "blobs-gone" / ("d" * 64)
+    link = root / "snap" / "m.gguf"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    registry.add(Model(id="m", path=str(link)))
+
+    out = _delete(registry, "m", [root])
+
+    assert not os.path.lexists(link)
+    assert _kept(out) == {str(target): "missing_at_delete"}
+    assert str(target) in out["tombstoned"]
+
+
+def test_files_under_a_remaining_directory_model_are_kept(
+    registry: ModelRegistry, root: Path
+) -> None:
+    d = root / "moonshine"
+    inner = _write(d / "encoder.onnx")
+    registry.add(Model(id="moonshine-dir", path=str(d)))
+    registry.add(Model(id="encoder-file", path=str(inner)))
+
+    out = _delete(registry, "encoder-file", [root])
+
+    assert inner.exists()
+    assert _kept(out) == {str(inner): "shared:moonshine-dir"}
+    assert out["tombstoned"] == []

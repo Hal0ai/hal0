@@ -971,3 +971,77 @@ def test_prune_missing_with_roots_keeps_rows_under_an_empty_root(
     assert sorted(result["pruned"]) == ["gone", "outside-file-gone"]
     assert sorted(result["missing_unverified"]) == ["outside-dir-gone", "unknown"]
     assert registry.has("unknown")
+
+
+def test_find_candidates_never_descends_into_dot_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dot dirs are pruned from the walk itself, so a huge ``.Trash`` tree
+    costs no stats and no scan budget."""
+    root = tmp_path / "models"
+    deep = root / ".Trash-1000" / "files" / "a" / "b"
+    deep.mkdir(parents=True)
+    for i in range(20):
+        (deep / f"junk{i}.gguf").write_bytes(b"x")
+    (root / "live-q4.gguf").write_bytes(b"x")
+    visited: list[str] = []
+    real_is_file = Path.is_file
+
+    def spy(self: Path, *a: object, **kw: object) -> bool:
+        visited.append(str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", spy)
+
+    found = {c.path.name for c in find_candidates([root], [".gguf"], set())}
+
+    assert found == {"live-q4.gguf"}
+    assert not [v for v in visited if ".Trash-1000" in v]
+
+
+def test_prune_missing_releases_store_blob_refs(tmp_path: Path, registry: ModelRegistry) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+
+    gone = tmp_path / "store" / "gone.gguf"
+    sha = "e" * 64
+    registry.add(Model(id="pulled-gone", path=str(gone)))
+    with connect(registry.db_path) as conn, tx(conn):
+        repository.insert_blob(conn, sha256=sha, size_bytes=8, blob_path=str(gone))
+        repository.upsert_model_file(
+            conn,
+            model_id="pulled-gone",
+            rel="gone.gguf",
+            dest=str(gone),
+            size_bytes=8,
+            sha256=sha,
+            lfs=True,
+            role="model",
+        )
+
+    result = prune_missing(registry, protected_ids=set())
+
+    assert result["pruned"] == ["pulled-gone"]
+    with connect(registry.db_path) as conn:
+        blob = repository.get_blob(conn, sha)
+    assert blob is None or blob["refcount"] == 0
+
+
+def test_prune_missing_trusts_an_empty_root_that_is_a_mountpoint(
+    tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    mounted_empty = tmp_path / "nfs"
+    mounted_empty.mkdir()
+    registry.add(Model(id="gone", path=str(mounted_empty / "m.gguf")))
+    real_ismount = os.path.ismount
+    monkeypatch.setattr(
+        os.path,
+        "ismount",
+        lambda p: str(p) == str(mounted_empty.resolve()) or real_ismount(p),
+    )
+
+    result = prune_missing(registry, protected_ids=set(), roots=[mounted_empty])
+
+    assert result["pruned"] == ["gone"]

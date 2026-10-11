@@ -37,6 +37,7 @@ import contextlib
 import logging
 import os
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -135,6 +136,36 @@ def release_blob_ref(
         # hardlink-dedup for a later same-sha pull
         # (_maybe_hardlink_from_blob probes blob_path.is_file()). #8.
         _repoint_shared_blob(conn, sha256, dest, exclude_model_id=model_id)
+
+
+def model_blob_refs(db_path: str | Path, model_id: str) -> list[tuple[str, str]]:
+    """``(sha256, dest)`` for each of ``model_id``'s LFS ``model_file`` rows.
+
+    Read BEFORE the registry row is removed — the rows cascade away with it.
+    """
+    with connect(db_path) as conn:
+        return [
+            (str(f["sha256"]), str(f.get("dest") or ""))
+            for f in repository.list_model_files(conn, model_id)
+            if f.get("sha256")
+        ]
+
+
+def release_blob_refs(
+    db_path: str | Path, refs: Sequence[tuple[str | None, str]], *, model_id: str
+) -> None:
+    """Apply :func:`release_blob_ref` to each ``(sha256, dest)`` in one transaction.
+
+    Used after a model's registry row is gone, by an explicit delete (for
+    the files it removed) and by :func:`hal0.registry.discover.prune_missing`
+    (for a pruned row), so a ``store_blob`` row never keeps a reference no
+    ``model_file`` row backs. Raises on a DB error; callers decide.
+    """
+    if not any(sha for sha, _ in refs):
+        return
+    with connect(db_path) as conn, tx(conn):
+        for sha, dest in refs:
+            release_blob_ref(conn, sha, dest, model_id=model_id)
 
 
 def delete_model_files(conn, model_id: str) -> int:
@@ -356,7 +387,9 @@ __all__ = [
     "GCReport",
     "collect_orphans",
     "delete_model_files",
+    "model_blob_refs",
     "prune_orphans",
     "reconcile_store_tree",
     "release_blob_ref",
+    "release_blob_refs",
 ]

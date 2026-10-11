@@ -188,7 +188,8 @@ export interface ModelDeleteFileRemoved {
 export interface ModelDeleteFileKept {
   path: string
   /** kept_by_request | runtime_managed | directory | outside_roots |
-   *  hal0_state | shared:<model id> | unlink_failed:<error> */
+   *  hal0_state | missing_at_delete | shared:<model id> |
+   *  unlink_failed:<error> */
   reason: string
 }
 

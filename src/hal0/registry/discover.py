@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -256,12 +257,7 @@ def find_candidates(
         root_path = Path(root).expanduser()
         if not root_path.exists() or not root_path.is_dir():
             continue
-        try:
-            iterator = root_path.rglob("*")
-        except OSError as exc:
-            log.warning("discover.rglob_failed root=%s err=%s", root_path, exc)
-            continue
-        for candidate in iterator:
+        for candidate in _walk_files(root_path):
             if time.monotonic() - started > _SCAN_BUDGET_SECONDS:
                 log.warning(
                     "discover.budget_exceeded after=%.1fs roots=%s — returning partial results",
@@ -273,8 +269,6 @@ def find_candidates(
                 if not candidate.is_file():
                     continue
             except OSError:
-                continue
-            if _under_dot_dir(candidate, root_path):
                 continue
             # Record mmproj sidecars for association, then skip them so they
             # never become standalone routable candidates. Done before the
@@ -584,19 +578,26 @@ def _inode(path: Path) -> tuple[int, int] | None:
     return (st.st_dev, st.st_ino)
 
 
-def _under_dot_dir(path: Path, root: Path) -> bool:
-    """True when a directory BETWEEN ``root`` and ``path`` starts with ``.``.
+def _walk_files(root: Path) -> Iterator[Path]:
+    """Yield every file below ``root`` without descending into dot directories.
 
-    Relative to the root, like :func:`_under_skip_dir`, so a root that itself
-    sits under a dot directory (``~/.cache/models``) still scans, while a
-    ``.Trash-1000/`` or ``.cache/`` inside a root is never walked into
-    candidates. The file name itself is covered by :func:`_is_skippable`.
+    ``os.walk`` lets the walk prune ``.Trash-1000/``, ``.cache/`` and similar
+    trees in place, so they cost neither stats nor the scan budget. Only
+    directories BELOW ``root`` are pruned: a root that itself sits under a
+    dot directory (``~/.cache/models``) still scans. Symlinked directories
+    are not followed, matching the old ``Path.rglob`` walk; symlinked files
+    (HF ``snapshots/``) are yielded. The file name itself is covered by
+    :func:`_is_skippable`.
     """
-    try:
-        rel = path.parent.relative_to(root)
-    except ValueError:
-        return False
-    return any(part.startswith(".") for part in rel.parts)
+
+    def _onerror(exc: OSError) -> None:
+        log.warning("discover.walk_failed root=%s err=%s", root, exc)
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_onerror):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        here = Path(dirpath)
+        for name in filenames:
+            yield here / name
 
 
 def _containing_roots(path: Path, roots: list[Path]) -> list[Path]:
@@ -688,15 +689,28 @@ def is_runtime_managed(m: Model) -> bool:
 
 
 def _root_is_live(root: Path) -> bool:
-    """True when ``root`` exists and has at least one entry.
+    """True when a missing file under ``root`` can be trusted as deleted.
 
-    An empty or absent root is what an unmounted NFS share looks like: its
-    mount point is an empty directory. Every row under it would read as
-    missing, so prune treats it as "unknown", not "gone".
+    * non-empty → live.
+    * empty and a mount point (``os.path.ismount``) → live: the share IS
+      mounted, it just holds nothing now.
+    * empty and not a mount point, or absent → not live. That is what an
+      unmounted NFS share looks like (its mount point is an empty local
+      directory), so every row under it is "unknown", not "gone".
+
+    Trade-off: an ordinary local root whose last model file was removed by
+    hand is also empty and not a mount point, so its ghost row is kept as
+    ``missing_unverified`` until the root holds something again or the row
+    is deleted explicitly (ADR-0026).
     """
     try:
         with os.scandir(root) as it:
-            return any(True for _ in it)
+            if any(True for _ in it):
+                return True
+    except OSError:
+        return False
+    try:
+        return os.path.ismount(root)
     except OSError:
         return False
 
@@ -717,6 +731,35 @@ def _missing_is_trustworthy(path: Path, roots: list[Path], live: dict[Path, bool
         return path.parent.is_dir()
     except OSError:
         return False
+
+
+def _prune_row(registry: ModelRegistry, model_id: str) -> None:
+    """Remove one pruned row and release its ``store_blob`` references.
+
+    The row's ``model_file`` rows cascade away with it; without the release
+    the blob would stay positively referenced forever and
+    :func:`hal0.registry.gc.prune_orphans` could never reclaim it. Same
+    release an explicit delete does (ADR-0026). Best-effort.
+    """
+    from hal0.registry import gc
+
+    db_path = getattr(registry, "db_path", None)
+    refs: list[tuple[str, str]] = []
+    if db_path is not None:
+        try:
+            refs = gc.model_blob_refs(db_path, model_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.prune_refs_read_failed id=%s err=%s", model_id, exc)
+    try:
+        registry.remove(model_id)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("discover.prune_remove_failed id=%s err=%s", model_id, exc)
+        return
+    if db_path is not None and refs:
+        try:
+            gc.release_blob_refs(db_path, refs, model_id=model_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.prune_release_failed id=%s err=%s", model_id, exc)
 
 
 def prune_missing(
@@ -783,10 +826,7 @@ def prune_missing(
                 continue
         pruned.append(m.id)
         if not dry_run:
-            try:
-                registry.remove(m.id)
-            except Exception as exc:  # pragma: no cover — defensive
-                log.warning("discover.prune_remove_failed id=%s err=%s", m.id, exc)
+            _prune_row(registry, m.id)
     return {
         "pruned": pruned,
         "missing_referenced": missing_referenced,

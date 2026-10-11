@@ -933,31 +933,61 @@ def _resolve(p: str | Path) -> Path:
         return path
 
 
-def _other_references(registry: Any) -> dict[str, str]:
-    """Resolved path → id for every file a REMAINING registry row references."""
-    refs: dict[str, str] = {}
-    try:
-        rows = list(registry.list())
-    except Exception:
-        rows = []
-    for row in rows:
-        for p in _model_paths(row):
-            refs.setdefault(str(_resolve(p)), row.id)
-            refs.setdefault(str(Path(p).expanduser()), row.id)
-    for frow in _model_file_rows(registry):
-        dest = frow.get("dest")
-        if dest:
-            refs.setdefault(str(_resolve(dest)), str(frow.get("model_id")))
-            refs.setdefault(str(Path(dest).expanduser()), str(frow.get("model_id")))
-    return refs
+class _References:
+    """Every path a REMAINING registry row still owns.
+
+    ``exact`` maps a referenced file (resolved and literal form) to its row
+    id. ``dirs`` lists directory-valued row paths (FLM model dirs, ONNX model
+    directories…): everything below one of them belongs to that row too.
+    """
+
+    def __init__(self, registry: Any) -> None:
+        self.exact: dict[str, str] = {}
+        self.dirs: list[tuple[Path, str]] = []
+        try:
+            rows = list(registry.list())
+        except Exception:
+            rows = []
+        for row in rows:
+            for p in _model_paths(row):
+                resolved = _resolve(p)
+                self.exact.setdefault(str(resolved), row.id)
+                self.exact.setdefault(str(Path(p).expanduser()), row.id)
+                with contextlib.suppress(OSError):
+                    if resolved.is_dir():
+                        self.dirs.append((resolved, row.id))
+        for frow in _model_file_rows(registry):
+            dest = frow.get("dest")
+            if dest:
+                self.exact.setdefault(str(_resolve(dest)), str(frow.get("model_id")))
+                self.exact.setdefault(str(Path(dest).expanduser()), str(frow.get("model_id")))
+
+    def owner(self, *forms: Path) -> str | None:
+        """The id of a remaining row that owns any of ``forms``, else ``None``."""
+        for form in forms:
+            hit = self.exact.get(str(form))
+            if hit:
+                return hit
+        for form in forms:
+            for d, mid in self.dirs:
+                if form != d and form.is_relative_to(d):
+                    return mid
+        return None
+
+    def dir_paths(self) -> set[Path]:
+        return {d for d, _ in self.dirs}
 
 
 def _containing_root(p: Path, roots: list[Path]) -> Path | None:
-    """The root ``p`` sits STRICTLY inside (never equal to), else ``None``."""
-    for root in roots:
-        if p != root and p.is_relative_to(root):
-            return root
-    return None
+    """The DEEPEST root ``p`` sits strictly inside (never equal to), else ``None``.
+
+    With overlapping roots (``/`` and ``/mnt/models``) the most specific one
+    wins, so empty-parent pruning stops at ``/mnt/models``.
+    """
+    matches = [r for r in roots if p != r and p.is_relative_to(r)]
+    if not matches:
+        return None
+    return max(matches, key=lambda r: len(r.parts))
 
 
 def _hal0_state_guard() -> tuple[list[Path], list[Path]]:
@@ -1015,7 +1045,11 @@ def delete_model_files_on_disk(
 
     * ``outside_roots`` — the file (or, for a symlink, the link or its
       resolved target) is not strictly inside a :func:`deletion_roots` root.
-    * ``shared:<id>`` — another remaining registry row references it.
+    * ``shared:<id>`` — another remaining registry row references it, or
+      it sits under a remaining row whose path is a directory.
+    * ``missing_at_delete`` — the file is not there at delete time (an
+      unmounted share, a dangling symlink target). It is tombstoned so it
+      cannot reappear when the storage returns.
     * ``hal0_state`` — it sits under hal0's own config or state tree
       (``/etc/hal0``, ``/var/lib/hal0``) outside the model store, which a
       broad scan root such as ``/`` would otherwise expose.
@@ -1040,7 +1074,16 @@ def delete_model_files_on_disk(
     out = _empty_file_outcome()
     to_tombstone: list[str] = []
 
-    existing = [(p, sha) for p, sha in planned if os.path.lexists(Path(p).expanduser())]
+    existing: list[tuple[str, str | None]] = []
+    for p, sha in planned:
+        if os.path.lexists(Path(p).expanduser()):
+            existing.append((p, sha))
+        else:
+            # Not there right now — an unmounted share, or a file already
+            # gone. Tombstone it anyway so it can't reappear when the storage
+            # comes back.
+            out["files_kept"].append({"path": p, "reason": "missing_at_delete"})
+            to_tombstone.append(p)
 
     from hal0.registry.discover import is_runtime_managed
 
@@ -1062,9 +1105,10 @@ def delete_model_files_on_disk(
         rp = _resolve(r)
         if rp.is_dir() and rp not in root_paths:
             root_paths.append(rp)
-    others = _other_references(registry)
+    others = _References(registry)
     state_guard = _hal0_state_guard()
     removed_dirs: list[tuple[Path, Path]] = []
+    gone: set[Path] = set()
     released: list[tuple[str | None, str]] = []
     by_id: Path | None = None
     with contextlib.suppress(Exception):
@@ -1076,11 +1120,15 @@ def delete_model_files_on_disk(
             to_tombstone.append(str(path))
 
     def _unlink(path: Path, root: Path) -> bool:
+        if path in gone:
+            return True  # listed twice in the plan (link + target); done already
         try:
             st = path.lstat()
             path.unlink()
         except FileNotFoundError:
-            return True
+            # A dangling symlink's target, or storage that went away.
+            _keep(path, "missing_at_delete")
+            return False
         except OSError as exc:
             _keep(path, f"unlink_failed:{exc.strerror or exc}")
             return False
@@ -1095,6 +1143,7 @@ def delete_model_files_on_disk(
             out["bytes_freed"] += size
         out["files_removed"].append(entry)
         removed_dirs.append((path.parent, root))
+        gone.add(path)
         return True
 
     for p, sha in existing:
@@ -1109,7 +1158,7 @@ def delete_model_files_on_disk(
         link_loc = _resolve(literal.parent) / literal.name if is_link else target
 
         if is_link:
-            owner = others.get(str(literal)) or others.get(str(link_loc))
+            owner = others.owner(literal, link_loc)
             link_root = _containing_root(link_loc, root_paths)
             if owner:
                 _keep(p, f"shared:{owner}", tombstone=False)
@@ -1120,7 +1169,7 @@ def delete_model_files_on_disk(
             else:
                 _unlink(link_loc, link_root)
 
-        owner = others.get(str(target))
+        owner = others.owner(target)
         target_root = _containing_root(target, root_paths)
         if owner:
             _keep(target, f"shared:{owner}", tombstone=False)
@@ -1135,19 +1184,15 @@ def delete_model_files_on_disk(
             released.append((sha, p))
 
     # Release store_blob references for removed pulled files.
-    if any(sha for sha, _ in released):
-        db_path = getattr(registry, "db_path", None)
-        if db_path is not None:
-            from hal0.db.connection import connect, tx
-            from hal0.registry import gc
+    db_path = getattr(registry, "db_path", None)
+    if db_path is not None and any(sha for sha, _ in released):
+        from hal0.registry import gc
 
-            try:
-                with connect(db_path) as conn, tx(conn):
-                    for sha, dest in released:
-                        gc.release_blob_ref(conn, sha, dest, model_id=model.id)
-            except Exception as exc:
-                log.warning("models.blob_release_failed id=%s err=%s", model.id, exc)
-                out["warnings"].append(f"store refcount update failed: {exc}")
+        try:
+            gc.release_blob_refs(db_path, released, model_id=model.id)
+        except Exception as exc:
+            log.warning("models.blob_release_failed id=%s err=%s", model.id, exc)
+            out["warnings"].append(f"store refcount update failed: {exc}")
 
     # The by-id pointer (pulled models) dangles once its target is gone.
     with contextlib.suppress(Exception):
@@ -1155,7 +1200,10 @@ def delete_model_files_on_disk(
         if pointer.is_symlink() and not pointer.exists():
             pointer.unlink()
 
-    keep_dirs = {by_id} if by_id is not None else set()
+    # Never rmdir the by-id pointer dir or a remaining row's model directory.
+    keep_dirs = others.dir_paths()
+    if by_id is not None:
+        keep_dirs.add(by_id)
     for start, root in removed_dirs:
         _prune_empty_parents(start, root, keep_dirs)
 
