@@ -25,7 +25,7 @@ import {
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
-import { hostHwFlags, selectedRunnerKey } from './hw-cascade.js'
+import { hostHwFlags, selectedRunnerKey, tierRank } from './hw-cascade.js'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -137,10 +137,10 @@ function profileRunnerOptions(backends, hw) {
       blurb: r.blurb || '',
       lanes,
       state: r.state,
-      isDefault: !!r.is_default,
+      tier: r.tier || null,
     });
   }
-  out.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0) || a.title.localeCompare(b.title));
+  out.sort((a, b) => tierRank(a.tier) - tierRank(b.tier) || a.title.localeCompare(b.title));
   return out;
 }
 

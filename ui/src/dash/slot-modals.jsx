@@ -2158,7 +2158,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-row">
 							<div className="form-lbl">
 								<span>Lane</span>
-								<FieldInfoIcon description="Which GPU stack the Standard runtime uses. Auto
+								<FieldInfoIcon description="Which GPU stack this runtime uses. Auto
 									follows the device." />
 							</div>
 							<div className="form-ctl">

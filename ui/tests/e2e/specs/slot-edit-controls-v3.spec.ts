@@ -378,7 +378,7 @@ test.describe('Slot edit controls (/slots)', () => {
               supported_backends: ['rocm', 'vulkan'],
               format_arch: 'gguf',
               state: 'installed',
-              is_default: true,
+              tier: 'default',
             },
             strix: {
               title: 'Strix (Vulkan optional)',

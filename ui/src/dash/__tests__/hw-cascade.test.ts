@@ -2,16 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { applyRunnerChoice, archFitWarning, laneValues, runnerOptions, selectedRunnerKey } from '../hw-cascade.js'
 
 // Backends fixture mirroring system-info's `backends[key]` shape (Task 2):
-// title/blurb/is_default alongside the existing supported_backends/
+// title/blurb/tier alongside the existing supported_backends/
 // device_class/runtime_family/state.
 const backends = {
-  rocmfpx:     { title: 'Standard',    blurb: 'Runs everything.', is_default: true,
+  rocmfpx:     { title: 'Standard',    blurb: 'Runs everything.', tier: 'default',
                  supported_backends: ['rocm', 'vulkan'], device_class: 'gpu',
                  runtime_family: 'llama-server', state: 'installed' },
-  promptforge: { title: 'PromptForge', blurb: 'Accelerated PF.', is_default: false,
+  promptforge: { title: 'PromptForge', blurb: 'Accelerated PF.', tier: 'optional',
                  supported_backends: ['rocm'], device_class: 'gpu',
                  runtime_family: 'llama-server', state: 'installed' },
-  strix:       { title: 'Strix',       blurb: 'Qwen4 + MTP.', is_default: false,
+  strix:       { title: 'Strix',       blurb: 'Qwen4 + MTP.', tier: 'optional',
                  supported_backends: ['vulkan'], device_class: 'gpu',
                  runtime_family: 'llama-server', state: 'installable' },
   kokoro:      { title: 'Kokoro', supported_backends: ['cpu'], device_class: 'cpu',
@@ -22,7 +22,26 @@ describe('runnerOptions', () => {
   it('lists gpu llama runtimes for an llm slot, default first', () => {
     const { options } = runnerOptions({ backends, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true } })
     expect(options.map(o => o.key)).toEqual(['rocmfpx', 'promptforge', 'strix'])
-    expect(options[0].isDefault).toBe(true)
+    expect(options[0].tier).toBe('default')
+  })
+  it('sorts by registry tier (default → optional → frozen → unknown), then title', () => {
+    const tiered = {
+      a: { title: 'A frozen', tier: 'frozen', device_class: 'gpu', runtime_family: 'llama-server' },
+      b: { title: 'B optional', tier: 'optional', device_class: 'gpu', runtime_family: 'llama-server' },
+      c: { title: 'C untiered', device_class: 'gpu', runtime_family: 'llama-server' },
+      d: { title: 'D default', tier: 'default', device_class: 'gpu', runtime_family: 'llama-server' },
+      e: { title: 'A optional', tier: 'optional', device_class: 'gpu', runtime_family: 'llama-server' },
+    }
+    const { options } = runnerOptions({ backends: tiered, device: 'gpu-rocm', slotType: 'llm', hw: {} })
+    expect(options.map(o => o.key)).toEqual(['d', 'e', 'b', 'a', 'c'])
+  })
+  it('ignores a legacy is_default flag: the tier is the only sort signal', () => {
+    const legacy = {
+      x: { title: 'X', is_default: true, device_class: 'gpu', runtime_family: 'llama-server' },
+      y: { title: 'Y', tier: 'default', device_class: 'gpu', runtime_family: 'llama-server' },
+    }
+    const { options } = runnerOptions({ backends: legacy, device: 'gpu-rocm', slotType: 'llm', hw: {} })
+    expect(options.map(o => o.key)).toEqual(['y', 'x'])
   })
   it('hides hardware-infeasible lanes (no kfd → rocm-only rows gone)', () => {
     const { options } = runnerOptions({ backends, device: 'gpu-vulkan', slotType: 'llm', hw: { rocm: false, vulkan: true } })

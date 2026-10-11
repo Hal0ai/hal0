@@ -12,12 +12,13 @@
 // dialog naming the `in_use_by` slots that will drift.
 //
 // runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
-// FamilyStrip driven straight by the server's `families` summary (effective
-// ref, source tier, store state, newer-release marker), and the list groups
-// into "Default runtime" / "Optional runtimes" sections via the pure
-// groupRows() helper (ADR-0006, Task 11 — every shipped image is a registry
-// runner, so the old three-way default/specialized/other split collapses to
-// default-vs-everything-else).
+// FamilyStrip ("Launch images") driven straight by the server's `families`
+// summary (effective ref, source tier, store state, newer-release marker).
+// ADR-0026: the list groups by each row's runtime TIER (default / optional /
+// frozen, plus "Other images" for catalogued images no runtime ships) via
+// the pure groupRows() helper, and rows show the registry's title + blurb.
+// The per-runtime launch image is a separate marker ("launch image" chip),
+// worded so it cannot be mistaken for the tier.
 
 import {
   useRunnerImages,
@@ -46,25 +47,61 @@ function fmtBytesRI(b) {
 
 // ── Pure helpers (unit-tested in __tests__/runner-images-view.test.tsx) ──
 
-// Row grouping for the catalogue list (runner-catalogue-v3, Task 10; ADR-0006
-// regroup, Task 11): every catalogued image is a registry runner now — the
-// list has exactly two sections, "Default runtime" (a family's release/
-// override default) and "Optional runtimes" (everything else, specialty
-// images sorted ahead of plain referenced/uncatalogued-family rows). A row
-// that IS a family default lands in `defaults` even if it also carries
-// specialties — the family strip above already surfaces it, so the list
-// shouldn't also branch it into the optional bucket.
-export function groupRows(images) {
-  const defaults = [];
-  const specialized = [];
-  const other = [];
-  for (const img of images || []) {
-    if (img.is_default) defaults.push(img);
-    else if ((img.specialties || img.extra?.specialties || []).length) specialized.push(img);
-    else other.push(img);
-  }
-  return { defaults, optional: [...specialized, ...other] };
+// Row grouping for the catalogue list (ADR-0026). The section a row lands in
+// is its runtime's TIER, read from the row (`tier`, which the backend copies
+// off `hal0.runners.Runner.tier` — the same field the slot drawer's runtime
+// picker sorts by). It is NOT derived from `is_default`: that marker says
+// which repo a family's slots launch, and every family has one, so grouping
+// by it put niche runtimes (Qwen3 TTS, Strix Halo Vulkan) under "Default".
+// A row no registry runner ships (`tier` null: a legacy toolbox or a
+// pin-only variant) is not a runtime at all and goes to `other`. Rows sort
+// by display title within each section.
+export function rowTitle(img) {
+  return img?.title || img?.id || "";
 }
+
+export function groupRows(images) {
+  const out = { defaults: [], optional: [], frozen: [], other: [] };
+  const bucket = { default: out.defaults, optional: out.optional, frozen: out.frozen };
+  for (const img of images || []) {
+    (bucket[img.tier] || out.other).push(img);
+  }
+  for (const list of Object.values(out)) {
+    list.sort((a, b) => rowTitle(a).localeCompare(rowTitle(b)));
+  }
+  return out;
+}
+
+// Family key → runtime title, from the server's `families` summary (each
+// carries its registry `title`). Falls back to the key when absent.
+export function familyTitleMap(families) {
+  const out = {};
+  for (const f of families || []) out[f.family] = f.title || f.family;
+  return out;
+}
+
+// Label for the per-family LAUNCH IMAGE marker (`is_default` on a row: this
+// repo is what a runtime's unpinned slots launch right now). Deliberately
+// never the word "default", so it cannot be read as the runtime's tier: a
+// row of an optional runtime is still its own runtime's launch image. Names
+// the runtime only when it is not the row's own (an override pointing some
+// runtime at another runtime's repo).
+export function launchImageLabel(image, familyTitles = {}) {
+  const mark = image?.is_default;
+  if (!mark) return null;
+  const own = image.runner && image.runner === mark.family;
+  const base = own ? "launch image" : `${familyTitles[mark.family] || mark.family} launch image`;
+  return mark.source === "override" ? `${base} · override` : base;
+}
+
+// The list's sections, in tier order (hw-cascade.js TIER_ORDER), each with the
+// one-line hint an operator needs to read the grouping.
+export const ROW_SECTIONS = [
+  { key: "defaults", label: "Default runtimes", hint: "Every box is expected to have these." },
+  { key: "optional", label: "Optional runtimes", hint: "Opt-in, for a specific model or device." },
+  { key: "frozen", label: "Frozen runtimes", hint: "Kept only for models already on slots; no updates." },
+  { key: "other", label: "Other images", hint: "Not a hal0 runtime; reachable only through a slot's image pin." },
+];
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
 // build (branch heads) or dev iteration (old floating dev tags), so their
@@ -289,12 +326,13 @@ export function RunnerImagesView() {
   const filtered = images.filter(img => {
     if (!q.trim()) return true;
     const needle = q.trim().toLowerCase();
-    const hay = `${img.id} ${img.image} ${img.tag} ${img.notes || ""}`.toLowerCase();
+    const hay = `${img.title || ""} ${img.blurb || ""} ${img.id} ${img.image} ${img.tag} ${img.notes || ""}`.toLowerCase();
     return hay.includes(needle);
   });
 
   const grouped = groupRows(filtered);
   const selected = images.find(i => i.id === selId) || images[0];
+  const familyTitles = familyTitleMap(families);
 
   return (
     <div className="models-layout" style={{marginTop: 18}}>
@@ -333,26 +371,27 @@ export function RunnerImagesView() {
             </div>
           )}
 
-          {grouped.defaults.length > 0 && (
-            <>
-              <div className="mdl-list-h"><span>Default runtime</span></div>
-              {grouped.defaults.map(img => (
-                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
+          {ROW_SECTIONS.filter(s => grouped[s.key].length > 0).map(s => (
+            <React.Fragment key={s.key}>
+              <div className="mdl-list-h" data-testid={`ri-section-${s.key}`}>
+                <span>{s.label}</span>
+                <span className="right" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "none", letterSpacing: 0}}>{s.hint}</span>
+              </div>
+              {grouped[s.key].map(img => (
+                <RunnerImageRow
+                  key={img.id}
+                  image={img}
+                  familyTitles={familyTitles}
+                  selected={selId === img.id}
+                  onSelect={() => setSelId(img.id)}
+                />
               ))}
-            </>
-          )}
-          {grouped.optional.length > 0 && (
-            <>
-              <div className="mdl-list-h"><span>Optional runtimes</span></div>
-              {grouped.optional.map(img => (
-                <RunnerImageRow key={img.id} image={img} selected={selId === img.id} onSelect={() => setSelId(img.id)} />
-              ))}
-            </>
-          )}
+            </React.Fragment>
+          ))}
         </div>
 
         <div className="models-sidebar">
-          <RunnerCard image={selected} />
+          <RunnerCard image={selected} familyTitles={familyTitles} />
           <RunnerDownloadsPane />
         </div>
     </div>
@@ -369,7 +408,7 @@ function familySourceChip(source) {
     return <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)"}}>override</span>;
   }
   if (source === "release") {
-    return <span className="chip">release default</span>;
+    return <span className="chip" title="The image this hal0 release ships">release</span>;
   }
   return <span className="chip">{source}</span>; // env | manifest
 }
@@ -394,12 +433,14 @@ function FamilyStrip({ families }) {
 
   const clearRow = rows.find(f => f.family === clearFamily) || null;
   const drifters = clearRow?.slots || [];
+  const clearTitle = clearRow ? (clearRow.title || clearRow.family) : "";
 
   const onClear = () => {
     const fam = clearFamily;
+    const name = clearTitle || fam;
     setClearFamily(null);
     setDefault.mutate({ family: fam, ref: null }, {
-      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${fam}: override cleared — release default applies`, "info"),
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name}: override cleared — the release image applies`, "info"),
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Clear failed — ${e?.message || "see logs"}`, "err"),
     });
   };
@@ -407,12 +448,12 @@ function FamilyStrip({ families }) {
   return (
     <div className="ri-defaults" data-testid="ri-family-strip" style={{padding: "10px 16px", borderBottom: "1px solid var(--line-soft)"}}>
       <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6}}>
-        Family defaults
+        Launch images
       </div>
       {rows.map(f => (
         <div key={f.family} data-testid={`ri-family-${f.family}`} style={{padding: "3px 0"}}>
           <div style={{display: "flex", alignItems: "center", gap: 8, fontSize: 12}}>
-            <span className="mono" style={{color: "var(--fg-2)", minWidth: 88}}>{f.family}</span>
+            <span style={{color: "var(--fg-2)", minWidth: 140}} title={`runner key: ${f.family}`}>{f.title || f.family}</span>
             <span className="mono" style={{color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{f.effective_ref}</span>
             {familySourceChip(f.source)}
             <StoreStateChip image={{ store_state: f.store_state, downloaded: f.store_state === "present" }} />
@@ -427,7 +468,7 @@ function FamilyStrip({ families }) {
                 data-testid={`ri-clear-default-${f.family}`}
                 disabled={setDefault.isPending}
                 onClick={() => setClearFamily(f.family)}
-                title="Remove the operator override — the release default applies again"
+                title="Remove the operator override — the release image applies again"
               >clear</button>
             )}
           </div>
@@ -444,10 +485,10 @@ function FamilyStrip({ families }) {
         open={!!clearRow}
         onCancel={() => setClearFamily(null)}
         onConfirm={onClear}
-        title={`Clear ${clearRow?.family || ""} override`}
+        title={`Clear ${clearTitle} override`}
         message={
           clearRow
-            ? `Remove the ${clearRow.family} override (${clearRow.effective_ref}) and fall back to the release default.` +
+            ? `Remove the ${clearTitle} override (${clearRow.effective_ref}) and fall back to the image this release ships.` +
               (drifters.length
                 ? ` Slots using it now: ${drifters.join(", ")} — they pick up the release image on their next restart.`
                 : " No slot currently references it.")
@@ -489,7 +530,8 @@ function StoreStateChip({ image }) {
 }
 
 // ── RunnerImageRow ──────────────────────────────────────────────────────
-function RunnerImageRow({ image, selected, onSelect }) {
+function RunnerImageRow({ image, familyTitles, selected, onSelect }) {
+  const launch = launchImageLabel(image, familyTitles);
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className="mdl-row-icon">
@@ -497,14 +539,19 @@ function RunnerImageRow({ image, selected, onSelect }) {
           ? <span style={{color: "var(--green)", display: "inline-flex"}}>{Icons.download}</span>
           : <span style={{color: "var(--fg-5)", display: "inline-flex"}}>{Icons.download}</span>}
       </span>
-      <span className="nm">
-        {image.id}
+      <span className="nm" title={image.blurb || undefined}>
+        {rowTitle(image)}
         <span className="sub">{image.image}:{image.tag}</span>
       </span>
       <span className="mdl-row-tags">
-        {image.is_default && (
-          <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)"}}>
-            {image.is_default.family} default{image.is_default.source === "override" ? " · override" : ""}
+        {launch && (
+          <span
+            className="chip"
+            data-testid="ri-launch-image"
+            title="Slots on this runtime launch this image unless they pin their own."
+            style={{color: "var(--ok)", borderColor: "var(--ok)"}}
+          >
+            {launch}
           </span>
         )}
         {newerTagAvailable(image) && (
@@ -528,7 +575,7 @@ function RunnerImageRow({ image, selected, onSelect }) {
 }
 
 // ── RunnerCard (detail view) ────────────────────────────────────────────
-function RunnerCard({ image }) {
+function RunnerCard({ image, familyTitles = {} }) {
   const pull = useRunnerImagePullJob();
   const setDefault = useSetDefaultImage();
   const restartAffected = useRestartAffected();
@@ -571,14 +618,16 @@ function RunnerCard({ image }) {
   // this row's image with a family (`is_default.family`) — for any other row
   // there is no family key to write the override under.
   const family = image.is_default?.family || null;
+  // The runtime's display name for the launch-image controls below.
+  const familyTitle = family ? (familyTitles[family] || family) : "";
   const defaultRef = `${image.image}:${selTag}`;
   const alreadyDefault = !!(image.is_default && selTag === image.tag && image.is_default.source);
   const inUseBy = Array.isArray(image.in_use_by) ? image.in_use_by : [];
   const onSetDefault = () => {
     setConfirmDefault(false);
     setDefault.mutate({ family, ref: defaultRef }, {
-      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${family} default → ${defaultRef}`, "info"),
-      onError: (e) => window.__hal0Toast && window.__hal0Toast(`Set default failed — ${e?.message || "see logs"}`, "err"),
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${familyTitle} launch image → ${defaultRef}`, "info"),
+      onError: (e) => window.__hal0Toast && window.__hal0Toast(`Set launch image failed — ${e?.message || "see logs"}`, "err"),
     });
   };
 
@@ -648,13 +697,25 @@ function RunnerCard({ image }) {
     <div className="mdl-detail">
       <div className="mdl-detail-h">
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
-          <div className="nm mono">{image.id}</div>
+          <div className="nm" data-testid="ri-card-title">{rowTitle(image)}</div>
+          {image.tier && <span className="chip" data-testid="ri-card-tier">{image.tier} runtime</span>}
           <span style={{marginLeft: "auto"}}>
             <StoreStateChip image={image} />
           </span>
         </div>
         <div className="repo">{image.image}:{image.tag}</div>
+        {image.title && image.title !== image.id && (
+          <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginTop: 2}}>catalogue id: {image.id}</div>
+        )}
       </div>
+
+      {image.blurb ? (
+        <p data-testid="ri-card-blurb" style={{fontSize: 12.5, color: "var(--fg-2)", lineHeight: 1.5, padding: "0 16px"}}>{image.blurb}</p>
+      ) : !image.tier && (
+        <p data-testid="ri-card-blurb" style={{fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5, padding: "0 16px"}}>
+          Not a hal0 runtime. A slot can only use this image through its image pin.
+        </p>
+      )}
 
       <div className="mdl-detail-meta">
         {image.digest && <div><div className="k">digest</div><div className="v mono">{image.digest.slice(0, 19)}…</div></div>}
@@ -673,8 +734,14 @@ function RunnerCard({ image }) {
         )}
       </div>
 
+      {/* images.json `notes` are maintainer notes (build history, gate
+          runs), not operator copy — the registry's blurb above is. Kept
+          reachable, collapsed. */}
       {image.notes && (
-        <p style={{fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5, padding: "0 16px"}}>{image.notes}</p>
+        <details style={{margin: "4px 16px 8px"}} data-testid="ri-maintainer-notes">
+          <summary className="mono" style={{fontSize: 11, color: "var(--fg-4)", cursor: "pointer"}}>maintainer notes</summary>
+          <p style={{fontSize: 11.5, color: "var(--fg-3)", lineHeight: 1.5, margin: "6px 0 0"}}>{image.notes}</p>
+        </details>
       )}
 
       {features.length > 0 && (
@@ -767,10 +834,10 @@ function RunnerCard({ image }) {
                 data-testid="ri-set-default"
                 disabled={setDefault.isPending || alreadyDefault}
                 title={alreadyDefault
-                  ? `${defaultRef} already is the ${family} default`
-                  : `Pin ${defaultRef} as the ${family} family default via a settings override`}
+                  ? `${defaultRef} already is the ${familyTitle} launch image`
+                  : `Make ${defaultRef} the image ${familyTitle} slots launch, via a settings override`}
                 onClick={() => setConfirmDefault(true)}
-              >Set as {family} default</button>
+              >Set as {familyTitle} launch image</button>
             )}
             {inUseBy.length > 0 && (
               <button
@@ -799,14 +866,14 @@ function RunnerCard({ image }) {
         open={confirmDefault}
         onCancel={() => setConfirmDefault(false)}
         onConfirm={onSetDefault}
-        title={`Set ${family || ""} default`}
+        title={`Set ${familyTitle} launch image`}
         message={
-          `Pin ${defaultRef} as the ${family || ""} family default ([slots].default_images override).` +
+          `Make ${defaultRef} the image ${familyTitle} slots launch ([slots].default_images override).` +
           (inUseBy.length
-            ? ` Slots on this family's image now: ${inUseBy.join(", ")} — they move to the new tag on their next restart.`
+            ? ` Slots on this image now: ${inUseBy.join(", ")} — they move to the new tag on their next restart.`
             : " No slot currently references this image.")
         }
-        confirmLabel="Set default"
+        confirmLabel="Set launch image"
         footerNote="Applies on the next slot restart."
       />
 
