@@ -603,8 +603,8 @@ class TestMetaConfigVersion:
 class TestManifestLoader:
     """Covers the toolbox-image manifest reader used at slot-spawn time.
 
-    The manifest's digests are refreshed by `scripts/update-toolbox-digests.sh`
-    before a release. The runtime reads it through `load_manifest` /
+    The manifest's digests are pinned from images built in
+    Hal0ai/hal0-runner-images before a release. The runtime reads it through `load_manifest` /
     `manifest_image_ref` to decide whether to pin pulls by digest or fall
     back to :v1 tags.
     """

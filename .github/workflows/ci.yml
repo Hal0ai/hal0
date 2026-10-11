@@ -56,13 +56,6 @@ jobs:
         # Via pip on the setup-python interpreter — no third-party action tag
         # to chase (astral-sh/setup-uv@v8 didn't resolve and bricked the job).
         run: pip install uv
-      - name: Install system deps
-        # ffmpeg backs the in-container moonshine audio decoder
-        # (packaging/toolbox/moonshine/moonshine_server.py). The redaction
-        # tests in tests/providers/test_moonshine_server.py exercise the
-        # real subprocess path; without ffmpeg they hit FileNotFoundError
-        # instead of the CalledProcessError the code catches.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install
         # --frozen: fail instead of silently re-resolving if uv.lock drifts
         # from pyproject.toml, so CI installs the exact pinned versions —

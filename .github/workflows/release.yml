@@ -17,11 +17,10 @@ name: Release
 #
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
-#   - rebuild + republish toolbox images. The release manifest mirrors the
-#     toolbox digests pinned in manifest.json at the moment of the tag. Those
-#     digests are refreshed by running scripts/update-toolbox-digests.sh on
-#     main before cutting the release (it queries ghcr.io and patches
-#     manifest.json in place); see docs/internal/release-manifest.md.
+#   - rebuild + republish toolbox images. Runner and toolbox images are built
+#     only in Hal0ai/hal0-runner-images. The release manifest mirrors the
+#     toolbox digests pinned in manifest.json at the moment of the tag; see
+#     docs/internal/release-manifest.md.
 #
 # See: docs/internal/release-manifest.md, src/hal0/updater/updater.py,
 #      scripts/release-prototype/verify-roundtrip.sh, PLAN §9 + §17.

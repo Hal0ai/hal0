@@ -8,6 +8,12 @@ The Runner Images grouping consequence below is amended by ADR-0027: the
 list groups by each runner's `tier`, not by which family resolves to an
 image.
 
+Amended (2026-10-11): the `packaging/runner/` and `packaging/toolbox/`
+recipes named below no longer live in this repository. Runner and toolbox
+images are built only in `Hal0ai/hal0-runner-images`; hal0 consumes the
+published digests through `manifest.json` and carries no image builder. The
+decisions here about the registry and the catalogue are unchanged.
+
 ## Context
 
 #2118 shipped `hal0-combined-upstream` (pristine `ggml-org/llama.cpp`,
