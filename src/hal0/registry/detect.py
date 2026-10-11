@@ -233,6 +233,34 @@ def unsupported_quant(quant: str | None = None, *names: str | None) -> str | Non
     return None
 
 
+#: The ggml tensor types the pinned llama.cpp (the ``standard`` and ``cpu``
+#: runners) can load: upstream ``enum ggml_type`` with the removed ids left
+#: out (4, 5: old Q4_2/Q4_3; 31-33 and 36-38: the retired repack types). A
+#: GGUF declaring any other type carries weights only a fork can read, such
+#: as the ROCmFPX family, whatever its file is called. Bump with the runner
+#: pin when upstream adds a type.
+KNOWN_GGML_TYPES: frozenset[int] = frozenset({0, 1, 2, 3, *range(6, 31), 34, 35, 39, 40})
+
+
+def unsupported_gguf_contents(path: str | Path) -> str | None:
+    """A fork-only label when a GGUF's own tensor types need a fork, else ``None``.
+
+    Reads the tensor-info block (:func:`hal0.registry.gguf_header.read_gguf_tensor_types`),
+    so a fork build renamed to a generic file name is still caught. An
+    unreadable file returns ``None``: the name-based check and llama.cpp's own
+    load error still apply.
+    """
+    from hal0.registry.gguf_header import read_gguf_tensor_types
+
+    types = read_gguf_tensor_types(path)
+    if not types:
+        return None
+    unknown = sorted(t for t in types if t not in KNOWN_GGML_TYPES)
+    if not unknown:
+        return None
+    return f"custom-weight GGUF (ggml type {', '.join(str(t) for t in unknown)})"
+
+
 def unsupported_quant_message(model: str, quant: str) -> str:
     """The one operator-facing refusal for a fork-only quant."""
     return (
@@ -621,6 +649,7 @@ __all__ = [
     "quant_from_file_type",
     "quant_from_filename",
     "quant_from_rocmfpx_filename",
+    "unsupported_gguf_contents",
     "unsupported_quant",
     "unsupported_quant_message",
 ]

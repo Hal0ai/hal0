@@ -1776,17 +1776,25 @@ def _guard_unsupported_quant(
 
     Raises :class:`UnprocessableEntity` (422) ``slot.unsupported_quant``.
     """
-    from hal0.registry.detect import unsupported_quant, unsupported_quant_message
+    from hal0.registry.detect import (
+        unsupported_gguf_contents,
+        unsupported_quant,
+        unsupported_quant_message,
+    )
 
     info = model_info or {}
     # File names only: a directory can be named for a fork family while
-    # holding a plain GGUF (the brain sft repo dir carries a plain F16).
+    # holding a plain GGUF (the brain sft repo dir carries a plain F16), and
+    # the model id is the operator's free choice.
+    model_path = Path(str(info.get("path") or ""))
     quant = unsupported_quant(
         str(info.get("quant") or ""),
-        Path(str(info.get("path") or "")).name,
+        model_path.name,
         str(info.get("hf_filename") or ""),
-        str(info.get("_model_key") or info.get("id") or ""),
     )
+    if quant is None and model_path.suffix.lower() == ".gguf" and model_path.is_file():
+        # A fork build renamed to a generic name: its tensor types tell.
+        quant = unsupported_gguf_contents(model_path)
     if quant is None:
         return
     slot_name = ""
