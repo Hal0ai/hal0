@@ -123,9 +123,9 @@ def test_serve_honours_the_restore_marker(tmp_hal0_home: str, monkeypatch, marke
     hal0_toml = _old_box()
     if marker:
         restore_marker().parent.mkdir(parents=True, exist_ok=True)
-        from hal0 import __version__
+        from hal0.updater.updater import installed_version
 
-        restore_marker().write_text(f"version={__version__}\n")
+        restore_marker().write_text(f"version={installed_version()}\n")
     monkeypatch.setattr(cli_main.uvicorn, "run", lambda *_a, **_kw: None)
     CliRunner().invoke(cli_main.app, ["serve"])
     converted = "vulkanfpx" not in hal0_toml.read_text(encoding="utf-8")

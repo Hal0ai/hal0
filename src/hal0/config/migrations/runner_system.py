@@ -246,6 +246,21 @@ def map_override_key(key: str, known: frozenset[str]) -> str | None:
     return "standard" if key in _OVERRIDE_DEFAULT_KEYS else None
 
 
+def _override_precedence(old: str, new: str) -> int:
+    """Which override wins when several converge on one key (lower wins).
+
+    The key's own name first, then ``rocmfpx``, then its ``vulkanfpx`` alias:
+    the old schema let a canonical-origin override beat its alias whatever
+    the TOML order, and the conversion keeps that.
+    """
+    old = old.strip()
+    if old == new:
+        return 0
+    if old == "rocmfpx":
+        return 1
+    return 2
+
+
 def _gone(key: str) -> str:
     """Why ``key`` maps to nothing, for a warning."""
     key = key.strip()
@@ -405,7 +420,12 @@ def plan_hal0_toml(
         return None
     converted: dict[str, Any] = {}
     changed = False
-    ordered = sorted(images.items(), key=lambda kv: str(kv[0]) not in known)
+
+    def _rank(item: tuple[Any, Any]) -> int:
+        new_key = map_override_key(str(item[0]), known)
+        return _override_precedence(str(item[0]), new_key) if new_key else 3
+
+    ordered = sorted(images.items(), key=_rank)
     for key, ref in ordered:
         new = map_override_key(str(key), known)
         if new is None:
@@ -496,8 +516,11 @@ def plan_env(
     """``api.env`` with ``HAL0_TOOLBOX_IMAGE_*`` converted, or ``None``.
 
     A converted line never duplicates a ``HAL0_RUNNER_IMAGE_<KEY>`` the file
-    already sets, nor another converted line: the first setting wins, an
-    identical duplicate is dropped quietly, a conflicting one loudly.
+    already sets, nor another converted line. Among old lines converging on
+    one key, the precedence the old schema applied wins regardless of line
+    order (:func:`_override_precedence`: the current key, then ``ROCMFPX``,
+    then its ``VULKANFPX`` alias); an identical duplicate is dropped quietly,
+    a conflicting one loudly.
     """
     lines = text.splitlines(keepends=True)
     present: dict[str, str] = {}
@@ -506,9 +529,32 @@ def plan_env(
         if match is not None:
             present.setdefault(match.group("key"), _env_value(match.group("value")))
 
+    preexisting = frozenset(present)
+    # The old line each new key keeps, chosen by precedence, not file order.
+    winners: dict[str, tuple[int, int]] = {}
+    for index, line in enumerate(lines):
+        match = _ENV_OLD_RE.match(line.rstrip("\r\n"))
+        if match is None:
+            continue
+        old = match.group("key").lower()
+        new = map_override_key(old, known)
+        value = _env_value(match.group("value"))
+        if new is None or not value or image_is_retired(value):
+            continue
+        rank = (_override_precedence(old, new), index)
+        if new.upper() not in winners or rank < winners[new.upper()]:
+            winners[new.upper()] = rank
+    for key, (_rank, index) in winners.items():
+        if key not in present:
+            match = _ENV_OLD_RE.match(lines[index].rstrip("\r\n"))
+            assert match is not None
+            present[key] = _env_value(match.group("value"))
+    claimed = {index for _rank, index in winners.values()}
+
     out: list[str] = []
+    written: set[str] = set()
     changed = False
-    for line in lines:
+    for index, line in enumerate(lines):
         match = _ENV_OLD_RE.match(line.rstrip("\r\n"))
         if match is None:
             out.append(line)
@@ -527,7 +573,7 @@ def plan_env(
             continue
         new_key = new.upper()
         new_name = f"HAL0_RUNNER_IMAGE_{new_key}"
-        if new_key in present:
+        if new_key in preexisting or index not in claimed or new_key in written:
             if present[new_key] == value:
                 actions.append(f"api.env: dropped {old_name} (duplicates {new_name})")
             else:
@@ -536,7 +582,7 @@ def plan_env(
                     f"{present[new_key]})"
                 )
             continue
-        present[new_key] = value
+        written.add(new_key)
         # The value is written back exactly as the operator quoted it: an
         # EnvironmentFile or a shell reads quoted and unquoted values
         # differently.
@@ -590,8 +636,10 @@ def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
             ) from exc
 
     def lookup(model_id: str) -> str | None:
+        # File and quant evidence only: the registry id is the operator's
+        # free choice and can name a fork family while the file is plain.
         path, quant, hf = rows.get(model_id, ("", "", ""))
-        return unsupported_quant(quant, Path(path).name, hf, model_id)
+        return unsupported_quant(quant, Path(path).name, hf)
 
     return lookup
 
@@ -784,9 +832,14 @@ def restore_marker() -> Path:
 
 
 def _running_version() -> str:
-    from hal0 import __version__
+    """The exact installed release (``current/VERSION``), nightly stamp included.
 
-    return str(__version__)
+    ``hal0.__version__`` carries only the base version on a nightly wheel, so
+    two nightlies of one base would share a marker.
+    """
+    from hal0.updater.updater import installed_version
+
+    return str(installed_version())
 
 
 def _restore_marker_active() -> bool:

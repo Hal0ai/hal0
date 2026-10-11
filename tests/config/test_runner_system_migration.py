@@ -258,7 +258,8 @@ def test_default_images_are_renamed_and_pruned() -> None:
     out = plan_hal0_toml(raw, known=KNOWN, actions=actions, warnings=warnings)
     assert out is not None
     assert out["slots"]["default_images"] == {
-        "standard": CURRENT,
+        # rocmfpx beats its vulkanfpx alias, whatever the order.
+        "standard": "ghcr.io/hal0ai/hal0-runner-standard:other",
         "flm": "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1",
         "kokoro": "docker.io/someone/kokoro:dev",
     }
@@ -277,6 +278,51 @@ def test_optional_runner_override_never_becomes_the_default_image(optional: str)
     out = plan_hal0_toml(raw, known=KNOWN, actions=[], warnings=warnings)
     assert out is not None and out["slots"]["default_images"] == {}
     assert any("special-build" in w and "was removed" in w for w in warnings)
+
+
+def test_the_canonical_override_wins_over_its_alias_whatever_the_order() -> None:
+    """The old schema let ``rocmfpx`` beat its ``vulkanfpx`` alias regardless
+    of TOML order; the conversion keeps that precedence."""
+    raw = {
+        "slots": {
+            "default_images": {
+                "vulkanfpx": "docker.io/me/alias:1",
+                "rocmfpx": "docker.io/me/canonical:1",
+            }
+        }
+    }
+    warnings: list[str] = []
+    out = plan_hal0_toml(raw, known=KNOWN, actions=[], warnings=warnings)
+    assert out is not None
+    assert out["slots"]["default_images"] == {"standard": "docker.io/me/canonical:1"}
+    assert any("alias:1" in w for w in warnings)
+
+
+def test_env_canonical_override_wins_over_its_alias_whatever_the_order() -> None:
+    text = (
+        "HAL0_TOOLBOX_IMAGE_VULKANFPX=docker.io/me/alias:1\n"
+        "HAL0_TOOLBOX_IMAGE_ROCMFPX=docker.io/me/canonical:1\n"
+    )
+    warnings: list[str] = []
+    out = plan_env(text, known=KNOWN, actions=[], warnings=warnings)
+    assert out == "HAL0_RUNNER_IMAGE_STANDARD=docker.io/me/canonical:1\n"
+    assert any("alias:1" in w for w in warnings)
+
+
+def test_migration_never_judges_the_operator_model_id(old_box: dict[str, Path]) -> None:
+    """A plain file under a fork-sounding registry id keeps its slot."""
+    conn = sqlite3.connect(str(paths.db_path()))
+    conn.execute(
+        "INSERT INTO model VALUES ('my-ROCmFPX', '/m/hal0-brain-sft-F16.gguf', 'F16', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+    _write_toml(
+        old_box["slots"] / "brain.toml",
+        {"name": "brain", "port": 8090, "model": {"default": "my-ROCmFPX"}},
+    )
+    migrate_runner_system()
+    assert _read_toml(old_box["slots"] / "brain.toml")["model"]["default"] == "my-ROCmFPX"
 
 
 def test_current_key_wins_over_a_renamed_one() -> None:
@@ -674,7 +720,7 @@ def test_a_marker_from_another_version_is_ignored(
     assert "version=" in restore_marker().read_text()
     # A different release now runs (the downgrade happened, or a later
     # upgrade): the marker no longer holds the boot conversion back.
-    monkeypatch.setattr(rs, "_running_version", lambda: "0.0.0-other")
+    monkeypatch.setattr(rs, "_running_version", lambda: "1.4.0-nightly.20990101")
     boot = migrate_runner_system(honour_restore_marker=True)
     assert not boot.skipped_for_restore
     assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
