@@ -1,4 +1,4 @@
-# hal0 legacy (demoted) profile definitions — the 8 workload variants the
+# hal0 legacy (demoted) profile definitions — the 5 workload variants the
 # seeded catalog carried until the profile-system overhaul.
 #
 # These are NOT seeds. The shipped seed set (seed_profiles.toml) is the
@@ -28,7 +28,7 @@
 # these predate but still honour.
 #
 # One deliberate deviation from "byte-identical": `--reasoning-format none`
-# is gone from the five non-thinking blocks (#2545). Upstream llama.cpp
+# is gone from the non-thinking blocks (#2545). Upstream llama.cpp
 # answers 400 "Failed to initialize samplers" to every response_format
 # request under it; `--reasoning off` alone already gives "no thinking".
 # The reasoning_format_none migration strips the pair from profiles that were
@@ -43,7 +43,7 @@ quant = ""
 
 [profile.dense]
 # Generic dense workload — model-agnostic. Family-specific kv-cache / sampler
-# overrides go in profile.<family>-dense (e.g. profile.chadrock-dense).
+# overrides go in a profile of their own.
 flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic dense workload · tuned for 128K ctx"
@@ -51,31 +51,11 @@ quant = ""
 
 [profile.moe]
 # Generic MoE workload — model-agnostic. Family-specific overrides in
-# profile.<family>-moe (e.g. profile.chadrock-moe).
+# a profile of their own.
 flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
 mtp = false
 intent = "Generic MoE workload · tuned for 32K ctx"
 quant = ""
-
-[profile.chadrock-dense]
-# Chadrock 27B dense coder recipe (from
-# jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp model card — the chadrock
-# launch card that the legacy profile.dense was distilled from). 27B
-# dense + ROCmFP4 + MTP-capable + mmproj (vision).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift -ctk q8_0 -ctv q8_0 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = true
-intent = "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx"
-quant = "ROCmFP4"
-
-[profile.chadrock-moe]
-# Chadrock 35B MoE Saber recipe (from
-# jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp model card — the Saber launch
-# card that the legacy profile.moe was distilled from). 35B MoE A3B +
-# ROCmFPX MoEQuality + MTP draft heads.
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift -ctk f16 -ctv f16 --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
-mtp = true
-intent = "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx"
-quant = "ROCmFP4"
 
 [profile.thinking]
 # Workload-level reasoning-ON profile. Use for reasoning-capable models
@@ -95,23 +75,3 @@ flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 
 mtp = false
 intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
 quant = ""
-
-[profile.promptforge]
-# CIRU ActiveFPX + PromptForge accelerated serving recipe (#1946's first
-# specialty distribution — see hal0.registry.specialty.SPECIALTY_KINDS).
-# `-fa on` is a DELIBERATE exception to this file's `-fa auto` rule above:
-# PromptForge's accelerated kernel path is a card requirement, not a
-# generic model/backend combination this template lands on unmodified —
-# the whole point of a specialty distribution is that its runner is built
-# a particular way, so a forced kernel is safe here where it would not be
-# on a generic seed. `--no-cache-prompt` matches the card's serving mode.
-# Device-agnostic like every other seed (fix round 1, #1946): the
-# ROCm-only enforcement lives where it already did — the promptforge
-# runner's supported_backends=("rocm",) and _guard_specialty_runner
-# (container.py) — pinning device_class/backend here would only have
-# duplicated that gate imprecisely (this is a template, not a hardware
-# placement decision; see ProfileConfig.device_class docs).
-flags = "-b 2048 -ub 2048 -fa on -ctk f16 -ctv f16 --no-cache-prompt"
-mtp = true
-quant = "ActiveFPX"
-intent = "CIRU ActiveFPX + PromptForge accelerated serving (#1946)"

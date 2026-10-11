@@ -277,15 +277,22 @@ def test_used_by_lists_bound_slots_id_keyed(tmp_hal0_home: str) -> None:
 
 def test_create_profile_with_runner(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
-    prof = cat.create("pf-setup", ProfileConfig(flags="-fa on", runner="promptforge"))
-    assert prof.runner == "promptforge"
-    assert cat.resolve("pf-setup").to_dict()["runner"] == "promptforge"
+    prof = cat.create("pf-setup", ProfileConfig(flags="-fa on", runner="cuda"))
+    assert prof.runner == "cuda"
+    assert cat.resolve("pf-setup").to_dict()["runner"] == "cuda"
 
 
-def test_create_profile_with_alias_runner_folds(tmp_hal0_home: str) -> None:
+@pytest.mark.parametrize("retired", ["vulkanfpx", "rocmfpx", "strix", "promptforge"])
+def test_create_profile_with_a_retired_runner_key_is_rejected(
+    tmp_hal0_home: str, retired: str
+) -> None:
+    """The runner registry has no aliases (ADR-0028): a retired key is an
+    unknown runtime, not something folded onto ``standard`` at save. The
+    one-shot ``hal0 migrate runners`` converts stored profiles instead."""
     cat = ProfileCatalog()
-    prof = cat.create("legacy", ProfileConfig(flags="", runner="vulkanfpx"))
-    assert prof.runner == "rocmfpx"  # RUNNER_ALIASES folded at save
+    with pytest.raises(UnprocessableEntity) as exc:
+        cat.create("legacy", ProfileConfig(flags="", runner=retired))
+    assert exc.value.code == "profiles.unknown_runner"
 
 
 def test_create_profile_unknown_runner_rejected(tmp_hal0_home: str) -> None:
@@ -326,14 +333,14 @@ def _stage_runner_profile(name: str, runner: str) -> None:
 
 def test_update_without_runner_leaves_the_stored_runtime(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
-    cat.create("keeper", ProfileConfig(flags="", runner="promptforge"))
-    assert cat.update("keeper", ProfilePatch(intent="renamed")).runner == "promptforge"
+    cat.create("keeper", ProfileConfig(flags="", runner="cuda"))
+    assert cat.update("keeper", ProfilePatch(intent="renamed")).runner == "cuda"
 
 
 def test_update_blank_runner_clears_to_auto(tmp_hal0_home: str) -> None:
     """#2186 — '' is the clear sentinel; None still means leave-unchanged."""
     cat = ProfileCatalog()
-    cat.create("clearme", ProfileConfig(flags="", runner="promptforge"))
+    cat.create("clearme", ProfileConfig(flags="", runner="cuda"))
     updated = cat.update("clearme", ProfilePatch(runner=""))
     assert updated.runner is None
     assert cat.resolve("clearme").runner is None
@@ -341,16 +348,18 @@ def test_update_blank_runner_clears_to_auto(tmp_hal0_home: str) -> None:
 
 def test_update_changing_the_runner_still_screens(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
-    cat.create("switcher", ProfileConfig(flags="", runner="promptforge"))
+    cat.create("switcher", ProfileConfig(flags="", runner="cuda"))
     with pytest.raises(UnprocessableEntity) as exc:
         cat.update("switcher", ProfilePatch(runner="nope"))
     assert exc.value.code == "profiles.unknown_runner"
 
 
-def test_update_changing_the_runner_folds_aliases(tmp_hal0_home: str) -> None:
+def test_update_changing_to_a_retired_runner_key_is_rejected(tmp_hal0_home: str) -> None:
     cat = ProfileCatalog()
     cat.create("folder", ProfileConfig(flags=""))
-    assert cat.update("folder", ProfilePatch(runner="vulkanfpx")).runner == "rocmfpx"
+    with pytest.raises(UnprocessableEntity) as exc:
+        cat.update("folder", ProfilePatch(runner="vulkanfpx"))
+    assert exc.value.code == "profiles.unknown_runner"
 
 
 def test_update_resubmitting_an_out_of_vocab_runner_is_grandfathered(
@@ -397,7 +406,7 @@ def test_runtime_family_runner_beats_legacy_name() -> None:
 
 
 def test_runtime_family_runner_beats_device_class() -> None:
-    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="rocmfpx")
+    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="standard")
     assert _runtime_family("custom", profile) == "llama-server"
 
 
@@ -469,18 +478,18 @@ def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path
     p = tmp_path / "profiles.toml"
     catalog = ProfileCatalog(path=p)
 
-    resolved = catalog.resolve("chadrock-moe")
-    assert resolved.name == "chadrock-moe"
+    resolved = catalog.resolve("dense")
+    assert resolved.name == "dense"
     assert resolved.seed is False
     # Persisted as a custom entry, so it is editable/deletable from here on.
-    assert "chadrock-moe" in load_profiles_config(p).profile
+    assert "dense" in load_profiles_config(p).profile
 
 
 def test_resolve_materializes_every_legacy_name_on_a_fresh_install(tmp_path: Path) -> None:
     """Adoption is once-per-NAME, not once-per-install.
 
     A fresh box ships three references to demoted profiles across different
-    files (agent.toml → chadrock-moe, coder.toml → coding, the saber seed
+    files (agent.toml → dense, coder.toml → coding, the saber seed
     stack → moe). The first resolve creates profiles.toml; if that alone shut
     adoption off, whichever slot happened to launch first would win and the
     rest would silently fall back to the device default.
@@ -488,11 +497,11 @@ def test_resolve_materializes_every_legacy_name_on_a_fresh_install(tmp_path: Pat
     p = tmp_path / "profiles.toml"
     catalog = ProfileCatalog(path=p)
 
-    for name in ("chadrock-moe", "coding", "moe"):
+    for name in ("dense", "coding", "moe"):
         assert catalog.resolve(name).name == name
 
     stored = load_profiles_config(p).profile
-    assert {"chadrock-moe", "coding", "moe"} <= set(stored)
+    assert {"dense", "coding", "moe"} <= set(stored)
 
 
 def test_materialized_legacy_profile_stays_deleted(tmp_path: Path) -> None:

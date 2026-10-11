@@ -3,26 +3,6 @@
   "schema_version": 1,
   "addons": [
     {
-      "name": "chadrock-dense",
-      "title": "Chadrock 27B dense coder",
-      "description": "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx",
-      "runtime_family": "llama-server",
-      "runner": null,
-      "checksum": "sha256:e53120ec1f3f16bf0ae587f8b96b1fe200d7ccd3d8be9f1378cb48a278d196eb",
-      "file": "chadrock-dense.hal0profile.json",
-      "min_hal0_version": "1.2.0"
-    },
-    {
-      "name": "chadrock-moe",
-      "title": "Chadrock 35B MoE Saber",
-      "description": "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx",
-      "runtime_family": "llama-server",
-      "runner": null,
-      "checksum": "sha256:899f96f6b3034cf6cf628ea14183a6f4b97467049524d7ed1d34639e535b0f41",
-      "file": "chadrock-moe.hal0profile.json",
-      "min_hal0_version": "1.2.0"
-    },
-    {
       "name": "chat-long-context",
       "title": "Long-context chat",
       "description": "Long-context chat · tuned for 128K ctx",
@@ -60,16 +40,6 @@
       "runner": null,
       "checksum": "sha256:a5a8fa871d7306111d86d22da75f31d98af8441440e39aa2cc0ccada4804cf4c",
       "file": "moe.hal0profile.json",
-      "min_hal0_version": "1.2.0"
-    },
-    {
-      "name": "promptforge",
-      "title": "CIRU ActiveFPX + PromptForge accelerated serving",
-      "description": "CIRU ActiveFPX + PromptForge accelerated serving (#1946)",
-      "runtime_family": "llama-server",
-      "runner": null,
-      "checksum": "sha256:98ec3d54902b378bd578ea78837e02169c4f6cc1b5c7014a04f36242bcd8ce74",
-      "file": "promptforge.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },
     {

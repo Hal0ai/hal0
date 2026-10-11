@@ -17,11 +17,9 @@
 # (rather than seeding a default model) because model-less +
 # surprise-download-free is the cleanest WS-E #1107 pattern.
 #
-# profile = chadrock-moe: agent slot is the chadrock 35B Saber anchor per
-# ADR-0023 + brain.toml docstring. The profile supplies the 35B-A3B
-# MoE/ROCmFPX/MTP recipe (sourced from the Saber launch card). Per-slot
-# [model].defaults.extra_args can override if the operator binds a different
-# model family.
+# profile = dense: the install-time agent offer is Qwen3.8 27B, a dense model
+# (ADR-0023, ADR-0027 decision 6). Per-slot [model].defaults.extra_args can
+# override if the operator binds a different model family.
 name = "agent"
 type = "llm"
 # gpu-rocm, not gpu-vulkan — a preference now, not a prohibition.
@@ -43,7 +41,7 @@ type = "llm"
 # or use the Device picker in the dashboard's slot drawer.
 device = "gpu-rocm"
 runtime = "container"
-profile = "chadrock-moe"
+profile = "dense"
 port = 8081
 n_gpu_layers = -1
 threads = 0

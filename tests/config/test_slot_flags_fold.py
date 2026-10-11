@@ -708,7 +708,7 @@ def test_without_a_template_gate_the_planner_folds_as_before():
 
 
 def test_a_slot_whose_profile_does_not_reach_launch_is_still_pending():
-    """Fit, resolved-name or specialty check fails: launch reads no template."""
+    """Fit or resolved-name check fails: launch reads no template."""
     plan = plan_slot_flags_fold(
         [_bare_slot("brain", "m")], {"brain": _BRAIN_FLAGS}, {"m": None}, template_applies=_never
     )
@@ -725,18 +725,16 @@ def test_one_misfit_slot_keeps_a_shared_model_planned():
     assert [f.model_id for f in plan.folds] == ["m"]
 
 
-# ── the write-free template classifier (launch-gate conditions 4 and 5) ──────
+# ── the write-free template classifier (launch-gate condition 4) ────────────
 
 
-def _classifier(profiles_toml: str, specialty: frozenset[str] = frozenset()):
+def _classifier(profiles_toml: str):
     import tomllib
 
     from hal0.config.migrations.slot_flags_fold import _profile_template_classifier
     from hal0.config.schema import ProfilesConfig
 
-    return _profile_template_classifier(
-        ProfilesConfig.model_validate(tomllib.loads(profiles_toml)), specialty
-    )
+    return _profile_template_classifier(ProfilesConfig.model_validate(tomllib.loads(profiles_toml)))
 
 
 def _rocm_slot(profile: str, model: str = "m") -> dict:
@@ -762,13 +760,6 @@ def test_classifier_rejects_a_profile_that_is_not_the_one_loaded():
     """The slot names a profile the catalog does not hold: launch falls back
     to the backend base, never this slot's profile."""
     assert _classifier(_FIT)(_rocm_slot("no-such-profile")) is False
-
-
-def test_classifier_rejects_a_specialty_model_whose_launch_may_be_degraded():
-    assert _classifier(_FIT, frozenset({"m"}))(_rocm_slot("tuned")) is False
-
-
-# ── --reasoning-format none is never folded (#2545) ───────────────────────────
 
 
 def test_fold_never_carries_reasoning_format_none_from_any_source():

@@ -486,15 +486,19 @@ class TestConfigEnrichment:
         assert e["binary"] is None
         assert e["image_pin"] is None
 
-    def test_binary_alias_spelling_folds_to_canonical(self) -> None:
-        # #2141: a persisted ``binary = "vulkanfpx"`` (pre-collapse TOML) must
-        # surface as the canonical ``rocmfpx`` so the edit drawer never sees
-        # the retired spelling — the launch path already heals it via
-        # ``get_runner``; the view lift is the surface that leaked. The next
-        # drawer Save then persists the canonical key naturally.
+    def test_binary_retired_alias_spelling_surfaces_verbatim(self) -> None:
+        # The runner registry has no aliases any more (ADR-0028): a leftover
+        # ``binary = "vulkanfpx"`` is just an unknown key, shown as stored for
+        # the drawer's out-of-vocab option. ``hal0 migrate runners`` rewrites
+        # it to ``standard`` on disk; the view never guesses.
         cfg = _llm_cfg(binary="vulkanfpx")
         e = config_enrichment([cfg])["chat"]
-        assert e["binary"] == "rocmfpx"
+        assert e["binary"] == "vulkanfpx"
+
+    def test_binary_current_key_surfaces_as_stored(self) -> None:
+        cfg = _llm_cfg(binary="standard")
+        e = config_enrichment([cfg])["chat"]
+        assert e["binary"] == "standard"
 
     def test_binary_unknown_key_still_surfaces_verbatim(self) -> None:
         # Genuinely unknown keys are NOT rewritten — the drawer's

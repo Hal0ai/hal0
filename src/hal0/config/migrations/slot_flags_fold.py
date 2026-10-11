@@ -23,9 +23,8 @@ full launch tune as plain text — the copy-on-stamp end state.
 One exception is already converged (#2476). A model with no tune text and no
 profile provenance (what every pull registers) still launches on its slot's
 profile flags through the ``slot_profile_template`` segment (#1787). A slot
-that carries no launch surface of its own, and whose profile resolves, fits the
-slot and is not suppressed by a specialty launch, is therefore skipped, not
-folded (see :func:`_launches_on_profile_template`). A fresh install's seeded
+that carries no launch surface of its own, and whose profile resolves and fits
+the slot, is therefore skipped, not folded (see :func:`_launches_on_profile_template`). A fresh install's seeded
 slots have exactly this shape, and counting them made every new box report
 itself as pre-v1.0. Anything that does not clearly match is planned as before.
 
@@ -363,18 +362,17 @@ def _launches_on_profile_template(
 ) -> bool:
     """True only when the slot clearly launches on its profile as the model's tune.
 
-    Mirrors all five conditions of the ``slot_profile_template`` launch gate in
+    Mirrors all four conditions of the ``slot_profile_template`` launch gate in
     :func:`hal0.providers.container._resolve_llama_scalars` (#1787):
 
     1. the slot names a profile;
     2. the bound model has no tune text (``defaults.extra_args``) and
     3. no profile provenance (``defaults.profile``);
-    4. the slot's profile is the one that resolves, and it fits the slot;
-    5. the model is not a degraded specialty launch.
+    4. the slot's profile is the one that resolves, and it fits the slot.
 
-    The first three are read here from the planner's own inputs. Conditions 4
-    and 5 need the profile catalog and the registry, so the caller supplies
-    them as ``template_applies`` (see :func:`_profile_template_classifier`).
+    The first three are read here from the planner's own inputs. Condition 4
+    needs the profile catalog, so the caller supplies it as
+    ``template_applies`` (see :func:`_profile_template_classifier`).
     Without it the answer is ``False``, which plans the fold as before.
 
     When all five hold, launch layers the profile's flags in under the model
@@ -450,8 +448,8 @@ def plan_slot_flags_fold(
             slot is such a lane goes to :attr:`FoldPlan.lane_skips` instead.
             ``None`` treats every slot as llama-server (every miss is work).
         template_applies: slot cfg -> True when the slot's profile resolves
-            from the loaded catalog, fits the slot, and the bound model is not a
-            specialty launch (see :func:`_launches_on_profile_template`). A
+            from the loaded catalog and fits the slot (see
+            :func:`_launches_on_profile_template`). A
             model whose every slot launches on its profile template is skipped
             as converged (#2476). ``None`` skips nothing on that ground.
 
@@ -606,24 +604,17 @@ def _provider_lane_classifier(profiles: Any) -> Callable[[Mapping[str, Any]], bo
     return _is_lane
 
 
-def _profile_template_classifier(
-    profiles: Any, specialty_models: frozenset[str]
-) -> Callable[[Mapping[str, Any]], bool]:
+def _profile_template_classifier(profiles: Any) -> Callable[[Mapping[str, Any]], bool]:
     """Build the planner's ``template_applies`` predicate from loaded state.
 
-    Answers launch-gate conditions 4 and 5 of
-    :func:`_launches_on_profile_template` without writing anything:
-
-    * the slot's profile resolves and fits the slot. Resolution uses the
+    Answers launch-gate condition 4 of :func:`_launches_on_profile_template`
+    without writing anything: the slot's profile resolves and fits the slot. Resolution uses the
       catalog ALREADY loaded here (a not-yet-adopted demoted seed is validated
       in memory, as :func:`_provider_lane_classifier` does), and fit is the
       pure :func:`hal0.slots.profile_adopt.resolved_profile_fits_slot`.
       ``profile_fits_slot`` itself is not called: it goes through
       ``ProfileCatalog.resolve()``, which can write profiles.toml, and this
       runs under the updater's dry run before any consent or backup.
-    * the bound model is not a specialty model. Whether a specialty launch is
-      degraded depends on the runner image, which this probe does not resolve,
-      so every specialty model is treated as "unclear" and planned as before.
 
     Any lookup or validation error answers ``False`` (plan as before).
     """
@@ -634,11 +625,7 @@ def _profile_template_classifier(
     adopted = profiles.adopted_legacy_names()
 
     def _applies(slot_cfg: Mapping[str, Any]) -> bool:
-        """True when the template gate's profile and specialty checks pass."""
-        model_tbl = slot_cfg.get("model")
-        model_id = model_tbl.get("default") if isinstance(model_tbl, Mapping) else None
-        if model_id and str(model_id) in specialty_models:
-            return False
+        """True when the template gate's profile check passes."""
         name = str(slot_cfg.get("profile") or "")
         if not name:
             return False
@@ -778,11 +765,11 @@ def collect_inputs() -> tuple[list[dict[str, Any]], dict[str, str], dict[str, An
 
 
 def _collect_inputs_and_profiles() -> tuple[
-    list[dict[str, Any]], dict[str, str], dict[str, Any], Any, Any, frozenset[str]
+    list[dict[str, Any]], dict[str, str], dict[str, Any], Any, Any
 ]:
-    """:func:`collect_inputs` plus the loaded profiles catalog and specialty model ids.
+    """:func:`collect_inputs` plus the loaded profiles catalog.
 
-    The last two feed the classifiers, which must stay write-free.
+    The catalog feeds the classifiers, which must stay write-free.
     """
     from hal0.config.loader import list_slots, load_profiles_config, load_slot_config
     from hal0.registry.store import ModelRegistry
@@ -800,15 +787,11 @@ def _collect_inputs_and_profiles() -> tuple[
 
     registry = ModelRegistry()
     model_defaults: dict[str, Any] = {}
-    specialty: set[str] = set()
     for m in registry.list():
         d = m.defaults
         model_defaults[m.id] = d.model_dump() if d is not None else None
-        meta = m.metadata if isinstance(m.metadata, Mapping) else {}
-        if meta.get("specialty"):
-            specialty.add(m.id)
 
-    return slots, profile_flags, model_defaults, registry, profiles, frozenset(specialty)
+    return slots, profile_flags, model_defaults, registry, profiles
 
 
 def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[str]:
@@ -822,13 +805,11 @@ def run_migration(*, deploy_window: bool = False, dry_run: bool = True) -> list[
     :class:`FoldPartiallyApplied` after a write pass that had to skip a model
     with no registry row (see :func:`apply_fold_plan`).
     """
-    slots, profile_flags, model_defaults, registry, profiles, specialty = (
-        _collect_inputs_and_profiles()
-    )
+    slots, profile_flags, model_defaults, registry, profiles = _collect_inputs_and_profiles()
     # Both classifiers read the catalog already loaded here; neither goes
     # through ProfileCatalog.resolve(), which can write (see the classifiers).
     is_lane = _provider_lane_classifier(profiles)
-    template_applies = _profile_template_classifier(profiles, specialty)
+    template_applies = _profile_template_classifier(profiles)
     plan = plan_slot_flags_fold(
         slots,
         profile_flags,

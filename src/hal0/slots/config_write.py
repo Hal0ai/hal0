@@ -120,9 +120,9 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
 
     prof_runner = getattr(prof, "runner", None) if prof is not None else None
     if prof_runner and "profile" in changed:
-        from hal0.runners import canonical_runner_key, get_runner
+        from hal0.runners import get_runner
 
-        key = canonical_runner_key(prof_runner)
+        key = prof_runner
         try:
             runner = get_runner(key)
         except Exception:
@@ -138,8 +138,8 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
                 # The lane is /dev/kfd AND a render node (#2313): the picker
                 # hides ROCm-only rows on a kfd-only box (#2354), so the apply
                 # must not accept one there either. Vulkan-lane feasibility
-                # stays with the existing spawn-time VULKAN_CAPABLE_IMAGE_REFS
-                # gate. Checked BEFORE any mutation so an infeasible apply
+                # stays with the existing spawn-time Vulkan-gated-pin check
+                # (hal0.runners.pins.vulkan_capable_refs). Checked BEFORE any mutation so an infeasible apply
                 # leaves ``scalars`` untouched (no partial write).
                 from hal0.providers._gpu import rocm_lane_present
 

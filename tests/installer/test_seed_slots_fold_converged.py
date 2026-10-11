@@ -25,7 +25,7 @@ from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _register_pulled(model_id: str, *, specialty: str | None = None) -> None:
+def _register_pulled(model_id: str) -> None:
     """Register *model_id* the way a pull does: no tune text, no provenance."""
     from hal0.registry.model import Model, ModelDefaults
     from hal0.registry.store import ModelRegistry
@@ -38,7 +38,7 @@ def _register_pulled(model_id: str, *, specialty: str | None = None) -> None:
             hf_repo=f"example/{model_id}",
             capabilities=["chat"],
             defaults=ModelDefaults(tokenizer_repo=f"example/{model_id}"),
-            metadata={"specialty": specialty} if specialty else {},
+            metadata={},
         )
     )
 
@@ -175,18 +175,6 @@ def test_profile_that_does_not_fit_the_slot_is_still_pending(tmp_hal0_home: str)
     pending = _pending_flag_lines()
     assert len(pending) == 1
     assert pending[0].startswith(f"would fold '{BRAIN_MODEL_DEFAULT}' <- profile='legacy'")
-
-
-def test_specialty_model_is_still_planned(tmp_hal0_home: str) -> None:
-    """A specialty launch may be degraded, which suppresses the template; the
-    probe cannot tell without the runner, so it plans the fold as before."""
-    _seed()
-    _register_pulled(BRAIN_MODEL_DEFAULT, specialty="promptforge")
-    _bind_brain()
-
-    pending = _pending_flag_lines()
-    assert len(pending) == 1
-    assert pending[0].startswith(f"would fold '{BRAIN_MODEL_DEFAULT}' <- profile='brain'")
 
 
 def test_profile_missing_from_the_catalog_is_not_reported_as_template(
