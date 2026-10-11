@@ -114,7 +114,12 @@ applying. Add those subsections to a version's section to surface them; see
   `publish`, `notes`, `build`, `runtime_family` and `supported_backends`, and
   their only badge is `pinned`. The catalogue reads `images.json` schema
   `hal0.runner-images.v2` only, and a sync prunes every row the catalogue no
-  longer lists, downloaded or not.
+  longer lists, downloaded or not, unless the catalogue is empty or holds an
+  entry this hal0 cannot read.
+- The privileged bench seam (`hal0-benchctl`) runs only an image the
+  installed release pins in `manifest.json` `runners`, matched exactly, with
+  the `/opt/hal0/bin/llama-bench` entrypoint. A `HAL0_RUNNER_IMAGE_<KEY>`
+  override image cannot be benchmarked through it.
 - `manifest.json` replaces `toolbox_images` and `_legacy_toolboxes` with the
   `runners` pin table (`_schema` `hal0.manifest.v2`). Its first pins are the
   hardware-gated `hal0-runner-*` images: `standard` and `cpu` on llama.cpp
@@ -133,14 +138,20 @@ applying. Add those subsections to a version's section to surface them; see
   automatically on `hal0 update`, on an `install.sh` re-run and when
   `hal0 serve` starts `hal0-api`, before config is validated. It never runs on
   import or from a read-only command. It rewrites slot runtimes, profile
-  runtimes, model `preferred_runner` values and `[slots].default_images` from
-  the old default keys (`rocmfpx`, `vulkanfpx`, `vulkan`, `rocm`) to
-  `standard`. Settings for the removed optional runners (`strix`,
-  `promptforge`, `upstream`) are dropped with a warning, never moved onto
-  `standard`. It removes image pins that name an image hal0 shipped and
+  runtimes and model `preferred_runner` values from the old default keys
+  (`rocmfpx`, `vulkanfpx`, `vulkan`, `rocm`) to `standard`. Image overrides
+  (`[slots].default_images`, `HAL0_TOOLBOX_IMAGE_*`) carry over to
+  `standard` only from `rocmfpx` and `vulkanfpx`; `vulkan` and `rocm`
+  overrides were already inert and are dropped with a warning. Settings for
+  the removed optional runners (`strix`, `promptforge`, `upstream`) are
+  dropped with a warning, never moved onto `standard`. Slots that name a
+  removed profile move to its replacement (`chadrock-moe` to `moe`,
+  `chadrock-dense` and `promptforge` to `dense`), and those definitions are
+  dropped from `profiles.toml`. It removes image pins that name an image hal0 shipped and
   retired (`ghcr.io/hal0ai/` `hal0-combined*`, `hal0-rocmfpx` (and `localhost/hal0-rocmfpx`), `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui` and `amd-strix-halo-toolboxes`, the two kyuz0 Strix Halo images (`amd-strix-halo-toolboxes`, `amd-strix-halo-comfyui`), and the floating `ghcr.io/ggml-org/llama.cpp:server-cuda` tag) and keeps and reports pins to any other image, such
-  as your own build. It renames `HAL0_TOOLBOX_IMAGE_*` lines in `api.env`
-  without duplicating a `HAL0_RUNNER_IMAGE_*` line already there. For a slot
+  as your own build. It renames `HAL0_TOOLBOX_IMAGE_*` lines in `api.env`,
+  keeping each value's quoting, without duplicating a `HAL0_RUNNER_IMAGE_*`
+  line already there. For a slot
   whose model is a ROCmFPX/IU4/ActiveFPX build, it keeps the slot's settings
   but unassigns the model. Every change and every dropped pin is logged. A
   file that does not parse is skipped with a warning and the rest still
@@ -148,10 +159,15 @@ applying. Add those subsections to a version's section to surface them; see
   `preferred_runner` values, to `/var/lib/hal0/backups/runners-<timestamp>.tar.gz`
   (mode 0600; the database itself is never copied). If a write fails it rolls
   back every write except `hal0.toml`, which stays converted so `hal0-api`
-  can start, and `hal0 update` reports the failure. Preview it with
+  can start, and `hal0 update` reports the failure; a file it could not put
+  back is named in the error, with the backup to restore from. When it
+  converts at `hal0-api` startup it also re-renders the slot units, so
+  restarted slots run the converted image. Preview it with
   `hal0 runner-images migrate` and run it with `--apply`. To downgrade, stop
-  `hal0-api` and run `hal0 runner-images migrate --restore <backup>`; the
-  API then does not convert again on boot, and the next `hal0 update` does.
+  `hal0-api` and run `hal0 runner-images migrate --restore <backup>`. The
+  restore leaves a marker that keeps this release's `hal0-api` from
+  converting again on boot; it holds only while the same hal0 version runs,
+  and the next `hal0 update` converts again.
 - Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
   from `/usr/share/hal0/skills` by `install.sh` and unlinked from
   `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list

@@ -101,8 +101,8 @@ hal0 slot create embed \
    `/dev/kfd` was never forwarded; an LLM slot on it must also resolve a
    Vulkan-validated runner image, or slot load refuses it by name. Either way
    the refusal is loud and immediate rather than a slot that serves nonsense.
-   On Strix Halo the Vulkan lane currently *measures faster* than ROCm — see
-   Switching a slot to the Vulkan lane, below. This sets the slot's
+   Which lane is faster depends on the model; `hal0 bench` measures both on
+   your box. This sets the slot's
    `device` field directly (`vulkan → gpu-vulkan`, `rocm → gpu-rocm`,
    `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
    (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the

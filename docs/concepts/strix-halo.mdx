@@ -119,7 +119,9 @@ point rather than an obstacle:
    ready. A lane that emits nonsense fails in about a second instead of
    serving it.
 
-Why you might switch: the measured prefill/decode advantage above. Why you
+Why you might switch: the Vulkan lane needs only a render node, so it serves
+a box where `/dev/kfd` was never forwarded, and on some models it may be the
+faster lane; measure yours with `hal0 bench` before you move a slot. Why you
 might not: MTP / speculative-decode profiles are tuned on the ROCm lane, so a
 slot leaning on those may do better where it is.
 

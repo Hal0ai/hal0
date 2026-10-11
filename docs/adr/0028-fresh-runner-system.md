@@ -80,7 +80,10 @@ fixtures, and convert existing installs with exactly one migration.
    `hal0-api` boot, during `hal0 update`, and on demand.
 7. **One conversion.** `hal0.config.migrations.runner_system` moves an install
    onto the new system. Only the old default keys (`rocmfpx`, `vulkanfpx`,
-   `vulkan`, `rocm`) map to `standard`; settings for the removed optional
+   `vulkan`, `rocm`) map a slot or profile runtime to `standard`, and only
+   `rocmfpx` / `vulkanfpx` carry an image override there (`vulkan` / `rocm`
+   overrides were already inert); slots on a removed profile move to its
+   generic replacement; settings for the removed optional
    runners (`strix`, `promptforge`, `upstream`) are dropped loudly, so a
    special build never becomes the default runner's image. Image pins to the
    exact repositories hal0 shipped and retired are removed; an operator's own
@@ -96,8 +99,9 @@ fixtures, and convert existing installs with exactly one migration.
    can start, and is idempotent. `hal0 runner-images migrate` previews it and
    `--apply` runs it. `--restore` is for a downgrade: with `hal0-api`
    stopped, it writes back only the files the conversion owns, refuses an
-   archive another user could have written, and leaves a marker so the API's
-   boot-time conversion stands down until the next update.
+   archive another user could have written, and leaves a marker, keyed to
+   the running hal0 version, so the API's boot-time conversion stands down
+   while that version runs.
 
 ## Options considered
 

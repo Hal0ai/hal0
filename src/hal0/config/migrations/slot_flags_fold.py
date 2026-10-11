@@ -375,7 +375,7 @@ def _launches_on_profile_template(
     ``template_applies`` (see :func:`_profile_template_classifier`).
     Without it the answer is ``False``, which plans the fold as before.
 
-    When all five hold, launch layers the profile's flags in under the model
+    When all four hold, launch layers the profile's flags in under the model
     tune, so the fold would add nothing of substance: it is equivalent up to
     the tokens the template screens out (``--jinja`` and the slot hardware
     flags), and those are better left out of a model tune anyway.
