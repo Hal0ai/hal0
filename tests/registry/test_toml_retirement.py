@@ -178,3 +178,31 @@ def test_failed_rename_raises_and_the_retry_succeeds(monkeypatch: pytest.MonkeyP
     assert retire_registry_toml()["outcome"] == "retired"
     assert not path.exists()
     assert ModelRegistry().list() == []
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+@pytest.mark.parametrize("with_toml", [False, True])
+def test_undeletable_lock_only_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, with_toml: bool
+) -> None:
+    """The stale lock is clutter, not data: failing to delete it must never
+    fail the post-activation migrations."""
+    if with_toml:
+        _write_toml("a")
+    _lock_path().parent.mkdir(parents=True, exist_ok=True)
+    _lock_path().write_text("")
+    real_unlink = Path.unlink
+
+    def _unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == "registry.toml.lock":
+            raise PermissionError("read-only")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+
+    result = retire_registry_toml()
+
+    assert result["outcome"] == ("retired" if with_toml else "absent")
+    assert not _toml_path().exists()
+    assert _lock_path().exists()
+    assert "registry.toml_lock_unlink_failed" in caplog.text

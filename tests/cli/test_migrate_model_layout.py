@@ -424,6 +424,30 @@ def test_cli_dry_run_does_not_write(tmp_path: Path) -> None:
     assert not canonical_root.exists() or not any(canonical_root.iterdir())
 
 
+def test_cli_aborts_when_the_registry_cannot_be_read(tmp_path: Path) -> None:
+    """Fail closed: planning against an empty registry would misclassify
+    every registered model by its source directory."""
+    mount_root, canonical_root, _registry = _make_tree(tmp_path)
+    _touch_file(mount_root / "local" / "m.gguf")
+    args = [
+        "model-layout",
+        "--apply",
+        "--mount-root",
+        str(mount_root),
+        "--canonical-root",
+        str(canonical_root),
+    ]
+    with patch(
+        "hal0.cli.migrate_commands._read_registry",
+        side_effect=RuntimeError("database is locked"),
+    ):
+        result = runner.invoke(migrate_app, args)
+
+    assert result.exit_code == 1
+    assert "cannot read the model registry" in result.output
+    assert not canonical_root.exists() or not any(canonical_root.iterdir())
+
+
 def test_cli_apply_creates_symlinks(tmp_path: Path) -> None:
     mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")

@@ -16,9 +16,10 @@ every ``install.sh`` re-run, and the boot-time safety net):
 1. If ``registry.toml`` exists, copy it to
    ``/var/lib/hal0/backups/registry-toml-<UTC>/`` and rename it to
    ``registry.toml.retired-<UTC>``, so nothing can ever read it again.
-2. Delete the dead ``registry.toml.lock`` sidecar.
+2. Delete the dead ``registry.toml.lock`` sidecar (best-effort: a failure
+   only logs a warning).
 
-It fails loud: a failed backup or rename raises
+It fails loud on the TOML itself: a failed backup or rename raises
 :class:`RegistryConversionError` and leaves the file in place, so the next
 run retries. The database is never touched.
 """
@@ -57,6 +58,20 @@ def _free_path(base: Path) -> Path:
     return candidate
 
 
+def _drop_stale_lock(lock_file: Path, job_id: str | None) -> None:
+    """Delete the dead ``registry.toml.lock`` sidecar. Best-effort.
+
+    Nothing takes this lock any more, so a leftover file is harmless clutter:
+    failing to remove it logs a warning and never fails the migrations.
+    """
+    try:
+        lock_file.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning(
+            "registry.toml_lock_unlink_failed job_id=%s path=%s err=%s", job_id, lock_file, exc
+        )
+
+
 def retire_registry_toml(*, job_id: str | None = None) -> dict[str, Any]:
     """Back up and rename a leftover ``registry.toml``. Idempotent.
 
@@ -71,7 +86,7 @@ def retire_registry_toml(*, job_id: str | None = None) -> dict[str, Any]:
     lock_file = paths.registry_dir() / _LOCK_NAME
 
     if not toml_file.exists():
-        lock_file.unlink(missing_ok=True)
+        _drop_stale_lock(lock_file, job_id)
         return {"outcome": "absent"}
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -97,7 +112,7 @@ def retire_registry_toml(*, job_id: str | None = None) -> dict[str, Any]:
             f"backed up {toml_file} but could not rename it: {exc}",
             details={"path": str(toml_file), "backup_dir": str(backup_dir), "reason": str(exc)},
         ) from exc
-    lock_file.unlink(missing_ok=True)
+    _drop_stale_lock(lock_file, job_id)
 
     result: dict[str, Any] = {
         "outcome": "retired",

@@ -242,8 +242,25 @@ file is still there, the post-update migrations (and the same pass at every
 `hal0-api` start) retire it without importing it — every supported release
 already imported it into SQLite on first boot. They copy it to
 `/var/lib/hal0/backups/registry-toml-<UTC>/` and rename it to
-`registry.toml.retired-<UTC>`. hal0 never reads the renamed file. To keep a copy of the catalog, back up `hal0.db`;
-`hal0 model list --json` prints it.
+`registry.toml.retired-<UTC>`. hal0 never reads the renamed file.
+
+`hal0 model list --json` prints the catalog. To keep a copy of it, snapshot
+`hal0.db` with SQLite's online backup. The database runs in WAL mode, so a
+plain file copy of a live `hal0.db` can miss committed changes still in the
+`-wal` file:
+
+```sh
+sudo sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"
+```
+
+Without the `sqlite3` CLI, Python's built-in module does the same:
+
+```sh
+sudo python3 -c "import sqlite3
+s = sqlite3.connect('/var/lib/hal0/hal0.db')
+d = sqlite3.connect('/root/hal0-db-backup.db')
+s.backup(d); d.close(); s.close()"
+```
 
 ## The registry on disk
 

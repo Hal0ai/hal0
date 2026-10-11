@@ -45,9 +45,13 @@ applying. Add those subsections to a version's section to surface them; see
   backup restore), the whole `hal0 registry` group (`registry import`,
   `registry export`, `registry import-sqlite`) and the `--registry` flag of
   `hal0 migrate model-layout` (which now reads the SQLite registry) are
-  removed. `hal0 model list --json` shows the catalog; back up
-  `/var/lib/hal0/hal0.db` to keep a copy. A `registry.toml` left over from
-  before the SQLite registry is retired on update (see Migrations).
+  removed. `hal0 model list --json` shows the catalog. To keep a copy, take
+  a consistent snapshot with SQLite's online backup, not a plain copy of the
+  live WAL database:
+  `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the
+  Pull and register models guide has a Python equivalent for boxes without
+  the `sqlite3` CLI). A `registry.toml` left over from before the SQLite
+  registry is retired on update (see Migrations).
 
 ### Migrations
 

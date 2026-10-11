@@ -219,18 +219,16 @@ class MigrationReport:
 
 
 def _read_registry() -> dict[str, dict[str, Any]]:
-    """Return the model registry as ``{model_id: entry}``, or ``{}``.
+    """Return the model registry as ``{model_id: entry}``.
 
-    An unreadable registry yields ``{}`` so a fresh-install box still runs
-    cleanly — every on-disk model just falls into the "imported, classify
-    manually" bucket.
+    An empty registry (a fresh install) yields ``{}``, and every on-disk
+    model then falls into the "imported, classify manually" bucket. A
+    registry that cannot be READ raises: planning against ``{}`` would
+    misclassify every registered model by its source directory.
     """
-    try:
-        from hal0.registry.store import ModelRegistry
+    from hal0.registry.store import ModelRegistry
 
-        return {m.id: m.model_dump(mode="python") for m in ModelRegistry().list()}
-    except Exception:
-        return {}
+    return {m.id: m.model_dump(mode="python") for m in ModelRegistry().list()}
 
 
 def _pick_capability(caps: Iterable[Any]) -> str | None:
@@ -659,8 +657,17 @@ def model_layout(
     """
     _safe_canonical_root(canonical_root)
 
+    try:
+        registry = _read_registry()
+    except Exception as exc:
+        console.print(
+            f"[red]error[/red]: cannot read the model registry ({exc}); "
+            "refusing to plan the layout without it."
+        )
+        raise typer.Exit(1) from exc
+
     report = plan_migration(
-        registry=_read_registry(),
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=force,
