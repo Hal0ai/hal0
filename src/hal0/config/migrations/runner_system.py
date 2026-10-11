@@ -19,18 +19,24 @@ slot ``image_pin`` / ``image`` (top level or    removed when it names an image h
                                                 operator's own build) is kept and reported
 slot whose ``[model].default`` is a fork-only   model unassigned; the rest of the slot
 quant (ROCmFPX family, IU4, ActiveFPX)          config is kept; reported as a WARNING
-``[slots].default_images``                      retired DEFAULT keys renamed to
-                                                ``standard``; overrides for retired
-                                                optional runners, unknown keys and
-                                                retired images dropped, loudly
+slot ``profile`` naming a removed profile       its replacement (chadrock-moe → moe,
+(chadrock-dense, chadrock-moe, promptforge)     chadrock-dense / promptforge → dense)
+``[slots].default_images``                      ``rocmfpx`` / ``vulkanfpx`` renamed to
+                                                ``standard``; ``vulkan`` / ``rocm``
+                                                (inert before), retired optional
+                                                runners, unknown keys and retired
+                                                images dropped, loudly
 profile ``runner``                              as for slot ``binary``
 profile ``image`` naming a retired image        removed
+removed profile definitions in profiles.toml    dropped, loudly
 model ``preferred_runner`` (registry column)    as for slot ``binary``; gone → NULL
-``HAL0_TOOLBOX_IMAGE_<KEY>`` in ``api.env``     ``HAL0_RUNNER_IMAGE_<NEWKEY>`` for a
-                                                current or retired DEFAULT key, deduped
+``HAL0_TOOLBOX_IMAGE_<KEY>`` in ``api.env``     ``HAL0_RUNNER_IMAGE_<NEWKEY>`` (value
+                                                kept verbatim) for a current key or
+                                                ``rocmfpx`` / ``vulkanfpx``, deduped
                                                 against existing lines; dropped, loudly,
-                                                for a retired optional runner, an
-                                                unknown key or a retired image
+                                                for ``vulkan`` / ``rocm``, a retired
+                                                optional runner, an unknown key or a
+                                                retired image
 ==============================================  ==========================================
 
 The runner-image catalogue table is recreated by SQL migration
@@ -62,8 +68,10 @@ Contract:
 * **Restore is for downgrades.** :func:`restore_backup` puts the owned files
   and the ``preferred_runner`` values back, then leaves a marker so the
   API's own boot-time conversion does not immediately redo the conversion.
-  The next ``hal0 update`` or an explicit ``--apply`` converts again and
-  clears the marker.
+  The marker records the hal0 version that wrote it and holds only while that
+  version runs. The next ``hal0 update`` or an explicit ``--apply`` converts
+  again and clears it. A failed rollback names every file it could not put
+  back and the backup to restore from.
 """
 
 from __future__ import annotations
@@ -106,6 +114,21 @@ RETIRED_DEFAULT_KEYS: dict[str, str] = {
 #: them named a special build, and turning it into ``standard``'s override
 #: would make every default slot run it.
 RETIRED_OPTIONAL_KEYS = frozenset({"strix", "promptforge", "upstream"})
+
+#: The keys whose IMAGE OVERRIDE (``[slots].default_images``,
+#: ``HAL0_TOOLBOX_IMAGE_<KEY>``) carries over to ``standard``: the default
+#: runner of the release this upgrades from. ``vulkan`` and ``rocm`` overrides
+#: were already inert there, so a leftover custom value under them is dropped
+#: rather than promoted to every default slot's image.
+_OVERRIDE_DEFAULT_KEYS = frozenset({"rocmfpx", "vulkanfpx"})
+
+#: Profiles this release removed (fork-specific flag sets for removed
+#: runners), and the generic profile a slot that named one moves to.
+RETIRED_PROFILES: dict[str, str] = {
+    "chadrock-dense": "dense",
+    "chadrock-moe": "moe",
+    "promptforge": "dense",
+}
 
 #: The exact repositories hal0 shipped and retired (normalized, see
 #: :func:`normalize_repo`). A pin to one of them is debris from the old runner
@@ -211,10 +234,25 @@ def map_runner_key(key: str, known: frozenset[str]) -> str | None:
     return RETIRED_DEFAULT_KEYS.get(key)
 
 
+def map_override_key(key: str, known: frozenset[str]) -> str | None:
+    """The fresh-system key an image OVERRIDE under ``key`` carries over to.
+
+    Stricter than :func:`map_runner_key`: only the previous default runner's
+    keys (``rocmfpx``, ``vulkanfpx``) carry an override to ``standard``.
+    """
+    key = key.strip()
+    if key in known:
+        return key
+    return "standard" if key in _OVERRIDE_DEFAULT_KEYS else None
+
+
 def _gone(key: str) -> str:
     """Why ``key`` maps to nothing, for a warning."""
-    if key.strip() in RETIRED_OPTIONAL_KEYS:
+    key = key.strip()
+    if key in RETIRED_OPTIONAL_KEYS:
         return f"the optional {key!r} runner was removed"
+    if key in RETIRED_DEFAULT_KEYS:
+        return f"a {key!r} override was already inert before this release"
     return f"{key!r} names no runner"
 
 
@@ -312,6 +350,12 @@ def plan_slot(
                 table["binary"] = new
                 actions.append(f"slot {name}: runtime {binary!r} -> {new!r}")
                 changed = True
+        profile = table.get("profile")
+        if isinstance(profile, str) and profile.strip() in RETIRED_PROFILES:
+            replacement = RETIRED_PROFILES[profile.strip()]
+            table["profile"] = replacement
+            actions.append(f"slot {name}: profile {profile!r} (removed) -> {replacement!r}")
+            changed = True
         for key in ("image_pin", "image"):
             ref = table.get(key)
             if not (isinstance(ref, str) and ref.strip()):
@@ -363,7 +407,7 @@ def plan_hal0_toml(
     changed = False
     ordered = sorted(images.items(), key=lambda kv: str(kv[0]) not in known)
     for key, ref in ordered:
-        new = map_runner_key(str(key), known)
+        new = map_override_key(str(key), known)
         if new is None:
             warnings.append(
                 f"[slots].default_images: dropped {key!r} = {ref!r} ({_gone(str(key))})"
@@ -409,6 +453,13 @@ def plan_profiles(
         return None
     out = _deep_copy(raw)
     changed = False
+    for name in [n for n in out["profile"] if n in RETIRED_PROFILES]:
+        del out["profile"][name]
+        warnings.append(
+            f"profile {name}: removed (hal0 no longer ships it); slots that named it "
+            f"move to {RETIRED_PROFILES[name]!r}"
+        )
+        changed = True
     for name, prof in out["profile"].items():
         if not isinstance(prof, dict):
             continue
@@ -465,8 +516,9 @@ def plan_env(
         changed = True
         old_key = match.group("key")
         old_name = f"HAL0_TOOLBOX_IMAGE_{old_key}"
-        value = _env_value(match.group("value"))
-        new = map_runner_key(old_key.lower(), known)
+        raw_value = match.group("value").strip()
+        value = _env_value(raw_value)
+        new = map_override_key(old_key.lower(), known)
         if new is None:
             warnings.append(f"api.env: dropped {old_name}={value} ({_gone(old_key.lower())})")
             continue
@@ -485,7 +537,10 @@ def plan_env(
                 )
             continue
         present[new_key] = value
-        out.append(f"{match.group('export') or ''}{new_name}={value}\n")
+        # The value is written back exactly as the operator quoted it: an
+        # EnvironmentFile or a shell reads quoted and unquoted values
+        # differently.
+        out.append(f"{match.group('export') or ''}{new_name}={raw_value}\n")
         actions.append(f"api.env: {old_name} -> {new_name}")
     return "".join(out) if changed else None
 
@@ -728,6 +783,30 @@ def restore_marker() -> Path:
     return paths.var_lib() / RESTORE_MARKER_NAME
 
 
+def _running_version() -> str:
+    from hal0 import __version__
+
+    return str(__version__)
+
+
+def _restore_marker_active() -> bool:
+    """Is there a restore marker written under the hal0 version running now?
+
+    The marker records the version that ran the restore. It holds only while
+    that same version runs: once another release is installed (the
+    downgrade, or a later upgrade), it is stale and ignored.
+    """
+    try:
+        text = restore_marker().read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "version":
+            return value.strip() == _running_version()
+    return False
+
+
 def _clear_restore_marker() -> None:
     with contextlib.suppress(FileNotFoundError):
         restore_marker().unlink()
@@ -756,7 +835,7 @@ def migrate_runner_system(
     from hal0.config.loader import hal0_config_file_lock
     from hal0.slot_config import slot_write_lock
 
-    if honour_restore_marker and restore_marker().exists():
+    if honour_restore_marker and _restore_marker_active():
         report = RunnerMigrationReport(dry_run=True, skipped_for_restore=True)
         log.warning(
             "migrate.runner_system.skipped_after_restore",
@@ -903,16 +982,27 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
         if runner_changes:
             _set_preferred_runners(db_path, [(c.model_id, c.new) for c in runner_changes])
     except Exception as exc:
+        not_restored: list[str] = []
         for w in reversed(done):
-            with contextlib.suppress(Exception):
+            try:
                 _replace_file(w.path, w.original)
+            except Exception as restore_exc:
+                not_restored.append(f"{w.path} ({restore_exc})")
         kept_toml = " (hal0.toml stays converted)" if toml_write is not None else ""
         log.error(
-            "migrate.runner_system.failed_restored",
+            "migrate.runner_system.failed",
             job_id=job_id,
             error=str(exc),
             backup=str(backup),
+            not_restored=not_restored,
         )
+        if not_restored:
+            raise RunnerMigrationError(
+                f"runner-system migration failed ({exc}) and these files could NOT be "
+                f"restored: {', '.join(not_restored)}. Stop hal0-api and run "
+                f"`hal0 runner-images migrate --restore {backup}`",
+                details={"error": str(exc), "backup": str(backup), "not_restored": not_restored},
+            ) from exc
         raise RunnerMigrationError(
             f"runner-system migration failed and was rolled back{kept_toml}: {exc} "
             f"(backup: {backup})",
@@ -944,6 +1034,22 @@ def _api_is_active() -> bool:
     return proc.returncode == 0
 
 
+def _trusted_archive_owners() -> set[int]:
+    """root, the caller, and the hal0 service user (``hal0-api`` writes backups).
+
+    Safe because :func:`_read_archive` accepts only the members this migration
+    owns, whoever wrote the archive.
+    """
+    owners = {0, os.getuid()}
+    try:
+        import pwd
+
+        owners.add(pwd.getpwnam("hal0").pw_uid)
+    except (KeyError, ImportError):
+        pass
+    return owners
+
+
 def _check_archive(archive: Path) -> None:
     """Refuse an archive another user could have planted or edited."""
     try:
@@ -952,9 +1058,9 @@ def _check_archive(archive: Path) -> None:
         raise RunnerMigrationError(f"cannot read {archive}: {exc}") from exc
     if not stat.S_ISREG(st.st_mode):
         raise RunnerMigrationError(f"{archive} is not a regular file; refusing to restore it")
-    if st.st_uid not in {0, os.getuid()}:
+    if st.st_uid not in _trusted_archive_owners():
         raise RunnerMigrationError(
-            f"{archive} is owned by uid {st.st_uid}, not root or you; refusing to restore it"
+            f"{archive} is owned by uid {st.st_uid}, not root, you or hal0; refusing to restore it"
         )
     if st.st_mode & 0o022:
         raise RunnerMigrationError(f"{archive} is group- or world-writable; refusing to restore it")
@@ -1065,7 +1171,11 @@ def restore_backup(archive: Path | str) -> list[str]:
 
     marker = restore_marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
-    _replace_file(marker, f"{archive}\n".encode(), default_mode=0o644)
+    _replace_file(
+        marker,
+        f"version={_running_version()}\narchive={archive}\n".encode(),
+        default_mode=0o644,
+    )
     return restored
 
 

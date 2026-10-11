@@ -302,6 +302,7 @@ def test_never_raises_on_internal_failure(monkeypatch: pytest.MonkeyPatch) -> No
         upgrade_memory_engine_venv=True,
         converge_companions=True,
         honour_restore_marker=False,
+        rerender_after_runner_conversion=False,
     ):
         raise RuntimeError("disk full")
 
@@ -314,7 +315,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False: (
+        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False: (
             1,
             2,
         ),
@@ -338,9 +339,11 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
         upgrade_memory_engine_venv=True,
         converge_companions=True,
         honour_restore_marker=False,
+        rerender_after_runner_conversion=False,
     ):
         seen["skip_catalogue_sync"] = skip_catalogue_sync
         seen["honour_restore_marker"] = honour_restore_marker
+        seen["rerender"] = rerender_after_runner_conversion
         return (1, 1)
 
     monkeypatch.setattr(updater_module, "run_post_activation_migrations", _fake_migrations)
@@ -349,3 +352,4 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["skip_catalogue_sync"] is True
     # The boot-time safety net stands down after a restore (a downgrade).
     assert seen["honour_restore_marker"] is True
+    assert seen["rerender"] is True

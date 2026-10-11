@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from hal0.config.migrations.runner_system import RunnerMigrationReport
 from hal0.errors import Hal0Error
 from hal0.updater.updater import check_outstanding_migrations, run_post_activation_migrations
 
@@ -33,6 +34,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     def _runner_system(*, dry_run=False, job_id=None, honour_restore_marker=False):
         calls["runner_system"].append(job_id)
         calls.setdefault("restore_marker", []).append(honour_restore_marker)
+        return RunnerMigrationReport(dry_run=dry_run)
 
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
@@ -93,7 +95,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
 
 def test_runner_conversion_runs_before_schema_and_registry_retirement(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
 ) -> None:
     """ADR-0028: the runner conversion rewrites raw TOML that config
     validation would reject, so it must run before the schema migration and
@@ -101,8 +103,8 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
     order: list[str] = []
     monkeypatch.setattr(
         "hal0.config.migrations.runner_system.migrate_runner_system",
-        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: order.append(
-            "runner_system"
+        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: (
+            order.append("runner_system") or RunnerMigrationReport(dry_run=False)
         ),
     )
     monkeypatch.setattr(
@@ -115,6 +117,36 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
     )
     run_post_activation_migrations(job_id="j0")
     assert order == ["runner_system", "schema", "registry_toml"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "applied", "rerendered"),
+    [
+        (True, True, 1),
+        (True, False, 0),
+        (False, True, 0),
+    ],
+)
+def test_a_boot_conversion_rerenders_the_slot_units(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    flag: bool,
+    applied: bool,
+    rerendered: int,
+) -> None:
+    """A conversion the boot safety net applies must reach the units systemd
+    restarts slots from; an update re-renders every unit itself."""
+    report = RunnerMigrationReport(dry_run=False, backup="/b.tar.gz" if applied else None)
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda **_kw: report,
+    )
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "hal0.updater.updater.rerender_slot_units", lambda *, job_id=None: calls.append(job_id)
+    )
+    run_post_activation_migrations(job_id="j", rerender_after_runner_conversion=flag)
+    assert len(calls) == rerendered
 
 
 def test_an_update_converts_even_after_a_restore(_stub_every_pass: dict[str, list[Any]]) -> None:

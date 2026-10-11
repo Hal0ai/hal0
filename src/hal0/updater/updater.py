@@ -1779,6 +1779,7 @@ def run_post_activation_migrations(
     upgrade_memory_engine_venv: bool = True,
     converge_companions: bool = True,
     honour_restore_marker: bool = False,
+    rerender_after_runner_conversion: bool = False,
 ) -> tuple[int, int]:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1843,6 +1844,11 @@ def run_post_activation_migrations(
     :func:`check_outstanding_migrations` passes ``True`` here; an actual
     update passes the default ``False``.
 
+    ``rerender_after_runner_conversion`` re-renders the slot units when the
+    runner-system conversion changed something, so a running or restarted slot
+    picks up the converted image and runner. :func:`check_outstanding_migrations`
+    passes ``True``; an update re-renders every unit after this call anyway.
+
     ``honour_restore_marker`` makes the runner-system conversion stand down
     after an operator restored its backup (a downgrade).
     :func:`check_outstanding_migrations`, the API's boot-time safety net,
@@ -1872,7 +1878,12 @@ def run_post_activation_migrations(
     # here leaves the box exactly as it was and the caller reports it.
     from hal0.config.migrations.runner_system import migrate_runner_system
 
-    migrate_runner_system(job_id=job_id, honour_restore_marker=honour_restore_marker)
+    conversion = migrate_runner_system(job_id=job_id, honour_restore_marker=honour_restore_marker)
+    if rerender_after_runner_conversion and conversion.backup:
+        try:
+            rerender_slot_units(job_id=job_id)
+        except Exception as exc:
+            log.warning("updater.runner_conversion_rerender_failed", job_id=job_id, error=str(exc))
 
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
 
@@ -1996,6 +2007,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
             job_id=job_id,
             skip_catalogue_sync=True,
             honour_restore_marker=True,
+            rerender_after_runner_conversion=True,
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
             converge_companions=False,

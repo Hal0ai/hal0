@@ -251,12 +251,19 @@ def _convert_runner_system_before_boot() -> None:
     the raw files first. This is the only API-startup call site: importing
     :mod:`hal0.api` never converts anything. ``hal0 update`` normally ran it
     already and this is a no-op. A restore marker (a downgrade) makes it stand
-    down. A failure is logged loudly and never stops the API from starting.
+    down. When it does convert, it re-renders the slot units, so a running slot
+    restarted by systemd picks up the converted image instead of the unit the
+    failed update rendered from the old config. A failure is logged loudly and
+    never stops the API from starting.
     """
     try:
         from hal0.config.migrations.runner_system import migrate_runner_system
 
-        migrate_runner_system(honour_restore_marker=True)
+        report = migrate_runner_system(honour_restore_marker=True)
+        if report.backup:
+            from hal0.updater.updater import rerender_slot_units
+
+            rerender_slot_units(job_id="serve")
     except Exception as exc:
         structlog.get_logger(__name__).error(
             "hal0.runner_system_migration_failed",

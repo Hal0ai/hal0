@@ -200,6 +200,35 @@ def test_fork_quant_model_is_unassigned_and_the_slot_kept() -> None:
     assert any("ROCmFP4" in w and "unassigned" in w for w in warnings)
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [("chadrock-moe", "moe"), ("chadrock-dense", "dense"), ("promptforge", "dense")],
+)
+def test_slot_on_a_removed_profile_moves_to_its_replacement(old: str, new: str) -> None:
+    out, actions, _w = _slot({"name": "agent", "profile": old, "binary": "standard"})
+    assert out is not None and out["profile"] == new
+    assert any(old in a for a in actions)
+    assert _slot(out)[0] is None
+
+
+def test_removed_profile_definitions_are_dropped_from_profiles_toml() -> None:
+    raw = {
+        "profile": {
+            "chadrock-moe": {"runner": "rocmfpx", "flags": "--x"},
+            "promptforge": {"flags": "--y"},
+            "mine": {"flags": "--z"},
+        },
+        "legacy_seeds_migrated": True,
+    }
+    warnings: list[str] = []
+    out = plan_profiles(raw, known=KNOWN, actions=[], warnings=warnings)
+    assert out is not None
+    assert out["profile"] == {"mine": {"flags": "--z"}}
+    assert out["legacy_seeds_migrated"] is True
+    assert len(warnings) == 2
+    assert plan_profiles(out, known=KNOWN, actions=[], warnings=[]) is None
+
+
 def test_converted_slot_is_a_noop_on_rerun() -> None:
     out, _a, _w = _slot({"binary": "rocmfpx", "image_pin": "ghcr.io/hal0ai/hal0-combined:0826"})
     assert out is not None
@@ -300,10 +329,49 @@ def test_env_overrides_are_renamed_or_dropped() -> None:
         "# api.env\n"
         "HF_TOKEN=abc\n"
         f"HAL0_RUNNER_IMAGE_STANDARD={CURRENT}\n"
-        "export HAL0_RUNNER_IMAGE_CPU=ghcr.io/hal0ai/hal0-runner-cpu:b1-r1\n"
+        'export HAL0_RUNNER_IMAGE_CPU="ghcr.io/hal0ai/hal0-runner-cpu:b1-r1"\n'
     )
     assert len(warnings) == 2
     assert plan_env(out, known=KNOWN, actions=[], warnings=[]) is None
+
+
+def test_env_value_keeps_its_quoting() -> None:
+    """An EnvironmentFile or a shell reads quoted and unquoted values
+    differently, so the converted line keeps the operator's quoting."""
+    text = "HAL0_TOOLBOX_IMAGE_ROCMFPX='docker.io/me/a:1 # not a comment'\n"
+    out = plan_env(text, known=KNOWN, actions=[], warnings=[])
+    assert out == "HAL0_RUNNER_IMAGE_STANDARD='docker.io/me/a:1 # not a comment'\n"
+
+
+@pytest.mark.parametrize("key", ["VULKAN", "ROCM"])
+def test_env_inert_default_keys_are_dropped_not_promoted(key: str) -> None:
+    """vulkan/rocm overrides were inert on the release this upgrades from; a
+    leftover custom value must not become every default slot's image."""
+    warnings: list[str] = []
+    out = plan_env(
+        f"HAL0_TOOLBOX_IMAGE_{key}=docker.io/me/x:1\n",
+        known=KNOWN,
+        actions=[],
+        warnings=warnings,
+    )
+    assert out == ""
+    assert any("inert" in w for w in warnings)
+
+
+@pytest.mark.parametrize("key", ["vulkan", "rocm"])
+def test_default_images_inert_default_keys_are_dropped(key: str) -> None:
+    raw = {"slots": {"default_images": {key: "docker.io/me/x:1"}}}
+    warnings: list[str] = []
+    out = plan_hal0_toml(raw, known=KNOWN, actions=[], warnings=warnings)
+    assert out is not None and out["slots"]["default_images"] == {}
+    assert any("inert" in w for w in warnings)
+
+
+@pytest.mark.parametrize("old", ["vulkan", "rocm"])
+def test_binary_vulkan_and_rocm_still_become_standard(old: str) -> None:
+    out, _a, warnings = _slot({"binary": old})
+    assert out is not None and out["binary"] == "standard"
+    assert not warnings
 
 
 def test_env_optional_runner_override_is_dropped() -> None:
@@ -512,6 +580,27 @@ def test_failure_restores_every_write_but_keeps_hal0_toml(
     assert _preferred_runners()["fpx"] == "rocmfpx"
 
 
+def test_a_failed_rollback_names_the_files_and_the_backup(
+    old_box: dict[str, Path], monkeypatch
+) -> None:
+    real = rs._replace_file
+    calls = {"n": 0}
+
+    def flaky(path: Path, data: bytes, **kw: Any) -> None:
+        calls["n"] += 1
+        # 1 = hal0.toml, 2 = first slot, 3 = second slot fails, 4 = the
+        # rollback of the first slot fails too.
+        if calls["n"] in (3, 4):
+            raise OSError("disk full")
+        real(path, data, **kw)
+
+    monkeypatch.setattr(rs, "_replace_file", flaky)
+    with pytest.raises(RunnerMigrationError, match="could NOT be restored") as info:
+        migrate_runner_system()
+    assert "--restore" in str(info.value)
+    assert info.value.details["not_restored"]
+
+
 def test_unparseable_file_is_skipped_and_the_rest_converted(old_box: dict[str, Path]) -> None:
     broken = old_box["slots"] / "broken.toml"
     broken.write_text("name = [", encoding="utf-8")
@@ -574,6 +663,41 @@ def test_restore_leaves_a_marker_the_boot_conversion_honours(
     again = migrate_runner_system()
     assert again.changed
     assert not restore_marker().exists()
+
+
+def test_a_marker_from_another_version_is_ignored(
+    old_box: dict[str, Path], api_down: None, monkeypatch
+) -> None:
+    report = migrate_runner_system()
+    assert report.backup
+    restore_backup(report.backup)
+    assert "version=" in restore_marker().read_text()
+    # A different release now runs (the downgrade happened, or a later
+    # upgrade): the marker no longer holds the boot conversion back.
+    monkeypatch.setattr(rs, "_running_version", lambda: "0.0.0-other")
+    boot = migrate_runner_system(honour_restore_marker=True)
+    assert not boot.skipped_for_restore
+    assert _read_toml(old_box["slots"] / "agent.toml")["binary"] == "standard"
+
+
+def test_restore_accepts_an_archive_owned_by_the_hal0_user(
+    old_box: dict[str, Path], api_down: None, monkeypatch
+) -> None:
+    """hal0-api writes backups as the hal0 user; root restoring one is fine,
+    because only owned members are ever written."""
+    import os
+    import pwd
+
+    report = migrate_runner_system()
+    assert report.backup
+    owner = os.getuid()
+    monkeypatch.setattr(rs.os, "getuid", lambda: owner + 4242)
+
+    class _Pw:
+        pw_uid = owner
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: _Pw() if name == "hal0" else None)
+    assert restore_backup(report.backup)
 
 
 def test_restore_refuses_while_the_api_runs(old_box: dict[str, Path], monkeypatch) -> None:

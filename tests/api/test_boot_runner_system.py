@@ -80,6 +80,24 @@ def test_serve_converts_before_importing_the_api(tmp_hal0_home: str, monkeypatch
     )
 
 
+def test_serve_rerenders_the_slot_units_after_converting(tmp_hal0_home: str, monkeypatch) -> None:
+    import hal0.cli.main as cli_main
+    import hal0.updater.updater as updater_mod
+
+    _old_box()
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        updater_mod, "rerender_slot_units", lambda *, job_id=None: calls.append(job_id)
+    )
+    monkeypatch.setattr(cli_main.uvicorn, "run", lambda *_a, **_kw: None)
+    CliRunner().invoke(cli_main.app, ["serve"])
+    assert calls == ["serve"]
+
+    # Already converted: nothing to re-render.
+    CliRunner().invoke(cli_main.app, ["serve"])
+    assert calls == ["serve"]
+
+
 def test_serve_starts_even_when_the_conversion_fails(tmp_hal0_home: str, monkeypatch) -> None:
     import hal0.cli.main as cli_main
     from hal0.config.migrations import runner_system
@@ -105,7 +123,9 @@ def test_serve_honours_the_restore_marker(tmp_hal0_home: str, monkeypatch, marke
     hal0_toml = _old_box()
     if marker:
         restore_marker().parent.mkdir(parents=True, exist_ok=True)
-        restore_marker().write_text("x\n")
+        from hal0 import __version__
+
+        restore_marker().write_text(f"version={__version__}\n")
     monkeypatch.setattr(cli_main.uvicorn, "run", lambda *_a, **_kw: None)
     CliRunner().invoke(cli_main.app, ["serve"])
     converted = "vulkanfpx" not in hal0_toml.read_text(encoding="utf-8")
