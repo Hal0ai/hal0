@@ -100,7 +100,7 @@ export const ROW_SECTIONS = [
   { key: "defaults", label: "Default runtimes", hint: "Every box is expected to have these." },
   { key: "optional", label: "Optional runtimes", hint: "Opt-in, for a specific model or device." },
   { key: "frozen", label: "Frozen runtimes", hint: "Kept only for models already on slots; no updates." },
-  { key: "other", label: "Other images", hint: "Not a hal0 runtime; reachable only through a slot's image pin." },
+  { key: "other", label: "Other images", hint: "Not a hal0 runtime; used only through a slot's image pin or a launch-image override." },
 ];
 
 // Mutable/floating-pointer tag names — GHCR re-pushes these on every CI
@@ -440,7 +440,7 @@ function FamilyStrip({ families }) {
     const name = clearTitle || fam;
     setClearFamily(null);
     setDefault.mutate({ family: fam, ref: null }, {
-      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name}: override cleared — the release image applies`, "info"),
+      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${name}: override cleared — the next source applies (env override, then manifest pin, then the release image)`, "info"),
       onError: (e) => window.__hal0Toast && window.__hal0Toast(`Clear failed — ${e?.message || "see logs"}`, "err"),
     });
   };
@@ -468,7 +468,7 @@ function FamilyStrip({ families }) {
                 data-testid={`ri-clear-default-${f.family}`}
                 disabled={setDefault.isPending}
                 onClick={() => setClearFamily(f.family)}
-                title="Remove the operator override — the release image applies again"
+                title="Remove the operator override — the next source applies (env override, then manifest pin, then the release image)"
               >clear</button>
             )}
           </div>
@@ -488,9 +488,9 @@ function FamilyStrip({ families }) {
         title={`Clear ${clearTitle} override`}
         message={
           clearRow
-            ? `Remove the ${clearTitle} override (${clearRow.effective_ref}) and fall back to the image this release ships.` +
+            ? `Remove the ${clearTitle} override (${clearRow.effective_ref}) and fall back to the next source: an env override, then the manifest pin, then the image this release ships.` +
               (drifters.length
-                ? ` Slots using it now: ${drifters.join(", ")} — they pick up the release image on their next restart.`
+                ? ` Slots launching it now: ${drifters.join(", ")}. Those that follow the launch image pick up the fallback on their next restart; a slot with its own image pin stays where it is.`
                 : " No slot currently references it.")
             : ""
         }
@@ -713,7 +713,7 @@ function RunnerCard({ image, familyTitles = {} }) {
         <p data-testid="ri-card-blurb" style={{fontSize: 12.5, color: "var(--fg-2)", lineHeight: 1.5, padding: "0 16px"}}>{image.blurb}</p>
       ) : !image.tier && (
         <p data-testid="ri-card-blurb" style={{fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5, padding: "0 16px"}}>
-          Not a hal0 runtime. A slot can only use this image through its image pin.
+          Not a hal0 runtime. A slot uses this image only through its own image pin or a launch-image override.
         </p>
       )}
 
@@ -870,7 +870,7 @@ function RunnerCard({ image, familyTitles = {} }) {
         message={
           `Make ${defaultRef} the image ${familyTitle} slots launch ([slots].default_images override).` +
           (inUseBy.length
-            ? ` Slots on this image now: ${inUseBy.join(", ")} — they move to the new tag on their next restart.`
+            ? ` Slots launching this image now: ${inUseBy.join(", ")}. Those that follow the launch image move to the new tag on their next restart; a slot with its own image pin stays where it is.`
             : " No slot currently references this image.")
         }
         confirmLabel="Set launch image"

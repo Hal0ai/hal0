@@ -151,6 +151,8 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
     expect(host.textContent).toContain('Set ROCmFPX launch image')
     expect(host.textContent).toContain('ghcr.io/hal0ai/hal0-combined:0824')
     expect(host.textContent).toContain('agent, utility')
+    // in_use_by can include image_pin slots, which do not follow the change.
+    expect(host.textContent).toContain('a slot with its own image pin stays where it is')
 
     // Confirm → exactly one PUT /api/settings mutation with the family +
     // selected ref; the dialog closes.

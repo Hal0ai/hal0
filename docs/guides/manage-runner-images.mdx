@@ -114,8 +114,9 @@ that runtime's tier:
 - **Optional runtimes** — opt-in runtimes for a specific model or device.
 - **Frozen runtimes** — shown only when a runtime is frozen (none today).
 - **Other images** — catalogued images that no registry runtime ships, such
-  as the legacy per-backend toolboxes. They are not runtimes; a slot can use
-  one only through its `image_pin`.
+  as the legacy per-backend toolboxes. They are not runtimes; a slot uses
+  one only through its own `image_pin`, or when a launch-image override
+  (`[slots].default_images`) points a runtime at it.
 
 Rows sort by title within each group. A row's tier comes from the runtime,
 never from which image a runtime currently launches, so an optional runtime
@@ -125,9 +126,11 @@ stays under **Optional runtimes** even though it has its own launch image.
 the image:tag its slots launch, and where that choice comes from (`release`
 for the image this hal0 release ships, `override`, `env` or `manifest`). An
 `override` line gets a **clear** button that removes the
-`[slots].default_images` entry and falls back to the release image; the
-confirm dialog names the slots currently on that image, since they pick up
-the change on their next restart, not immediately.
+`[slots].default_images` entry, so the runtime falls back to the next
+source: an `HAL0_TOOLBOX_IMAGE_<KEY>` env override, then the manifest pin,
+then the release image. The confirm dialog names the slots currently on that
+image; those that follow the launch image pick up the change on their next
+restart, not immediately, and a slot with its own `image_pin` does not move.
 
 Each row in the list shows:
 
@@ -179,11 +182,8 @@ unpinned — the newest tag by `sort_tags_newest_first`: all-digit tags
 then everything else in registry order.
 
 The card's **tag** dropdown lets you pick any tag in `available_tags` for
-display and for **Set as … launch image**, but the **Pull** button always pulls
-the row's headline tag — it is disabled with an explanatory tooltip if you've
-picked a different one in the dropdown. Pulling a specific non-headline tag
-isn't wired up in the dashboard; see "Pulling a specific tag" further down
-this page for the API-level workaround.
+display, for **Set as … launch image**, and for **Pull**: the button pulls
+whichever tag is selected (its label shows `:<tag>`), headline or not.
 
 ### The launch images strip and #2043
 
@@ -307,9 +307,9 @@ runner_image.pull_conflict`.
 
 #### Pulling a specific tag
 
-The pull route does accept `?tag=<tag>` for any tag in the row's
-`available_tags` — the dashboard just never sends it. If you need a
-non-headline tag pulled onto disk right now, call the API directly:
+The pull route accepts `?tag=<tag>` for any tag in the row's
+`available_tags`; the dashboard sends it when you pick a non-headline tag
+before clicking **Pull**. From the API:
 
 ```sh
 curl -X POST "http://localhost:8080/api/runner-images/hal0ai%2Fhal0-toolbox-cpu/pull?tag=v1.2.3"
@@ -323,8 +323,9 @@ An unknown tag 404s as `runner_image.tag_not_available`.
 <TabItem label="Dashboard">
 On the card, pick the tag you want (if not the headline), then **Set as
 `<runtime>` launch image**. The confirm dialog names every slot currently
-running that image — none of them restart immediately; they pick up the
-new launch image on their next (re)start. This writes
+running that image — none of them restart immediately. Those that follow
+the launch image pick it up on their next (re)start; a slot with its own
+`image_pin` stays on its pin. This writes
 `{"slots": {"default_images": {"<family>": "<image>:<tag>"}}}` through the
 existing settings deep-merge, i.e. `[slots].default_images.<family>` in
 `hal0.toml`.
@@ -337,7 +338,8 @@ curl -X PUT http://localhost:8080/api/settings \
 ```
 
 Send an explicit `null` value for the family to clear the override and fall
-back to the release image (the deep-merge has no key-delete idiom, so
+back to the next source — env override, manifest pin, then the release image
+(the deep-merge has no key-delete idiom, so
 `null` is the documented clear signal) — an empty string is rejected.
 </TabItem>
 </Tabs>
