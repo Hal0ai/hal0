@@ -1,12 +1,11 @@
-"""``RunnerImage`` — one catalogued container image row.
+"""``RunnerImage`` — one runner-image catalogue row.
 
-Deliberately small and JSON-native (unlike ``hal0.registry.model.Model``):
-the runner-image catalogue has no launch-time recipe/defaults to validate,
-just discovery facts (GHCR tag/digest/size) plus optional display metadata
-merged in from the ``Hal0ai/hal0-runner-images`` repo's ``images.json``
-manifest (schema ``hal0.runner-images.v1``). Every field except ``id``/
-``image``/``tag`` is optional — a package discovered on GHCR with no
-matching ``images.json`` entry is still a fully valid row.
+One row per hal0 runner, keyed by the runner key (``standard``, ``cpu``, …).
+Facts come from two places merged at sync time
+(:mod:`hal0.registry.runner_image_sync`): the runner-images repo's
+``images.json`` (schema ``hal0.runner-images.v2``: title, summary, image,
+tag, digest, backends, lanes_gated, family, tier) and an anonymous GHCR probe
+(size, per-tag digests, build provenance labels).
 """
 
 from __future__ import annotations
@@ -24,58 +23,37 @@ class RunnerImageTag(BaseModel):
     size_bytes: int | None = None
     last_seen: str | None = None
     #: llama.cpp build provenance read from the image config blob's OCI
-    #: labels during sync (``hal0.registry.runner_image_sync``):
-    #: ``{"source_repo": str|None, "revision": str|None,
-    #: "patch_count": int|None}``. ``None`` when the blob probe failed,
-    #: hasn't run, or the image carries none of the labels — consumers
-    #: render nothing in that case rather than a placeholder.
+    #: labels during sync: ``{"source_repo", "revision", "patch_count"}``.
+    #: ``None`` when the probe failed or the image carries none of them.
     provenance: dict[str, Any] | None = None
 
 
 class RunnerImage(BaseModel):
-    """A single runner image catalogue entry.
-
-    ``id`` is the stable key: the GHCR repo path with the registry host
-    stripped (e.g. ``hal0ai/hal0-toolbox-cpu`` for
-    ``ghcr.io/hal0ai/hal0-toolbox-cpu``) — this is what routes address and
-    what ``images.json``'s ``image``/``manifest_key`` fields are matched
-    against during sync.
-    """
+    """A single runner-image catalogue entry. ``id`` is the runner key."""
 
     id: str
     image: str
-    tag: str = "latest"
+    tag: str
     digest: str | None = None
     size_bytes: int | None = None
-    #: Every tag the GHCR ``tags/list`` probe saw, newest first (see
-    #: ``hal0.registry.runner_image_sync.sort_tags_newest_first``). ``[]``
-    #: when the probe failed or hasn't run — the headline ``tag`` above
-    #: keeps its own semantics (images.json pin, else newest, else latest).
+    title: str | None = None
+    summary: str | None = None
+    #: Runtime the image's entrypoint serves (``hal0.runners.RuntimeFamily``).
+    family: str | None = None
+    #: ``"default"`` | ``"optional"`` as the catalogue publishes it.
+    tier: str | None = None
+    #: Backends the image's runner binary can execute.
+    backends: list[str] = Field(default_factory=list)
+    #: Backends the hardware gate passed for ``digest``.
+    lanes_gated: list[str] = Field(default_factory=list)
+    #: Tags the GHCR ``tags/list`` probe saw, newest first.
     available_tags: list[str] = Field(default_factory=list)
-
-    #: Per-tag digest facts (catalogue v3) — transport-only, populated by the
-    #: store from runner_image_tag; never JSON-encoded into the row itself.
+    #: Per-tag digest facts — transport-only, populated by the store from
+    #: ``runner_image_tag``; never JSON-encoded into the row itself.
     tags: list[RunnerImageTag] = Field(default_factory=list)
 
-    # images.json (hal0.runner-images.v1) fields — None when unmatched.
-    manifest_key: str | None = None
-    ownership: str | None = None  # "owned" | "referenced"
-    publish: str | None = None  # "ci" | "external" | "manual"
-    notes: str | None = None
-    build: dict[str, Any] | None = None
-    #: Runtime the image's entrypoint serves — same vocabulary as
-    #: ``hal0.runners.RuntimeFamily`` (``"llama-server"``, ``"comfyui"``, …).
-    #: ``None`` when the matched ``images.json`` entry predates the field (or
-    #: no entry matched at all) — consumers fall back to their own assumption
-    #: rather than treating absence as a veto.
-    runtime_family: str | None = None
-    #: Backends the image's runner binary can execute (``"rocm"``/``"vulkan"``/
-    #: ``"cpu"``/…). Same semantics as ``hal0.runners.Runner.supported_backends``:
-    #: metadata, not a selector, and ``[]`` means "not declared" (no veto).
-    supported_backends: list[str] = Field(default_factory=list)
-
-    # Local download state — set by hal0.registry.runner_pull once an
-    # image has actually been pulled onto this host.
+    # Local download state — set by hal0.registry.runner_pull once an image
+    # has actually been pulled onto this host.
     local_path: str | None = None
     downloaded_at: str | None = None
 

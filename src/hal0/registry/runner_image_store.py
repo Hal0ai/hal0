@@ -29,37 +29,42 @@ log = logging.getLogger(__name__)
 
 _DB_FILENAME = "hal0.db"
 
-#: Row columns that map 1:1 onto RunnerImage fields (everything except
-#: ``build``/``extra``, which are JSON-encoded columns).
+#: Row columns that map 1:1 onto RunnerImage fields (the list fields are
+#: JSON-encoded columns, handled separately).
 _SCALAR_FIELDS = (
     "id",
     "image",
     "tag",
     "digest",
     "size_bytes",
-    "manifest_key",
-    "ownership",
-    "publish",
-    "notes",
-    "runtime_family",
+    "title",
+    "summary",
+    "family",
+    "tier",
     "local_path",
     "downloaded_at",
     "discovered_at",
     "updated_at",
 )
 
+#: List fields stored as JSON text columns: model field -> column.
+_JSON_LIST_FIELDS = {
+    "backends": "backends_json",
+    "lanes_gated": "lanes_gated_json",
+    "available_tags": "available_tags_json",
+}
+
 
 def _row_to_runner_image(row: sqlite3.Row) -> RunnerImage:
-    build_raw = row["build_json"]
     extra_raw = row["extra"]
-    tags_raw = row["available_tags_json"]
-    backends_raw = row["supported_backends_json"]
+    lists = {
+        field: (json.loads(row[col]) if row[col] else [])
+        for field, col in _JSON_LIST_FIELDS.items()
+    }
     return RunnerImage(
         **{k: row[k] for k in _SCALAR_FIELDS},
-        build=json.loads(build_raw) if build_raw else None,
         extra=json.loads(extra_raw) if extra_raw else {},
-        available_tags=json.loads(tags_raw) if tags_raw else [],
-        supported_backends=json.loads(backends_raw) if backends_raw else [],
+        **lists,
     )
 
 
@@ -102,12 +107,10 @@ def _runner_image_to_row(image: RunnerImage, *, discovered_at: str | None = None
     row: dict[str, Any] = {k: getattr(image, k) for k in _SCALAR_FIELDS if k != "discovered_at"}
     row["discovered_at"] = discovered_at or image.discovered_at or now
     row["updated_at"] = now
-    row["build_json"] = json.dumps(image.build) if image.build is not None else None
     row["extra"] = json.dumps(image.extra) if image.extra else None
-    row["available_tags_json"] = json.dumps(image.available_tags) if image.available_tags else None
-    row["supported_backends_json"] = (
-        json.dumps(image.supported_backends) if image.supported_backends else None
-    )
+    for field, col in _JSON_LIST_FIELDS.items():
+        value = getattr(image, field)
+        row[col] = json.dumps(value) if value else None
     return row
 
 
@@ -248,8 +251,19 @@ class RunnerImageStore:
             self._ensure_migrated(conn)
             with tx(conn):
                 existing = conn.execute(
-                    "SELECT discovered_at FROM runner_image WHERE id = ?", (image.id,)
+                    "SELECT discovered_at, local_path, downloaded_at FROM runner_image "
+                    "WHERE id = ?",
+                    (image.id,),
                 ).fetchone()
+                if existing is not None and image.local_path is None:
+                    # A sync row carries no download state; keep what a pull
+                    # recorded (clearing it is set_local_state's job).
+                    image = image.model_copy(
+                        update={
+                            "local_path": existing["local_path"],
+                            "downloaded_at": existing["downloaded_at"],
+                        }
+                    )
                 row = _runner_image_to_row(
                     image,
                     discovered_at=existing["discovered_at"] if existing is not None else None,
@@ -294,14 +308,13 @@ class RunnerImageStore:
         return self.get(image_id)
 
     def prune_absent(self, keep_ids: set[str]) -> int:
-        """Delete rows whose id is not in ``keep_ids`` and has no local pull.
+        """Delete every row whose id is not in ``keep_ids``.
 
-        Called by the sync job after a *successful* images.json fetch so
-        removed/renamed manifest entries (e.g. the repo-path ids used
-        before images.json carried per-entry ``id`` short names) don't
-        linger as stale duplicates. Rows with ``local_path`` set are kept —
-        a downloaded image stays visible even if delisted upstream.
-        Returns the number of rows deleted.
+        Called by the sync job after a *successful* ``images.json`` fetch:
+        the catalogue lists exactly the runners hal0 can launch, so a row the
+        catalogue no longer carries goes, downloaded or not. Images already in
+        podman's store are a separate fact and are not touched. Returns the
+        number of rows deleted.
         """
         with self._connect() as conn:
             self._ensure_migrated(conn)
@@ -309,13 +322,17 @@ class RunnerImageStore:
                 if keep_ids:
                     placeholders = ", ".join("?" for _ in keep_ids)
                     cur = conn.execute(
-                        f"DELETE FROM runner_image WHERE local_path IS NULL "
-                        f"AND id NOT IN ({placeholders})",
+                        f"DELETE FROM runner_image WHERE id NOT IN ({placeholders})",
                         tuple(keep_ids),
                     )
                 else:
-                    cur = conn.execute("DELETE FROM runner_image WHERE local_path IS NULL")
+                    cur = conn.execute("DELETE FROM runner_image")
                 removed = int(cur.rowcount)
+                # runner_image_tag's FK cascade only fires with foreign_keys
+                # on; delete orphans explicitly so it never depends on that.
+                conn.execute(
+                    "DELETE FROM runner_image_tag WHERE image_id NOT IN (SELECT id FROM runner_image)"
+                )
         if removed:
             self._notify_change()
         return removed

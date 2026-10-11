@@ -1,41 +1,21 @@
-"""Runner-image discovery — GHCR anonymous probe + ``images.json`` merge.
+"""Runner-image catalogue sync — ``images.json`` v2 merged with a GHCR probe.
 
-Two independent fetches, merged per ``images.json`` entry — row id is the
-entry's ``id`` short name, falling back to the GHCR repo path
-(feat/runner-image-catalogue, corrected against the original handoff doc —
-see PR description):
+The runner-images repo publishes ``images.json`` (schema
+``hal0.runner-images.v2``): one entry per runner, ``id`` = the hal0 runner
+key, plus ``title``, ``summary``, ``image`` (registry repo), ``tag`` and
+``digest`` (the gated pin), ``backends``, ``lanes_gated``, ``family`` and
+``tier``. A sync writes exactly one catalogue row per entry whose ``id`` is a
+runner in :data:`hal0.runners.RUNNER_IMAGES` and prunes every other row.
 
-1. **GHCR discovery.** Anonymous-token tag/digest resolution against known
-   packages (the same flow already proven out by
-   ``hal0.cli.doctor_commands._ghcr_anon_token`` /
-   ``_ghcr_manifest_digest`` for the toolbox-pull doctor probe). GHCR's
-   package-LIST API needs an authenticated, org-scoped token — there is no
-   anonymous "list every package under this org" call — so this module
-   does not enumerate the org. Instead it probes the exact package repo
-   paths named by ``images.json``'s ``image`` field (falling back to
-   ``manifest_key`` when ``image`` is absent), which is a deliberate,
-   documented deviation from the original handoff doc's assumption that
-   anonymous org-wide listing would work.
+Each row is then enriched by an anonymous GHCR probe of its repo: the
+headline tag's size, the newest tags with their digests, and each tag's build
+provenance (OCI labels ``org.opencontainers.image.source`` / ``.revision`` and
+``dev.hal0.runner.patches`` from the image config blob). A failed probe keeps
+the catalogue facts and records the error; it never drops the row.
 
-2. **``images.json`` fetch.** ``raw.githubusercontent.com/Hal0ai/hal0-runner-images/main/images.json``
-   (schema ``hal0.runner-images.v1``) — anonymous, CDN-backed, no auth. Gives
-   display metadata (``ownership``/``publish``/``manifest_key``/``build``/
-   ``notes``) plus runtime metadata (``runtime_family``/
-   ``supported_backends``) per image. Fetched live at sync time, never baked
-   into a release.
-
-Fetch failures degrade gracefully at every layer: a malformed/unreachable
-``images.json`` still lets already-known GHCR packages sync (tag/digest/size
-only, no metadata); a single package's GHCR probe failing doesn't abort the
-whole sync run.
-
-Per-tag build provenance (h0/runner-provenance): alongside each tag's
-manifest probe, the image CONFIG BLOB (manifest → ``config.digest`` → blob
-GET) is fetched and its OCI labels (``org.opencontainers.image.source`` /
-``.revision``, ``dev.hal0.runner.patches``) are folded into
-``RunnerImageTag.provenance`` — so an operator can tell the upstream
-llama.cpp Vulkan/ROCm build apart from the ROCmFPX fork one. A failed blob
-fetch degrades that tag to ``provenance=None``, never fails the sync.
+The sync runs at ``hal0-api`` boot (background, non-blocking), during
+``hal0 update`` (the ``runner-images`` component arm, best-effort), and on
+demand (``POST /api/runner-images/sync``, ``hal0 runner-images sync``).
 """
 
 from __future__ import annotations
@@ -54,7 +34,13 @@ from hal0.registry.runner_image_store import RunnerImageStore
 log = logging.getLogger(__name__)
 
 IMAGES_JSON_URL = "https://raw.githubusercontent.com/Hal0ai/hal0-runner-images/main/images.json"
-_EXPECTED_SCHEMA = "hal0.runner-images.v1"
+_EXPECTED_SCHEMA = "hal0.runner-images.v2"
+
+#: Newest tags probed per repo beyond the headline. Tags are immutable and
+#: the catalogue already names the gated one, so this only feeds the tag
+#: picker; the cap keeps a large upstream repo (ggml-org/llama.cpp carries
+#: thousands of tags) to a bounded number of registry calls.
+_MAX_EXTRA_TAGS = 10
 
 _GHCR_TOKEN_URL = "https://ghcr.io/token"
 _OCI_MANIFEST_ACCEPT = (
@@ -82,6 +68,8 @@ class SyncResult:
     images_json_ok: bool = False
     images_json_error: str | None = None
     probe_errors: dict[str, str] = field(default_factory=dict)
+    #: Catalogue entries ignored: ``id`` -> reason (unknown runner, bad shape).
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 def _strip_registry_host(image_ref: str) -> str:
@@ -166,9 +154,9 @@ async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, A
     """Fetch + validate ``images.json``.
 
     Returns ``(entries, error)`` — ``entries`` is ``[]`` and ``error`` is a
-    human-readable string on any failure (network, non-200, bad JSON, wrong
-    schema, non-list ``images``); the caller degrades to GHCR-only rows
-    rather than raising.
+    human-readable string on any failure (network, non-200, bad JSON, a schema
+    other than ``hal0.runner-images.v2``, non-list ``images``). A failed fetch
+    never prunes anything.
     """
     try:
         resp = await client.get(IMAGES_JSON_URL, timeout=_HTTP_TIMEOUT_S)
@@ -180,11 +168,58 @@ async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[dict[str, A
         return [], "images.json is not a JSON object"
     schema = payload.get("schema")
     if schema != _EXPECTED_SCHEMA:
-        log.warning("runner_images.unexpected_schema schema=%r", schema)
+        return [], f"images.json schema {schema!r} is not {_EXPECTED_SCHEMA!r}"
     entries = payload.get("images")
     if not isinstance(entries, list):
         return [], "images.json has no 'images' array"
     return [e for e in entries if isinstance(e, dict)], None
+
+
+def _str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+
+
+def _opt_str(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def catalogue_row(entry: dict[str, Any]) -> tuple[RunnerImage | None, str | None]:
+    """One ``images.json`` v2 entry → ``(row, None)`` or ``(None, reason)``.
+
+    The entry must name a registered runner (``id``), a registry repo
+    (``image``, no tag) and a ``tag``. Pure; the GHCR probe enriches the row
+    afterwards.
+    """
+    from hal0.runners import RUNNER_IMAGES
+
+    key = _opt_str(entry.get("id"))
+    if key is None:
+        return None, "entry has no id"
+    if key not in RUNNER_IMAGES:
+        return None, f"{key!r} is not a runner this hal0 ships"
+    image = _opt_str(entry.get("image"))
+    tag = _opt_str(entry.get("tag"))
+    if image is None or tag is None:
+        return None, "entry needs both image and tag"
+    if "@" in image or ":" in image.rsplit("/", 1)[-1]:
+        return None, "image must be a bare repo (tag and digest are separate fields)"
+    return (
+        RunnerImage(
+            id=key,
+            image=image,
+            tag=tag,
+            digest=_opt_str(entry.get("digest")),
+            title=_opt_str(entry.get("title")),
+            summary=_opt_str(entry.get("summary")),
+            family=_opt_str(entry.get("family")),
+            tier=_opt_str(entry.get("tier")),
+            backends=_str_list(entry.get("backends")),
+            lanes_gated=_str_list(entry.get("lanes_gated")),
+        ),
+        None,
+    )
 
 
 async def _ghcr_anon_token(repo: str, *, client: httpx.AsyncClient) -> str:
@@ -392,24 +427,15 @@ async def _ghcr_tag_provenance(
     return provenance_from_labels(labels)
 
 
-async def probe_ghcr_package(
-    repo: str,
-    *,
-    client: httpx.AsyncClient,
-    tag: str | None = None,
-    image_id: str | None = None,
-) -> RunnerImage:
-    """Anonymously resolve one GHCR package's tags + digest + size.
+async def probe_ghcr_package(row: RunnerImage, *, client: httpx.AsyncClient) -> RunnerImage:
+    """Enrich one catalogue row from GHCR: size, newest tags, provenance.
 
-    ``tag`` pins the headline tag (from an ``images.json`` entry); when
-    omitted, the newest tag per :func:`sort_tags_newest_first` is used,
-    falling back to ``latest``. Either way ``tags/list`` is always probed
-    so the row carries the full ``available_tags`` list (catalogue v2 tag
-    tracking); a failing ``tags/list`` degrades to ``available_tags=[]``
-    without failing the row. ``image_id`` sets the catalogue row id (the
-    ``images.json`` short name, e.g. ``cpu``); defaults to the repo path
-    for rows with no manifest entry.
+    The headline ``row.tag`` is always probed; up to :data:`_MAX_EXTRA_TAGS`
+    of the newest other tags are probed too. The catalogue's ``digest`` stays
+    authoritative; a probe that sees a different digest for the headline tag
+    logs a warning and keeps the catalogue value.
     """
+    repo = _strip_registry_host(row.image)
     token = await _ghcr_anon_token(repo, client=client)
     try:
         tags = await _ghcr_list_tags(repo, token=token, client=client)
@@ -417,34 +443,28 @@ async def probe_ghcr_package(
         log.warning("runner_images.tags_list_failed repo=%s error=%s", repo, exc)
         tags = []
     available = sort_tags_newest_first(tags)
-    resolved_tag = tag if tag is not None else (available[0] if available else "latest")
     digest, size, config_digest = await _ghcr_manifest_info(
-        repo, resolved_tag, token=token, client=client
+        repo, row.tag, token=token, client=client
     )
-    # Build provenance from the config blob's OCI labels — but never for a
-    # noise-tag headline (an images.json pin should never name one, but the
-    # per-tag blob GET is real registry traffic worth gating anyway;
-    # `available` is already noise-filtered at _ghcr_list_tags).
-    provenance = (
-        None
-        if is_noise_tag(resolved_tag)
-        else await _ghcr_tag_provenance(repo, config_digest, token=token, client=client)
-    )
-
-    # Resolve a digest for every catalogued tag (catalogue v3).
+    if row.digest and digest and digest != row.digest:
+        log.warning(
+            "runner_images.digest_mismatch id=%s tag=%s catalogue=%s registry=%s",
+            row.id,
+            row.tag,
+            row.digest,
+            digest,
+        )
     now = datetime.now(UTC).isoformat()
-    tag_rows: list[RunnerImageTag] = []
-
-    # Build tag rows from available tags (newest-first).
-    for t in available:
-        if t == resolved_tag:
-            # Reuse the headline manifest result.
-            tag_rows.append(
-                RunnerImageTag(
-                    tag=t, digest=digest, size_bytes=size, last_seen=now, provenance=provenance
-                )
-            )
-            continue
+    tag_rows = [
+        RunnerImageTag(
+            tag=row.tag,
+            digest=row.digest or digest,
+            size_bytes=size,
+            last_seen=now,
+            provenance=await _ghcr_tag_provenance(repo, config_digest, token=token, client=client),
+        )
+    ]
+    for t in [t for t in available if t != row.tag][:_MAX_EXTRA_TAGS]:
         try:
             t_digest, t_size, t_config = await _ghcr_manifest_info(
                 repo, t, token=token, client=client
@@ -458,83 +478,24 @@ async def probe_ghcr_package(
                 tag=t, digest=t_digest, size_bytes=t_size, last_seen=now, provenance=t_prov
             )
         )
-
-    # If resolved_tag (pinned or fallback) is not in available, prepend it.
-    if resolved_tag not in available:
-        tag_rows.insert(
-            0,
-            RunnerImageTag(
-                tag=resolved_tag,
-                digest=digest,
-                size_bytes=size,
-                last_seen=now,
-                provenance=provenance,
-            ),
-        )
-
-    return RunnerImage(
-        id=image_id or repo,
-        image=f"ghcr.io/{repo}",
-        tag=resolved_tag,
-        digest=digest,
-        size_bytes=size,
-        available_tags=available,
-        tags=tag_rows,
+    return row.model_copy(
+        update={
+            "digest": row.digest or digest,
+            "size_bytes": size,
+            "available_tags": available,
+            "tags": tag_rows,
+        }
     )
-
-
-def _match_key(entry: dict[str, Any]) -> str | None:
-    """The GHCR repo path an images.json entry describes, or None if unusable."""
-    image = entry.get("image")
-    if isinstance(image, str) and image.strip():
-        return _strip_registry_host(image)
-    manifest_key = entry.get("manifest_key")
-    if isinstance(manifest_key, str) and manifest_key.strip():
-        return manifest_key.strip()
-    return None
-
-
-def _apply_manifest_metadata(image: RunnerImage, entry: dict[str, Any]) -> RunnerImage:
-    """Overlay images.json display metadata onto a GHCR-discovered row."""
-    update: dict[str, Any] = {}
-    for field_name in ("manifest_key", "ownership", "publish", "notes", "runtime_family"):
-        val = entry.get(field_name)
-        if isinstance(val, str) and val.strip():
-            update[field_name] = val.strip()
-    build = entry.get("build")
-    if isinstance(build, dict):
-        update["build"] = build
-    # Runtime metadata (feat/catalogue-runtime-metadata): a list of backend
-    # strings, filtered fail-soft — a malformed value (non-list, or non-string
-    # members) degrades to "not declared" rather than failing the row, same
-    # discipline as every other images.json field here.
-    backends = entry.get("supported_backends")
-    if isinstance(backends, list):
-        cleaned = [b.strip() for b in backends if isinstance(b, str) and b.strip()]
-        if cleaned:
-            update["supported_backends"] = cleaned
-    tag = entry.get("tag")
-    if isinstance(tag, str) and tag.strip():
-        update["tag"] = tag.strip()
-    return image.model_copy(update=update) if update else image
 
 
 async def sync_runner_images(
     store: RunnerImageStore, *, client: httpx.AsyncClient | None = None
 ) -> SyncResult:
-    """Run one discovery pass and persist the merged rows.
+    """Run one catalogue sync and persist the rows.
 
-    Source of which GHCR packages to probe: ``images.json``'s entries
-    (see module docstring — anonymous org-wide GHCR listing isn't
-    available). Row id is the entry's ``id`` short name (``cpu``,
-    ``rocmfpx-hy3``, …) so two entries sharing one GHCR repo path under
-    different tags stay distinct rows; entries with no ``id`` fall back
-    to the repo path. A malformed/unreachable ``images.json`` still lets
-    already-catalogued packages keep their existing rows; on a *successful*
-    manifest fetch, catalogue rows whose id no longer appears in
-    ``images.json`` are pruned (unless locally downloaded) so removed or
-    renamed entries don't linger as stale duplicates. A failed per-package
-    probe never deletes anything.
+    A failed ``images.json`` fetch changes nothing. A successful one writes a
+    row per valid entry (GHCR-enriched when the probe answers) and prunes
+    every row the catalogue no longer lists, downloaded or not.
     """
     owns_client = client is None
     client = client or httpx.AsyncClient(follow_redirects=True)
@@ -543,55 +504,73 @@ async def sync_runner_images(
         entries, err = await fetch_images_json(client)
         result.images_json_ok = err is None
         result.images_json_error = err
+        if err is not None:
+            log.warning("runner_images.catalogue_fetch_failed error=%s", err)
+            return result
 
-        by_id: dict[str, tuple[str, dict[str, Any]]] = {}
+        rows: dict[str, RunnerImage] = {}
         for entry in entries:
-            repo = _match_key(entry)
-            if not repo:
+            row, reason = catalogue_row(entry)
+            if row is None:
+                result.skipped[str(entry.get("id") or "?")] = reason or "invalid"
                 continue
-            entry_id = entry.get("id")
-            image_id = entry_id.strip() if isinstance(entry_id, str) and entry_id.strip() else repo
-            by_id[image_id] = (repo, entry)
+            rows[row.id] = row
 
-        for image_id, (repo, entry) in by_id.items():
-            tag = entry.get("tag") if isinstance(entry.get("tag"), str) else None
+        for key, row in rows.items():
             try:
-                image = await probe_ghcr_package(repo, client=client, tag=tag, image_id=image_id)
+                row = await probe_ghcr_package(row, client=client)
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                result.probe_errors[image_id] = str(exc)
+                result.probe_errors[key] = str(exc)
                 log.warning(
-                    "runner_images.probe_failed id=%s repo=%s error=%s", image_id, repo, exc
+                    "runner_images.probe_failed id=%s repo=%s error=%s", key, row.image, exc
                 )
+                # Refresh the catalogue facts only; keep the registry facts the
+                # last good probe recorded (size, tag list, per-tag digests).
+                previous = store.get(key)
+                if previous is not None and previous.image == row.image:
+                    row = row.model_copy(
+                        update={
+                            "size_bytes": previous.size_bytes,
+                            "available_tags": previous.available_tags,
+                        }
+                    )
+                result.images.append(store.upsert(row))
                 continue
-            image = _apply_manifest_metadata(image, entry)
-            # `store.upsert` reads the tag table for the row it returns
-            # BEFORE `set_tags` below writes this sync's freshly-probed
-            # tags — reading upsert's return value straight would carry the
-            # PREVIOUS sync's tags into the SyncResult (empty on a first
-            # sync), so the /sync response — and its families payload —
-            # would lag by one sync. Persist the fresh tags first, then
-            # stamp them onto the row this call reports.
-            stored = store.upsert(image)
-            store.set_tags(image.id, image.tags)
-            result.images.append(stored.model_copy(update={"tags": image.tags}))
+            # Persist the fresh tags first, then stamp them onto the row this
+            # call reports (upsert's read-back would carry the previous sync's
+            # tags otherwise).
+            stored = store.upsert(row)
+            store.set_tags(row.id, row.tags)
+            result.images.append(stored.model_copy(update={"tags": row.tags}))
 
-        if result.images_json_ok:
-            pruned = store.prune_absent(set(by_id))
-            if pruned:
-                log.info("runner_images.pruned_stale_rows count=%d", pruned)
+        pruned = store.prune_absent(set(rows))
+        if pruned:
+            log.info("runner_images.pruned_rows count=%d", pruned)
     finally:
         if owns_client:
             await client.aclose()
     return result
 
 
+def sync_catalogue_blocking(store: RunnerImageStore | None = None) -> SyncResult:
+    """Run :func:`sync_runner_images` from synchronous code (no running loop).
+
+    Used by the ``runner-images`` component arm during ``hal0 update``.
+    """
+    import asyncio
+
+    return asyncio.run(sync_runner_images(store or RunnerImageStore()))
+
+
 __all__ = [
     "IMAGES_JSON_URL",
     "SyncResult",
+    "catalogue_row",
     "fetch_images_json",
     "is_noise_tag",
     "probe_ghcr_package",
     "provenance_from_labels",
     "sort_tags_newest_first",
+    "sync_catalogue_blocking",
     "sync_runner_images",
 ]

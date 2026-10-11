@@ -15,8 +15,9 @@ def store(tmp_path: Path) -> RunnerImageStore:
     return RunnerImageStore(db_path=tmp_path / "hal0.db")
 
 
-def _image(image_id: str = "hal0ai/hal0-toolbox-cpu", **kw) -> RunnerImage:
-    return RunnerImage(id=image_id, image=f"ghcr.io/{image_id}", **kw)
+def _image(image_id: str = "cpu", **kw) -> RunnerImage:
+    kw.setdefault("tag", "b1-r1")
+    return RunnerImage(id=image_id, image=f"ghcr.io/hal0ai/hal0-runner-{image_id}", **kw)
 
 
 class TestEmptyStore:
@@ -32,21 +33,21 @@ class TestEmptyStore:
 
 class TestUpsert:
     def test_insert_then_get(self, store: RunnerImageStore) -> None:
-        store.upsert(_image(tag="v1", digest="sha256:abc", size_bytes=123, notes="hello"))
-        got = store.get("hal0ai/hal0-toolbox-cpu")
+        store.upsert(_image(tag="v1", digest="sha256:abc", size_bytes=123, title="CPU"))
+        got = store.get("cpu")
         assert got is not None
         assert got.tag == "v1"
         assert got.digest == "sha256:abc"
         assert got.size_bytes == 123
-        assert got.notes == "hello"
+        assert got.title == "CPU"
         assert got.discovered_at is not None
         assert got.updated_at is not None
 
     def test_upsert_updates_existing_row(self, store: RunnerImageStore) -> None:
         store.upsert(_image(tag="v1"))
-        first = store.get("hal0ai/hal0-toolbox-cpu")
+        first = store.get("cpu")
         store.upsert(_image(tag="v2", digest="sha256:def"))
-        second = store.get("hal0ai/hal0-toolbox-cpu")
+        second = store.get("cpu")
         assert second is not None
         assert second.tag == "v2"
         assert second.digest == "sha256:def"
@@ -54,37 +55,84 @@ class TestUpsert:
         # brand-new discovery).
         assert second.discovered_at == first.discovered_at
 
-    def test_build_and_extra_round_trip_json(self, store: RunnerImageStore) -> None:
-        store.upsert(
-            _image(build={"context": ".", "dockerfile": "Dockerfile"}, extra={"foo": "bar"})
-        )
-        got = store.get("hal0ai/hal0-toolbox-cpu")
-        assert got.build == {"context": ".", "dockerfile": "Dockerfile"}
+    def test_extra_round_trips_json(self, store: RunnerImageStore) -> None:
+        store.upsert(_image(extra={"foo": "bar"}))
+        got = store.get("cpu")
+        assert got is not None
         assert got.extra == {"foo": "bar"}
 
-    def test_runtime_metadata_round_trips(self, store: RunnerImageStore) -> None:
-        # feat/catalogue-runtime-metadata: runtime_family is a scalar column,
-        # supported_backends a JSON column (supported_backends_json,
-        # migration 010) — both must survive a write/read cycle.
-        store.upsert(_image(runtime_family="comfyui", supported_backends=["rocm"]))
-        got = store.get("hal0ai/hal0-toolbox-cpu")
+    def test_catalogue_columns_round_trip(self, store: RunnerImageStore) -> None:
+        # Migration 011: title/summary/family/tier are scalar columns,
+        # backends/lanes_gated JSON-list columns — all must survive a
+        # write/read cycle.
+        store.upsert(
+            _image(
+                title="Standard",
+                summary="llama.cpp on ROCm and Vulkan.",
+                family="llama-server",
+                tier="default",
+                backends=["rocm", "vulkan"],
+                lanes_gated=["vulkan"],
+            )
+        )
+        got = store.get("cpu")
         assert got is not None
-        assert got.runtime_family == "comfyui"
-        assert got.supported_backends == ["rocm"]
+        assert got.title == "Standard"
+        assert got.summary == "llama.cpp on ROCm and Vulkan."
+        assert got.family == "llama-server"
+        assert got.tier == "default"
+        assert got.backends == ["rocm", "vulkan"]
+        assert got.lanes_gated == ["vulkan"]
 
-    def test_runtime_metadata_defaults_when_absent(self, store: RunnerImageStore) -> None:
-        # A row written without the fields (pre-010 shape) reads back as
-        # "not declared", never as a veto.
-        store.upsert(_image())
-        got = store.get("hal0ai/hal0-toolbox-cpu")
+    def test_json_lists_keep_order(self, store: RunnerImageStore) -> None:
+        store.upsert(
+            _image(
+                backends=["vulkan", "rocm", "cpu"],
+                lanes_gated=["rocm", "vulkan"],
+                available_tags=["b3", "b2", "b1"],
+            )
+        )
+        got = store.get("cpu")
         assert got is not None
-        assert got.runtime_family is None
-        assert got.supported_backends == []
+        assert got.backends == ["vulkan", "rocm", "cpu"]
+        assert got.lanes_gated == ["rocm", "vulkan"]
+        assert got.available_tags == ["b3", "b2", "b1"]
+
+    def test_catalogue_columns_default_when_absent(self, store: RunnerImageStore) -> None:
+        # A row written without the optional facts reads back as "not
+        # declared": None scalars, empty lists.
+        store.upsert(_image())
+        got = store.get("cpu")
+        assert got is not None
+        assert got.title is None
+        assert got.summary is None
+        assert got.family is None
+        assert got.tier is None
+        assert got.backends == []
+        assert got.lanes_gated == []
+        assert got.available_tags == []
+
+    def test_empty_lists_overwrite_previous_lists(self, store: RunnerImageStore) -> None:
+        store.upsert(_image(backends=["rocm"], lanes_gated=["rocm"]))
+        store.upsert(_image(backends=[], lanes_gated=[]))
+        got = store.get("cpu")
+        assert got is not None
+        assert got.backends == []
+        assert got.lanes_gated == []
+
+    def test_list_returns_catalogue_columns(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu", backends=["cpu"], tier="default"))
+        store.upsert(_image("flm", backends=["npu"], tier="optional", title="FLM"))
+        by_id = {i.id: i for i in store.list()}
+        assert by_id["cpu"].backends == ["cpu"]
+        assert by_id["flm"].backends == ["npu"]
+        assert by_id["flm"].tier == "optional"
+        assert by_id["flm"].title == "FLM"
 
     def test_persists_across_instances(self, store: RunnerImageStore, tmp_path: Path) -> None:
         store.upsert(_image())
         store2 = RunnerImageStore(db_path=tmp_path / "hal0.db")
-        assert store2.get("hal0ai/hal0-toolbox-cpu") is not None
+        assert store2.get("cpu") is not None
 
     def test_on_change_invoked(self, store: RunnerImageStore) -> None:
         calls = []
@@ -105,24 +153,33 @@ class TestLocalState:
     def test_set_local_state_marks_downloaded(self, store: RunnerImageStore) -> None:
         store.upsert(_image())
         updated = store.set_local_state(
-            "hal0ai/hal0-toolbox-cpu",
-            local_path="/var/lib/hal0/runner-images/hal0-toolbox-cpu",
+            "cpu",
+            local_path="/var/lib/hal0/runner-images/hal0-runner-cpu",
             downloaded_at="2026-07-31T00:00:00Z",
         )
         assert updated is not None
         assert updated.downloaded is True
-        assert updated.local_path.endswith("hal0-toolbox-cpu")
-        assert "hal0ai/hal0-toolbox-cpu" in [i.id for i in store.list_downloaded()]
+        assert updated.local_path.endswith("hal0-runner-cpu")
+        assert "cpu" in [i.id for i in store.list_downloaded()]
 
     def test_set_local_state_unknown_id_returns_none(self, store: RunnerImageStore) -> None:
         assert store.set_local_state("nope", local_path="/x") is None
 
+    def test_upsert_without_local_state_keeps_the_recorded_download(
+        self, store: RunnerImageStore
+    ) -> None:
+        store.upsert(_image())
+        store.set_local_state("cpu", local_path="/x", downloaded_at="t")
+        store.upsert(_image())  # a sync row carries no download state
+        got = store.get("cpu")
+        assert got is not None and got.local_path == "/x" and got.downloaded_at == "t"
+
     def test_clearing_local_path_removes_from_downloaded(self, store: RunnerImageStore) -> None:
         store.upsert(_image())
-        store.set_local_state("hal0ai/hal0-toolbox-cpu", local_path="/x")
-        store.set_local_state("hal0ai/hal0-toolbox-cpu", local_path=None)
+        store.set_local_state("cpu", local_path="/x")
+        store.set_local_state("cpu", local_path=None)
         assert store.list_downloaded() == []
-        got = store.get("hal0ai/hal0-toolbox-cpu")
+        got = store.get("cpu")
         assert got.downloaded is False
 
 
@@ -301,3 +358,53 @@ class TestRemoveTag:
         row = store.get("x")
         assert row.local_path is None
         assert row.downloaded_at is None
+
+
+class TestPruneAbsent:
+    """``prune_absent`` — the sync's post-fetch sweep of delisted rows."""
+
+    def test_deletes_rows_not_kept(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu"))
+        store.upsert(_image("flm"))
+        store.upsert(_image("kokoro"))
+        assert store.prune_absent({"cpu"}) == 2
+        assert [i.id for i in store.list()] == ["cpu"]
+
+    def test_nothing_to_prune_returns_zero(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu"))
+        assert store.prune_absent({"cpu", "flm"}) == 0
+        assert store.get("cpu") is not None
+
+    def test_ignores_local_path(self, store: RunnerImageStore) -> None:
+        """A downloaded row is pruned like any other: the catalogue is the
+        list of runners hal0 can launch."""
+        store.upsert(_image("cpu"))
+        store.upsert(_image("flm"))
+        store.set_local_state("flm", local_path="/var/lib/hal0/flm.json", downloaded_at="t")
+        assert store.prune_absent({"cpu"}) == 1
+        assert store.get("flm") is None
+        assert store.list_downloaded() == []
+
+    def test_empty_keep_set_deletes_everything(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu"))
+        store.upsert(_image("flm"))
+        assert store.prune_absent(set()) == 2
+        assert store.list() == []
+
+    def test_removes_orphaned_tag_rows(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu"))
+        store.upsert(_image("flm"))
+        store.set_tags("cpu", [RunnerImageTag(tag="b1-r1")])
+        store.set_tags("flm", [RunnerImageTag(tag="v1"), RunnerImageTag(tag="v0")])
+        store.prune_absent({"cpu"})
+        assert store.tags_for("flm") == []
+        assert [t.tag for t in store.tags_for("cpu")] == ["b1-r1"]
+
+    def test_notifies_on_change_only_when_rows_were_deleted(self, store: RunnerImageStore) -> None:
+        store.upsert(_image("cpu"))
+        calls: list[int] = []
+        store.on_change = lambda: calls.append(1)
+        assert store.prune_absent({"cpu"}) == 0
+        assert calls == []
+        assert store.prune_absent(set()) == 1
+        assert calls == [1]

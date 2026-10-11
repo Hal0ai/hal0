@@ -290,8 +290,12 @@ def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep tests away from host FHS state, including non-API unit tests."""
+    """Keep tests away from host FHS state, including non-API unit tests.
+
+    Also keeps app boot off the network: no runner-image catalogue sync.
+    """
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setenv("HAL0_RUNNER_CATALOGUE_SYNC", "0")
 
 
 @pytest.fixture(scope="function")
