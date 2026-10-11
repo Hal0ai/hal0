@@ -59,26 +59,36 @@ Operators deleted models in the dashboard and saw them come back.
      covers an operator who configures a very broad root such as `/`.
    - another remaining registry row references it (`shared:<id>`). This
      compares resolved paths across `path`, shards, `mmproj` and
-     `model_file.dest`.
+     `model_file.dest`. A file below a remaining row whose path is a
+     directory (an FLM or ONNX model directory) also counts as shared.
    - the path is a directory (`directory`). Nothing is ever removed
      recursively.
    - the row belongs to FLM (`runtime_managed`). FLM manages its model
      directory itself.
    - the OS refuses the unlink (`unlink_failed:<error>`).
+   - the file is not there at delete time (`missing_at_delete`). Examples
+     are an unmounted share or a dangling symlink target. The row is still
+     removed, and the path is tombstoned so the file does not come back
+     when the storage returns.
 
    For a symlink, such as an HF `snapshots/…` link to `blobs/<sha>`, both
    the link and its resolved target are removed, and each is checked
    against the guards. A file with other hardlinks is removed, but its
    bytes are left out of `bytes_freed` and a warning says no space was
    freed. Directories left empty are removed up to, but not including,
-   the root. `store_blob` refcounts are released through
+   the deepest root that holds the file. With overlapping roots such as
+   `/` and `/mnt/models`, the walk stops at `/mnt/models`. A remaining
+   row's model directory is never removed. `store_blob` refcounts are released through
    `hal0.registry.gc.release_blob_ref`, the logic `delete_model_files`
    already used.
 
 4. **Tombstones.** Every file left on disk is tombstoned, whether the
    operator opted out or a guard other than `shared:` refused it. A
    tombstone is a resolved path in `<var_lib>/registry/ignored-paths.json`
-   (`hal0.registry.tombstones`, written atomically).
+   (`hal0.registry.tombstones`). Writes are atomic. Every
+   read-modify-write holds an in-process lock plus an `flock` on
+   `ignored-paths.json.lock`, so overlapping deletes, in the API or from a
+   CLI process, cannot drop each other's entries.
    `find_candidates` skips a tombstoned path and anything below it, so the
    model does not come back. An explicit registration clears tombstones at
    or below its path. Explicit registrations are `hal0 model add` /
@@ -106,11 +116,26 @@ Operators deleted models in the dashboard and saw them come back.
    holding it exists and is non-empty, or, for a row outside every root,
    when the file's parent directory still exists. An unmounted NFS share is
    an empty mount point, so rows under it are reported as
-   `missing_unverified` and kept.
+   `missing_unverified` and kept. An empty root that is itself a mount
+   point (`os.path.ismount`) counts as live, because the share is mounted
+   and just holds nothing. The trade-off is an ordinary local root that
+   became empty when its last model file was removed by hand. That root is
+   empty and not a mount point, so its ghost row is kept until the root
+   holds something again or the row is deleted explicitly. Telling that
+   case apart from an unmounted share would need fstab or mount-table
+   parsing, which isn't worth it for one leftover row.
 
-6. **Scanner fixes.** The scanner skips any directory below a root whose
-   name starts with `.`. The check is relative to the root, so a root under
-   a dot directory still scans. A shard set is named after its walked
+   When `prune_missing` removes a row, it releases the row's `store_blob`
+   references with the same `release_blob_ref` logic an explicit delete
+   uses. Without that, a pruned pulled model's blob would stay referenced
+   and `prune_orphans` could never reclaim it. This covers both the startup
+   prune and a manual `{"prune": true}` scan.
+
+6. **Scanner fixes.** The scanner does not descend into any directory below
+   a root whose name starts with `.`. It walks with `os.walk` and prunes
+   those directories in place, so a large `.Trash-1000/` costs neither
+   stats nor the 30-second scan budget. Only directories below the root are
+   pruned, so a root under a dot directory still scans. A shard set is named after its walked
    shard-1 path, not the resolved blob. A file whose inode matches an
    already registered file (a hardlinked copy) is not a new candidate. The
    HF `blobs/` directory was already skipped when walked directly. Blobs
@@ -131,3 +156,15 @@ Operators deleted models in the dashboard and saw them come back.
 - Removing an operator-placed file under a scan root is now the default.
   The guards keep deletes inside the roots, away from files another model
   uses, and away from directories.
+
+## Known limitations
+
+- **A surviving hardlink can be rediscovered.** When a deleted model's file
+  has another hardlink inside a scan root, the delete unlinks only the
+  registered path and warns that no space was freed. The scanner's inode
+  check hides the second name only while the original row exists. Once
+  the row is gone, the next scan registers the surviving link as a new
+  model. Tombstoning by inode, or finding and removing every link, was
+  left out. The first misfires once the inode is reused, and the second
+  needs a full-tree walk on every delete. To remove the surviving link,
+  delete the rediscovered model too.
