@@ -17,9 +17,10 @@ name: Release
 #
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
-#   - rebuild + republish toolbox images. Runner and toolbox images are built
-#     only in Hal0ai/hal0-runner-images. The release manifest mirrors the
-#     toolbox digests pinned in manifest.json at the moment of the tag; see
+#   - rebuild + republish runner images. They are built only in
+#     Hal0ai/hal0-runner-images. The release manifest mirrors manifest.json's
+#     `runners` pin table at the moment of the tag, and refuses to publish
+#     while it is not release-ready (hal0.runners.pins.release_gate_problems); see
 #     docs/internal/release-manifest.md.
 #
 # See: docs/internal/release-manifest.md, src/hal0/updater/updater.py,
@@ -460,11 +461,13 @@ jobs:
           from hal0.updater.updater import ReleaseManifest
 
           out_dir, version, tag, kind, stage, targets, digest, base, ident = sys.argv[1:]
+          from hal0.runners.pins import release_gate_problems
+
           repo_manifest = json.loads(Path("manifest.json").read_text())
-          toolbox_images = repo_manifest.get("toolbox_images", {})
-          missing = [name for name, entry in toolbox_images.items() if not entry.get("digest")]
-          if missing:
-              sys.exit(f"toolbox_images digests missing for: {missing}")
+          problems = release_gate_problems()
+          if problems:
+              sys.exit("runner pins not release-ready: " + "; ".join(problems))
+          runners = repo_manifest.get("runners", {})
 
           # The supported upgrade window. Every channel manifest carries it and
           # the updater refuses to stage a release from a box below it.
@@ -495,7 +498,7 @@ jobs:
               "upgrade_from": upgrade_from,
               "released_at": released_at,
               "notes_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
-              "toolbox_images": toolbox_images,
+              "runners": runners,
           }
           for channel in targets.split(","):
               payload = {
