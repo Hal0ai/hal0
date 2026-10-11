@@ -356,6 +356,77 @@ fi
 
 info "system: $(uname -srm)"
 
+# ── Upgrade floor ────────────────────────────────────────────────────────────
+# A run over an existing install is an upgrade in place, so it is held to the
+# same floor `hal0 update` enforces: manifest.json's `upgrade_from` (a PEP 440
+# specifier, checked by updater._enforce_upgrade_floor). The converters for
+# state older than the floor have been deleted, so a box below it must step
+# through a release inside the window, or be reinstalled, before this one.
+#
+# The installed version is `current/VERSION`, the same identity
+# updater.installed_version() reads. A nightly `X.Y.Z-nightly.<stamp>` is
+# compared as `X.Y.Z.dev<stamp>` (updater.floor_comparable_version). The check
+# runs under the existing install's venv, which carries `packaging` as a hard
+# dependency; when no interpreter can evaluate it the check fails open, as the
+# updater's does.
+check_upgrade_floor() {
+    [[ "${DEV_MODE}" -eq 0 ]] || return 0
+    [[ -e "${CURRENT_LINK}" ]] || return 0
+    local installed="" py="" verdict="" rc=0
+    installed="$(tr -d '[:space:]' < "${CURRENT_LINK}/VERSION" 2>/dev/null || true)"
+    if [[ -z "${installed}" ]]; then
+        installed="$(basename "$(readlink -f "${CURRENT_LINK}")")"
+        installed="${installed#hal0-}"
+    fi
+    [[ -n "${installed}" ]] || return 0
+    for py in "${VENV_DIR}/bin/python" "${PY}"; do
+        command -v "${py}" >/dev/null 2>&1 || continue
+        rc=0
+        verdict="$("${py}" -I - "${REPO_ROOT}/manifest.json" "${installed}" <<'PY' 2>/dev/null
+import json
+import re
+import sys
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    spec = (json.load(fh).get("upgrade_from") or "").strip()
+if not spec:
+    sys.exit(0)
+installed = sys.argv[2]
+m = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)-nightly\.([0-9]+)", installed)
+if m:
+    installed = f"{m.group(1)}.dev{m.group(2)}"
+try:
+    ok = SpecifierSet(spec).contains(Version(installed), prereleases=True)
+except InvalidVersion:
+    sys.exit(0)
+if not ok:
+    print(spec)
+    sys.exit(3)
+PY
+)" || rc=$?
+        case "${rc}" in
+            0) return 0 ;;
+            3)
+                local floor="${verdict#>=}"
+                floor="${floor%%,*}"
+                die "hal0 ${installed} is installed, and this release (${VERSION}) upgrades only from ${verdict}.
+
+  Upgrade to ${floor} first or reinstall. To step through ${floor} in place,
+  run its installer, then re-run this one:
+      curl -fsSL https://hal0.dev/install.sh | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v${floor}/stable.json bash
+  To reinstall from scratch, run 'sudo bash installer/uninstall.sh --purge'
+  first (it deletes /etc/hal0 and /var/lib/hal0, models included).
+  See 'Upgrading from an older release' in docs/guides/update-and-rollback.mdx."
+                ;;
+        esac
+    done
+    warn "could not evaluate the upgrade floor against installed hal0 ${installed}; continuing"
+}
+check_upgrade_floor
+
 # ── Bootstrap-prereq parity (#1098) ─────────────────────────────────────────
 # bootstrap.sh (the curl|bash one-liner) hard-requires a Linux host plus
 # curl/tar/sha256sum in its own preflight() before it ever fetches the

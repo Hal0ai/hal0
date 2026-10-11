@@ -41,6 +41,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Breaking
 
+- Upgrades now start at **1.3.0**. Every release manifest carries
+  `upgrade_from: ">=1.3.0"` (declared in `manifest.json`), so `hal0 update`
+  on a box below 1.3.0 stops with `system.update_upgrade_path_unsupported`
+  before it downloads anything. Re-running the installer over an existing
+  install below 1.3.0 stops the same way, before it changes anything. A
+  nightly counts as a prerelease of its base version. A box below the floor
+  steps through 1.3.0 by running its installer, or reinstalls; see
+  "Upgrading from an older release" in
+  `docs/guides/update-and-rollback.mdx`. The 0.9.8 upgrade guidance is gone.
 - `DELETE /api/models/{id}` now deletes the model's files by default:
   the model file, any shards, the `mmproj` sidecar, and a pulled model's
   file set. Pass `delete_files=false` to remove only the registry entry,

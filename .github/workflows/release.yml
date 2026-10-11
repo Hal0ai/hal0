@@ -466,6 +466,18 @@ jobs:
           if missing:
               sys.exit(f"toolbox_images digests missing for: {missing}")
 
+          # The supported upgrade window. Every channel manifest carries it and
+          # the updater refuses to stage a release from a box below it.
+          from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+          upgrade_from = str(repo_manifest.get("upgrade_from") or "").strip()
+          if not upgrade_from:
+              sys.exit("manifest.json upgrade_from is empty; declare the upgrade floor")
+          try:
+              SpecifierSet(upgrade_from)
+          except InvalidSpecifier as exc:
+              sys.exit(f"manifest.json upgrade_from {upgrade_from!r} is not a PEP 440 specifier: {exc}")
+
           released_at = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
           common = {
               "_schema": "hal0.releases.v1",
@@ -480,6 +492,7 @@ jobs:
               "signer_identity": ident,
               "signer_issuer": "https://token.actions.githubusercontent.com",
               "min_data_version": int(repo_manifest.get("min_data_version", 1)),
+              "upgrade_from": upgrade_from,
               "released_at": released_at,
               "notes_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
               "toolbox_images": toolbox_images,

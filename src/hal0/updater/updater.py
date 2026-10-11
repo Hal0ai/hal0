@@ -206,8 +206,9 @@ class UpdateUpgradePathUnsupported(UpdateError):
     ``prepare()`` would attempt to converge it. Enforcing it makes "we support
     upgrades from >= X" a machine-checked claim instead of a docs claim.
 
-    Inert unless a manifest actually sets the field — the default is ``""``
-    (no floor), which is what every published manifest carries today.
+    Release manifests carry the floor that ``manifest.json``'s ``upgrade_from``
+    declares; ``release.yml`` copies it into every channel manifest. An empty
+    value means no floor.
     """
 
     code = "system.update_upgrade_path_unsupported"
@@ -663,6 +664,24 @@ def _is_newer(candidate: str, current: str) -> bool:
         return _naive_version_key(candidate) > _naive_version_key(current)
 
 
+_NIGHTLY_INSTALLED_VERSION_RE = re.compile(
+    r"^(?P<base>[0-9]+\.[0-9]+\.[0-9]+)-nightly\.(?P<stamp>[0-9]+)$"
+)
+
+
+def floor_comparable_version(installed: str) -> str:
+    """Map a nightly ``X.Y.Z-nightly.<stamp>`` onto PEP 440 ``X.Y.Z.dev<stamp>``.
+
+    A nightly is cut from main before its base version ships, so it orders
+    below ``X.Y.Z``. Every other string is returned unchanged. installer/install.sh
+    applies the same mapping in its own floor check.
+    """
+    m = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch(installed.strip())
+    if m is None:
+        return installed
+    return f"{m.group('base')}.dev{m.group('stamp')}"
+
+
 def _enforce_upgrade_floor(
     manifest: ReleaseManifest,
     *,
@@ -671,8 +690,13 @@ def _enforce_upgrade_floor(
 ) -> None:
     """Refuse to stage a release whose ``upgrade_from`` floor this box is below.
 
-    ``upgrade_from`` is a PEP 440 specifier set (e.g. ``">=0.9.8"``). An empty
-    value — every published manifest today — means no floor and this is a no-op.
+    ``upgrade_from`` is a PEP 440 specifier set (e.g. ``">=1.3.0"``). An empty
+    value means no floor and this is a no-op.
+
+    A nightly install reports ``X.Y.Z-nightly.<stamp>``, which is not PEP 440.
+    It is compared as ``X.Y.Z.dev<stamp>`` (:func:`floor_comparable_version`), so
+    a nightly cut before the floor's release is held to the floor instead of
+    failing open.
 
     Fail-open on anything unparseable: a malformed specifier or a non-PEP-440
     installed version must never block an otherwise
@@ -689,9 +713,9 @@ def _enforce_upgrade_floor(
     installed = current or installed_version()
     try:
         allowed = SpecifierSet(spec)
-        # prereleases=True: 1.0.0-alpha.2 is a real, supported baseline, and a
-        # bare ">=0.9.8" would otherwise exclude every prerelease.
-        ok = allowed.contains(Version(installed), prereleases=True)
+        # prereleases=True: an rc or nightly of a release above the floor is a
+        # supported baseline, and a bare ">=" would exclude every prerelease.
+        ok = allowed.contains(Version(floor_comparable_version(installed)), prereleases=True)
     except (InvalidSpecifier, InvalidVersion) as exc:
         log.warning(
             "updater.upgrade_floor_unparseable",
@@ -712,7 +736,8 @@ def _enforce_upgrade_floor(
             "upgrade_from": spec,
             "hint": (
                 "upgrade to a release inside the supported window first, or "
-                "re-install with installer/install.sh"
+                "reinstall; see 'Upgrading from an older release' in "
+                "docs/guides/update-and-rollback.mdx"
             ),
         },
     )
