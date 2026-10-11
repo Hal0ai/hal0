@@ -233,6 +233,36 @@ def test_pull_judges_the_file_not_the_operator_id(
     assert r.status_code in (200, 202), r.text
 
 
+def test_launch_guard_reads_a_suffixless_blob_and_every_shard(tmp_path: Path) -> None:
+    from hal0.errors import UnprocessableEntity
+    from hal0.providers.container import _guard_unsupported_quant
+
+    blob = tmp_path / "0f3a9c"  # an HF cache blob: no suffix
+    blob.write_bytes(_gguf([0, 77]))
+    with pytest.raises(UnprocessableEntity):
+        _guard_unsupported_quant({"name": "s"}, {"_model_key": "m", "path": str(blob)})
+
+    first = tmp_path / "m-00001-of-00002.gguf"
+    first.write_bytes(_gguf([0, 12]))
+    second = tmp_path / "m-00002-of-00002.gguf"
+    second.write_bytes(_gguf([0, 77]))
+    info = {"_model_key": "m", "path": str(first), "metadata": {"shards": [str(second)]}}
+    with pytest.raises(UnprocessableEntity):
+        _guard_unsupported_quant({"name": "s"}, info)
+
+
+def test_scan_checks_every_shard(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "m-00001-of-00002.gguf").write_bytes(_gguf([0, 12]))
+    (root / "m-00002-of-00002.gguf").write_bytes(_gguf([0, 77]))
+    registry = ModelRegistry(registry_dir=tmp_path / "registry")
+
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+    assert registry.list() == []
+
+
 def test_launch_guard_ignores_the_id_and_reads_the_file(tmp_path: Path) -> None:
     from hal0.errors import UnprocessableEntity
     from hal0.providers.container import _guard_unsupported_quant

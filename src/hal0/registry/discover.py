@@ -1090,9 +1090,11 @@ def _scan_and_register_locked(
         # load them (ADR-0028); a scan never registers one. The resolved path
         # of an HF cache snapshot is a hash, so the symlink-derived id is
         # checked too, and the file's own tensor types catch a renamed build.
-        fork_quant = unsupported_quant(
-            None, cand.path.name, cand.suggested_id
-        ) or unsupported_gguf_contents(cand.path)
+        fork_quant = unsupported_quant(None, cand.path.name, cand.suggested_id)
+        for shard in [cand.path, *(cand.shards or [])]:
+            if fork_quant is not None:
+                break
+            fork_quant = unsupported_gguf_contents(shard)
         if fork_quant is not None:
             skipped.append({"path": str(cand.path), "reason": f"unsupported_quant:{fork_quant}"})
             continue

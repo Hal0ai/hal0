@@ -1792,9 +1792,18 @@ def _guard_unsupported_quant(
         model_path.name,
         str(info.get("hf_filename") or ""),
     )
-    if quant is None and model_path.suffix.lower() == ".gguf" and model_path.is_file():
-        # A fork build renamed to a generic name: its tensor types tell.
-        quant = unsupported_gguf_contents(model_path)
+    if quant is None:
+        # A fork build renamed to a generic name (or stored as a hash-named
+        # HF cache blob): its tensor types tell. The reader checks the GGUF
+        # magic itself, and every shard of a split model is checked.
+        metadata = info.get("metadata")
+        shards = metadata.get("shards") if isinstance(metadata, Mapping) else None
+        candidates = [model_path] + [Path(str(p)) for p in (shards or []) if p]
+        for candidate in candidates:
+            if candidate.is_file():
+                quant = unsupported_gguf_contents(candidate)
+                if quant is not None:
+                    break
     if quant is None:
         return
     slot_name = ""
