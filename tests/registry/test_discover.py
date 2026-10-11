@@ -1117,3 +1117,21 @@ def test_walk_does_not_descend_into_tombstoned_directories(
 
     assert [c.path.name for c in found] == ["live-q4.gguf"]
     assert not [v for v in visited if "kept-flm-model" in v]
+
+
+def test_prune_preview_leaves_out_rows_prune_would_keep_unverified(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    from hal0.services.models_service import missing_registry_rows
+
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "other.gguf").write_bytes(b"x")
+    empty = tmp_path / "nfs"
+    empty.mkdir()
+    registry.add(Model(id="gone", path=str(live / "gone.gguf")))
+    registry.add(Model(id="on-nfs", path=str(empty / "m.gguf")))
+
+    rows = missing_registry_rows(registry, roots=[live, empty])
+
+    assert [r["id"] for r in rows] == ["gone"]

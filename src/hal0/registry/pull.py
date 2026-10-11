@@ -409,6 +409,58 @@ def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:
 # ── Job orchestration ────────────────────────────────────────────────────────
 
 
+# ── model-delete markers (ADR-0026) ──────────────────────────────────────────
+#
+# A model delete marks the id as "deleting" for its whole cascade, so no new
+# pull or update job can start for it, and records when its row went, so a
+# job created before that moment never registers afterwards.
+
+_DELETING: set[str] = set()
+_DELETED_AT: dict[str, float] = {}
+
+
+def mark_deleting(model_id: str) -> None:
+    """Block new pull/update jobs for ``model_id`` until :func:`unmark_deleting`."""
+    _DELETING.add(model_id)
+
+
+def unmark_deleting(model_id: str) -> None:
+    _DELETING.discard(model_id)
+
+
+def mark_deleted(model_id: str) -> None:
+    """Record that ``model_id``'s registry row was removed just now."""
+    _DELETED_AT[model_id] = time.time()
+
+
+def ensure_not_deleting(model_id: str) -> None:
+    """Raise ``Conflict`` (``model.deleting``) while a delete of ``model_id`` runs.
+
+    Call right before a new job is stored in the jobs map, with no ``await``
+    in between, so the check and the insert are atomic on the event loop.
+    """
+    if model_id in _DELETING:
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"model {model_id!r} is being deleted; retry the pull once the delete finishes",
+            code="model.deleting",
+            details={"model_id": model_id},
+        )
+
+
+def _registration_abandoned(job: PullJob) -> bool:
+    """True when a finished download must NOT be registered.
+
+    Either the job was cancelled, or its model was deleted after the job was
+    created (a delete that raced the job's start).
+    """
+    if job.cancel_requested:
+        return True
+    deleted_at = _DELETED_AT.get(job.model_id)
+    return deleted_at is not None and deleted_at > job.started_at
+
+
 def make_job(model_id: str) -> PullJob:
     """Create a fresh job record for ``model_id``."""
     return PullJob(
@@ -1082,8 +1134,9 @@ async def run_pull(
             )
 
         # A delete cancels the job and waits for it (ADR-0026): if the cancel
-        # landed after the last chunk, never re-register the deleted model.
-        if job.cancel_requested:
+        # landed after the last chunk, or the model was deleted after this job
+        # started, never re-register the deleted model.
+        if _registration_abandoned(job):
             raise _PullCancelled()
 
         # Register / update the registry entry (mmproj set directly — the
@@ -1779,9 +1832,9 @@ async def _run_pull_fileset(
         entry_dest = next(dest for e, dest in installed if e.rel == fileset.entry_rel)
         mmproj_dest = next((dest for e, dest in installed if e.role == "mmproj"), None)
 
-        # Cancelled after the last file landed (e.g. the model is being
-        # deleted, ADR-0026): don't re-register it.
-        if job.cancel_requested:
+        # Cancelled after the last file landed, or deleted after this job
+        # started (ADR-0026): don't re-register it.
+        if _registration_abandoned(job):
             raise _PullCancelled()
 
         await asyncio.to_thread(
@@ -2071,9 +2124,9 @@ async def run_flm_pull(
                     pulled_capabilities = list(caps)
                 break
 
-        # Cancelled while FLM finished (e.g. the model is being deleted,
-        # ADR-0026): don't re-register it.
-        if job.cancel_requested:
+        # Cancelled while FLM finished, or deleted after this job started
+        # (ADR-0026): don't re-register it.
+        if _registration_abandoned(job):
             job.state = "cancelled"
             job.finished_at = time.time()
             job._signal()

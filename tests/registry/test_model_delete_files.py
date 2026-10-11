@@ -545,3 +545,85 @@ def test_delete_refuses_while_a_pull_will_not_stop(registry: ModelRegistry, root
 
     assert registry.has("m")
     assert f.exists()
+
+
+# ── PR #2543 review round 3 ──────────────────────────────────────────────────
+
+
+def test_owner_check_failure_fails_closed(
+    registry: ModelRegistry, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the remaining rows can't be read, no file is deleted: sharing
+    can't be ruled out. The row delete still goes through."""
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+
+    def boom() -> list[Model]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(registry, "list", boom)
+
+    out = _delete(registry, "m", [root])
+
+    assert out["deleted"] is True
+    assert f.exists()
+    assert _kept(out) == {str(f): "owner_check_failed"}
+    assert out["tombstoned"] == [str(f)]
+    assert any(w.startswith("owner_check_failed") for w in out["warnings"])
+
+
+def test_model_file_read_failure_also_fails_closed(
+    registry: ModelRegistry, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    real_rows = svc._model_file_rows
+
+    def rows(reg: Any, model_id: str | None = None, *, strict: bool = False) -> list[Any]:
+        if strict:
+            raise RuntimeError("disk I/O error")
+        return real_rows(reg, model_id)
+
+    monkeypatch.setattr(svc, "_model_file_rows", rows)
+
+    out = _delete(registry, "m", [root])
+
+    assert f.exists()
+    assert _kept(out) == {str(f): "owner_check_failed"}
+
+
+def test_directory_reported_kept_is_not_rmdired(registry: ModelRegistry, root: Path) -> None:
+    d = root / "onnx-model"
+    mm = _write(d / "mmproj.gguf")
+    registry.add(Model(id="onnx", path=str(d), mmproj=str(mm)))
+
+    out = _delete(registry, "onnx", [root])
+
+    assert not mm.exists()
+    assert d.is_dir(), "a directory reported as kept must survive empty-parent pruning"
+    assert _kept(out) == {str(d): "directory"}
+
+
+def test_new_pull_is_refused_while_the_model_is_being_deleted(
+    registry: ModelRegistry, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.errors import Conflict
+    from hal0.registry import pull as pull_mod
+
+    f = _write(root / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+    seen: dict[str, bool] = {}
+
+    async def probe(pull_jobs: Any, model_id: str, **kw: Any) -> None:
+        try:
+            pull_mod.ensure_not_deleting(model_id)
+            seen["refused"] = False
+        except Conflict as exc:
+            seen["refused"] = exc.code == "model.deleting"
+
+    monkeypatch.setattr(svc, "cancel_active_pull", probe)
+
+    _delete(registry, "m", [root])
+
+    assert seen == {"refused": True}
+    pull_mod.ensure_not_deleting("m")  # the guard is released after the delete

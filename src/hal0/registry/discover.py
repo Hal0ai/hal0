@@ -19,7 +19,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -750,6 +750,31 @@ def _missing_is_trustworthy(path: Path, roots: list[Path], live: dict[Path, bool
         return False
 
 
+def miss_checker(roots: list[str | Path]) -> Callable[[str | Path], bool]:
+    """A predicate: may a missing ``path`` under ``roots`` be trusted as deleted?
+
+    Wraps :func:`_missing_is_trustworthy` with resolved roots and a per-root
+    liveness cache. :func:`prune_missing` and the prune preview
+    (``models_service.missing_registry_rows``) share it, so the preview
+    lists exactly what a prune would remove.
+    """
+    root_paths: list[Path] = []
+    for r in roots:
+        rp = Path(r).expanduser()
+        with contextlib.suppress(OSError):
+            rp = rp.resolve()
+        root_paths.append(rp)
+    live: dict[Path, bool] = {}
+
+    def check(path: str | Path) -> bool:
+        p = Path(path).expanduser()
+        with contextlib.suppress(OSError):
+            p = p.resolve()
+        return _missing_is_trustworthy(p, root_paths, live)
+
+    return check
+
+
 def _prune_row(registry: ModelRegistry, model_id: str) -> None:
     """Remove one pruned row and release its ``store_blob`` references.
 
@@ -808,13 +833,7 @@ def prune_missing(
     missing_referenced: list[str] = []
     missing_unverified: list[str] = []
     kept = 0
-    root_paths: list[Path] = []
-    for r in roots or []:
-        rp = Path(r).expanduser()
-        with contextlib.suppress(OSError):
-            rp = rp.resolve()
-        root_paths.append(rp)
-    live: dict[Path, bool] = {}
+    trustworthy = miss_checker(roots or [])
     for m in registry.list():
         if is_runtime_managed(m):
             kept += 1
@@ -834,13 +853,9 @@ def prune_missing(
             # that needs a repair, not a deletion. Report, never remove.
             missing_referenced.append(m.id)
             continue
-        if roots is not None:
-            p = Path(m.path).expanduser()
-            with contextlib.suppress(OSError):
-                p = p.resolve()
-            if not _missing_is_trustworthy(p, root_paths, live):
-                missing_unverified.append(m.id)
-                continue
+        if roots is not None and not trustworthy(m.path):
+            missing_unverified.append(m.id)
+            continue
         pruned.append(m.id)
         if not dry_run:
             _prune_row(registry, m.id)

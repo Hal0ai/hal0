@@ -85,6 +85,7 @@ from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
     PullJobNotFound,
+    ensure_not_deleting,
     list_persisted_jobs,
     make_job,
     persist_pull_job,
@@ -561,6 +562,7 @@ async def start_flm_pull(
     rate. Footer events are emitted directly around the run.
     """
     job = make_job(model_id)
+    ensure_not_deleting(model_id)  # atomic with the insert below (ADR-0026)
     jobs[model_id] = job
     # Persist the queued snapshot before returning so a status poll resolves
     # even if the daemon restarts before the background task runs (#626).
@@ -671,6 +673,7 @@ async def enqueue(
         screen_vision_mmproj(labels, mmproj_file, require_on_disk=False)
         seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template)
     job = make_job(model_id)
+    ensure_not_deleting(model_id)  # atomic with the insert below (ADR-0026)
     jobs[model_id] = job
     # Persist the queued snapshot before returning so a status poll resolves
     # even if the daemon restarts before the background task runs (#626).
@@ -745,6 +748,7 @@ async def enqueue_update(
         }
 
     job = make_job(model_id)
+    ensure_not_deleting(model_id)  # atomic with the insert below (ADR-0026)
     jobs[model_id] = job
     persist_pull_job(job)
 
