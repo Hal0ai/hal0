@@ -2022,6 +2022,16 @@ def run_post_activation_migrations(
         # Non-fatal: an affected model keeps failing to launch until the
         # operator removes the managed flag in the model drawer.
 
+    try:
+        from hal0.config.migrations.reasoning_format_none import run_migration
+
+        run_migration()
+    except Exception as exc:
+        log.warning("updater.reasoning_format_none_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: structured-output requests keep failing on upstream
+        # llama.cpp for the affected profile/model until the flag is removed
+        # by hand (#2545); never a reason to fail an update.
+
     # ── Component convergence (spec 2026-08-30): the catalog runs LAST for
     # the same reason the engine pass did — hindsight (inside it) is the
     # slowest pass and stops a companion service; every cheap pass above

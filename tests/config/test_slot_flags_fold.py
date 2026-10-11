@@ -766,3 +766,42 @@ def test_classifier_rejects_a_profile_that_is_not_the_one_loaded():
 
 def test_classifier_rejects_a_specialty_model_whose_launch_may_be_degraded():
     assert _classifier(_FIT, frozenset({"m"}))(_rocm_slot("tuned")) is False
+
+
+# ── --reasoning-format none is never folded (#2545) ───────────────────────────
+
+
+def test_fold_never_carries_reasoning_format_none_from_any_source():
+    """Upstream llama.cpp 400s every response_format request under
+    ``--reasoning-format none``; the fold must not copy it into a model's
+    defaults from the profile, the model's own defaults, or the slot."""
+    ft = compute_folded_tune(
+        _slot("s", "m", extra_args="-b 2048 --reasoning-format=none"),
+        profile_flags="--reasoning off --reasoning-format none -fa auto",
+        model_defaults={"extra_args": "--temp 0 --reasoning-format none"},
+    )
+    assert "reasoning-format" not in ft.extra_args
+    # The unrelated flags around it survive.
+    for kept in ("--reasoning off", "-fa auto", "--temp 0", "-b 2048"):
+        assert kept in ft.extra_args
+
+
+def test_fold_keeps_a_deliberate_reasoning_format_and_is_not_shadowed():
+    """A stripped higher-precedence ``none`` must not shadow a deliberate
+    lower-precedence ``deepseek`` (strip happens per source, before the merge)."""
+    ft = compute_folded_tune(
+        _slot("s", "m", extra_args="--reasoning-format none"),
+        profile_flags="--reasoning-format deepseek",
+        model_defaults=None,
+    )
+    assert ft.extra_args == "--reasoning-format deepseek"
+
+
+def test_fold_of_a_stale_model_default_is_idempotent_after_sanitizing():
+    """Order of operations does not matter: folding a model whose defaults
+    already carry the pair rewrites it clean, and a second fold is a no-op."""
+    slot = _slot("s", "m", extra_args="")
+    first = compute_folded_tune(slot, "", {"extra_args": "--jinja --reasoning-format none"})
+    assert first.extra_args == "--jinja"
+    again = compute_folded_tune(slot, "", {"extra_args": first.extra_args})
+    assert again == first

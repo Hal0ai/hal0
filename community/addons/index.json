@@ -8,7 +8,7 @@
       "description": "Chadrock 27B dense coder (ROCmFP4 + MTP + mmproj) · 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:ccf7aa2c4a3fa04471ee492860ecbe0f82bc25ac5599e916fc2865026f634c0f",
+      "checksum": "sha256:e53120ec1f3f16bf0ae587f8b96b1fe200d7ccd3d8be9f1378cb48a278d196eb",
       "file": "chadrock-dense.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },
@@ -18,7 +18,7 @@
       "description": "Chadrock 35B MoE Saber (ROCmFPX MoEQuality + MTP) · 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:cd454bc0cf8bf74da61dbae0e82ac66e75e78ba03e8fca424e9f2bebd41740a6",
+      "checksum": "sha256:899f96f6b3034cf6cf628ea14183a6f4b97467049524d7ed1d34639e535b0f41",
       "file": "chadrock-moe.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },
@@ -38,7 +38,7 @@
       "description": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:03a7ee5c6752b0efef783f2215de6f2b58260fc7d7635fab991d1a95fb161a09",
+      "checksum": "sha256:291988b6402f6bbbdbbc951b7f87e0d2c6ff3e386e94f5e008a1506bf9cf88dd",
       "file": "coding.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },
@@ -48,7 +48,7 @@
       "description": "Generic dense workload · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:24233a11274cc95d5c5055626b070d9b71a0639378439c0f24ecd62f857c2c3f",
+      "checksum": "sha256:342918f13268bcac35f6d609cf95b6ecff5ed7eb35d74a07d071f52a0bd7e98d",
       "file": "dense.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },
@@ -58,7 +58,7 @@
       "description": "Generic MoE workload · tuned for 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:962e4ff331785f77eb8c945eb6b75f42ec35912710ebdf6ba0dca3c6588f6fbd",
+      "checksum": "sha256:a5a8fa871d7306111d86d22da75f31d98af8441440e39aa2cc0ccada4804cf4c",
       "file": "moe.hal0profile.json",
       "min_hal0_version": "1.2.0"
     },

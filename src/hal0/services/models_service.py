@@ -2256,7 +2256,11 @@ def screen_model_write(
     if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
         import shlex
 
-        from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
+        from hal0.slots.argv import (
+            _deny_managed_flags,
+            _deny_slot_hardware_flags,
+            deny_reasoning_format_none,
+        )
 
         seg = "model defaults.extra_args"
         raw = defaults["extra_args"]
@@ -2280,6 +2284,17 @@ def screen_model_write(
         # managed-arg one — ``-ngl`` is in both sets.
         _deny_slot_hardware_flags(tokens, segment=seg)
         _deny_managed_flags(tokens, segment=seg)
+        # #2545: reject a save that INTRODUCES `--reasoning-format none`; a row
+        # that already carries it stays editable (resolve_argv strips it at launch).
+        prior_defaults = (existing or {}).get("defaults")
+        prior_extra = prior_defaults.get("extra_args") if isinstance(prior_defaults, dict) else None
+        prior_tokens: list[str] | None = None
+        if isinstance(prior_extra, str):
+            try:
+                prior_tokens = shlex.split(prior_extra.rstrip().rstrip("\\"))
+            except ValueError:
+                prior_tokens = []
+        deny_reasoning_format_none(tokens, segment=seg, grandfathered=prior_tokens)
 
     provider = body.get("provider")
     if provider is not None:

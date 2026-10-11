@@ -31,6 +31,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "mtp": [],
         "vulkan_migration": [],
         "extra_args": [],
+        "reasoning_format_none": [],
         "hermes_venv": [],
         "converge_components": [],
     }
@@ -55,6 +56,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["extra_args"].append(job_id)
         return 0
 
+    def _reasoning_format_none(*, registry=None):
+        calls["reasoning_format_none"].append(registry)
+        return {"profiles": [], "slots": [], "models": []}
+
     def _hermes_venv(*, job_id=None, install=True, venv=None, restart_gateway=True):
         calls["hermes_venv"].append((job_id, install))
         return False
@@ -78,6 +83,9 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
     monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
+    monkeypatch.setattr(
+        "hal0.config.migrations.reasoning_format_none.run_migration", _reasoning_format_none
+    )
     monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
     monkeypatch.setattr("hal0.components.runner.converge_components", _converge_components)
     return calls
@@ -91,6 +99,7 @@ def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
     assert _stub_every_pass["extra_args"] == ["j1"]
+    assert _stub_every_pass["reasoning_format_none"] == [None]
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "j1",

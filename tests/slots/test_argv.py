@@ -496,3 +496,65 @@ def test_strip_managed_flags_custom_denylist_covers_hardware() -> None:
     )
     assert clean == ["-fa", "on"]
     assert removed == ["--threads"]
+
+
+# ── strip_reasoning_format_none (#2545) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected", "removed"),
+    [
+        (["--reasoning-format", "none"], [], 1),
+        (["--reasoning-format", "none", "-b", "2048"], ["-b", "2048"], 1),  # at start
+        (["-b", "2048", "--reasoning-format", "none"], ["-b", "2048"], 1),  # at end
+        (  # in the middle
+            ["--reasoning", "off", "--reasoning-format", "none", "--jinja"],
+            ["--reasoning", "off", "--jinja"],
+            1,
+        ),
+        (["--reasoning-format=none", "-b", "2048"], ["-b", "2048"], 1),  # `=` form
+        (["--reasoning-format=NONE"], [], 1),  # value is case-insensitive
+        # `=` form takes no separate value: an unrelated token after it survives.
+        (["--reasoning-format=none", "positional"], ["positional"], 1),
+        (["--reasoning-format", "none", "--reasoning-format=none"], [], 2),
+    ],
+)
+def test_strip_reasoning_format_none_removes_the_pair(tokens, expected, removed):
+    from hal0.slots.argv import strip_reasoning_format_none
+
+    assert strip_reasoning_format_none(tokens) == (expected, removed)
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["--reasoning-format", "deepseek"],
+        ["--reasoning-format=deepseek"],
+        ["--reasoning-format", "auto", "--jinja"],
+        ["--reasoning", "off", "--jinja"],  # sibling flag untouched
+        ["--reasoning-format"],  # dangling, no value
+        ["--reasoning-format", "--jinja"],  # next token is a flag, not a value
+        [],
+    ],
+)
+def test_strip_reasoning_format_none_leaves_everything_else(tokens):
+    from hal0.slots.argv import strip_reasoning_format_none
+
+    assert strip_reasoning_format_none(tokens) == (tokens, 0)
+
+
+def test_resolve_argv_strips_reasoning_format_none_from_every_segment() -> None:
+    """Launch backstop (#2545): whichever segment carries it, it never reaches the
+    argv, and a stripped `none` does not shadow a lower-precedence `deepseek`."""
+    for label in ("slot_profile", "model_extra_args", "extra_args"):
+        out = resolve_argv(
+            [
+                ("slot_profile", ["--jinja", "--reasoning-format", "deepseek"]),
+                (label, ["--reasoning-format", "none", "-b", "2048"]),
+            ]
+        )
+        assert "none" not in out.argv
+        assert _value_after(out.argv, "--reasoning-format") == "deepseek"
+        assert _value_after(out.argv, "-b") == "2048"
+    only = resolve_argv([("model_extra_args", ["--reasoning-format=none", "--jinja"])])
+    assert only.argv == ["--jinja"]

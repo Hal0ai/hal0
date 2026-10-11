@@ -1,11 +1,11 @@
 {
-  "checksum": "sha256:03a7ee5c6752b0efef783f2215de6f2b58260fc7d7635fab991d1a95fb161a09",
+  "checksum": "sha256:291988b6402f6bbbdbbc951b7f87e0d2c6ff3e386e94f5e008a1506bf9cf88dd",
   "exported_at": "2026-09-01T00:00:00Z",
-  "hal0_version": "1.1.0",
+  "hal0_version": "1.4.0",
   "kind": "hal0.profile",
   "name": "coding",
   "profile": {
-    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-format none --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj",
+    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj",
     "intent": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
     "mtp": false,
     "quant": ""

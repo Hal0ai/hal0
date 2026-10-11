@@ -3099,7 +3099,7 @@ if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
     print(f"  hal0.toml schema already at {target}")
-print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args cleanup passes ran (see log for any per-item detail)")
+print("  seed-profile / stale-MTP / vulkan-slot / runner-image / extra-args / reasoning-format cleanup passes ran (see log for any per-item detail)")
 PYEOF
 fi
 
