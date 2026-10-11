@@ -154,6 +154,16 @@ def registry_dir() -> Path:
     return var_lib() / "registry"
 
 
+def model_tombstones_path() -> Path:
+    """Return the ignored-model-paths file (/var/lib/hal0/registry/ignored-paths.json).
+
+    Resolved paths the discovery scan must never re-register: written when an
+    operator deletes a model but its files stay on disk (see
+    :mod:`hal0.registry.tombstones` and ADR-0026).
+    """
+    return registry_dir() / "ignored-paths.json"
+
+
 def agents_config_dir() -> Path:
     """Return the per-agent allow-list config directory.
 

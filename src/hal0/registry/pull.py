@@ -41,6 +41,7 @@ from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
 from hal0.model_meta import derive_model_provider
+from hal0.registry import tombstones
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
@@ -1203,6 +1204,9 @@ def _register_pulled(
     # ``pulled_at`` provenance lets the dashboard show when the installed
     # bytes were fetched — and thereby how stale they are vs an available
     # HF update (registry/update_check.py compares the shas).
+    # A pull is an explicit request for these bytes: drop any tombstone a
+    # keep-files delete left on the path (ADR-0026).
+    tombstones.clear(path)
     fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
     # Curated template override: some artifacts ship an embedded chat template
     # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
@@ -1552,6 +1556,8 @@ def _register_pulled_fileset(
     installed file (ML-2 is the first writer of that table — ML-1 imports
     it EMPTY).
     """
+    # Explicit pull: un-ignore the entry path (ADR-0026).
+    tombstones.clear(entry_dest)
     entry_sha = next((e.lfs_sha256 for e, dest in installed if dest == entry_dest), None)
     total_size = sum(dest.stat().st_size for _, dest in installed if dest.exists())
     fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
@@ -2225,6 +2231,8 @@ def _register_flm_pulled(
     only when the caller couldn't resolve a classification (e.g. the probe
     was transiently empty right after the pull).
     """
+    # Explicit pull: un-ignore the FLM model dir (ADR-0026).
+    tombstones.clear(path)
     caps = list(capabilities) if capabilities else ["chat"]
     updates: dict[str, Any] = {
         "path": path,

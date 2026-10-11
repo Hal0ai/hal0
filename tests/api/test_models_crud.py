@@ -1175,3 +1175,144 @@ def test_put_explicit_null_provider_rederives_from_backends_2199(
 
     row = crud_client.get("/api/models/null-provider").json()
     assert row["provider"] == "kokoro"
+
+
+# ── DELETE removes files by default (ADR-0026) ─────────────────────────────
+
+
+def test_delete_removes_files_by_default_and_reports_them(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "sub" / "doomed.gguf"
+    fpath.parent.mkdir()
+    fpath.write_bytes(b"\x00" * 32)
+    assert (
+        crud_client.post("/api/models", json={"id": "doomed", "path": str(fpath)}).status_code
+        == 201
+    )
+
+    r = crud_client.delete("/api/models/doomed")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["affected_slots"] == []
+    assert body["files_removed"] == [{"path": str(fpath), "size_bytes": 32}]
+    assert body["bytes_freed"] == 32
+    assert body["files_kept"] == []
+    assert body["tombstoned"] == []
+    assert not fpath.exists()
+    assert not fpath.parent.exists(), "emptied parent dir is removed"
+    assert crud_models_root.is_dir()
+
+
+def test_delete_keep_files_tombstones_and_scan_does_not_readd(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "kept.gguf"
+    fpath.write_bytes(b"\x00" * 32)
+    assert (
+        crud_client.post("/api/models", json={"id": "kept", "path": str(fpath)}).status_code == 201
+    )
+
+    r = crud_client.delete("/api/models/kept?delete_files=false")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert fpath.exists()
+    assert body["files_kept"] == [{"path": str(fpath), "reason": "kept_by_request"}]
+    assert body["tombstoned"] == [str(fpath.resolve())]
+
+    scan = crud_client.post("/api/models/scan", json={})
+    assert scan.status_code == 200, scan.text
+    assert scan.json()["added"] == []
+    assert crud_client.get("/api/models/kept").status_code == 404
+
+    # An explicit add-from-path brings it back and clears the tombstone.
+    r = crud_client.post("/api/models/add-from-path", json={"path": str(fpath), "id": "kept"})
+    assert r.status_code in (200, 201), r.text
+    from hal0.registry import tombstones
+
+    assert tombstones.load() == set()
+
+
+def test_delete_never_removes_files_outside_the_roots(
+    crud_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    outside = Path(tmp_hal0_home) / "not-a-root" / "precious.gguf"
+    outside.parent.mkdir()
+    outside.write_bytes(b"\x00" * 8)
+    crud_client.post("/api/models", json={"id": "precious", "path": str(outside)})
+
+    body = crud_client.delete("/api/models/precious").json()
+
+    assert outside.exists()
+    assert body["deleted"] is True
+    assert body["files_kept"] == [{"path": str(outside), "reason": "outside_roots"}]
+
+
+# ── startup auto-scan prunes ghost rows (ADR-0026) ─────────────────────────
+
+
+def _boot_with_ghosts(tmp_hal0_home: str, *, mounted: bool = True) -> tuple[Path, Any]:
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    root = Path(tmp_hal0_home) / "boot-models"
+    root.mkdir()
+    if mounted:
+        # A non-empty root reads as mounted; an empty one as an unmounted share.
+        (root / "README").write_text("models live here\n", encoding="utf-8")
+    etc = Path(tmp_hal0_home) / "etc" / "hal0"
+    (etc / "slots").mkdir(parents=True, exist_ok=True)
+    (etc / "hal0.toml").write_text(
+        f'[models]\nroots = ["{root}"]\nauto_scan_on_start = true\n', encoding="utf-8"
+    )
+    (etc / "slots" / "chat.toml").write_text(
+        'name = "chat"\nport = 8081\nbackend = "vulkan"\nprovider = "llama-server"\n'
+        '[model]\ndefault = "ghost-referenced"\n',
+        encoding="utf-8",
+    )
+    reg = ModelRegistry()
+    reg.add(Model(id="ghost", path=str(root / "gone.gguf")))
+    reg.add(Model(id="ghost-referenced", path=str(root / "also-gone.gguf")))
+    reg.add(Model(id="npu-model", path=str(root / "flm-gone"), metadata={"runtime": "flm"}))
+    return root, reg
+
+
+def test_startup_scan_prunes_missing_rows_but_protects_referenced(tmp_hal0_home: str) -> None:
+    _root, reg = _boot_with_ghosts(tmp_hal0_home)
+
+    with TestClient(create_app()):
+        pass
+
+    assert not reg.has("ghost")
+    assert reg.has("ghost-referenced"), "slot-referenced row is protected"
+    assert reg.has("npu-model"), "FLM rows are never pruned"
+
+
+def test_startup_scan_skips_prune_when_references_incomplete(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.api as api_mod
+
+    _root, reg = _boot_with_ghosts(tmp_hal0_home)
+    monkeypatch.setattr(api_mod, "_collect_referenced_model_ids", lambda: (set(), False))
+
+    with TestClient(create_app()):
+        pass
+
+    assert reg.has("ghost"), "no prune with an incomplete protected set"
+
+
+def test_startup_scan_does_not_prune_under_an_empty_root(tmp_hal0_home: str) -> None:
+    """An empty root looks like an unmounted share: its rows are not pruned."""
+    _root, reg = _boot_with_ghosts(tmp_hal0_home, mounted=False)
+
+    with TestClient(create_app()):
+        pass
+
+    assert reg.has("ghost")

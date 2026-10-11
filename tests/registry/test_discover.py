@@ -839,3 +839,135 @@ def test_collect_referenced_model_ids_flags_a_failed_source(
     monkeypatch.setattr(loader, "load_hal0_config", _boom)
     _ids, complete = discover._collect_referenced_model_ids()
     assert complete is False
+
+
+# ── ADR-0026: dot dirs, tombstones, HF shard naming, hardlink dedupe ─────────
+
+
+def test_find_candidates_skips_dot_dirs_below_root(tmp_path: Path) -> None:
+    """``.Trash-1000/files/…`` inside a root never yields a candidate."""
+    root = tmp_path / "models"
+    (root / ".Trash-1000" / "files").mkdir(parents=True)
+    (root / ".Trash-1000" / "files" / "deleted-q4.gguf").write_bytes(b"x" * 16)
+    (root / "live-q4.gguf").write_bytes(b"x" * 16)
+
+    found = {c.path.name for c in find_candidates([root], [".gguf"], set())}
+
+    assert found == {"live-q4.gguf"}
+
+
+def test_find_candidates_root_under_dot_dir_still_scans(tmp_path: Path) -> None:
+    root = tmp_path / ".cache" / "models"
+    root.mkdir(parents=True)
+    (root / "cached-q4.gguf").write_bytes(b"x" * 16)
+
+    found = {c.path.name for c in find_candidates([root], [".gguf"], set())}
+
+    assert found == {"cached-q4.gguf"}
+
+
+def test_find_candidates_skips_tombstoned_paths(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    gone = root / "deleted-q4.gguf"
+    gone.write_bytes(b"x" * 16)
+    (root / "flmdir").mkdir()
+    (root / "flmdir" / "inner.gguf").write_bytes(b"x" * 16)
+    (root / "live-q4.gguf").write_bytes(b"x" * 16)
+
+    found = {
+        c.path.name
+        for c in find_candidates(
+            [root],
+            [".gguf"],
+            set(),
+            ignored_paths={str(gone.resolve()), str((root / "flmdir").resolve())},
+        )
+    }
+
+    assert found == {"live-q4.gguf"}
+
+
+def test_find_candidates_drops_shard_set_with_tombstoned_shard(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    s1 = root / "m-00001-of-00002.gguf"
+    s2 = root / "m-00002-of-00002.gguf"
+    s1.write_bytes(b"x" * 16)
+    s2.write_bytes(b"x" * 16)
+
+    assert find_candidates([root], [".gguf"], set(), ignored_paths={str(s2.resolve())}) == []
+
+
+def test_hf_snapshot_shard_set_is_named_from_snapshot_not_blob(tmp_path: Path) -> None:
+    """A shard set whose shards resolve into ``blobs/<sha>`` gets its id from
+    the snapshot filename — never the hash-named blob."""
+    root = tmp_path / "hub"
+    repo = root / "models--org--big"
+    blobs = repo / "blobs"
+    snap = repo / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    for i, ch in ((1, "a"), (2, "b")):
+        blob = blobs / (ch * 64)
+        blob.write_bytes(b"x" * 16)
+        (snap / f"big-model-0000{i}-of-00002.gguf").symlink_to(blob)
+
+    cands = find_candidates([root], [".gguf"], set())
+
+    assert len(cands) == 1
+    assert cands[0].suggested_id == "big-model-00001-of-00002"
+    assert cands[0].path == (blobs / ("a" * 64)).resolve()
+
+
+def test_scan_skips_hardlinked_copy_of_registered_model(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    import os
+
+    root = tmp_path / "models"
+    root.mkdir()
+    original = root / "store" / "m-q4.gguf"
+    original.parent.mkdir()
+    original.write_bytes(b"x" * 16)
+    copy = root / "cache" / "other-name-q4.gguf"
+    copy.parent.mkdir()
+    os.link(original, copy)
+    registry.add(Model(id="m-q4", path=str(original)))
+
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+    assert result["added"] == []
+
+
+def test_prune_missing_never_drops_flm_rows(tmp_path: Path, registry: ModelRegistry) -> None:
+    registry.add(
+        Model(id="qwen3:0.6b", path=str(tmp_path / "gone-flm-dir"), metadata={"runtime": "flm"})
+    )
+    registry.add(Model(id="ghost", path=str(tmp_path / "gone.gguf")))
+
+    result = prune_missing(registry, protected_ids=set())
+
+    assert result["pruned"] == ["ghost"]
+    assert registry.has("qwen3:0.6b")
+
+
+def test_prune_missing_with_roots_keeps_rows_under_an_empty_root(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    (mounted / "other.gguf").write_bytes(b"x")
+    unmounted = tmp_path / "nfs"
+    unmounted.mkdir()
+    registry.add(Model(id="gone", path=str(mounted / "gone.gguf")))
+    registry.add(Model(id="unknown", path=str(unmounted / "m.gguf")))
+    registry.add(Model(id="outside-dir-gone", path=str(tmp_path / "nope" / "m.gguf")))
+    (tmp_path / "loose").mkdir()
+    registry.add(Model(id="outside-file-gone", path=str(tmp_path / "loose" / "m.gguf")))
+
+    result = prune_missing(registry, protected_ids=set(), roots=[mounted, unmounted])
+
+    assert sorted(result["pruned"]) == ["gone", "outside-file-gone"]
+    assert sorted(result["missing_unverified"]) == ["outside-dir-gone", "unknown"]
+    assert registry.has("unknown")

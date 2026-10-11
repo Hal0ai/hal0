@@ -20,10 +20,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from hal0.model_meta import RUNTIME_FAMILIES, classify, derive_model_provider
+from hal0.registry import tombstones
 from hal0.registry.detect import DetectionResult, detect, detected_architecture
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
@@ -459,6 +463,8 @@ async def commit_scan_rows(
         except ModelAlreadyExists:
             skipped.append({"path": str(resolved), "reason": "already_registered"})
             continue
+        # The operator picked this row explicitly (scan commit) — un-ignore it.
+        tombstones.clear(path)
         added.append(model.id)
         if event_bus is not None:
             await event_bus.emit(
@@ -555,12 +561,15 @@ def missing_registry_rows(registry: Any) -> list[dict[str, Any]]:
     protected from prune (repair, don't delete); see
     :func:`hal0.registry.discover.referenced_model_ids`.
     """
-    from hal0.registry.discover import referenced_model_ids
+    from hal0.registry.discover import is_runtime_managed, referenced_model_ids
 
     missing: list[dict[str, Any]] = []
     try:
         referenced = referenced_model_ids()
         for m in registry.list():
+            if is_runtime_managed(m):
+                # prune_missing never drops these; don't preview them as drift.
+                continue
             try:
                 present = Path(m.path).exists()
             except OSError:
@@ -758,8 +767,11 @@ async def cascade_delete_model(
     slot_manager: Any,
     model_id: str,
     affected: list[dict[str, Any]],
-) -> bool:
-    """Cascade-delete a model: unload referrers, clear defaults, remove row.
+    *,
+    delete_files: bool = True,
+    roots: Sequence[str | Path] | None = None,
+) -> dict[str, Any]:
+    """Cascade-delete a model: unload referrers, clear defaults, remove row, files.
 
     Cascade order is load-bearing for the footer's ticker UX:
 
@@ -767,12 +779,29 @@ async def cascade_delete_model(
       2. clear ``[model].default`` in slot TOMLs
       3. registry delete
       4. GC the durable pull-job snapshot
+      5. remove the model's files (``delete_files=True``, the default) or
+         tombstone them so a scan never re-adds them — see
+         :func:`delete_model_files_on_disk` and ADR-0026
+
+    The file set is captured before step 3, because the row's ``model_file``
+    rows cascade away with it. File removal never raises and never undoes
+    the row delete: a refused or failed file is reported in ``files_kept``.
+    ``roots`` defaults to :func:`deletion_roots`.
 
     The caller emits ``model.deleted`` *after* this returns so subscribers
-    see the slot transitions before the model disappears. Returns whether
-    the registry row was actually removed.
+    see the slot transitions before the model disappears. Returns
+    ``{"deleted": bool, "files_removed", "files_kept", "bytes_freed",
+    "tombstoned", "warnings"}``.
     """
+    import asyncio
+
     from hal0.registry.pull import pull_job_file
+
+    try:
+        model = registry.get(model_id)
+    except Exception:
+        model = None
+    planned = plan_model_files(registry, model) if model is not None else []
 
     for entry in affected:
         await unload_slot_if_running(slot_manager, entry["name"])
@@ -785,7 +814,354 @@ async def cascade_delete_model(
     # startup sweep reaps anything we miss here.
     with contextlib.suppress(OSError):
         pull_job_file(model_id).unlink(missing_ok=True)
-    return bool(removed)
+
+    outcome = _empty_file_outcome()
+    if removed and model is not None:
+        try:
+            outcome = await asyncio.to_thread(
+                delete_model_files_on_disk,
+                registry,
+                model,
+                planned,
+                delete_files=delete_files,
+                roots=roots if roots is not None else deletion_roots(),
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("models.delete_files_failed id=%s err=%s", model_id, exc)
+            outcome["warnings"].append(f"file cleanup failed: {exc}")
+    return {"deleted": bool(removed), **outcome}
+
+
+# ── model file removal on delete (ADR-0026) ───────────────────────────────────
+
+
+def _empty_file_outcome() -> dict[str, Any]:
+    return {
+        "files_removed": [],
+        "files_kept": [],
+        "bytes_freed": 0,
+        "tombstoned": [],
+        "warnings": [],
+    }
+
+
+def deletion_roots() -> list[str]:
+    """Directories a model delete may remove files under.
+
+    The discovery scan roots (``[models].roots`` plus the effective store —
+    :meth:`hal0.config.schema.ModelsConfig.scan_roots`) and the resolved
+    store root hal0 pulls to. A config-load failure degrades to the store
+    root alone, never to "anywhere".
+    """
+    from hal0.config import store as store_cfg
+
+    out: list[str] = []
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        out.extend(load_hal0_config().models.scan_roots())
+    except Exception as exc:
+        log.warning("models.deletion_roots_config_failed err=%s", exc)
+    with contextlib.suppress(Exception):
+        sr = str(store_cfg.store_root())
+        if sr not in out:
+            out.append(sr)
+    return out
+
+
+def _model_file_rows(registry: Any, model_id: str | None = None) -> list[dict[str, Any]]:
+    """``model_file`` rows (all models, or one) — empty on a non-SQLite registry."""
+    db_path = getattr(registry, "db_path", None)
+    if db_path is None:
+        return []
+    from hal0.db.connection import connect
+
+    try:
+        with connect(db_path) as conn:
+            if model_id is not None:
+                from hal0.db import repository
+
+                return repository.list_model_files(conn, model_id)
+            rows = conn.execute(
+                "SELECT model_id, dest, sha256 FROM model_file WHERE dest IS NOT NULL"
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        log.warning("models.model_file_read_failed id=%s err=%s", model_id, exc)
+        return []
+
+
+def _model_paths(model: Any) -> list[str]:
+    """The paths a registry row itself records: path, shards, mmproj."""
+    out: list[str] = []
+    if getattr(model, "path", ""):
+        out.append(str(model.path))
+    shards = (getattr(model, "metadata", None) or {}).get("shards")
+    if isinstance(shards, list):
+        out.extend(str(s) for s in shards if isinstance(s, str) and s)
+    if getattr(model, "mmproj", None):
+        out.append(str(model.mmproj))
+    return out
+
+
+def plan_model_files(registry: Any, model: Any) -> list[tuple[str, str | None]]:
+    """The file set a delete would remove, as ``(path, sha256 | None)``.
+
+    Union, deduped, of the row's ``path``, ``metadata["shards"]``, ``mmproj``
+    and every ``model_file`` row's ``dest`` (pulled filesets record config,
+    tokenizer and shard files there; ``sha256`` drives the ``store_blob``
+    refcount). Must be called BEFORE ``registry.remove`` — the ``model_file``
+    rows cascade away with the model row.
+    """
+    seen: dict[str, str | None] = {}
+    for p in _model_paths(model):
+        seen.setdefault(p, None)
+    for row in _model_file_rows(registry, model.id):
+        dest = row.get("dest")
+        if dest:
+            sha = row.get("sha256") or None
+            if seen.get(dest) is None:
+                seen[dest] = sha
+    return list(seen.items())
+
+
+def _resolve(p: str | Path) -> Path:
+    path = Path(p).expanduser()
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _other_references(registry: Any) -> dict[str, str]:
+    """Resolved path → id for every file a REMAINING registry row references."""
+    refs: dict[str, str] = {}
+    try:
+        rows = list(registry.list())
+    except Exception:
+        rows = []
+    for row in rows:
+        for p in _model_paths(row):
+            refs.setdefault(str(_resolve(p)), row.id)
+            refs.setdefault(str(Path(p).expanduser()), row.id)
+    for frow in _model_file_rows(registry):
+        dest = frow.get("dest")
+        if dest:
+            refs.setdefault(str(_resolve(dest)), str(frow.get("model_id")))
+            refs.setdefault(str(Path(dest).expanduser()), str(frow.get("model_id")))
+    return refs
+
+
+def _containing_root(p: Path, roots: list[Path]) -> Path | None:
+    """The root ``p`` sits STRICTLY inside (never equal to), else ``None``."""
+    for root in roots:
+        if p != root and p.is_relative_to(root):
+            return root
+    return None
+
+
+def _hal0_state_guard() -> tuple[list[Path], list[Path]]:
+    """``(protected, allowed)`` — hal0's own config/state trees, and the model
+    stores inside them that ARE fair game.
+
+    A delete never touches a file under ``/etc/hal0`` or ``/var/lib/hal0``
+    (slot TOMLs, the registry DB, secrets…) even when an operator configured
+    a very broad scan root such as ``/``; the model store and the default
+    models dir under ``/var/lib/hal0`` stay deletable.
+    """
+    from hal0.config import paths as cfg_paths
+    from hal0.config import store as store_cfg
+
+    protected = [_resolve(cfg_paths.etc()), _resolve(cfg_paths.var_lib())]
+    allowed = [_resolve(cfg_paths.models_dir())]
+    with contextlib.suppress(Exception):
+        allowed.append(_resolve(store_cfg.store_root()))
+    return protected, allowed
+
+
+def _in_hal0_state(p: Path, guard: tuple[list[Path], list[Path]]) -> bool:
+    protected, allowed = guard
+    if any(p.is_relative_to(a) for a in allowed):
+        return False
+    return any(p.is_relative_to(d) for d in protected)
+
+
+def _prune_empty_parents(start: Path, root: Path, keep: set[Path]) -> None:
+    """``rmdir`` empty directories from ``start`` up to (not including) ``root``."""
+    cur = start
+    while cur != root and cur.is_relative_to(root) and cur not in keep:
+        try:
+            cur.rmdir()
+        except OSError:
+            return
+        cur = cur.parent
+
+
+def delete_model_files_on_disk(
+    registry: Any,
+    model: Any,
+    planned: list[tuple[str, str | None]],
+    *,
+    delete_files: bool,
+    roots: Sequence[str | Path],
+) -> dict[str, Any]:
+    """Remove (or tombstone) a just-deleted model's files. Never raises.
+
+    ``planned`` comes from :func:`plan_model_files`, captured before the
+    registry row was removed. With ``delete_files=False`` nothing on disk is
+    touched; every existing file is tombstoned instead. Otherwise each file
+    is unlinked unless a guard refuses it (reported in ``files_kept`` with a
+    reason):
+
+    * ``outside_roots`` — the file (or, for a symlink, the link or its
+      resolved target) is not strictly inside a :func:`deletion_roots` root.
+    * ``shared:<id>`` — another remaining registry row references it.
+    * ``hal0_state`` — it sits under hal0's own config or state tree
+      (``/etc/hal0``, ``/var/lib/hal0``) outside the model store, which a
+      broad scan root such as ``/`` would otherwise expose.
+    * ``runtime_managed`` — an FLM row
+      (:func:`hal0.registry.discover.is_runtime_managed`): FLM owns its model
+      directory, so nothing is removed and the directory is tombstoned.
+    * ``directory`` — any other directory-valued path. Directories are never
+      removed recursively; the directory is tombstoned instead.
+    * ``unlink_failed:<error>`` — the OS refused.
+
+    A symlink (HF cache ``snapshots/…`` → ``blobs/<sha>``) is removed along
+    with its resolved target. A file with other hardlinks is removed but
+    frees no space; it is listed in ``warnings`` and left out of
+    ``bytes_freed``. Emptied parent directories are removed up to the root.
+    Every kept file that no other row references is tombstoned so a scan
+    never re-registers it. ``store_blob`` refcounts are released for each
+    removed pulled file via :func:`hal0.registry.gc.release_blob_ref`.
+    """
+    from hal0.config import store as store_cfg
+    from hal0.registry import tombstones
+
+    out = _empty_file_outcome()
+    to_tombstone: list[str] = []
+
+    existing = [(p, sha) for p, sha in planned if os.path.lexists(Path(p).expanduser())]
+
+    from hal0.registry.discover import is_runtime_managed
+
+    keep_reason = None
+    if not delete_files:
+        keep_reason = "kept_by_request"
+    elif is_runtime_managed(model):
+        # FLM owns these files (its model dir); never remove them from here.
+        keep_reason = "runtime_managed"
+    if keep_reason is not None:
+        for p, _sha in existing:
+            out["files_kept"].append({"path": p, "reason": keep_reason})
+            to_tombstone.append(p)
+        out["tombstoned"] = tombstones.add(to_tombstone)
+        return out
+
+    root_paths: list[Path] = []
+    for r in roots:
+        rp = _resolve(r)
+        if rp.is_dir() and rp not in root_paths:
+            root_paths.append(rp)
+    others = _other_references(registry)
+    state_guard = _hal0_state_guard()
+    removed_dirs: list[tuple[Path, Path]] = []
+    released: list[tuple[str | None, str]] = []
+    by_id: Path | None = None
+    with contextlib.suppress(Exception):
+        by_id = store_cfg.by_id_dir().resolve()
+
+    def _keep(path: str | Path, reason: str, *, tombstone: bool = True) -> None:
+        out["files_kept"].append({"path": str(path), "reason": reason})
+        if tombstone:
+            to_tombstone.append(str(path))
+
+    def _unlink(path: Path, root: Path) -> bool:
+        try:
+            st = path.lstat()
+            path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            _keep(path, f"unlink_failed:{exc.strerror or exc}")
+            return False
+        size = 0 if stat.S_ISLNK(st.st_mode) else st.st_size
+        entry: dict[str, Any] = {"path": str(path), "size_bytes": size}
+        if size and st.st_nlink > 1:
+            entry["hardlinks"] = st.st_nlink
+            out["warnings"].append(
+                f"{path} had {st.st_nlink - 1} other hardlink(s); its space is not freed"
+            )
+        else:
+            out["bytes_freed"] += size
+        out["files_removed"].append(entry)
+        removed_dirs.append((path.parent, root))
+        return True
+
+    for p, sha in existing:
+        literal = Path(p).expanduser()
+        target = _resolve(literal)
+        if target.is_dir():
+            _keep(p, "directory")
+            continue
+        is_link = literal.is_symlink()
+        # The link's own location: resolve its PARENT only, so the check is
+        # about where the link lives, not where it points.
+        link_loc = _resolve(literal.parent) / literal.name if is_link else target
+
+        if is_link:
+            owner = others.get(str(literal)) or others.get(str(link_loc))
+            link_root = _containing_root(link_loc, root_paths)
+            if owner:
+                _keep(p, f"shared:{owner}", tombstone=False)
+            elif link_root is None:
+                _keep(p, "outside_roots")
+            elif _in_hal0_state(link_loc, state_guard):
+                _keep(p, "hal0_state")
+            else:
+                _unlink(link_loc, link_root)
+
+        owner = others.get(str(target))
+        target_root = _containing_root(target, root_paths)
+        if owner:
+            _keep(target, f"shared:{owner}", tombstone=False)
+            continue
+        if target_root is None:
+            _keep(target, "outside_roots")
+            continue
+        if _in_hal0_state(target, state_guard):
+            _keep(target, "hal0_state")
+            continue
+        if _unlink(target, target_root):
+            released.append((sha, p))
+
+    # Release store_blob references for removed pulled files.
+    if any(sha for sha, _ in released):
+        db_path = getattr(registry, "db_path", None)
+        if db_path is not None:
+            from hal0.db.connection import connect, tx
+            from hal0.registry import gc
+
+            try:
+                with connect(db_path) as conn, tx(conn):
+                    for sha, dest in released:
+                        gc.release_blob_ref(conn, sha, dest, model_id=model.id)
+            except Exception as exc:
+                log.warning("models.blob_release_failed id=%s err=%s", model.id, exc)
+                out["warnings"].append(f"store refcount update failed: {exc}")
+
+    # The by-id pointer (pulled models) dangles once its target is gone.
+    with contextlib.suppress(Exception):
+        pointer = store_cfg.entry_pointer(model.id)
+        if pointer.is_symlink() and not pointer.exists():
+            pointer.unlink()
+
+    keep_dirs = {by_id} if by_id is not None else set()
+    for start, root in removed_dirs:
+        _prune_empty_parents(start, root, keep_dirs)
+
+    if to_tombstone:
+        out["tombstoned"] = tombstones.add(to_tombstone)
+    return out
 
 
 # ── catalog aggregation (GET /api/models) ─────────────────────────────────────
@@ -1199,6 +1575,10 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
 
     # ModelAlreadyExists (409) propagates to the typed envelope unchanged.
     registry.add(model)
+    # An explicit add brings a deleted-but-kept file back: drop its
+    # tombstone so a later registry-only delete + scan behaves normally
+    # (ADR-0026).
+    tombstones.clear(path)
 
     if event_bus is not None:
         await event_bus.emit(

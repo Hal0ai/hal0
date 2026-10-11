@@ -2760,7 +2760,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Async: returns a job id immediately. Check model_pull_status once and report "
         "progress — do NOT poll in a loop; downloads run for minutes in the background."
     ),
-    "model_delete": "Delete a model from the local registry (gated).",
+    "model_delete": (
+        "Delete a model and, by default, its files on disk "
+        "(delete_files=false removes only the registry entry and keeps the files) (gated)."
+    ),
     "model_register": "Register a model that's already on disk into the local registry (gated).",
     "model_add": "Register an already-downloaded model file — capabilities auto-detected (gated).",
     "model_store_set": (

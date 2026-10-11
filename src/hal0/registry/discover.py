@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
+from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.model import Model
@@ -212,13 +214,29 @@ def find_candidates(
     roots: list[str | Path],
     extensions: list[str],
     known_paths: set[str],
+    ignored_paths: set[str] | None = None,
+    known_inodes: set[tuple[int, int]] | None = None,
 ) -> list[CandidateModel]:
     """Walk each root and return :class:`CandidateModel`s not already registered.
 
     Files whose absolute path is in ``known_paths`` are skipped silently
     so a re-scan after a manual registry add doesn't fight itself. The
     walk is case-insensitive on extension to handle ``.GGUF`` vs ``.gguf``.
+
+    ``ignored_paths`` are tombstoned resolved paths
+    (:mod:`hal0.registry.tombstones`): a file at or below one is never a
+    candidate, so a model deleted with its files kept does not reappear.
+    Any directory BELOW a root whose name starts with ``.`` is skipped
+    (``.Trash-1000/``, ``.cache/``…); the root itself may live under a dot
+    directory.
+
+    ``known_inodes`` are ``(st_dev, st_ino)`` pairs of already-registered
+    files: a hardlinked copy of a registered model (the same bytes under a
+    second name, e.g. an HF-cache blob beside a store copy) is not a new
+    candidate.
     """
+    ignored = ignored_paths or set()
+    inodes = known_inodes or set()
     exts = {e.lower() for e in extensions}
     seen: set[Path] = set()
     out: list[CandidateModel] = []
@@ -232,6 +250,7 @@ def find_candidates(
     # "drop every shard" behaviour. An incomplete group (no shard-1 seen)
     # is silently dropped, same as before.
     shard_groups: dict[tuple[str, str, str], dict[int, Path]] = {}
+    shard_names: dict[tuple[str, str, str], Path] = {}
     started = time.monotonic()
     for root in roots:
         root_path = Path(root).expanduser()
@@ -254,6 +273,8 @@ def find_candidates(
                 if not candidate.is_file():
                     continue
             except OSError:
+                continue
+            if _under_dot_dir(candidate, root_path):
                 continue
             # Record mmproj sidecars for association, then skip them so they
             # never become standalone routable candidates. Done before the
@@ -289,6 +310,10 @@ def find_candidates(
                 idx = _shard_index(candidate)
                 if idx is not None:
                     shard_groups.setdefault(shard_key, {})[idx] = shard_abs
+                    if idx == 1:
+                        # Name from the walked path, not the resolved one:
+                        # an HF snapshot shard resolves to a hash-named blob.
+                        shard_names[shard_key] = candidate
                 continue
             if _is_skippable(candidate):
                 continue
@@ -303,13 +328,19 @@ def find_candidates(
                 continue
             if str(abs_path) in known_paths:
                 continue
+            if tombstones.is_tombstoned(abs_path, ignored):
+                continue
             if abs_path in seen:
                 continue
             seen.add(abs_path)
             try:
-                size = abs_path.stat().st_size
+                st = abs_path.stat()
             except OSError:
                 size = 0
+            else:
+                if (st.st_dev, st.st_ino) in inodes:
+                    continue
+                size = st.st_size
             # Prefer the symlink filename for id derivation + curated
             # match: the resolved blob is hash-named, but the snapshot
             # symlink carries the human-meaningful name.
@@ -330,12 +361,16 @@ def find_candidates(
     # as the old behaviour, since llama-server can't load a set missing its
     # entry point. Already-registered groups are filtered by shard-1's path,
     # mirroring the single-file `known_paths` check above.
-    for (_dirkey, _stem, _tot), idx_map in shard_groups.items():
+    for key, idx_map in shard_groups.items():
         if 1 not in idx_map:
             continue
         ordered = [idx_map[i] for i in sorted(idx_map)]
         entry_path = ordered[0]
         if str(entry_path) in known_paths or entry_path in seen:
+            continue
+        if any(tombstones.is_tombstoned(sp, ignored) for sp in ordered):
+            continue
+        if _inode(entry_path) in inodes:
             continue
         seen.add(entry_path)
         total_size = 0
@@ -344,7 +379,7 @@ def find_candidates(
                 total_size += shard_path.stat().st_size
             except OSError:
                 continue
-        naming_source = entry_path
+        naming_source = shard_names.get(key, entry_path)
         out.append(
             CandidateModel(
                 path=entry_path,
@@ -540,6 +575,30 @@ def _under_skip_dir(path: Path, root: Path) -> bool:
     return any(part in _SKIP_DIR_NAMES for part in path.parent.relative_to(root).parts)
 
 
+def _inode(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of ``path``, or ``None`` if it cannot be stat'd."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _under_dot_dir(path: Path, root: Path) -> bool:
+    """True when a directory BETWEEN ``root`` and ``path`` starts with ``.``.
+
+    Relative to the root, like :func:`_under_skip_dir`, so a root that itself
+    sits under a dot directory (``~/.cache/models``) still scans, while a
+    ``.Trash-1000/`` or ``.cache/`` inside a root is never walked into
+    candidates. The file name itself is covered by :func:`_is_skippable`.
+    """
+    try:
+        rel = path.parent.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in rel.parts)
+
+
 def _containing_roots(path: Path, roots: list[Path]) -> list[Path]:
     """The roots (as given, and resolved) that contain ``path``, deduped."""
     out: list[Path] = []
@@ -615,11 +674,57 @@ def _is_reconcilable(m: Model, roots: list[Path]) -> bool:
     )
 
 
+def is_runtime_managed(m: Model) -> bool:
+    """True for a row whose bytes a runtime manages, not hal0 (FLM).
+
+    FLM rows (``metadata.runtime == "flm"`` or ``provider == "flm"``) record
+    the FLM model directory as ``path``; FLM pulls and removes those files
+    itself. Prune never drops them and model delete never removes their
+    directory.
+    """
+    if (m.metadata or {}).get("runtime") == "flm":
+        return True
+    return getattr(m, "provider", None) == "flm"
+
+
+def _root_is_live(root: Path) -> bool:
+    """True when ``root`` exists and has at least one entry.
+
+    An empty or absent root is what an unmounted NFS share looks like: its
+    mount point is an empty directory. Every row under it would read as
+    missing, so prune treats it as "unknown", not "gone".
+    """
+    try:
+        with os.scandir(root) as it:
+            return any(True for _ in it)
+    except OSError:
+        return False
+
+
+def _missing_is_trustworthy(path: Path, roots: list[Path], live: dict[Path, bool]) -> bool:
+    """Whether a missing ``path`` really means "deleted", not "not mounted".
+
+    Under a scan root, the root must be live (:func:`_root_is_live`). Outside
+    every root, the file's parent directory must still exist.
+    """
+    containing = [r for r in roots if path.is_relative_to(r)]
+    if containing:
+        for root in containing:
+            if root not in live:
+                live[root] = _root_is_live(root)
+        return all(live[r] for r in containing)
+    try:
+        return path.parent.is_dir()
+    except OSError:
+        return False
+
+
 def prune_missing(
     registry: ModelRegistry,
     *,
     protected_ids: set[str],
     dry_run: bool = False,
+    roots: list[str | Path] | None = None,
 ) -> dict:
     """Remove registry rows whose backing path no longer exists on disk.
 
@@ -627,12 +732,33 @@ def prune_missing(
     not in ``protected_ids`` (slot/stack-referenced ids). Protected-but-missing
     rows are returned under ``missing_referenced`` so callers can surface them
     as drift needing repair rather than silently deleting a referenced model.
-    Returns {"pruned": [...ids...], "missing_referenced": [...ids...], "kept": int}.
+    Rows of a runtime that manages its own files (FLM — see
+    :func:`is_runtime_managed`) are never pruned: their ``path`` is the
+    runtime's model directory, not a file hal0 owns, and they count as kept.
+
+    When ``roots`` is given, a missing row is pruned only if the miss is
+    trustworthy (:func:`_missing_is_trustworthy`): its scan root exists and
+    is non-empty, or — outside every root — its parent directory exists. A
+    row under an unmounted share is reported under ``missing_unverified``
+    and kept.
+    Returns {"pruned": [...], "missing_referenced": [...],
+    "missing_unverified": [...], "kept": int}.
     """
     pruned: list[str] = []
     missing_referenced: list[str] = []
+    missing_unverified: list[str] = []
     kept = 0
+    root_paths: list[Path] = []
+    for r in roots or []:
+        rp = Path(r).expanduser()
+        with contextlib.suppress(OSError):
+            rp = rp.resolve()
+        root_paths.append(rp)
+    live: dict[Path, bool] = {}
     for m in registry.list():
+        if is_runtime_managed(m):
+            kept += 1
+            continue
         # ``p.exists()`` is authoritative: do NOT special-case size_bytes==0
         # (that's stale metadata — the weights may well still be on disk).
         try:
@@ -648,13 +774,25 @@ def prune_missing(
             # that needs a repair, not a deletion. Report, never remove.
             missing_referenced.append(m.id)
             continue
+        if roots is not None:
+            p = Path(m.path).expanduser()
+            with contextlib.suppress(OSError):
+                p = p.resolve()
+            if not _missing_is_trustworthy(p, root_paths, live):
+                missing_unverified.append(m.id)
+                continue
         pruned.append(m.id)
         if not dry_run:
             try:
                 registry.remove(m.id)
             except Exception as exc:  # pragma: no cover — defensive
                 log.warning("discover.prune_remove_failed id=%s err=%s", m.id, exc)
-    return {"pruned": pruned, "missing_referenced": missing_referenced, "kept": kept}
+    return {
+        "pruned": pruned,
+        "missing_referenced": missing_referenced,
+        "missing_unverified": missing_unverified,
+        "kept": kept,
+    }
 
 
 def referenced_model_ids() -> set[str]:
@@ -810,17 +948,23 @@ def scan_and_register(
             reconcile_referenced = rec["referenced"]
 
     known_paths: set[str] = set()
+    known_inodes: set[tuple[int, int]] = set()
     for existing in registry.list():
         try:
             known_paths.add(str(Path(existing.path).resolve()))
         except OSError:
             known_paths.add(existing.path)
         known_paths.add(existing.path)
+        ino = _inode(Path(existing.path))
+        if ino is not None:
+            known_inodes.add(ino)
 
     candidates = find_candidates(
         roots=list(roots),
         extensions=list(cfg.file_extensions),
         known_paths=known_paths,
+        ignored_paths=tombstones.load(),
+        known_inodes=known_inodes,
     )
 
     added: list[str] = []
@@ -860,6 +1004,7 @@ def scan_and_register(
             registry,
             protected_ids=protected_ids or set(),
             dry_run=False,
+            roots=list(roots),
         )
         pruned = prune_result["pruned"]
         missing_referenced = prune_result["missing_referenced"]
@@ -887,6 +1032,7 @@ __all__ = [
     "CandidateModel",
     "backfill_coordless",
     "find_candidates",
+    "is_runtime_managed",
     "is_skippable",
     "prune_missing",
     "reconcile_skipped_auto_scan",

@@ -282,21 +282,55 @@ def model_register(
 
 @app.command("rm")
 def model_rm(
-    ref: str = typer.Argument(..., help="Model ref to remove from the registry"),
-    force: bool = typer.Option(False, "--force", "-f"),
+    ref: str = typer.Argument(..., help="Model ref to remove"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip the confirmation prompt."),
+    keep_files: bool = typer.Option(
+        False,
+        "--keep-files",
+        help=(
+            "Remove only the registry entry; leave the files on disk and hide "
+            "them from future scans."
+        ),
+    ),
 ) -> None:
-    """Remove a model from the local registry."""
+    """Remove a model and, unless --keep-files is given, its files on disk.
+
+    Calls ``DELETE /api/models/<ref>?delete_files=…`` — the same path the
+    dashboard's Delete dialog uses (ADR-0026). Files outside the scan/store
+    roots, files another model uses, and directories are never removed; the
+    command lists what it kept and why.
+    """
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
     if not force:
-        typer.confirm(f"Remove model {ref!r} from the registry?", abort=True)
+        what = "from the registry (files stay on disk)" if keep_files else "and its files on disk"
+        typer.confirm(f"Remove model {ref!r} {what}?", abort=True)
     try:
-        api_delete(f"/api/models/{ref}")
+        result = api_delete(
+            f"/api/models/{ref}",
+            params={"delete_files": "false" if keep_files else "true"},
+        )
     except CliApiError as exc:
         die(str(exc))
         return
-    console.print(f"Removed model [bold]{ref}[/bold] from the registry.")
+    result = result if isinstance(result, dict) else {}
+    console.print(f"Removed model [bold]{ref}[/bold].")
+    removed = result.get("files_removed") or []
+    if removed:
+        console.print(
+            f"  deleted {len(removed)} file(s), freed {_fmt_size(result.get('bytes_freed'))}"
+        )
+    for kept in result.get("files_kept") or []:
+        console.print(
+            f"  [yellow]kept[/yellow] {kept.get('path')} [dim]({kept.get('reason')})[/dim]"
+        )
+    for warning in result.get("warnings") or []:
+        console.print(f"  [yellow]warning:[/yellow] {warning}")
+    if result.get("tombstoned"):
+        console.print(
+            "  [dim]Kept files are hidden from future scans; `hal0 model add <path>` brings one back.[/dim]"
+        )
 
 
 @app.command("show")
