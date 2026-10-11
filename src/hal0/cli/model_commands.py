@@ -280,6 +280,10 @@ def model_register(
     model_add(path=path, model_id=model_id, name=name, license_id=license_id, overwrite=False)
 
 
+#: ``hal0 model rm`` request timeout: above the server's 30 s pull-cancel wait.
+_RM_TIMEOUT_S = 60.0
+
+
 @app.command("rm")
 def model_rm(
     ref: str = typer.Argument(..., help="Model ref to remove"),
@@ -310,6 +314,10 @@ def model_rm(
         result = api_delete(
             f"/api/models/{ref}",
             params={"delete_files": "false" if keep_files else "true"},
+            # The server may wait up to PULL_CANCEL_WAIT_S (30 s,
+            # hal0.services.models_service) for an active pull to stop
+            # before it deletes; leave room for that plus the file cleanup.
+            timeout=_RM_TIMEOUT_S,
         )
     except CliApiError as exc:
         die(str(exc))

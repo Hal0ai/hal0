@@ -71,9 +71,18 @@ Operators deleted models in the dashboard and saw them come back.
    - it is not strictly inside a deletion root (`outside_roots`). The
      deletion roots are `ModelsConfig.scan_roots()` plus the resolved store
      root. A root itself is never removed.
-   - it is under hal0's own config or state tree (`/etc/hal0`,
-     `/var/lib/hal0`) but outside the model store (`hal0_state`). This
-     covers an operator who configures a very broad root such as `/`.
+   - it is hal0's own config or state (`hal0_state`). This covers an
+     operator who configures a very broad root such as `/`.
+     - Always protected: all of `/etc/hal0`, the hal0 and activity SQLite
+       files and their sidecars, the registry dir (which holds the
+       tombstone file), and the slot, stack, agent, Open WebUI and
+       first-run state.
+     - Also protected: everything else under `/var/lib/hal0` that is not in
+       a model store.
+     - A model store (the default models dir, or the configured store) is
+       exempt only when it sits strictly inside that tree. A store set to
+       `/var/lib/hal0` itself, or to an ancestor such as `/var/lib`, can't
+       expose the state tree.
    - another remaining registry row references it (`shared:<id>`). This
      compares resolved paths across `path`, shards, `mmproj` and
      `model_file.dest`. A file below a remaining row whose path is a

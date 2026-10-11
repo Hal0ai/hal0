@@ -171,7 +171,9 @@ def test_model_rm_deletes_files_by_default(deletes: list[tuple[str, dict[str, An
     result = runner.invoke(model_commands.app, ["rm", "qwen3-4b", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert deletes == [("/api/models/qwen3-4b", {"params": {"delete_files": "true"}})]
+    assert deletes == [
+        ("/api/models/qwen3-4b", {"params": {"delete_files": "true"}, "timeout": 60.0})
+    ]
     assert "freed 2.0KB" in result.output
 
 
@@ -179,7 +181,9 @@ def test_model_rm_keep_files_sends_opt_out(deletes: list[tuple[str, dict[str, An
     result = runner.invoke(model_commands.app, ["rm", "qwen3-4b", "--force", "--keep-files"])
 
     assert result.exit_code == 0, result.output
-    assert deletes == [("/api/models/qwen3-4b", {"params": {"delete_files": "false"}})]
+    assert deletes == [
+        ("/api/models/qwen3-4b", {"params": {"delete_files": "false"}, "timeout": 60.0})
+    ]
     assert "kept_by_request" in result.output
     assert "hidden from future scans" in result.output
 
@@ -190,3 +194,9 @@ def test_model_rm_prompt_names_the_files(deletes: list[tuple[str, dict[str, Any]
     assert result.exit_code != 0
     assert "and its files on disk" in result.output
     assert deletes == []
+
+
+def test_model_rm_timeout_outlasts_the_server_pull_cancel_wait() -> None:
+    from hal0.services.models_service import PULL_CANCEL_WAIT_S
+
+    assert model_commands._RM_TIMEOUT_S > PULL_CANCEL_WAIT_S

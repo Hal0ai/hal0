@@ -627,3 +627,39 @@ def test_new_pull_is_refused_while_the_model_is_being_deleted(
 
     assert seen == {"refused": True}
     pull_mod.ensure_not_deleting("m")  # the guard is released after the delete
+
+
+# ── PR #2543 review round 4 ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("store_shape", ["var_lib_itself", "var_lib_parent"])
+def test_state_guard_holds_when_the_store_encloses_var_lib(
+    registry: ModelRegistry,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+    store_shape: str,
+) -> None:
+    """A store configured as /var/lib/hal0, or an ancestor like /var/lib,
+    must not exempt hal0's own state from the guard."""
+    from hal0.config import paths
+
+    var_lib = paths.var_lib()
+    store = var_lib if store_shape == "var_lib_itself" else var_lib.parent
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
+    db = _write(paths.db_path())
+    slot_state = _write(var_lib / "slots" / "chat" / "state.json")
+    loose = _write(var_lib / "loose.gguf")
+    model_file = _write(paths.models_dir() / "real-q4.gguf")
+    for mid, p in (("db", db), ("slot", slot_state), ("loose", loose), ("real", model_file)):
+        registry.add(Model(id=mid, path=str(p)))
+
+    reasons = {}
+    for mid in ("db", "slot", "loose", "real"):
+        out = _delete(registry, mid, [store])
+        reasons[mid] = _kept(out)
+
+    assert db.exists() and slot_state.exists() and loose.exists()
+    assert reasons["db"] == {str(db): "hal0_state"}
+    assert reasons["slot"] == {str(slot_state): "hal0_state"}
+    assert reasons["loose"] == {str(loose): "hal0_state"}
+    assert not model_file.exists(), "the models dir inside var_lib stays deletable"

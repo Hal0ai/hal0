@@ -1100,30 +1100,63 @@ def _containing_root(p: Path, roots: list[Path]) -> Path | None:
     return max(matches, key=lambda r: len(r.parts))
 
 
-def _hal0_state_guard() -> tuple[list[Path], list[Path]]:
-    """``(protected, allowed)`` — hal0's own config/state trees, and the model
-    stores inside them that ARE fair game.
+class _StateGuard:
+    """hal0's own config/state, which a model delete must never touch.
 
-    A delete never touches a file under ``/etc/hal0`` or ``/var/lib/hal0``
-    (slot TOMLs, the registry DB, secrets…) even when an operator configured
-    a very broad scan root such as ``/``; the model store and the default
-    models dir under ``/var/lib/hal0`` stay deletable.
+    * ``always`` — specific state paths protected no matter what: all of
+      ``/etc/hal0``, the hal0 and activity SQLite files (with their
+      ``-wal``/``-shm``/``-journal`` sidecars), the registry dir (which holds
+      the tombstone file), slot data, stacks state, agent workspaces, Open
+      WebUI data and the first-run lock.
+    * ``trees`` — ``/etc/hal0`` and ``/var/lib/hal0`` as a whole.
+    * ``exempt`` — model stores inside those trees that ARE fair game (the
+      default models dir, the configured store). A store only exempts files
+      when it sits STRICTLY inside a protected tree. A store configured as
+      ``/var/lib/hal0`` itself, or an ancestor such as ``/var/lib``, can't
+      swallow the state tree, and the ``always`` paths win over any
+      exemption.
     """
-    from hal0.config import paths as cfg_paths
-    from hal0.config import store as store_cfg
 
-    protected = [_resolve(cfg_paths.etc()), _resolve(cfg_paths.var_lib())]
-    allowed = [_resolve(cfg_paths.models_dir())]
-    with contextlib.suppress(Exception):
-        allowed.append(_resolve(store_cfg.store_root()))
-    return protected, allowed
+    def __init__(self) -> None:
+        from hal0.config import paths as cfg_paths
+        from hal0.config import store as store_cfg
+
+        var_lib = _resolve(cfg_paths.var_lib())
+        etc = _resolve(cfg_paths.etc())
+        self.trees = [etc, var_lib]
+        always = [
+            etc,
+            _resolve(cfg_paths.registry_dir()),
+            var_lib / "slots",
+            var_lib / "stacks",
+            var_lib / "agents",
+            _resolve(cfg_paths.openwebui_data_dir()),
+            _resolve(cfg_paths.first_run_lock()),
+            _resolve(cfg_paths.model_tombstones_path()),
+        ]
+        for db in (cfg_paths.db_path(), cfg_paths.activity_db()):
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                always.append(_resolve(f"{db}{suffix}"))
+        self.always = always
+        candidates = [_resolve(cfg_paths.models_dir())]
+        with contextlib.suppress(Exception):
+            candidates.append(_resolve(store_cfg.store_root()))
+        self.exempt = [
+            c for c in candidates if any(c != t and c.is_relative_to(t) for t in self.trees)
+        ]
 
 
-def _in_hal0_state(p: Path, guard: tuple[list[Path], list[Path]]) -> bool:
-    protected, allowed = guard
-    if any(p.is_relative_to(a) for a in allowed):
+def _hal0_state_guard() -> _StateGuard:
+    return _StateGuard()
+
+
+def _in_hal0_state(p: Path, guard: _StateGuard) -> bool:
+    """True when ``p`` is hal0 config/state a delete must not remove."""
+    if any(p == a or p.is_relative_to(a) for a in guard.always):
+        return True
+    if any(p.is_relative_to(e) for e in guard.exempt):
         return False
-    return any(p.is_relative_to(d) for d in protected)
+    return any(p.is_relative_to(t) for t in guard.trees)
 
 
 #: Flags for walking a path one component at a time: never follow a symlink,
