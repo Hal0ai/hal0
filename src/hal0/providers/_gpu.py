@@ -123,9 +123,8 @@ def resolve_image_runtime_uid(image_ref: str | None) -> int:
     """UID the container process will actually run as, best-effort.
 
     Rootful podman does NOT imply the process is root: an image declaring
-    ``USER`` runs as that user unless the unit overrides it, and this repo ships
-    exactly that pattern (``packaging/toolbox/cpu.Dockerfile`` ends ``USER
-    hal0``). Equating "rootful podman" with uid 0 would let :func:`kfd_status`
+    ``USER`` runs as that user unless the unit overrides it, and the runner
+    images ship exactly that pattern (the ``cpu`` runner ends ``USER hal0``). Equating "rootful podman" with uid 0 would let :func:`kfd_status`
     pass a ``0660 root:root`` node that the real process cannot open — waving
     through the invalid Vulkan fallback the guard exists to stop (#1953).
 

@@ -5,8 +5,8 @@ The STT sibling of :class:`~hal0.providers.kokoro.KokoroProvider`: a
 same slot on ``device=npu`` runs whisper through the FLM trio — the
 device-keyed engine switch, same shape as the tts kokoro⇄qwen3tts pair.
 
-Image API surface (ghcr.io/hal0ai/hal0-runner-moonshine; server source
-packaging/toolbox/moonshine/moonshine_server.py):
+Image API surface (ghcr.io/hal0ai/hal0-runner-moonshine; server source in the
+hal0-runner-images repo, runners/moonshine):
   ENTRYPOINT: the FastAPI server — ``container_spec.command`` carries flags
   only (no binary path or subcommand prefix).
   Flags: ``--model_path <dir> --model_arch <arch> --port N --host H``.

@@ -6,7 +6,8 @@ slot can be served by either engine; this one runs the multilingual
 Qwen3-TTS CustomVoice model on the Strix Halo iGPU instead of Kokoro's
 CPU ONNX path.
 
-Image API surface (packaging/toolbox/qwen3tts.Dockerfile):
+Image API surface (ghcr.io/hal0ai/hal0-runner-qwen3tts; built in the
+hal0-runner-images repo):
   ENTRYPOINT: python3 /opt/qwen3tts/qwen3tts_server.py
   CMD:        --help
 
