@@ -79,3 +79,54 @@ def test_corrupt_file_reads_as_empty_and_is_overwritten(tmp_path: Path) -> None:
     assert tombstones.load() == set()
     tombstones.add([tmp_path / "a.gguf"])
     assert tombstones.load() == {str(tmp_path / "a.gguf")}
+
+
+def _slow_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Widen the read-modify-write window so an unlocked race would lose data."""
+    import time
+
+    real_load = tombstones.load
+
+    def slow() -> set[str]:
+        current = real_load()
+        time.sleep(0.02)
+        return current
+
+    monkeypatch.setattr(tombstones, "load", slow)
+
+
+def test_concurrent_adds_in_threads_keep_every_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    _slow_load(monkeypatch)
+    workers = [
+        threading.Thread(target=tombstones.add, args=([tmp_path / f"t{i}.gguf"],)) for i in range(8)
+    ]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+
+    assert tombstones.load() == {str(tmp_path / f"t{i}.gguf") for i in range(8)}
+
+
+def test_concurrent_adds_across_processes_keep_every_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flock sidecar serialises a second process (CLI next to the API)."""
+    import multiprocessing
+
+    _slow_load(monkeypatch)
+    ctx = multiprocessing.get_context("fork")
+    procs = [
+        ctx.Process(target=tombstones.add, args=([tmp_path / f"p{i}.gguf"],)) for i in range(6)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+
+    assert tombstones.load() == {str(tmp_path / f"p{i}.gguf") for i in range(6)}

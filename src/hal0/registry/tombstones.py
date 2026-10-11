@@ -15,24 +15,63 @@ for it back.
 The store is a small JSON list (``paths.model_tombstones_path()``) rather than
 a registry table: it is a handful of strings consulted only by the scanner,
 and it must survive a registry row's deletion by design. Writes are atomic
-(tmpfile + fsync + replace). Every function is best-effort: a read failure
+(tmpfile + fsync + replace), and every read-modify-write holds a thread lock
+plus an ``flock`` on a sidecar ``ignored-paths.json.lock`` so concurrent
+deletes cannot drop each other's entries. Every function is best-effort: a read failure
 yields an empty set, a write failure logs and is swallowed, so a broken
 tombstone file can never block a delete, a scan or an add. See ADR-0026.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable
-from contextlib import suppress
+import threading
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from hal0.config import paths
 
 log = logging.getLogger(__name__)
+
+#: Serialises read-modify-write within this process. Deletes run their file
+#: cleanup in ``asyncio.to_thread`` workers, so two can overlap.
+_LOCK = threading.Lock()
+
+
+@contextmanager
+def _locked() -> Iterator[None]:
+    """Hold the in-process lock plus an ``flock`` on ``<file>.lock``.
+
+    The sidecar lock covers a second process (a root-run CLI next to the
+    API). If the lock file cannot be opened, the in-process lock still
+    applies and the failure is logged, keeping every operation best-effort.
+    """
+    with _LOCK:
+        lock_path = paths.model_tombstones_path().with_suffix(".json.lock")
+        fd: int | None = None
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o664)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            log.warning("tombstones.lock_failed path=%s err=%s", lock_path, exc)
+            if fd is not None:
+                with suppress(OSError):
+                    os.close(fd)
+                fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                with suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                with suppress(OSError):
+                    os.close(fd)
 
 
 def _norm(p: str | Path) -> str:
@@ -96,10 +135,11 @@ def add(path_list: Iterable[str | Path]) -> list[str]:
     new = {_norm(p) for p in path_list if str(p)}
     if not new:
         return []
-    current = load()
-    added = sorted(new - current)
-    if added:
-        _write(current | new)
+    with _locked():
+        current = load()
+        added = sorted(new - current)
+        if added:
+            _write(current | new)
     return added
 
 
@@ -112,14 +152,15 @@ def clear(path: str | Path) -> list[str]:
     """
     try:
         forms = {Path(_norm(path)), Path(path).expanduser()}
-        current = load()
-        if not current:
-            return []
-        removed = sorted(
-            e for e in current if any(Path(e) == f or Path(e).is_relative_to(f) for f in forms)
-        )
-        if removed:
-            _write(current - set(removed))
+        with _locked():
+            current = load()
+            if not current:
+                return []
+            removed = sorted(
+                e for e in current if any(Path(e) == f or Path(e).is_relative_to(f) for f in forms)
+            )
+            if removed:
+                _write(current - set(removed))
         return removed
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("tombstones.clear_failed path=%s err=%s", path, exc)
