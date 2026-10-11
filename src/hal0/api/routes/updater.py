@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -459,21 +460,28 @@ def _flm_toolbox_image() -> str:
         return ""
 
 
-def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
-    """``ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4`` → ``0.9.44``.
+#: The runner-images build suffix on a tag: ``-r`` plus the short revision of
+#: the recipe (``0.9.44-re14329d`` is FLM 0.9.44 built from recipe e14329d).
+_RUNNER_BUILD_SUFFIX_RE = re.compile(r"-r[0-9a-f]{7,40}$")
 
-    Parses the tag off an OCI image reference (everything after the last
-    ``:``) and returns it, or ``None`` if the ref is empty / has no tag.
+
+def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
+    """``ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4@sha256:…`` → ``0.9.44``.
+
+    Drops any ``@digest``, takes the tag (the part after the last ``:`` of the
+    final path component, so a registry port is never mistaken for one), and
+    strips the runner-images build suffix (``-r<revision>``). Returns ``None``
+    when the ref is empty or has no tag.
     """
     if not image_ref:
         return None
-    # image_ref may be "repo/image:tag" or "registry/repo/image:tag".
-    # The tag is always the fragment after the last colon, provided it
-    # exists and is non-empty.
-    if ":" not in image_ref:
+    body = image_ref.strip().split("@", 1)[0]
+    last = body.rsplit("/", 1)[-1]
+    if ":" not in last:
         return None
-    tag = image_ref.rsplit(":", 1)[-1].strip()
-    return tag if tag else None
+    tag = last.rsplit(":", 1)[-1].strip()
+    tag = _RUNNER_BUILD_SUFFIX_RE.sub("", tag)
+    return tag or None
 
 
 @router.get("/state")
