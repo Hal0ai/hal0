@@ -6,11 +6,6 @@
 // still part of the window-globals shim (see ui/src/main.tsx); this is the
 // first real import in this file.
 import { SettingsShell } from './settings/SettingsShell.jsx'
-// D5 (post-R3 surface rework): flag-migration surfaces. MigrationBanner is the
-// live (endpoint-dormant) banner; MigrationResolveHost opens the resolution
-// view off the Tweaks-panel demo toggle. Real ESM imports (like SettingsShell).
-import { MigrationBanner } from './migration/MigrationBanner.jsx'
-import { MigrationResolveHost } from './migration/MigrationResolveHost.jsx'
 // O19: app-shell auth gate. Renders the login view in place of the app when
 // this session has to sign in — enforcement on, or the posture-coupled ADMIN
 // gate (#1822) refusing this caller while enforcement reads off. A no-op on
@@ -51,8 +46,7 @@ function fmtApprovalTs(v) {
 }
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-  "slotVariant": "instrument",
-  "showHero": true
+  "slotVariant": "instrument"
 }/*EDITMODE-END*/;
 
 // ─── hash routing — supports #slots or #slots/<name> ───
@@ -60,10 +54,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-// runner-catalogue-v2: "profiles" is no longer a route of its own — the
-// redirects below rewrite legacy #profiles / #slots/profiles deep-links to
-// the Models ▸ Profiles tab before the ROUTES lookup runs.
-const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board", "services", "benchmarks"];
+const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "board", "services", "benchmarks"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -74,41 +65,6 @@ function parseRoute() {
   if (head === "agents" && rest[0] === "mcp") {
     head = "mcp";
     rest = rest.slice(1);
-  }
-  // v0.5 nav: the Connections page was dissolved — its Local-endpoints section
-  // moved to Slots ▸ Endpoints and its MCP section to Agent ▸ MCP. Redirect old
-  // #connections deep-links to the Endpoints tab.
-  if (head === "connections") {
-    if (typeof window !== "undefined" && window.location.hash !== "#slots/endpoints") {
-      window.location.hash = "#slots/endpoints";
-    }
-    head = "slots";
-    rest = ["endpoints"];
-  }
-  // runner-catalogue-v2 nav: Profiles now lives under Models (it templates
-  // model-serving containers, not slot lifecycle). Redirect both legacy
-  // shapes — the v0.4 top-level #profiles and the v0.5 #slots/profiles tab —
-  // to the Models ▸ Profiles tab.
-  if (head === "profiles" || (head === "slots" && rest[0] === "profiles")) {
-    if (typeof window !== "undefined" && window.location.hash !== "#models/profiles") {
-      window.location.hash = "#models/profiles";
-    }
-    head = "models";
-    rest = ["profiles"];
-  }
-  // v0.3 PR-8: legacy #peers route redirects to the Peer memory
-  // subsection inside the Memory tab on the agent route. We mutate
-  // the hash here so deep links from older docs / bookmarks land on
-  // the new shape.
-  if (head === "peers") {
-    if (typeof window !== "undefined") {
-      const next = "#agent/memory?subsection=peer";
-      if (window.location.hash !== next) {
-        window.location.hash = next;
-      }
-    }
-    head = "agent";
-    rest = ["memory"];
   }
   const route = ROUTES.includes(head) ? head : "dashboard";
   const query = {};
@@ -174,7 +130,6 @@ function App() {
   const { active: activeBanners } = useBanners();
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [approvalsOpen, setApprovalsOpen] = useStateA(false);
-  const [heroDismissed, setHeroDismissed] = useStateA(false);
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
@@ -317,23 +272,10 @@ function App() {
     switch (route) {
       case "dashboard":
         // Dashboard redesign (design_handoff_dashboard_redesign): the
-        // fixed-band, swap-in-place view (DashboardRedesignView) replaces
-        // the free-form customizable grid. It owns its own swap-mode state
+        // fixed-band, swap-in-place view. It owns its own swap-mode state
         // and customize toggle in the hero strip, so it drops in without
-        // topbar threading. Falls back to the legacy view if the global
-        // hasn't registered (stale bundle) so the route never blanks.
-        return (
-          typeof DashboardRedesignView === "function" ? (
-            <DashboardRedesignView onGo={go} />
-          ) : (
-            <DashboardView
-              slots={HAL0_DATA.slots}
-              onGo={go}
-              showHero={tweaks.showHero && !heroDismissed}
-              onDismissHero={() => setHeroDismissed(true)}
-            />
-          )
-        );
+        // topbar threading.
+        return <DashboardRedesignView onGo={go} />;
       case "slots":
         return (
           <SlotsView
@@ -405,11 +347,6 @@ function App() {
             {/* Phase D8: self-renders while the GPU arbiter reports image
                 mode (/api/comfyui/status arbiter.mode === "img"). */}
             <GpuImageModeBanner />
-            {/* D5: self-renders only when the flag-migration report is non-empty
-                (endpoint pending → dormant today). The resolution-view host
-                sits alongside it, opening off the demo banner's Resolve event. */}
-            <MigrationBanner />
-            <MigrationResolveHost />
             <BannerStack scope="global" route={route} />
           </div>
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>
@@ -490,19 +427,6 @@ function App() {
               { value: "spec",       label: "Spec card" },
             ]}
           />
-        </TweakSection>
-
-        <TweakSection title="Dashboard">
-          <TweakToggle
-            label="Hero strip"
-            value={tweaks.showHero}
-            onChange={v => setTweak("showHero", v)}
-          />
-          {/* "Persona placement" and "Composer state" lived here until #1477.
-              Both drove the chat page deleted in #439 — nothing has read
-              tweaks.personaPlacement or composerState since, so the controls
-              moved state no surface consumed. A knob that visibly does
-              nothing teaches an operator the whole panel is decorative. */}
         </TweakSection>
 
         <TweakSection title="Banners" label="Banners">

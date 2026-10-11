@@ -325,14 +325,6 @@ export const ENDPOINTS = {
   // exposure table (ExposureTable.jsx) — wired live since Phase 1 wave 2.
   authExposure: '/api/auth/exposure',
 
-  // ── Flag-migration report (D5 migration-resolve) ─────────────────
-  // GET /api/migrations/flag-report — MISSING today (API-lane request). The
-  // typed client (useMigrationReport) returns an empty report by default and
-  // fails soft to empty on 404/network, so the banner + resolution view stay
-  // dormant until the migration lane ships the endpoint. Shape is documented
-  // in useMigrationReport.ts.
-  migrationFlagReport: '/api/migrations/flag-report',
-
   // ── Doctor diagnoses (D6 diagnostics panel) ──────────────────────
   // GET /api/doctor — LIVE (src/hal0/api/routes/doctor.py): composes the
   // same typed Diagnosis objects (HAL0-* id / severity / evidence /

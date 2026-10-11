@@ -16,7 +16,7 @@ declare global {
     parseSizeGB: (s: string) => number
     slotsUsingModel: (id: string) => any[]
 
-    // dash/primitives.jsx, chrome.jsx, dashboard.jsx, slots.jsx, models.jsx, etc.
+    // dash/primitives.jsx, chrome.jsx, slots.jsx, models.jsx, etc.
     [key: string]: any
   }
 

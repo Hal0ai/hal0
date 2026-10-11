@@ -117,7 +117,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/capabilities', (route) => json(route, capsWith(QWEN3)))
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const ttsPanel = capPanel(page, 'TTS')
@@ -153,7 +153,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/capabilities', (route) => json(route, capsWith(QWEN3)))
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'live', voices: ['Ryan', 'Chelsie'] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
 
     const ttsPanel = capPanel(page, 'TTS')
     await capabilitiesApplied(ttsPanel, 'qwen3-tts')
@@ -168,7 +168,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/capabilities', (route) => json(route, capsWith(KOKORO)))
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const ttsPanel = capPanel(page, 'TTS')
@@ -187,7 +187,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     await page.route('**/api/capabilities', (route) => json(route, capsWith(KOKORO)))
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
 
     const sttPanel = capPanel(page, 'STT')
     await capabilitiesApplied(sttPanel, 'moonshine-base')
@@ -204,7 +204,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
       json(route, capsWith(KOKORO, { model: 'whisper-large-v3', provider: 'flm', device: 'npu' })))
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
 
     const sttPanel = capPanel(page, 'STT')
     await capabilitiesApplied(sttPanel, 'whisper-large-v3')
@@ -230,7 +230,7 @@ test.describe('Voice page copy keyed on provider (#1470)', () => {
     })
     await page.route('**/api/slots/tts/config', (route) => json(route, {}))
     await page.route('**/api/slots/tts/voices', (route) => json(route, { source: 'offline', voices: [] }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
 
     const ttsPanel = capPanel(page, 'TTS')
     const voiceRow = panelRow(ttsPanel, 'Default voice')

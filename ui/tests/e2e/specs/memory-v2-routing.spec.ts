@@ -1,7 +1,6 @@
 /**
  * memory-v2-routing — Playwright coverage for task C6's root MemoryView +
- * routing integration: Overview/Bank sub-tabs, legacy #memory/graph and
- * #memory/tools redirects, the #agent/memory/<section> alias, deep-link
+ * routing integration: Overview/Bank sub-tabs, the #agent/memory/<section> alias, deep-link
  * query parsing (`?bank=<id>&fact=<id>`), and the existing memory_enabled
  * gate still hiding the Memory tab.
  *
@@ -28,27 +27,9 @@ test.describe('memory-v2 routing (task C6)', () => {
     await expect(page.getByTestId('mv-bankbar')).toBeVisible()
   })
 
-  test('#memory/graph redirects to #memory/bank', async ({ page }) => {
-    await page.goto('/#memory/graph')
-    await expect(page).toHaveURL(/#memory\/bank/)
-    await expect(page.getByTestId('mv-workspace')).toBeVisible()
-  })
-
-  test('#memory/tools redirects to #memory/bank', async ({ page }) => {
-    await page.goto('/#memory/tools')
-    await expect(page).toHaveURL(/#memory\/bank/)
-    await expect(page.getByTestId('mv-workspace')).toBeVisible()
-  })
-
   test('#agent/memory/bank also works (the accepted alias prefix)', async ({ page }) => {
     await page.goto('/#agent/memory/bank')
     await expect(page.getByTestId('agent-tab-memory')).toBeVisible()
-    await expect(page.getByTestId('mv-workspace')).toBeVisible()
-  })
-
-  test('a legacy redirect under the #agent/memory prefix preserves that prefix', async ({ page }) => {
-    await page.goto('/#agent/memory/graph')
-    await expect(page).toHaveURL(/#agent\/memory\/bank/)
     await expect(page.getByTestId('mv-workspace')).toBeVisible()
   })
 

@@ -14,10 +14,8 @@
 // directions: nav click → hash → re-render, and hash change → re-render,
 // are the same code path.
 //
-// Legacy ids resolve through SECTION_ALIASES (settings-panel cleanup merged
-// several pages), so e.g. #settings/general and #settings/health both land
-// on Overview. An unrecognized or missing param falls back to "overview".
-import { SettingsNav, VALID_IDS, SECTION_ALIASES } from './SettingsNav.jsx'
+// An unrecognized or missing param falls back to "overview".
+import { SettingsNav, VALID_IDS } from './SettingsNav.jsx'
 
 import { OverviewPage } from './pages/general/OverviewPage.jsx'
 import { SecurityPage } from './pages/server/SecurityPage.jsx'
@@ -36,8 +34,7 @@ import { RealtimePage } from './pages/integrations/RealtimePage.jsx'
 import { AgentsBrainPage } from './pages/routing/AgentsBrainPage.jsx'
 
 export function SettingsShell({ param }) {
-  const resolved = SECTION_ALIASES[param] || param;
-  const section = resolved && VALID_IDS.includes(resolved) ? resolved : "overview";
+  const section = param && VALID_IDS.includes(param) ? param : "overview";
 
   const onSelect = (id) => {
     if (typeof window !== "undefined") window.location.hash = "#settings/" + id;

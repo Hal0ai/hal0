@@ -53,6 +53,18 @@ applying. Add those subsections to a version's section to surface them; see
   no-op `--dry-run` flags on `capabilities migrate` and
   `slot migrate-id-keying` (both already dry-run unless you pass `--apply`).
 
+- Removed dead dashboard surfaces. The flag-migration banner and resolution
+  view (their `GET /api/migrations/flag-report` endpoint was never built) are
+  gone, along with the unreachable old dashboard grid, the `ConnectionsView`
+  wrapper and the `#connections`, `#profiles`, `#slots/profiles`, `#peers`,
+  `#memory/graph` and `#memory/tools` hash redirects. Legacy
+  `#settings/<id>` section ids (`general`, `health`, `library`, `backend`,
+  `runtimes`, `hwtuning`, `about`, `voice`, `imagegen`, `npu`, `oauth`) no
+  longer resolve and fall back to Overview; use `#settings/capabilities`,
+  `#settings/accounts` and so on. `GET /api/user/dashboard-layout` now answers
+  `{}` for a pre-v1.1 layout file left on disk (v2) instead of returning it
+  reconciled; the dashboard shows its default bands until the next save.
+
 ### Fixed
 
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,

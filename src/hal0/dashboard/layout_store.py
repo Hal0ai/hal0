@@ -7,13 +7,10 @@ Storage path: ``paths.var_lib() / "dashboard-layout.json"``
 Public API:
     load()                              -> dict (empty on missing/corrupt)
     save(layout: dict)                  -> None (atomic write)
-    reconcile(layout, slot_names)       -> dict (pure, never raises)
+    reconcile(layout)                   -> dict (pure, never raises)
 
-``reconcile`` dispatches on the payload's own ``v`` (#1460): v3 is the current
-fixed-band schema (:mod:`hal0.dashboard.layout_v3`), v2 the pre-#1061 free-form
-grid handled here. Dispatching matters on the READ path too — running the v2
-pin/span rules over a stored v3 payload would graft ``order``/``spans``/
-``pinned`` onto it and hand the client a layout it can't parse.
+``reconcile`` accepts only the v3 fixed-band schema
+(:mod:`hal0.dashboard.layout_v3`); a pre-#1061 v2 file on disk reads as empty.
 """
 
 from __future__ import annotations
@@ -125,91 +122,15 @@ def save(layout: dict[str, Any]) -> None:
     _write_json_atomic(_layout_path(), layout)
 
 
-def reconcile(layout: dict[str, Any], slot_names: list[str]) -> dict[str, Any]:
-    """Return a defensively-normalised copy of *layout*, per its own version.
+def reconcile(layout: dict[str, Any]) -> dict[str, Any]:
+    """Return a defensively-normalised copy of *layout*.
 
     A v3 payload (the current fixed-band schema) is reconciled against the
-    cell whitelists in :mod:`hal0.dashboard.layout_v3`; ``slot_names`` is
-    irrelevant there because v3 has no pinned-slot concept. Anything else
-    falls through to the v2 rules below, which is what a pre-#1061 file on
-    disk still needs.
+    cell whitelists in :mod:`hal0.dashboard.layout_v3`. Any other shape (a
+    pre-#1061 free-form grid file) is treated as "no saved layout" and comes
+    back as ``{}``: the dashboard then renders its default bands, and the
+    operator's next save overwrites the stale file.
     """
     if isinstance(layout, dict) and layout.get("v") == layout_v3.LAYOUT_VERSION:
         return layout_v3.reconcile(layout)
-    return _reconcile_v2(layout, slot_names)
-
-
-def _reconcile_v2(layout: dict[str, Any], slot_names: list[str]) -> dict[str, Any]:
-    """Return a defensively-normalised copy of a pre-#1061 v2 *layout*.
-
-    Rules applied (pure — never raises, never mutates the input):
-
-    1. Every name in ``pinned`` must have a ``"pin:<name>"`` entry in
-       ``order``; if missing, insert it right *after* the ``"slots"`` entry
-       (or append it).
-    2. Drop ``"pin:<name>"`` keys from ``order`` (and ``spans``) when
-       ``<name>`` is not in ``pinned`` and not in ``slot_names`` (stale slot
-       that no longer exists).
-    3. Clamp every value in ``spans`` to [1, 12].
-
-    Args:
-        layout:     The raw layout dict (may be empty ``{}``).
-        slot_names: The names of currently-known slots from the slot manager.
-
-    Returns:
-        A new dict with the same top-level keys, normalised.
-    """
-    if not layout:
-        return layout
-
-    # Work on shallow copies of the mutable collections.
-    order: list[str] = list(layout.get("order", []))
-    spans: dict[str, int] = dict(layout.get("spans", {}))
-    pinned: list[str] = list(layout.get("pinned", []))
-    enabled: dict[str, bool] = dict(layout.get("enabled", {}))
-
-    slot_name_set = set(slot_names)
-    pinned_set = set(pinned)
-
-    # ── Rule 3: clamp spans ────────────────────────────────────────────────
-    for key in list(spans):
-        try:
-            val = int(spans[key])
-        except (TypeError, ValueError):
-            val = 1
-        spans[key] = max(1, min(12, val))
-
-    # ── Rule 2: drop stale pin:<name> keys ────────────────────────────────
-    # A "pin:<name>" key is stale when <name> is not in pinned AND not in
-    # slot_names (i.e. the slot was deleted and was never re-pinned).
-    def _is_stale_pin(key: str) -> bool:
-        if not key.startswith("pin:"):
-            return False
-        name = key[4:]
-        return name not in pinned_set and name not in slot_name_set
-
-    order = [k for k in order if not _is_stale_pin(k)]
-    for stale in [k for k in spans if _is_stale_pin(k)]:
-        del spans[stale]
-
-    # ── Rule 1: ensure pin:<name> present in order for every pinned slot ──
-    present_pins = {k[4:] for k in order if k.startswith("pin:")}
-    missing_pins = [n for n in pinned if n not in present_pins]
-
-    if missing_pins:
-        # Find insertion point: right after "slots" entry, else append.
-        try:
-            slots_idx = order.index("slots")
-            insert_at = slots_idx + 1
-        except ValueError:
-            insert_at = len(order)
-
-        for i, name in enumerate(missing_pins):
-            order.insert(insert_at + i, f"pin:{name}")
-
-    result = dict(layout)
-    result["order"] = order
-    result["spans"] = spans
-    result["pinned"] = pinned
-    result["enabled"] = enabled
-    return result
+    return {}

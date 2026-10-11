@@ -38,7 +38,7 @@ test.describe('Settings — hash routing (#1438)', () => {
   })
 
   test('a hash change while already on /settings re-renders the section (no remount)', async ({ page }) => {
-    // legacy id — resolves to Overview via SECTION_ALIASES
+    // unknown id — falls back to Overview
     await page.goto('/#settings/general')
     await expect(page.locator('.settings-content h2').first()).toHaveText('Overview')
 

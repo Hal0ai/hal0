@@ -5,8 +5,6 @@
 //   - Hardware & Runtimes merges Backend & GPU + Runtimes (both evidence UIs)
 //   - Updates absorbs About
 //   - Hardware Tuning (blocked stub, spec D4) removed until its lane lands
-// Every retired `id` stays routable via SECTION_ALIASES so existing
-// #settings/<id> deep links land on the page that absorbed the content.
 export const NAV_GROUPS = [
   {
     title: "GENERAL",
@@ -44,25 +42,6 @@ export const NAV_GROUPS = [
     ],
   },
 ];
-
-// Legacy section ids → the page that owns that content now. Applied before
-// the VALID_IDS check so old bookmarks, palette entries, and cross-links keep
-// resolving.
-export const SECTION_ALIASES = {
-  general: "overview",
-  health: "overview",
-  library: "slots",
-  backend: "hardware",
-  runtimes: "hardware",
-  hwtuning: "hardware",
-  about: "updates",
-  // Unified AI Capabilities page (2026-08) absorbed three pages:
-  voice: "capabilities",
-  imagegen: "capabilities",
-  npu: "capabilities",
-  // OAuth connected accounts (#2267) — the panel's own API name.
-  oauth: "accounts",
-};
 
 // Flat id → item lookup + the ordered id list, derived once from NAV_GROUPS
 // so the shell's VALID_IDS check and the nav's render loop can't drift.

@@ -7,9 +7,7 @@ backend still required v2 (``order/enabled/spans/pinned``), so every save
 
 v3 is now the ONLY accepted PUT body — the v2 acceptance window (kept for
 cached pre-#1061 bundles) closed with the v1.3.0 sunset tranche (#2168).
-A pre-#1061 v2 file on disk is still preserved, not erased: GET dispatches
-its reconcile by the STORED payload's version so a v3 file is never mangled
-by the v2 pin/span rules and a v2 file still round-trips.
+A pre-#1061 v2 file left on disk reads back as ``{}`` (no saved layout).
 """
 
 from __future__ import annotations
@@ -121,11 +119,9 @@ def test_v2_body_is_rejected(layout_client: TestClient) -> None:
     assert r.json()["error"]["code"] == "layout.invalid"
 
 
-def test_v2_file_on_disk_still_round_trips(layout_client: TestClient) -> None:
-    """Only the WRITE path is v3-only: a pre-#1061 v2 file already on disk
-    still comes back reconciled under the v2 rules, not erased or 500'd."""
+def test_v2_file_on_disk_reads_as_no_saved_layout(layout_client: TestClient) -> None:
+    """A pre-#1061 v2 file left on disk is not handed to the v3 client (it
+    would discard it anyway): GET answers ``{}`` until the next save."""
     layout_store.save(_V2_LAYOUT)
 
-    body = layout_client.get("/api/user/dashboard-layout").json()
-    assert body["v"] == 2
-    assert body["order"] == ["slots", "memory", "throughput"]
+    assert layout_client.get("/api/user/dashboard-layout").json() == {}

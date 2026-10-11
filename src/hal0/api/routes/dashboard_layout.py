@@ -17,11 +17,9 @@ every cell must exist and hold a widget from its own ``accepts`` list that is
 actually built, otherwise it falls back to that cell's default. Shape-only
 validation would let a stale client persist a cell the dashboard can't render.
 
-v3 is the only accepted PUT body — any other version is a 422. The pre-#1061
-v2 schema's acceptance window (kept for cached UI bundles) closed with the
-v1.3.0 sunset tranche (#2168). A v2 file already ON DISK still round-trips on
-GET under the v2 rules (:mod:`hal0.dashboard.layout_store` dispatches on the
-stored payload's own version); only the write path is v3-only.
+v3 is the only accepted PUT body — any other version is a 422. A pre-#1061
+v2 file left on disk reads back as ``{}`` (the dashboard then shows its
+default bands) until the operator's next save replaces it.
 """
 
 from __future__ import annotations
@@ -91,45 +89,28 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     return out
 
 
-# ── Slot name helper ───────────────────────────────────────────────────────────
-
-
-async def _get_slot_names(request: Request) -> list[str]:
-    """Return current slot names from app.state.slot_manager; empty on error."""
-    try:
-        sm = getattr(request.app.state, "slot_manager", None)
-        if sm is None:
-            return []
-        slots = await sm.list()
-        return [s.name for s in slots]
-    except Exception:
-        return []
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
 @router.get("/dashboard-layout")
-async def get_dashboard_layout(request: Request) -> dict[str, Any]:
+async def get_dashboard_layout() -> dict[str, Any]:
     """Return the saved dashboard layout, or ``{}`` when none has been saved.
 
-    ``layout_store.reconcile`` dispatches on the STORED payload's own version,
-    so a v3 file comes back as v3 and a pre-#1061 v2 file still comes back
-    reconciled under the v2 pin/span rules (#1460).
+    A v3 file comes back reconciled against the cell whitelists; a pre-#1061 v2
+    file (or a corrupt one) comes back as ``{}``.
     """
     raw = layout_store.load()
     if not raw:
         return {}
-    slot_names = await _get_slot_names(request)
-    return layout_store.reconcile(raw, slot_names)
+    return layout_store.reconcile(raw)
 
 
 @router.put("/dashboard-layout", status_code=204)
 async def put_dashboard_layout(request: Request) -> Response:
     """Validate, reconcile, and persist the dashboard layout.
 
-    v3 is the only accepted body — any other ``v`` (including the sunset
-    pre-#1061 v2 schema, #2168) is a 422. Returns 204 No Content on success
+    v3 is the only accepted body — any other ``v`` (including the removed
+    pre-#1061 v2 schema) is a 422. Returns 204 No Content on success
     and 422 with ``code: "layout.invalid"`` on schema/validation errors.
     """
     try:

@@ -3,8 +3,7 @@
 // panels absorbed from the former Library & Downloads page: catalog size +
 // background pull status. The full search/pull experience stays on the main
 // Models view (dash/models.jsx) — not duplicated here. The `id` stays
-// "slots" (unchanged) so existing #settings/slots deep links keep working;
-// #settings/library aliases here.
+// "slots" (unchanged) so existing #settings/slots deep links keep working.
 import { useState } from 'react'
 import { useSlots, useSlotEdit } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'

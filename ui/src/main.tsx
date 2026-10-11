@@ -75,7 +75,6 @@ import './dash/optin-cards.jsx'
 import './dash/command-palette.jsx'
 import './dash/flow-modals.jsx'
 import './dash/extra-modals.jsx'
-import './dash/dashboard.jsx'
 // Dashboard redesign (design_handoff_dashboard_redesign): fixed-band layout
 // with swap-in-place customization (DashboardRedesignView). Replaces the
 // free-form DashGrid / DashboardOverhaulView board. Must load after

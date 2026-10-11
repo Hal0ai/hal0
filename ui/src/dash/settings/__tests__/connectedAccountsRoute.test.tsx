@@ -1,14 +1,14 @@
 // Connected accounts (OAuth) must be reachable from the dashboard (#2267).
 //
-// #2252 shipped ConnectedAccountsPanel, but it was only rendered by the
-// legacy ConnectionsView, and main.jsx redirects #connections to
-// #slots/endpoints — so no navigation path led to it. The panel now lives at
+// #2252 shipped ConnectedAccountsPanel, but it was only rendered by a
+// Connections page the nav no longer reaches — so no navigation path led to
+// it. The panel now lives at
 // Settings ▸ Integrations ▸ Connected Accounts (#settings/accounts).
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { NAV_GROUPS, SECTION_ALIASES, VALID_IDS } from '../SettingsNav.jsx'
+import { NAV_GROUPS, VALID_IDS } from '../SettingsNav.jsx'
 import { ConnectedAccountsPage } from '../pages/integrations/ConnectedAccountsPage.jsx'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
@@ -26,10 +26,6 @@ describe('Settings ▸ Integrations ▸ Connected Accounts (#2267)', () => {
     const integrations = NAV_GROUPS.find((g) => g.title === 'INTEGRATIONS')
     expect(integrations?.items.map((i) => i.id)).toContain('accounts')
     expect(VALID_IDS).toContain('accounts')
-  })
-
-  it('resolves the oauth alias to the accounts section', () => {
-    expect(SECTION_ALIASES.oauth).toBe('accounts')
   })
 
   it('renders the window-registered ConnectedAccountsPanel', () => {

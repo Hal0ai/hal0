@@ -104,7 +104,7 @@ const CAPS_MOCK = {
 test.describe('Capability catalog pickers (#1454)', () => {
   test('Voice page: STT/TTS Model pickers render as <select> populated from the bare-array catalog', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
     const panelModelRow = makePanelModelRow(page)
 
@@ -127,7 +127,7 @@ test.describe('Capability catalog pickers (#1454)', () => {
 
   test('Image-gen panel has no Model row — checkpoint choice belongs to ComfyUI workflows', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
-    await page.goto('/#settings/imagegen')
+    await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Image generation$/ }) })
@@ -147,7 +147,7 @@ test.describe('Capability catalog pickers (#1454)', () => {
         img: { img: capabilityRow('', '', null, 'img', 'offline') },
       },
     }))
-    await page.goto('/#settings/voice')
+    await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
     const panelModelRow = makePanelModelRow(page)
 

@@ -140,15 +140,9 @@ describe('pageOfHash — the unit a "View read-only" choice applies to', () => {
     expect(pageOfHash('#slots?focus=1')).toBe(pageOfHash('#slots'))
   })
 
-  it('follows the router\'s legacy redirects, so a dismissal lands on the page actually shown', () => {
-    // main.jsx parseRoute() rewrites these before rendering; without the same
-    // mapping, "View this page read-only" on #connections would be stored as
-    // "connections", the app would rewrite the hash to #slots/endpoints, and the
-    // login would come straight back.
-    expect(pageOfHash('#connections')).toBe('slots')
-    expect(pageOfHash('#profiles')).toBe('models')
-    expect(pageOfHash('#slots/profiles')).toBe('models')
-    expect(pageOfHash('#peers')).toBe('agent')
+  it('follows the router\'s #agents/mcp alias, so a dismissal lands on the page actually shown', () => {
+    // main.jsx parseRoute() rewrites #agents/mcp to the mcp route before
+    // rendering; without the same mapping the login would come straight back.
     expect(pageOfHash('#agents/mcp')).toBe('mcp')
   })
 

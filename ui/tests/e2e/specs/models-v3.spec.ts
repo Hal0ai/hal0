@@ -59,14 +59,6 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
   })
 
-  test('legacy #slots/profiles and #profiles deep-links land on Models ▸ Profiles', async ({ page }) => {
-    await page.goto('/#slots/profiles')
-    await expect(page).toHaveURL(/#models\/profiles/)
-    await expect(page.locator('.slot-tab.on:has-text("Profiles")')).toBeVisible()
-    await page.goto('/#profiles')
-    await expect(page).toHaveURL(/#models\/profiles/)
-  })
-
   test('simplified filter chips toggle OR semantics', async ({ page }) => {
     await page.goto('/#models')
     // All 7 filter chips render

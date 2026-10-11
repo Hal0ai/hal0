@@ -1,8 +1,7 @@
 // MODELS & INFERENCE ▸ AI Capabilities — the unified settings surface for
 // every non-chat capability slot: TTS, STT, embeddings, reranking, image
 // generation, plus the collapsed NPU anchor. Absorbs the former Voice /
-// Image Generation / NPU pages (their #settings/<id> deep links resolve here
-// via SECTION_ALIASES). Chat models stay on Loaded Models; the memory recall
+// Image Generation / NPU pages. Chat models stay on Loaded Models; the memory recall
 // reranker client stays on Memory (linked from the Reranking panel).
 import { useCapabilities } from '@/api/hooks/useCapabilities'
 import { useSettingsClient } from '../../data/settingsClient.js'

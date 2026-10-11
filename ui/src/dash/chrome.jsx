@@ -409,10 +409,6 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
     logs:      ["Runtime", "Logs"],
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
-    connections: ["Network", "Connections"],
-    // (runner-catalogue-v2: the legacy top-level "profiles" route is gone —
-    // #profiles now redirects to the Models ▸ Profiles tab in main.jsx, so
-    // the Models labels apply.)
     board:     ["Orchestration", "Board"],
     benchmarks: ["Performance", "Benchmarks"],
     services:  ["Companions", "Services"],
