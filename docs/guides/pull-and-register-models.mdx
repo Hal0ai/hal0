@@ -242,7 +242,11 @@ file is still there, the post-update migrations (and the same pass at every
 `hal0-api` start) retire it without importing it — every supported release
 already imported it into SQLite on first boot. They copy it to
 `/var/lib/hal0/backups/registry-toml-<UTC>/` and rename it to
-`registry.toml.retired-<UTC>`. hal0 never reads the renamed file.
+`registry.toml.retired-<UTC>`. hal0 never reads the renamed file. If the
+service user cannot read or rename the file (a root-owned `0600` file left
+by an old `sudo` export, say), the file stays put, nothing fails, and
+`hal0 doctor all` shows a `registry-toml` warning with the reason. Nothing
+reads it, so delete it: `sudo rm /var/lib/hal0/registry/registry.toml`.
 
 `hal0 model list --json` prints the catalog. To keep a copy of it, snapshot
 `hal0.db` with SQLite's online backup. The database runs in WAL mode, so a

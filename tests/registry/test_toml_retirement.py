@@ -8,6 +8,7 @@ therefore brought them all back on the next registry open.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ import tomli_w
 from hal0.config import paths
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
-from hal0.registry.toml_retirement import RegistryConversionError, retire_registry_toml
+from hal0.registry.toml_retirement import retire_registry_toml, retirement_blocker
 
 
 def _toml_path() -> Path:
@@ -143,26 +144,55 @@ def test_malformed_toml_is_retired_without_being_parsed() -> None:
     assert not path.exists()
 
 
-# ── fail loud ────────────────────────────────────────────────────────────────
+# ── never fatal: the file is inert ──────────────────────────────────────────
 
 
 @pytest.mark.usefixtures("tmp_hal0_home")
-def test_failed_backup_raises_and_leaves_the_file(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0000 file")
+def test_unreadable_root_owned_style_file_warns_and_stays(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 0600 file owned by someone else (a `sudo hal0 registry export`) is
+    unreadable to the hal0 daemon: warn, leave it, never raise."""
+    path = _write_toml("a")
+    path.chmod(0)
+    try:
+        result = retire_registry_toml()
+
+        assert result["outcome"] == "failed"
+        assert "cannot back it up" in result["reason"]
+        assert path.exists()
+        assert _retired() == []
+        assert not any((paths.var_lib() / "backups").glob("registry-toml-*"))
+        assert "registry.toml_retire_failed" in caplog.text
+        assert "not readable" in (retirement_blocker() or "")
+        assert ModelRegistry().list() == []
+    finally:
+        path.chmod(0o600)
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_failed_backup_warns_and_leaves_the_file(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     path = _write_toml("a")
 
     def _no_copy(*_a, **_kw):
-        raise OSError("disk full")
+        raise PermissionError("[Errno 13] Permission denied")
 
     monkeypatch.setattr("hal0.registry.toml_retirement.shutil.copy2", _no_copy)
 
-    with pytest.raises(RegistryConversionError, match="back up"):
-        retire_registry_toml()
+    result = retire_registry_toml()
+
+    assert result["outcome"] == "failed"
+    assert "Permission denied" in result["reason"]
     assert path.exists()
     assert _retired() == []
+    assert "registry.toml_retire_failed" in caplog.text
 
 
 @pytest.mark.usefixtures("tmp_hal0_home")
-def test_failed_rename_raises_and_the_retry_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failed_rename_warns_and_the_next_run_retires(monkeypatch: pytest.MonkeyPatch) -> None:
     path = _write_toml("a")
     real_rename = Path.rename
 
@@ -170,14 +200,22 @@ def test_failed_rename_raises_and_the_retry_succeeds(monkeypatch: pytest.MonkeyP
         raise PermissionError("read-only")
 
     monkeypatch.setattr(Path, "rename", _no_rename)
-    with pytest.raises(RegistryConversionError, match="rename"):
-        retire_registry_toml()
+    result = retire_registry_toml()
+    assert result["outcome"] == "failed"
+    assert "cannot rename" in result["reason"]
     assert path.exists()
 
     monkeypatch.setattr(Path, "rename", real_rename)
     assert retire_registry_toml()["outcome"] == "retired"
     assert not path.exists()
     assert ModelRegistry().list() == []
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_blocker_is_none_without_a_file_and_explains_a_pending_one() -> None:
+    assert retirement_blocker() is None
+    _write_toml("a")
+    assert "not retired yet" in (retirement_blocker() or "")
 
 
 @pytest.mark.usefixtures("tmp_hal0_home")

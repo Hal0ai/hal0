@@ -61,9 +61,12 @@ applying. Add those subsections to a version's section to surface them; see
   holds nothing the database needs. The first update or `hal0-api` start on
   this release copies it to `/var/lib/hal0/backups/registry-toml-<UTC>/`,
   renames it to `registry.toml.retired-<UTC>` and deletes the
-  `registry.toml.lock` sidecar. `hal0.db` is not touched. If the backup or
-  the rename fails, the update reports the error and the file stays in place
-  so the next start retries.
+  `registry.toml.lock` sidecar. `hal0.db` is not touched. Nothing reads the
+  file any more, so this step never blocks `hal0 update` or `hal0-api`
+  start: if it cannot back up or rename the file (for example a root-owned
+  `0600` file left by a `sudo hal0 registry export`), it logs a warning,
+  `hal0 update` lists it among its pass warnings, and `hal0 doctor all`
+  reports a `registry-toml` warning until you delete the file.
 
 - Removed the deprecated CLI aliases and no-op flags. Use the replacement
   instead: `hal0 probe` -> `hal0 config hardware --refresh`;

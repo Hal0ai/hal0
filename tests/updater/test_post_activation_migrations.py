@@ -192,26 +192,37 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["converge_components"] == []
 
 
-def test_registry_toml_retirement_failure_propagates(
-    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+@pytest.mark.parametrize("mode", ["raises", "reports_failed"])
+def test_registry_toml_retirement_failure_never_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
 ) -> None:
-    """The registry.toml retirement fails loud, like the schema migration:
-    a file it could not back up or rename must reach the caller (commit()
-    logs it at ERROR and reports the update unconverged; the boot safety
-    net retries next start)."""
-    from hal0.registry.toml_retirement import RegistryConversionError
+    """registry.toml is inert, so failing to retire it must never block API
+    boot or `hal0 update`: every later pass still runs, and the failure is
+    logged under the event commit() scans for pass warnings."""
 
-    def _boom(*, job_id=None):
-        raise RegistryConversionError("rename failed")
+    def _retire(*, job_id=None):
+        if mode == "raises":
+            raise PermissionError("root-owned")
+        return {"outcome": "failed", "reason": "cannot back it up: root-owned"}
 
-    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _boom)
+    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _retire)
 
-    with pytest.raises(RegistryConversionError):
-        run_post_activation_migrations(job_id="j4")
+    assert run_post_activation_migrations(job_id="j4") == (1, 2)
 
-    assert _stub_every_pass["config_migrations"] == [(1, "j4")]
-    assert _stub_every_pass["seed_profiles"] == []
-    assert _stub_every_pass["converge_components"] == []
+    assert _stub_every_pass["seed_profiles"] == ["j4"]
+    assert _stub_every_pass["extra_args"] == ["j4"]
+    assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == ["j4"]
+
+
+def test_registry_toml_retire_event_is_a_reported_pass_warning() -> None:
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    assert "updater.registry_toml_retire_failed" in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    assert set(_MIGRATION_PASS_LABELS) == set(_NON_FATAL_MIGRATION_FAILURE_EVENTS)
 
 
 def test_update_path_repairs_a_drifted_hermes_venv(

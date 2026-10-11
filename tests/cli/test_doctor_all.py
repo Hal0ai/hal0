@@ -139,6 +139,22 @@ def test_migrations_pending_warns() -> None:
     assert "5 link" in c.detail
 
 
+# ── check_leftover_registry_toml ───────────────────────────────────────────────
+
+
+def test_leftover_registry_toml_absent_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    assert da.check_leftover_registry_toml(tmp_path / "registry.toml").status == "pass"
+
+
+def test_leftover_registry_toml_warns_with_reason_and_remedy(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    toml = tmp_path / "registry.toml"
+    toml.write_text("[models]\n")
+    c = da.check_leftover_registry_toml(toml)
+    assert c.status == "warn"
+    assert "leftover registry.toml could not be retired" in c.detail
+    assert "remove it manually" in c.detail
+
+
 # ── check_ui_dist ──────────────────────────────────────────────────────────────
 
 
@@ -1212,11 +1228,12 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 20 extras.
-    assert keys[-20:] == [
+    # 7 verify rows + 21 extras.
+    assert keys[-21:] == [
         "auth",
         "models",
         "migrations",
+        "registry-toml",
         "ui-dist",
         "ports",
         "port_dnat",
