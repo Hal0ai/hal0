@@ -71,6 +71,10 @@ applying. Add those subsections to a version's section to surface them; see
   model root, such as `.Trash-1000/`. It also no longer names a Hugging
   Face shard set after its hash-named blob, and it no longer registers a
   hardlinked copy of a model that is already registered.
+- Deleting a model while it is still downloading cancels the download
+  first, so the finished download can't bring the model back. If the
+  download doesn't stop within 30 seconds, the delete is refused with
+  `model.pull_active`.
 - The Delete dialog shows the model's real path and size. It used to claim
   it removed the size "from /var/lib/hal0/models", whatever the model's
   actual location.

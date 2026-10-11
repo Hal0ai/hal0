@@ -44,10 +44,21 @@ Operators deleted models in the dashboard and saw them come back.
    file set before the row is removed. The file set is the row's `path`,
    `metadata["shards"]`, the `mmproj` sidecar, and every `model_file`
    row's `dest`. The `model_file` rows cascade away with the row, which is
-   why the set is captured first. The order is: unload referencing slots,
-   clear slot defaults, remove the row, then call
-   `delete_model_files_on_disk`. A file failure never fails the request and
-   never undoes the row delete. It is reported instead.
+   why the set is captured first. The order is:
+   1. Cancel any queued or running pull or update job for the model, and
+      wait up to 30 s for it to stop. If it doesn't stop, the delete
+      returns 409 `model.pull_active` before touching anything. The pull
+      layer re-checks the cancel flag right before it registers, so a
+      cancelled pull never re-adds the row.
+   2. Unload referencing slots and clear their slot defaults.
+   3. Remove the row and call `delete_model_files_on_disk`.
+
+   Step 3 runs in a worker thread under `SCAN_DELETE_LOCK`, which the whole
+   of `scan_and_register` also holds. Without it, a scan landing between
+   the row removal and the tombstone would re-register the file, and the
+   cleanup would then treat the new row as a sharing owner. A file failure
+   never fails the request and never undoes the row delete. It is reported
+   instead.
 
 3. **Guards.** A file is kept, and listed in `files_kept` with a reason,
    when:
@@ -66,6 +77,9 @@ Operators deleted models in the dashboard and saw them come back.
    - the row belongs to FLM (`runtime_managed`). FLM manages its model
      directory itself.
    - the OS refuses the unlink (`unlink_failed:<error>`).
+   - a path component changed between the checks and the unlink
+     (`path_changed`). For example, another account swapped a directory
+     for a symlink.
    - the file is not there at delete time (`missing_at_delete`). Examples
      are an unmounted share or a dangling symlink target. The row is still
      removed, and the path is tombstoned so the file does not come back
@@ -80,7 +94,22 @@ Operators deleted models in the dashboard and saw them come back.
    `/` and `/mnt/models`, the walk stops at `/mnt/models`. A remaining
    row's model directory is never removed. `store_blob` refcounts are released through
    `hal0.registry.gc.release_blob_ref`, the logic `delete_model_files`
-   already used.
+   already used. This covers every planned pulled file, not only the ones
+   removed. A kept file's reference is dropped too, because its
+   `model_file` row is gone, but with `keep_bytes`. At refcount 0 that
+   forgets the blob row instead of unlinking the kept bytes.
+
+   **Every unlink and `rmdir` goes through directory file descriptors.**
+   Model roots on real boxes can be writable by other accounts, so a
+   pathname checked once can't be trusted when the delete acts on it later.
+   The delete opens the containing root, then each component below it, with
+   `O_DIRECTORY | O_NOFOLLOW`, each relative to its parent's fd. It re-checks
+   the final component with `lstat` against that fd: it must still be a
+   symlink when a symlink is expected, and a plain non-directory otherwise.
+   Only then does it call `unlink(name, dir_fd=…)`. Pruning empty parents
+   uses the same fd chain with `rmdir(name, dir_fd=…)`. A directory swapped
+   for a symlink fails the walk and the file is reported as
+   `path_changed`. The delete never follows the swap.
 
 4. **Tombstones.** Every file left on disk is tombstoned, whether the
    operator opted out or a guard other than `shared:` refused it. A
@@ -88,7 +117,10 @@ Operators deleted models in the dashboard and saw them come back.
    (`hal0.registry.tombstones`). Writes are atomic. Every
    read-modify-write holds an in-process lock plus an `flock` on
    `ignored-paths.json.lock`, so overlapping deletes, in the API or from a
-   CLI process, cannot drop each other's entries.
+   CLI process, cannot drop each other's entries. If the file cannot be
+   written (full or read-only filesystem), `tombstones.add` raises. The
+   delete then reports `tombstone_failed` in `warnings` and leaves
+   `tombstoned` empty, rather than claiming the kept files are hidden.
    `find_candidates` skips a tombstoned path and anything below it, so the
    model does not come back. An explicit registration clears tombstones at
    or below its path. Explicit registrations are `hal0 model add` /
@@ -131,6 +163,13 @@ Operators deleted models in the dashboard and saw them come back.
    and `prune_orphans` could never reclaim it. This covers both the startup
    prune and a manual `{"prune": true}` scan.
 
+   The prune runs before the add pass. A file moved within a root keeps
+   its derived id, so the stale row has to go first. Otherwise the new
+   path would be skipped as an `id_collision`, and the model would be
+   missing until the next scan. The scan result, and the startup log line,
+   report `missing_unverified` next to `pruned` and `missing_referenced`.
+   An operator can then tell that reconciliation was incomplete.
+
 6. **Scanner fixes.** The scanner does not descend into any directory below
    a root whose name starts with `.`. It walks with `os.walk` and prunes
    those directories in place, so a large `.Trash-1000/` costs neither
@@ -140,7 +179,12 @@ Operators deleted models in the dashboard and saw them come back.
    already registered file (a hardlinked copy) is not a new candidate. The
    HF `blobs/` directory was already skipped when walked directly. Blobs
    only entered the registry through resolved shard paths, which the
-   naming and inode checks now cover.
+   naming and inode checks now cover. Tombstones are honoured in three more
+   places:
+   - the walk prunes a tombstoned directory before descending into it, so
+     a kept FLM or ONNX tree costs no scan budget.
+   - a tombstoned `mmproj` sidecar is never attached to a sibling model.
+   - a shard set with any tombstoned shard is dropped.
 
 ## Consequences
 
