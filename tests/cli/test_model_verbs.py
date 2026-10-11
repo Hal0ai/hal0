@@ -139,3 +139,64 @@ def test_model_update_requires_ref_or_check(captured: dict[str, Any]) -> None:
     result = runner.invoke(model_commands.app, ["update"])
     assert result.exit_code != 0
     assert "--check" in result.output
+
+
+# ── model rm → DELETE /api/models/<id>?delete_files=… (ADR-0026) ──────────
+
+
+@pytest.fixture
+def deletes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_delete(path: str, **kw: Any) -> dict[str, Any]:
+        calls.append((path, kw))
+        keep = kw.get("params", {}).get("delete_files") == "false"
+        return {
+            "id": "qwen3-4b",
+            "deleted": True,
+            "affected_slots": [],
+            "files_removed": [] if keep else [{"path": "/m/q.gguf", "size_bytes": 2048}],
+            "files_kept": [{"path": "/m/q.gguf", "reason": "kept_by_request"}] if keep else [],
+            "bytes_freed": 0 if keep else 2048,
+            "tombstoned": ["/m/q.gguf"] if keep else [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(model_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(model_commands, "api_delete", fake_delete)
+    return calls
+
+
+def test_model_rm_deletes_files_by_default(deletes: list[tuple[str, dict[str, Any]]]) -> None:
+    result = runner.invoke(model_commands.app, ["rm", "qwen3-4b", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert deletes == [
+        ("/api/models/qwen3-4b", {"params": {"delete_files": "true"}, "timeout": 60.0})
+    ]
+    assert "freed 2.0KB" in result.output
+
+
+def test_model_rm_keep_files_sends_opt_out(deletes: list[tuple[str, dict[str, Any]]]) -> None:
+    result = runner.invoke(model_commands.app, ["rm", "qwen3-4b", "--force", "--keep-files"])
+
+    assert result.exit_code == 0, result.output
+    assert deletes == [
+        ("/api/models/qwen3-4b", {"params": {"delete_files": "false"}, "timeout": 60.0})
+    ]
+    assert "kept_by_request" in result.output
+    assert "hidden from future scans" in result.output
+
+
+def test_model_rm_prompt_names_the_files(deletes: list[tuple[str, dict[str, Any]]]) -> None:
+    result = runner.invoke(model_commands.app, ["rm", "qwen3-4b"], input="n\n")
+
+    assert result.exit_code != 0
+    assert "and its files on disk" in result.output
+    assert deletes == []
+
+
+def test_model_rm_timeout_outlasts_the_server_pull_cancel_wait() -> None:
+    from hal0.services.models_service import PULL_CANCEL_WAIT_S
+
+    assert model_commands._RM_TIMEOUT_S > PULL_CANCEL_WAIT_S

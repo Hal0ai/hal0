@@ -970,8 +970,9 @@ async def delete_model(
     model_id: str,
     request: Request,
     force_cascade: bool = True,
+    delete_files: bool = True,
 ) -> dict[str, object]:
-    """Remove a model from the registry, cascading through referencing slots.
+    """Remove a model from the registry and, by default, its files on disk.
 
     Query param ``force_cascade`` (default ``true``) controls behaviour
     when at least one slot has this model as its ``[model].default``:
@@ -983,8 +984,19 @@ async def delete_model(
     * ``force_cascade=false``: return 409 with the ``affected_slots`` list
       so the UI can render a confirm-cascade dialog.
 
-    The actual model file on disk is never touched — that's the
-    operator's call. Registry rows hold metadata, not bytes.
+    Query param ``delete_files`` (default ``true``, ADR-0026) controls the
+    bytes: ``true`` removes the model's files (path, shards, mmproj sidecar,
+    pulled fileset) after the row is gone, subject to the guards in
+    :func:`hal0.services.models_service.delete_model_files_on_disk` — never
+    outside the scan/store roots, never a file another model uses, never a
+    directory. ``false`` leaves every file on disk and tombstones it so the
+    discovery scan does not re-register it. Refused or failed files land in
+    ``files_kept``; they never fail the request.
+
+    Response: ``id``, ``deleted``, ``affected_slots``, plus
+    ``files_removed`` (``[{path, size_bytes, hardlinks?}]``), ``files_kept``
+    (``[{path, reason}]``), ``bytes_freed``, ``tombstoned`` and
+    ``warnings``.
     """
     registry = request.app.state.model_registry
     # Wrap the whole resolve+cascade+remove so the durable audit row captures
@@ -1022,11 +1034,22 @@ async def delete_model(
         # referrers → clear [model].default → registry delete → snapshot GC);
         # the terminal model.deleted emit fires AFTER the audit context closes.
         slot_manager = getattr(request.app.state, "slot_manager", None)
-        removed = await _svc.cascade_delete_model(registry, slot_manager, model_id, affected)
+        outcome = await _svc.cascade_delete_model(
+            registry,
+            slot_manager,
+            model_id,
+            affected,
+            delete_files=delete_files,
+            pull_jobs=getattr(request.app.state, "model_pull_jobs", None),
+        )
+        removed = bool(outcome.get("deleted"))
+        files = {k: v for k, v in outcome.items() if k != "deleted"}
         rec.after = {
             "id": model_id,
-            "deleted": bool(removed),
+            "deleted": removed,
             "cascaded_slots": affected_names,
+            "delete_files": delete_files,
+            **files,
         }
 
     event_bus = getattr(request.app.state, "events", None)
@@ -1037,12 +1060,17 @@ async def delete_model(
             f"model:{model_id}",
             f"{model_id}: deleted"
             + (f" (cascaded {len(affected_names)} slot(s))" if affected_names else ""),
-            data={"id": model_id, "affected_slots": affected_names},
+            data={
+                "id": model_id,
+                "affected_slots": affected_names,
+                "bytes_freed": files.get("bytes_freed", 0),
+            },
         )
     return {
         "id": model_id,
-        "deleted": bool(removed),
+        "deleted": removed,
         "affected_slots": affected_names,
+        **files,
     }
 
 

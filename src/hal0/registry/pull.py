@@ -41,6 +41,7 @@ from hal0.db.connection import connect, tx
 from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
 from hal0.model_meta import derive_model_provider
+from hal0.registry import tombstones
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
 from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
@@ -406,6 +407,58 @@ def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:
 
 
 # ── Job orchestration ────────────────────────────────────────────────────────
+
+
+# ── model-delete markers (ADR-0026) ──────────────────────────────────────────
+#
+# A model delete marks the id as "deleting" for its whole cascade, so no new
+# pull or update job can start for it, and records when its row went, so a
+# job created before that moment never registers afterwards.
+
+_DELETING: set[str] = set()
+_DELETED_AT: dict[str, float] = {}
+
+
+def mark_deleting(model_id: str) -> None:
+    """Block new pull/update jobs for ``model_id`` until :func:`unmark_deleting`."""
+    _DELETING.add(model_id)
+
+
+def unmark_deleting(model_id: str) -> None:
+    _DELETING.discard(model_id)
+
+
+def mark_deleted(model_id: str) -> None:
+    """Record that ``model_id``'s registry row was removed just now."""
+    _DELETED_AT[model_id] = time.time()
+
+
+def ensure_not_deleting(model_id: str) -> None:
+    """Raise ``Conflict`` (``model.deleting``) while a delete of ``model_id`` runs.
+
+    Call right before a new job is stored in the jobs map, with no ``await``
+    in between, so the check and the insert are atomic on the event loop.
+    """
+    if model_id in _DELETING:
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"model {model_id!r} is being deleted; retry the pull once the delete finishes",
+            code="model.deleting",
+            details={"model_id": model_id},
+        )
+
+
+def _registration_abandoned(job: PullJob) -> bool:
+    """True when a finished download must NOT be registered.
+
+    Either the job was cancelled, or its model was deleted after the job was
+    created (a delete that raced the job's start).
+    """
+    if job.cancel_requested:
+        return True
+    deleted_at = _DELETED_AT.get(job.model_id)
+    return deleted_at is not None and deleted_at > job.started_at
 
 
 def make_job(model_id: str) -> PullJob:
@@ -1080,6 +1133,12 @@ async def run_pull(
                 base_total=main_rec.bytes_total,
             )
 
+        # A delete cancels the job and waits for it (ADR-0026): if the cancel
+        # landed after the last chunk, or the model was deleted after this job
+        # started, never re-register the deleted model.
+        if _registration_abandoned(job):
+            raise _PullCancelled()
+
         # Register / update the registry entry (mmproj set directly — the
         # row is vision-ready without waiting for a directory scan).
         _register_pulled(
@@ -1203,6 +1262,9 @@ def _register_pulled(
     # ``pulled_at`` provenance lets the dashboard show when the installed
     # bytes were fetched — and thereby how stale they are vs an available
     # HF update (registry/update_check.py compares the shas).
+    # A pull is an explicit request for these bytes: drop any tombstone a
+    # keep-files delete left on the path (ADR-0026).
+    tombstones.clear(path)
     fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
     # Curated template override: some artifacts ship an embedded chat template
     # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
@@ -1552,6 +1614,8 @@ def _register_pulled_fileset(
     installed file (ML-2 is the first writer of that table — ML-1 imports
     it EMPTY).
     """
+    # Explicit pull: un-ignore the entry path (ADR-0026).
+    tombstones.clear(entry_dest)
     entry_sha = next((e.lfs_sha256 for e, dest in installed if dest == entry_dest), None)
     total_size = sum(dest.stat().st_size for _, dest in installed if dest.exists())
     fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
@@ -1767,6 +1831,11 @@ async def _run_pull_fileset(
 
         entry_dest = next(dest for e, dest in installed if e.rel == fileset.entry_rel)
         mmproj_dest = next((dest for e, dest in installed if e.role == "mmproj"), None)
+
+        # Cancelled after the last file landed, or deleted after this job
+        # started (ADR-0026): don't re-register it.
+        if _registration_abandoned(job):
+            raise _PullCancelled()
 
         await asyncio.to_thread(
             _register_pulled_fileset,
@@ -2055,6 +2124,14 @@ async def run_flm_pull(
                     pulled_capabilities = list(caps)
                 break
 
+        # Cancelled while FLM finished, or deleted after this job started
+        # (ADR-0026): don't re-register it.
+        if _registration_abandoned(job):
+            job.state = "cancelled"
+            job.finished_at = time.time()
+            job._signal()
+            return
+
         # Register an FLM tag so the registry surfaces it for downstream
         # consumers (catalog, slot model resolution). hf_repo/filename
         # stay empty — FLM tags route through the toolbox, not HF directly.
@@ -2225,6 +2302,8 @@ def _register_flm_pulled(
     only when the caller couldn't resolve a classification (e.g. the probe
     was transiently empty right after the pull).
     """
+    # Explicit pull: un-ignore the FLM model dir (ADR-0026).
+    tombstones.clear(path)
     caps = list(capabilities) if capabilities else ["chat"]
     updates: dict[str, Any] = {
         "path": path,

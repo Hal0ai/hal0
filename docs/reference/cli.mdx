@@ -178,7 +178,7 @@ selected with `--hardware`, and stored on the slot as `device` (`gpu-rocm`, `gpu
 | `model default <ref>` | `ref` | `--clear` |
 | `model update [ref]` | optional `ref` | `--check`, `--refresh` (only meaningful with `--check`) |
 | `model register <model_id>` | `model_id` | hidden, deprecated alias for `model add`: `--path`/`-p` (required), `--name`, `--license` (default `unknown`) |
-| `model rm <ref>` | `ref` | `--force`/`-f` |
+| `model rm <ref>` | `ref` | `--force`/`-f`, `--keep-files` (remove only the registry entry; files stay on disk, hidden from scans) |
 | `model show <ref>` | `ref` | `--json` |
 | `model assign <ref>` | `ref` | hidden, deprecated alias for `slot edit --model`: `--slot`/`-s` (required) |
 | `model scan` | — | — |

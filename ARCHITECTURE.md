@@ -1300,8 +1300,10 @@ deferred), `0004` (bundled agents), `0005` (memory namespace grammar),
 Hermes exposure join), `0020` (localhost-callback-only OAuth PKCE for
 OpenRouter), `0023` (canonical LLM roles + Hindsight-native memory
 extraction), `0024` (agent credential tier — proposed), `0025` (upstream llama.cpp as the
-default runner, forks frozen — proposed), `0027` (a runner's tier is the one
-source of "default"; every runner named for what it is). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
+default runner, forks frozen — proposed), `0026` (model delete removes
+files by default, behind guards, with tombstones for kept files), `0027` (a
+runner's tier is the one source of "default"; every runner named for what it
+is). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
 `0022` are gaps in this tree, not missing numbers to fill — see the next
 paragraph.
 

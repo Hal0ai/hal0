@@ -2053,3 +2053,96 @@ async def test_run_pull_stamps_comfyui_provider_on_fresh_registration(
     entry = registry.get("some-comfyui-checkpoint")
     assert entry.provider == "comfyui"
     assert entry.backends == ["comfyui"]
+
+
+@pytest.mark.asyncio
+async def test_run_pull_cancelled_after_download_does_not_register(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete cancels the job after the last chunk landed: the pull must not
+    re-register the model it is deleting (ADR-0026)."""
+    import hal0.registry.pull as pull_mod
+
+    body = _payload(2048)
+    job = make_job("being-deleted")
+    registry = ModelRegistry()
+    real_download = pull_mod._download_one
+
+    async def download_then_cancel(*a: object, **kw: object) -> str:
+        digest = await real_download(*a, **kw)
+        job.cancel_requested = True
+        return digest
+
+    monkeypatch.setattr(pull_mod, "_download_one", download_then_cancel)
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/being-deleted-GGUF",
+            hf_file="being-deleted.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "cancelled"
+    assert not registry.has("being-deleted")
+
+
+@pytest.mark.asyncio
+async def test_run_pull_started_before_a_delete_does_not_register(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model was deleted after this job was created: never re-register it."""
+    import hal0.registry.pull as pull_mod
+
+    body = _payload(2048)
+    job = make_job("raced-delete")
+    registry = ModelRegistry()
+    real_download = pull_mod._download_one
+
+    async def download_then_delete(*a: object, **kw: object) -> str:
+        digest = await real_download(*a, **kw)
+        pull_mod.mark_deleted("raced-delete")
+        return digest
+
+    monkeypatch.setattr(pull_mod, "_download_one", download_then_delete)
+    monkeypatch.setattr(pull_mod, "_DELETED_AT", {})
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="org/raced-GGUF",
+            hf_file="raced.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "cancelled"
+    assert not registry.has("raced-delete")
+
+
+@pytest.mark.asyncio
+async def test_run_pull_created_after_a_delete_registers(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time as _time
+
+    import hal0.registry.pull as pull_mod
+
+    monkeypatch.setattr(pull_mod, "_DELETED_AT", {"re-pulled": _time.time() - 60})
+    job = make_job("re-pulled")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(_payload(2048)))
+    try:
+        await run_pull(
+            job, hf_repo="org/re-GGUF", hf_file="re.gguf", registry=registry, client=client
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed"
+    assert registry.has("re-pulled")

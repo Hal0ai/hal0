@@ -2,8 +2,8 @@
 
 Historically "delete model" (``api/routes/models.py::delete_model``) was
 registry-row-only: the bytes on disk were never touched, and no GC ever
-existed to reclaim them. This module adds the two pieces plan §7.1e /
-§23.3 asked for:
+existed to reclaim them (ADR-0026 changed the delete default). This module
+adds the two pieces plan §7.1e / §23.3 asked for:
 
 * :func:`collect_orphans` / :func:`prune_orphans` — refcount-driven
   ``store_blob`` cleanup (a hardlinked-dedup blob whose last referencing
@@ -14,13 +14,15 @@ existed to reclaim them. This module adds the two pieces plan §7.1e /
   NO ``store_blob`` row AND NO ``model_file`` row tracks (a crashed pull, an
   interrupted write, a manual copy). This is the fs-walk half the
   refcount-row-driven prune above cannot see.
-* :func:`delete_model_files` — the guarded, opt-in "actually remove the
-  bytes" path a caller (route handler) invokes explicitly; it is never
-  implicit in a registry row delete. When a delete drops a shared blob's
-  refcount but leaves it referenced (refcount > 0), it re-points the blob's
-  canonical ``blob_path`` to a surviving referent so ``blob_path`` never
-  dangles at a just-unlinked file (which would defeat hardlink-dedup for a
-  later same-sha pull).
+* :func:`release_blob_ref` / :func:`delete_model_files` — the refcount
+  side of removing a model's bytes. Model deletion
+  (:func:`hal0.services.models_service.delete_model_files_on_disk`, which
+  ``DELETE /api/models/{id}`` uses and which removes files by default —
+  ADR-0026) calls :func:`release_blob_ref` for each store file it unlinks.
+  When a delete drops a shared blob's refcount but leaves it referenced
+  (refcount > 0), the blob's canonical ``blob_path`` is re-pointed to a
+  surviving referent so it never dangles at a just-unlinked file (which
+  would defeat hardlink-dedup for a later same-sha pull).
 
 Every unlink in this module goes through
 :func:`hal0.config.store.assert_under_store` FIRST (fail-fast severity —
@@ -34,6 +36,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -103,16 +107,100 @@ def prune_orphans(conn=None, *, dry_run: bool = True) -> GCReport:
     return report
 
 
+def release_blob_ref(
+    conn: sqlite3.Connection,
+    sha256: str | None,
+    dest: str | None,
+    *,
+    model_id: str,
+    keep_bytes: bool = False,
+) -> None:
+    """Drop one reference on ``sha256``'s ``store_blob`` row for a file of
+    ``model_id`` that is being (or has just been) unlinked at ``dest``.
+
+    When the refcount hits 0 the blob's canonical ``blob_path`` is unlinked
+    too (under the store guard) — nothing references those bytes any more.
+    When it stays above 0 and ``blob_path`` IS ``dest``, the canonical path
+    is re-pointed at a surviving referent's live hardlink so it never
+    dangles (#8). A ``None``/empty ``sha256`` (non-LFS file) is a no-op.
+
+    ``keep_bytes=True`` is for a file a delete left ON DISK (keep-files, a
+    guard refusal, a failed unlink): the reference is still dropped, because
+    the ``model_file`` row behind it is gone, but at refcount 0 the
+    ``store_blob`` row is forgotten instead of its bytes being unlinked. The
+    kept file then stays where it is, untracked and tombstoned, and a later
+    same-sha pull starts a fresh blob row.
+    """
+    if not sha256:
+        return
+    new_count = repository.drop_blob_ref(conn, sha256)
+    if new_count == 0 and keep_bytes:
+        conn.execute("DELETE FROM store_blob WHERE sha256 = ?", (sha256,))
+        return
+    if new_count == 0:
+        blob = repository.get_blob(conn, sha256)
+        if blob is not None:
+            with contextlib.suppress(Exception):
+                resolved = assert_under_store(blob["blob_path"], severity="fail")
+                resolved.unlink(missing_ok=True)
+    elif new_count > 0:
+        # The blob is still referenced by another model, but ``dest`` may BE
+        # the blob's canonical referent (blob_path). If so, re-point
+        # blob_path at a surviving referent's live hardlink so it never
+        # dangles at a deleted path — a dangling blob_path breaks
+        # hardlink-dedup for a later same-sha pull
+        # (_maybe_hardlink_from_blob probes blob_path.is_file()). #8.
+        _repoint_shared_blob(conn, sha256, dest, exclude_model_id=model_id)
+
+
+def model_blob_refs(db_path: str | Path, model_id: str) -> list[tuple[str, str]]:
+    """``(sha256, dest)`` for each of ``model_id``'s LFS ``model_file`` rows.
+
+    Read BEFORE the registry row is removed — the rows cascade away with it.
+    """
+    with connect(db_path) as conn:
+        return [
+            (str(f["sha256"]), str(f.get("dest") or ""))
+            for f in repository.list_model_files(conn, model_id)
+            if f.get("sha256")
+        ]
+
+
+def release_blob_refs(
+    db_path: str | Path,
+    refs: Sequence[tuple[str | None, str]],
+    *,
+    model_id: str,
+    kept: Sequence[tuple[str | None, str]] = (),
+) -> None:
+    """Apply :func:`release_blob_ref` to each ``(sha256, dest)`` in one transaction.
+
+    Used after a model's registry row is gone, by an explicit delete (for
+    the files it removed) and by :func:`hal0.registry.discover.prune_missing`
+    (for a pruned row), so a ``store_blob`` row never keeps a reference no
+    ``model_file`` row backs. ``kept`` lists refs whose files stay on disk;
+    they are released with ``keep_bytes=True``. Raises on a DB error;
+    callers decide.
+    """
+    if not any(sha for sha, _ in refs) and not any(sha for sha, _ in kept):
+        return
+    with connect(db_path) as conn, tx(conn):
+        for sha, dest in refs:
+            release_blob_ref(conn, sha, dest, model_id=model_id)
+        for sha, dest in kept:
+            release_blob_ref(conn, sha, dest, model_id=model_id, keep_bytes=True)
+
+
 def delete_model_files(conn, model_id: str) -> int:
     """Decrement/GC every ``model_file`` row's blob ref, then unlink its
     ``dest`` hardlink, for ``model_id``. Returns the count of files removed.
 
-    Caller contract (``api/routes/models.py::delete_model``): this is
-    invoked ONLY when ``delete_files=True`` is explicitly requested — the
-    default stays registry-row-only (bytes untouched), matching the
-    historic "safe by default" behaviour. When a blob's refcount hits 0
-    here its bytes are unlinked immediately (not deferred to the next
-    sweep) since we already hold the row lock for this model's files.
+    This is the store-only primitive: it trusts ``model_file`` rows and
+    applies no cross-model or scan-root guards. Model deletion goes through
+    :func:`hal0.services.models_service.delete_model_files_on_disk`, which
+    applies those guards and calls :func:`release_blob_ref` per file it
+    actually removes. When a blob's refcount hits 0 here its bytes are
+    unlinked immediately (not deferred to the next sweep).
 
     ``model_file`` rows themselves are NOT deleted here — the caller's
     subsequent ``registry.remove(model_id)`` cascades them via
@@ -122,24 +210,7 @@ def delete_model_files(conn, model_id: str) -> int:
     files = repository.list_model_files(conn, model_id)
     for f in files:
         dest = f.get("dest")
-        sha256 = f.get("sha256")
-        if sha256:
-            new_count = repository.drop_blob_ref(conn, sha256)
-            if new_count == 0:
-                blob = repository.get_blob(conn, sha256)
-                if blob is not None:
-                    with contextlib.suppress(Exception):
-                        resolved = assert_under_store(blob["blob_path"], severity="fail")
-                        resolved.unlink(missing_ok=True)
-            elif new_count > 0:
-                # The blob is still referenced by another model, but the dest
-                # we are about to unlink below may BE the blob's canonical
-                # referent (blob_path). If so, re-point blob_path at a
-                # surviving referent's live hardlink so it never dangles at a
-                # deleted path — a dangling blob_path breaks hardlink-dedup for
-                # a later same-sha pull (_maybe_hardlink_from_blob probes
-                # blob_path.is_file()). #8.
-                _repoint_shared_blob(conn, sha256, dest, exclude_model_id=model_id)
+        release_blob_ref(conn, f.get("sha256"), dest, model_id=model_id)
         if dest:
             try:
                 resolved_dest = assert_under_store(dest, severity="fail")
@@ -339,6 +410,9 @@ __all__ = [
     "GCReport",
     "collect_orphans",
     "delete_model_files",
+    "model_blob_refs",
     "prune_orphans",
     "reconcile_store_tree",
+    "release_blob_ref",
+    "release_blob_refs",
 ]

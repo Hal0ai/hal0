@@ -178,16 +178,46 @@ export function useHfSearch(q: string, type?: string | null) {
   })
 }
 
+export interface ModelDeleteFileRemoved {
+  path: string
+  size_bytes: number
+  /** Link count before removal; set only when >1 (no space freed). */
+  hardlinks?: number
+}
+
+export interface ModelDeleteFileKept {
+  path: string
+  /** kept_by_request | runtime_managed | directory | outside_roots |
+   *  hal0_state | missing_at_delete | shared:<model id> |
+   *  unlink_failed:<error> */
+  reason: string
+}
+
 export interface ModelDeleteResponse {
   id: string
   deleted: boolean
   affected_slots: string[]
+  files_removed: ModelDeleteFileRemoved[]
+  files_kept: ModelDeleteFileKept[]
+  bytes_freed: number
+  /** Resolved paths hidden from future scans (files left on disk). */
+  tombstoned: string[]
+  warnings: string[]
+}
+
+export interface ModelDeleteVars {
+  id: string
+  /** Also remove the model's files from disk (ADR-0026 default: true). */
+  deleteFiles: boolean
 }
 
 export function useModelDelete() {
   const qc = useQueryClient()
-  return useMutation<ModelDeleteResponse, Hal0Error, string>({
-    mutationFn: (id: string) => apiDelete<ModelDeleteResponse>(ENDPOINTS.model(id)),
+  return useMutation<ModelDeleteResponse, Hal0Error, ModelDeleteVars>({
+    mutationFn: ({ id, deleteFiles }: ModelDeleteVars) =>
+      apiDelete<ModelDeleteResponse>(
+        `${ENDPOINTS.model(id)}?delete_files=${deleteFiles ? 'true' : 'false'}`,
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
   })
 }

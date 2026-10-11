@@ -15,19 +15,30 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
+import threading
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
+from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.model import Model
 from hal0.registry.store import ModelAlreadyExists, ModelRegistry
 
 log = logging.getLogger(__name__)
+
+#: Serialises a scan with a model delete (ADR-0026). The delete removes the
+#: row, cleans up files and writes tombstones while holding it; without it a
+#: scan landing between the row removal and the tombstone re-registers the
+#: file, and the cleanup then treats the new row as a sharing owner.
+SCAN_DELETE_LOCK = threading.Lock()
 
 # Soft budget — beyond this the scan returns what it has and logs a warning.
 _SCAN_BUDGET_SECONDS = 30.0
@@ -212,13 +223,29 @@ def find_candidates(
     roots: list[str | Path],
     extensions: list[str],
     known_paths: set[str],
+    ignored_paths: set[str] | None = None,
+    known_inodes: set[tuple[int, int]] | None = None,
 ) -> list[CandidateModel]:
     """Walk each root and return :class:`CandidateModel`s not already registered.
 
     Files whose absolute path is in ``known_paths`` are skipped silently
     so a re-scan after a manual registry add doesn't fight itself. The
     walk is case-insensitive on extension to handle ``.GGUF`` vs ``.gguf``.
+
+    ``ignored_paths`` are tombstoned resolved paths
+    (:mod:`hal0.registry.tombstones`): a file at or below one is never a
+    candidate, so a model deleted with its files kept does not reappear.
+    Any directory BELOW a root whose name starts with ``.`` is skipped
+    (``.Trash-1000/``, ``.cache/``…); the root itself may live under a dot
+    directory.
+
+    ``known_inodes`` are ``(st_dev, st_ino)`` pairs of already-registered
+    files: a hardlinked copy of a registered model (the same bytes under a
+    second name, e.g. an HF-cache blob beside a store copy) is not a new
+    candidate.
     """
+    ignored = ignored_paths or set()
+    inodes = known_inodes or set()
     exts = {e.lower() for e in extensions}
     seen: set[Path] = set()
     out: list[CandidateModel] = []
@@ -232,17 +259,13 @@ def find_candidates(
     # "drop every shard" behaviour. An incomplete group (no shard-1 seen)
     # is silently dropped, same as before.
     shard_groups: dict[tuple[str, str, str], dict[int, Path]] = {}
+    shard_names: dict[tuple[str, str, str], Path] = {}
     started = time.monotonic()
     for root in roots:
         root_path = Path(root).expanduser()
         if not root_path.exists() or not root_path.is_dir():
             continue
-        try:
-            iterator = root_path.rglob("*")
-        except OSError as exc:
-            log.warning("discover.rglob_failed root=%s err=%s", root_path, exc)
-            continue
-        for candidate in iterator:
+        for candidate in _walk_files(root_path, ignored):
             if time.monotonic() - started > _SCAN_BUDGET_SECONDS:
                 log.warning(
                     "discover.budget_exceeded after=%.1fs roots=%s — returning partial results",
@@ -264,7 +287,10 @@ def find_candidates(
                     mmproj_abs = candidate.resolve()
                 except OSError:
                     mmproj_abs = candidate
-                mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
+                # A tombstoned sidecar stays ignored: attaching it to a sibling
+                # would hand the file back to a model (and to its later delete).
+                if not tombstones.is_tombstoned(mmproj_abs, ignored):
+                    mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
                 continue
             # Shard grouping (plan §7.1c a4): bucket by (dir, stem, total)
             # instead of falling into the generic skip rule below, which
@@ -289,6 +315,10 @@ def find_candidates(
                 idx = _shard_index(candidate)
                 if idx is not None:
                     shard_groups.setdefault(shard_key, {})[idx] = shard_abs
+                    if idx == 1:
+                        # Name from the walked path, not the resolved one:
+                        # an HF snapshot shard resolves to a hash-named blob.
+                        shard_names[shard_key] = candidate
                 continue
             if _is_skippable(candidate):
                 continue
@@ -303,13 +333,19 @@ def find_candidates(
                 continue
             if str(abs_path) in known_paths:
                 continue
+            if tombstones.is_tombstoned(abs_path, ignored):
+                continue
             if abs_path in seen:
                 continue
             seen.add(abs_path)
             try:
-                size = abs_path.stat().st_size
+                st = abs_path.stat()
             except OSError:
                 size = 0
+            else:
+                if (st.st_dev, st.st_ino) in inodes:
+                    continue
+                size = st.st_size
             # Prefer the symlink filename for id derivation + curated
             # match: the resolved blob is hash-named, but the snapshot
             # symlink carries the human-meaningful name.
@@ -330,12 +366,16 @@ def find_candidates(
     # as the old behaviour, since llama-server can't load a set missing its
     # entry point. Already-registered groups are filtered by shard-1's path,
     # mirroring the single-file `known_paths` check above.
-    for (_dirkey, _stem, _tot), idx_map in shard_groups.items():
+    for key, idx_map in shard_groups.items():
         if 1 not in idx_map:
             continue
         ordered = [idx_map[i] for i in sorted(idx_map)]
         entry_path = ordered[0]
         if str(entry_path) in known_paths or entry_path in seen:
+            continue
+        if any(tombstones.is_tombstoned(sp, ignored) for sp in ordered):
+            continue
+        if _inode(entry_path) in inodes:
             continue
         seen.add(entry_path)
         total_size = 0
@@ -344,7 +384,7 @@ def find_candidates(
                 total_size += shard_path.stat().st_size
             except OSError:
                 continue
-        naming_source = entry_path
+        naming_source = shard_names.get(key, entry_path)
         out.append(
             CandidateModel(
                 path=entry_path,
@@ -540,6 +580,43 @@ def _under_skip_dir(path: Path, root: Path) -> bool:
     return any(part in _SKIP_DIR_NAMES for part in path.parent.relative_to(root).parts)
 
 
+def _inode(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of ``path``, or ``None`` if it cannot be stat'd."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _walk_files(root: Path, ignored: set[str] | None = None) -> Iterator[Path]:
+    """Yield every file below ``root`` without descending into dot directories.
+
+    ``os.walk`` lets the walk prune ``.Trash-1000/``, ``.cache/`` and similar
+    trees in place, so they cost neither stats nor the scan budget. Only
+    directories BELOW ``root`` are pruned: a root that itself sits under a
+    dot directory (``~/.cache/models``) still scans. Symlinked directories
+    are not followed, matching the old ``Path.rglob`` walk; symlinked files
+    (HF ``snapshots/``) are yielded. The file name itself is covered by
+    :func:`_is_skippable`. A directory at or below a tombstoned path
+    (``ignored``) is pruned too, so a kept FLM/ONNX model tree costs nothing.
+    """
+
+    def _onerror(exc: OSError) -> None:
+        log.warning("discover.walk_failed root=%s err=%s", root, exc)
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_onerror):
+        here = Path(dirpath)
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and not (ignored and tombstones.is_tombstoned(os.path.realpath(here / d), ignored))
+        ]
+        for name in filenames:
+            yield here / name
+
+
 def _containing_roots(path: Path, roots: list[Path]) -> list[Path]:
     """The roots (as given, and resolved) that contain ``path``, deduped."""
     out: list[Path] = []
@@ -615,11 +692,124 @@ def _is_reconcilable(m: Model, roots: list[Path]) -> bool:
     )
 
 
+def is_runtime_managed(m: Model) -> bool:
+    """True for a row whose bytes a runtime manages, not hal0 (FLM).
+
+    FLM rows (``metadata.runtime == "flm"`` or ``provider == "flm"``) record
+    the FLM model directory as ``path``; FLM pulls and removes those files
+    itself. Prune never drops them and model delete never removes their
+    directory.
+    """
+    if (m.metadata or {}).get("runtime") == "flm":
+        return True
+    return getattr(m, "provider", None) == "flm"
+
+
+def _root_is_live(root: Path) -> bool:
+    """True when a missing file under ``root`` can be trusted as deleted.
+
+    * non-empty → live.
+    * empty and a mount point (``os.path.ismount``) → live: the share IS
+      mounted, it just holds nothing now.
+    * empty and not a mount point, or absent → not live. That is what an
+      unmounted NFS share looks like (its mount point is an empty local
+      directory), so every row under it is "unknown", not "gone".
+
+    Trade-off: an ordinary local root whose last model file was removed by
+    hand is also empty and not a mount point, so its ghost row is kept as
+    ``missing_unverified`` until the root holds something again or the row
+    is deleted explicitly (ADR-0026).
+    """
+    try:
+        with os.scandir(root) as it:
+            if any(True for _ in it):
+                return True
+    except OSError:
+        return False
+    try:
+        return os.path.ismount(root)
+    except OSError:
+        return False
+
+
+def _missing_is_trustworthy(path: Path, roots: list[Path], live: dict[Path, bool]) -> bool:
+    """Whether a missing ``path`` really means "deleted", not "not mounted".
+
+    Under a scan root, the root must be live (:func:`_root_is_live`). Outside
+    every root, the file's parent directory must still exist.
+    """
+    containing = [r for r in roots if path.is_relative_to(r)]
+    if containing:
+        for root in containing:
+            if root not in live:
+                live[root] = _root_is_live(root)
+        return all(live[r] for r in containing)
+    try:
+        return path.parent.is_dir()
+    except OSError:
+        return False
+
+
+def miss_checker(roots: list[str | Path]) -> Callable[[str | Path], bool]:
+    """A predicate: may a missing ``path`` under ``roots`` be trusted as deleted?
+
+    Wraps :func:`_missing_is_trustworthy` with resolved roots and a per-root
+    liveness cache. :func:`prune_missing` and the prune preview
+    (``models_service.missing_registry_rows``) share it, so the preview
+    lists exactly what a prune would remove.
+    """
+    root_paths: list[Path] = []
+    for r in roots:
+        rp = Path(r).expanduser()
+        with contextlib.suppress(OSError):
+            rp = rp.resolve()
+        root_paths.append(rp)
+    live: dict[Path, bool] = {}
+
+    def check(path: str | Path) -> bool:
+        p = Path(path).expanduser()
+        with contextlib.suppress(OSError):
+            p = p.resolve()
+        return _missing_is_trustworthy(p, root_paths, live)
+
+    return check
+
+
+def _prune_row(registry: ModelRegistry, model_id: str) -> None:
+    """Remove one pruned row and release its ``store_blob`` references.
+
+    The row's ``model_file`` rows cascade away with it; without the release
+    the blob would stay positively referenced forever and
+    :func:`hal0.registry.gc.prune_orphans` could never reclaim it. Same
+    release an explicit delete does (ADR-0026). Best-effort.
+    """
+    from hal0.registry import gc
+
+    db_path = getattr(registry, "db_path", None)
+    refs: list[tuple[str, str]] = []
+    if db_path is not None:
+        try:
+            refs = gc.model_blob_refs(db_path, model_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.prune_refs_read_failed id=%s err=%s", model_id, exc)
+    try:
+        registry.remove(model_id)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("discover.prune_remove_failed id=%s err=%s", model_id, exc)
+        return
+    if db_path is not None and refs:
+        try:
+            gc.release_blob_refs(db_path, refs, model_id=model_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.prune_release_failed id=%s err=%s", model_id, exc)
+
+
 def prune_missing(
     registry: ModelRegistry,
     *,
     protected_ids: set[str],
     dry_run: bool = False,
+    roots: list[str | Path] | None = None,
 ) -> dict:
     """Remove registry rows whose backing path no longer exists on disk.
 
@@ -627,12 +817,27 @@ def prune_missing(
     not in ``protected_ids`` (slot/stack-referenced ids). Protected-but-missing
     rows are returned under ``missing_referenced`` so callers can surface them
     as drift needing repair rather than silently deleting a referenced model.
-    Returns {"pruned": [...ids...], "missing_referenced": [...ids...], "kept": int}.
+    Rows of a runtime that manages its own files (FLM — see
+    :func:`is_runtime_managed`) are never pruned: their ``path`` is the
+    runtime's model directory, not a file hal0 owns, and they count as kept.
+
+    When ``roots`` is given, a missing row is pruned only if the miss is
+    trustworthy (:func:`_missing_is_trustworthy`): its scan root exists and
+    is non-empty, or — outside every root — its parent directory exists. A
+    row under an unmounted share is reported under ``missing_unverified``
+    and kept.
+    Returns {"pruned": [...], "missing_referenced": [...],
+    "missing_unverified": [...], "kept": int}.
     """
     pruned: list[str] = []
     missing_referenced: list[str] = []
+    missing_unverified: list[str] = []
     kept = 0
+    trustworthy = miss_checker(roots or [])
     for m in registry.list():
+        if is_runtime_managed(m):
+            kept += 1
+            continue
         # ``p.exists()`` is authoritative: do NOT special-case size_bytes==0
         # (that's stale metadata — the weights may well still be on disk).
         try:
@@ -648,13 +853,18 @@ def prune_missing(
             # that needs a repair, not a deletion. Report, never remove.
             missing_referenced.append(m.id)
             continue
+        if roots is not None and not trustworthy(m.path):
+            missing_unverified.append(m.id)
+            continue
         pruned.append(m.id)
         if not dry_run:
-            try:
-                registry.remove(m.id)
-            except Exception as exc:  # pragma: no cover — defensive
-                log.warning("discover.prune_remove_failed id=%s err=%s", m.id, exc)
-    return {"pruned": pruned, "missing_referenced": missing_referenced, "kept": kept}
+            _prune_row(registry, m.id)
+    return {
+        "pruned": pruned,
+        "missing_referenced": missing_referenced,
+        "missing_unverified": missing_unverified,
+        "kept": kept,
+    }
 
 
 def referenced_model_ids() -> set[str]:
@@ -770,12 +980,15 @@ def scan_and_register(
     Returns a result dict shaped for both the API surface and the
     startup log line.
 
-    When ``prune`` is True, also run :func:`prune_missing` after the add pass
-    to drop registry rows whose backing file no longer exists — except rows in
-    ``protected_ids`` (slot/stack-referenced), which are reported under
-    ``missing_referenced`` for repair. The ``pruned`` / ``missing_referenced``
-    keys are always present (both ``[]`` when ``prune`` is False) so the return
-    shape is stable.
+    When ``prune`` is True, also run :func:`prune_missing` BEFORE the add pass
+    (so a file moved within a root re-registers under its id in the same
+    scan) to drop registry rows whose backing file no longer exists — except
+    rows in ``protected_ids`` (slot/stack-referenced), which are reported
+    under ``missing_referenced`` for repair, and rows whose miss can't be
+    trusted (empty/absent root), reported under ``missing_unverified``. The
+    ``pruned`` / ``missing_referenced`` / ``missing_unverified`` keys are
+    always present (``[]`` when ``prune`` is False) so the return shape is
+    stable. The whole scan holds :data:`SCAN_DELETE_LOCK`.
 
     Every call also runs :func:`reconcile_skipped_auto_scan` first, so rows an
     older scan registered under a now-skipped dir are dropped (reported under
@@ -785,6 +998,17 @@ def scan_and_register(
     source fails to load, reconcile is skipped for that scan rather than
     deleting with a partial protected set.
     """
+    with SCAN_DELETE_LOCK:
+        return _scan_and_register_locked(registry, cfg, prune=prune, protected_ids=protected_ids)
+
+
+def _scan_and_register_locked(
+    registry: ModelRegistry,
+    cfg: ModelsConfig,
+    *,
+    prune: bool,
+    protected_ids: set[str] | None,
+) -> dict[str, Any]:
     # scan_roots() folds the effective store/pull_root into the declared roots
     # so a headless install (where --models-dir wrote pull_root but not roots)
     # still scans where the models actually are.
@@ -809,18 +1033,41 @@ def scan_and_register(
             reconciled = rec["removed"]
             reconcile_referenced = rec["referenced"]
 
+    # Prune BEFORE the add pass: a file moved within a root keeps its derived
+    # id, so the stale row must go first or the new path is skipped as an
+    # id_collision and the model is missing until the next scan.
+    pruned: list[str] = []
+    missing_referenced: list[str] = []
+    missing_unverified: list[str] = []
+    if prune:
+        prune_result = prune_missing(
+            registry,
+            protected_ids=protected_ids or set(),
+            dry_run=False,
+            roots=list(roots),
+        )
+        pruned = prune_result["pruned"]
+        missing_referenced = prune_result["missing_referenced"]
+        missing_unverified = prune_result["missing_unverified"]
+
     known_paths: set[str] = set()
+    known_inodes: set[tuple[int, int]] = set()
     for existing in registry.list():
         try:
             known_paths.add(str(Path(existing.path).resolve()))
         except OSError:
             known_paths.add(existing.path)
         known_paths.add(existing.path)
+        ino = _inode(Path(existing.path))
+        if ino is not None:
+            known_inodes.add(ino)
 
     candidates = find_candidates(
         roots=list(roots),
         extensions=list(cfg.file_extensions),
         known_paths=known_paths,
+        ignored_paths=tombstones.load(),
+        known_inodes=known_inodes,
     )
 
     added: list[str] = []
@@ -853,17 +1100,6 @@ def scan_and_register(
             log.warning("discover.register_failed path=%s err=%s", cand.path, exc)
             skipped.append({"path": str(cand.path), "reason": f"register_failed:{exc}"})
 
-    pruned: list[str] = []
-    missing_referenced: list[str] = []
-    if prune:
-        prune_result = prune_missing(
-            registry,
-            protected_ids=protected_ids or set(),
-            dry_run=False,
-        )
-        pruned = prune_result["pruned"]
-        missing_referenced = prune_result["missing_referenced"]
-
     return {
         "added": added,
         "backfilled": backfilled,
@@ -871,6 +1107,7 @@ def scan_and_register(
         "scanned_roots": [str(r) for r in roots],
         "pruned": pruned,
         "missing_referenced": missing_referenced,
+        "missing_unverified": missing_unverified,
         "reconciled": reconciled,
         "reconcile_referenced": reconcile_referenced,
     }
@@ -887,6 +1124,7 @@ __all__ = [
     "CandidateModel",
     "backfill_coordless",
     "find_candidates",
+    "is_runtime_managed",
     "is_skippable",
     "prune_missing",
     "reconcile_skipped_auto_scan",

@@ -30,6 +30,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- `DELETE /api/models/{id}` now deletes the model's files by default:
+  the model file, any shards, the `mmproj` sidecar, and a pulled model's
+  file set. Pass `delete_files=false` to remove only the registry entry,
+  which was the old behaviour. `hal0 model rm` deletes files too unless you
+  pass `--keep-files`. The dashboard's Delete dialog has an "Also delete
+  files from disk" checkbox, ticked by default. hal0 never removes files
+  outside the model roots and the store, files another model uses,
+  directories, or its own config and state files. Each kept file is listed
+  in the response with its reason (ADR-0026).
+
 ### Fixed
 
 - The Runner Images page no longer lists niche runtimes (PromptForge,
@@ -38,6 +50,33 @@ applying. Add those subsections to a version's section to surface them; see
   runtimes** (when any) and **Other images** for catalogued images no
   runtime ships — instead of by which image a runtime currently launches
   (ADR-0027).
+
+- A deleted model no longer reappears after a restart. Files kept on disk
+  (by opting out, or because a safety check refused to remove them) are
+  recorded in `<var_lib>/registry/ignored-paths.json`, and the discovery
+  scan skips them. `hal0 model add`, scan commit and pulls clear that
+  record for the path they register.
+- The startup auto-scan now drops registry rows whose file is gone. These
+  rows are kept:
+  - rows that a slot, stack or `hal0.toml` field references
+  - rows with a pending pull
+  - FLM rows
+  - rows under a model root that is empty or missing, such as an unmounted
+    share
+
+  If any of those references fails to load, pruning is skipped for that
+  boot.
+- The scan no longer registers model files under dot directories inside a
+  model root, such as `.Trash-1000/`. It also no longer names a Hugging
+  Face shard set after its hash-named blob, and it no longer registers a
+  hardlinked copy of a model that is already registered.
+- Deleting a model while it is still downloading cancels the download
+  first, so the finished download can't bring the model back. If the
+  download doesn't stop within 30 seconds, the delete is refused with
+  `model.pull_active`.
+- The Delete dialog shows the model's real path and size. It used to claim
+  it removed the size "from /var/lib/hal0/models", whatever the model's
+  actual location.
 
 ### Changed
 

@@ -142,7 +142,7 @@ from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.observability import sentry
-from hal0.registry.discover import scan_and_register
+from hal0.registry.discover import _collect_referenced_model_ids, scan_and_register
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
@@ -1182,6 +1182,21 @@ async def _run_boot_phase(
     report.record(name, "ok", (time.monotonic() - start) * 1000.0)
 
 
+def _pending_pull_model_ids() -> set[str]:
+    """Model ids with a persisted non-terminal pull snapshot (best-effort)."""
+    from hal0.registry.pull import list_persisted_jobs
+
+    try:
+        return {
+            str(s["model_id"])
+            for s in list_persisted_jobs()
+            if s.get("state") in ("queued", "running") and s.get("model_id")
+        }
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("models.pending_pulls_unreadable", error=str(exc))
+        return set()
+
+
 async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
     """Phase — core registries + hardware probe + parsed config + model auto-scan."""
     ctx.upstreams = UpstreamRegistry()
@@ -1204,13 +1219,41 @@ async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
     # shows up in the registry without operator intervention.  Failures
     # here must NOT block startup — the API still has to come up so the
     # user can fix the offending root.
+    #
+    # The startup scan also prunes rows whose file is gone (an operator
+    # ``rm``'d it), so they do not linger as ghosts. Rows a slot, stack or
+    # hal0.toml field references, and rows with a pending pull, are
+    # protected and reported instead; if any reference source fails to
+    # load, the protected set is incomplete and pruning is skipped for this
+    # boot rather than risk deleting a referenced row. FLM rows are never
+    # pruned, and neither is a row under an empty/absent root (an unmounted
+    # share) — see prune_missing (ADR-0026).
     if ctx.hal0_config.models.auto_scan_on_start:
         try:
-            scan_result = scan_and_register(ctx.model_registry, ctx.hal0_config.models)
+            ref_ids, refs_complete = _collect_referenced_model_ids()
+            # A row whose interrupted pull has not landed yet has no file;
+            # _auto_resume_interrupted_pulls needs that row later in boot.
+            ref_ids |= _pending_pull_model_ids()
+            if not refs_complete:
+                log.warning(
+                    "models.auto_scan_prune_skipped",
+                    reason="a slot/stack/config reference failed to load",
+                )
+            scan_result = scan_and_register(
+                ctx.model_registry,
+                ctx.hal0_config.models,
+                prune=refs_complete,
+                protected_ids=ref_ids,
+            )
             log.info(
                 "models.auto_scan_complete",
                 added=len(scan_result.get("added", [])),
                 skipped=len(scan_result.get("skipped", [])),
+                pruned=len(scan_result.get("pruned", [])),
+                missing_referenced=len(scan_result.get("missing_referenced", [])),
+                # Rows kept because their root is empty/absent (an unmounted
+                # share?) — reconciliation was incomplete for those.
+                missing_unverified=len(scan_result.get("missing_unverified", [])),
                 roots=len(scan_result.get("scanned_roots", [])),
             )
         except Exception as exc:
