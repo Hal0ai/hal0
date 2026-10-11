@@ -20,7 +20,7 @@ Contract (same as the other upgrade passes in :mod:`hal0.updater.updater`):
 * **Idempotent.** A file / row is rewritten only when it still carries the
   pair; a second run touches nothing.
 * **Backed up first.** Every file that is rewritten is first copied to
-  ``<var_lib>/backups/<kind>-<UTC stamp>.toml`` (collision-suffixed, never
+  ``<var_lib>/backups/<kind>-<UTC stamp>.toml`` (owner-only 0600, collision-suffixed, never
   overwritten — the :func:`hal0.updater.updater._backup_profiles_toml`
   convention). Registry rows have no file of their own, so the prior
   ``defaults.extra_args`` of every changed row is written to
@@ -39,8 +39,8 @@ identical rule and the order the two run in does not matter.
 from __future__ import annotations
 
 import json
+import os
 import shlex
-import shutil
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,26 +85,44 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _free_name(root: Path, stem: str, suffix: str) -> Path:
-    dest = root / f"{stem}{suffix}"
-    n = 2
-    while dest.exists():
-        dest = root / f"{stem}-{n}{suffix}"
-        n += 1
+def _write_backup(kind: str, suffix: str, data: bytes) -> Path | None:
+    """Create ``<var_lib>/backups/<kind>-<stamp><suffix>`` owner-only; ``None`` on failure.
+
+    Backups copy operator config that can hold secrets (slot env, extra args),
+    so the file is created ``0600`` atomically (``O_EXCL``, so a name collision
+    suffixes rather than overwrites) and the backups directory is ``0700`` when
+    this call is the one that creates it. An existing directory is left as the
+    operator set it.
+    """
+    root = paths.var_lib() / "backups"
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stem = f"{kind}-{_stamp()}"
+        n = 1
+        while True:
+            dest = root / (f"{stem}{suffix}" if n == 1 else f"{stem}-{n}{suffix}")
+            try:
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                n += 1
+                continue
+            break
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+    except OSError as exc:
+        log.warning("reasoning_format_none.backup_failed", kind=kind, error=str(exc))
+        return None
     return dest
 
 
 def _backup_file(src: Path, kind: str) -> Path | None:
-    """Copy ``src`` to ``<var_lib>/backups/<kind>-<stamp>.toml``; ``None`` on failure."""
-    root = paths.var_lib() / "backups"
+    """Back up ``src`` as ``<kind>-<stamp>.toml`` (owner-only)."""
     try:
-        root.mkdir(parents=True, exist_ok=True)
-        dest = _free_name(root, f"{kind}-{_stamp()}", ".toml")
-        shutil.copy2(src, dest)
+        data = src.read_bytes()
     except OSError as exc:
         log.warning("reasoning_format_none.backup_failed", path=str(src), error=str(exc))
         return None
-    return dest
+    return _write_backup(kind, ".toml", data)
 
 
 def migrate_profiles(path: Path | None = None) -> list[str]:
@@ -117,6 +135,10 @@ def migrate_profiles(path: Path | None = None) -> list[str]:
     """
     from hal0.config.loader import write_toml_atomic
 
+    # No cross-process lock to take here: unlike slots/*.toml (`slot_write_lock`)
+    # and hal0.toml (`hal0_config_file_lock`), no writer of profiles.toml takes
+    # one (ProfileCatalog serialises only in-process). The read-strip-backup-write
+    # below is a single short pass with no await.
     target = path or paths.profiles_toml()
     if not target.is_file():
         return []
@@ -181,25 +203,28 @@ def migrate_slots(slots_dir: Path | None = None) -> list[str]:
 
     changed: list[str] = []
     for toml_path in sorted(base.glob("*.toml")):
-        try:
-            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning(
-                "reasoning_format_none.slot_unreadable", slot=toml_path.stem, error=str(exc)
-            )
-            continue
-        dirty = False
-        for server in _server_tables(raw):
-            extra = server.get("extra_args")
-            if not isinstance(extra, str):
-                continue
-            new_extra, removed = strip_flag_string(extra)
-            if removed:
-                server["extra_args"] = new_extra
-                dirty = True
-        if not dirty:
-            continue
+        # The WHOLE read -> strip -> backup -> write is one locked section:
+        # `slot_write_lock` guards slot read-modify-write, so reading outside
+        # it could overwrite a concurrent API edit with a stale snapshot.
         with slot_write_lock(base):
+            try:
+                raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                log.warning(
+                    "reasoning_format_none.slot_unreadable", slot=toml_path.stem, error=str(exc)
+                )
+                continue
+            dirty = False
+            for server in _server_tables(raw):
+                extra = server.get("extra_args")
+                if not isinstance(extra, str):
+                    continue
+                new_extra, removed = strip_flag_string(extra)
+                if removed:
+                    server["extra_args"] = new_extra
+                    dirty = True
+            if not dirty:
+                continue
             if _backup_file(toml_path, f"slot-{toml_path.stem}") is None:
                 continue
             try:
@@ -246,16 +271,8 @@ def migrate_model_defaults(registry: Any = None) -> list[str]:
 
     # Registry rows are not a file; record what each row held so the change is
     # reversible by hand.
-    try:
-        root = paths.var_lib() / "backups"
-        root.mkdir(parents=True, exist_ok=True)
-        dest = _free_name(root, f"model-extra-args-{_stamp()}", ".json")
-        dest.write_text(
-            json.dumps({m.id: old for m, old, _ in pending}, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("reasoning_format_none.model_backup_failed", error=str(exc))
+    payload = json.dumps({m.id: old for m, old, _ in pending}, indent=2, sort_keys=True) + "\n"
+    if _write_backup("model-extra-args", ".json", payload.encode("utf-8")) is None:
         return []  # never rewrite without a restore point
 
     changed: list[str] = []

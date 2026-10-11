@@ -52,7 +52,11 @@ applying. Add those subsections to a version's section to surface them; see
   moved to an upstream runner. `--reasoning off` stays, so the profiles still
   mean "no thinking". The published addon envelopes under `community/addons/`
   are regenerated without the flag. `hal0 slot migrate-flags` also drops the
-  flag instead of folding it into a model's defaults (#2545).
+  flag instead of folding it into a model's defaults. Saving a profile or a
+  model's `defaults.extra_args` that adds `--reasoning-format none` is now
+  rejected with a 400 (`slot.reasoning_format_none_denied`) explaining why,
+  and the flag is dropped from the command line of every slot launch as a
+  backstop for anything already saved (#2545).
 
 - The Runner Images page no longer lists niche runtimes (PromptForge,
   Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
@@ -129,7 +133,8 @@ applying. Add those subsections to a version's section to surface them; see
   `--reasoning-format deepseek` and every other value are left alone. Before
   it rewrites anything it copies the file to `/var/lib/hal0/backups/`
   (`profiles-<time>.toml`, `slot-<name>-<time>.toml`) and writes the old model
-  values to `model-extra-args-<time>.json`. Running slots keep their old
+  values to `model-extra-args-<time>.json`; backups are readable by their
+  owner only. Running slots keep their old
   command line until their next restart.
 
 ## [1.4.0] — 2026-10-08

@@ -326,6 +326,40 @@ def strip_reasoning_format_none(tokens: list[str]) -> tuple[list[str], int]:
     return clean, removed
 
 
+def deny_reasoning_format_none(
+    tokens: list[str],
+    *,
+    segment: str,
+    grandfathered: list[str] | None = None,
+) -> None:
+    """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set ``--reasoning-format none``.
+
+    The write-side half of :func:`strip_reasoning_format_none` (#2545): new
+    profile / model-default saves are rejected with the reason, while
+    :func:`resolve_argv` strips the pair on every launch as the backstop for
+    anything already persisted. ``grandfathered`` is the previously stored
+    token list on an update — a row that already carries the pair passes
+    unchanged (the edit drawer re-sends stored text verbatim, so rejecting it
+    would make the row un-editable, the #1411 round-trip trap); only a save
+    that INTRODUCES it is rejected.
+    """
+    _, found = strip_reasoning_format_none(tokens)
+    if not found:
+        return
+    if grandfathered is not None and strip_reasoning_format_none(grandfathered)[1]:
+        return
+    raise BadRequest(
+        f"{segment} may not set `--reasoning-format none`: upstream llama.cpp answers "
+        "HTTP 400 'Failed to initialize samplers' to every response_format "
+        "(json_object / json_schema) request when the server runs with it, so "
+        "structured output and tool-call grammars would stop working. Omit the "
+        "flag (use `--reasoning off` to disable thinking), or pick another "
+        "--reasoning-format value such as `deepseek`.",
+        code="slot.reasoning_format_none_denied",
+        details={"segment": segment, "flags": ["--reasoning-format", "none"]},
+    )
+
+
 def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
     """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a slot-hardware flag.
 
@@ -445,6 +479,11 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     Raises:
         hal0.errors.BadRequest: an untrusted segment sets a managed flag.
 
+    Every segment also has ``--reasoning-format none`` silently stripped
+    (:func:`strip_reasoning_format_none`, #2545): saves that introduce it are
+    rejected (:func:`deny_reasoning_format_none`), and this is the backstop for
+    anything already persisted.
+
     The profile-sourced segments (``slot_profile`` #1636, ``slot_profile_template``
     #1787) first get their hardware flags
     (``SLOT_HARDWARE_FLAGS``) silently stripped rather than hard-rejected: the
@@ -469,6 +508,11 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
             seg, _stripped = strip_managed_flags(seg, denylist=SLOT_HARDWARE_FLAGS)
         if label in UNTRUSTED_SEGMENT_LABELS:
             _deny_managed_flags(seg, segment=label)
+        # Backstop for #2545: whatever a segment carries (a row persisted
+        # before the write-side screen, a hand-edited TOML), the launched
+        # command never has `--reasoning-format none`. Per segment, so a
+        # lower-precedence `deepseek` is not shadowed by a stripped `none`.
+        seg, _ = strip_reasoning_format_none(seg)
         for tok in seg:
             tokens.append(tok)
             sources.append(label)
@@ -561,6 +605,7 @@ __all__ = [
     "FlagProvenance",
     "NormalizedArgv",
     "ResolvedArgv",
+    "deny_reasoning_format_none",
     "merge_flags",
     "normalize_argv",
     "resolve_argv",

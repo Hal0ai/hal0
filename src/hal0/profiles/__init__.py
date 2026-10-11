@@ -627,10 +627,12 @@ def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None)
         _canon,
         _deny_managed_flags,
         _deny_slot_hardware_flags,
+        deny_reasoning_format_none,
         strip_managed_flags,
     )
 
     inherited: list[str] = []
+    prior_tokens: list[str] | None = None
     if grandfathered and grandfathered.strip():
         try:
             prior_tokens = shlex.split(grandfathered)
@@ -654,3 +656,10 @@ def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None)
     # message — mirrors the route/screen_model_write ordering.
     _deny_slot_hardware_flags(tokens, segment="profile flags")
     _deny_managed_flags(tokens, segment="profile flags")
+    # #2545: reject a save that INTRODUCES `--reasoning-format none` (an
+    # inherited one passes; resolve_argv strips it at launch).
+    deny_reasoning_format_none(
+        tokens,
+        segment="profile flags",
+        grandfathered=prior_tokens,
+    )

@@ -541,3 +541,20 @@ def test_strip_reasoning_format_none_leaves_everything_else(tokens):
     from hal0.slots.argv import strip_reasoning_format_none
 
     assert strip_reasoning_format_none(tokens) == (tokens, 0)
+
+
+def test_resolve_argv_strips_reasoning_format_none_from_every_segment() -> None:
+    """Launch backstop (#2545): whichever segment carries it, it never reaches the
+    argv, and a stripped `none` does not shadow a lower-precedence `deepseek`."""
+    for label in ("slot_profile", "model_extra_args", "extra_args"):
+        out = resolve_argv(
+            [
+                ("slot_profile", ["--jinja", "--reasoning-format", "deepseek"]),
+                (label, ["--reasoning-format", "none", "-b", "2048"]),
+            ]
+        )
+        assert "none" not in out.argv
+        assert _value_after(out.argv, "--reasoning-format") == "deepseek"
+        assert _value_after(out.argv, "-b") == "2048"
+    only = resolve_argv([("model_extra_args", ["--reasoning-format=none", "--jinja"])])
+    assert only.argv == ["--jinja"]
