@@ -127,9 +127,11 @@ applying. Add those subsections to a version's section to surface them; see
   automatically on `hal0 update`, on an `install.sh` re-run and at `hal0-api`
   startup, before config is validated. It rewrites slot runtimes, profile
   runtimes and `[slots].default_images` from `rocmfpx`, `vulkanfpx`, `strix`
-  and `promptforge` to `standard`; removes image pins that name a retired or
-  unknown image (anything that is not a `hal0-runner-<key>` package or a
-  ggml-org `server-cuda-b<N>` tag); renames `HAL0_TOOLBOX_IMAGE_*` lines in
+  and `promptforge` to `standard`; removes image pins that name a retired hal0
+  image (`hal0-combined*`, `hal0-rocmfpx`, `hal0-strix-vulkan`,
+  `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui`,
+  `amd-strix-halo-toolboxes`, kyuz0 builds) and keeps and reports pins to any
+  other image, such as your own build; renames `HAL0_TOOLBOX_IMAGE_*` lines in
   `api.env`; renames leftover model `preferred_runner` values; and, for a slot
   whose model is a ROCmFPX/IU4/ActiveFPX build, keeps the slot's settings but
   unassigns the model. Every change and every dropped pin is logged. It backs

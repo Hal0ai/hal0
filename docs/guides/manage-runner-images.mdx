@@ -477,9 +477,10 @@ What it changes (`hal0.config.migrations.runner_system`):
 |---|---|
 | Slot `binary` of `rocmfpx`, `vulkanfpx`, `strix`, `promptforge`, `upstream`, `vulkan` or `rocm` | `binary = "standard"` |
 | Slot `binary` that names no runner | Cleared; the slot's `device` picks the runner |
-| Slot `image_pin` / `image` naming a retired or unknown image | Removed, unless it names a current runner package (`hal0-runner-<key>`, or a ggml-org `server-cuda-b<N>` tag) |
+| Slot `image_pin` / `image` naming a retired hal0 image (`hal0-combined*`, `hal0-rocmfpx`, `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui`, `amd-strix-halo-toolboxes`, kyuz0 builds) | Removed; the slot runs its runner's pinned image |
+| Slot `image_pin` / `image` naming any other image (your own build) | Kept, and listed as `kept:` in the report |
 | A slot whose model is a fork-only quant (ROCmFPX family, IU4, ActiveFPX) | Model unassigned, rest of the slot kept; reported as a warning |
-| `[slots].default_images` keys | Renamed the same way as `binary`; entries naming no runner, or a retired or unknown image, dropped |
+| `[slots].default_images` keys | Renamed the same way as `binary`; entries naming no runner, or a retired hal0 image, dropped; your own images are kept |
 | Profile `runner` | Renamed the same way; unknown values dropped. A profile `image` naming a retired image is removed |
 | A model's `preferred_runner` | Renamed the same way; unknown values become empty |
 | `HAL0_TOOLBOX_IMAGE_<KEY>` in `api.env` | `HAL0_RUNNER_IMAGE_<NEWKEY>`, or dropped when the key or image is retired |

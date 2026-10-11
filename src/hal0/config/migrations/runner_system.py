@@ -13,13 +13,13 @@ on-disk state                                   becomes
 slot ``binary`` = rocmfpx / vulkanfpx / strix /  ``binary = "standard"``
 promptforge / upstream / vulkan / rocm
 slot ``binary`` naming no runner                cleared (the device picks the runner)
-slot ``image_pin`` / ``image`` (top level or    removed, unless it names a current runner
-``[slot]``) naming a retired or unknown image   package (``hal0-runner-<key>``, ggml-org
-                                                ``server-cuda-b<N>``)
+slot ``image_pin`` / ``image`` (top level or    removed when it names a retired hal0
+``[slot]``)                                     image; any other image (an operator's own
+                                                build) is kept and reported
 slot whose ``[model].default`` is a fork-only   model unassigned; the rest of the slot
 quant (ROCmFPX family, IU4, ActiveFPX)          config is kept; reported as a WARNING
 ``[slots].default_images``                      keys renamed as for ``binary``; entries
-                                                naming no runner, or a retired/unknown
+                                                naming no runner, or a retired hal0
                                                 image, dropped
 profile ``runner``                              renamed as for ``binary``; unknown dropped
 profile ``image`` naming a retired image        removed
@@ -86,9 +86,23 @@ RETIRED_RUNNER_KEYS: dict[str, str] = {
     "rocm": "standard",
 }
 
-#: Tags that move. A pin to one of these never names a fixed image, so it is
-#: treated as unknown even on a current runner repo.
-_MOVING_TAGS = frozenset({"latest", "main", "server-cuda"})
+#: Image repository names hal0 used to ship and no longer does. A pin to any
+#: of them is debris from the old runner system and is removed. Matched on the
+#: repository name, whatever registry or owner prefix it carries.
+_RETIRED_IMAGE_NAMES = frozenset(
+    {
+        "hal0-combined",
+        "hal0-combined-upstream",
+        "hal0-rocmfpx",
+        "hal0-strix-vulkan",
+        "hal0-promptforge",
+        "hal0-comfyui",
+        "amd-strix-halo-toolboxes",
+    }
+)
+_RETIRED_IMAGE_PREFIXES = ("hal0-toolbox-",)
+#: Image owners whose images hal0 used to ship (the kyuz0 Strix Halo builds).
+_RETIRED_IMAGE_OWNERS = frozenset({"kyuz0"})
 
 _ENV_OLD_RE = re.compile(
     r"^(?P<export>export\s+)?HAL0_TOOLBOX_IMAGE_(?P<key>[A-Z0-9_]+)=(?P<value>.*)$"
@@ -110,6 +124,9 @@ class RunnerMigrationReport:
     actions: list[str] = field(default_factory=list)
     #: Loud lines an operator must see: unassigned models, dropped pins.
     warnings: list[str] = field(default_factory=list)
+    #: Operator images left in place (not hal0's to manage). Reported, but
+    #: not a change: they do not make the report "changed".
+    kept: list[str] = field(default_factory=list)
     backup: str | None = None
 
     @property
@@ -121,9 +138,11 @@ class RunnerMigrationReport:
         out = [f"runner-system migration ({'dry run' if self.dry_run else 'applied'}):"]
         if not self.changed:
             out.append("  nothing to convert")
+            out += [f"  kept: {k}" for k in self.kept]
             return out
         out += [f"  {verb}: {a}" for a in self.actions]
         out += [f"  WARNING: {w}" for w in self.warnings]
+        out += [f"  kept: {k}" for k in self.kept]
         if self.backup:
             out.append(f"  backup: {self.backup}")
         return out
@@ -136,12 +155,6 @@ def _known_runner_keys() -> frozenset[str]:
     from hal0.runners import RUNNER_IMAGES
 
     return frozenset(RUNNER_IMAGES)
-
-
-def _current_repos() -> frozenset[str]:
-    from hal0.runners.pins import runner_pins
-
-    return frozenset(pin.image for pin in runner_pins().values())
 
 
 def map_runner_key(key: str, known: frozenset[str]) -> str | None:
@@ -161,21 +174,30 @@ def split_image_ref(ref: str) -> tuple[str, str | None, str | None]:
     return body, None, digest or None
 
 
-def image_is_current(ref: str, repos: frozenset[str]) -> bool:
-    """Does ``ref`` name a fixed image of a current runner package?
+def image_is_retired(ref: str) -> bool:
+    """Does ``ref`` name an image the old runner system shipped?
 
-    True for any tag or digest of a repo in ``manifest.json`` ``runners``
-    except a moving tag. Every other ref — the retired ``hal0-combined``,
+    The retired packages are ``hal0-combined`` (and ``-upstream``),
     ``hal0-rocmfpx``, ``hal0-strix-vulkan``, ``hal0-promptforge``,
-    ``hal0-toolbox-*``, ``hal0-comfyui`` and ``amd-strix-halo-toolboxes``
-    packages, the moving ``server-cuda`` tag, and any other image — is not.
+    ``hal0-toolbox-*``, ``hal0-comfyui``, ``amd-strix-halo-toolboxes`` and
+    the kyuz0 builds, under any registry. Everything else, including an
+    operator's own build, is not.
     """
-    repo, tag, digest = split_image_ref(ref)
-    if repo not in repos:
+    repo, _tag, _digest = split_image_ref(ref)
+    parts = [p for p in repo.lower().split("/") if p]
+    if not parts:
         return False
-    if digest:
+    name = parts[-1]
+    if name in _RETIRED_IMAGE_NAMES or name.startswith(_RETIRED_IMAGE_PREFIXES):
         return True
-    return bool(tag) and tag not in _MOVING_TAGS
+    return any(owner in _RETIRED_IMAGE_OWNERS for owner in parts[:-1])
+
+
+def image_is_hal0_runner(ref: str) -> bool:
+    """Does ``ref`` name one of the current runner packages?"""
+    repo, _tag, _digest = split_image_ref(ref)
+    name = repo.lower().rsplit("/", 1)[-1]
+    return name.startswith("hal0-runner-") or repo.lower().endswith("ggml-org/llama.cpp")
 
 
 # ── plans (pure dict transforms) ──────────────────────────────────────────────
@@ -190,10 +212,10 @@ def plan_slot(
     *,
     name: str,
     known: frozenset[str],
-    repos: frozenset[str],
     fork_quant_of: Callable[[str], str | None],
     actions: list[str],
     warnings: list[str],
+    kept: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """The converted slot TOML, or ``None`` when nothing changes."""
     out = _deep_copy(raw)
@@ -220,13 +242,17 @@ def plan_slot(
                 changed = True
         for key in ("image_pin", "image"):
             ref = table.get(key)
-            if isinstance(ref, str) and ref.strip() and not image_is_current(ref, repos):
+            if not (isinstance(ref, str) and ref.strip()):
+                continue
+            if image_is_retired(ref):
                 del table[key]
                 warnings.append(
-                    f"slot {name}: dropped image pin {ref!r} (not a current runner image); "
+                    f"slot {name}: dropped image pin {ref!r} (a retired hal0 image); "
                     "the slot now runs its runner's pinned image"
                 )
                 changed = True
+            elif kept is not None and not image_is_hal0_runner(ref):
+                kept.append(f"slot {name}: custom image pin {ref!r} (not managed by hal0)")
 
     model = _as_table(out.get("model"))
     model_id = model.get("default") if model is not None else None
@@ -248,9 +274,9 @@ def plan_hal0_toml(
     raw: dict[str, Any],
     *,
     known: frozenset[str],
-    repos: frozenset[str],
     actions: list[str],
     warnings: list[str],
+    kept: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """The converted ``hal0.toml``, or ``None`` when nothing changes."""
     slots = _as_table(raw.get("slots"))
@@ -265,12 +291,14 @@ def plan_hal0_toml(
             warnings.append(f"[slots].default_images: dropped {key!r} (no such runner)")
             changed = True
             continue
-        if not isinstance(ref, str) or not image_is_current(ref, repos):
+        if not isinstance(ref, str) or not ref.strip() or image_is_retired(ref):
             warnings.append(
-                f"[slots].default_images: dropped {key!r} = {ref!r} (not a current runner image)"
+                f"[slots].default_images: dropped {key!r} = {ref!r} (a retired hal0 image)"
             )
             changed = True
             continue
+        if kept is not None and not image_is_hal0_runner(ref):
+            kept.append(f"[slots].default_images: custom image {key!r} = {ref!r}")
         if new in converted:
             warnings.append(
                 f"[slots].default_images: dropped {key!r} (another entry already sets {new!r})"
@@ -292,7 +320,6 @@ def plan_profiles(
     raw: dict[str, Any],
     *,
     known: frozenset[str],
-    repos: frozenset[str],
     actions: list[str],
     warnings: list[str],
 ) -> dict[str, Any] | None:
@@ -317,7 +344,7 @@ def plan_profiles(
                 actions.append(f"profile {name}: runtime {runner!r} -> {new!r}")
                 changed = True
         ref = prof.get("image")
-        if isinstance(ref, str) and ref.strip() and not image_is_current(ref, repos):
+        if isinstance(ref, str) and ref.strip() and image_is_retired(ref):
             del prof["image"]
             actions.append(f"profile {name}: dropped image {ref!r}")
             changed = True
@@ -328,7 +355,6 @@ def plan_env(
     text: str,
     *,
     known: frozenset[str],
-    repos: frozenset[str],
     actions: list[str],
     warnings: list[str],
 ) -> str | None:
@@ -348,10 +374,9 @@ def plan_env(
         if new is None:
             warnings.append(f"api.env: dropped HAL0_TOOLBOX_IMAGE_{old_key} (no such runner)")
             continue
-        if not value or not image_is_current(value, repos):
+        if not value or image_is_retired(value):
             warnings.append(
-                f"api.env: dropped HAL0_TOOLBOX_IMAGE_{old_key}={value} "
-                "(not a current runner image)"
+                f"api.env: dropped HAL0_TOOLBOX_IMAGE_{old_key}={value} (a retired hal0 image)"
             )
             continue
         newline = f"{match.group('export') or ''}HAL0_RUNNER_IMAGE_{new.upper()}={value}\n"
@@ -555,7 +580,6 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
     from hal0.config import paths
 
     known = _known_runner_keys()
-    repos = _current_repos()
     report = RunnerMigrationReport(dry_run=dry_run)
     actions, warnings = report.actions, report.warnings
 
@@ -571,7 +595,7 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
     loaded = _read_toml(hal0_toml)
     if loaded is not None:
         new = plan_hal0_toml(
-            loaded[1], known=known, repos=repos, actions=actions, warnings=warnings
+            loaded[1], known=known, actions=actions, warnings=warnings, kept=report.kept
         )
         if new is not None:
             writes.append(_FileWrite(hal0_toml, loaded[0], tomli_w.dumps(new).encode()))
@@ -585,17 +609,17 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
                 loaded[1],
                 name=slot_path.stem,
                 known=known,
-                repos=repos,
                 fork_quant_of=fork_quant_of,
                 actions=actions,
                 warnings=warnings,
+                kept=report.kept,
             )
             if new is not None:
                 writes.append(_FileWrite(slot_path, loaded[0], tomli_w.dumps(new).encode()))
 
     loaded = _read_toml(profiles_toml)
     if loaded is not None:
-        new = plan_profiles(loaded[1], known=known, repos=repos, actions=actions, warnings=warnings)
+        new = plan_profiles(loaded[1], known=known, actions=actions, warnings=warnings)
         if new is not None:
             writes.append(_FileWrite(profiles_toml, loaded[0], tomli_w.dumps(new).encode()))
 
@@ -611,7 +635,6 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
             new_text = plan_env(
                 original.decode("utf-8"),
                 known=known,
-                repos=repos,
                 actions=actions,
                 warnings=warnings,
             )
@@ -703,7 +726,8 @@ __all__ = [
     "RETIRED_RUNNER_KEYS",
     "RunnerMigrationError",
     "RunnerMigrationReport",
-    "image_is_current",
+    "image_is_hal0_runner",
+    "image_is_retired",
     "map_runner_key",
     "migrate_runner_system",
     "plan_env",

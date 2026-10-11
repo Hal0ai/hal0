@@ -78,8 +78,8 @@ fixtures, and convert existing installs with exactly one migration.
    `hal0-api` boot, during `hal0 update`, and on demand.
 7. **One conversion.** `hal0.config.migrations.runner_system` moves an install
    onto the new system: slot runtimes and profile runtimes to the new keys,
-   `[slots].default_images` renamed or dropped, image pins to retired or
-   unknown images removed, `HAL0_TOOLBOX_IMAGE_*` in `api.env` renamed, model
+   `[slots].default_images` renamed or dropped, image pins to retired hal0
+   images removed (an operator's own image is kept and reported), `HAL0_TOOLBOX_IMAGE_*` in `api.env` renamed, model
    `preferred_runner` leftovers renamed, and slots whose model is a fork-only
    quant keep their settings but lose the model, each reported. It runs on raw
    TOML before config validation (first in the post-update migrations and

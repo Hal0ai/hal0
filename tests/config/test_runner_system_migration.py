@@ -16,7 +16,8 @@ from hal0.config import paths
 from hal0.config.migrations import runner_system as rs
 from hal0.config.migrations.runner_system import (
     RunnerMigrationError,
-    image_is_current,
+    image_is_hal0_runner,
+    image_is_retired,
     map_runner_key,
     migrate_runner_system,
     plan_env,
@@ -28,10 +29,6 @@ from hal0.config.migrations.runner_system import (
 from hal0.runners import RUNNER_IMAGES
 
 KNOWN = frozenset(RUNNER_IMAGES)
-REPOS = frozenset(
-    {f"ghcr.io/hal0ai/hal0-runner-{k}" for k in RUNNER_IMAGES if k != "cuda"}
-    | {"ghcr.io/ggml-org/llama.cpp"}
-)
 CURRENT = "ghcr.io/hal0ai/hal0-runner-standard:b11552-r1a2b3c4"
 
 
@@ -46,7 +43,6 @@ def _slot(raw: dict[str, Any], *, fork: Any = _no_fork) -> tuple[dict | None, li
         raw,
         name="s",
         known=KNOWN,
-        repos=REPOS,
         fork_quant_of=fork,
         actions=actions,
         warnings=warnings,
@@ -77,29 +73,38 @@ def test_map_runner_key(key: str, new: str | None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("ref", "current"),
+    ("ref", "retired"),
+    [
+        ("ghcr.io/hal0ai/hal0-combined:0826", True),
+        ("ghcr.io/hal0ai/hal0-combined-upstream:0829", True),
+        ("ghcr.io/hal0ai/hal0-rocmfpx:ade07ba", True),
+        ("localhost/hal0-rocmfpx:vulkan-minicpm5", True),
+        ("ghcr.io/hal0ai/hal0-strix-vulkan:0831", True),
+        ("ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38", True),
+        ("ghcr.io/hal0ai/hal0-toolbox-cpu:v1", True),
+        ("ghcr.io/hal0ai/hal0-comfyui:latest", True),
+        ("ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server", True),
+        ("docker.io/kyuz0/amd-strix-halo-comfyui:latest", True),
+        ("ghcr.io/hal0ai/hal0-runner-standard:b11552-r1@sha256:" + "a" * 64, False),
+        ("ghcr.io/ggml-org/llama.cpp:server-cuda", False),
+        ("docker.io/someone/custom:1", False),
+        ("localhost/my-llama:dev", False),
+    ],
+)
+def test_image_is_retired(ref: str, retired: bool) -> None:
+    assert image_is_retired(ref) is retired
+
+
+@pytest.mark.parametrize(
+    ("ref", "runner"),
     [
         (CURRENT, True),
-        ("ghcr.io/hal0ai/hal0-runner-standard@sha256:" + "a" * 64, True),
-        ("ghcr.io/hal0ai/hal0-runner-cpu:b1-r1@sha256:" + "a" * 64, True),
         ("ghcr.io/ggml-org/llama.cpp:server-cuda-b11541", True),
-        ("ghcr.io/ggml-org/llama.cpp:server-cuda", False),
-        ("ghcr.io/hal0ai/hal0-runner-standard:latest", False),
-        ("ghcr.io/hal0ai/hal0-runner-standard", False),
-        ("ghcr.io/hal0ai/hal0-combined:0826", False),
-        ("ghcr.io/hal0ai/hal0-combined-upstream:0829", False),
-        ("ghcr.io/hal0ai/hal0-rocmfpx:ade07ba", False),
-        ("localhost/hal0-rocmfpx:vulkan-minicpm5", False),
-        ("ghcr.io/hal0ai/hal0-strix-vulkan:0831", False),
-        ("ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38", False),
-        ("ghcr.io/hal0ai/hal0-toolbox-cpu:v1", False),
-        ("ghcr.io/hal0ai/hal0-comfyui:latest", False),
-        ("ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server", False),
         ("docker.io/someone/custom:1", False),
     ],
 )
-def test_image_is_current(ref: str, current: bool) -> None:
-    assert image_is_current(ref, REPOS) is current
+def test_image_is_hal0_runner(ref: str, runner: bool) -> None:
+    assert image_is_hal0_runner(ref) is runner
 
 
 # ── slots ─────────────────────────────────────────────────────────────────────
@@ -131,6 +136,21 @@ def test_retired_image_pin_is_dropped_and_current_one_kept() -> None:
     assert out is not None and "image_pin" not in out
     assert warnings
     assert _slot({"image_pin": CURRENT})[0] is None
+
+
+def test_custom_image_pin_is_kept_and_reported() -> None:
+    kept: list[str] = []
+    out = plan_slot(
+        {"name": "s", "image_pin": "docker.io/someone/my-llama:dev"},
+        name="s",
+        known=KNOWN,
+        fork_quant_of=_no_fork,
+        actions=[],
+        warnings=[],
+        kept=kept,
+    )
+    assert out is None
+    assert kept and "my-llama" in kept[0]
 
 
 def test_image_gen_table_is_not_an_image_pin() -> None:
@@ -170,6 +190,7 @@ def test_default_images_are_renamed_and_pruned() -> None:
                 "strix": "ghcr.io/hal0ai/hal0-strix-vulkan:0831",
                 "cpu": "ghcr.io/hal0ai/hal0-toolbox-cpu:v1",
                 "flm": "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1",
+                "kokoro": "docker.io/someone/kokoro:dev",
                 "bogus": CURRENT,
             }
         },
@@ -177,15 +198,16 @@ def test_default_images_are_renamed_and_pruned() -> None:
     }
     actions: list[str] = []
     warnings: list[str] = []
-    out = plan_hal0_toml(raw, known=KNOWN, repos=REPOS, actions=actions, warnings=warnings)
+    out = plan_hal0_toml(raw, known=KNOWN, actions=actions, warnings=warnings)
     assert out is not None
     assert out["slots"]["default_images"] == {
         "standard": CURRENT,
         "flm": "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1",
+        "kokoro": "docker.io/someone/kokoro:dev",
     }
     assert out["other"] == {"x": 1}
     assert len(warnings) == 4  # duplicate standard, strix image, cpu image, bogus key
-    assert plan_hal0_toml(out, known=KNOWN, repos=REPOS, actions=[], warnings=[]) is None
+    assert plan_hal0_toml(out, known=KNOWN, actions=[], warnings=[]) is None
 
 
 def test_profiles_runner_and_image() -> None:
@@ -198,13 +220,13 @@ def test_profiles_runner_and_image() -> None:
         }
     }
     warnings: list[str] = []
-    out = plan_profiles(raw, known=KNOWN, repos=REPOS, actions=[], warnings=warnings)
+    out = plan_profiles(raw, known=KNOWN, actions=[], warnings=warnings)
     assert out is not None
     assert out["profile"]["a"] == {"runner": "standard", "flags": "-fa on"}
     assert out["profile"]["b"] == {}
     assert out["profile"]["c"] == {"runner": "cpu"}
     assert out["profile"]["d"] == {"flags": "x"}
-    assert plan_profiles(out, known=KNOWN, repos=REPOS, actions=[], warnings=[]) is None
+    assert plan_profiles(out, known=KNOWN, actions=[], warnings=[]) is None
 
 
 def test_env_overrides_are_renamed_or_dropped() -> None:
@@ -217,7 +239,7 @@ def test_env_overrides_are_renamed_or_dropped() -> None:
         "HAL0_TOOLBOX_IMAGE_WHATEVER=x\n"
     )
     warnings: list[str] = []
-    out = plan_env(text, known=KNOWN, repos=REPOS, actions=[], warnings=warnings)
+    out = plan_env(text, known=KNOWN, actions=[], warnings=warnings)
     assert out == (
         "# api.env\n"
         "HF_TOKEN=abc\n"
@@ -225,7 +247,7 @@ def test_env_overrides_are_renamed_or_dropped() -> None:
         "export HAL0_RUNNER_IMAGE_CPU=ghcr.io/hal0ai/hal0-runner-cpu:b1-r1\n"
     )
     assert len(warnings) == 2
-    assert plan_env(out, known=KNOWN, repos=REPOS, actions=[], warnings=[]) is None
+    assert plan_env(out, known=KNOWN, actions=[], warnings=[]) is None
 
 
 # ── end to end ────────────────────────────────────────────────────────────────
