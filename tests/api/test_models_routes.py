@@ -775,8 +775,31 @@ def test_list_models_dedupe_keeps_legacy_flm_id_as_an_alias(
 # ── upstream provenance in /api/models ─────────────────────────────────────
 
 
+def _seed_upstream_models(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, models: dict[str, list[str]]
+) -> None:
+    """Seed the per-upstream model cache that ``/api/models`` reads, offline.
+
+    The route reads ``app.state.model_cache``; at boot that is the same dict
+    object as ``app.state.upstream_models``. Rebinding ``upstream_models`` to
+    a new dict leaves the route on the original, empty cache, so it fell
+    through to ``fetch_models`` and asked the real openrouter.ai, and the
+    test passed or failed with the CI runner's network. Fill the shared
+    dict in place instead, and make any live fetch fail the test.
+    """
+    cache = app.state.model_cache
+    assert cache is app.state.upstream_models
+    cache.clear()
+    cache.update(models)
+
+    async def _no_live_fetch(name: str) -> list[str]:
+        pytest.fail(f"/api/models fetched upstream {name!r} live; seed its cache")
+
+    monkeypatch.setattr(app.state.upstreams, "fetch_models", _no_live_fetch)
+
+
 def test_slot_backed_upstreams_never_stamp_origin_upstream(
-    inspect_client: TestClient,
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The composite ``hal0`` aggregate and container slots serve LOCAL
     models — their advertised ids must not appear as origin="upstream"
@@ -805,11 +828,15 @@ def test_slot_backed_upstreams_never_stamp_origin_upstream(
             url="https://openrouter.ai/api/v1",
         )
     )
-    app.state.upstream_models = {
-        "hal0": ["Qwopus3.5-4B-Coder-MTP-Q6_K"],
-        "ops": ["qwopus3-5-4b-coder-mtp-q6-k"],
-        "openrouter": ["anthropic/claude-sonnet-4"],
-    }
+    _seed_upstream_models(
+        app,
+        monkeypatch,
+        {
+            "hal0": ["Qwopus3.5-4B-Coder-MTP-Q6_K"],
+            "ops": ["qwopus3-5-4b-coder-mtp-q6-k"],
+            "openrouter": ["anthropic/claude-sonnet-4"],
+        },
+    )
 
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     # Slot-backed advertisements are suppressed entirely.
@@ -821,7 +848,7 @@ def test_slot_backed_upstreams_never_stamp_origin_upstream(
 
 
 def test_disabled_or_filtered_remote_curates_api_models(
-    inspect_client: TestClient,
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """/api/models honors enabled + advertise_models + model_filters for
     remote upstreams (same curation as /v1/models)."""
@@ -844,14 +871,18 @@ def test_disabled_or_filtered_remote_curates_api_models(
     reg.add(
         dataclasses.replace(base, name="disabled-one", enabled=False),
     )
-    app.state.upstream_models = {
-        "openrouter": [
-            "anthropic/claude-sonnet-4",
-            "anthropic/claude-haiku:free",
-            "nvidia/nemotron-70b",
-        ],
-        "disabled-one": ["mistral/mistral-large"],
-    }
+    _seed_upstream_models(
+        app,
+        monkeypatch,
+        {
+            "openrouter": [
+                "anthropic/claude-sonnet-4",
+                "anthropic/claude-haiku:free",
+                "nvidia/nemotron-70b",
+            ],
+            "disabled-one": ["mistral/mistral-large"],
+        },
+    )
 
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     assert "anthropic/claude-sonnet-4" in rows
