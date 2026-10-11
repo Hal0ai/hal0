@@ -59,7 +59,7 @@ export interface RunnerImage {
   // this repo right now. Not the runtime tier (see `tier` below).
   is_default?: RunnerImageDefault | null
   in_use_by?: string[]
-  // ADR-0026: the registry runner that ships this image lineage, its
+  // ADR-0027: the registry runner that ships this image lineage, its
   // operator-facing title + one-line description, and its tier. All null for
   // a catalogued image no runner ships (legacy toolbox, pin-only variant).
   runner?: string | null
@@ -94,7 +94,7 @@ const RUNNER_IMAGES_POLL_MS = 30_000
 // (`pinned_slots`), and whether a newer release-shaped tag is catalogued.
 export interface RunnerImageFamily {
   family: string
-  /** The runtime's registry title and tier (ADR-0026). */
+  /** The runtime's registry title and tier (ADR-0027). */
   title?: string
   tier?: RunnerTier | null
   effective_ref: string

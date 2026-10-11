@@ -1492,7 +1492,7 @@ function buildRunnerImages() {
         downloaded: true,
         is_default: { family: 'rocmfpx', source: 'release' },
         in_use_by: ['agent', 'utility'],
-        // ADR-0026 registry copy + tier (hal0.runners.RUNNER_IMAGES["rocmfpx"]).
+        // ADR-0027 registry copy + tier (hal0.runners.RUNNER_IMAGES["rocmfpx"]).
         runner: 'rocmfpx',
         title: 'ROCmFPX',
         blurb:

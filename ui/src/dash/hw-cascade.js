@@ -43,7 +43,7 @@ function deviceClassOf(device) {
 			: "cpu";
 }
 
-// Runtime tier → sort rank (ADR-0026). The tier itself is owned by the backend
+// Runtime tier → sort rank (ADR-0027). The tier itself is owned by the backend
 // registry (`hal0.runners.Runner.tier`, surfaced as system-info
 // `backends[].tier`); this table only orders it, in the same order the Runner
 // Images page lists its sections. An unknown/absent tier sorts last rather
@@ -117,7 +117,7 @@ export function hostHwFlags(rawHardware) {
  *
  * Returns `{ options }`, where each option is
  * `{ key, title, blurb, lanes, state, tier, provenance }`, default-tier
- * runtimes first (ADR-0026), then by title.
+ * runtimes first (ADR-0027), then by title.
  */
 export function runnerOptions({ backends, device, slotType, hw }) {
 	const devClass = deviceClassOf(device);

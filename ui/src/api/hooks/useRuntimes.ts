@@ -26,7 +26,7 @@ import { useSlots } from './useSlots'
 
 export type RunnerState = 'installed' | 'installable' | 'unavailable'
 
-/** `hal0.runners.RunnerTier` (ADR-0026). */
+/** `hal0.runners.RunnerTier` (ADR-0027). */
 export type RunnerTier = 'default' | 'optional' | 'frozen'
 
 export interface SystemInfoBackend {
@@ -40,7 +40,7 @@ export interface SystemInfoBackend {
   title?: string
   /** One-line operator-facing description shown as the Runtime select's hint. */
   blurb?: string
-  /** Runtime tier from the registry (ADR-0026) — default-tier runtimes sort
+  /** Runtime tier from the registry (ADR-0027) — default-tier runtimes sort
    *  first in runner pickers; the Runner Images page groups by the same field. */
   tier?: RunnerTier | null
   /** Fit-check metadata (spec-hw-slot-ownership §4): the backends this runner

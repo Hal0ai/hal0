@@ -14,7 +14,7 @@
 // runner-catalogue-v3 (Task 10): the Defaults strip is now a launch-truth
 // FamilyStrip ("Launch images") driven straight by the server's `families`
 // summary (effective ref, source tier, store state, newer-release marker).
-// ADR-0026: the list groups by each row's runtime TIER (default / optional /
+// ADR-0027: the list groups by each row's runtime TIER (default / optional /
 // frozen, plus "Other images" for catalogued images no runtime ships) via
 // the pure groupRows() helper, and rows show the registry's title + blurb.
 // The per-runtime launch image is a separate marker ("launch image" chip),
@@ -47,7 +47,7 @@ function fmtBytesRI(b) {
 
 // ── Pure helpers (unit-tested in __tests__/runner-images-view.test.tsx) ──
 
-// Row grouping for the catalogue list (ADR-0026). The section a row lands in
+// Row grouping for the catalogue list (ADR-0027). The section a row lands in
 // is its runtime's TIER, read from the row (`tier`, which the backend copies
 // off `hal0.runners.Runner.tier` — the same field the slot drawer's runtime
 // picker sorts by). It is NOT derived from `is_default`: that marker says

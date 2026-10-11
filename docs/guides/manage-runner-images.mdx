@@ -36,7 +36,7 @@ description the dashboard shows, and a **tier**:
 | `cuda` | NVIDIA CUDA | optional | llama-server | gpu | cuda |
 | `promptforge` | PromptForge (legacy) | optional | llama-server | gpu | rocm |
 
-The tier (`hal0.runners.Runner.tier`, ADR-0026) is the one place hal0 records
+The tier (`hal0.runners.Runner.tier`, ADR-0027) is the one place hal0 records
 whether a runtime is a default. **Default** runtimes are the set every box is
 expected to have, one per kind of work. **Optional** runtimes are opt-in: you
 pick one on purpose for a specific model or device. A **frozen** runtime

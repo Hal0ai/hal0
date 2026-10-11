@@ -153,9 +153,9 @@ def enrich_row(
     :func:`_repo_specialties`, hoisted once per request beside ``defaults``).
     ``[]`` for a repo no specialty runner claims — every plain toolbox image
     included. The UI no longer groups by it: ``groupRows``
-    (``runner-images.jsx``) groups by ``tier`` (ADR-0026).
+    (``runner-images.jsx``) groups by ``tier`` (ADR-0027).
 
-    ``runner``/``title``/``blurb``/``tier`` (ADR-0026) come from the
+    ``runner``/``title``/``blurb``/``tier`` (ADR-0027) come from the
     :data:`hal0.runners.RUNNER_IMAGES` entry whose bundled image lives in
     this row's repo (:func:`_runner_for_repo`), all ``None`` when no entry
     does. They replace ``images.json``'s ``notes`` as the operator-facing
@@ -170,7 +170,7 @@ def enrich_row(
     """
     row = _image_to_dict(image)
     row["specialties"] = list(specialties.get(image.image, []))
-    # ADR-0026: the registry runner this image lineage belongs to, and that
+    # ADR-0027: the registry runner this image lineage belongs to, and that
     # runner's own title/blurb/tier — the page's grouping and display copy.
     # ``None`` for a catalogued image no RUNNER_IMAGES entry ships (an old
     # per-backend toolbox, a pin-only variant): it is not a runtime, so it
@@ -440,7 +440,7 @@ def _families_payload(
         out.append(
             {
                 "family": family,
-                # ADR-0026: the runtime's display name and tier, from the
+                # ADR-0027: the runtime's display name and tier, from the
                 # registry (families are runner keys by construction).
                 "title": runner.title if runner else family,
                 "tier": runner.tier if runner else None,

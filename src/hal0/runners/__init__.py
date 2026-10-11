@@ -176,7 +176,7 @@ class Runner:
     unsupported_archs: tuple[str, ...] = ()
     #: Operator-facing display name ("ROCmFPX", "CPU") — D5 of the
     #: runtime-cascade spec. UI copy speaks "Runtime <title>", never the key.
-    #: Naming rule (ADR-0026): a title says what the runtime is, never how its
+    #: Naming rule (ADR-0027): a title says what the runtime is, never how its
     #: image was assembled ("combined"), and "Standard" is reserved for the
     #: pristine-upstream llama.cpp runner ADR-0025 proposes.
     title: str = ""
@@ -185,7 +185,7 @@ class Runner:
     #: behind it. Never a git revision (provenance stays its own field on the
     #: API payload) and never a maintainer note.
     blurb: str = ""
-    #: The ONE owner of "is this a default runtime" (ADR-0026). ``default``:
+    #: The ONE owner of "is this a default runtime" (ADR-0027). ``default``:
     #: in the set every box is expected to have; ``optional``: opt-in, picked
     #: deliberately for a specific model or device; ``frozen``: kept only to
     #: load models already on slots, never bumped. The slot runtime pickers

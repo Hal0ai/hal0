@@ -1,4 +1,4 @@
-# ADR-0026: A runner's tier is the one source of "default", and every runner is named for what it is
+# ADR-0027: A runner's tier is the one source of "default", and every runner is named for what it is
 
 ## Status
 

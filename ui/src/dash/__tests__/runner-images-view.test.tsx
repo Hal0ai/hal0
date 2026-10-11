@@ -175,7 +175,7 @@ function row(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('groupRows (ADR-0026: grouped by runtime tier)', () => {
+describe('groupRows (ADR-0027: grouped by runtime tier)', () => {
   const ids = (list: Array<{ id: string }>) => list.map(r => r.id)
 
   it('groups rows by their registry tier, not by the launch-image marker', () => {

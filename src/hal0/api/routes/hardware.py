@@ -931,7 +931,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "backend": runner.backend,
             "title": runner.title,
             "blurb": runner.blurb,
-            # ADR-0026: the runtime tier ("default" | "optional" | "frozen"),
+            # ADR-0027: the runtime tier ("default" | "optional" | "frozen"),
             # read straight off the registry — the one owner the Runner
             # Images page grouping reads too. Pickers sort by it.
             "tier": runner.tier,

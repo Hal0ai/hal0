@@ -37,11 +37,11 @@ applying. Add those subsections to a version's section to surface them; see
   registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
   runtimes** (when any) and **Other images** for catalogued images no
   runtime ships — instead of by which image a runtime currently launches
-  (ADR-0026).
+  (ADR-0027).
 
 ### Changed
 
-- ADR-0026: `Runner.tier` (`default` / `optional` / `frozen`) replaces
+- ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
   `Runner.is_default` as the one record of whether a runtime is a default.
   Default: ROCmFPX, CPU, NPU (FastFlowLM), Kokoro speech, Moonshine
   transcription, ComfyUI. Optional: Strix Halo Vulkan, Qwen3 TTS, NVIDIA
