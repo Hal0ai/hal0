@@ -59,9 +59,11 @@ fixtures, and convert existing installs with exactly one migration.
    has a null tag or digest, while `standard` and `cpu` name different
    llama.cpp releases, or while a published `cuda` pin is not a
    `server-cuda-b<M>` tag with `M` at or below `standard`'s release. A `cuda`
-   pin more than 50 releases behind warns. Until the runner-images repo
-   publishes the new packages, every row is a placeholder (`tag: null`) and the
-   gate refuses to cut a release.
+   pin more than 50 releases behind warns. A row is filled only from a passing
+   hardware-gate report: its tag and digest come from the report, and
+   `lanes_gated` lists every lane the report marks passed. `tag: null` marks a
+   runner that is not published yet, which the gate refuses for the default
+   tier.
 5. **Fork-only quants are unsupported.** ROCmFPX-family (ROCmFP3/4/6/8,
    ROCmFPX), IU4 and ActiveFPX GGUFs need a fork no runner ships. They are
    refused at model add, pull, scan and launch with one message

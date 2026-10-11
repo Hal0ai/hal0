@@ -167,10 +167,12 @@ def test_optional_runners_may_stay_unpublished(key: str) -> None:
     assert release_gate_problems(_release_ready(**{key: _row(key)})) == []
 
 
-def test_shipped_placeholders_fail_the_gate_until_pins_land() -> None:
-    """Today every row is a placeholder: the release ritual must refuse."""
-    problems = release_gate_problems(load_runner_pins(_REPO_ROOT / "manifest.json"))
-    assert any("'standard'" in p for p in problems)
+def test_shipped_pin_table_is_release_ready() -> None:
+    """The shipped table carries the hardware-gated pins: the release ritual
+    must accept it, and every published pin is digest-pinned."""
+    table = load_runner_pins(_REPO_ROOT / "manifest.json")
+    assert release_gate_problems(table) == []
+    assert all(pin.digest for pin in table.values() if pin.tag)
 
 
 def test_standard_and_cpu_must_share_a_release() -> None:
@@ -213,12 +215,12 @@ def test_llama_release(tag: str | None, release: int | None) -> None:
     assert llama_release(tag) == release
 
 
-def test_release_check_script_fails_on_placeholders() -> None:
+def test_release_check_script_passes_on_the_shipped_pins() -> None:
     proc = subprocess.run(
         [sys.executable, str(_REPO_ROOT / "scripts" / "check_runner_pins.py")],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert proc.returncode == 1
-    assert "not digest-pinned" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    assert "release-ready" in proc.stdout

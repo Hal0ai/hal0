@@ -502,6 +502,18 @@ def _vulkan_slot_on(image: str) -> str:
     return f'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\nimage_pin = "{image}"\n'
 
 
+def _ungate_standard_pin(monkeypatch) -> None:
+    """Make every pin, ``standard`` included, unpublished: no lane is gated."""
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners.pins import RunnerPin
+
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+
+
 def _gate_standard_pin(monkeypatch) -> str:
     """Make ``standard`` a published pin whose digest passed the Vulkan gate.
 
@@ -557,7 +569,8 @@ def test_an_unpinned_slot_follows_the_standard_pins_gate(tmp_hal0_home: str, mon
         'name = "utility"\ndevice = "gpu-vulkan"\nport = 8082\n', encoding="utf-8"
     )
 
-    # The shipped placeholder pin gates nothing.
+    # A standard pin that has not passed the Vulkan gate gates nothing.
+    _ungate_standard_pin(monkeypatch)
     assert relabel_stale_vulkan_slots(amd_host=True, rocm_lane=False) == 1
     assert _device_of("utility") == "cpu"
 

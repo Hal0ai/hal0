@@ -8,50 +8,50 @@
   "runners": {
     "standard": {
       "image": "ghcr.io/hal0ai/hal0-runner-standard",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "b11552-re14329d",
+      "digest": "sha256:2626239586c1c8fcf1ab310000f9d19b26b3a4fa5230f608e65cc9ef2252c462",
+      "lanes_gated": ["rocm", "vulkan"]
     },
     "cpu": {
       "image": "ghcr.io/hal0ai/hal0-runner-cpu",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "b11552-re14329d",
+      "digest": "sha256:d8e1cfa2066f6ab3124dd185decd15771c4cdf058ed9c0cee49f62e7f02afd77",
+      "lanes_gated": ["cpu"]
     },
     "flm": {
       "image": "ghcr.io/hal0ai/hal0-runner-flm",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "0.9.44-re14329d",
+      "digest": "sha256:ba7f7edafc07ae2bb96eb94b519b8ab46a8564cdfb9d77372bef611811aa8643",
+      "lanes_gated": ["npu"]
     },
     "kokoro": {
       "image": "ghcr.io/hal0ai/hal0-runner-kokoro",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "0.4.9-re14329d",
+      "digest": "sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
+      "lanes_gated": ["cpu"]
     },
     "moonshine": {
       "image": "ghcr.io/hal0ai/hal0-runner-moonshine",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "20251121-re14329d",
+      "digest": "sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
+      "lanes_gated": ["cpu"]
     },
     "comfyui": {
       "image": "ghcr.io/hal0ai/hal0-runner-comfyui",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "0.28.0-r6996d85",
+      "digest": "sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
+      "lanes_gated": ["rocm"]
     },
     "qwen3tts": {
       "image": "ghcr.io/hal0ai/hal0-runner-qwen3tts",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "0.1.1-re14329d",
+      "digest": "sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
+      "lanes_gated": ["rocm"]
     },
     "cuda": {
       "image": "ghcr.io/ggml-org/llama.cpp",
-      "tag": null,
-      "digest": null,
+      "tag": "server-cuda-b11541",
+      "digest": "sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb",
       "lanes_gated": []
     }
   }

@@ -116,7 +116,12 @@ applying. Add those subsections to a version's section to surface them; see
   `hal0.runner-images.v2` only, and a sync prunes every row the catalogue no
   longer lists, downloaded or not.
 - `manifest.json` replaces `toolbox_images` and `_legacy_toolboxes` with the
-  `runners` pin table (`_schema` `hal0.manifest.v2`).
+  `runners` pin table (`_schema` `hal0.manifest.v2`). Its first pins are the
+  hardware-gated `hal0-runner-*` images: `standard` and `cpu` on llama.cpp
+  b11552 (`standard` gated for ROCm and Vulkan), `flm` 0.9.44 (NPU), `kokoro`
+  0.4.9 and `moonshine` 20251121 (CPU), `qwen3tts` 0.1.1 and `comfyui`
+  0.28.0 (ROCm), plus the upstream `server-cuda-b11541` image for `cuda`,
+  which hal0 does not gate.
 - The default curated chat model is `qwen3.8-27b` (Qwen3.8 27B, UD-Q4_K_XL
   with vision, 96K default context). A fresh install seeds it as the primary
   chat model on a box with a 32 GB or larger memory pool (smaller boxes keep

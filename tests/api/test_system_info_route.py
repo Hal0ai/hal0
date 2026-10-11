@@ -135,6 +135,7 @@ def test_system_info_backend_image_is_the_runner_pin_ref(
         tag="b2-r1",
         digest=digest,
     )
+    table["flm"] = RunnerPin(key="flm", image="ghcr.io/hal0ai/hal0-runner-flm")
     monkeypatch.setattr("hal0.runners.pins.runner_pins", lambda: table)
     monkeypatch.setenv("HAL0_RUNNER_IMAGE_CPU", "ghcr.io/me/my-cpu:dev")
 
