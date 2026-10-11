@@ -663,3 +663,187 @@ def test_state_guard_holds_when_the_store_encloses_var_lib(
     assert reasons["slot"] == {str(slot_state): "hal0_state"}
     assert reasons["loose"] == {str(loose): "hal0_state"}
     assert not model_file.exists(), "the models dir inside var_lib stays deletable"
+
+
+# ── custom model store chosen at install time ────────────────────────────────
+#
+# install.sh --models-dir=PATH (or HAL0_MODELS_DIR, or the interactive prompt)
+# writes ``[models] store`` and the deprecated ``pull_root`` into hal0.toml and
+# leaves ``roots`` at its default. DELETE /api/models/{id} passes no roots, so
+# these drive cascade_delete_model through the default deletion_roots(), the
+# way the API does.
+
+
+def _delete_with_default_roots(registry: ModelRegistry, model_id: str) -> dict[str, Any]:
+    return asyncio.run(svc.cascade_delete_model(registry, None, model_id, []))
+
+
+def _write_models_toml(body: str) -> None:
+    from hal0.config import paths
+
+    toml = paths.hal0_toml()
+    toml.parent.mkdir(parents=True, exist_ok=True)
+    toml.write_text(f"[models]\n{body}")
+
+
+@pytest.fixture
+def custom_store(tmp_hal0_home: str, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A store outside HAL0_HOME, like ``--models-dir=/data/models``."""
+    store = tmp_path_factory.mktemp("data") / "models"
+    store.mkdir()
+    return store
+
+
+@pytest.mark.parametrize(
+    "toml_body",
+    ['store = "{s}"\npull_root = "{s}"\n', 'pull_root = "{s}"\n'],
+    ids=["installer_store", "legacy_pull_root_only"],
+)
+def test_custom_store_files_are_removed_with_default_roots(
+    registry: ModelRegistry, custom_store: Path, toml_body: str
+) -> None:
+    _write_models_toml(toml_body.format(s=custom_store))
+    f = _write(custom_store / "org" / "m" / "m-q4.gguf", 40)
+    registry.add(Model(id="m", path=str(f)))
+
+    out = _delete_with_default_roots(registry, "m")
+
+    assert out["deleted"] is True
+    assert not f.exists()
+    assert out["files_kept"] == []
+    assert out["bytes_freed"] == 40
+    assert not (custom_store / "org").exists()
+    assert custom_store.is_dir(), "the store root itself is never removed"
+
+
+def test_default_models_dir_stays_deletable_after_the_store_moved(
+    registry: ModelRegistry, custom_store: Path
+) -> None:
+    """Models pulled before the operator re-ran the installer with a new
+    --models-dir still live under the default dir, which ``roots`` keeps."""
+    from hal0.config import paths
+
+    _write_models_toml(f'store = "{custom_store}"\npull_root = "{custom_store}"\n')
+    old = _write(paths.models_dir() / "old" / "old-q4.gguf")
+    registry.add(Model(id="old", path=str(old)))
+
+    out = _delete_with_default_roots(registry, "old")
+
+    assert not old.exists()
+    assert out["files_kept"] == []
+
+
+def test_declared_extra_root_files_are_removed(
+    registry: ModelRegistry, custom_store: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    extra = tmp_path_factory.mktemp("nas") / "gguf"
+    extra.mkdir()
+    _write_models_toml(f'roots = ["{extra}"]\nstore = "{custom_store}"\n')
+    f = _write(extra / "x.gguf")
+    registry.add(Model(id="x", path=str(f)))
+
+    out = _delete_with_default_roots(registry, "x")
+
+    assert not f.exists()
+    assert out["files_kept"] == []
+    assert extra.is_dir()
+
+
+def test_store_reached_through_a_symlink_is_deletable(
+    registry: ModelRegistry, custom_store: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``--models-dir=/models`` where /models is a symlink to the real disk:
+    the row records the symlinked path, the guards compare resolved paths."""
+    link = tmp_path_factory.mktemp("alias") / "models"
+    link.symlink_to(custom_store)
+    _write_models_toml(f'store = "{link}"\npull_root = "{link}"\n')
+    f = _write(link / "org" / "m.gguf")
+    registry.add(Model(id="m", path=str(f)))
+
+    out = _delete_with_default_roots(registry, "m")
+
+    assert out["files_kept"] == []
+    assert not (custom_store / "org" / "m.gguf").exists()
+    assert not (custom_store / "org").exists()
+    assert link.is_symlink() and custom_store.is_dir()
+
+
+def test_env_store_override_files_are_removed(
+    registry: ModelRegistry, custom_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(custom_store))
+    f = _write(custom_store / "e.gguf")
+    registry.add(Model(id="e", path=str(f)))
+
+    out = _delete_with_default_roots(registry, "e")
+
+    assert not f.exists()
+    assert out["files_kept"] == []
+
+
+def test_pulled_model_in_custom_store_removes_files_and_by_id_pointer(
+    registry: ModelRegistry, custom_store: Path
+) -> None:
+    from hal0.config import store as store_cfg
+
+    _write_models_toml(f'store = "{custom_store}"\npull_root = "{custom_store}"\n')
+    # Shape of pull.py's install: the row records the entry file and
+    # by-id/<id> points at that same file.
+    f = _write(custom_store / "org--pulled" / "p.gguf", 32)
+    pointer = store_cfg.set_entry_pointer("pulled", f)
+    assert pointer.is_relative_to(custom_store)
+    registry.add(Model(id="pulled", path=str(f)))
+    with connect(registry.db_path) as conn, tx(conn):
+        repository.upsert_model_file(
+            conn,
+            model_id="pulled",
+            rel="p.gguf",
+            dest=str(f),
+            size_bytes=32,
+            sha256=None,
+            lfs=False,
+            role="model",
+        )
+
+    out = _delete_with_default_roots(registry, "pulled")
+
+    assert out["files_kept"] == []
+    assert not f.exists()
+    assert not pointer.is_symlink(), "the dangling by-id pointer is removed"
+    assert not (custom_store / "org--pulled").exists()
+    assert custom_store.is_dir()
+
+
+def test_custom_store_inside_var_lib_is_exempt_from_the_state_guard(
+    registry: ModelRegistry, tmp_hal0_home: str
+) -> None:
+    """``--models-dir=/var/lib/hal0/big-models`` is a model store, not state."""
+    from hal0.config import paths
+
+    store = paths.var_lib() / "big-models"
+    _write_models_toml(f'store = "{store}"\npull_root = "{store}"\n')
+    f = _write(store / "b.gguf")
+    registry.add(Model(id="b", path=str(f)))
+
+    out = _delete_with_default_roots(registry, "b")
+
+    assert not f.exists()
+    assert out["files_kept"] == []
+
+
+def test_custom_store_file_is_tombstoned_when_kept_and_not_rescanned(
+    registry: ModelRegistry, custom_store: Path
+) -> None:
+    """--keep-files on a custom store: the startup scan (which walks the
+    store via scan_roots) must not re-register the file."""
+    _write_models_toml(f'store = "{custom_store}"\npull_root = "{custom_store}"\n')
+    f = _write(custom_store / "k-q4.gguf")
+    registry.add(Model(id="k", path=str(f)))
+
+    asyncio.run(svc.cascade_delete_model(registry, None, "k", [], delete_files=False))
+    assert f.exists()
+
+    from hal0.config.loader import load_hal0_config
+
+    scan_and_register(registry, load_hal0_config().models)
+    assert registry.list() == []
