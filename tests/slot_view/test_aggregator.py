@@ -489,7 +489,7 @@ class TestConfigEnrichment:
     def test_binary_retired_alias_spelling_surfaces_verbatim(self) -> None:
         # The runner registry has no aliases any more (ADR-0028): a leftover
         # ``binary = "vulkanfpx"`` is just an unknown key, shown as stored for
-        # the drawer's out-of-vocab option. ``hal0 migrate runners`` rewrites
+        # the drawer's out-of-vocab option. ``hal0 runner-images migrate`` rewrites
         # it to ``standard`` on disk; the view never guesses.
         cfg = _llm_cfg(binary="vulkanfpx")
         e = config_enrichment([cfg])["chat"]

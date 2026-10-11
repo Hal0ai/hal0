@@ -85,7 +85,7 @@ fixtures, and convert existing installs with exactly one migration.
    TOML before config validation (first in the post-update migrations and
    first thing at `hal0-api` startup), backs up every file it changes first,
    restores them itself on any failure, and is idempotent.
-   `hal0 migrate runners` previews it; `--apply` runs it; `--restore` puts a
+   `hal0 runner-images migrate` previews it; `--apply` runs it; `--restore` puts a
    backup back.
 
 ## Options considered

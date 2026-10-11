@@ -78,7 +78,7 @@ the fact otherwise:
      are gone, env overrides read `HAL0_RUNNER_IMAGE_<KEY>`, a slot bound to a ROCmFP4/IU4/
      ActiveFPX model keeps its settings with an empty model, every change is in the
      `migrate.runner_system` journal lines, a `runners-<ts>.tar.gz` backup exists under
-     `/var/lib/hal0/backups/`, and `hal0 migrate runners` then reports nothing to convert. See
+     `/var/lib/hal0/backups/`, and `hal0 runner-images migrate` then reports nothing to convert. See
      `regressions.yaml: runner-system-conversion`.
    * **5c. Perf-row reference envelope, now inverted.** If bench numbers are captured for this
      upgrade (`hal0 bench` or the #1948 §3-C matrix commands), record decode/prefill for BOTH

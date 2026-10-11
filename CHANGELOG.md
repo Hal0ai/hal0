@@ -140,8 +140,8 @@ applying. Add those subsections to a version's section to surface them; see
   column) to `/var/lib/hal0/backups/runners-<timestamp>.tar.gz` first and
   restores them itself if anything fails, so a failed conversion leaves the
   box as it was and `hal0 update` reports it. Preview it with
-  `hal0 migrate runners`, run it with `--apply`, and undo it with
-  `hal0 migrate runners --restore <backup>`.
+  `hal0 runner-images migrate`, run it with `--apply`, and undo it with
+  `hal0 runner-images migrate --restore <backup>`.
 - Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
   from `/usr/share/hal0/skills` by `install.sh` and unlinked from
   `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list

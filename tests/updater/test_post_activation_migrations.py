@@ -91,6 +91,29 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     return calls
 
 
+def test_runner_conversion_runs_before_schema_and_registry_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0028: the runner conversion rewrites raw TOML that config
+    validation would reject, so it must run before the schema migration and
+    before the registry.toml retirement (both load config)."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda *, dry_run=False, job_id=None: order.append("runner_system"),
+    )
+    monkeypatch.setattr(
+        "hal0.updater.updater._maybe_run_config_migrations",
+        lambda min_data_version, *, job_id=None, ceiling=None: order.append("schema") or (1, 2),
+    )
+    monkeypatch.setattr(
+        "hal0.registry.toml_retirement.retire_registry_toml",
+        lambda *, job_id=None: order.append("registry_toml") or {"outcome": "absent"},
+    )
+    run_post_activation_migrations(job_id="j0")
+    assert order == ["runner_system", "schema", "registry_toml"]
+
+
 def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
@@ -167,7 +190,7 @@ def test_runner_system_failure_is_fatal(
         run_post_activation_migrations(job_id="j9")
 
     assert _stub_every_pass["config_migrations"] == []
-    assert _stub_every_pass["seed_profiles"] == []
+    assert _stub_every_pass["registry_toml"] == []
     assert _stub_every_pass["converge_components"] == []
 
 

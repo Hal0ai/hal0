@@ -47,7 +47,7 @@ Contract:
 * **Idempotent.** Every rule is "old shape? convert : leave", so a converted
   install plans nothing and writes nothing.
 * **Dry run.** ``dry_run=True`` plans and reports without touching disk
-  (``hal0 migrate runners`` without ``--apply``).
+  (``hal0 runner-images migrate`` without ``--apply``).
 """
 
 from __future__ import annotations
@@ -492,7 +492,7 @@ def _read_toml(path: Path) -> tuple[bytes, dict[str, Any]] | None:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise RunnerMigrationError(
             f"cannot parse {path}: {exc}; fix or remove it, then re-run "
-            "`hal0 migrate runners --apply`",
+            "`hal0 runner-images migrate --apply`",
             details={"path": str(path)},
         ) from exc
 
@@ -696,7 +696,7 @@ def _migrate(*, dry_run: bool, job_id: str | None) -> RunnerMigrationReport:
 def restore_backup(archive: Path | str, *, root: Path = Path("/")) -> list[str]:
     """Extract a ``runners-<ts>.tar.gz`` backup over ``root``. Returns the paths.
 
-    The operator's undo for an applied conversion (``hal0 migrate runners
+    The operator's undo for an applied conversion (``hal0 runner-images migrate
     --restore <archive>``). Members are written back to their original
     absolute paths; nothing outside the archive is touched.
     """

@@ -1537,12 +1537,12 @@ regressions:
       grep -n 'binary\|image_pin\|^image' /etc/hal0/slots/*.toml
       grep -n -A5 'default_images' /etc/hal0/hal0.toml
       grep -n HAL0_TOOLBOX_IMAGE /etc/hal0/api.env
-      hal0 migrate runners            # dry run on the NEW release only
+      hal0 runner-images migrate            # dry run on the NEW release only
       # Upgrade, then:
       journalctl -u hal0-api --since <upgrade-start> | grep migrate.runner_system
       ls -l /var/lib/hal0/backups/runners-*.tar.gz
       grep -n 'binary\|image_pin' /etc/hal0/slots/*.toml
-      hal0 migrate runners            # must report "nothing to convert"
+      hal0 runner-images migrate            # must report "nothing to convert"
     expect: >-
       Every old runner key reads `standard`, every pin to a retired image is gone, the env
       override reads `HAL0_RUNNER_IMAGE_<KEY>`, a slot bound to a ROCmFP4/IU4/ActiveFPX model

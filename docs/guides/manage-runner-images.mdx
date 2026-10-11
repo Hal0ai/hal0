@@ -466,9 +466,9 @@ config. The same conversion runs on an `install.sh` re-run and first thing when
 yourself:
 
 ```sh
-hal0 migrate runners            # dry run: print the plan, touch nothing
-hal0 migrate runners --apply    # apply it
-hal0 migrate runners --restore /var/lib/hal0/backups/runners-<ts>.tar.gz
+hal0 runner-images migrate            # dry run: print the plan, touch nothing
+hal0 runner-images migrate --apply    # apply it
+hal0 runner-images migrate --restore /var/lib/hal0/backups/runners-<ts>.tar.gz
 ```
 
 What it changes (`hal0.config.migrations.runner_system`):

@@ -288,7 +288,7 @@ def test_create_profile_with_a_retired_runner_key_is_rejected(
 ) -> None:
     """The runner registry has no aliases (ADR-0028): a retired key is an
     unknown runtime, not something folded onto ``standard`` at save. The
-    one-shot ``hal0 migrate runners`` converts stored profiles instead."""
+    one-shot ``hal0 runner-images migrate`` converts stored profiles instead."""
     cat = ProfileCatalog()
     with pytest.raises(UnprocessableEntity) as exc:
         cat.create("legacy", ProfileConfig(flags="", runner=retired))

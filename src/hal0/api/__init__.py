@@ -1203,7 +1203,7 @@ def _convert_runner_system() -> None:
     no-op; it matters for a box whose post-update step failed or that was
     restored from an old backup. A failure restores its own backup and is
     logged loudly; startup continues so the operator can reach the dashboard
-    and ``hal0 migrate runners``.
+    and ``hal0 runner-images migrate``.
     """
     try:
         from hal0.config.migrations.runner_system import migrate_runner_system
@@ -1213,7 +1213,7 @@ def _convert_runner_system() -> None:
         log.error(
             "hal0.runner_system_migration_failed",
             error=str(exc),
-            remedy="run `hal0 migrate runners` to see the plan, fix the named file, then --apply",
+            remedy="run `hal0 runner-images migrate` to see the plan, fix the named file, then --apply",
         )
 
 
