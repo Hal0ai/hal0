@@ -179,11 +179,13 @@ applying. Add those subsections to a version's section to surface them; see
 - `hal0 update` now removes root-owned files older releases installed and
   nothing replaces: the `hal0-slotctl` wrapper and its sudoers grant
   (installed by 0.8.0-beta.1 to beta.3; it let the `hal0` user write a
-  root-owned slot unit), and a pre-quadlet static `hal0-slot@.service`
-  template with its drop-ins, which shadows every quadlet slot unit. Only
-  install.sh removed them before, so a box that had only ever been updated
-  kept them. The sweep runs on the activation of the next update after this
-  one.
+  root-owned slot unit), the `hal0-comfyui` sudoers grant (dropped in #984),
+  and a pre-quadlet static `hal0-slot@.service` template with its drop-ins,
+  which shadows every quadlet slot unit. Only install.sh and uninstall.sh
+  removed them before, so a box that had only ever been updated kept them.
+  The sweep runs on the activation of the next update after this one.
+- `installer/uninstall.sh` now removes the `hal0-update` and `hal0-slotctl`
+  sudoers grants. It left both behind.
 - The Runner Images page no longer lists niche runtimes (PromptForge,
   Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
   registry tier — **Default runtimes**, **Optional runtimes**, **Frozen

@@ -3438,10 +3438,15 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
 #: Where systemd unit files live; a module constant so tests redirect it.
 SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
-#: Seam names whose wrapper and sudoers grant hal0 no longer ships. The
-#: hal0-slotctl grant (v0.8.0-beta.1 to beta.3) let the hal0 user write unit text
-#: into a root-owned slot unit, which is root.
-_RETIRED_SEAMS: tuple[str, ...] = ("hal0-slotctl",)
+#: ``/etc/sudoers.d`` grants hal0 once installed and no longer ships. Every
+#: grant hal0 ever wrote came from ``packaging/sudoers/``; these are the two
+#: that left it. hal0-slotctl (v0.8.0-beta.1 to beta.3) let the hal0 user write
+#: unit text into a root-owned slot unit, which is root. hal0-comfyui let it
+#: restart ``hal0-slot@img.service`` and was dropped in #984.
+_RETIRED_SUDOERS: tuple[str, ...] = ("hal0-comfyui", "hal0-slotctl")
+
+#: ``/usr/lib/hal0/bin`` wrappers hal0 no longer ships.
+_RETIRED_WRAPPERS: tuple[str, ...] = ("hal0-slotctl",)
 
 
 def remove_retired_artifacts(*, job_id: str | None = None) -> list[str]:
@@ -3453,8 +3458,8 @@ def remove_retired_artifacts(*, job_id: str | None = None) -> list[str]:
     that re-ran the installer. Before this, ``install.sh`` was the only place
     that removed them, so an update-only box kept them.
 
-    * ``hal0-slotctl``: the wrapper in ``/usr/lib/hal0/bin`` and its
-      ``/etc/sudoers.d`` grant.
+    * The ``hal0-slotctl`` wrapper in ``/usr/lib/hal0/bin`` and the
+      ``hal0-slotctl`` and ``hal0-comfyui`` grants in ``/etc/sudoers.d``.
     * The pre-quadlet static ``hal0-slot@.service`` template and any
       ``hal0-slot@*.service.d`` drop-ins. A static unit in
       ``/etc/systemd/system`` shadows the quadlet generator's unit of the same
@@ -3471,9 +3476,8 @@ def remove_retired_artifacts(*, job_id: str | None = None) -> list[str]:
 
     from hal0.system.seam_check import SEAM_BIN_DIR, SUDOERS_DIR
 
-    candidates: list[Path] = []
-    for seam in _RETIRED_SEAMS:
-        candidates += [SEAM_BIN_DIR / seam, SUDOERS_DIR / seam]
+    candidates: list[Path] = [SEAM_BIN_DIR / name for name in _RETIRED_WRAPPERS]
+    candidates += [SUDOERS_DIR / name for name in _RETIRED_SUDOERS]
     units = [SYSTEMD_UNIT_DIR / "hal0-slot@.service"]
     units += sorted(SYSTEMD_UNIT_DIR.glob("hal0-slot@*.service.d"))
     candidates += units

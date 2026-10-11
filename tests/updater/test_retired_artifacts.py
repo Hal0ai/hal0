@@ -17,6 +17,8 @@ import pytest
 import hal0.system.seam_check as seam_check
 from hal0.updater import updater as U
 
+_REPO = Path(__file__).resolve().parents[2]
+
 
 @pytest.fixture()
 def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -50,6 +52,36 @@ def test_removes_the_slotctl_grant_and_the_static_slot_template(roots: dict[str,
     for p in (slotctl, grant, template, dropin):
         assert not p.exists()
     assert ["systemctl", "daemon-reload"] in roots["runs"]
+
+
+def test_removes_the_comfyui_grant(roots: dict[str, Any]) -> None:
+    """hal0-comfyui left the product in #984 and stays on long-lived boxes."""
+    grant = roots["sudoers"] / "hal0-comfyui"
+    grant.write_text(
+        "hal0 ALL=(root) NOPASSWD: /usr/bin/systemctl restart hal0-slot@img.service\n",
+        encoding="utf-8",
+    )
+    assert U.remove_retired_artifacts() == [str(grant)]
+    assert not grant.exists()
+    assert roots["runs"] == []
+
+
+def test_every_shipped_sudoers_grant_survives(roots: dict[str, Any]) -> None:
+    """The sweep must never touch a grant the release still ships."""
+    shipped = sorted(p.name for p in (_REPO / "packaging" / "sudoers").iterdir())
+    assert shipped, "packaging/sudoers is empty — wrong repo root?"
+    assert not set(shipped) & set(U._RETIRED_SUDOERS)
+    for name in shipped:
+        (roots["sudoers"] / name).write_text("x", encoding="utf-8")
+    U.remove_retired_artifacts()
+    assert sorted(p.name for p in roots["sudoers"].iterdir()) == shipped
+
+
+def test_uninstall_removes_every_shipped_and_retired_grant() -> None:
+    text = (_REPO / "installer" / "uninstall.sh").read_text(encoding="utf-8")
+    shipped = {p.name for p in (_REPO / "packaging" / "sudoers").iterdir()}
+    for name in sorted(shipped | set(U._RETIRED_SUDOERS)):
+        assert f'rm_path "/etc/sudoers.d/{name}"' in text, name
 
 
 def test_leaves_current_files_alone(roots: dict[str, Any]) -> None:
@@ -91,9 +123,7 @@ def test_activate_release_runs_the_sweep() -> None:
 
 
 def test_install_sh_runs_the_same_sweep() -> None:
-    text = (Path(__file__).resolve().parents[2] / "installer" / "install.sh").read_text(
-        encoding="utf-8"
-    )
+    text = (_REPO / "installer" / "install.sh").read_text(encoding="utf-8")
     assert "from hal0.updater.updater import remove_retired_artifacts" in text
     # The old inline bash cleanups are gone: the sweep is the one owner.
     assert "/bin/hal0-slotctl" not in text

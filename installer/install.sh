@@ -2900,8 +2900,9 @@ hal0_migration_step() {
 
 # ── retired system artefacts ──────────────────────────────────────────────────
 # Root-owned files older releases installed and nothing replaces: the
-# hal0-slotctl wrapper and sudoers grant, and the pre-quadlet static
-# hal0-slot@.service template, which shadows the quadlet generator's units.
+# hal0-slotctl wrapper, its sudoers grant, the retired ComfyUI restart grant,
+# and the pre-quadlet static hal0-slot@.service template, which shadows the
+# quadlet generator's units.
 # updater.remove_retired_artifacts is the one sweep; activate_release also runs
 # it on every `hal0 update`, so an update-only box converges the same way.
 if [[ "${DEV_MODE}" -eq 1 ]]; then

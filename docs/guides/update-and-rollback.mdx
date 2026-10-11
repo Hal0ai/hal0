@@ -143,9 +143,9 @@ Settings → Updates page shows next to the channel.
    root-owned `hal0-*` sudo wrappers, re-asserts the `/usr/local/bin/hal0`
    and `/usr/local/bin/hal0-agent` PATH links from the new tree, and removes
    root-owned files older releases installed and nothing replaces (the
-   `hal0-slotctl` wrapper and its sudoers grant, a pre-quadlet
-   `hal0-slot@.service` template). The new code then runs the config
-   migrations the release needs.
+   `hal0-slotctl` wrapper, the `hal0-slotctl` and `hal0-comfyui` sudoers
+   grants, and a pre-quadlet `hal0-slot@.service` template). The new code
+   then runs the config migrations the release needs.
 
 6. **Re-render every slot's systemd unit** through the newly installed
    code. The re-render itself never bounces a running slot. Afterwards the

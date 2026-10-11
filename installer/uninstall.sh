@@ -430,8 +430,12 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # P3-perms: hal0-systemctl (the seam that lets hal0-api, now User=hal0,
     # write per-slot units + daemon-reload/start/stop/restart them).
     rm_path "/etc/sudoers.d/hal0-systemctl"
-    # hal0-comfyui sudoers removed in #984 (hardened-perms abandoned, ADR-0023)
+    # The self-update seam (hal0 update's privileged half).
+    rm_path "/etc/sudoers.d/hal0-update"
+    # Retired grants an older install may still carry; the update path sweeps
+    # the same set (updater.remove_retired_artifacts).
     rm_path "/etc/sudoers.d/hal0-comfyui"
+    rm_path "/etc/sudoers.d/hal0-slotctl"
     # O12: hal0-podman-ro (read-only podman-introspection seam, install.sh's
     # PODMAN_RO_SUDOERS_DST) — installed since O12 landed but never swept
     # here (r5-sync-assessment §6.3): a root sudoers grant for a
