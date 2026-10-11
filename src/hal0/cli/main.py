@@ -242,6 +242,30 @@ app.add_typer(update_app, name="update")
 # ---------------------------------------------------------------------------
 
 
+def _convert_runner_system_before_boot() -> None:
+    """Run the runner-system conversion (ADR-0028) before the API is imported.
+
+    ``uvicorn.run("hal0.api:app")`` imports :mod:`hal0.api`, whose module-level
+    ``create_app()`` loads ``hal0.toml``; a removed runner key in
+    ``[slots].default_images`` fails that load, so the conversion has to run on
+    the raw files first. This is the only API-startup call site: importing
+    :mod:`hal0.api` never converts anything. ``hal0 update`` normally ran it
+    already and this is a no-op. A restore marker (a downgrade) makes it stand
+    down. A failure is logged loudly and never stops the API from starting.
+    """
+    try:
+        from hal0.config.migrations.runner_system import migrate_runner_system
+
+        migrate_runner_system(honour_restore_marker=True)
+    except Exception as exc:
+        structlog.get_logger(__name__).error(
+            "hal0.runner_system_migration_failed",
+            error=str(exc),
+            remedy="run `hal0 runner-images migrate` to see the plan, fix the named file, "
+            "then --apply",
+        )
+
+
 @app.command()
 def serve(
     host: str = typer.Option(
@@ -260,6 +284,7 @@ def serve(
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (dev mode)."),
 ) -> None:
     """Start the hal0 API server (used by hal0-api.service)."""
+    _convert_runner_system_before_boot()
     console.print(f"Starting hal0 API on [bold]{host}:{port}[/bold]")
     # Bounded graceful shutdown (issue #1225): uvicorn's default
     # timeout_graceful_shutdown is None (wait forever for open connections —

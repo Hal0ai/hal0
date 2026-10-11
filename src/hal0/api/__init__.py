@@ -1193,30 +1193,6 @@ def _pending_pull_model_ids() -> set[str]:
         return set()
 
 
-def _convert_runner_system() -> None:
-    """Convert an un-migrated install onto the fresh runner system (ADR-0028).
-
-    Runs FIRST in :func:`create_app`, before anything loads ``hal0.toml``: a
-    removed runner key in ``[slots].default_images`` fails config validation,
-    so the conversion (:mod:`hal0.config.migrations.runner_system`) must run on
-    raw TOML first. ``hal0 update`` normally ran it already and this is a
-    no-op; it matters for a box whose post-update step failed or that was
-    restored from an old backup. A failure restores its own backup and is
-    logged loudly; startup continues so the operator can reach the dashboard
-    and ``hal0 runner-images migrate``.
-    """
-    try:
-        from hal0.config.migrations.runner_system import migrate_runner_system
-
-        migrate_runner_system()
-    except Exception as exc:
-        log.error(
-            "hal0.runner_system_migration_failed",
-            error=str(exc),
-            remedy="run `hal0 runner-images migrate` to see the plan, fix the named file, then --apply",
-        )
-
-
 async def _boot_background_catalogue_sync(app: FastAPI) -> None:
     """Refresh the runner-image catalogue once at boot, off the startup path."""
     try:
@@ -2542,7 +2518,6 @@ def create_app() -> FastAPI:
     # reportable. Inert unless HAL0_SENTRY_DSN is set — see
     # hal0.observability.sentry.
     sentry.init_sentry("api")
-    _convert_runner_system()
 
     app = FastAPI(
         title="hal0",
