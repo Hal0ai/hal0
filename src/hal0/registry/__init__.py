@@ -1,11 +1,9 @@
-"""hal0.registry — SQLite-backed model catalog (ML-1 pilot).
+"""hal0.registry — SQLite-backed model catalog.
 
 The registry is the single source of truth for "what models exist on this
-host." As of ML-1 (hal0-specs/spec-ml1-sqlite.final.md), that source of
-truth is a SQLite database (see ``hal0.db``) rather than the historic
-atomic ``registry.toml`` — the TOML store (``TomlModelRegistry``) is kept
-alive for the import/export path, but ``ModelRegistry`` now names
-``SqliteModelRegistry``.
+host": the ``model`` tables of the shared SQLite database (see ``hal0.db``).
+A TOML-era ``registry.toml`` is backed up and renamed, never imported, by
+:mod:`hal0.registry.toml_retirement`; nothing reads it afterwards.
 
 Slot configs reference model IDs from the registry.  If a model is deleted,
 any slot referencing it fails to load with a structured error
@@ -17,9 +15,7 @@ See PLAN.md §3, §7.5, §8 and ARCHITECTURE.md §Key boundaries.
 Key exports:
     ModelRegistry       — primary entry point for all registry operations
                            (= SqliteModelRegistry).
-    SqliteModelRegistry — the ML-1 SQLite-backed implementation.
-    TomlModelRegistry   — the original TOML-backed implementation, kept
-                           for the import/export path.
+    SqliteModelRegistry — the SQLite-backed implementation.
     Model               — pydantic model for a single registry entry.
 """
 
@@ -34,7 +30,6 @@ from hal0.registry.store import (
     ModelRegistry,
     RegistryError,
     SqliteModelRegistry,
-    TomlModelRegistry,
 )
 
 __all__ = [
@@ -47,7 +42,6 @@ __all__ = [
     "ModelRegistry",
     "RegistryError",
     "SqliteModelRegistry",
-    "TomlModelRegistry",
     "detect",
     "read_gguf_header",
 ]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json as jsonlib
-from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -19,8 +18,6 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
-from hal0.cli.registry_commands import DEFAULT_REGISTRY_PATH, _do_import_backup
-from hal0.registry.import_toml import import_toml_to_sqlite
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 app = typer.Typer(help="Manage the local model registry.")
@@ -642,51 +639,3 @@ def model_run(
         console.print(f"  [dim]{state}…[/dim]", end="\r")
         time.sleep(2.0)
     die(f"timed out after {timeout_s}s waiting for slot {target} (last state: {state})")
-
-
-@app.command("import-backup")
-def model_import_backup(
-    path: Path = typer.Argument(
-        ...,
-        help="Path to hal0-v0.1-backup-YYYY-MM-DD.tar.gz produced by the "
-        "v0.1.x backup instructions in install.sh.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite an existing registry.toml at the destination. "
-        "Without this, the command refuses to clobber a registry that "
-        "may already hold v0.2 selections.",
-    ),
-    dest: Path = typer.Option(
-        DEFAULT_REGISTRY_PATH,
-        "--dest",
-        help="Destination registry.toml path. Test/dev escape hatch — "
-        "production always uses /var/lib/hal0/registry/registry.toml.",
-    ),
-) -> None:
-    """Restore ``registry.toml`` from a v0.1.x disaster-recovery backup.
-
-    v0.1.x → v0.2 disaster recovery command (formerly ``hal0 registry
-    import``, moved here because ``hal0 model`` already owns registry
-    CRUD). Slot selections, ``capabilities.toml``, and per-slot TOML files
-    are NOT restored — v0.1.x → v0.2 is a clean break; redo slot selection
-    via the bundle picker or ``hal0 slot create`` after importing.
-
-    Post-ML-1, ``registry.toml`` is a derived snapshot — the SQLite
-    registry is what every runtime reader consults, and it ignores a
-    non-empty on-disk TOML (:mod:`hal0.registry.sqlite_store` §161-163).
-    Restoring the TOML alone would silently do nothing on any box that has
-    already cut over. Chain the same idempotent ``INSERT OR IGNORE`` import
-    ``hal0 registry import-sqlite`` uses so the restored entries actually
-    become visible to ``hal0 model list`` — never overwrites a model id
-    already present in SQLite.
-    """
-    _do_import_backup(path, force, dest)
-    report = import_toml_to_sqlite(registry_file=dest)
-    console.print(
-        f"[green]sqlite sync[/green]: {report.imported} imported, "
-        f"{report.skipped_existing} already present, "
-        f"{report.skipped_invalid} invalid (skipped)"
-    )

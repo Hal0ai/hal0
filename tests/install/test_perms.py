@@ -559,32 +559,21 @@ def test_hermes_home_row_unchanged_by_recursion_feature(tmp_hal0_home: str) -> N
     assert row.child_file_mode is None
 
 
-def test_registry_files_get_explicit_rows_matching_each_writer(tmp_hal0_home: str) -> None:
-    """registry/ is flat: its 3 known files get explicit rows, not a recursive glob.
-
-    Each mode matches that file's actual writer (see the comment above the
-    registry rows in ownership_table): registry.toml born via the same
-    tempfile.mkstemp atomic-write path as hal0.toml (0600); registry.toml.lock
-    matches the *.lock cross-process-shared convention (0664); hal0.db matches
-    sqlite3.connect's birth mode (0644).
-    """
+def test_registry_dir_rows_match_each_writer(tmp_hal0_home: str) -> None:
+    """registry/ gets a dir row plus an explicit ``hal0.db`` row (0644, the
+    sqlite3.connect birth mode), and no rows for the retired ``registry.toml``
+    or its ``registry.toml.lock`` sidecar, which nothing writes any more."""
     table = perms.ownership_table(service_user="hal0")
     by_target = {r.target: r for r in table}
     var_lib = paths.var_lib()
 
-    toml_row = by_target[var_lib / "registry" / "registry.toml"]
-    assert (toml_row.owner, toml_row.group, toml_row.mode) == ("hal0", "hal0", 0o600)
-
-    lock_row = by_target[var_lib / "registry" / "registry.toml.lock"]
-    assert (lock_row.owner, lock_row.group, lock_row.mode) == ("hal0", "hal0", 0o664)
-
     db_row = by_target[var_lib / "registry" / "hal0.db"]
     assert (db_row.owner, db_row.group, db_row.mode) == ("hal0", "hal0", 0o644)
-
-    # all optional: these files don't exist until the registry is first used.
-    assert toml_row.optional is True
-    assert lock_row.optional is True
+    # optional: the file doesn't exist until the registry is first used.
     assert db_row.optional is True
+
+    assert var_lib / "registry" / "registry.toml" not in by_target
+    assert var_lib / "registry" / "registry.toml.lock" not in by_target
 
 
 def test_primary_database_has_an_ownership_row(tmp_hal0_home: str) -> None:
@@ -956,7 +945,7 @@ def test_model_pull_jobs_dir_snapshot_files_get_hal0_owned_child_rows(
     ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp`` +
     ``os.replace`` — mkstemp always births its tempfile ``0600`` regardless
     of umask, so the row's ``child_mode`` must match that birth mode (not
-    fight it), the same convention as ``registry.toml`` /
+    fight it), the same convention as ``hal0.toml`` /
     ``slots/*/state.json`` above.
     """
     from hal0.registry.pull import _pull_jobs_dir

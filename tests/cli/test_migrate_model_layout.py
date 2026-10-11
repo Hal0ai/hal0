@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import tomli_w
 from typer.testing import CliRunner
 
 from hal0.cli.migrate_commands import (
@@ -41,13 +40,16 @@ runner = CliRunner()
 # ── Fixture helpers ───────────────────────────────────────────────────────────
 
 
-def _make_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Return ``(mount_root, canonical_root, registry_path)`` under ``tmp_path``."""
+def _make_tree(tmp_path: Path) -> tuple[Path, Path, dict[str, dict]]:
+    """Return ``(mount_root, canonical_root, registry)`` under ``tmp_path``.
+
+    ``registry`` is the ``{model_id: entry}`` mapping ``plan_migration``
+    reads; tests fill it through :func:`_write_registry`.
+    """
     mount_root = tmp_path / "mnt" / "ai-models"
     canonical_root = tmp_path / "var" / "lib" / "hal0" / "models"
-    registry_path = tmp_path / "var" / "lib" / "hal0" / "registry" / "registry.toml"
     mount_root.mkdir(parents=True)
-    return mount_root, canonical_root, registry_path
+    return mount_root, canonical_root, {}
 
 
 def _touch_file(path: Path, *, size: int = 16) -> Path:
@@ -56,17 +58,15 @@ def _touch_file(path: Path, *, size: int = 16) -> Path:
     return path
 
 
-def _write_registry(path: Path, models: dict[str, dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        tomli_w.dump({"models": models}, f)
+def _write_registry(registry: dict[str, dict], models: dict[str, dict]) -> None:
+    registry.update(models)
 
 
 def _invoke(
     *,
     mount_root: Path,
     canonical_root: Path,
-    registry_path: Path,
+    registry: dict[str, dict],
     extra_args: list[str] | None = None,
 ) -> object:
     args = [
@@ -75,12 +75,11 @@ def _invoke(
         str(mount_root),
         "--canonical-root",
         str(canonical_root),
-        "--registry",
-        str(registry_path),
     ]
     if extra_args:
         args.extend(extra_args)
-    return runner.invoke(migrate_app, args)
+    with patch("hal0.cli.migrate_commands._read_registry", return_value=registry):
+        return runner.invoke(migrate_app, args)
 
 
 # ── Pure-function tests (classification + capability picking) ─────────────────
@@ -153,10 +152,10 @@ def test_classify_falls_back_to_default_recipe_when_backend_unknown() -> None:
 
 
 def test_plan_creates_symlink_for_registered_chat_model(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "qwen3-4b-q4_k_m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {
             "qwen3-4b-q4_k_m": {
                 "path": str(gguf),
@@ -167,7 +166,7 @@ def test_plan_creates_symlink_for_registered_chat_model(tmp_path: Path) -> None:
     )
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -181,13 +180,13 @@ def test_plan_creates_symlink_for_registered_chat_model(tmp_path: Path) -> None:
 
 
 def test_plan_classifies_non_registry_files_by_dir(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     # Empty registry — everything falls into source-dir classification.
     voice = _touch_file(mount_root / "voices" / "af_heart.bin")
     moonshine = _touch_file(mount_root / "moonshine_voice" / "moonshine-base.bin")
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -204,11 +203,11 @@ def test_plan_classifies_non_registry_files_by_dir(tmp_path: Path) -> None:
 
 
 def test_plan_reports_local_dir_as_unclassified_when_no_registry(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     rogue = _touch_file(mount_root / "local" / "mystery.gguf")
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -220,10 +219,10 @@ def test_plan_reports_local_dir_as_unclassified_when_no_registry(tmp_path: Path)
 
 
 def test_plan_skips_existing_correct_symlink(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     link = canonical_root / "llamacpp" / "chat" / "m.gguf"
@@ -231,7 +230,7 @@ def test_plan_skips_existing_correct_symlink(tmp_path: Path) -> None:
     os.symlink(gguf, link)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -243,11 +242,11 @@ def test_plan_skips_existing_correct_symlink(tmp_path: Path) -> None:
 
 
 def test_plan_refuses_to_overwrite_differing_symlink_without_force(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     wrong = _touch_file(tmp_path / "somewhere-else" / "decoy.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     link = canonical_root / "llamacpp" / "chat" / "m.gguf"
@@ -255,7 +254,7 @@ def test_plan_refuses_to_overwrite_differing_symlink_without_force(tmp_path: Pat
     os.symlink(wrong, link)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -267,11 +266,11 @@ def test_plan_refuses_to_overwrite_differing_symlink_without_force(tmp_path: Pat
 
 
 def test_plan_overwrites_differing_symlink_with_force(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     wrong = _touch_file(tmp_path / "somewhere-else" / "decoy.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     link = canonical_root / "llamacpp" / "chat" / "m.gguf"
@@ -279,7 +278,7 @@ def test_plan_overwrites_differing_symlink_with_force(tmp_path: Path) -> None:
     os.symlink(wrong, link)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=True,
@@ -291,10 +290,10 @@ def test_plan_overwrites_differing_symlink_with_force(tmp_path: Path) -> None:
 
 
 def test_plan_refuses_when_real_file_occupies_canonical_path(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     # Plant a real file (not a symlink) where the migration wants to write.
@@ -302,7 +301,7 @@ def test_plan_refuses_when_real_file_occupies_canonical_path(tmp_path: Path) -> 
 
     # Even with --force, a real file is not overwritten.
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=True,
@@ -314,7 +313,7 @@ def test_plan_refuses_when_real_file_occupies_canonical_path(tmp_path: Path) -> 
 
 
 def test_plan_leaves_huggingface_cache_alone(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     hf_blob = _touch_file(
         mount_root
         / "huggingface"
@@ -326,7 +325,7 @@ def test_plan_leaves_huggingface_cache_alone(tmp_path: Path) -> None:
     )
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -340,12 +339,12 @@ def test_plan_leaves_huggingface_cache_alone(tmp_path: Path) -> None:
 
 
 def test_plan_handles_already_canonical_layout(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     # Disk already in the v0.2 layout.
     gguf = _touch_file(mount_root / "llamacpp" / "chat" / "qwen.gguf")
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -359,14 +358,14 @@ def test_plan_handles_already_canonical_layout(tmp_path: Path) -> None:
 
 def test_plan_treats_flm_model_dir_as_one_entity(tmp_path: Path) -> None:
     """FLM models live as directories with a ``config.json`` sentinel."""
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     model_dir = mount_root / "flm-ubuntu" / "gemma3-1b"
     model_dir.mkdir(parents=True)
     (model_dir / "config.json").write_text("{}")
     (model_dir / "weights.bin").write_bytes(b"\x00" * 32)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -381,16 +380,16 @@ def test_plan_treats_flm_model_dir_as_one_entity(tmp_path: Path) -> None:
 
 def test_plan_dedupes_registry_and_disk_scan(tmp_path: Path) -> None:
     """A registry entry covers the same file the disk scan would surface."""
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     # File lives under flm-ubuntu (v0.1.x dir) AND is in the registry.
     gguf = _touch_file(mount_root / "flm-ubuntu" / "model.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["flm"]}},
     )
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -406,17 +405,17 @@ def test_plan_dedupes_registry_and_disk_scan(tmp_path: Path) -> None:
 
 
 def test_cli_dry_run_does_not_write(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
 
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
     )
 
     assert result.exit_code == 0, result.output
@@ -425,18 +424,42 @@ def test_cli_dry_run_does_not_write(tmp_path: Path) -> None:
     assert not canonical_root.exists() or not any(canonical_root.iterdir())
 
 
+def test_cli_aborts_when_the_registry_cannot_be_read(tmp_path: Path) -> None:
+    """Fail closed: planning against an empty registry would misclassify
+    every registered model by its source directory."""
+    mount_root, canonical_root, _registry = _make_tree(tmp_path)
+    _touch_file(mount_root / "local" / "m.gguf")
+    args = [
+        "model-layout",
+        "--apply",
+        "--mount-root",
+        str(mount_root),
+        "--canonical-root",
+        str(canonical_root),
+    ]
+    with patch(
+        "hal0.cli.migrate_commands._read_registry",
+        side_effect=RuntimeError("database is locked"),
+    ):
+        result = runner.invoke(migrate_app, args)
+
+    assert result.exit_code == 1
+    assert "cannot read the model registry" in result.output
+    assert not canonical_root.exists() or not any(canonical_root.iterdir())
+
+
 def test_cli_apply_creates_symlinks(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
 
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply"],
     )
 
@@ -450,17 +473,17 @@ def test_cli_apply_creates_symlinks(tmp_path: Path) -> None:
 
 
 def test_cli_apply_is_idempotent(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
 
     first = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply"],
     )
     assert first.exit_code == 0, first.output
@@ -472,7 +495,7 @@ def test_cli_apply_is_idempotent(tmp_path: Path) -> None:
     second = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply"],
     )
     assert second.exit_code == 0, second.output
@@ -484,11 +507,11 @@ def test_cli_apply_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_cli_refuses_overwrite_without_force_in_apply(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     wrong = _touch_file(tmp_path / "decoy" / "wrong.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     link = canonical_root / "llamacpp" / "chat" / "m.gguf"
@@ -498,7 +521,7 @@ def test_cli_refuses_overwrite_without_force_in_apply(tmp_path: Path) -> None:
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply"],
     )
 
@@ -509,11 +532,11 @@ def test_cli_refuses_overwrite_without_force_in_apply(tmp_path: Path) -> None:
 
 
 def test_cli_force_overwrites_differing_symlink_in_apply(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     gguf = _touch_file(mount_root / "local" / "m.gguf")
     wrong = _touch_file(tmp_path / "decoy" / "wrong.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {"m": {"path": str(gguf), "capabilities": ["chat"], "backends": ["vulkan"]}},
     )
     link = canonical_root / "llamacpp" / "chat" / "m.gguf"
@@ -523,7 +546,7 @@ def test_cli_force_overwrites_differing_symlink_in_apply(tmp_path: Path) -> None
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply", "--force"],
     )
 
@@ -532,7 +555,7 @@ def test_cli_force_overwrites_differing_symlink_in_apply(tmp_path: Path) -> None
 
 
 def test_cli_refuses_symlinked_canonical_root(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     # Make canonical_root itself a symlink.
     real = tmp_path / "real-canonical"
     real.mkdir(parents=True)
@@ -542,7 +565,7 @@ def test_cli_refuses_symlinked_canonical_root(tmp_path: Path) -> None:
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
     )
 
     assert result.exit_code != 0
@@ -552,13 +575,13 @@ def test_cli_refuses_symlinked_canonical_root(tmp_path: Path) -> None:
 
 
 def test_cli_empty_mount_root_is_noop(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     # mount_root exists but empty.
 
     result = _invoke(
         mount_root=mount_root,
         canonical_root=canonical_root,
-        registry_path=registry_path,
+        registry=registry,
         extra_args=["--apply"],
     )
 
@@ -608,12 +631,12 @@ def test_execute_plan_crash_midway_leaves_no_broken_state(tmp_path: Path) -> Non
     """
     from hal0.cli.migrate_commands import execute_plan
 
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     g1 = _touch_file(mount_root / "local" / "a.gguf")
     g2 = _touch_file(mount_root / "local" / "b.gguf")
     g3 = _touch_file(mount_root / "local" / "c.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {
             "a": {"path": str(g1), "capabilities": ["chat"], "backends": ["vulkan"]},
             "b": {"path": str(g2), "capabilities": ["chat"], "backends": ["vulkan"]},
@@ -626,7 +649,7 @@ def test_execute_plan_crash_midway_leaves_no_broken_state(tmp_path: Path) -> Non
         (canonical_root / recipe / capability).mkdir(parents=True, exist_ok=True)
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -661,11 +684,11 @@ def test_execute_plan_crash_midway_leaves_no_broken_state(tmp_path: Path) -> Non
 
 
 def test_report_by_leaf_counts_creates_only(tmp_path: Path) -> None:
-    mount_root, canonical_root, registry_path = _make_tree(tmp_path)
+    mount_root, canonical_root, registry = _make_tree(tmp_path)
     g1 = _touch_file(mount_root / "local" / "a.gguf")
     g2 = _touch_file(mount_root / "local" / "e.gguf")
     _write_registry(
-        registry_path,
+        registry,
         {
             "a": {"path": str(g1), "capabilities": ["chat"], "backends": ["vulkan"]},
             "e": {"path": str(g2), "capabilities": ["embed"], "backends": ["vulkan"]},
@@ -673,7 +696,7 @@ def test_report_by_leaf_counts_creates_only(tmp_path: Path) -> None:
     )
 
     report = plan_migration(
-        registry_path=registry_path,
+        registry=registry,
         mount_root=mount_root,
         canonical_root=canonical_root,
         force=False,
@@ -694,3 +717,35 @@ def test_action_dataclass_is_frozen() -> None:
     # frozen dataclass → FrozenInstanceError (subclass of AttributeError)
     with pytest.raises(AttributeError):
         action.kind = "skip-exists"  # type: ignore[misc]
+
+
+# ── _read_registry: read-only against hal0.db ────────────────────────────────
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_read_registry_never_creates_the_database() -> None:
+    from hal0.cli.migrate_commands import _read_registry
+    from hal0.config import paths
+
+    assert _read_registry() == {}
+    assert not paths.db_path().exists()
+
+
+@pytest.mark.usefixtures("tmp_hal0_home")
+def test_read_registry_reads_models_and_backends_read_only() -> None:
+    from hal0.cli.migrate_commands import _read_registry
+    from hal0.config import paths
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelRegistry
+
+    ModelRegistry().add(
+        Model(id="m", path="/models/m.gguf", capabilities=["chat"], backends=["vulkan", "cpu"])
+    )
+    before = paths.db_path().stat().st_mtime_ns
+
+    reg = _read_registry()
+
+    assert reg["m"]["path"] == "/models/m.gguf"
+    assert reg["m"]["backends"] == ["vulkan", "cpu"]
+    assert _classify_registry_entry(reg["m"]) is not None
+    assert paths.db_path().stat().st_mtime_ns == before

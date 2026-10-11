@@ -16,7 +16,7 @@ Two kinds of command live here:
 (The schema_version=1 → 2 migration that used to live here as a CLI
 command now runs automatically on config load — see
 ``hal0.capabilities.config``. The old ``sync`` command is gone too:
-``registry.toml`` is the sole model catalog.)
+the SQLite model registry is the sole model catalog.)
 
 Migration is the reason ``migrate`` exists: when the catalog reshape
 landed (model-first grouped rows + per-(backend, model) validation), any

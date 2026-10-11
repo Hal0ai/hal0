@@ -588,7 +588,7 @@ def ownership_table(
         # row meant ``doctor perms --fix`` could not heal it either.
         # ``persist_pull_job`` writes each snapshot via ``tempfile.mkstemp``
         # + ``os.replace`` — mkstemp always creates its tempfile ``0600``
-        # regardless of umask, matching the ``registry.toml`` /
+        # regardless of umask, matching the ``hal0.toml`` /
         # ``slots/*/state.json`` convention above.
         PermRow(
             var_lib / "model-pull-jobs",
@@ -621,22 +621,10 @@ def ownership_table(
             child_mode=0o600,
             role="update-jobs/ (durable update-job snapshots)",
         ),
-        # registry/ — the model registry, also born root:root from the same
-        # install.sh mkdir and also written by the User=hal0 daemon. Same O13
-        # birth-ownership class as slots/ above; heal the dir. registry/ is
-        # flat (no per-item subdirs like slots/<id>/), so its 3 known files —
-        # each written by a different mechanism with a different birth mode —
-        # get their own explicit (non-recursive, non-glob) rows below rather
-        # than one blanket recursive glob, to match each writer instead of
-        # fighting it:
-        #   * registry.toml    — hal0.registry.import_toml / store, written via
-        #     the same write_toml_atomic tempfile.mkstemp path as hal0.toml
-        #     above -> born 0600.
-        #   * registry.toml.lock — hal0.registry.store.registry_write_lock,
-        #     opened via ``os.open(..., 0o644)``; declared 0664 here (not its
-        #     0644 birth mode) to match the SAME cross-process-shared
-        #     rationale as the *.lock rows above — a root-run tool may create
-        #     it first, and the hal0 daemon must still be able to flock it.
+        # registry/ — born root:root from the same install.sh mkdir and
+        # written by the User=hal0 daemon (the model-path tombstone file,
+        # ``ignored-paths.json``). Same O13 birth-ownership class as slots/
+        # above; heal the dir. Its one other known file gets its own row:
         #   * hal0.db — NOT the production database. This path is only ever
         #     reached by ``SqliteModelRegistry(registry_dir=...)``, whose
         #     db_path override puts the file at ``registry_dir/hal0.db`` for
@@ -654,20 +642,6 @@ def ownership_table(
             0o2775,
             optional=False,
             role="registry/ (model registry)",
-        ),
-        PermRow(
-            var_lib / "registry" / "registry.toml",
-            state_owner,
-            service_group,
-            0o600,
-            role="registry/registry.toml",
-        ),
-        PermRow(
-            var_lib / "registry" / "registry.toml.lock",
-            state_owner,
-            service_group,
-            0o664,
-            role="registry/registry.toml.lock",
         ),
         PermRow(
             var_lib / "registry" / "hal0.db",
@@ -712,7 +686,7 @@ def ownership_table(
         # (``api/routes/chat_templates.py`` ``_templates_dir``), nested one
         # level under the DEFAULT model store above. Declared as its own row
         # rather than left to the ``models/`` recursive glob alone, for the
-        # same reason ``registry.toml`` gets its own row next to
+        # same reason ``hal0.db`` gets its own row next to
         # ``registry/``: `doctor perms`'s coverage check and audit table work
         # off concrete declared rows, and the earlier omission was exactly
         # the #1938 gap (surfaced during #1895's enumeration, left out of
@@ -766,7 +740,7 @@ def ownership_table(
         # daemon's first save leaves it un-writable to ``hal0`` with no
         # ``doctor perms --fix`` remedy (#1938). Written via
         # ``tempfile.mkstemp`` + ``os.replace`` (the same atomic-write shape
-        # as ``hal0.toml``/``registry.toml`` above), which always births the
+        # as ``hal0.toml`` above), which always births the
         # tempfile ``0600`` regardless of umask.
         PermRow(
             var_lib / "dashboard-layout.json",

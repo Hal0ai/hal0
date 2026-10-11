@@ -793,6 +793,28 @@ def check_migrations(pending: tuple[int, int] | None) -> Check:
     )
 
 
+def check_leftover_registry_toml(toml_file: Path | None = None) -> Check:
+    """A TOML-era ``registry.toml`` the migrations could not retire (warn).
+
+    Nothing reads the file any more, so it is never fatal — but a file the
+    daemon cannot back up or rename (a root-owned ``0600`` one, say) would
+    otherwise sit there silently. See :mod:`hal0.registry.toml_retirement`.
+    """
+    from hal0.registry.toml_retirement import registry_toml_path, retirement_blocker
+
+    path = toml_file if toml_file is not None else registry_toml_path()
+    reason = retirement_blocker(path)
+    if reason is None:
+        return Check("registry-toml", "Leftover registry.toml", _PASS, "none")
+    return Check(
+        "registry-toml",
+        "Leftover registry.toml",
+        _WARN,
+        f"leftover registry.toml could not be retired: {reason} — nothing reads it; "
+        f"remove it manually (`sudo rm {path}`)",
+    )
+
+
 def _read_env_value(
     env_path: Path, key: str, *, read_text: Callable[[Path], str] | None = None
 ) -> str | None:
@@ -1497,6 +1519,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_auth_posture(auth_payload),
         check_model_store(_get_any("/api/models", base)),
         check_migrations(pending_layout_migration()),
+        check_leftover_registry_toml(),
         check_ui_dist(),
         check_ports(slots_payload),
         check_port_dnat(slots_payload),

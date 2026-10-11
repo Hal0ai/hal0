@@ -20,9 +20,8 @@ Field-mapping rules (must hold for a lossless TOML round-trip, see
 3. ``backends`` lives in the separate ``model_backend`` child table, not on
    this row at all — see :meth:`row_to_model`'s ``backends`` parameter.
 4. ``defaults`` is ``None`` when every ``ModelDefaults`` column is NULL;
-   otherwise it is reconstructed from the columns. Mirrors
-   ``hal0.registry.store._model_to_toml``'s "collapse to no key when
-   nothing is set".
+   otherwise it is reconstructed from the columns ("collapse to no value
+   when nothing is set").
 """
 
 from __future__ import annotations

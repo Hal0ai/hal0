@@ -45,7 +45,6 @@ from hal0.cli.model_commands import app as model_app
 from hal0.cli.oauth_commands import app as oauth_app
 from hal0.cli.ports_command import ports_cmd
 from hal0.cli.profile_commands import app as profile_app
-from hal0.cli.registry_commands import app as registry_app
 from hal0.cli.runner_image_commands import app as runner_images_app
 from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
@@ -86,7 +85,6 @@ app.add_typer(agent_app, name="agent")
 # skipped via HAL0_SKIP_OPENWEBUI=1 at install time; Q9 skip/defer parity).
 app.add_typer(app_ext_app, name="app")
 app.add_typer(migrate_app, name="migrate")
-app.add_typer(registry_app, name="registry")
 # Issue #2106 — ``hal0 runner-images {ls,sync,pull}``: the CLI-absence gap
 # on the runner-image catalogue (API + dashboard existed, no CLI verb at
 # all). `rm` deliberately absent pending spec D2.
@@ -95,7 +93,7 @@ app.add_typer(runner_images_app, name="runner-images")
 # every slot TOML references but which had no CLI surface at all.
 app.add_typer(profile_app, name="profile")
 # Issue #504 — ``hal0 mcp {list,status,install,uninstall,restart,catalog}``
-# CLI over /api/mcp/*. Mounted after registry before setup.
+# CLI over /api/mcp/*.
 app.add_typer(mcp_app, name="mcp")
 # §5.2 (R5 sync assessment) — the R3/R4 auth + operator-board surfaces the
 # CLI had zero verbs for. `auth` mirrors /api/auth/{status,rotate,require};

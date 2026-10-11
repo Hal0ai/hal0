@@ -44,9 +44,26 @@ from hal0.model_meta import derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
-from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
+from hal0.registry.store import ModelNotFound, ModelRegistry
 
 log = logging.getLogger(__name__)
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """Best-effort fsync of a directory so a just-renamed entry is durable.
+
+    An atomic ``os.replace`` only guarantees the rename is visible to later
+    ``open`` calls; the directory entry itself is not on stable storage until
+    the parent directory is fsynced. Any OSError (e.g. a platform without
+    ``O_DIRECTORY``) is suppressed so it can never break the write it is
+    meant to harden.
+    """
+    with contextlib.suppress(OSError):
+        dfd = os.open(dir_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 # ── Tunables ─────────────────────────────────────────────────────────────────

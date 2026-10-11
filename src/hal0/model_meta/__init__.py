@@ -642,8 +642,7 @@ def labels_of(cfg: dict[str, Any]) -> set[str]:
     """Pull the ``model.labels`` list out of a slot config dict.
 
     Kept as the fallback reader for slot TOMLs written before the
-    ``capability_flags.tool_calling`` fold (registry/import_toml.py) has
-    run over them — :func:`model_capabilities_of` is the primary source
+    ``capability_flags.tool_calling`` fold has run over them — :func:`model_capabilities_of` is the primary source
     now; see its docstring + the 🔴 routing-gate fix in
     ``omni_router/filter.py`` / ``slots/routing.py``.
     """

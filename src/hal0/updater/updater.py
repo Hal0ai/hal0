@@ -1908,7 +1908,9 @@ def run_post_activation_migrations(
     the running code and the on-disk schema have diverged, which the
     caller must treat as fatal (``commit()`` nukes the staged tree and
     aborts; install.sh's ``set -euo pipefail`` aborts the script on a
-    non-zero exit). The five data-cleanup passes after it are each
+    non-zero exit). The data-cleanup passes after it, starting with the
+    ``registry.toml`` retirement
+    (:func:`hal0.registry.toml_retirement.retire_registry_toml`), are each
     independently best-effort, exactly as before: one pass's exception is
     logged and never blocks the others or the caller's activation.
 
@@ -1967,6 +1969,22 @@ def run_post_activation_migrations(
     logging, the same shape ``commit()`` already returned.
     """
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
+
+    # Retire a leftover registry.toml: back it up, rename it, never import
+    # it (every box at the 1.3.0 floor already did its first-boot import).
+    # Non-fatal: nothing reads the file, so a box that cannot retire it
+    # (a root-owned 0600 file, say) logs a warning and `hal0 doctor all`
+    # reports it. retire_registry_toml never raises; the guard is defensive.
+    try:
+        from hal0.registry.toml_retirement import retire_registry_toml
+
+        retired = retire_registry_toml(job_id=job_id)
+        if retired.get("outcome") == "failed":
+            log.warning(
+                "updater.registry_toml_retire_failed", job_id=job_id, error=retired.get("reason")
+            )
+    except Exception as exc:
+        log.warning("updater.registry_toml_retire_failed", job_id=job_id, error=str(exc))
 
     try:
         ensure_seed_profiles(job_id=job_id)
@@ -4352,6 +4370,7 @@ _MIGRATION_RESULT_KEY = "hal0_migration_result"
 #: relayed child log for these exact event names so a swallowed failure
 #: still surfaces in commit()'s convergence report.
 _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
+    "updater.registry_toml_retire_failed",
     "updater.seed_profiles_prune_failed",
     "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",

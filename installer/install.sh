@@ -3419,7 +3419,7 @@ fi
 ui_step "Service start" "~30-90s"
 
 # P4-model-layout backstop: the v0.1→v0.2 model-layout migration
-# (src/hal0/cli/migrate_commands.py) reads registry.toml + the on-disk
+# (src/hal0/cli/migrate_commands.py) reads the model registry + the on-disk
 # store and plants the canonical <recipe>/<capability>/ symlink farm under
 # /var/lib/hal0/models. Nothing upstream of this point ever calls it, so a
 # fresh install that just pulled the brain/agent chat model (registry pass,

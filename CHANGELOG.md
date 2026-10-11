@@ -50,6 +50,17 @@ applying. Add those subsections to a version's section to surface them; see
   outside the model roots and the store, files another model uses,
   directories, or its own config and state files. Each kept file is listed
   in the response with its reason (ADR-0026).
+- The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
+  backup restore), the whole `hal0 registry` group (`registry import`,
+  `registry export`, `registry import-sqlite`) and the `--registry` flag of
+  `hal0 migrate model-layout` (which now reads the SQLite registry) are
+  removed. `hal0 model list --json` shows the catalog. To keep a copy, take
+  a consistent snapshot with SQLite's online backup, not a plain copy of the
+  live WAL database:
+  `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the
+  Pull and register models guide has a Python equivalent for boxes without
+  the `sqlite3` CLI). A `registry.toml` left over from before the SQLite
+  registry is retired on update (see Migrations).
 
 - Removed the deprecated CLI aliases and no-op flags. Use the replacement
   instead: `hal0 probe` -> `hal0 config hardware --refresh`;
@@ -134,6 +145,11 @@ applying. Add those subsections to a version's section to surface them; see
   runtime ships — instead of by which image a runtime currently launches
   (ADR-0027).
 
+- Deleting every model no longer brings them all back. The registry
+  re-imported `registry.toml` whenever its model table was empty, and
+  `hal0 registry export` and `hal0 model import-backup` wrote that same
+  file, so the next registry open after deleting the last model restored
+  every model in it. Nothing reads `registry.toml` now.
 - A deleted model no longer reappears after a restart. Files kept on disk
   (by opting out, or because a safety check refused to remove them) are
   recorded in `<var_lib>/registry/ignored-paths.json`, and the discovery
@@ -192,6 +208,19 @@ applying. Add those subsections to a version's section to surface them; see
   pins agent self-approval as a strict xfail until the v1.5 tier lands.
 
 ### Migrations
+
+- **A leftover `/var/lib/hal0/registry/registry.toml` is retired, not
+  imported.** Every box at the 1.3.0 upgrade floor already runs the SQLite
+  registry and already imported that file on its first boot, so the file
+  holds nothing the database needs. The first update or `hal0-api` start on
+  this release copies it to `/var/lib/hal0/backups/registry-toml-<UTC>/`,
+  renames it to `registry.toml.retired-<UTC>` and deletes the
+  `registry.toml.lock` sidecar. `hal0.db` is not touched. Nothing reads the
+  file any more, so this step never blocks `hal0 update` or `hal0-api`
+  start: if it cannot back up or rename the file (for example a root-owned
+  `0600` file left by a `sudo hal0 registry export`), it logs a warning,
+  `hal0 update` lists it among its pass warnings, and `hal0 doctor all`
+  reports a `registry-toml` warning until you delete the file.
 
 - **`--reasoning-format none` is stripped from existing config (#2545).** It
   runs by itself on `hal0 update`, on an `install.sh` re-run and at `hal0-api`

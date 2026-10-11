@@ -383,6 +383,7 @@ def _maybe_converge_profiles(status: dict | None, *, yes: bool) -> bool:
 #: run_post_activation_migrations can log (#1960 B2) — keys must match
 #: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
 _MIGRATION_PASS_LABELS: dict[str, str] = {
+    "updater.registry_toml_retire_failed": "registry.toml retirement (see hal0 doctor all)",
     "updater.seed_profiles_prune_failed": "seed-profile cleanup",
     "updater.mtp_migration_failed": "mtp override cleanup",
     "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",

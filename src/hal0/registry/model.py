@@ -46,9 +46,7 @@ class ModelCapabilities(BaseModel):
             "Tri-state: True forces the omni-router tool-call gate on for "
             "this model, False forces it off, None means the routing "
             "decision falls back to the model's slot-config labels (the "
-            "route predating this field, kept one release for TOML rows "
-            "that have not been migrated yet — see "
-            "registry/import_toml.py's labels fold)."
+            "route predating this field)."
         ),
     )
 

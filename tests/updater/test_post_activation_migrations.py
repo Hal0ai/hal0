@@ -27,6 +27,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     order/count without touching real config/registry state."""
     calls: dict[str, list[Any]] = {
         "config_migrations": [],
+        "registry_toml": [],
         "seed_profiles": [],
         "mtp": [],
         "vulkan_migration": [],
@@ -39,6 +40,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
         return (1, 2)
+
+    def _registry_toml(*, job_id=None):
+        calls["registry_toml"].append(job_id)
+        return {"outcome": "absent"}
 
     def _seed_profiles(*, job_id=None):
         calls["seed_profiles"].append(job_id)
@@ -79,6 +84,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         return {}
 
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
+    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.ensure_seed_profiles", _seed_profiles)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
@@ -95,6 +101,7 @@ def test_runs_all_six_passes(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
+    assert _stub_every_pass["registry_toml"] == ["j1"]
     assert _stub_every_pass["seed_profiles"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
@@ -183,6 +190,39 @@ def test_schema_migration_failure_propagates(
     assert _stub_every_pass["vulkan_migration"] == []
     assert _stub_every_pass["extra_args"] == []
     assert _stub_every_pass["converge_components"] == []
+
+
+@pytest.mark.parametrize("mode", ["raises", "reports_failed"])
+def test_registry_toml_retirement_failure_never_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+) -> None:
+    """registry.toml is inert, so failing to retire it must never block API
+    boot or `hal0 update`: every later pass still runs, and the failure is
+    logged under the event commit() scans for pass warnings."""
+
+    def _retire(*, job_id=None):
+        if mode == "raises":
+            raise PermissionError("root-owned")
+        return {"outcome": "failed", "reason": "cannot back it up: root-owned"}
+
+    monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _retire)
+
+    assert run_post_activation_migrations(job_id="j4") == (1, 2)
+
+    assert _stub_every_pass["seed_profiles"] == ["j4"]
+    assert _stub_every_pass["extra_args"] == ["j4"]
+    assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == ["j4"]
+
+
+def test_registry_toml_retire_event_is_a_reported_pass_warning() -> None:
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    assert "updater.registry_toml_retire_failed" in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    assert set(_MIGRATION_PASS_LABELS) == set(_NON_FATAL_MIGRATION_FAILURE_EVENTS)
 
 
 def test_update_path_repairs_a_drifted_hermes_venv(

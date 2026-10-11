@@ -9,7 +9,7 @@ or pull a runner image without curling the API by hand.
 Talks to the **service layer directly** (:class:`RunnerImageStore`,
 :func:`sync_runner_images`, :func:`run_runner_pull`) rather than through
 the local API client, matching the read-verb idiom other direct-store CLI
-groups use (e.g. ``hal0 registry``): ``ls`` must keep working even when
+groups use (e.g. ``hal0 config show``): ``ls`` must keep working even when
 ``hal0-api`` itself is down, and ``sync``/``pull`` reuse the exact same
 service calls the API route handlers do, so behaviour (tag validation,
 store writes) is identical either way.
