@@ -668,11 +668,16 @@ def test_install_log_swapped_after_selection_is_rejected(
     def select_then_swap(globs, **kw):
         found = real_select(globs, **kw)
         if found is not None and found[0] == log:
-            os.unlink(log)
             if swap_to == "symlink":
+                os.unlink(log)
                 log.symlink_to(victim)
             else:
-                log.write_text(_PLANTED + "\n")
+                # Create the replacement before the original goes, so it
+                # can't be handed the freed inode: an unlink-then-write can
+                # reuse it, and (st_dev, st_ino) would then match.
+                planted = log.with_name(log.name + ".new")
+                planted.write_text(_PLANTED + "\n")
+                os.replace(planted, log)
         return found
 
     monkeypatch.setattr(doctor_bundle, "_latest_candidate", select_then_swap)
