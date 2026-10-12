@@ -754,6 +754,24 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
 # ── profiles.toml ─────────────────────────────────────────────────────────────
 
 
+#: Quarantined profile entries already logged, by (path, name, reason).
+_QUARANTINE_LOGGED: set[tuple[str, str, str]] = set()
+
+
+def _validation_reason(exc: Exception) -> str:
+    """One line naming each invalid field (``quant: Extra inputs are not permitted``)."""
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            return "; ".join(
+                f"{'.'.join(str(p) for p in e.get('loc', ())) or 'entry'}: {e.get('msg', '')}"
+                for e in errors()
+            )
+        except Exception:
+            pass
+    return str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+
+
 def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     """Load and validate /etc/hal0/profiles.toml, with the seeds overlaid.
 
@@ -761,26 +779,38 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     every load and win over a same-named disk entry; operator profiles on disk
     are returned as written. No file means a fresh install: the seeds alone.
 
-    A file still in the pre-ADR-0029 shape (``mtp`` as a bool,
-    ``device_class``/``backend``/``quant``, the demoted-seed markers) fails
-    validation: ``hal0 profile migrate`` converts it.
+    One invalid entry never fails the catalog: it is logged and quarantined
+    (kept verbatim on disk, resolving to ``profiles.invalid`` for the slots
+    that name it). Unknown top-level keys are logged and kept as written.
 
     Raises:
-        ConfigParseError: If the TOML is malformed or fails validation.
+        ConfigParseError: If the TOML itself does not parse.
     """
     target = path if path is not None else paths.profiles_toml()
     if not Path(target).exists():
         return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
     raw = _read_toml(Path(target))
-    try:
-        cfg = ProfilesConfig.model_validate(raw)
-    except Exception as exc:
-        raise ConfigParseError(
-            f"failed to validate profiles.toml at {target}: {exc}",
-            details={"path": str(target), "reason": str(exc)},
-        ) from exc
+    entries = raw.get("profile") if isinstance(raw.get("profile"), dict) else {}
+    cfg = ProfilesConfig()
+    for name, entry in entries.items():
+        try:
+            cfg.profile[str(name)] = ProfileConfig.model_validate(entry)
+        except Exception as exc:
+            reason = _validation_reason(exc)
+            key = (str(target), str(name), reason)
+            if key not in _QUARANTINE_LOGGED:  # once per entry, not on every load
+                _QUARANTINE_LOGGED.add(key)
+                log.warning(
+                    "profiles.entry_quarantined name=%s path=%s reason=%s", name, target, reason
+                )
+            cfg.quarantined[str(name)] = {"entry": entry, "reason": reason}
+    unknown = {k: v for k, v in raw.items() if k != "profile"}
+    if unknown:
+        log.warning("profiles.unknown_keys_kept keys=%s path=%s", sorted(unknown), target)
+        cfg._unknown = unknown
     for key, seed_raw in SEED_PROFILES.items():
         cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
+        cfg.quarantined.pop(key, None)
     return cfg
 
 
@@ -812,6 +842,13 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
     # so writing them would freeze a stale copy on disk (the #PS-2 bug).
     profiles = data.get("profile") or {}
     data["profile"] = {name: entry for name, entry in profiles.items() if name not in SEED_PROFILES}
+    # A quarantined entry (invalid as stored) is written back exactly as it
+    # was, unless the operator has since defined that name validly.
+    for name, held in cfg.quarantined.items():
+        if name not in data["profile"] and name not in SEED_PROFILES:
+            data["profile"][name] = held["entry"]
+    for key, value in cfg._unknown.items():
+        data.setdefault(key, value)
     write_toml_atomic(target, data)
 
 

@@ -176,6 +176,14 @@ class ProfileCatalog:
     def resolve(self, name: str) -> ResolvedProfile:
         cfg = load_profiles_config(self._path)
         profile = cfg.profile.get(name)
+        if profile is None and name in cfg.quarantined:
+            raise UnprocessableEntity(
+                f"profile {name!r} is invalid as stored and was set aside: "
+                f"{cfg.quarantined[name]['reason']}; fix or recreate it "
+                "(hal0 profile edit / the Profiles page)",
+                code="profiles.invalid",
+                details={"profile": name, "reason": cfg.quarantined[name]["reason"]},
+            )
         if profile is None:
             raise NotFound(
                 f"profile {name!r} not found",

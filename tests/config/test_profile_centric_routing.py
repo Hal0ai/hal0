@@ -233,7 +233,8 @@ def test_settled_deleted_demoted_name_is_not_resurrected() -> None:
     assert _one(plan).profile_after != "dense"
 
 
-def test_markers_stay_while_any_slot_is_blocked() -> None:
+def test_markers_move_to_the_ledger_even_while_a_slot_is_blocked() -> None:
+    """profiles.toml must load in the new shape whatever is blocked."""
     _write(
         paths.profiles_toml(),
         {"legacy_seeds_migrated": True, "legacy_seeds_adopted": [], "profile": {}},
@@ -241,19 +242,42 @@ def test_markers_stay_while_any_slot_is_blocked() -> None:
     _slot(profile="chat")
     _db([_model(defaults={"extra_args": "--mmproj /x"})])
     plan = pc.plan_conversion()
-    assert plan.blocked and "(profiles.toml)" not in plan.profile_rewrites
-    assert any("markers" in w for w in plan.warnings)
+    assert plan.blocked
+    assert all(pc.LEDGER_FILE in n for n in plan.profile_rewrites["(profiles.toml)"])
+
+
+def test_ledger_feeds_the_frozen_resolver_once_markers_left_profiles_toml() -> None:
+    """A demoted seed the ledger settled stays deleted after the move."""
+    _write(paths.profiles_toml(), {"profile": {}})
+    ledger = paths.var_lib() / pc.LEDGER_FILE
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"legacy_seeds_migrated": True}))
+    _slot(profile="dense")
+    _db([_model()])
+    sp = _one(pc.plan_conversion())
+    assert "does not exist" in " ".join(sp.notes)  # settled: not re-adopted
 
 
 # ── engines ──────────────────────────────────────────────────────────────────
 
 
 def test_flm_ctx_is_always_explicit() -> None:
+    """An older FLM slot with no window ran FLM's 8192; the flm seed is 16384,
+    so the slot gets a profile carrying 8192 explicitly."""
+    assert pc.target_seeds()["flm"]["ctx_size"] == 16384
     _slot(device="npu", profile="flm", model={"default": "npu-m"})
     _db([_model("npu-m")])
     plan = pc.plan_conversion()
     sp = _one(plan)
     assert plan.profiles[sp.profile_after]["ctx_size"] == 8192
+
+
+def test_flm_slot_window_is_kept_in_its_own_profile() -> None:
+    _slot(device="npu", profile="flm", model={"default": "npu-m", "context_size": 12000})
+    _db([_model("npu-m")])
+    plan = pc.plan_conversion()
+    sp = _one(plan)
+    assert plan.profiles[sp.profile_after]["ctx_size"] == 12000
 
 
 def test_self_managed_engine_keeps_its_bundle_path_in_the_profile() -> None:

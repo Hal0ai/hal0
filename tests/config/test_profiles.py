@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.config.loader import ConfigParseError, load_profiles_config
+from hal0.config.loader import ConfigParseError, load_profiles_config, save_profiles_config
 from hal0.config.schema import (
     MTP_DRAFT_BUNDLE,
     SEED_PROFILES,
@@ -174,12 +174,20 @@ class TestLoadProfilesConfig:
         with pytest.raises(ConfigParseError):
             load_profiles_config(path=p)
 
-    def test_unknown_field_raises_config_parse_error(self, tmp_path: Path) -> None:
-        """extra='forbid' on ProfileConfig: typos in profile keys raise at load."""
+    def test_an_invalid_entry_is_quarantined_not_fatal(self, tmp_path: Path) -> None:
+        """One invalid entry never fails the catalog: it is set aside with its
+        reason, and every other profile (and every seed) still loads."""
         p = tmp_path / "profiles.toml"
-        p.write_text('[profile.bad]\nnot_a_field = "surprise"\n', encoding="utf-8")
-        with pytest.raises(ConfigParseError):
-            load_profiles_config(path=p)
+        p.write_text(
+            '[profile.bad]\nnot_a_field = "surprise"\n\n[profile.good]\nflags = "-fa on"\n',
+            encoding="utf-8",
+        )
+        cfg = load_profiles_config(path=p)
+        assert "bad" not in cfg.profile
+        assert cfg.quarantined["bad"]["entry"] == {"not_a_field": "surprise"}
+        assert cfg.quarantined["bad"]["reason"]
+        assert cfg.profile["good"].flags == "-fa on"
+        assert set(SEED_PROFILES) <= set(cfg.profile)
 
     @pytest.mark.parametrize(
         "body",
@@ -187,16 +195,67 @@ class TestLoadProfilesConfig:
             '[profile.old]\nflags = "-fa on"\nmtp = false\n',
             '[profile.old]\nflags = "-fa on"\ndevice_class = "gpu"\n',
             '[profile.old]\nflags = "-fa on"\nbackend = "rocm"\n',
-            'legacy_seeds_migrated = true\n[profile.old]\nflags = "-fa on"\n',
         ],
     )
-    def test_unconverted_shape_fails_to_load(self, tmp_path: Path, body: str) -> None:
-        """A file still in the pre-ADR-0029 shape fails validation; ``hal0
-        profile migrate`` converts it."""
+    def test_an_unconverted_entry_is_quarantined(self, tmp_path: Path, body: str) -> None:
+        """An entry still in the pre-ADR-0029 shape is set aside (``hal0
+        profile migrate`` converts it); the rest of the catalog loads."""
         p = tmp_path / "profiles.toml"
-        p.write_text(body, encoding="utf-8")
-        with pytest.raises(ConfigParseError):
-            load_profiles_config(path=p)
+        p.write_text(body + "\n[profile.fine]\nctx_size = 8192\n", encoding="utf-8")
+        cfg = load_profiles_config(path=p)
+        assert "old" not in cfg.profile
+        assert "old" in cfg.quarantined
+        assert cfg.profile["fine"].ctx_size == 8192
+
+    def test_a_quarantined_profile_blocks_only_its_slots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slot naming the quarantined profile refuses to launch with
+        ``profiles.invalid`` (naming the reason); a slot on a valid profile
+        still resolves."""
+        from hal0.errors import UnprocessableEntity
+        from hal0.profiles import ProfileCatalog
+        from hal0.providers import container
+
+        p = tmp_path / "profiles.toml"
+        p.write_text(
+            '[profile.old]\nflags = "-fa on"\nmtp = false\n\n[profile.good]\nflags = "-fa on"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            container, "_resolve_profile", lambda name: ProfileCatalog(path=p).resolve(name)
+        )
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            container.resolve_slot_profile({"name": "agent", "profile": "old"})
+        assert exc.value.code == "profiles.invalid"
+        assert exc.value.details["profile"] == "old"
+
+        assert container.resolve_slot_profile({"name": "chat", "profile": "good"}).name == "good"
+
+    def test_a_quarantined_entry_is_written_back_verbatim(self, tmp_path: Path) -> None:
+        """Saving the catalog never drops an operator's (invalid) entry: it is
+        written back exactly as stored, along with unknown top-level keys."""
+        p = tmp_path / "profiles.toml"
+        p.write_text(
+            'legacy_seeds_migrated = true\n\n[profile.old]\nflags = "-fa on"\nmtp = false\n',
+            encoding="utf-8",
+        )
+        cfg = load_profiles_config(path=p)
+        assert "old" in cfg.quarantined
+        save_profiles_config(cfg, path=p)
+        on_disk = tomllib.loads(p.read_text(encoding="utf-8"))
+        assert on_disk["profile"]["old"] == {"flags": "-fa on", "mtp": False}
+        assert on_disk["legacy_seeds_migrated"] is True
+
+    def test_unknown_top_level_keys_do_not_fail_the_catalog(self, tmp_path: Path) -> None:
+        p = tmp_path / "profiles.toml"
+        p.write_text(
+            'legacy_seeds_migrated = true\n[profile.old]\nflags = "-fa on"\n', encoding="utf-8"
+        )
+        cfg = load_profiles_config(path=p)
+        assert cfg.profile["old"].flags == "-fa on"
+        assert not cfg.quarantined
 
     # ── virtual seeds (overlay from code, never trusted from disk) ─────────────
 

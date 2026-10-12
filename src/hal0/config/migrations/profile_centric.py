@@ -39,6 +39,17 @@ from hal0.errors import Hal0Error
 
 # ── constants of the conversion ──────────────────────────────────────────────
 
+#: Slot keys valid in both shapes: dropped from a converted slot, but their
+#: presence does not make a slot old.
+SHAPE_NEUTRAL_KEYS: frozenset[str] = frozenset({"runtime"})
+
+
+def drops_slot_key(key: str, value: Any) -> bool:
+    """Whether a top-level slot key leaves the slot. ``image`` leaves only as
+    the old image pin (a string); the ``[image]`` settings table stays."""
+    return not (key == "image" and isinstance(value, Mapping))
+
+
 #: Top-level slot keys that leave the slot.
 SLOT_DROP_KEYS: tuple[str, ...] = (
     "parallel",
@@ -73,6 +84,13 @@ MODEL_TUNING_COLUMNS: tuple[str, ...] = (
 MODEL_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
 #: The table SQL migration 012 moves the model tuning columns into.
 HOLDING_TABLE = "legacy_model_tuning"
+#: The SQL migration that copies the model tuning into :data:`HOLDING_TABLE`.
+HOLDING_MIGRATION = 12
+#: Where the demoted-seed adoption markers live once they leave profiles.toml
+#: (under ``/var/lib/hal0``). Only the frozen resolver reads them: they say
+#: which demoted seeds an older release already settled.
+LEDGER_FILE = "profile-centric-ledger.json"
+MARKER_KEYS: tuple[str, ...] = ("legacy_seeds_migrated", "legacy_seeds_adopted")
 #: Audit record under ``/var/lib/hal0`` of what the last conversion run did
 #: (written by the apply step). It is a report and is never consulted: what
 #: still needs converting is read from the content itself (:func:`profile_shape`,
@@ -200,8 +218,6 @@ class ConversionPlan:
     blocked_profiles: dict[str, list[str]] = field(default_factory=dict)
     #: every custom profile after conversion (new shape): what profiles.toml holds
     custom_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
-    #: whether profiles.toml drops the demoted-seed markers
-    drop_markers: bool = False
 
     @property
     def blocked(self) -> list[SlotPlan]:
@@ -554,6 +570,8 @@ class Inputs:
     profiles_raw: dict[str, Any] | None
     stacks_raw: dict[str, Any] | None
     models: dict[str, dict[str, Any]]
+    #: demoted-seed markers still in profiles.toml (moved to :data:`LEDGER_FILE`)
+    markers_in_file: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
@@ -592,12 +610,41 @@ def read_inputs(
         stacks_raw = _read_toml(stacks_toml)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProfileMigrationError(f"cannot read profile/stack config: {exc}") from exc
-    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path))
+    in_file = {k: profiles_raw[k] for k in MARKER_KEYS if profiles_raw and k in profiles_raw}
+    if not in_file:
+        # Markers an earlier run moved out: the frozen resolver still needs
+        # them to know which demoted seeds were settled.
+        ledger = read_ledger(paths.var_lib() / LEDGER_FILE)
+        if ledger:
+            profiles_raw = {**(profiles_raw or {}), **ledger}
+    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path), in_file)
+
+
+def read_ledger(path: Path) -> dict[str, Any]:
+    """The demoted-seed markers saved in :data:`LEDGER_FILE` (empty if none)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ProfileMigrationError(f"cannot read {path}: {exc}") from exc
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ProfileMigrationError(f"cannot read {path}: {exc}") from exc
+    return {k: data[k] for k in MARKER_KEYS if isinstance(data, dict) and k in data}
 
 
 def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
-    """Every ``model`` row as a plain dict, read-only, with the tuning columns
-    filled from the holding table when SQL migration 012 has moved them."""
+    """Every ``model`` row as a plain dict, read-only, with its tuning.
+
+    Before SQL migration 012 the tuning is the row's own columns (and two
+    ``extra`` keys). Once 012 has run, the holding table is the only source:
+    the columns stay in the table for a rollback but are never read again, so
+    a converted install (holding table dropped) reads as untuned.
+    """
     if not db_path.exists():
         return {}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -607,6 +654,22 @@ def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
         if "model" not in tables:
             return {}
         rows = {str(r["id"]): dict(r) for r in conn.execute("SELECT * FROM model")}
+        applied = set()
+        if "schema_migrations" in tables:
+            applied = {int(r[0]) for r in conn.execute("SELECT version FROM schema_migrations")}
+        if HOLDING_MIGRATION not in applied and HOLDING_TABLE not in tables:
+            return rows
+        for row in rows.values():
+            for col in MODEL_TUNING_COLUMNS:
+                row[col] = None
+            try:
+                extra = json.loads(row.get("extra") or "{}")
+            except ValueError:
+                extra = {}
+            if isinstance(extra, dict):
+                for key in MODEL_TUNING_EXTRA_KEYS:
+                    extra.pop(key, None)
+                row["extra"] = json.dumps(extra)
         if HOLDING_TABLE in tables:
             for held in conn.execute(f"SELECT * FROM {HOLDING_TABLE}"):
                 row = rows.get(str(held["id"]))
@@ -872,10 +935,10 @@ class _Planner:
             assert resolved is not None
             conv = convert_profile(self.old.custom[name], frozen.runtime_family(resolved))
             self.name_map[name] = self._place(name, conv, new=False, stored=self.old.custom[name])
-        raw = self.inputs.profiles_raw or {}
-        markers = [m for m in ("legacy_seeds_migrated", "legacy_seeds_adopted") if m in raw]
-        if markers:
-            self.plan.profile_rewrites["(profiles.toml)"] = [f"{m} removed" for m in markers]
+        if self.inputs.markers_in_file:
+            self.plan.profile_rewrites["(profiles.toml)"] = [
+                f"{m} moved to /var/lib/hal0/{LEDGER_FILE}" for m in self.inputs.markers_in_file
+            ]
 
     def new_name(self, old_name: str) -> str | None:
         """The profile an old name resolves to after conversion (None: nothing)."""
@@ -982,7 +1045,9 @@ class _Planner:
             )
         probe = SlotPlan(file=sp.file, name=sp.name, engine=frozen.engine_for(slot, self.old))
         self._shape_keys(raw, slot, probe)
-        old_keys = [*probe.drop_keys, *probe.set_keys]
+        # ``runtime`` is still a valid slot key in the new shape (the shipped
+        # slot files carry it), so it says nothing about the file's shape.
+        old_keys = [k for k in [*probe.drop_keys, *probe.set_keys] if k not in SHAPE_NEUTRAL_KEYS]
         file_old = bool(old_keys or probe.inert)
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
         model_id = str(table.get("default") or "")
@@ -1008,7 +1073,7 @@ class _Planner:
 
     def _shape_keys(self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan) -> None:
         for key in SLOT_DROP_KEYS:
-            if key in slot:
+            if key in slot and drops_slot_key(key, slot[key]):
                 sp.drop_keys.append(key)
         if "backend" in slot and not slot.get("device"):
             from hal0.model_meta import map_backend_to_device
@@ -1460,12 +1525,6 @@ def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     plan.custom_profiles = {
         name: content for name, content in planner.catalog.items() if name not in target_seeds()
     }
-    plan.drop_markers = not plan.blockers
-    if plan.blockers and "(profiles.toml)" in plan.profile_rewrites:
-        plan.profile_rewrites.pop("(profiles.toml)")
-        plan.warnings.append(
-            "the demoted-seed markers in profiles.toml stay until nothing is blocked"
-        )
     return plan
 
 

@@ -87,10 +87,13 @@ def test_apply_converts_backs_up_and_verifies() -> None:
     SlotConfig.model_validate({**agent, "name": agent["name"]})
     profiles = tomllib.loads(paths.profiles_toml().read_text())
     assert "legacy_seeds_migrated" not in profiles
+    ledger = json.loads((paths.var_lib() / pc.LEDGER_FILE).read_text())
+    assert ledger["legacy_seeds_migrated"] is True  # moved, not lost
     assert profiles["profile"]["coding-custom"]["flags"]
     # The registry: SQL migration 012 ran, the holding table is gone once
-    # every slot converted, and an explicit "no MTP" left the model.
-    assert "profile" not in model_columns() and "extra_args" not in model_columns()
+    # every slot converted, and the old columns are left for a rollback.
+    assert 12 in _migrations()
+    assert "profile" in model_columns() and _row("small-chat")["profile"] == "coding"
     assert pc.HOLDING_TABLE not in tables()
     # The state file is an audit record of the run, never read back.
     state_path = paths.var_lib() / pc.STATE_FILE
@@ -100,6 +103,7 @@ def test_apply_converts_backs_up_and_verifies() -> None:
         "converted": sorted(s.file for s in plan.slots if s.status == "convert"),
         "blocked": [],
         "backup": str(backup),
+        "backups": [str(backup)],
     }
 
 
@@ -131,7 +135,7 @@ def test_verify_mismatch_blocks_only_that_slot(monkeypatch: pytest.MonkeyPatch) 
     others = [p for p in before if p.parent == paths.slots_config_dir() and p != agent]
     assert any(p.read_bytes() != before[p] for p in others)  # the rest converted
     profiles = tomllib.loads(paths.profiles_toml().read_text())
-    assert profiles.get("legacy_seeds_migrated") is True  # markers stay while blocked
+    assert "legacy_seeds_migrated" not in profiles  # strict shape even while blocked
     assert pc.HOLDING_TABLE in tables()
     assert _state()["complete"] is False and _state()["blocked"] == ["1.toml"]
 
@@ -238,7 +242,7 @@ def test_restore_puts_files_and_model_columns_back(restorable: None) -> None:
     before = _snapshot()
     small_before = _row("small-chat")
     report = pca.migrate_profile_centric()
-    assert "profile" not in model_columns()
+    assert 12 in _migrations()
 
     pca.restore_backup(report.backup or "")
 
@@ -262,7 +266,7 @@ def test_restore_puts_files_and_model_columns_back(restorable: None) -> None:
     again = pca.migrate_profile_centric()
     assert again.plan is not None and again.plan.changed
     assert not pca.restore_marker().exists()
-    assert "profile" not in model_columns()
+    assert 12 in _migrations()
 
 
 def test_restore_refuses_while_the_api_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -367,3 +371,264 @@ def test_slot_on_an_unregistered_model_converts_and_verifies() -> None:
     assert report.plan is not None and not report.plan.blockers, report.lines()
     stale = tomllib.loads((paths.slots_config_dir() / "31.toml").read_text())
     assert "workers" not in stale
+
+
+# ── a blocker never takes the rest of the box down (review P0-1) ─────────────
+
+
+def _launches(stem: str) -> list[str]:
+    """What the slot launches through the strict launch-path render."""
+    from hal0.config.migrations import profile_centric_frozen as frozen
+    from hal0.providers.container import strict_slot_argv
+
+    raw = tomllib.loads((paths.slots_config_dir() / f"{stem}.toml").read_text())
+    return list(strict_slot_argv(frozen.hoist_slot(raw, stem)).argv)
+
+
+def test_blocked_slot_leaves_the_clean_slots_launching() -> None:
+    write_toml(paths.profiles_toml(), {"legacy_seeds_migrated": True, "profile": {}})
+    for stem, port, model in (("1", 8081, "m"), ("2", 8082, "n")):
+        write_slot(
+            stem,
+            {
+                "id": int(stem),
+                "name": f"s{stem}",
+                "type": "llm",
+                "device": "gpu-rocm",
+                "profile": "chat",
+                "port": port,
+                "workers": 1,
+                "model": {"default": model},
+            },
+        )
+    write_db(
+        [
+            old_model("m", defaults={"extra_args": "--mmproj /x"}),
+            old_model("n", metadata={"context_length": 131072}),
+        ]
+    )
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None and report.plan.blockers == ["1.toml"]
+    # profiles.toml is in the strict new shape and loads; the other slot launches.
+    from hal0.config.loader import load_profiles_config
+
+    assert "chat" in load_profiles_config().profile
+    argv = _launches("2")
+    assert argv[argv.index("--model") + 1] == "/models/n/model.gguf"
+
+
+def test_registry_error_during_verify_rolls_everything_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hal0.providers.container as container
+
+    production_install()
+    pca._ensure_db_migrated(paths.db_path())
+    before = _snapshot()
+
+    def _locked(_slot: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(container, "strict_slot_argv", _locked)
+    with pytest.raises(pca.ProfileConversionError, match="rolled back"):
+        pca.migrate_profile_centric()
+    assert _snapshot() == before  # a transient error is never a block
+    assert not (paths.var_lib() / pc.STATE_FILE).exists()
+
+
+def test_mixed_shape_profile_blocks_only_its_slots() -> None:
+    from hal0.errors import UnprocessableEntity
+    from hal0.profiles import ProfileCatalog
+
+    production_install()
+    data = tomllib.loads(paths.profiles_toml().read_text())
+    data["profile"]["half"] = {"flags": "-fa auto", "quant": "Q4", "ctx_size": 8192}
+    write_toml(paths.profiles_toml(), data)
+    write_slot(
+        "40",
+        {
+            "id": 40,
+            "name": "halfslot",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "half",
+            "port": 8140,
+            "workers": 1,
+            "model": {"default": "untuned"},
+        },
+    )
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None
+    assert set(report.plan.blockers) == {"40.toml", "profile:half"}
+    # The catalog loads; the bad entry is set aside, not fatal.
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().resolve("half")
+    assert exc.value.code == "profiles.invalid"
+    assert "--model" in _launches("16")  # a converted slot still launches
+    stored = tomllib.loads(paths.profiles_toml().read_text())["profile"]["half"]
+    assert stored == {"flags": "-fa auto", "quant": "Q4", "ctx_size": 8192}
+
+
+def test_verify_block_reverts_the_stack_row_that_followed_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production_install()
+    write_toml(
+        paths.stacks_toml(),
+        {"stack": {"st": {"slots": [{"slot": "agent", "profile": "thinking", "mtp": True}]}}},
+    )
+    monkeypatch.setattr(pca, "_verify", lambda plan: {"1.toml": "--ctx-size: plan 1, launch 2"})
+    pca.migrate_profile_centric()
+    (row,) = tomllib.loads(paths.stacks_toml().read_text())["stack"]["st"]["slots"]
+    assert row == {"slot": "agent", "profile": "thinking"}  # tuning dropped, ref kept
+
+
+def test_shipped_installer_config_converts_nothing() -> None:
+    """A fresh install of this release is already in the new shape."""
+    import shutil
+
+    repo = Path(__file__).resolve().parents[2]
+    shutil.copytree(repo / "installer" / "etc-hal0", paths.etc(), dirs_exist_ok=True)
+    write_db([], upgraded=True)
+    plan = pc.plan_conversion()
+    assert not plan.changed, plan.lines()
+
+
+# ── rollback to a release before ADR-0029 (review P1-1) ──────────────────────
+
+
+def test_rollback_restore_undoes_every_run(restorable: None) -> None:
+    production_install()
+    before = _snapshot()
+    small_before = _row("small-chat")
+    pca.migrate_profile_centric()
+    write_slot(
+        "30",
+        {
+            "id": 30,
+            "name": "late",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "chat",
+            "port": 8099,
+            "workers": 1,
+            "model": {"default": "untuned", "context_size": 16000},
+        },
+    )
+    late = (paths.slots_config_dir() / "30.toml").read_bytes()
+    pca.migrate_profile_centric()
+    assert len(pca.conversion_backups()) == 2
+
+    restored = pca.restore_for_rollback()
+
+    assert restored
+    after = _snapshot()
+    for path, data in before.items():
+        assert after.get(path) == data, path
+    assert (paths.slots_config_dir() / "30.toml").read_bytes() == late
+    assert _row("small-chat")["profile"] == small_before["profile"]
+    assert 12 not in _migrations() and pc.HOLDING_TABLE not in tables()
+    assert not (paths.var_lib() / pc.STATE_FILE).exists()
+    assert pca.restore_for_rollback() == []  # nothing left to undo
+
+
+def test_updater_rollback_restores_only_for_an_older_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.updater import updater
+
+    calls: list[str] = []
+    monkeypatch.setattr(pca, "restore_for_rollback", lambda **_k: calls.append("r") or ["x"])
+    newer = tmp_path / "hal0-1.5.0"
+    (newer / updater._PROFILE_CENTRIC_MARKER).parent.mkdir(parents=True)
+    (newer / updater._PROFILE_CENTRIC_MARKER).write_text("")
+    assert updater._restore_profile_conversion_for(newer, job_id=None) == []
+    older = tmp_path / "hal0-1.4.0"
+    older.mkdir()
+    assert updater._restore_profile_conversion_for(older, job_id=None) == ["x"]
+    assert calls == ["r"]
+
+
+def test_updater_rollback_refuses_with_manual_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.updater import updater
+
+    def _fail(**_k: Any) -> list[str]:
+        raise pca.ProfileConversionError("conversion backup(s) missing: /x")
+
+    monkeypatch.setattr(pca, "restore_for_rollback", _fail)
+    older = tmp_path / "hal0-1.4.0"
+    older.mkdir()
+    with pytest.raises(updater.UpdateRollbackUnavailable, match="profile migrate --restore"):
+        updater._restore_profile_conversion_for(older, job_id=None)
+
+
+# ── FLM windows: anchor and trio shadows (review P2) ──────────────────────────
+
+
+def _flm_trio(anchor: dict[str, Any]) -> None:
+    write_slot(
+        "8", {"id": 8, "name": "flm", "type": "llm", "device": "npu", "port": 8088, **anchor}
+    )
+    for sid, name, kind, model in (
+        (6, "flm-embed", "embedding", "embed-gemma:300m"),
+        (7, "flm-stt", "transcription", "whisper-v3:turbo"),
+    ):
+        write_slot(
+            str(sid),
+            {
+                "id": sid,
+                "name": name,
+                "type": kind,
+                "device": "npu",
+                "port": 8088,
+                "served_by": "flm",
+                "profile": "flm",
+                "model": {"default": model},
+            },
+        )
+
+
+def _window(stem: str) -> int | None:
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.providers.container import slot_effective_context
+
+    raw = _read_toml(paths.slots_config_dir() / f"{stem}.toml")
+    return slot_effective_context(_flatten_slot_toml(raw, slot_name=stem))[0]
+
+
+def test_flm_shadows_keep_the_window_they_had() -> None:
+    """The box's shape: an anchor an older hal0 wrote (no window: 8192 today)
+    and two clean shadows on the flm seed. Nothing changes at restart."""
+    write_toml(paths.profiles_toml(), {"profile": {}})
+    _flm_trio(
+        {
+            "backend": "flm",
+            "runtime": "container",
+            "profile": "flm",
+            "model": {"default": "gemma4-it:e4b"},
+        }
+    )
+    write_db([old_model("gemma4-it:e4b", defaults={"enable_thinking": True})])
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None and not report.plan.blockers
+    assert _window("8") == 8192  # the anchor keeps FLM's 8192
+    assert _window("6") == 8192 and _window("7") == 8192  # shadows follow it
+    shadows = {s.file: s.status for s in report.plan.slots if s.file in ("6.toml", "7.toml")}
+    assert shadows == {"6.toml": "unchanged", "7.toml": "unchanged"}
+    assert not pca.migrate_profile_centric().plan.changed  # type: ignore[union-attr]
+
+
+def test_fresh_flm_trio_runs_the_seed_window() -> None:
+    import shutil
+
+    repo = Path(__file__).resolve().parents[2]
+    shutil.copytree(repo / "installer" / "etc-hal0", paths.etc(), dirs_exist_ok=True)
+    flm = next(p for p in paths.slots_config_dir().glob("*.toml") if p.stem == "flm")
+    flm.rename(paths.slots_config_dir() / "8.toml")
+    _flm_trio({"profile": "flm", "runtime": "container"})
+    write_db([], upgraded=True)
+    assert not pc.plan_conversion().changed
+    assert _window("8") == 16384
+    assert _window("6") == 16384 and _window("7") == 16384

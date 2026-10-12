@@ -31,6 +31,7 @@ from typing import Any, Literal
 from pydantic import (
     BaseModel,
     Field,
+    PrivateAttr,
     field_serializer,
     field_validator,
     model_serializer,
@@ -1053,6 +1054,16 @@ class ProfilesConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
+    #: Stored entries that failed validation, kept verbatim: name ->
+    #: ``{"entry": raw, "reason": str}``. They resolve to nothing (a slot naming
+    #: one is refused with ``profiles.invalid``) and are written back unchanged.
+    _quarantined: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    #: Unknown top-level keys, kept verbatim and written back unchanged.
+    _unknown: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    @property
+    def quarantined(self) -> dict[str, dict[str, Any]]:
+        return self._quarantined
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────

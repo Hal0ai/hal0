@@ -5,8 +5,8 @@ and, unless it is a dry run, writes the result:
 
 * ``profiles.toml`` — every custom profile in the new shape (converted,
   renamed, adopted and generated; one already in the new shape, or mixing
-  both shapes, is kept exactly as stored), the demoted-seed markers dropped
-  once nothing is blocked;
+  both shapes, is kept exactly as stored), the demoted-seed markers moved
+  to ``/var/lib/hal0/profile-centric-ledger.json``;
 * each converted slot file — re-pointed at its profile, tuning keys removed;
   a blocked slot's file is left untouched;
 * ``stacks.toml`` — row tuning keys dropped, row profiles re-pointed,
@@ -31,9 +31,10 @@ Contract, as for the runner-system conversion (ADR-0028):
   plan's; any difference, or a failed write, restores every file and the
   registry and raises.
 * **Restore is for downgrades** (``hal0 profile migrate --restore``): with
-  ``hal0-api`` stopped it puts the files back, re-adds the dropped model
-  columns with their values, and leaves a version-keyed marker so the
-  boot-time conversion stands down.
+  ``hal0-api`` stopped it puts the files back, writes the held tuning back
+  into the ``model`` columns (SQL migration 012 left them in place), forgets
+  migration 012, and leaves a version-keyed marker so the boot-time
+  conversion stands down.
 """
 
 from __future__ import annotations
@@ -71,18 +72,20 @@ RESTORE_MARKER_NAME = "profile-centric.restored"
 _BACKUP_PROFILES = "etc/profiles.toml"
 _BACKUP_STACKS = "etc/stacks.toml"
 _BACKUP_STATE = "var/profile-centric.json"
+_BACKUP_LEDGER = f"var/{pc.LEDGER_FILE}"
 _BACKUP_MODELS = "registry/model-tuning.json"
 _BACKUP_SLOT_RE = re.compile(r"^etc/slots/(?P<name>[A-Za-z0-9_.-]+\.toml)$")
 _BACKUP_MEMBER_MAX = 8 * 1024 * 1024
-#: Columns SQL migration 012 drops from ``model`` (restore re-adds them).
-_DROPPED_COLUMNS: dict[str, str] = {
-    "profile": "TEXT",
-    "extra_args": "TEXT",
-    "n_gpu_layers": "INTEGER",
-    "context_size": "INTEGER",
-    "rope_freq_base": "REAL",
-    "preferred_runner": "TEXT",
-}
+#: The ``model`` tuning columns SQL migration 012 copies (and leaves in place);
+#: a restore writes the held values back into them for the older release.
+_TUNING_COLUMNS: tuple[str, ...] = (
+    "profile",
+    "extra_args",
+    "n_gpu_layers",
+    "context_size",
+    "rope_freq_base",
+    "preferred_runner",
+)
 
 
 class ProfileConversionError(Hal0Error):
@@ -135,7 +138,8 @@ def _edit_slot(raw: dict[str, Any], sp: pc.SlotPlan) -> dict[str, Any]:
         tables.append(nested)
     for key in pc.SLOT_DROP_KEYS:
         for table in tables:
-            table.pop(key, None)
+            if key in table and pc.drops_slot_key(key, table[key]):
+                table.pop(key)
     model = data.get("model")
     if isinstance(model, dict):
         for key in pc.MODEL_TABLE_DROP:
@@ -173,9 +177,10 @@ def _profiles_file(raw: dict[str, Any] | None, plan: pc.ConversionPlan) -> dict[
     data["profile"] = dict(
         sorted({**kept, **{n: dict(c) for n, c in plan.custom_profiles.items()}}.items())
     )
-    if plan.drop_markers:
-        data.pop("legacy_seeds_migrated", None)
-        data.pop("legacy_seeds_adopted", None)
+    # The demoted-seed markers move to the ledger file: profiles.toml keeps
+    # only the strict new shape, whatever is blocked.
+    for key in pc.MARKER_KEYS:
+        data.pop(key, None)
     return data
 
 
@@ -229,7 +234,20 @@ def _plan_writes(inputs: pc.Inputs, plan: pc.ConversionPlan) -> list[_FileWrite]
         new = _dump(_stacks_file(inputs.stacks_raw, plan))
         if new != original:
             writes.append(_FileWrite(stacks_path, _BACKUP_STACKS, original, new))
+
+    if inputs.markers_in_file:
+        ledger_path = _ledger_path()
+        original = ledger_path.read_bytes() if ledger_path.exists() else b""
+        new = json.dumps(inputs.markers_in_file, indent=2, sort_keys=True).encode()
+        if new != original:
+            writes.append(_FileWrite(ledger_path, _BACKUP_LEDGER, original, new))
     return writes
+
+
+def _ledger_path() -> Path:
+    from hal0.config import paths
+
+    return paths.var_lib() / pc.LEDGER_FILE
 
 
 # ── registry ─────────────────────────────────────────────────────────────────
@@ -290,18 +308,13 @@ def _clear_model_tuning(
 
 def _restore_models(db_path: Path, rows: list[dict[str, Any]], *, columns: bool) -> None:
     """Put the model tuning back: the holding table (rollback) or, for a
-    downgrade (``columns=True``), the dropped ``model`` columns themselves."""
+    downgrade (``columns=True``), the ``model`` columns an older release reads."""
     conn = sqlite3.connect(db_path)
     try:
         with conn:
             tables = {
                 r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-            if columns:
-                have = {r[1] for r in conn.execute("PRAGMA table_info(model)")}
-                for col, kind in _DROPPED_COLUMNS.items():
-                    if col not in have:
-                        conn.execute(f"ALTER TABLE model ADD COLUMN {col} {kind}")
             for row in rows:
                 mid = row["id"]
                 if "mtp" in row:
@@ -310,7 +323,7 @@ def _restore_models(db_path: Path, rows: list[dict[str, Any]], *, columns: bool)
                 if not held:
                     continue
                 if columns:
-                    sets = {c: held.get(c) for c in _DROPPED_COLUMNS}
+                    sets = {c: held.get(c) for c in _TUNING_COLUMNS}
                     conn.execute(
                         "UPDATE model SET " + ", ".join(f"{c} = ?" for c in sets) + " WHERE id = ?",
                         (*sets.values(), mid),
@@ -350,26 +363,31 @@ def _restore_models(db_path: Path, rows: list[dict[str, Any]], *, columns: bool)
 
 def _verify(plan: pc.ConversionPlan) -> dict[str, str]:
     """Render every converted llama slot through the real launch path and
-    compare it with the plan's launch. Returns ``{slot file: difference}``."""
+    compare it with the plan's launch. Returns ``{slot file: difference}``.
+
+    Strict: any failure to render (a registry or catalog error, a file that
+    does not read) raises, so the caller rolls the whole run back and the next
+    boot or update retries. Only a rendered argv that differs from the plan
+    blocks its one slot.
+    """
     from hal0.config import paths
     from hal0.config.migrations import profile_centric_frozen as frozen
-    from hal0.providers.container import _resolve_slot_argv
+    from hal0.providers.container import strict_slot_argv
 
     problems: dict[str, str] = {}
     for sp in plan.slots:
         if sp.status != "convert" or sp.engine != frozen.LLAMA or not sp.argv_after:
             continue
         path = paths.slots_config_dir() / sp.file
+        slot = frozen.hoist_slot(tomllib.loads(path.read_text(encoding="utf-8")), sp.file[:-5])
         try:
-            slot = frozen.hoist_slot(tomllib.loads(path.read_text(encoding="utf-8")), sp.file[:-5])
-            resolved = _resolve_slot_argv(slot)
+            resolved = strict_slot_argv(slot)
         except Exception as exc:
-            problems[sp.file] = f"cannot render ({exc})"
-            continue
-        if resolved is None:
-            problems[sp.file] = "does not resolve after conversion"
-            continue
-        live = pc.effective_map(resolved[1].argv)
+            raise ProfileConversionError(
+                f"cannot verify {sp.file} after conversion ({exc}); nothing is kept, "
+                "the conversion runs again at the next start or update"
+            ) from exc
+        live = pc.effective_map(resolved.argv)
         want = pc.effective_map(sp.argv_after)
         if live != want:
             diff = [
@@ -506,8 +524,7 @@ def _block_mismatched_slots(
     Each slot file is separate: its original goes back, it is reported as
     BLOCKED with the difference, and the rest of the install stays
     converted. A profile generated for it alone stays in ``profiles.toml``,
-    unreferenced. The demoted-seed markers come back while anything is
-    blocked.
+    unreferenced, and a stack row re-pointed to follow it is put back.
     """
     from hal0.config import paths
 
@@ -526,12 +543,20 @@ def _block_mismatched_slots(
         log.error(
             "migrate.profile_centric.slot_blocked", job_id=job_id, slot=sp.file, error=sp.error
         )
-    if plan.drop_markers:
-        plan.drop_markers = False
-        profiles_path = paths.profiles_toml()
+    blocked_names = {sp.name for sp in plan.slots if sp.file in problems}
+    reverted = False
+    for st in plan.stacks:
+        for row in st.rows:
+            if row.get("slot") in blocked_names and row.get("profile"):
+                # The row followed the slot's new profile; the slot kept its
+                # old one, so the row keeps its old reference too.
+                row["profile"] = None
+                reverted = True
+    if reverted and inputs.stacks_raw is not None:
+        stacks_path = paths.stacks_toml()
         for w in done:
-            if w.path == profiles_path:
-                w.new = _dump(_profiles_file(inputs.profiles_raw, plan))
+            if w.path == stacks_path:
+                w.new = _dump(_stacks_file(inputs.stacks_raw, plan))
                 _replace_file(w.path, w.new)
 
 
@@ -582,6 +607,8 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
             "converted": sorted(s.file for s in plan.slots if s.status == "convert"),
             "blocked": plan.blockers,
             "backup": str(backup),
+            # Every run's backup, oldest first: a rollback undoes them all.
+            "backups": [*conversion_backups(), str(backup)],
         }
         state_path.parent.mkdir(parents=True, exist_ok=True)
         _replace_file(state_path, json.dumps(audit, indent=2).encode(), default_mode=0o640)
@@ -628,6 +655,7 @@ def _owned_path(member: str) -> Path | None:
         _BACKUP_PROFILES: paths.profiles_toml(),
         _BACKUP_STACKS: paths.stacks_toml(),
         _BACKUP_STATE: _state_path(),
+        _BACKUP_LEDGER: _ledger_path(),
     }
     if member in fixed:
         return fixed[member]
@@ -637,12 +665,17 @@ def _owned_path(member: str) -> Path | None:
     return None
 
 
-def restore_backup(archive: Path | str) -> list[str]:
+def restore_backup(
+    archive: Path | str, *, allow_running_api: bool = False, write_marker: bool = True
+) -> list[str]:
     """Put a ``profiles-<ts>.tar.gz`` backup back, for a downgrade.
 
+    ``allow_running_api`` is only for :func:`restore_for_rollback`, which runs
+    inside the ``hal0-api`` being rolled back, under the config locks.
+
     With ``hal0-api`` stopped, it writes back the files the conversion owns,
-    re-adds the model columns SQL migration 012 dropped (with their values),
-    forgets migration 012, and leaves a version-keyed marker so the boot-time
+    writes the held tuning back into the ``model`` columns an older release
+    reads, forgets migration 012, and leaves a version-keyed marker so the boot-time
     conversion stands down. It refuses an archive another user could have
     written and any member it does not own.
     """
@@ -655,7 +688,7 @@ def restore_backup(archive: Path | str) -> list[str]:
         _check_archive(archive)
     except Hal0Error as exc:
         raise ProfileConversionError(str(exc)) from exc
-    if _api_is_active():
+    if not allow_running_api and _api_is_active():
         raise ProfileConversionError(
             "hal0-api is running; stop it first (`sudo systemctl stop hal0-api`) so it "
             "does not convert or overwrite the restored files"
@@ -704,6 +737,12 @@ def restore_backup(archive: Path | str) -> list[str]:
             with contextlib.suppress(FileNotFoundError):
                 _state_path().unlink()
                 restored.append(f"{_state_path()} (removed)")
+    if write_marker:
+        _write_restore_marker(archive)
+    return restored
+
+
+def _write_restore_marker(archive: Path | str) -> None:
     marker = restore_marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
     _replace_file(
@@ -711,6 +750,50 @@ def restore_backup(archive: Path | str) -> list[str]:
         f"version={_running_version()}\narchive={archive}\n".encode(),
         default_mode=0o644,
     )
+
+
+def conversion_backups() -> list[str]:
+    """Every backup the conversion runs on this install wrote, oldest first
+    (from the audit record; empty when nothing was converted)."""
+    try:
+        record = json.loads(_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(record, dict):
+        return []
+    backups = [str(b) for b in record.get("backups") or () if b]
+    if not backups and record.get("backup"):
+        backups = [str(record["backup"])]
+    return backups
+
+
+def restore_for_rollback(*, job_id: str | None = None) -> list[str]:
+    """Undo every conversion run on this install, newest first, for a rollback
+    to a release that predates ADR-0029 (``Updater.rollback``).
+
+    Runs inside the ``hal0-api`` being rolled back (the conversion ran as the
+    same service user, so its backups are readable), under the config locks.
+    Afterwards the files, the model columns and migration 012's bookkeeping
+    are as the older release left them. Returns what was restored; empty
+    when nothing was converted. Raises :class:`ProfileConversionError` when a
+    backup is missing or unreadable, so the caller refuses the rollback.
+    """
+    backups = conversion_backups()
+    if not backups:
+        return []
+    missing = [b for b in backups if not Path(b).is_file()]
+    if missing:
+        raise ProfileConversionError(
+            f"conversion backup(s) missing: {', '.join(missing)}; cannot restore the "
+            "pre-conversion config for the older release"
+        )
+    restored: list[str] = []
+    for archive in reversed(backups):
+        restored += restore_backup(archive, allow_running_api=True, write_marker=False)
+    with contextlib.suppress(FileNotFoundError):
+        _state_path().unlink()
+    _write_restore_marker(backups[0])
+    log.warning("migrate.profile_centric.restored_for_rollback", job_id=job_id, backups=backups)
     return restored
 
 
@@ -718,7 +801,9 @@ __all__ = [
     "RESTORE_MARKER_NAME",
     "ConversionReport",
     "ProfileConversionError",
+    "conversion_backups",
     "migrate_profile_centric",
     "restore_backup",
+    "restore_for_rollback",
     "restore_marker",
 ]

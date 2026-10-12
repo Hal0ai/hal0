@@ -1304,8 +1304,18 @@ def slot_effective_context(
     The ONE resolver views (``slot_view``, ``/v1/models``, the agent anchor
     window, capacity) use, so no surface re-implements the rule. A slot whose
     profile does not resolve yields ``(None, None)``. FLM slots report their
-    profile's window, else 8192.
+    profile's window, else 8192. An FLM trio shadow (``served_by`` its anchor)
+    runs no process of its own: it reports its anchor's window.
     """
+    if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
+        "transcription",
+        "embedding",
+    ):
+        extra = slot_cfg.get("extra") if isinstance(slot_cfg.get("extra"), Mapping) else {}
+        anchor = str(slot_cfg.get("served_by") or extra.get("served_by") or "flm")
+        anchor_cfg = _served_by_anchor_cfg(anchor)
+        if anchor_cfg is not None:
+            return slot_effective_context(anchor_cfg, model_registry)
     try:
         profile = resolve_slot_profile(slot_cfg)
     except Hal0Error:
@@ -1327,6 +1337,26 @@ def slot_effective_context(
         # backfill in :func:`_native_ctx` needs it (#1617).
         model_info.setdefault("_model_key", model_id)
     return profile_context(profile, model_info)
+
+
+def _served_by_anchor_cfg(name: str) -> dict[str, Any] | None:
+    """The flattened config of the slot named ``name`` when it is an anchor
+    (serves itself), else ``None``."""
+    from hal0.config import paths
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        slots_dir = paths.slots_config_dir()
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        cfg = _flatten_slot_toml(_read_toml(slots_dir / f"{stem}.toml"), slot_name=name)
+    except Exception:
+        return None
+    if cfg.get("device") != "npu" or cfg.get("type") in ("transcription", "embedding"):
+        return None
+    return cfg
 
 
 def _guard_unsupported_quant(
@@ -2650,6 +2680,34 @@ def _resolve_preview_bundle(
     except Exception:
         return None
     return model_info, scalars
+
+
+def strict_slot_argv(slot_cfg: dict[str, Any]) -> ResolvedArgv:
+    """The argv a llama slot launches with, raising on any failure.
+
+    The profile-centric conversion verifies with this, not the fail-open
+    preview: a registry or catalog error must abort (and roll back) the run,
+    never pass for an argv mismatch. Only a model with no registry row falls
+    back, exactly as the launch does, to ``--model <model id>``.
+    """
+    from hal0.registry.store import ModelNotFound, ModelRegistry
+
+    profile = resolve_slot_profile(slot_cfg)
+    model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), dict) else {}
+    model_id = str(model_table.get("default") or "")
+    model_info: dict[str, Any] = {}
+    if model_id:
+        model_info["_model_key"] = model_id
+        try:
+            model = ModelRegistry().get(model_id)
+        except ModelNotFound:
+            model = None
+        if model is not None:
+            model_info.update(model.model_dump())
+        model_info["path"] = str(model_info.get("path") or model_id)
+    scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
+    port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
+    return resolve_argv(_segments_from_scalars(port, str(model_info.get("path") or ""), scalars))
 
 
 def _resolve_slot_argv(
