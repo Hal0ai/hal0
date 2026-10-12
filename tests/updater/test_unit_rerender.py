@@ -20,18 +20,13 @@ import pytest
 
 from hal0.config.schema import ProfileConfig
 from hal0.providers import container as container_mod
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.updater import updater as updater_mod
 from hal0.updater.updater import rerender_slot_units
 
-_PROFILE = ProfileConfig(
-    flags="-fa on -b 1024",
-    mtp=False,
-    device_class="gpu",
-    backend="vulkan",
-)
+_PROFILE = ProfileConfig(flags="-fa on -b 1024", mtp="off")
 
 
 @pytest.fixture
@@ -66,9 +61,8 @@ def _unit_path(unit_dir, name: str):
 
 
 async def _mk_slot(name: str, port: int) -> None:
-    # FLAGS-own (d4253f8f): flags are the MODEL's materialized
-    # defaults.extra_args — the render no longer injects profile flags — so
-    # the fresh-render assertion needs a registered model carrying the tune.
+    # ADR-0029: the slot's profile carries the tune (stubbed as _PROFILE);
+    # the registered model contributes only file facts (path, alias).
     reg = ModelRegistry()
     try:
         reg.get("some-model")
@@ -78,7 +72,6 @@ async def _mk_slot(name: str, port: int) -> None:
                 id="some-model",
                 path="/tmp/some-model.gguf",
                 capabilities=["chat"],
-                defaults=ModelDefaults(extra_args="-fa on -b 1024"),
             )
         )
     await SlotManager().create(

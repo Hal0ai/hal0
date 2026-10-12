@@ -1,34 +1,47 @@
 """``hal0 profile`` subcommands — thin CLI over ``/api/profiles``.
 
-Before this file existed there was no CLI surface for profiles at all
-(#1796): 17 server-side profiles with full CRUD live at ``/api/profiles``
-(+``/generate``, ``/import``, ``/export``), and every slot TOML references
-one by name, but ``hal0 profile`` returned "No such command". ``list`` /
-``show`` cover the minimum read surface an operator needs to answer "what
-profiles exist" and "what does this one resolve to" without a REST client —
-mirroring the read half of the dashboard's Profiles page and
-``GET /api/profiles`` / ``GET /api/profiles/{name}``. Write operations
-(create/update/delete/generate/import/export) stay API/dashboard-only for
-now; add them here the same way if operators ask for scriptable writes.
+``list`` / ``show`` cover the read surface an operator needs to answer "what
+profiles exist" and "what does this one resolve to". ``create`` / ``edit``
+write a custom profile through the same endpoints (and so the same
+``ProfileCatalog`` + flag/window screens) the dashboard uses. A profile owns
+every tune a slot launches with (ADR-0029): ``--flags``, ``--ctx-size``,
+``--thinking``, ``--vision``, ``--mtp``, ``--runner``. Seed profiles are
+read-only: ``create <new> --from <seed>`` duplicates one, then ``edit`` the
+copy and point a slot at it (``hal0 slot edit <slot> --profile <new>``).
 """
 
 from __future__ import annotations
 
 import json as jsonlib
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
+from hal0.cli._shared import (
+    CliApiError,
+    _api_base,
+    _api_unreachable,
+    api_get,
+    api_post,
+    api_put,
+    die,
+)
+from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN
 
 app = typer.Typer(
     name="profile",
-    help="Inspect launch-flag profiles (read-only; full CRUD lives in the dashboard/API).",
+    help="Inspect and edit profiles — the tune a slot launches a model with.",
     no_args_is_help=True,
 )
 
 console = Console()
+
+
+def _tri(value: Any) -> str:
+    """Render a tri-state bool: unset is "—", not "no"."""
+    return "—" if value is None else ("on" if value else "off")
 
 
 @app.command("list")
@@ -56,9 +69,11 @@ def profile_list(
         return
     table = Table(title=f"Profiles ({len(profiles)})")
     table.add_column("Name", style="bold")
-    table.add_column("Device")
-    table.add_column("Backend")
+    table.add_column("Ctx", justify="right")
+    table.add_column("Thinking")
+    table.add_column("Vision")
     table.add_column("MTP")
+    table.add_column("Runner")
     table.add_column("Intent")
     table.add_column("tok/s", justify="right")
     table.add_column("Used by")
@@ -69,9 +84,11 @@ def profile_list(
         used_by = p.get("used_by") or []
         table.add_row(
             p.get("name", "—"),
-            p.get("device_class") or "—",
-            p.get("backend") or "—",
-            "yes" if p.get("mtp") else "",
+            f"{p['ctx_size']:,}" if isinstance(p.get("ctx_size"), int) else "native",
+            _tri(p.get("enable_thinking")),
+            str(p.get("vision") or "auto"),
+            str(p.get("mtp") or "auto"),
+            p.get("runner") or "—",
             p.get("intent") or "—",
             f"{tps:.1f}" if isinstance(tps, (int, float)) else "—",
             ", ".join(used_by) if used_by else "—",
@@ -105,11 +122,14 @@ def profile_show(
         return
     for key in (
         "name",
-        "device_class",
-        "backend",
+        "seed",
+        "ctx_size",
+        "enable_thinking",
+        "vision",
         "mtp",
+        "runner",
+        "cloned_from",
         "intent",
-        "quant",
         "tps",
         "rtf",
     ):
@@ -122,36 +142,243 @@ def profile_show(
         console.print(f"[bold]flags[/bold]: {flags}")
 
 
-@app.command("migrate")
-def profile_migrate(
-    json_out: bool = typer.Option(False, "--json", help="Emit the plan as JSON."),
-) -> None:
-    """Preview the move to profile-centric config (ADR-0029). Writes nothing.
+_ONOFF = {"auto", "off"}
 
-    Reads the slot, profile and stack files and the model registry on this
-    box, and prints which profiles would be generated, which slots re-point,
-    which keys leave the slots, and every value that is inert today (those
-    are dropped, never applied: the conversion keeps what launches). Exits 2
-    when anything cannot be converted (a slot, a stored profile or a stack).
-    """
-    from hal0.config.migrations.profile_centric import ProfileMigrationError, plan_conversion
+
+def _check_auto_off(option: str, value: str | None) -> str | None:
+    if value is not None and value not in _ONOFF:
+        raise typer.BadParameter(f"{option} must be 'auto' or 'off' (got {value!r})")
+    return value
+
+
+@app.command("create")
+def profile_create(
+    name: str = typer.Argument(..., help="New profile name (kebab-case, <=32 chars)."),
+    from_profile: str | None = typer.Option(
+        None,
+        "--from",
+        help="Duplicate this profile (a seed or a custom one) and apply the other options on top.",
+    ),
+    flags: str | None = typer.Option(
+        None,
+        "--flags",
+        help="Free llama-server flags (KV cache types, batch sizes, sampling, ...).",
+    ),
+    ctx_size: int | None = typer.Option(
+        None,
+        "--ctx-size",
+        min=CTX_SIZE_MIN,
+        max=CTX_SIZE_MAX,
+        help=(
+            f"Context window ({CTX_SIZE_MIN}-{CTX_SIZE_MAX}). Unset = the model's native "
+            "window, capped at 32768 (8192 when unknown)."
+        ),
+    ),
+    thinking: bool | None = typer.Option(
+        None,
+        "--thinking/--no-thinking",
+        help="Request-time reasoning default for slots running this profile.",
+    ),
+    vision: str | None = typer.Option(
+        None, "--vision", help="'auto' loads the model's mmproj when it has one; 'off' never does."
+    ),
+    mtp: str | None = typer.Option(
+        None,
+        "--mtp",
+        help="'auto' drafts with the model's MTP heads when it has them; 'off' never.",
+    ),
+    runner: str | None = typer.Option(None, "--runner", help="Runner key this profile applies."),
+    intent: str | None = typer.Option(None, "--intent", help="Human label for the profile."),
+    json_out: bool = typer.Option(False, "--json", help="Emit the created profile as JSON."),
+) -> None:
+    """Create a custom profile (POST /api/profiles); ``--from`` duplicates one first."""
+    _check_auto_off("--vision", vision)
+    _check_auto_off("--mtp", mtp)
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    body: dict[str, Any] = {"name": name}
+    if from_profile:
+        try:
+            source = api_get(f"/api/profiles/{from_profile}")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        for key in ("flags", "ctx_size", "enable_thinking", "vision", "mtp", "runner", "intent"):
+            if isinstance(source, dict) and source.get(key) is not None:
+                body[key] = source[key]
+        body["cloned_from"] = from_profile
+    for key, value in (
+        ("flags", flags),
+        ("ctx_size", ctx_size),
+        ("enable_thinking", thinking),
+        ("vision", vision),
+        ("mtp", mtp),
+        ("runner", runner),
+        ("intent", intent),
+    ):
+        if value is not None:
+            body[key] = value
 
     try:
-        plan = plan_conversion()
-    except (ProfileMigrationError, OSError) as exc:
+        created = api_post("/api/profiles", json=body)
+    except CliApiError as exc:
         die(str(exc))
         return
     if json_out:
-        typer.echo(jsonlib.dumps(plan.to_dict(), indent=2, default=str))
+        typer.echo(jsonlib.dumps(created, indent=2))
+        return
+    console.print(f"Created profile [bold]{name}[/bold]")
+
+
+@app.command("edit")
+def profile_edit(
+    name: str = typer.Argument(..., help="Custom profile to edit."),
+    flags: str | None = typer.Option(None, "--flags", help="Replace the llama-server flags."),
+    ctx_size: int | None = typer.Option(
+        None,
+        "--ctx-size",
+        min=CTX_SIZE_MIN,
+        max=CTX_SIZE_MAX,
+        help=f"Context window ({CTX_SIZE_MIN}-{CTX_SIZE_MAX}).",
+    ),
+    clear_ctx_size: bool = typer.Option(
+        False, "--clear-ctx-size", help="Unset the window: follow the model's native one."
+    ),
+    thinking: bool | None = typer.Option(
+        None, "--thinking/--no-thinking", help="Request-time reasoning default."
+    ),
+    clear_thinking: bool = typer.Option(
+        False, "--clear-thinking", help="Unset the reasoning default."
+    ),
+    vision: str | None = typer.Option(None, "--vision", help="'auto' | 'off'."),
+    mtp: str | None = typer.Option(None, "--mtp", help="'auto' | 'off'."),
+    runner: str | None = typer.Option(
+        None, "--runner", help="Runner key; pass '' to clear (back to the slot's own runner)."
+    ),
+    intent: str | None = typer.Option(None, "--intent", help="Human label for the profile."),
+    json_out: bool = typer.Option(False, "--json", help="Emit the updated profile as JSON."),
+) -> None:
+    """Edit a custom profile (PUT /api/profiles/{name}); omitted options keep their value."""
+    _check_auto_off("--vision", vision)
+    _check_auto_off("--mtp", mtp)
+    if ctx_size is not None and clear_ctx_size:
+        raise typer.BadParameter("--ctx-size and --clear-ctx-size are mutually exclusive")
+    if thinking is not None and clear_thinking:
+        raise typer.BadParameter("--thinking/--no-thinking and --clear-thinking are exclusive")
+
+    payload: dict[str, Any] = {}
+    if flags is not None:
+        payload["flags"] = flags
+    if ctx_size is not None:
+        payload["ctx_size"] = ctx_size
+    if clear_ctx_size:
+        payload["ctx_size"] = None
+    if thinking is not None:
+        payload["enable_thinking"] = thinking
+    if clear_thinking:
+        payload["enable_thinking"] = None
+    if vision is not None:
+        payload["vision"] = vision
+    if mtp is not None:
+        payload["mtp"] = mtp
+    if runner is not None:
+        payload["runner"] = runner
+    if intent is not None:
+        payload["intent"] = intent
+    if not payload:
+        console.print(
+            "[bold yellow]No fields provided.[/bold yellow]  Pass at least one of --flags, "
+            "--ctx-size/--clear-ctx-size, --thinking/--no-thinking/--clear-thinking, "
+            "--vision, --mtp, --runner, --intent."
+        )
+        raise typer.Exit(code=2)
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        current = api_get(f"/api/profiles/{name}")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if isinstance(current, dict) and current.get("seed"):
+        die(
+            f"profile {name!r} is a seed profile and is read-only. Duplicate it first: "
+            f"`hal0 profile create <new-name> --from {name}`, edit the copy, then "
+            f"`hal0 slot edit <slot> --profile <new-name>`."
+        )
+        return
+    try:
+        updated = api_put(f"/api/profiles/{name}", json=payload)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(updated, indent=2))
+        return
+    console.print(
+        f"Updated profile [bold]{name}[/bold]; slots running it pick the change up at their "
+        "next restart."
+    )
+
+
+@app.command("migrate")
+def profile_migrate(
+    apply: bool = typer.Option(False, "--apply", help="Convert this install (backs up first)."),
+    restore: str | None = typer.Option(
+        None,
+        "--restore",
+        metavar="ARCHIVE",
+        help="Put a profiles-<ts>.tar.gz backup back (for a downgrade; stop hal0-api first).",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the plan as JSON."),
+) -> None:
+    """Move this install to profile-centric config (ADR-0029).
+
+    Without flags it previews: which profiles would be generated, which slots
+    re-point, which keys leave the slots, and every value that is inert today
+    (those are dropped, never applied: the conversion keeps what launches).
+    ``--apply`` converts (``hal0 update`` and ``hal0 serve`` do this
+    automatically). Exits 2 when anything cannot be converted (a slot, a
+    stored profile or a stack).
+    """
+    from hal0.config.migrations.profile_centric import ProfileMigrationError
+    from hal0.config.migrations.profile_centric_apply import (
+        ProfileConversionError,
+        migrate_profile_centric,
+        restore_backup,
+    )
+
+    if restore:
+        try:
+            restored = restore_backup(restore)
+        except ProfileConversionError as exc:
+            die(str(exc))
+            return
+        for line in restored:
+            typer.echo(f"restored {line}")
+        return
+    try:
+        report = migrate_profile_centric(dry_run=not apply)
+    except (ProfileMigrationError, ProfileConversionError, OSError) as exc:
+        die(str(exc))
+        return
+    plan = report.plan
+    if json_out:
+        payload = plan.to_dict() if plan is not None else {}
+        payload["backup"] = report.backup
+        typer.echo(jsonlib.dumps(payload, indent=2, default=str))
     else:
-        for line in plan.lines():
+        for line in report.lines():
             typer.echo(line)
-        if plan.blockers:
+        if plan is not None and plan.blockers:
             typer.echo(
                 f"{len(plan.blockers)} item(s) cannot be converted "
                 f"({', '.join(plan.blockers)}); see BLOCKED above"
             )
-    if plan.blockers:
+    if plan is not None and plan.blockers:
         raise typer.Exit(2)
 
 

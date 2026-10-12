@@ -31,8 +31,6 @@ import sqlite3
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
-from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 
@@ -107,11 +105,6 @@ ENGINE_SEED: dict[str, str] = {
 #: Slot type -> the seed that carries its mode flag.
 TYPE_SEED: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
 
-#: The MTP draft defaults the new launch path adds in the profile layer; the
-#: draft device is placement and comes from the slot.
-MTP_DRAFT_BUNDLE = "--spec-type draft-mtp" + frozen._MTP_BUNDLE_TAIL
-MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
-
 _BASE = frozenset({"--host", "--port", "--model", "--alias", "--ctx-size"})
 _VISION_OFF = frozenset({"--no-mmproj", "--no-mmproj-auto"})
 #: Flags whose combined effect is "is the projector loaded" (llama.cpp clears
@@ -131,15 +124,11 @@ class ProfileMigrationError(Hal0Error):
     code = "profiles.migration_failed"
 
 
-@lru_cache(maxsize=1)
 def target_seeds() -> dict[str, dict[str, Any]]:
-    """The seed catalog the conversion targets (new profile shape)."""
-    text = (
-        files("hal0.config.data")
-        .joinpath("profile_centric_seeds_after.toml")
-        .read_text(encoding="utf-8")
-    )
-    return {k: dict(v) for k, v in tomllib.loads(text).get("profile", {}).items()}
+    """The seed catalog the conversion targets: the shipped seeds."""
+    from hal0.config.schema import SEED_PROFILES
+
+    return {k: dict(v) for k, v in SEED_PROFILES.items()}
 
 
 # ── plan data ────────────────────────────────────────────────────────────────
@@ -188,8 +177,11 @@ class ModelPlan:
 @dataclass
 class StackPlan:
     stack: str
+    #: ``{"index", "slot", "change", "drop": [keys], "profile": new name | None}``
     rows: list[dict[str, Any]] = field(default_factory=list)
     profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
+    #: embedded profiles in the new shape, by name
+    profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -206,6 +198,10 @@ class ConversionPlan:
     #: Stored profiles that cannot be converted as they are: name -> reasons.
     #: Reported (and counted as blocking) whether or not any slot uses them.
     blocked_profiles: dict[str, list[str]] = field(default_factory=dict)
+    #: every custom profile after conversion (new shape): what profiles.toml holds
+    custom_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: whether profiles.toml drops the demoted-seed markers
+    drop_markers: bool = False
 
     @property
     def blocked(self) -> list[SlotPlan]:
@@ -465,7 +461,16 @@ def new_launch(
     jinja = (
         bool(getattr(supports, "jinja", False)) and defaults.get("jinja") is not False and not embed
     )
-    model_layer = ["--jinja"] if jinja else []
+    from hal0.config.schema import family_flags
+
+    quirks = family_flags(
+        str(model.get("_model_key") or ""),
+        str(model.get("path") or ""),
+        architecture=model.get("architecture"),
+    )
+    model_layer = shlex.split(quirks) if quirks.strip() else []
+    if jinja:
+        model_layer += ["--jinja"]
     tmpl = defaults.get("chat_template")
     if tmpl and tmpl != "auto":
         model_layer += ["--chat-template-file", f"{chat_template_root}/chat-templates/{tmpl}.jinja"]
@@ -479,6 +484,8 @@ def new_launch(
         and bool(getattr(supports, "mtp", False))
         and not embed
     )
+    from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
+
     profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
 
     slot_layer: list[str] = []
@@ -493,7 +500,7 @@ def new_launch(
         backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
         slot_layer += [
             "--spec-draft-device",
-            MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0"),
+            mtp_draft_device(backend),
         ]
 
     from hal0.slots.argv import _dedup, _split_pairs
@@ -785,12 +792,18 @@ class _Planner:
         # profiles: a new-shape one means something else to it.
         self.old = frozen.Catalog(None if raw is None else {**raw, "profile": old_entries})
         self.bound: set[str] = set()
+        #: slot file -> the model it names (to keep a blocked slot's tuning).
+        self.model_of: dict[str, str] = {}
         #: new-shape catalog after conversion: target seeds + converted customs.
         self.catalog: dict[str, dict[str, Any]] = {k: dict(v) for k, v in target_seeds().items()}
         #: names no converted or generated profile may take.
         self.reserved: set[str] = {str(n) for n in entries}
         #: old profile name -> its name after conversion.
         self.name_map: dict[str, str] = {}
+        from hal0.config.paths import model_store_root
+
+        #: where chat-template files live, as the launch path renders them
+        self.ct_root = str(Path(model_store_root()))
 
     # -- profiles --------------------------------------------------------
 
@@ -1037,6 +1050,7 @@ class _Planner:
         row = self.inputs.models.get(model_id) if model_id else None
         if model_id:
             self.bound.add(model_id)
+            self.model_of[sp.file] = model_id
         if sp.engine != frozen.LLAMA:
             self._plan_other_engine(slot, sp, model_id, row)
         elif not model_id:
@@ -1075,7 +1089,7 @@ class _Planner:
     ) -> None:
         model = _launch_model_info(row, model_id)
         model_after = _launch_model_info(_row_after(row) if row else None, model_id)
-        old = frozen.evaluate(slot, model, self.old)
+        old = frozen.evaluate(slot, model, self.old, chat_template_root=self.ct_root)
         sp.argv_today = old.argv
         base = self._base_for(slot, sp, old.profile_launched)
         fixed_profile = False
@@ -1084,7 +1098,9 @@ class _Planner:
             # gets the seed that carries it.
             fixed_profile = base != old.profile_launched
             if fixed_profile:
-                old = frozen.evaluate({**slot, "profile": base}, model, self.old)
+                old = frozen.evaluate(
+                    {**slot, "profile": base}, model, self.old, chat_template_root=self.ct_root
+                )
                 sp.launch_changes.append(
                     f"launches with the {base!r} profile (its type's mode flag) instead of "
                     f"{sp.profile_before or 'no profile'!r}"
@@ -1151,7 +1167,12 @@ class _Planner:
             sp.profile_after = self._generate(base, model_id, want)
             sp.generated = sp.profile_after in self.plan.profiles
 
-        after = new_launch(slot_after, model_after, self.catalog[sp.profile_after])
+        after = new_launch(
+            slot_after,
+            model_after,
+            self.catalog[sp.profile_after],
+            chat_template_root=self.ct_root,
+        )
         sp.argv_after = after.argv
         self._diff(sp, old, after, fixed_profile)
 
@@ -1292,9 +1313,24 @@ class _Planner:
     # -- models and stacks -----------------------------------------------
 
     def plan_models(self) -> None:
+        held = {
+            self.model_of[s.file]: s.file
+            for s in self.plan.slots
+            if s.status == "blocked" and s.file in self.model_of
+        }
         for model_id, row in sorted(self.inputs.models.items()):
             tuning = _model_tuning(row)
             if not tuning:
+                continue
+            if model_id in held:
+                # A blocked slot still launches from this tuning; it stays
+                # until that slot converts.
+                self.plan.models.append(
+                    ModelPlan(
+                        model_id=model_id,
+                        notes=[f"tuning kept: blocked slot {held[model_id]} still uses it"],
+                    )
+                )
                 continue
             mp = ModelPlan(model_id=model_id, clear=tuning)
             if model_id not in self.bound:
@@ -1352,13 +1388,16 @@ class _Planner:
                     st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
                 if conv.notes or _tidy(conv.content) != dict(entry):
                     st.profile_rewrites[str(pname)] = conv.notes or ["rewritten in the new shape"]
+                st.profiles[str(pname)] = _tidy(conv.content)
             rows = stack.get("slots") if isinstance(stack.get("slots"), list) else []
-            for row in rows:
+            for index, row in enumerate(rows):
                 if not isinstance(row, Mapping):
                     continue
-                change = self._plan_stack_row(row, embedded, by_slot, stack=st.stack)
-                if change:
-                    st.rows.append({"slot": str(row.get("slot") or ""), "change": change})
+                edit = self._plan_stack_row(row, embedded, by_slot, stack=st.stack)
+                if edit["change"]:
+                    st.rows.append({"index": index, "slot": str(row.get("slot") or ""), **edit})
+            # Only a stack with something to write is planned: one already in
+            # the new shape (or broken only by a missing profile) is not.
             if st.rows or st.profile_rewrites or st.errors:
                 self.plan.stacks.append(st)
 
@@ -1369,8 +1408,9 @@ class _Planner:
         by_slot: Mapping[str, SlotPlan],
         *,
         stack: str,
-    ) -> str:
+    ) -> dict[str, Any]:
         parts: list[str] = []
+        new_profile: str | None = None
         present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
         if present:
             shown = [
@@ -1392,6 +1432,7 @@ class _Planner:
                 and sp.profile_after != pname
             ):
                 parts.append(f"profile {pname!r} -> {sp.profile_after!r} (the converted slot's)")
+                new_profile = sp.profile_after
             else:
                 new = self.new_name(pname)
                 if new is None:
@@ -1403,7 +1444,8 @@ class _Planner:
                     )
                 elif new != pname:
                     parts.append(f"profile {pname!r} -> {new!r}")
-        return "; ".join(parts)
+                    new_profile = new
+        return {"change": "; ".join(parts), "drop": present, "profile": new_profile}
 
 
 def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
@@ -1415,6 +1457,10 @@ def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     planner.plan_models()
     planner.plan_stacks()
     plan = planner.plan
+    plan.custom_profiles = {
+        name: content for name, content in planner.catalog.items() if name not in target_seeds()
+    }
+    plan.drop_markers = not plan.blockers
     if plan.blockers and "(profiles.toml)" in plan.profile_rewrites:
         plan.profile_rewrites.pop("(profiles.toml)")
         plan.warnings.append(
@@ -1425,7 +1471,6 @@ def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
 
 __all__ = [
     "HOLDING_TABLE",
-    "MTP_DRAFT_BUNDLE",
     "STATE_FILE",
     "ConversionPlan",
     "FlagConversion",

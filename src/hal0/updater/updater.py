@@ -1879,7 +1879,14 @@ def run_post_activation_migrations(
     from hal0.config.migrations.runner_system import migrate_runner_system
 
     conversion = migrate_runner_system(job_id=job_id, honour_restore_marker=honour_restore_marker)
-    if rerender_after_runner_conversion and conversion.backup:
+    # The profile-centric conversion (ADR-0029) runs next, on the converted
+    # runner keys, and is fatal the same way: it moves every tune onto a
+    # profile, verifies each converted slot's launch, and rolls back every
+    # write before raising.
+    from hal0.config.migrations.profile_centric_apply import migrate_profile_centric
+
+    profiles = migrate_profile_centric(job_id=job_id, honour_restore_marker=honour_restore_marker)
+    if rerender_after_runner_conversion and (conversion.backup or profiles.backup):
         try:
             rerender_slot_units(job_id=job_id)
         except Exception as exc:
@@ -1904,13 +1911,6 @@ def run_post_activation_migrations(
         log.warning("updater.registry_toml_retire_failed", job_id=job_id, error=str(exc))
 
     try:
-        clear_stale_mtp_overrides(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.mtp_migration_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: the affected slot simply fails to load until the
-        # operator flips MTP to Auto/Off in the drawer.
-
-    try:
         repair_hermes_mcp_client(job_id=job_id, install=repair_hermes_venv)
     except Exception as exc:
         log.warning("updater.hermes_venv_repair_pass_failed", job_id=job_id, error=str(exc))
@@ -1931,23 +1931,6 @@ def run_post_activation_migrations(
     except Exception as exc:
         log.warning("updater.retired_skills_prune_failed", job_id=job_id, error=str(exc))
         # Non-fatal: a retired skill stays offered until the next install.sh.
-
-    try:
-        sanitize_model_extra_args(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.extra_args_sanitize_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: an affected model keeps failing to launch until the
-        # operator removes the managed flag in the model drawer.
-
-    try:
-        from hal0.config.migrations.reasoning_format_none import run_migration
-
-        run_migration()
-    except Exception as exc:
-        log.warning("updater.reasoning_format_none_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: structured-output requests keep failing on upstream
-        # llama.cpp for the affected profile/model until the flag is removed
-        # by hand (#2545); never a reason to fail an update.
 
     # ── Component convergence (spec 2026-08-30): the catalog runs LAST for
     # the same reason the engine pass did — hindsight (inside it) is the
@@ -2379,269 +2362,6 @@ def _raw_schema_version(raw: dict[str, Any] | None) -> int:
         return 1
 
 
-#: The three spec-hw-slot-ownership / spec-flags-ownership folds that are
-#: deploy-window gated and operator-run. Keyed by report name → (module,
-#: remediation command).
-_OWNERSHIP_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("flags", "hal0.config.migrations.slot_flags_fold", "hal0 slot migrate-flags --apply"),
-    ("caps", "hal0.config.migrations.model_owned_caps", "hal0 slot migrate-caps --apply"),
-    ("hw", "hal0.config.migrations.hw_slot_ownership", "hal0 slot migrate-hw --apply"),
-)
-
-
-def detect_pending_ownership_migrations(*, job_id: str | None = None) -> dict[str, Any]:
-    """Detect — never apply — the ownership folds an old box still needs.
-
-    Why detect instead of auto-run (the deliberate call, spec'd in the commit
-    message for this change):
-
-    1. ``hal0 slot migrate-hw --apply`` REFUSES to run while ``hal0-api`` or any
-       ``hal0-slot@*`` unit is active (``cli/slot_commands.py``), because
-       rewriting slot TOMLs under a live runtime split-brains it.
-       :meth:`Updater.commit` executes *inside* hal0-api, and install.sh's
-       migration block runs while the old hal0-api is still serving. Both
-       auto-run sites are exactly the state the migration refuses.
-    2. ``slot_flags_fold`` legitimately REFUSES a model when two slots bound to
-       it carry divergent tunes. There is no operator in an auto-run to resolve
-       that, so an auto-run would be half-applied by design.
-    3. ``hw_slot_ownership`` NULLs registry-DB columns. ``hal0 update rollback``
-       restores the code tree, not the DB — irreversible on a path with no undo.
-
-    What is NOT acceptable is leaving the box silently half-converged, so this
-    runs each fold's *planner* (``dry_run=True``, filesystem- and DB-write-free)
-    and reports precisely what is outstanding, with the EXACT runnable command
-    that fixes it — including ``--stop-services`` when it is actually required
-    (#1845/H8): every ``migrate-*`` command in :data:`_OWNERSHIP_MIGRATIONS`
-    refuses ``--apply`` while ``hal0-api`` or any ``hal0-slot@*`` unit is
-    active (:func:`hal0.cli.slot_commands.active_hal0_units` is that same
-    live-unit check), and a bare ``... --apply`` printed while units are up
-    fails with no indication the flag exists. Callers (the CLI panel and the
-    dashboard) print this string verbatim — the flag is decided HERE, once,
-    not re-derived client-side.
-
-    Returns ``{"pending": [keys], "detail": {key: {...}}, "commands": [...]}``.
-    """
-    import importlib
-
-    from hal0.cli.slot_commands import active_hal0_units
-
-    stop_services_suffix = " --stop-services" if active_hal0_units() else ""
-
-    detail: dict[str, Any] = {}
-    for key, module_name, base_command in _OWNERSHIP_MIGRATIONS:
-        command = base_command + stop_services_suffix
-        entry: dict[str, Any] = {"command": command, "lines": [], "error": None}
-        try:
-            module = importlib.import_module(module_name)
-            raw_lines = module.run_migration(deploy_window=False, dry_run=True) or []
-            # slot_flags_fold reports its no-op skips as "skip model ..." lines;
-            # those mean CONVERGED, not pending. Every other line is real work.
-            entry["lines"] = [str(line) for line in raw_lines if not str(line).startswith("skip ")]
-        except Exception as exc:
-            # slot_flags_fold raises RuntimeError on divergent-share refusals
-            # even in dry-run — that is the single most important thing to
-            # surface, not swallow.
-            entry["error"] = str(exc)
-        detail[key] = entry
-
-    pending = [k for k, v in detail.items() if v["lines"] or v["error"]]
-    result = {
-        "pending": pending,
-        "detail": detail,
-        "commands": [detail[k]["command"] for k in pending],
-    }
-    if pending:
-        log.warning(
-            "updater.ownership_migrations_pending",
-            job_id=job_id,
-            pending=pending,
-            commands=result["commands"],
-        )
-    else:
-        log.info("updater.ownership_migrations_converged", job_id=job_id)
-    return result
-
-
-def convergence_report(*, job_id: str | None = None) -> dict[str, Any]:
-    """Read-only snapshot of how far this box is from the v1.0 on-disk shape.
-
-    Applies nothing. Used by ``installer/install.sh`` to print the same
-    convergence verdict ``hal0 update`` prints, so both entry points tell an
-    operator the same story about the same box.
-    """
-    ownership = detect_pending_ownership_migrations(job_id=job_id)
-    return {
-        "ownership_migrations": ownership,
-        "converged": not ownership["pending"],
-    }
-
-
-def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None) -> int:
-    """Clear crash-only ``mtp = true`` slot overrides (upgrade migration).
-
-    An explicit slot ``mtp = true`` is honored literally at launch — it is the
-    escape hatch for MTP-capable models the eligibility heuristics miss. But a
-    force-on pointing at a model with NO MTP layers makes llama-server exit at
-    load ("context type MTP requested but model doesn't contain MTP layers").
-    Such overrides are typically debris from the pre-separation binary MTP
-    pill or an old stack apply, left behind by a later model swap and masked
-    for months by stale baked units.
-
-    For every slot with ``mtp = true`` whose bound model is registry-resolvable
-    and NOT MTP-eligible, drop the override (→ AUTO) and log loudly. Slots are
-    left untouched when the model can't be resolved (can't judge, stay
-    conservative), when the override is ``false``/absent (harmless), or when
-    the model is eligible (deliberate force-on — the escape hatch stands).
-
-    Args:
-        job_id: Optional breadcrumb for structured-log tracing.
-        registry: Model-registry override for tests (anything with
-            ``get(model_id)`` returning an object with ``model_dump()``).
-            ``None`` uses the real :class:`~hal0.registry.store.ModelRegistry`.
-
-    Returns:
-        Number of slot overrides cleared.
-    """
-    import tomllib
-
-    from hal0.config.loader import write_toml_atomic
-    from hal0.config.paths import slots_config_dir
-    from hal0.model_meta import model_is_mtp_eligible
-
-    if registry is None:
-        from hal0.registry.store import ModelRegistry
-
-        registry = ModelRegistry()
-
-    # Raw-TOML surgery, deliberately schema-free: slot TOMLs exist in two
-    # shapes on real boxes (flat manager-written keys vs the nested ``[slot]``
-    # table of the installer seeds), and a migration must not depend on the
-    # current SlotConfig validating either. Only the ``mtp`` key is touched,
-    # and a file is rewritten only when it actually changes.
-    cleared = 0
-    slots_dir = slots_config_dir()
-    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
-        slot_name = toml_path.stem
-        try:
-            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning("updater.mtp_migration_slot_unreadable", slot=slot_name, error=str(exc))
-            continue
-        # ``mtp`` lives top-level (flat shape) or under [slot] (nested shape).
-        holder = raw
-        if not isinstance(holder.get("mtp"), bool) and isinstance(raw.get("slot"), dict):
-            holder = raw["slot"]
-        if holder.get("mtp") is not True:
-            continue
-        model_table = raw.get("model")
-        model_id = model_table.get("default", "") if isinstance(model_table, dict) else ""
-        if not model_id:
-            continue
-        try:
-            model = registry.get(model_id)
-            info = model.model_dump() if hasattr(model, "model_dump") else dict(model)
-        except Exception:
-            # Unresolvable model — can't judge eligibility; leave the override.
-            continue
-        info.setdefault("_model_key", model_id)
-        if model_is_mtp_eligible(info):
-            continue
-        del holder["mtp"]  # absent = AUTO (TOML has no null)
-        try:
-            write_toml_atomic(toml_path, raw)
-        except Exception as exc:
-            log.warning("updater.mtp_migration_write_failed", slot=slot_name, error=str(exc))
-            continue
-        cleared += 1
-        log.warning(
-            "updater.mtp_force_on_cleared",
-            job_id=job_id,
-            slot=slot_name,
-            model=model_id,
-            note=(
-                "slot forced MTP on but the model has no MTP heads (would crash "
-                "llama-server at load); override cleared to AUTO. If the model "
-                "really ships MTP layers, tag it 'mtp' in the registry or re-force "
-                "MTP in the slot drawer."
-            ),
-        )
-    return cleared
-
-
-def sanitize_model_extra_args(*, job_id: str | None = None, registry: Any = None) -> int:
-    """Strip hal0-managed flags from model ``defaults.extra_args`` (upgrade migration).
-
-    ``defaults.extra_args`` rides the untrusted ``model_extra_args`` argv
-    segment, which hard-rejects the §21.7 managed flags at every launch
-    (``slot.managed_arg_denied``). Rows stamped before the screens existed —
-    notably via the unscreened profile stamp of the since-removed
-    ``POST /api/models/{id}/duplicate``, back when 8 seed profiles carried
-    ``-c <N>`` — are therefore
-    bricked: they can never load until the flag is hand-removed. Strip exactly
-    the denylisted tokens (+ values) from every model's ``extra_args`` and log
-    loudly per row. Matching is token-exact via the argv alias table, so
-    ``--model_path``/``--threads-batch`` are never touched; slot-hardware
-    flags (``--threads``/``-dev``) are left alone too — they are functional at
-    launch, so stripping them would change working rows.
-
-    Args:
-        job_id: Optional breadcrumb for structured-log tracing.
-        registry: Model-registry override for tests (anything with ``list()``
-            and ``update(model_id, updates)``). ``None`` uses the real
-            :class:`~hal0.registry.store.ModelRegistry`.
-
-    Returns:
-        Number of model rows sanitized.
-    """
-    import shlex
-
-    from hal0.slots.argv import strip_managed_flags
-
-    if registry is None:
-        from hal0.registry.store import ModelRegistry
-
-        registry = ModelRegistry()
-
-    sanitized = 0
-    for model in registry.list():
-        defaults = getattr(model, "defaults", None)
-        extra = getattr(defaults, "extra_args", None) if defaults is not None else None
-        if not extra or not extra.strip():
-            continue
-        try:
-            tokens = shlex.split(extra)
-        except ValueError:
-            continue  # malformed quoting — leave for the edit-path screens
-        clean, removed = strip_managed_flags(tokens)
-        if not removed:
-            continue
-        defaults_dict = defaults.model_dump(mode="python")
-        defaults_dict["extra_args"] = " ".join(shlex.quote(tok) for tok in clean)
-        try:
-            registry.update(model.id, {"defaults": defaults_dict})
-        except Exception as exc:
-            log.warning(
-                "updater.extra_args_sanitize_write_failed",
-                job_id=job_id,
-                model=model.id,
-                error=str(exc),
-            )
-            continue
-        sanitized += 1
-        log.warning(
-            "updater.model_extra_args_sanitized",
-            job_id=job_id,
-            model=model.id,
-            removed=removed,
-            note=(
-                "defaults.extra_args carried hal0-managed flag(s) the launcher "
-                "hard-rejects (slot.managed_arg_denied); stripped so the model "
-                "can load again. Context/port/host come from the slot config."
-            ),
-        )
-    return sanitized
-
-
 def converge_kfd_group(*, job_id: str | None = None) -> str:
     """Align ``/dev/kfd``'s group with the render node's. PRIVILEGED CALLERS ONLY.
 
@@ -2746,7 +2466,7 @@ def relabel_stale_vulkan_slots(
 
     On an AMD host, for every slot TOML with a literal ``device =
     "gpu-vulkan"`` (top-level or nested under ``[slot]``, the same two-shape
-    handling :func:`clear_stale_mtp_overrides` uses) that is ALSO llama.cpp-backed
+    handling the slot loader accepts) that is ALSO llama.cpp-backed
     (see runtime scope below), relabel ``device`` to:
 
     * ``"gpu-rocm"`` — when :func:`hal0.providers._gpu.rocm_lane_present`
@@ -2797,8 +2517,8 @@ def relabel_stale_vulkan_slots(
     like every other pass in this module, the write goes through
     :func:`~hal0.config.loader.write_toml_atomic`, which reserializes the
     whole parsed document via ``tomli_w`` — so any comments in a touched
-    slot's TOML are dropped on that rewrite, exactly as they are for
-    :func:`clear_stale_mtp_overrides`.
+    slot's TOML are dropped on that rewrite, as they are for every other
+    pass here.
     Image scope — #1948, and the reason this pass is no longer a blanket
     rescue: the Vulkan LLM lane is supported again, on a runner image whose
     Vulkan backend passed validation. Under #1923 every ``gpu-vulkan`` llama
@@ -3728,9 +3448,7 @@ _MIGRATION_RESULT_KEY = "hal0_migration_result"
 #: still surfaces in commit()'s convergence report.
 _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.registry_toml_retire_failed",
-    "updater.mtp_migration_failed",
     "updater.vulkan_migration_failed",
-    "updater.extra_args_sanitize_failed",
     "updater.retired_skills_prune_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",
@@ -4024,8 +3742,8 @@ class Updater:
         Slot units are NOT restarted and ``hal0-api`` is not bounced here; the
         route layer (``routes/updater._run_commit_job``) try-restarts hal0-api
         fail-soft after a successful commit. Returns the same breadcrumb dict
-        shape as the old single-step apply, plus ``convergence`` — see
-        :func:`convergence_report`.
+        shape as the old single-step apply, plus ``convergence`` (what the
+        post-activation conversions changed).
 
         Args:
             version: the version ``prepare()`` staged.
@@ -4066,25 +3784,6 @@ class Updater:
         # _run_post_activation_migrations_after_swap for why an in-process call
         # here executed the OUTGOING version's migrations, never the incoming
         # release's.
-
-        # spec-hw-slot-ownership §6 / spec-flags-ownership §5 one-shot folds are
-        # still NOT auto-run here — see detect_pending_ownership_migrations()
-        # for the three concrete reasons (the folds refuse to run under a live
-        # runtime, and commit() IS the live runtime). What HAS changed is that
-        # they are no longer silently skipped: step 7f below runs each fold's
-        # write-free planner and the result rides out on the job so an operator
-        # is told, by name and with the exact command, what is still outstanding.
-
-        # Step 7f: write-free detection of the deploy-window ownership folds this
-        # box still owes. Runs before the swap so the report describes the state
-        # the operator is actually being handed.
-        try:
-            pending_ownership = await asyncio.to_thread(
-                detect_pending_ownership_migrations, job_id=self.job_id
-            )
-        except Exception as exc:
-            log.warning("updater.ownership_detect_failed", job_id=self.job_id, error=str(exc))
-            pending_ownership = {"pending": [], "detail": {}, "commands": [], "error": str(exc)}
 
         # Step 8 + 8b: atomic symlink swap + venv re-pip, as ONE privileged
         # operation (`activate_release`). The venv imports hal0 from its own
@@ -4172,10 +3871,6 @@ class Updater:
             previous=str(prior) if prior else None,
         )
 
-        # A commit that swapped the tree but left the box on the pre-v1.0 slot /
-        # model shape is not "done" — surface exactly what is outstanding so the
-        # CLI can refuse to call it a clean success.
-        #
         # `pass_warnings` (#1960 B2) does NOT factor into `ok`/`converged`:
         # those five passes are independently best-effort BY DESIGN (see
         # run_post_activation_migrations's own docstring — an affected slot
@@ -4185,7 +3880,6 @@ class Updater:
         # journalctl; it is now visible here too, without reclassifying a
         # long-standing non-fatal outcome as a hard one.
         convergence = {
-            "ownership_migrations": pending_ownership,
             "post_activation_migrations": {
                 "ok": migrations_error is None,
                 "from": migration_info[0],
@@ -4193,13 +3887,12 @@ class Updater:
                 "error": migrations_error,
                 "pass_warnings": pass_warnings,
             },
-            "converged": not pending_ownership.get("pending") and migrations_error is None,
+            "converged": migrations_error is None,
         }
         log.info(
             "updater.convergence",
             job_id=self.job_id,
             converged=convergence["converged"],
-            ownership_pending=pending_ownership.get("pending"),
             post_activation_migrations_ok=migrations_error is None,
             post_activation_migrations_pass_warnings=pass_warnings,
         )
@@ -4370,8 +4063,6 @@ __all__ = [
     "assert_release_dir_name",
     "assert_trusted_release_dir",
     "check_outstanding_migrations",
-    "convergence_report",
-    "detect_pending_ownership_migrations",
     "discard_release",
     "fetch_release_manifest",
     "refresh_gpu_perms_unit",
@@ -4381,7 +4072,6 @@ __all__ = [
     "releases_url",
     "remove_retired_artifacts",
     "run_post_activation_migrations",
-    "sanitize_model_extra_args",
     "stage_release",
     "validate_manifest_for_channel",
 ]

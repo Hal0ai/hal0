@@ -8,7 +8,6 @@ is either a reported launch change or a blocked slot, never silent.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +16,7 @@ from typer.testing import CliRunner
 
 from hal0.config import paths
 from hal0.config.migrations import profile_centric as pc
-from hal0.db.repository import model_to_row
-from hal0.registry.model import Model, ModelDefaults
+from tests.config.profile_centric_fixtures import old_model, write_db
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -26,42 +24,12 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.write_bytes(tomli_w.dumps(data).encode())
 
 
-def _db(models: list[Model], holding: list[dict[str, Any]] | None = None) -> None:
-    rows = [model_to_row(m) for m in models]
-    target = paths.db_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
-    cols = list(rows[0])
-    conn.execute(f"CREATE TABLE model ({', '.join(cols)})")
-    for row in rows:
-        conn.execute(
-            f"INSERT INTO model ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
-            [row[c] for c in cols],
-        )
-    if holding is not None:
-        conn.execute(
-            f"CREATE TABLE {pc.HOLDING_TABLE} (id, profile, extra_args, n_gpu_layers, "
-            "context_size, rope_freq_base, preferred_runner, enable_thinking, vision)"
-        )
-        for h in holding:
-            keys = list(h)
-            conn.execute(
-                f"INSERT INTO {pc.HOLDING_TABLE} ({', '.join(keys)}) "
-                f"VALUES ({', '.join('?' for _ in keys)})",
-                [h[k] for k in keys],
-            )
-    conn.commit()
-    conn.close()
+def _db(models: list[dict[str, Any]], *, upgraded: bool = False) -> None:
+    write_db(models, upgraded=upgraded)
 
 
-def _model(model_id: str = "m", **kw: Any) -> Model:
-    defaults = kw.pop("defaults", None)
-    return Model(
-        id=model_id,
-        path=kw.pop("path", f"/models/{model_id}.gguf"),
-        defaults=ModelDefaults(**defaults) if defaults else None,
-        **kw,
-    )
+def _model(model_id: str = "m", **kw: Any) -> dict[str, Any]:
+    return old_model(model_id, path=kw.pop("path", f"/models/{model_id}.gguf"), **kw)
 
 
 def _slot(stem: str = "1", **kw: Any) -> None:
@@ -320,8 +288,13 @@ def test_only_the_file_the_loader_uses_is_planned() -> None:
 def test_holding_table_supplies_model_tuning() -> None:
     _slot(profile="chat")
     _db(
-        [_model(metadata={"context_length": 262144})],
-        holding=[{"id": "m", "context_size": 50000, "enable_thinking": 1}],
+        [
+            _model(
+                metadata={"context_length": 262144},
+                defaults={"context_size": 50000, "enable_thinking": True},
+            )
+        ],
+        upgraded=True,
     )
     plan = pc.plan_conversion()
     sp = _one(plan)

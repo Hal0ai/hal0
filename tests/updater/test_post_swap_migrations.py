@@ -136,10 +136,8 @@ def test_a_1_3_child_script_still_imports_and_runs(monkeypatch: pytest.MonkeyPat
         return (1, 1)
 
     monkeypatch.setattr(updater_module, "_maybe_run_config_migrations", _fake_config_migrations)
-    monkeypatch.setattr(updater_module, "clear_stale_mtp_overrides", lambda **_k: 0)
     monkeypatch.setattr(updater_module, "repair_hermes_mcp_client", lambda **_k: True)
     monkeypatch.setattr(updater_module, "relabel_stale_vulkan_slots", lambda **_k: 0)
-    monkeypatch.setattr(updater_module, "sanitize_model_extra_args", lambda **_k: 0)
     monkeypatch.setattr("hal0.components.runner.converge_components", lambda **_k: {}, raising=True)
 
     result = updater_module.run_post_activation_migrations(
@@ -185,7 +183,7 @@ def test_pass_warnings_surfaced_when_a_nonfatal_pass_logs_a_failure(
     the subprocess with rc=0 (by design) — that warning must not be
     silently discarded; it belongs in the returned pass_warnings list."""
     child_stderr = (
-        "2026-08-20T00:00:00Z [warning] updater.mtp_migration_failed error=boom job_id=j4\n"
+        "2026-08-20T00:00:00Z [warning] updater.vulkan_migration_failed error=boom job_id=j4\n"
     )
 
     def _fake_run(cmd, *a, **k):
@@ -194,7 +192,7 @@ def test_pass_warnings_surfaced_when_a_nonfatal_pass_logs_a_failure(
     monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j4"))
-    assert result["pass_warnings"] == ["updater.mtp_migration_failed"]
+    assert result["pass_warnings"] == ["updater.vulkan_migration_failed"]
 
 
 def test_no_pass_warnings_on_a_clean_run(monkeypatch: pytest.MonkeyPatch) -> None:
