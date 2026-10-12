@@ -69,7 +69,7 @@ async function capturePut(page: import('@playwright/test').Page) {
 async function openDrawer(page: import('@playwright/test').Page) {
   await page.goto('/#models')
   await page.locator('button:has-text("Edit options")').first().click()
-  await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
+  await expect(page.getByTestId('model-chat-template')).toBeVisible()
 }
 
 /**

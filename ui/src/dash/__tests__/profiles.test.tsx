@@ -318,22 +318,17 @@ describe('ProfileDrawer runtime select (U2)', () => {
     act(() => root.unmount())
   })
 
-  it('demotes Quant to the Advanced disclosure, prefilled on edit', () => {
+  it('has no Quant or Advanced section any more (quant left the profile)', () => {
     const { host, root } = mount(
       React.createElement(ProfileDrawer, {
         mode: 'edit',
-        source: { name: 'brain', flags: '', quant: 'Q8_0' },
+        source: { name: 'brain', flags: '' },
         onClose: () => {},
         onSaved: () => {},
       }),
     )
+    expect(host.querySelector('[data-testid="pf-advanced-toggle"]')).toBeNull()
     expect(host.querySelector('[data-testid="pf-input-quant"]')).toBeNull()
-    const toggle = host.querySelector('[data-testid="pf-advanced-toggle"]') as HTMLButtonElement
-    expect(toggle).toBeTruthy()
-    act(() => toggle.click())
-    const quant = host.querySelector('[data-testid="pf-input-quant"]') as HTMLInputElement
-    expect(quant).toBeTruthy()
-    expect(quant.value).toBe('Q8_0')
     act(() => root.unmount())
   })
 
@@ -435,7 +430,8 @@ describe('ProfileCard runtime facts (U3)', () => {
   it('a pinned dual-backend runtime renders one chip PER lane, plus state and blurb', () => {
     const { host, root } = card({
       name: 'coding', intent: 'Coder tune', runner: 'standard',
-      runtime_family: 'llama-server', quant: 'Q6_K', flags: '--jinja', used_by: ['agent'],
+      runtime_family: 'llama-server', flags: '-fa on', ctx_size: 65536,
+      enable_thinking: false, vision: 'off', mtp: 'off', used_by: ['agent'],
     })
     const chips = Array.from(
       host.querySelectorAll('[data-testid="pf-runner-badge-coding"] .pf-be'),
@@ -448,8 +444,7 @@ describe('ProfileCard runtime facts (U3)', () => {
       'Standard — llama.cpp for AMD GPUs, on ROCm or Vulkan.',
     )
     // No layout regression: the existing rows and footer tags stay put.
-    expect(host.textContent).toContain('Q6_K')
-    expect(host.textContent).toContain('--jinja')
+    expect(host.textContent).toContain('-fa on')
     expect(host.textContent).toContain('used by 1')
     act(() => root.unmount())
   })
@@ -547,6 +542,227 @@ async function openImportWith(report: Record<string, unknown>) {
 function confirmBtn(host: HTMLElement) {
   return host.querySelector('[data-testid="pf-import-confirm"]') as HTMLButtonElement
 }
+
+// ── ADR-0029: the profile owns the whole tune ───────────────────────────────
+
+const field = (host: HTMLElement, testid: string) =>
+  host.querySelector(`[data-testid="${testid}"]`) as HTMLElement
+
+function setValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, value: string) {
+  const proto =
+    el instanceof window.HTMLSelectElement
+      ? window.HTMLSelectElement.prototype
+      : el instanceof window.HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')!.set!
+  act(() => {
+    setter.call(el, value)
+    el.dispatchEvent(new Event(el instanceof window.HTMLSelectElement ? 'change' : 'input', { bubbles: true }))
+  })
+}
+
+async function submit(host: HTMLElement) {
+  await act(async () => {
+    field(host, 'pf-btn-submit').click()
+  })
+}
+
+describe('ProfileDrawer tune fields (ADR-0029)', () => {
+  const drawer = (mode: string, source?: Record<string, unknown>) =>
+    mount(React.createElement(ProfileDrawer, { mode, source, onClose: () => {}, onSaved: () => {} }))
+
+  it('a new profile defaults to context native, thinking auto, vision auto, MTP auto', () => {
+    const { host, root } = drawer('create')
+    expect((field(host, 'pf-input-ctx') as HTMLInputElement).value).toBe('')
+    expect((field(host, 'pf-select-thinking') as HTMLSelectElement).value).toBe('auto')
+    expect((field(host, 'pf-select-vision') as HTMLSelectElement).value).toBe('auto')
+    expect((field(host, 'pf-select-mtp') as HTMLSelectElement).value).toBe('auto')
+    act(() => root.unmount())
+  })
+
+  it('prefills every tune field on edit', () => {
+    const { host, root } = drawer('edit', {
+      name: 'tuned', flags: '-fa on', ctx_size: 65536, enable_thinking: true, vision: 'off', mtp: 'off',
+    })
+    expect((field(host, 'pf-input-ctx') as HTMLInputElement).value).toBe('65536')
+    expect((field(host, 'pf-select-thinking') as HTMLSelectElement).value).toBe('on')
+    expect((field(host, 'pf-select-vision') as HTMLSelectElement).value).toBe('off')
+    expect((field(host, 'pf-select-mtp') as HTMLSelectElement).value).toBe('off')
+    act(() => root.unmount())
+  })
+
+  it('maps the fields onto the wire shape: ctx_size int, enable_thinking tri-state, vision/mtp auto|off', async () => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'my-tune')
+    setValue(field(host, 'pf-input-ctx') as HTMLInputElement, '32768')
+    setValue(field(host, 'pf-select-thinking') as HTMLSelectElement, 'off')
+    setValue(field(host, 'pf-select-vision') as HTMLSelectElement, 'off')
+    setValue(field(host, 'pf-select-mtp') as HTMLSelectElement, 'off')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '-fa on -b 2048')
+    await submit(host)
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0]).toEqual({
+      name: 'my-tune',
+      flags: '-fa on -b 2048',
+      ctx_size: 32768,
+      enable_thinking: false,
+      vision: 'off',
+      mtp: 'off',
+      intent: '',
+      runner: '',
+    })
+    act(() => root.unmount())
+  })
+
+  it('never sends the removed fields (backend, device_class, quant, boolean mtp)', async () => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'plain')
+    await submit(host)
+    const body = createCalls[0] as Record<string, unknown>
+    for (const k of ['backend', 'device_class', 'quant']) expect(body).not.toHaveProperty(k)
+    expect(typeof body.mtp).toBe('string')
+    // An empty context on a create is simply omitted (native window).
+    expect(body).not.toHaveProperty('ctx_size')
+    act(() => root.unmount())
+  })
+
+  it('clearing the context on an edit sends ctx_size: null; thinking Auto sends null', async () => {
+    const { host, root } = drawer('edit', {
+      name: 'tuned', flags: '', ctx_size: 65536, enable_thinking: true, vision: 'auto', mtp: 'auto',
+    })
+    setValue(field(host, 'pf-input-ctx') as HTMLInputElement, '')
+    setValue(field(host, 'pf-select-thinking') as HTMLSelectElement, 'auto')
+    await submit(host)
+    const call = updateCalls[0] as { name: string; body: Record<string, unknown> }
+    expect(call.body.ctx_size).toBeNull()
+    expect(call.body.enable_thinking).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it.each([
+    ['64', 'between 128 and 16,777,216'],
+    ['16777217', 'between 128 and 16,777,216'],
+    ['32k', 'whole number'],
+  ])('rejects ctx %s inline and does not save', async (value, msg) => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'bad-ctx')
+    setValue(field(host, 'pf-input-ctx') as HTMLInputElement, value)
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain(msg)
+    act(() => root.unmount())
+  })
+
+  it('accepts the bounds 128 and 16777216', async () => {
+    for (const v of ['128', '16777216']) {
+      createCalls.length = 0
+      const { host, root } = drawer('create')
+      setValue(field(host, 'pf-input-name') as HTMLInputElement, 'edge')
+      setValue(field(host, 'pf-input-ctx') as HTMLInputElement, v)
+      await submit(host)
+      expect((createCalls[0] as Record<string, unknown>).ctx_size).toBe(Number(v))
+      act(() => root.unmount())
+    }
+  })
+
+  it.each([
+    ['--jinja', '--jinja'],
+    ['--chat-template chatml', '--chat-template'],
+    ['--chat-template-file /x/t.jinja', '--chat-template-file'],
+    ['--mmproj /x/m.gguf', '--mmproj'],
+    ['--no-mmproj', '--no-mmproj'],
+    ['--spec-draft-device ROCm0', '--spec-draft-device'],
+    ['--reasoning-format none', '--reasoning-format none'],
+  ])('rejects the model-fact flag %s inline (profiles.model_fact_flag_denied)', async (flags, named) => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'bad-flags')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, `-fa on ${flags}`)
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain(`${named} can't be set on a profile`)
+    act(() => root.unmount())
+  })
+
+  it('still rejects hardware and managed flags, and allows a reasoning format other than none', async () => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'hw')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '-ngl 99')
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain('belongs on the slot')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '--ctx-size 4096')
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain('computed by hal0')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '--reasoning-format deepseek')
+    await submit(host)
+    expect(createCalls).toHaveLength(1)
+    act(() => root.unmount())
+  })
+
+  it('a stored hardware flag is refused on save too — no grandfathering', async () => {
+    const { host, root } = drawer('edit', { name: 'old', flags: '-fa on --threads 8' })
+    await submit(host)
+    expect(updateCalls).toHaveLength(0)
+    expect(host.textContent).toContain('belongs on the slot')
+    act(() => root.unmount())
+  })
+
+  it('a stored model-fact flag is refused on save too — no grandfathering', async () => {
+    const { host, root } = drawer('edit', { name: 'old', flags: '-fa on --jinja' })
+    setValue(field(host, 'pf-input-ctx') as HTMLInputElement, '8192')
+    await submit(host)
+    expect(updateCalls).toHaveLength(0)
+    expect(host.textContent).toContain("--jinja can't be set on a profile")
+    // Removing the flag releases the save.
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '-fa on')
+    await submit(host)
+    expect(updateCalls).toHaveLength(1)
+    act(() => root.unmount())
+  })
+
+  it('reports the saved name to onSaved so the slot drawer can point at a fork', async () => {
+    const saved: unknown[] = []
+    const { host, root } = mount(
+      React.createElement(ProfileDrawer, {
+        mode: 'clone',
+        source: { name: 'chat', flags: '-fa on', seed: true },
+        onClose: () => {},
+        onSaved: (n: unknown) => saved.push(n),
+      }),
+    )
+    await submit(host)
+    expect(saved).toEqual(['chat-custom'])
+    act(() => root.unmount())
+  })
+})
+
+describe('ProfileCard tune rows (ADR-0029)', () => {
+  it('shows ctx, thinking, vision, MTP, runner and flags', () => {
+    const { host, root } = card({
+      name: 'tuned', flags: '-fa on', resolved_flags: '-fa on', ctx_size: 65536,
+      enable_thinking: false, vision: 'off', mtp: 'off', runner: 'standard',
+    })
+    const rows = (host.querySelector('[data-testid="pf-tune-tuned"]') as HTMLElement).textContent || ''
+    expect(rows).toContain('ctx64K')
+    expect(rows).toContain('thinkingoff')
+    expect(rows).toContain('visionoff')
+    expect(rows).toContain('mtpoff')
+    expect(rows).toContain('runnerStandard')
+    expect(rows).toContain('-fa on')
+    act(() => root.unmount())
+  })
+
+  it('a profile with no ctx_size says it defers to the model, and auto fields read auto', () => {
+    const { host, root } = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', mtp: 'auto' })
+    const rows = (host.querySelector('[data-testid="pf-tune-plain"]') as HTMLElement).textContent || ''
+    expect(rows).toContain('ctxmodel native')
+    expect(rows).toContain('thinkingauto')
+    expect(rows).toContain('runnerauto')
+    act(() => root.unmount())
+  })
+})
 
 describe('ImportModal runtime preview (U5)', () => {
   it('names the envelope runtime by title, with its lane chip and family', async () => {

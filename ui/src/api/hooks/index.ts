@@ -7,7 +7,6 @@
 export * from './useRuntime'
 export * from './useSlots'
 export * from './useModels'
-export * from './useModelSeedProfile'
 export * from './useModelsFeasibility'
 export * from './useBackends'
 export * from './useCapabilities'

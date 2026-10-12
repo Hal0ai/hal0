@@ -22,14 +22,9 @@ describe('footSummary', () => {
       mmproj: false,
       hfRepo: false,
       hfFilename: false,
-      extra: false,
-      profile: false,
-      ctx: false,
       chatTemplate: false,
       mtp: false,
-      thinking: false,
       jinja: false,
-      vision: false,
       any: false,
     }
     const usingSlots = [{ name: 'agent' }]
@@ -43,18 +38,13 @@ describe('footSummary', () => {
       mmproj: false,
       hfRepo: false,
       hfFilename: false,
-      extra: true,
-      profile: false,
-      ctx: true,
-      chatTemplate: false,
+      chatTemplate: true,
       mtp: false,
-      thinking: false,
-      jinja: false,
-      vision: false,
+      jinja: true,
       any: true,
     }
     const usingSlots = [{ name: 'agent' }, { name: 'brain' }]
-    expect(footSummary(changes, usingSlots)).toBe('2 changes — flags · context ⟳ restarts 2 slots: agent · brain')
+    expect(footSummary(changes, usingSlots)).toBe('2 changes — template · overrides ⟳ restarts 2 slots: agent · brain')
   })
 
   it('zero using slots → restart clause omitted', () => {
@@ -64,18 +54,13 @@ describe('footSummary', () => {
       mmproj: false,
       hfRepo: false,
       hfFilename: false,
-      extra: true,
-      profile: false,
-      ctx: true,
-      chatTemplate: false,
+      chatTemplate: true,
       mtp: false,
-      thinking: false,
-      jinja: false,
-      vision: false,
+      jinja: true,
       any: true,
     }
     const usingSlots: { name: string }[] = []
-    expect(footSummary(changes, usingSlots)).toBe('2 changes — flags · context')
+    expect(footSummary(changes, usingSlots)).toBe('2 changes — template · overrides')
   })
 
   it('source fields (hfRepo/hfFilename) dedupe to one display name', () => {
@@ -85,35 +70,25 @@ describe('footSummary', () => {
       mmproj: false,
       hfRepo: true,
       hfFilename: true,
-      extra: false,
-      profile: false,
-      ctx: false,
       chatTemplate: false,
       mtp: false,
-      thinking: false,
       jinja: false,
-      vision: false,
       any: true,
     }
     const usingSlots = [{ name: 'agent' }]
     expect(footSummary(changes, usingSlots)).toBe('1 change — source ⟳ restarts 1 slot: agent')
   })
 
-  it('override fields (mtp/thinking/jinja/vision) dedupe to one display name', () => {
+  it('override fields (mtp/jinja) dedupe to one display name', () => {
     const changes = {
       name: false,
       provider: false,
       mmproj: false,
       hfRepo: false,
       hfFilename: false,
-      extra: false,
-      profile: false,
-      ctx: false,
       chatTemplate: false,
       mtp: true,
-      thinking: true,
-      jinja: false,
-      vision: true,
+      jinja: true,
       any: true,
     }
     const usingSlots = [{ name: 'agent' }]

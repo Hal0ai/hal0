@@ -48,7 +48,6 @@ export const RELOAD_CLASS_FALLBACK = {
   // Every one of these re-renders the slot's Quadlet/ExecStart from config on
   // the next (re)start, so the owning slot unit must be bounced to observe the
   // new value. This is exactly what the NPU page hard-coded as an amber chip.
-  'slot.model.context_size': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
   'slot.npu.embed': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
   'slot.npu.asr': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
 
@@ -69,12 +68,11 @@ export const RELOAD_CLASS_FALLBACK = {
   'slot.image.idle_restore_minutes': { apply_class: 'service-restart', services: [SERVICE_HAL0_API] },
 
   // ── per-model launch defaults (`/api/models/{id}` → ModelDefaults) ──────
-  // A model's stored launch defaults (ctx / gpu-layers / chat-template) are
-  // baked into a slot's argv at launch (§7.1a resolve_argv). A change is
-  // observed only when a slot serving that model is (re)started — the model
-  // registry write itself is immediate, but the running slot keeps its argv.
-  'model.defaults.context_size': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
-  'model.defaults.n_gpu_layers': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
+  // A model's stored file facts (chat template / jinja / MTP heads) are baked
+  // into a slot's argv at launch (§7.1a resolve_argv). A change is observed
+  // only when a slot serving that model is (re)started — the model registry
+  // write itself is immediate, but the running slot keeps its argv. (The
+  // context window and GPU layers are not model settings any more — ADR-0029.)
   'model.defaults.chat_template': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
 }
 

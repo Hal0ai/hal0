@@ -154,7 +154,7 @@ function _health(slot) {
   const m = (slot && slot.metrics) || {};
   const toks = m.toks;
   const ctxUsed = m.ctx;
-  const ctxMax = slot && slot.ctx_max != null ? slot.ctx_max : null;
+  const ctxMax = slot && slot.ctx_effective != null ? slot.ctx_effective : null;
   const ctxPct = ctxUsed != null && ctxMax ? Math.min(100, (ctxUsed / ctxMax) * 100) : 0;
   return {
     tput: toks != null && toks > 0 ? Math.round(toks) + " tok/s" : null,

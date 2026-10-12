@@ -177,7 +177,7 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.err').first()).toContainText('Inspect failed')
   })
 
-  test('Recipe editor opens, pre-fills defaults, writes PUT /api/models/{id}', async ({ page }) => {
+  test('Model drawer opens and writes file facts only via PUT /api/models/{id}', async ({ page }) => {
     let putBody: any = null
     await page.route('**/api/models/qwen3.6-27b-mtp', async (route) => {
       if (route.request().method() === 'PUT') {
@@ -196,10 +196,15 @@ test.describe('Models v3 (/models)', () => {
 
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').click()
-    const ctx = page.locator('input[placeholder*="8192"]')
-    await ctx.fill('16384')
+    // ADR-0029: the context window is a profile tune; the drawer has no input
+    // for it and shows the native window read-only.
+    await expect(page.locator('input[placeholder*="8192"]')).toHaveCount(0)
+    await page.getByTestId('model-cap-override-add').click()
+    await page.getByTestId('model-cap-override-add-jinja-off').click()
     await page.getByTestId('model-save').click()
-    await expect.poll(() => putBody?.defaults?.context_size).toBe(16384)
+    await expect.poll(() => putBody?.defaults?.jinja).toBe(false)
+    expect(putBody.defaults).not.toHaveProperty('context_size')
+    expect(putBody.defaults).not.toHaveProperty('extra_args')
   })
 
   test('Delete cascade reads affected_slots from DELETE response', async ({ page }) => {

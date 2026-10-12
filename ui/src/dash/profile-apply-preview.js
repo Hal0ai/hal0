@@ -31,26 +31,81 @@ export function laneTitle(lane) {
 	return LANE_TITLE[lane] || lane;
 }
 
-// Concatenate a flag base with an overlay the way the launcher does: the
-// profile's tune is appended AFTER the model tune, and diffFlags' pair map is
-// last-wins, so the joined text reads as the effective launch tune.
-function joinFlags(base, overlay) {
-	return [base, overlay]
-		.map((s) => String(s || "").trim())
-		.filter(Boolean)
-		.join(" ");
+// Device token → device class (gpu | npu | cpu | img). Mirrors the server's
+// slots/profile_adopt.py: gpu-* is "gpu"; npu/cpu/img are themselves; anything
+// else reads as cpu.
+function deviceClassOf(device) {
+	const d = String(device || "");
+	if (d.startsWith("gpu")) return "gpu";
+	return ["npu", "cpu", "img"].includes(d) ? d : "cpu";
 }
 
 /**
- * Apply preview for a profile pick — every consequence of "profile wins" in
- * one structure, computed BEFORE anything is written (mockup panel 12 for the
- * drawer's Save; panel 02 for the slot card's apply confirm).
+ * Does `profile` fit a slot? The client twin of the server's
+ * `resolved_profile_fits_slot` (slots/profile_adopt.py), so the pickers never
+ * offer a profile the server would refuse:
+ *   · the slot's type must be one the profile supports
+ *     (`supported_slot_types`, which follows its runtime family);
+ *   · a profile that pins a `runner` must pin one whose device class matches
+ *     the slot's device. The runner's class comes from the system-info
+ *     `backends` catalog; an empty catalog (not loaded yet) vetoes nothing, and
+ *     a key the loaded catalog does not carry never fits.
+ * A profile pinning no runner fits any device.
+ */
+export function profileFitsSlot(profile, { type, device } = {}, backends = {}) {
+	if (!profile) return false;
+	const types = profile.supported_slot_types;
+	if (type && Array.isArray(types) && !types.includes(type)) return false;
+	if (device && profile.runner) {
+		const cat = backends || {};
+		if (Object.keys(cat).length === 0) return true;
+		const row = cat[profile.runner];
+		if (!row) return false;
+		if (row.device_class && row.device_class !== deviceClassOf(device)) return false;
+	}
+	return true;
+}
+
+// A profile's context window as a short label ("32K"); a profile that sets
+// none defers to the model's native window.
+function ctxText(p) {
+	const n = p?.ctx_size;
+	if (n == null || n === "") return "model native";
+	const v = Number(n);
+	if (v >= 1024 && v % 1024 === 0) return `${v / 1024}K`;
+	return String(v);
+}
+function thinkingText(p) {
+	return p?.enable_thinking === true ? "on" : p?.enable_thinking === false ? "off" : "auto";
+}
+const offAuto = (v) => (v === "off" ? "off" : "auto");
+
+// The typed tune fields that differ between the outgoing and incoming profile,
+// as [{ label, from, to }] — only the ones that actually change.
+function tuneChanges(next, prev) {
+	const rows = [
+		["context", ctxText(prev), ctxText(next)],
+		["thinking", thinkingText(prev), thinkingText(next)],
+		["vision", offAuto(prev?.vision), offAuto(next?.vision)],
+		["mtp", offAuto(prev?.mtp), offAuto(next?.mtp)],
+	];
+	return rows
+		.filter(([, from, to]) => from !== to)
+		.map(([label, from, to]) => ({ label, from, to }));
+}
+
+/**
+ * Apply preview for a profile pick — every consequence of switching a slot to
+ * another profile, in one structure, computed BEFORE anything is written
+ * (mockup panel 12 for the drawer's Save; panel 02 for the slot card's apply
+ * confirm). ADR-0029: the profile IS the tune, so a swap replaces the whole
+ * tune — flags, context, thinking, vision, MTP and runtime — and nothing from
+ * the model is layered underneath.
  *
  * The lines are DERIVED, never re-guessed: the runtime and lane come out of
  * the same hw-cascade.js `applyRunnerChoice` the Hardware group's Runtime
  * select drives (and that the server's profile-wins reconcile mirrors, Task
- * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`
- * — the same tokenizer the model drawer's divergence hint uses.
+ * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`.
  *
  * A line with nothing true to say is OMITTED rather than faked (`lane: null`,
  * `flags: 0`), with ONE exception the mockup calls out: a profile pinning no
@@ -63,11 +118,12 @@ function joinFlags(base, overlay) {
  * @param options             runnerOptions() rows for this slot
  * @param baselineRunner      the slot's FROZEN persisted binary ('' = auto)
  * @param currentDevice       the slot's pending device enum, e.g. "gpu-rocm"
- * @param modelFlags          the bound model's stamped tune (defaults.extra_args)
- * @param currentProfileFlags the OUTGOING profile's tune ('' = none)
+ * @param currentProfile      the OUTGOING profile row (null = none)
  *
- * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, restart }`
- * or null.
+ * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, tune,
+ * restart }` or null. `flags` counts the flag pairs the swap adds, changes or
+ * drops; `tune` lists the typed fields (context / thinking / vision / mtp)
+ * that differ.
  */
 export function profileApplyPreview({
 	profile,
@@ -75,8 +131,7 @@ export function profileApplyPreview({
 	options,
 	baselineRunner,
 	currentDevice,
-	modelFlags,
-	currentProfileFlags,
+	currentProfile,
 }) {
 	if (!profile) return null;
 	const key = profile.runner || "";
@@ -119,18 +174,15 @@ export function profileApplyPreview({
 		lane = { unchanged: true, from: laneTitle(curLane), to: laneTitle(curLane) };
 	}
 
-	// "replaces N flags": the pairs in THIS profile's tune that the slot does
-	// not already launch with — diffed against the effective current tune
-	// (model stamp + the outgoing profile's overlay), so switching between two
-	// profiles that agree on a flag doesn't bill it as a change.
-	const d = diffFlags(
-		profile.flags || "",
-		joinFlags(modelFlags, currentProfileFlags),
-	);
+	// "changes N flags": the flag pairs that differ between the outgoing and
+	// the incoming profile. The profile is the whole tune now, so a pair the
+	// outgoing profile had and the incoming one lacks counts too.
+	const d = diffFlags(profile.flags || "", currentProfile?.flags || "");
 	return {
 		runtime,
 		lane,
-		flags: d.added.length + d.changed.length,
+		flags: d.added.length + d.changed.length + d.removed.length,
+		tune: tuneChanges(profile, currentProfile),
 		restart: true,
 	};
 }

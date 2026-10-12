@@ -15,11 +15,15 @@
  *       write of any of the three through PUT /config is hard-rejected
  *       server-side (slot.model_owned_key_denied) — the drawer never sends
  *       them. The tests below assert the pills/group are absent.
+ *       ADR-0029 then moved the tune itself onto the PROFILE: thinking, vision
+ *       and the context window are profile fields, and a slot write carrying
+ *       any tuning key is a 400 slot.tuning_key_denied.
  *   C5. NGL lives in the typed Hardware grid (spec-hw-slot-ownership §2),
  *       a TOP-LEVEL slot-owned field persisted via PUT /config { n_gpu_layers }
  *       (reversing the §5 fold into [model].n_gpu_layers). -1/empty = the "all
- *       layers" default; an untouched field never rides the PUT. ctx_size keeps
- *       its own PATCH /defaults path. The grid also carries device / THREADS /
+ *       layers" default; an untouched field never rides the PUT. The context window
+ *       is NOT a slot field any more (ADR-0029): the drawer shows it read-only.
+ *       The grid also carries device / THREADS /
  *       the Runtime-first cascade (runtime-cascade redesign, ADR-0006): a
  *       single Runtime select (`slot-hw-runtime`, hw-cascade.js's
  *       runnerOptions/applyRunnerChoice) replaces the old Device + Runner
@@ -179,11 +183,6 @@ test.describe('Slot edit controls (/slots)', () => {
       }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    // ctx_size keeps its own /defaults path — stub it so an unrelated write
-    // never falls through to real fetch.
-    await page.route('**/api/slots/primary/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
@@ -192,8 +191,8 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].n_gpu_layers).toBe(24)
-    // NGL is a TOP-LEVEL slot field now, not a [model] default — the untouched
-    // ctx_size must not ride the /config PUT.
+    // NGL is a TOP-LEVEL slot field now, not a [model] default — and no
+    // context key can ride the /config PUT (slot.tuning_key_denied).
     expect(puts[0]).not.toHaveProperty('ctx_size')
   })
 
@@ -533,37 +532,35 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0].npu).toMatchObject({ chat: true, asr: true, embed: false })
   })
 
-  test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {
+  test('C5 — the Context ceiling is gone: no input, no PATCH /defaults, the profile window is shown read-only', async ({ page }) => {
     const patches: any[] = []
+    const puts: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {
       patches.push(JSON.parse(route.request().postData() || '{}'))
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await page.route('**/api/slots/primary/config', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await seedSlots(page, [PRIMARY, EMBED])
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await seedSlots(page, [{ ...PRIMARY, ctx_effective: 32768, ctx_source: 'profile' }, EMBED])
 
     await page.goto('/#slots/primary')
-    // Context is directly visible in the "How it runs" group (not inside
-    // Advanced) — Task 11a moved the ceiling IN from the old Model group
-    // beside the hardware that enforces it. Label reads "Context (ceiling)":
-    // the bound model's own default context_size is authoritative; this
-    // slot value only clamps it down for lighter hardware, it never
-    // overrides it upward.
-    const hwGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
-    })
-    const contextRow = hwGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
-    })
-    await expect(contextRow).toBeVisible()
-    await contextRow.locator('input').fill('16384')
+    // No "Context (ceiling)" row in "How it runs" (ADR-0029) …
+    await expect(
+      page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
+    ).toHaveCount(0)
+    // … the effective window and its source read out next to the Profile row.
+    await expect(page.getByTestId('slot-ctx-effective')).toContainText('32,768')
+    await expect(page.getByTestId('slot-ctx-effective')).toContainText('set by profile')
+
+    // Touch a real field: only that field rides the write; never a context key.
+    await page.getByTestId('slot-hw-advanced').click()
+    await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => patches.length).toBeGreaterThan(0)
-    expect(patches[0].ctx_size).toBe(16384)
-    // Untouched n_gpu_layers (seeded -1 = unset) never rides the PATCH.
-    expect(patches[0]).not.toHaveProperty('n_gpu_layers')
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).toEqual({ n_gpu_layers: 24 })
+    expect(patches).toEqual([])
   })
 
   // #587: the slot-edit drawer used to seed idle_timeout_s / workers /

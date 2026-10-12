@@ -153,25 +153,6 @@ export function UpdatesPage() {
             <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
           </>}
         />
-        {/* #1845/H8: ownership-fold migrations the update installed but did NOT
-            apply (they refuse to rewrite slot TOMLs under a live runtime — see
-            hal0.updater.updater.detect_pending_ownership_migrations). The
-            command lines are printed EXACTLY as the server returns them —
-            including `--stop-services` when it decided units are up — so
-            this can never drift from what `hal0 update`'s own CLI panel
-            prints for the same job. */}
-        {job?.convergence?.ownership_migrations?.pending?.length > 0 && (
-          <div className="s-row" data-testid="updates-convergence-pending">
-            <div className="k"><span style={{color: "var(--warn)"}}>Migrations not yet applied</span></div>
-            <div className="v mono" style={{color: "var(--fg-3)"}}>
-              The new code is installed and running, but the on-disk slot/model shape is not
-              fully migrated. hal0 refuses to rewrite it while live — stop hal0, then run:
-              {job.convergence.ownership_migrations.commands.map((cmd) => (
-                <div key={cmd} style={{marginTop: 4}}>{cmd}</div>
-              ))}
-            </div>
-          </div>
-        )}
         {u.hal0?.revoked && (
           <SRow
             k="Release notice"
@@ -286,7 +267,13 @@ export function UpdatesPage() {
             // The backend swaps the version symlink but does NOT restart
             // services — the running hal0-api keeps serving the current
             // build until the operator bounces it.
-            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Rolled back — restart hal0-api (Settings → Advanced) to run the previous version", "warn"),
+            onSuccess: (res) => {
+              const restored = Array.isArray(res?.profile_conversion_restored) ? res.profile_conversion_restored : [];
+              const note = restored.length
+                ? ` Profile conversion undone: restored ${restored.join(", ")}.`
+                : "";
+              window.__hal0Toast && window.__hal0Toast(`Rolled back — restart hal0-api (Settings → Advanced) to run the previous version.${note}`, "warn");
+            },
             onError: (err) => window.__hal0Toast && window.__hal0Toast(`Rollback failed: ${err?.message || "no previous version retained"}`, "err"),
           });
         }}

@@ -1,22 +1,20 @@
-// MODELS ▸ Model Defaults — per-model launch defaults (ctx / chat template)
-// + the arch/runner resolution reference. Unblocked by ML-4
-// (the runner-image registry + model-config taxonomy); slots into the MODELS
-// group per the old SettingsNav TODO.
+// MODELS ▸ Model Defaults — per-model FILE FACTS (chat template) plus the
+// arch/runner resolution reference. ADR-0029: a model carries facts about its
+// file only. Every tune — context window, flags, thinking, vision, MTP on/off,
+// GPU layers — lives on a profile (Profiles page) and is picked by the slot,
+// so this page no longer edits a context size or GPU layers.
 //
-// spec (b) MODELS▸Defaults: "ctx/quant/per-arch/load-on-start/per-model opts =
-// E reshaped by G[§7.1a/d]". These launch defaults live on the model registry
-// row (ModelDefaults, registry/model.py) — edited via PUT /api/models/{id},
-// NOT /api/settings. A change is written to the registry immediately but is
-// observed only when a slot serving the model is (re)started (the launch argv
-// is resolved at slot start, §7.1a) — hence the "⟳ restart slots" badge, which
-// resolves through the ONE reload-class source (data/reloadClass.js →
-// `model.defaults.*` fallback), not a hand-rolled chip.
+// The chat template is stored on the model registry row (ModelDefaults,
+// registry/model.py) — edited via PUT /api/models/{id}, NOT /api/settings. A
+// change is written to the registry immediately but is observed only when a
+// slot serving the model is (re)started (the launch argv is resolved at slot
+// start) — hence the "⟳ restart slots" badge, which resolves through the ONE
+// reload-class source (data/reloadClass.js → `model.defaults.*` fallback),
+// not a hand-rolled chip.
 //
-// Per-model editing is intentionally the SAME contract the Models-page recipe
-// editor uses (useModelUpdate → PUT /api/models/{id} with a whole-`defaults`
-// object): both surfaces converge on one hook + one backend writer, so there's
-// one owner of the write. This page is the settings-side, defaults-focused
-// view of that surface.
+// Per-model editing is the SAME contract the model drawer uses
+// (useModelUpdate → PUT /api/models/{id} with a `defaults` object): both
+// surfaces converge on one hook + one backend writer.
 import { useState, useEffect } from 'react'
 import { useModels, useModelUpdate } from '@/api/hooks/useModels'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
@@ -25,22 +23,17 @@ import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { _advInputStyle } from '../../shared/SchemaRow.jsx'
 
-// Build the next `defaults` object, preserving any ModelDefaults key this page
-// doesn't surface (mtp/jinja/profile/extra_args/…) by starting from the stored
-// defaults, then writing every key we DO render explicitly — mirrors the recipe
-// editor exactly. Since #1413 the registry merges `defaults` one level deep, so
-// absent means "keep the stored value" and only `null` deletes: an emptied input
-// sends `null` ("launcher default"), never an omitted key.
-function buildDefaultsPatch(init, { ctx, chatTemplate }) {
-  const defaults = { ...init }
-  const ctxNum = ctx.trim() ? parseInt(ctx, 10) : NaN
-  defaults.context_size = Number.isFinite(ctxNum) ? ctxNum : null
-  // #2105: NGL is slot-owned hardware (spec-hw-slot-ownership §2) — it is not a
-  // ModelDefaults field any more (registry/model.py drops it on validation) and
-  // the launcher reads the SLOT's typed n_gpu_layers instead. Send `null` so a
-  // save from here unsets any residual stored value, exactly as model-drawer.jsx
-  // does; the field is no longer offered for editing.
-  defaults.n_gpu_layers = null
+// The next `defaults` object. Facts only (ADR-0029): the server rejects any
+// tuning key under `defaults` with a 422, so the body starts from the stored
+// FACT keys alone — a stale tuning key on a row can never ride along. Since
+// #1413 the registry merges `defaults` one level deep, so absent means "keep
+// the stored value" and only `null` deletes: 'auto' sends `null`, never an
+// omitted key.
+const FACT_KEYS = ['chat_template', 'mtp', 'jinja', 'tokenizer_repo']
+function buildDefaultsPatch(init, { chatTemplate }) {
+  const defaults = Object.fromEntries(
+    FACT_KEYS.filter(k => init[k] !== undefined).map(k => [k, init[k]]),
+  )
   // 'auto' = GGUF-embedded template = absence of an override.
   defaults.chat_template = chatTemplate && chatTemplate !== 'auto' ? chatTemplate : null
   return defaults
@@ -50,27 +43,19 @@ function ModelDefaultsRow({ model, templates }) {
   const update = useModelUpdate()
   const init = model?.defaults || {}
 
-  const origCtx = init.context_size != null ? String(init.context_size) : ''
   const origTpl = init.chat_template ?? 'auto'
 
-  const [ctx, setCtx] = useState(origCtx)
   const [chatTemplate, setChatTemplate] = useState(origTpl)
   useEffect(() => {
-    setCtx(origCtx)
     setChatTemplate(origTpl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model?.id])
 
-  // Mirror the model drawer's ≥ 128 floor (#1378/#1386) and the server's own
-  // range screen (#1414 → 400 model.context_size_out_of_range) so a 0 fails
-  // inline here rather than round-tripping to a red toast.
-  const ctxValid =
-    ctx.trim() === '' || (/^\d+$/.test(ctx.trim()) && Number(ctx.trim()) >= 128)
-  const dirty = ctx !== origCtx || chatTemplate !== origTpl
-  const canSave = dirty && ctxValid && !update.isPending
+  const dirty = chatTemplate !== origTpl
+  const canSave = dirty && !update.isPending
 
   const onSave = async () => {
-    const defaults = buildDefaultsPatch(init, { ctx, chatTemplate })
+    const defaults = buildDefaultsPatch(init, { chatTemplate })
     try {
       await update.mutateAsync({ id: model.id, body: { defaults } })
       window.__hal0Toast && window.__hal0Toast(`Defaults saved for ${model.longName || model.id} — restart its slot to apply`, 'warn')
@@ -79,7 +64,7 @@ function ModelDefaultsRow({ model, templates }) {
     }
   }
 
-  const numStyle = (ok) => ({ ..._advInputStyle, width: 96, borderColor: ok ? 'var(--line)' : 'var(--err)' })
+  const nativeCtx = Number(model?.metadata?.context_length) || null
   const tplOptions = ['auto', ...(templates || []).map(t => t.id)]
 
   return (
@@ -92,7 +77,7 @@ function ModelDefaultsRow({ model, templates }) {
           />
         </div>
         <div className="ac" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <ApplyBadge settingsKey="model.defaults.context_size" />
+          <ApplyBadge settingsKey="model.defaults.chat_template" />
           {dirty && (
             <button className="btn ghost sm" disabled={!canSave} onClick={onSave}>
               {update.isPending ? 'Saving…' : 'Save'}
@@ -101,9 +86,10 @@ function ModelDefaultsRow({ model, templates }) {
         </div>
       </div>
       <SRow
-        k="Context size"
-        sub="ctx tokens · ≥ 128 · empty = model/launcher default"
-        v={<input className="mono" value={ctx} onChange={e => setCtx(e.target.value)} placeholder="auto" style={numStyle(ctxValid)} />}
+        k="Native context"
+        sub="The window this file was trained for · read-only · a slot launches with its profile's ctx_size, falling back to this"
+        mono
+        v={<span style={{ color: 'var(--fg-3)' }} data-testid="model-defaults-native-ctx">{nativeCtx ? `${nativeCtx.toLocaleString('en-US')} tokens` : 'not recorded'}</span>}
       />
       <SRow
         k="Chat template"
@@ -132,21 +118,22 @@ export function ModelDefaultsPage() {
     <div className="s-section">
       <h2>Model Defaults</h2>
       <p className="desc">
-        Per-model launch defaults — context length and chat template. These are stored on the
-        model registry row and resolved into a slot's launch command when it starts, so a change takes
-        effect on the next slot restart. GPU layers are not a model default: NGL is slot-owned
-        hardware, set on the slot's hardware grid.
+        Per-model file facts — the chat template. These are stored on the model registry row and
+        resolved into a slot's launch command when it starts, so a change takes effect on the next
+        slot restart. The context window, flags, thinking, vision and MTP are not model settings:
+        they belong to a profile (Profiles page), and the slot picks the profile. GPU layers are
+        slot-owned hardware, set on the slot's hardware grid.
       </p>
 
       {/* ── Resolution reference (read-only meta) ────────────────────────── */}
       <div className="s-panel">
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-          <div className="k"><span>Defaults resolution</span><FieldInfoIcon description="how launch flags are chosen · REWORK §D" /></div>
+          <div className="k"><span>Defaults resolution</span><FieldInfoIcon description="how launch flags are chosen · ADR-0029" /></div>
         </div>
         <SRow
           k="Precedence"
-          sub="Later wins — model defaults sit near the end, before slot overrides"
-          v={<span className="mono" style={{ color: 'var(--fg-3)', fontSize: 11 }}>runner → profile → arch/family → model defaults → slot overrides</span>}
+          sub="Later wins — the profile's tune is the main layer"
+          v={<span className="mono" style={{ color: 'var(--fg-3)', fontSize: 11 }}>base → model facts → profile → slot placement</span>}
         />
         <SRow k="Runtime families" sub="Arch/family default flags ship in the runner registry" mono v={<span style={{ color: 'var(--fg-3)' }}>{(enums.runtime_families || []).join(' · ') || '—'}</span>} />
         <SRow k="Chat templates" sub="Templates pinnable as a per-model default (/api/chat-templates)" mono v={<span style={{ color: 'var(--fg-3)' }}>{templates.length ? `${templates.length} available` : 'auto only'}</span>} />
@@ -154,7 +141,7 @@ export function ModelDefaultsPage() {
 
       {/* ── Per-model defaults ───────────────────────────────────────────── */}
       <div style={{ marginTop: 14, marginBottom: 8 }}>
-        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>Per-model defaults · stored on the registry row · <span style={{ color: 'var(--fg-3)' }}>PUT /api/models/&lt;id&gt;</span></span>
+        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>Per-model file facts · stored on the registry row · <span style={{ color: 'var(--fg-3)' }}>PUT /api/models/&lt;id&gt;</span></span>
       </div>
 
       {modelsQuery.isPending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>Loading models…</div>}

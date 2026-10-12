@@ -444,6 +444,23 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- The dashboard follows the profile-centric config (ADR-0029). A profile now
+  holds the whole tune: the profile drawer gains context size (128 to
+  16,777,216 tokens), thinking (Auto, On, Off), vision (Auto, Off) and MTP
+  (Auto, Off), and loses backend, device class and quant. The profile screen
+  also rejects the model-fact flags (`--jinja`, `--chat-template`,
+  `--chat-template-file`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`),
+  `--spec-draft-device` and `--reasoning-format none`. The model drawer keeps
+  only file facts (chat template, jinja, MTP heads) and shows the native
+  context window read-only. Its flag editor, "Seed from profile", divergence
+  diff, context input and Thinking and Vision overrides are gone. The slot
+  drawer drops the context ceiling, shows the effective context and where it
+  came from, and adds "Edit profile" and "Duplicate & edit" next to the
+  profile picker. The stacks editor drops its per-row MTP control, and the
+  Updates page drops the pending-migrations panel. A slot the conversion
+  could not convert gets a "Conversion blocked" badge on its card and in its
+  drawer, with the reason, the fix, and a note when it is still running its
+  pre-conversion tune. This needs a server with the matching API change.
 - ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
   `Runner.is_default` as the one record of whether a runtime is a default.
   Default: ROCmFPX, CPU, NPU (FastFlowLM), Kokoro speech, Moonshine

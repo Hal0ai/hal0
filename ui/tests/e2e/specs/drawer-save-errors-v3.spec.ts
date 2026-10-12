@@ -10,9 +10,9 @@
  *   2. the operator's edits are still in the fields afterwards,
  *   3. the backend's error-envelope `message` is surfaced verbatim (the client
  *      lifts `{error:{code,message,details}}` in src/api/client.ts),
- *   4. a failed FIRST write short-circuits the second one (the drawer's Save
- *      is a two-step PATCH /defaults → PUT /config; a defaults failure must
- *      not leave a half-applied config behind),
+ *   4. a failed config write never restarts the slot (ADR-0029: Save is a
+ *      single PUT /config — there is no PATCH /defaults leg any more — and the
+ *      restart is only fired after that write lands),
  *   5. an instant-apply toggle that the server rejects REVERTS to server truth
  *      instead of lying about the new state.
  *
@@ -68,9 +68,6 @@ test.describe('Slot drawer — rejected writes', () => {
         ),
       }),
     )
-    await page.route('**/api/slots/primary/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
     await seedSlots(page, [PRIMARY])
 
     await page.goto('/#slots/primary')
@@ -87,43 +84,35 @@ test.describe('Slot drawer — rejected writes', () => {
     await expect(page.getByTestId('slot-hw-ngl')).toHaveValue('24')
   })
 
-  test('E2 — a failed PATCH /defaults short-circuits the /config PUT', async ({ page }) => {
-    // Save is a two-step write: defaults FIRST, then config. If the first leg
-    // fails the second must not fire, or the slot ends up half-applied.
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/primary/defaults', (route) =>
+  test('E2 — a failed /config PUT never restarts the slot', async ({ page }) => {
+    // Save writes the placement keys in one PUT /config and only THEN fires the
+    // background restart. If the write fails the restart must not run, or the
+    // slot cold-restarts onto a config that never landed.
+    const restarts: string[] = []
+    await page.route('**/api/slots/primary/config', (route) =>
       route.fulfill({
         status: 500,
         contentType: 'application/json',
         body: envelope('slot.config_write_failed', 'failed to rewrite primary.toml'),
       }),
     )
+    await page.route('**/api/slots/primary/restart', async (route) => {
+      restarts.push(route.request().url())
+      await route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+    })
     await seedSlots(page, [PRIMARY])
 
     await page.goto('/#slots/primary')
-    // Touch BOTH legs: ctx_size rides /defaults, NGL rides /config. Context
-    // (ceiling) lives in the "How it runs" group now (Task 11a moved it IN
-    // from the old Model group); NGL is behind the Advanced disclosure.
-    const hwGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
-    })
-    await hwGroup
-      .locator('.form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
-      .locator('input')
-      .fill('16384')
+    // NGL is behind the Advanced disclosure; it is a hardware key, so a
+    // successful write WOULD restart.
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
     await drawer(page).locator('button:has-text("Save")').click()
 
     await expect(drawer(page)).toContainText('failed to rewrite primary.toml')
     await expect(drawer(page)).toBeVisible()
-    // The second leg never ran.
-    expect(puts).toEqual([])
+    await page.waitForTimeout(250)
+    expect(restarts).toEqual([])
   })
 
   test('E3 — a rejected model swap surfaces inline and leaves the drawer open', async ({ page }) => {
@@ -135,9 +124,6 @@ test.describe('Slot drawer — rejected writes', () => {
       }),
     )
     await page.route('**/api/slots/primary/config', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/primary/defaults', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
     )
     await seedSlots(page, [
@@ -215,16 +201,7 @@ test.describe('Model drawer — rejected writes', () => {
   async function openDrawer(page: Page) {
     await page.goto('/#models')
     await page.locator('button:has-text("Edit options")').first().click()
-    await expect(page.getByTestId('model-tune-raw-toggle')).toBeVisible()
-  }
-
-  /** model-drawer-2 Task 4: the tune editor rests on grouped pills, and the
-   *  flags TEXTAREA is the raw view behind the toggle. These cases are about
-   *  the flags string itself (managed-arg screening, an unbalanced quote), so
-   *  they reach it the way an operator would — through raw mode. */
-  async function showRawFlags(page: Page) {
-    await page.getByTestId('model-tune-raw-toggle').click()
-    await expect(page.getByTestId('model-flags-input')).toBeVisible()
+    await expect(page.getByTestId('model-chat-template')).toBeVisible()
   }
 
   test('E5 — a rejected PUT keeps the drawer open with edits intact', async ({ page }) => {
@@ -252,7 +229,9 @@ test.describe('Model drawer — rejected writes', () => {
     await page.getByTestId('model-title-edit').click()
     await page.getByTestId('model-title-input').fill('Renamed while failing')
     await page.getByTestId('model-title-input').press('Enter')
-    await page.getByTestId('model-ctx-input').fill('16384')
+    // A second, unrelated edit (a file fact): jinja marked unsupported.
+    await page.getByTestId('model-cap-override-add').click()
+    await page.getByTestId('model-cap-override-add-jinja-off').click()
     await page.getByTestId('model-save').click()
 
     await expect.poll(() => puts).toBe(1)
@@ -265,52 +244,12 @@ test.describe('Model drawer — rejected writes', () => {
     await expect(
       page.locator('.drawer.open h2 > span > span').first(),
     ).toHaveText('Renamed while failing')
-    await expect(page.getByTestId('model-ctx-input')).toHaveValue('16384')
+    await expect(page.getByTestId('model-cap-override-jinja')).toContainText('off')
   })
 
-  test('E6 — a hal0-managed flag blocks Save client-side before any PUT', async ({ page }) => {
-    // `--port` is owned by the launch path; the drawer refuses it locally so the
-    // operator gets the message without a round-trip (the server screens it too,
-    // via screen_model_write).
-    await stubLookups(page)
-    let puts = 0
-    await page.route(`**/api/models/${MODEL_ID}`, async (route) => {
-      if (route.request().method() === 'PUT') {
-        puts += 1
-        return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-      }
-      return route.fallback()
-    })
-
-    await openDrawer(page)
-    await showRawFlags(page)
-    await page.getByTestId('model-flags-input').fill('--port 9999')
-
-    await expect(page.getByTestId('model-save')).toBeDisabled()
-    await expect(page.locator('.drawer.open')).toContainText('--port')
-    expect(puts).toBe(0)
-
-    // Clearing the offending flag re-enables the write path.
-    await page.getByTestId('model-flags-input').fill('--cache-type-k q8_0')
-    await expect(page.getByTestId('model-save')).toBeEnabled()
-  })
-
-  test('E6 — an unbalanced quote in flags blocks Save too', async ({ page }) => {
-    await stubLookups(page)
-    let puts = 0
-    await page.route(`**/api/models/${MODEL_ID}`, async (route) => {
-      if (route.request().method() === 'PUT') {
-        puts += 1
-        return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-      }
-      return route.fallback()
-    })
-
-    await openDrawer(page)
-    await showRawFlags(page)
-    await page.getByTestId('model-flags-input').fill('--chat-template "broken')
-
-    await expect(page.getByTestId('model-save')).toBeDisabled()
-    expect(puts).toBe(0)
-  })
+  // E6 (a hal0-managed flag / an unbalanced quote blocks Save client-side) lived
+  // here while the model drawer carried a flag editor. ADR-0029 moved the flags
+  // onto the profile; the same inline screens (managed, hardware, model-fact
+  // flags, unbalanced quote, context range) are pinned in profiles-crud-v3.spec.ts
+  // and the profiles vitest suite.
 })

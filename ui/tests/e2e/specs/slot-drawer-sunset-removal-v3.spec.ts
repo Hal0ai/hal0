@@ -26,9 +26,11 @@
  *     overlay disappearing was the only signal, and it was a false positive.
  *
  * Removed outright rather than left read-only, matching how Reasoning/MTP/
- * Vision were handled under `spec-hw-slot-ownership` §1. The migrator that
- * folds any already-persisted slot tune into the bound model shipped first as
- * `hal0 slot migrate-flags` (#1396/#1397), so this removal strands nothing.
+ * Vision were handled under `spec-hw-slot-ownership` §1. ADR-0029 then made it
+ * a server rule: those keys (and the context window) belong on the slot's
+ * PROFILE, and a slot write carrying one is a 400 slot.tuning_key_denied. The
+ * profile conversion (`hal0 profile migrate`) carries any already-persisted slot
+ * tune onto a profile, so this removal strands nothing.
  *
  * Test roles, stated plainly because they differ:
  *
@@ -49,7 +51,7 @@
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
 
-/** A slot whose TOML still carries all three sunset keys (pre-migration box). */
+/** A slot whose payload still carries the sunset keys (pre-conversion box). */
 const SUNSET_SLOT = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
   model: 'qwen3.6-27b-mtp', model_id: 'qwen3.6-27b-mtp',
@@ -173,28 +175,25 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     expect(patches).toEqual([])
   })
 
-  test('S5 (guard) — a ctx-only Save on a slot with a persisted template does not restart', async ({
+  test('S5 (guard) — there is no context ceiling to edit, and no write ever carries a context key', async ({
     page,
   }) => {
-    // The restart trigger used to include the chat_template comparison. Under
-    // the naive removal that comparison flips permanently true for any slot
-    // carrying a persisted template, so EVERY save would cold-restart. A
-    // ctx-only edit touches no hardware, so nothing should restart.
-    const { puts, patches, restarts } = await captureWrites(page)
+    // ADR-0029: the context window is the profile's. The slot drawer shows it
+    // read-only, so a Save can never put a context key on either route (the
+    // server would answer slot.tuning_key_denied).
+    const { puts, patches } = await captureWrites(page)
     await seedSlots(page, [SUNSET_SLOT])
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    const ctxRow = rowByLabel(page, /^Context \(ceiling\)$/)
-    await ctxRow.locator('input').fill('16384')
+    await expect(rowByLabel(page, /^Context \(ceiling\)$/)).toHaveCount(0)
+    await page.getByTestId('slot-hw-advanced').click()
+    await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
 
-    await expect.poll(() => patches.length).toBe(1)
-    expect(patches[0]).toEqual({ ctx_size: 16384 })
-    expect(puts).toEqual([])
-    // ctx_size takes effect on the next request — no cold restart.
-    await page.waitForTimeout(250)
-    expect(restarts).toEqual([])
+    await expect.poll(() => puts.length).toBe(1)
+    expect(JSON.stringify(puts[0])).not.toMatch(/ctx|context/)
+    expect(patches).toEqual([])
   })
 
   test('S6 (guard) — a genuine hardware change still restarts', async ({ page }) => {
@@ -232,7 +231,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     expect(restarts).toEqual([])
   })
 
-  test('S8 — the Model group points the operator at the model for the launch tune', async ({
+  test('S8 — the Model group points the operator at the profile for the launch tune', async ({
     page,
   }) => {
     // Removal without a signpost just relocates the confusion: the operator
@@ -241,8 +240,12 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    await expect(page.getByTestId('slot-launch-tune-note')).toContainText(/model/i)
-    // The existing in-place editor is the destination.
+    const note = page.getByTestId('slot-launch-tune-note')
+    await expect(note).toContainText(/profile/i)
+    await expect(note).toContainText(/Edit model/)
+    // The in-place editors are the destinations: the profile (the tune) and the
+    // model (file facts).
+    await expect(page.getByTestId('slot-profile-edit')).toBeVisible()
     await expect(page.getByTestId('slot-model-edit-open')).toBeVisible()
   })
 })

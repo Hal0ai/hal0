@@ -7,7 +7,6 @@
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
 	useSlotEdit,
-	useSlotDefaults,
 	useSlotImagePull,
 	useSlotRestart,
 	useSlotLoad,
@@ -18,11 +17,9 @@ import {
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
-// Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 7/11d) —
-// same hook + copy mapper the PR-3 branch's model drawer uses; copied
-// verbatim rather than redesigned so the two branches dedupe at merge.
+// Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 11d) —
+// feeds the per-row fit chips on the Model picker.
 import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
-import { feasibilityHint } from "./feasibility-copy";
 import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
@@ -43,13 +40,13 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // Profiles view's not-pulled runtime chip uses — reused verbatim here for
 // the Runtime RichSelect's inline Pull affordance rather than a second
 // hook that could resolve a pull target differently.
-import { runtimeChips, useRunnerPull } from "./profiles.jsx";
+import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
 // The profile apply preview + its lane-title table. Pure derivations, so they
 // live in their own module (profile-apply-preview.js) rather than in this view
 // file — the slot CARD's apply confirm asks the same question and must get the
 // same answer from the same code, without importing this drawer.
-import { laneTitle, profileApplyPreview } from "./profile-apply-preview.js";
+import { laneTitle, profileApplyPreview, profileFitsSlot } from "./profile-apply-preview.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -60,6 +57,7 @@ import {
 } from "./slot-status.js";
 import { statusCopyForSlotState } from "./status-copy";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
+import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
 import { npuModalityOn } from "./npu-modality.js";
 import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
 
@@ -115,49 +113,14 @@ function compatibleModels(models, { type }) {
 		.filter((m) => m.type === type && !isUpstreamModel(m));
 }
 
-// Device-class token for profile/runner fit filters — mirrors the backend
-// derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is). ONE helper so
-// the drawer's baseline deviceClass and the cross-profile target-device class
-// (below) can't drift apart.
-function deviceClassOf(device) {
-	return device.startsWith("gpu")
-		? "gpu"
-		: ["npu", "cpu", "img"].includes(device)
-			? device
-			: "cpu";
-}
-
-// A GPU/CPU backend a profile can declare → the device it drives
-// (map_backend_to_device's FE mirror). Module-level so the cross-device
-// picker (#1636) and its Codex-flagged fixes share one source of truth
-// instead of three independently-drifting inline copies.
+// A GPU/CPU lane → the device it drives (map_backend_to_device's FE mirror).
+// Module-level so the Lane pills share one source of truth.
 const BACKEND_DEVICE = {
 	rocm: "gpu-rocm",
 	vulkan: "gpu-vulkan",
 	cuda: "gpu-cuda",
 	cpu: "cpu",
 };
-
-// Cross-device target for a candidate profile (#1636 + Codex P2 fixes):
-// - must declare a recognized backend that ACTUALLY differs from the slot's
-//   current backend (same-backend device_class mismatches are not a "switch"
-//   — _reconcile_device_profile leaves `device` alone when backends already
-//   agree, so admitting them here would silently persist a profile the
-//   normal `fit` predicate rejects, e.g. device_class:"cpu"/backend:"rocm" on
-//   a gpu-rocm slot).
-// - its device_class (if declared) must be compatible with the CLASS OF THE
-//   TARGET device, not the slot's current class.
-// Returns the target device string, or null when the profile doesn't
-// resolve to a genuine cross-backend switch.
-function crossDeviceTarget(profile, devBackend) {
-	if (!profile?.backend || !BACKEND_DEVICE[profile.backend]) return null;
-	if (profile.backend === devBackend) return null;
-	const targetDevice = BACKEND_DEVICE[profile.backend];
-	const targetClass = deviceClassOf(targetDevice);
-	if (profile.device_class && profile.device_class !== targetClass)
-		return null;
-	return targetDevice;
-}
 
 // Slot display-name validity — mirrors RenameSlotDialog.jsx's own NAME_RE
 // (lowercase + dashes, ≤31 chars). Two copies rather than a shared export
@@ -324,19 +287,18 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 function profileRuntimeTitle(key, backends) {
 	return key ? backends?.[key]?.title || key : "Auto";
 }
-function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND_DEVICE: deviceMap }) {
+function profileRichOptions({ none, outOfVocab, fit, backends }) {
 	const opts = [];
 	// keep a none/out-of-vocab persisted profile selectable — exact current
 	// copy, no chips/desc (out-of-vocab rows keep their plain-text row).
 	if (none) opts.push({ id: "", row: "— none —" });
 	if (outOfVocab) opts.push({ id: outOfVocab, row: outOfVocab });
-	const rowFor = (p, crossTarget) => ({
+	const rowFor = (p) => ({
 		id: p.name,
 		row: (
 			<span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
 				<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
 					{p.name}
-					{crossTarget ? ` · → ${crossTarget}` : ""}
 				</span>
 				<span className="pf-be-row">
 					{runtimeChips(p, backends).map((c) => (
@@ -351,23 +313,15 @@ function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND
 				</span>
 			</span>
 		),
-		desc: p.intent
-			? `${profileRuntimeTitle(p.runner, backends)} — ${p.intent}`
-			: profileRuntimeTitle(p.runner, backends),
+		desc: `${[
+			p.intent,
+			`ctx ${p.ctx_size != null ? ctxLabel(p.ctx_size) : "model native"}`,
+			`runtime ${profileRuntimeTitle(p.runner, backends)}`,
+		]
+			.filter(Boolean)
+			.join(" · ")}`,
 	});
-	for (const p of fit) opts.push(rowFor(p, null));
-	// RichSelect has no <optgroup> — a disabled marker row stands in for the
-	// old "Other backend — switches slot device" group label (disabled rows
-	// are skipped by arrow/Home/End nav and unclickable, same as a group
-	// header would be).
-	if (crossFit.length > 0) {
-		opts.push({
-			id: "__crossfit_header__",
-			disabled: true,
-			row: "— other backend — switches slot device —",
-		});
-		for (const p of crossFit) opts.push(rowFor(p, deviceMap[p.backend]));
-	}
+	for (const p of fit) opts.push(rowFor(p));
 	return opts;
 }
 
@@ -414,29 +368,16 @@ function runnerBackends(runner) {
 // poll then has nothing to move.
 //
 // Baseline purity rule: every field below is a PERSISTED config value.
-// `ctxSeed` is the single concession — it mirrors the *display* seed, which
-// may fall back to the live metric when nothing is on disk — but because it is
-// frozen at the same instant as the display value, an untouched field can
-// never become dirty. Nothing here may read a runtime metric at compare time.
+// Nothing here may read a runtime metric at compare time.
 //
-// #1379: chat_template, parallel and [server].extra_args are deliberately NOT
-// baselined. They are sunset — inert at launch (spec-flags-ownership §1/§4;
-// `providers/container.py` does `del profile_flags, slot_parallel,
-// extra_args`) — so the drawer no longer edits them. Baselining them would
-// re-arm the save path: the desired value of an absent control reads as
-// "empty", which against a persisted value looks like a deliberate clear. A
-// slot TOML that still carries them is left strictly alone; folding them into
-// the bound model is `hal0 slot migrate-flags` (#1396/#1397).
+// ADR-0029: the context window, chat template, parallelism and extra args are
+// not slot config any more — the slot carries placement (device, hardware,
+// runner) plus WHICH model and WHICH profile. The tune lives on the profile,
+// so there is no ctx ceiling to baseline.
 function configBaseline(slot) {
 	if (!slot) return null;
 	return {
 		name: slot.name,
-		// The PERSISTED context window ([model].context_size). null = no
-		// override on disk; the drawer must not invent one.
-		ctxMax: slot.ctx_max ?? null,
-		// Frozen display seed: persisted value → live metric at open → the
-		// backend's 8192 floor. Mirrors the `setCtx` seed exactly.
-		ctxSeed: slot.ctx_max ?? (slot.metrics?.ctx || 8192),
 		device: slot.device || "gpu-rocm",
 		nGpuLayers: slot.n_gpu_layers ?? -1,
 		threads: slot.threads ?? 0,
@@ -459,14 +400,11 @@ function deriveChanges(baseline, form) {
 	const thrRaw = String(form.threads).trim();
 	const thrValue = thrRaw === "" ? 0 : Number(thrRaw);
 	const pinValue = (form.imagePin || "").trim() || null;
-	const ctxValue = Number(String(form.ctx).trim());
 	return {
 		// Normalised values, so the Save body ships exactly what was compared.
 		nglValue,
 		thrValue,
 		pinValue,
-		ctxValue,
-		ctx: ctxValue !== Number(baseline.ctxSeed),
 		device: form.device !== baseline.device,
 		ngl: nglValue !== baseline.nGpuLayers,
 		threads: thrValue !== baseline.threads,
@@ -480,7 +418,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Hooks must execute every render — early `return null` would skip
 	// them; render the drawer shell with a sentinel slot instead.
 	const editMut = useSlotEdit();
-	const defaultsMut = useSlotDefaults();
 	// Delete is owned by its extracted dialog (D2 decomposition):
 	// dash/slots/DeleteSlotDialog.jsx. Rename used to be too
 	// (dash/slots/RenameSlotDialog.jsx) — Task 11a replaces the "Rename…"
@@ -523,19 +460,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// to the same image and profiles carry backend only as an inert fit hint.
 	const systemInfoQuery = useSystemInfo();
 
-	// Seed from the PERSISTED context window (slot.ctx_max, from
-	// [model].context_size) first — NOT the live runtime metric, which is 0
-	// whenever the slot isn't actively serving and would otherwise snap the
-	// field to a fabricated 16k on every cold (re)load. Fall back to the live
-	// metric, then the backend's safe 8192 floor.
-	const [ctx, setCtx] = useStateSM(
-		slot?.ctx_max ?? (slot?.metrics?.ctx || 8192),
-	);
-	// n_gpu_layers rides the Save button through PATCH /defaults
-	// ([model].n_gpu_layers; -1/empty = unset → sends null); seeds from the
-	// slot list payload. (Reasoning/MTP/Vision instant-apply pills removed —
-	// spec-hw-slot-ownership §1: those are model-owned tri-state caps now,
-	// edited in the model drawer instead of here.)
+	// (ADR-0029: no context state here. The window a slot launches with is its
+	// profile's ctx_size, or the model's native window; the slot view reports
+	// it read-only as ctx_effective + ctx_source.)
 	// ── Hardware grid (spec-hw-slot-ownership §2) ──────────────────────────
 	// The slot owns the physical layer as typed fields: device (enum) · NGL ·
 	// THREADS · BINARY (runner image ref) + an optional image_pin escape hatch.
@@ -564,14 +491,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// pin is set, so an operator who collapses it keeps it collapsed even
 	// while a debug pin is active.
 	const [advOpen, setAdvOpen] = useStateSM(false);
-	// Runtime profile (SlotConfig.profile) — picks the runtime family,
-	// device-class gating and MTP draft backend. Flags: copy-on-stamp into
-	// model.defaults.extra_args (model drawer) when aligned with the model's
-	// provenance; a DIVERGENT slot profile overlays its flags on the model
-	// tune at launch (#1636). Rides Save (PUT /config {profile}),
-	// restart-required; the backend's _reconcile_device_profile keeps
-	// device/profile coherent (a cross-backend profile flips the device).
+	// Profile (SlotConfig.profile) — THE tune for this slot (ADR-0029): flags,
+	// context window, thinking, vision, MTP and runtime all live on it. Rides
+	// Save (PUT /config {profile}), restart-required. A profile that pins a
+	// runner moves the slot's binary (+ device for a single-lane runner) via
+	// the server's profile-wins reconcile.
 	const [profileSel, setProfileSel] = useStateSM(slot?.profile || "");
+	// The profile drawer opened from the profile row: {mode, source} | null.
+	// "Edit profile" on a custom profile, "Duplicate & edit" on a seed (seeds
+	// are read-only server-side).
+	const [profileDrawer, setProfileDrawer] = useStateSM(null);
 	// Eviction priority (spec 2026-08-02) — instant-apply on blur/Enter, NOT
 	// part of the Save batch (see the pinned-toggle-shaped handler below).
 	// Hooks must execute every render (see the note atop this component), so
@@ -579,9 +508,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const [prio, setPrio] = useStateSM(
 		Number.isInteger(slot?.priority) ? slot.priority : 50,
 	);
-	// (#1379: `parallel` and `extra_args` state removed with their controls —
-	// both are INERT at launch, so editing them here only wrote TOML nothing
-	// reads. See configBaseline above.)
 	// #1391: does this payload actually carry the TOML-derived config fields, or
 	// is it the bare /api/status shape a dropped /api/slots poll falls back to?
 	// Provenance from useSlots — an absent key can't answer it (see
@@ -781,7 +707,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		if (baselineFor.current === slot.name) return;
 		baselineFor.current = slot.name;
 		setBaseline(configBaseline(slot));
-		setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
 		// HW grid re-seed from the (possibly-updated) slot prop.
 		setDevice(slot.device || "gpu-rocm");
 		setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
@@ -796,6 +721,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setPendingNav(null);
 		setPendingSwap(null);
 		setModelEditOpen(false);
+		setProfileDrawer(null);
 		setFieldErrs({});
 		setNpuAsr(npuModalityOn(slot.npu, "asr"));
 		setNpuEmbed(npuModalityOn(slot.npu, "embed"));
@@ -838,36 +764,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setNameDraft(slot?.name || "");
 	}, [slot?.name]);
 
-	// GTT feasibility (Task 11d) — TWO separate mutation instances, not one
-	// shared between them: the ceiling hint and the model-row batch each hold
-	// their own `.data`, and a shared instance would let whichever fired last
-	// clobber the other's result.
-	const ceilingFeasibility = useModelsFeasibility();
+	// GTT feasibility (Task 11d): one batch probe for the Model picker's
+	// per-row fit chips, fired on dropdown open at the slot's EFFECTIVE context
+	// (ADR-0029: the window comes from the profile, never from a slot ceiling).
 	const modelListFeasibility = useModelsFeasibility();
-	const ceilingFeasibilityTimer = useRefSM(null);
-	// Debounced 400ms probe for the bound model at the STAGED ceiling — fires
-	// on drawer open (curModelRow/ctx seed on mount) and again on every ctx
-	// edit. Advisory only (warn-never-block, 993ea3b6): a stale in-flight
-	// probe superseded by a newer keystroke is harmless — the render below
-	// always reads the mutation's latest `.data`.
-	useEffectSM(() => {
-		if (ceilingFeasibilityTimer.current) clearTimeout(ceilingFeasibilityTimer.current);
-		if (!open || !curModelRow?.id) return undefined;
-		const ctxNum = Number(ctx);
-		if (!Number.isFinite(ctxNum) || ctxNum <= 0) return undefined;
-		ceilingFeasibilityTimer.current = setTimeout(() => {
-			ceilingFeasibility.mutate({ models: [{ model_id: curModelRow.id, ctx: ctxNum }] });
-		}, 400);
-		return () => clearTimeout(ceilingFeasibilityTimer.current);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open, curModelRow?.id, ctx]);
-	// The bound model's row from the last successful ceiling probe (or none —
-	// `feasibilityHint`'s default branch renders no hint for an absent row,
-	// same as an explicit "unknown" verdict).
-	const ctxFeasibilityRow = (ceilingFeasibility.data?.results || []).find(
-		(r) => r.model_id === curModelRow?.id,
-	);
-	const ctxHint = ctxFeasibilityRow ? feasibilityHint(ctxFeasibilityRow) : null;
 	// Per-row chip for the Model RichSelect's `right` slot, from the last
 	// batch probe (fired on dropdown open — see the Model select below). A
 	// row with no verdict in the batch (still loading, or the batch hasn't
@@ -900,11 +800,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		if (!changes) return;
 		// Issue #548: validate numeric fields before any network call.
 		// Invalid values surface inline and block Save.
-		const ctxNum = Number(ctx);
 		const errs = {};
-		if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
-			errs.ctx = "Must be an integer ≥ 128";
-		}
 		// NGL (HW grid, spec-hw-slot-ownership §2): a slot-owned TOP-LEVEL int.
 		// -1 or empty = "all layers" default; otherwise an integer ≥ -1.
 		const nglRaw = String(nGpuLayers).trim();
@@ -935,17 +831,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// guarded a value the launch path ignores, and #1389 was that gate vetoing
 		// unrelated saves from an unmounted subtree — a whole failure mode that
 		// removing the control makes unrepresentable.)
-		// Device and profile edited to CONFLICTING backends in one Save — the
-		// server hard-rejects that pair (_reconcile_device_profile's operator
-		// error). Surface it inline instead of as a failed submit.
-		if (changes.device && changes.profile && profileSel) {
-			const selProf = (
-				Array.isArray(profilesQuery.data) ? profilesQuery.data : []
-			).find((p) => p.name === profileSel);
-			if (selProf?.backend && selProf.backend !== deviceBackend(device)) {
-				errs.profile = `Profile "${profileSel}" declares backend "${selProf.backend}" but the Backend picked above launches "${deviceBackend(device)}" — pick a matching pair.`;
-			}
-		}
 		if (Object.keys(errs).length > 0) {
 			setFieldErrs(errs);
 			return;
@@ -968,15 +853,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			changes.imagePin ||
 			changes.profile;
 		try {
-			// Two-step: defaults (ctx_size lives under [model]) + slot config for the
-			// top-level keys (device / NGL / threads / binary / image_pin). These
-			// are fast on-disk writes.
+			// One PUT /config for the placement keys (device / NGL / threads /
+			// binary / image_pin / profile). A fast on-disk write.
 			//
-			// #1379: chat_template / parallel / server.extra_args are absent by
-			// construction — they are not in `changes`, so a slot TOML that still
-			// carries them round-trips untouched. That is deliberate: clearing them
-			// here would be this drawer destroying config it no longer displays,
-			// and the fold into the bound model belongs to `hal0 slot migrate-flags`.
+			// ADR-0029: tuning keys (context_size, extra_args, parallel,
+			// chat_template, mtp, enable_thinking, vision, …) are never sent —
+			// the server rejects them with slot.tuning_key_denied ("belongs on a
+			// profile"), and none of them is in `changes`.
 			const slotBody = {};
 			if (changes.device) slotBody.device = device;
 			if (changes.ngl) slotBody.n_gpu_layers = changes.nglValue;
@@ -984,14 +867,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (changes.binary) slotBody.binary = binary;
 			if (changes.imagePin) slotBody.image_pin = changes.pinValue;
 			if (changes.profile) slotBody.profile = profileSel || null;
-			const defaultsBody = {};
-			if (changes.ctx) defaultsBody.ctx_size = ctxNum;
-			if (Object.keys(defaultsBody).length > 0) {
-				await defaultsMut.mutateAsync({
-					name: slot.name,
-					body: defaultsBody,
-				});
-			}
 			if (Object.keys(slotBody).length > 0) {
 				await editMut.mutateAsync({
 					name: slot.name,
@@ -1039,54 +914,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// `saving` gates the Save button on the fast config writes only — the
 	// restart is fired in the background (see onSaveClick) and must not keep the
 	// drawer in a blocked "Saving…" state for the whole model-load.
-	const saving = editMut.isPending || defaultsMut.isPending;
+	const saving = editMut.isPending;
 
 	// (curModelRow is resolved above the `!slot` guard, so the
 	// modelEditOpen effect can run on every render.)
 
-	// Device-class token for profile/runner fit filters — mirrors the
-	// backend derivation in profile_adopt (gpu-* → gpu; npu/cpu/img as-is).
-	const deviceClass = deviceClassOf(device);
-
-	// Pending cross-device target (#1636 Codex fix): when the selected
-	// profile is a genuine cross-backend switch (see crossDeviceTarget), the
-	// device this slot will actually launch on AFTER Save is the profile's
-	// backend device, not the still-persisted `device` state — the drawer
-	// has no direct device control, so `device` never moves on its own.
-	// Every dependent filter below (the Backend cascade) reads
-	// `pendingDevice` instead of `device` so
-	// they preview the POST-save world rather than hiding the very
-	// runner/model the operator is being told to pick.
-	const pendingDevice = (() => {
-		// Only a live in-drawer edit counts as "pending" — a persisted slot
-		// whose device and profile already disagree (a pre-existing
-		// misconfiguration the HW fit-check warning exists to surface) must
-		// keep reading its REAL device here, not a profile-implied one the
-		// operator never picked.
-		if (profileSel === (slot.profile || "")) return device;
-		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
-		const typeFit = all.filter(
-			(p) =>
-				!Array.isArray(p.supported_slot_types) ||
-				p.supported_slot_types.includes(slot.type),
-		);
-		const p = typeFit.find((x) => x.name === profileSel);
-		if (!p) return device;
-		const target = crossDeviceTarget(p, deviceBackend(device));
-		return target || device;
-	})();
-	// A live (uncommitted) cross-backend profile pick, or null — the single
-	// signal both the Save-time strand check and the Model-swap gate below
-	// key off. Split out from `pendingDevice` itself (which returns `device`
-	// as a harmless no-op fallback) so callers don't have to re-derive
-	// "is this actually pending" from an equality check on every read.
-	const pendingCrossDevice =
-		pendingDevice !== device ? pendingDevice : null;
-	// A live edit of the HW grid's Device select itself (the direct
-	// rocm↔vulkan switch): `device` state has already moved, so
-	// `pendingDevice` equals it — compare against the PERSISTED device to
-	// know a switch is pending. Same Save-time consequences as a
-	// cross-backend profile pick, different control.
+	// The device the slot launches on after Save. A profile no longer declares a
+	// backend (ADR-0029), so only the Runtime / Lane controls below move it, and
+	// `device` state already reflects them.
+	const pendingDevice = device;
+	// A live edit of the Runtime / Lane controls: `device` state has already
+	// moved — compare against the PERSISTED device to know a switch is pending.
 	// Compared against the FROZEN baseline (#1398), not the live-polled slot
 	// prop, so background drift can never read as an operator edit.
 	const deviceIsLiveEdit = baseline ? device !== baseline.device : false;
@@ -1210,7 +1048,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// them touches the live `slot` prop. See configBaseline/deriveChanges above
 	// for why (#1390 · #1391 · #1398).
 	const changes = deriveChanges(baseline, {
-		ctx,
 		device,
 		nGpuLayers,
 		threads,
@@ -1226,7 +1063,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const degraded = !configEnriched || !changes;
 
 	// UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields — the
-	// HW grid and ctx. The instant-apply ``pinned`` toggle fires its own PUT
+	// HW grid and the profile. The instant-apply ``pinned`` toggle fires its own PUT
 	// outside Save and is intentionally excluded: a flipped toggle is already
 	// persisted. ``autoload``/``priority`` (spec 2026-08-02) are the same
 	// shape — their own PUT fires on toggle/blur above and neither is passed
@@ -1236,8 +1073,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// left with #1379 — see configBaseline.)
 	const dirty =
 		!!changes &&
-		(changes.ctx ||
-			changes.ngl ||
+		(changes.ngl ||
 			changes.threads ||
 			changes.device ||
 			changes.binary ||
@@ -1252,7 +1088,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// WITHOUT calling onClose, so gating on modelEditOpen alone would wedge
 		// this drawer shut for good the moment a models refetch drops the bound
 		// row (deleted/renamed elsewhere, short registry reload).
-		if (modelEditOpen && curModelRow) return;
+		if ((modelEditOpen && curModelRow) || profileDrawer) return;
 		if (dirty) {
 			setDiscardOpen(true);
 			return;
@@ -1282,20 +1118,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			);
 	};
 
-	// Runtime profile row — the slot's SlotConfig.profile. Controls the runtime
-	// family, device-class gating and MTP draft backend. Flags: aligned with
-	// the model's stamped provenance (defaults.profile) they are copy-on-stamp
-	// only (model drawer); a DIVERGENT slot profile overlays its flags on the
-	// model tune at launch (#1636, the slot_profile argv segment). A profile
-	// declaring another backend switches the slot's device on save (the
-	// backend's _reconcile_device_profile rederives it).
+	// Profile row — the slot's SlotConfig.profile, THE tune (ADR-0029): the
+	// profile carries the flags, context window, thinking, vision, MTP and
+	// runtime. Nothing is layered underneath from the model (it holds file
+	// facts only) and nothing is stamped into the model.
 	// Rendered inside the Model group right under the model select (it rides
 	// the model choice), or under its own group on an NPU slot where the Model
 	// group is replaced by the NPU capability matrix.
 	const profileRow = (() => {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
-		const devBackend = deviceBackend(device);
-		const modelProfile = curModelRow?.defaults?.profile || "";
 		// Apply preview (Task 10 D4): a profile carrying `runner` (a
 		// RUNNER_IMAGES key — Task 3) is applied through the SAME cascade the
 		// Hardware group's Runtime select uses (hw-cascade.js's
@@ -1314,6 +1145,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			hw: hostHwFlags(systemInfoQuery.data?.hardware),
 		});
 		const selProfileRow = all.find((p) => p.name === profileSel) || null;
+		const outgoingProfileRow = all.find((p) => p.name === (slot.profile || "")) || null;
 		// Only a LIVE pick previews. Compared against the persisted profile
 		// name — NOT against the live `binary`/`device` state, which the
 		// select's onChange has already mirrored to the profile's runner by
@@ -1329,148 +1161,125 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					options: runnerCatalogOptions,
 					baselineRunner: baseline?.binary ?? "",
 					currentDevice: pendingDevice,
-					modelFlags: curModelRow?.defaults?.extra_args || "",
-					currentProfileFlags:
-						all.find((p) => p.name === (slot.profile || ""))?.flags || "",
+					currentProfile: outgoingProfileRow,
 				})
 			: null;
-		// Mirror backend profile_fits_slot: slot type supported first, then
-		// device_class match + backend match (when both declared).
-		const typeFit = all.filter(
-			(p) =>
-				!Array.isArray(p.supported_slot_types) ||
-				p.supported_slot_types.includes(slot.type),
+		// Mirror backend profile_fits_slot: the slot type must be one the profile
+		// supports, and a runner-pinning profile must pin a runner of the slot's
+		// device class (profileFitsSlot, profile-apply-preview.js).
+		const fit = all.filter((p) =>
+			profileFitsSlot(p, { type: slot.type, device }, runnerCat),
 		);
-		const fit = typeFit.filter(
-			(p) =>
-				(!p.device_class || p.device_class === deviceClass) &&
-				(!p.backend || !devBackend || p.backend === devBackend),
-		);
-		// Cross-device candidates (#1636): a profile declaring ANOTHER llama
-		// backend is selectable — on save the backend's
-		// _reconcile_device_profile flips the slot's device to match (profile
-		// changed alone → device rederived). Only gpu/cpu-class slots
-		// transition (npu/img route to different runtime families —
-		// hard-blocked in model_fit), and only a GENUINE backend switch can
-		// drive the flip — crossDeviceTarget excludes same-backend
-		// device_class mismatches (those aren't a switch;
-		// _reconcile_device_profile leaves `device` alone when the backend
-		// already agrees, so admitting them here would silently persist a
-		// profile the normal `fit` predicate rejects, e.g.
-		// device_class:"cpu"/backend:"rocm" on a gpu-rocm slot) and requires
-		// the profile's device_class (if any) to match the TARGET class.
-		const crossFit = ["gpu", "cpu"].includes(deviceClass)
-			? typeFit.filter(
-					(p) => !fit.includes(p) && !!crossDeviceTarget(p, devBackend),
-				)
-			: [];
-		const fitNames = fit.map((p) => p.name);
-		const listedNames = [...fitNames, ...crossFit.map((p) => p.name)];
-		const adoptedFromModel = !!profileSel && profileSel === modelProfile;
-		// Does the selected profile even resolve? A deleted/renamed profile
-		// stays selectable (out-of-vocab option below) but
-		// _resolve_profile_or_base falls back to the backend's base profile
-		// and _resolve_llama_scalars suppresses the overlay when the
-		// resolved name doesn't match the configured one — so an
-		// unresolvable profile never injects flags. Gate the divergence hint
-		// on actually resolving, or it tells the operator about an overlay
-		// that will not launch.
-		const profileResolves = all.some((p) => p.name === profileSel);
-		// Divergence overlay (#1636): a slot profile that differs from the
-		// model's stamped provenance layers its flags over the model tune at
-		// launch (the slot_profile argv segment).
-		const diverges =
-			profileResolves && !!modelProfile && profileSel !== modelProfile;
-		// Only a LIVE selection change counts as "picking" a cross-device
-		// profile — a persisted slot whose profile already sits in crossFit
-		// (backend drift predating this drawer, or edited out-of-band) has
-		// not had anything picked; treating it as `selCross` would suppress
-		// the fit warning and promise a Save-time switch that `changes.profile`
-		// (false — nothing changed) never arms, while `_reconcile_device_profile`
-		// deliberately leaves that drift untouched. (Same
-		// `profileIsLiveSelection` the apply preview above gates on.)
-		const selCross =
-			(profileIsLiveSelection &&
-				crossFit.find((p) => p.name === profileSel)) ||
-			null;
-		const targetDevice = selCross
-			? crossDeviceTarget(selCross, devBackend)
-			: null;
-		// Cross-device cautions: an explicit BINARY or a pinned image may not
-		// serve the target backend — warn before Save, never block (§4).
-		const crossCautions = [];
-		if (selCross) {
-			const backendsCat = systemInfoQuery.data?.backends ?? {};
-			const selRunner = binary ? backendsCat[binary] : null;
-			const sup = selRunner ? runnerBackends(selRunner) : [];
-			// Same provenance string the Runner select's option labels carry
-			// (h0/runner-provenance) — the fit-check line names the exact
-			// llama.cpp build it's warning about; absent provenance renders
-			// the line exactly as before.
-			const selProv = formatProvenanceShort(selRunner?.provenance);
-			if (binary && sup.length > 0 && !sup.includes(selCross.backend))
-				crossCautions.push(
-					`Runner binary "${binary}${selProv ? ` — ${selProv}` : ""}" does not list backend "${selCross.backend}" — clear it or pick a matching binary.`,
-				);
-			if ((imagePin || "").trim())
-				crossCautions.push(
-					"The pinned runner image may not serve the new backend — check or clear the pin.",
-				);
-		}
-		// A persisted profile that is neither same-device nor a viable
-		// transition target (bare device_class hint, npu/img class, unknown):
-		// stays selectable, but the device cannot follow it — warn.
+		const listedNames = fit.map((p) => p.name);
+		// A persisted profile that is not offered for this slot type (or no
+		// longer exists) stays selectable so the drawer never silently rewrites
+		// stored state — but warn.
 		const profileFitWarn =
 			profileSel && all.length > 0 && !listedNames.includes(profileSel)
-				? `Profile "${profileSel}" does not fit device "${device}" and declares no backend the device could follow — the slot may misbehave at launch. Pick a listed profile.`
+				? `Profile "${profileSel}" does not fit this ${slot.type} slot on ${device} — the slot may misbehave at launch. Pick a listed profile.`
 				: null;
+		// Effective context window + where it came from, read-only from the slot
+		// view (GET /api/slots → ctx_effective / ctx_source). It describes the
+		// SAVED slot; a staged profile pick shows its context change in the apply
+		// preview instead.
+		const ctxSourceCopy = {
+			profile: slot.profile ? `set by profile ${slot.profile}` : "set by the profile",
+			native: "the model's native window",
+			fallback: "the default window (the model reports none)",
+		};
+		const ctxEffective = Number.isFinite(Number(slot.ctx_effective)) && slot.ctx_effective > 0
+			? Number(slot.ctx_effective)
+			: null;
+		// Edit the selected profile in place, or fork a seed (read-only).
+		const isSeedSel = !!selProfileRow?.seed;
+		const otherUsers = (selProfileRow?.used_by || []).filter((n) => n !== slot.name);
 		return (
 			<div className="form-row">
 				<div className="form-lbl">
 					<span>Profile</span>
-					<FieldInfoIcon description="⟳ Runtime profile — picks the runtime family and the MTP
-						draft backend. Matching the model's profile: flags come solely
-						from the model's stamped tune. Diverging from it: this
-						profile's flags overlay the model tune for this slot at
-						launch. A profile declaring another backend also switches the
-						slot's device on save." />
+					<FieldInfoIcon description="⟳ The profile is this slot's whole tune: flags, context
+						window, thinking, vision, MTP and runtime. The model only records
+						facts about its file. A profile that pins a runtime also moves
+						the slot's runtime on save." />
 				</div>
 				<div className="form-ctl">
-					<RichSelect
-						data-testid="slot-profile"
-						value={profileSel}
-						options={profileRichOptions({
-							none: !slot.profile,
-							outOfVocab:
-								profileSel && !listedNames.includes(profileSel)
-									? profileSel
-									: null,
-							fit,
-							crossFit,
-							backends: runnerCat,
-							BACKEND_DEVICE,
-						})}
-						onChange={(nextName) => {
-							setProfileSel(nextName);
-							setFieldErrs((p) => ({ ...p, profile: undefined }));
-							// Profile wins (D4): a picked profile carrying `runner`
-							// mirrors into local binary/device state through the SAME
-							// applyRunnerChoice the Hardware group's Runtime select
-							// uses, so the Hardware rows below preview the post-save
-							// truth immediately — Save itself is unchanged; the
-							// server's reconcile (Task 5) performs the actual flip.
-							const nextProfile = all.find((p) => p.name === nextName);
-							if (nextProfile?.runner) {
-								const pick = applyRunnerChoice({
-									options: runnerCatalogOptions,
-									key: nextProfile.runner,
-									currentDevice: device,
-								});
-								setBinary(pick.binary);
-								setDevice(pick.device);
+					<div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+						<div style={{ flex: 1, minWidth: 0 }}>
+							<RichSelect
+								data-testid="slot-profile"
+								value={profileSel}
+								options={profileRichOptions({
+									none: !slot.profile,
+									outOfVocab:
+										profileSel && !listedNames.includes(profileSel)
+											? profileSel
+											: null,
+									fit,
+									backends: runnerCat,
+								})}
+								onChange={(nextName) => {
+									setProfileSel(nextName);
+									setFieldErrs((p) => ({ ...p, profile: undefined }));
+									// Profile wins (D4): a picked profile carrying `runner`
+									// mirrors into local binary/device state through the SAME
+									// applyRunnerChoice the Hardware group's Runtime select
+									// uses, so the Hardware rows below preview the post-save
+									// truth immediately — Save itself is unchanged; the
+									// server's reconcile (Task 5) performs the actual flip.
+									const nextProfile = all.find((p) => p.name === nextName);
+									if (nextProfile?.runner) {
+										const pick = applyRunnerChoice({
+											options: runnerCatalogOptions,
+											key: nextProfile.runner,
+											currentDevice: device,
+										});
+										setBinary(pick.binary);
+										setDevice(pick.device);
+									}
+								}}
+							/>
+						</div>
+						<button
+							className="btn ghost sm"
+							data-testid="slot-profile-edit"
+							disabled={!selProfileRow}
+							title={
+								!selProfileRow
+									? "Pick a profile to edit"
+									: isSeedSel
+										? "Seed profiles are read-only — fork a custom copy and edit that"
+										: "Edit this profile's tune (flags, context, thinking, vision, MTP, runtime)"
 							}
-						}}
-					/>
+							onClick={(e) => {
+								e.stopPropagation();
+								if (!selProfileRow) return;
+								setProfileDrawer({
+									mode: isSeedSel ? "clone" : "edit",
+									source: selProfileRow,
+								});
+							}}
+						>
+							{Icons.edit} {isSeedSel ? "Duplicate & edit" : "Edit profile"}
+						</button>
+					</div>
+					<div className="hint" data-testid="slot-ctx-effective">
+						Context:{" "}
+						{ctxEffective ? (
+							<>
+								<b>{ctxEffective.toLocaleString("en-US")}</b> tokens —{" "}
+								{ctxSourceCopy[slot.ctx_source] || "source not reported"}
+							</>
+						) : (
+							"not resolved yet (no model bound)"
+						)}
+						. Change it on the profile.
+					</div>
+					{otherUsers.length > 0 && !isSeedSel && (
+						<div className="hint" data-testid="slot-profile-shared">
+							Also used by {otherUsers.join(", ")} — editing the profile changes
+							{otherUsers.length === 1 ? " that slot" : " those slots"} too.
+						</div>
+					)}
 					{applyPreview && (
 						<div
 							className="hint sl-apply"
@@ -1525,14 +1334,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									)}
 								</div>
 							)}
+							{applyPreview.tune.map((t) => (
+								<div className="sl-apply-line" key={t.label} data-testid={`slot-profile-preview-${t.label}`}>
+									· {t.label} → {t.from} → <b>{t.to}</b>
+								</div>
+							))}
 							{applyPreview.flags > 0 && (
 								<div className="sl-apply-line">
-									· flags → profile tune{" "}
+									· flags →{" "}
 									<b>
-										replaces {applyPreview.flags} flag
-										{applyPreview.flags === 1 ? "" : "s"}
+										{applyPreview.flags} flag
+										{applyPreview.flags === 1 ? "" : "s"} differ
 									</b>{" "}
-									on this slot
+									from the current profile
 								</div>
 							)}
 							<div className="sl-apply-line">
@@ -1540,39 +1354,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							</div>
 						</div>
 					)}
-					{adoptedFromModel && (
-						<div className="hint">
-							Adopted from the bound model's preference — swapping the model
-							may change it.
-						</div>
-					)}
-					{diverges && (
-						<div className="hint" data-testid="slot-profile-diverges">
-							Diverges from the model's profile ("{modelProfile}") — this
-							profile's flags overlay the model tune for this slot at
-							launch.
-						</div>
-					)}
-					{selCross && (
-						<div
-							className="hint"
-							data-testid="slot-profile-device-switch"
-							style={{
-								marginTop: 6,
-								padding: "6px 10px",
-								borderRadius: "var(--rad-sm)",
-								border: "1px solid var(--line)",
-							}}
-						>
-							Saving switches this slot's device to "{targetDevice}"
-							(profile backend "{selCross.backend}") and restarts it.
-							{crossCautions.map((c) => (
-								<div key={c} style={{ marginTop: 4, color: "var(--warn)" }}>
-									⚠ {c}
-								</div>
-							))}
-						</div>
-					)}
+					<ConversionBlockedDetail s={slot} />
 					{profileFitWarn && (
 						<div
 							className="hint"
@@ -1587,22 +1369,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							}}
 						>
 							⚠ {profileFitWarn}
-						</div>
-					)}
-					{fieldErrs.profile && (
-						<div
-							className="hint"
-							data-testid="slot-profile-strands-model"
-							style={{
-								marginTop: 6,
-								padding: "6px 10px",
-								borderRadius: "var(--rad-sm)",
-								color: "var(--warn)",
-								border: "1px solid var(--warn-line)",
-								background: "var(--warn-soft)",
-							}}
-						>
-							⚠ {fieldErrs.profile}
 						</div>
 					)}
 				</div>
@@ -1721,6 +1487,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{slot.state}
 							</span>
 							<SlotBreakerChip s={slot} />
+							<ConversionBlockedChip s={slot} />
 							<span className="chip mono">
 								<span data-testid="slot-id-readonly">
 									{(slot.id != null ? slot.id : slot.slot_id) != null
@@ -1862,7 +1629,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														data-testid="slot-model-swap"
 														aria-label={`Model for ${slot.name}`}
 														value={cur}
-														disabled={saving || !!pendingCrossDevice}
+														disabled={saving}
 														options={modelRichOptions({
 															compatible,
 															cur,
@@ -1874,13 +1641,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
 															verdictChipFor: modelFeasibilityChipFor,
 														})}
 														// Task 11d: one batch feasibility call for every listed
-														// model at the slot's CURRENT (persisted/staged) ceiling,
-														// fired once per dropdown open — not per keystroke, not
-														// per row. `has` rows with no verdict in the response
-														// render no chip (see modelFeasibilityChipFor above).
+														// model at the slot's effective context, fired once per
+														// dropdown open — not per keystroke, not per row. `has`
+														// rows with no verdict in the response render no chip
+														// (see modelFeasibilityChipFor above).
 														onOpenChange={(isOpen) => {
 															if (!isOpen || compatible.length === 0) return;
-															const ctxNum = Number(ctx);
+															const ctxNum = Number(slot.ctx_effective);
 															modelListFeasibility.mutate({
 																models: compatible.map((m) => ({
 																	model_id: m.id,
@@ -1917,7 +1684,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													className="btn ghost sm"
 													data-testid="slot-model-edit-open"
 													disabled={!curModelRow}
-													title="Edit the bound model's tune (flags, template, caps) in place"
+													title="Edit the bound model's file facts (chat template, jinja, MTP heads) in place"
 													aria-label={`Edit model ${curModelRow?.longName || curModelRow?.name || ""}`.trim()}
 													onClick={(e) => {
 														e.stopPropagation();
@@ -1928,16 +1695,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 												</button>
 											</div>
 											{swapping && <div className="hint">Swapping…</div>}
-											{!swapping && pendingCrossDevice && (
-												<div
-													className="hint"
-													data-testid="slot-model-swap-blocked"
-												>
-													Model swap is unavailable while the profile pick
-													above is staged to switch this slot's device — Save
-													that change (or revert the profile) before swapping.
-												</div>
-											)}
 										</div>
 									</div>
 								);
@@ -1945,30 +1702,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 							{profileRow}
 
-							{/* #1379: Template / Parallel / Extra Args were removed here.
-          All three persisted to the slot TOML and reached nothing —
-          `providers/container.py` does `del profile_flags, slot_parallel,
-          extra_args`, and `resolve_chat_template` no longer consults the
-          per-slot key. spec-flags-ownership §1/§4 puts the launch tune on the
-          MODEL; spec-hw-slot-ownership §8 prescribes this editor as the HW grid
-          + image_pin only. Removed outright rather than left read-only, the
-          same call made for Reasoning/MTP/Vision under §1. Anything already on
-          disk is folded into the bound model by `hal0 slot migrate-flags`
-          (#1396/#1397) — this drawer neither reads nor clears it. */}
+							{/* ADR-0029: Template / Parallel / Extra Args / Context are not
+          slot config. The launch tune is the PROFILE's (flags, context,
+          thinking, vision, MTP, runtime); the model records file facts only
+          (chat template, jinja, MTP heads). The server rejects tuning keys on
+          a slot write with slot.tuning_key_denied. */}
 							<div className="hint" data-testid="slot-launch-tune-note">
-								Chat template and launch flags belong to the model — edit them
-								with “Edit model…” above. Flags set on a slot are not applied
-								at launch.
+								The launch tune — flags, context, thinking, vision, MTP — is
+								the profile's: use “Edit profile” above. The model only holds
+								facts about its file (chat template, jinja, MTP heads): use
+								“Edit model…”.
 							</div>
 						</>
 					)}
 				</FieldGroup>
 
 				{/* How it runs — this slot's hardware. Runtime + Lane are
-				    unchanged internals (cascade hoisted above, Task 11a); Context
-				    ceiling moves IN from the old Model group — a hardware ceiling
-				    reads better beside the hardware that enforces it than the
-				    model whose window it clamps. Threads/NGL and the image-facing
+				    unchanged internals (cascade hoisted above, Task 11a). There is
+				    no context ceiling here any more (ADR-0029): the window is the
+				    profile's, shown read-only under the Profile row. Threads/NGL and the image-facing
 				    disclosure move OUT, into the single consolidated Advanced
 				    section further down (threads, NGL, image block, debug pin,
 				    resolved command all live there now). */}
@@ -2093,66 +1845,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						</div>
 					)}
 
-					{device !== "npu" && (
-						<div className="form-row">
-							<div className="form-lbl">
-								<span>Context (ceiling)</span>
-								<FieldInfoIcon description="⟳ ctx_size — a hardware CEILING in tokens, not an
-									override: the bound model's own default context_size (set on the
-									model drawer) is authoritative, and this only clamps it down for
-									hardware that can't fit the model's full window. Slot-owned so the
-									same model can run capped on lighter hardware elsewhere. PATCHes
-									/defaults; takes effect on next request. (~model-load seconds)" />
-							</div>
-							<div className="form-ctl">
-								<input
-									className={"input mono" + (fieldErrs.ctx ? " input-err" : "")}
-									value={ctx}
-									onChange={(e) => {
-										setCtx(e.target.value);
-										setFieldErrs((p) => ({ ...p, ctx: undefined }));
-									}}
-								/>
-								{fieldErrs.ctx && (
-									<div className="hint" style={{ color: "var(--err)" }}>
-										{fieldErrs.ctx}
-									</div>
-								)}
-								{/* GTT feasibility hint (Task 11d, mockup panel 06) — host-truth,
-								    warn-never-block (993ea3b6): ok is a plain hint, warn/err are
-								    boxed. An absent/unknown verdict renders nothing at all. */}
-								{ctxHint?.tone && (
-									<div
-										className="hint"
-										data-testid="slot-ctx-feasibility"
-										style={
-											ctxHint.tone === "warn"
-												? {
-														marginTop: 6,
-														padding: "6px 10px",
-														borderRadius: "var(--rad-sm)",
-														color: "var(--warn)",
-														border: "1px solid var(--warn-line)",
-														background: "var(--warn-soft)",
-													}
-												: ctxHint.tone === "err"
-													? {
-															marginTop: 6,
-															padding: "6px 10px",
-															borderRadius: "var(--rad-sm)",
-															color: "var(--err)",
-															border: "1px solid var(--err-line)",
-															background: "var(--err-soft)",
-														}
-													: undefined
-										}
-									>
-										{ctxHint.text}
-									</div>
-								)}
-							</div>
-						</div>
-					)}
 				</FieldGroup>
 
 				{/* Task 11b: lifecycle gets its own section — one row, "Unloading":
@@ -2752,20 +2444,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							return null;
 						}
 						// Source → display label + CSS variable colour. These are the
-						// segments the backend argv assembler actually emits today (the
-						// old profile/extra_args segments are gone — profile flags are
-						// copy-on-stamp into model defaults). metaFor() falls back to a
-						// generic neutral badge carrying the raw label text, so a new
-						// backend source renders instead of breaking the drawer.
+						// layers the argv composition emits (ADR-0029): base, the model's
+						// file facts, the profile's tune, and the slot's placement.
+						// metaFor() falls back to a generic neutral badge carrying the
+						// raw label text, so a new source renders instead of breaking
+						// the drawer.
 						const SOURCE_META = {
 							base: { label: "base", color: "var(--fg-4)" },
-							model_extra_args: {
-								label: "model_extra_args",
-								color: "var(--accent)",
-							},
-							slot_hardware: { label: "slot_hardware", color: "var(--info)" },
-							chat_template: { label: "chat_template", color: "var(--ok)" },
-							mmproj: { label: "mmproj", color: "var(--warn)" },
+							model: { label: "model", color: "var(--ok)" },
+							profile: { label: "profile", color: "var(--accent)" },
+							slot: { label: "slot", color: "var(--info)" },
 						};
 						const metaFor = (source) =>
 							SOURCE_META[source] || {
@@ -2891,9 +2579,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							fontFamily: "var(--jbm)",
 						}}
 					>
-						Real podman argv: runner image (binary / image_pin) + model tune
-						flags + slot hardware flags. Restart the slot to run with new
-						flags.
+						Real podman argv, by layer: base flags, the model's file facts,
+						the profile's tune, the slot's placement. Restart the slot to
+						run with a new tune.
 					</div>
 					</>
 				)}
@@ -2922,6 +2610,26 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					model={curModelRow}
 				/>
 			</DrawerDock>
+			{/* Stacked profile editor — the Profiles page's own drawer, opened on
+			    the slot's profile. A seed opens as "Duplicate & edit" (clone
+			    mode); once the fork is saved the slot is pointed at it, staged
+			    like any other profile pick (Save applies it). Rendered after the
+			    slot Drawer so, at equal z-index, it stacks on top. */}
+			{profileDrawer && (
+				<ProfileDrawer
+					mode={profileDrawer.mode}
+					source={profileDrawer.source}
+					existing={(Array.isArray(profilesQuery.data) ? profilesQuery.data : []).map(
+						(p) => p.name,
+					)}
+					onClose={() => setProfileDrawer(null)}
+					onSaved={(savedName) => {
+						const wasClone = profileDrawer.mode === "clone";
+						setProfileDrawer(null);
+						if (wasClone && savedName) setProfileSel(savedName);
+					}}
+				/>
+			)}
 			<ConfirmDialog
 				open={discardOpen}
 				onCancel={() => {

@@ -6,7 +6,9 @@
  *
  * Covers:
  *   - "New profile" button opens the form
- *   - Create flow: fill name/image → submit → POST body asserted → card appears
+ *   - Create flow: fill name + tune fields → submit → POST body asserted → card appears
+ *   - Tune fields (ADR-0029): ctx_size 128..16777216, enable_thinking null|true|false,
+ *     vision auto|off, mtp auto|off; model-fact flags (--jinja, --mmproj, …) rejected inline
  *   - Seed cards: seed badge, Delete disabled, single "Edit a copy" action
  *     (no plain Edit/Clone) — seeds stay immutable, editing forks a custom copy
  *   - Edit-a-copy flow: prefills name "<seed>-custom", POST carries cloned_from
@@ -22,16 +24,15 @@ import { MOCK_DATA } from '../fixtures/mock-data'
 // A custom (non-seed) profile for delete/edit tests.
 const CUSTOM_PROFILE = {
   name: 'my-custom',
-  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   flags: '--flash-attn on',
-  mtp: false,
+  ctx_size: 32768,
+  enable_thinking: false,
+  vision: 'off',
+  mtp: 'off',
   resolved_flags: '--flash-attn on',
-  device_class: 'gpu',
-  backend: 'rocm',
   seed: false,
   cloned_from: 'vulkan',
   intent: 'Custom workload',
-  quant: 'FP4',
   tps: null,
   rtf: null,
   // Unbound — keeps the card's Delete action enabled so the confirm flow runs.
@@ -84,11 +85,12 @@ test.describe('Profiles CRUD — Phase C6', () => {
     const posts: any[] = []
     const NEW_PROFILE = {
       name: 'test-profile',
-      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '',
-      mtp: false,
+      ctx_size: null,
+      enable_thinking: null,
+      vision: 'auto',
+      mtp: 'auto',
       resolved_flags: '',
-      device_class: 'gpu',
       seed: false,
     }
 
@@ -127,6 +129,100 @@ test.describe('Profiles CRUD — Phase C6', () => {
     expect(posts).toHaveLength(1)
     expect(posts[0].name).toBe('test-profile')
     expect(posts[0]).not.toHaveProperty('image')
+  })
+
+  // ── Tune fields (ADR-0029) ───────────────────────────────────────────────────
+
+  test('create: ctx / thinking / vision / MTP ride the POST body in the wire shape', async ({ page }) => {
+    const posts: any[] = []
+    await page.route('**/api/profiles', async (route) => {
+      if (route.request().method() === 'POST') {
+        try { posts.push(JSON.parse(route.request().postData() || '{}')) } catch { posts.push({}) }
+        return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({}) })
+      }
+      return json(route, PROFILES_WITH_CUSTOM)
+    })
+
+    await gotoProfiles(page)
+    await page.click('[data-testid="pf-btn-new"]')
+    await page.fill('[data-testid="pf-input-name"]', 'tuned')
+    await page.fill('[data-testid="pf-input-ctx"]', '65536')
+    await page.selectOption('[data-testid="pf-select-thinking"]', 'on')
+    await page.selectOption('[data-testid="pf-select-vision"]', 'off')
+    await page.selectOption('[data-testid="pf-select-mtp"]', 'off')
+    await page.fill('[data-testid="pf-input-flags"]', '-fa on -b 2048')
+    await page.click('[data-testid="pf-btn-submit"]')
+    await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
+
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({
+      name: 'tuned',
+      flags: '-fa on -b 2048',
+      ctx_size: 65536,
+      enable_thinking: true,
+      vision: 'off',
+      mtp: 'off',
+    })
+    for (const gone of ['backend', 'device_class', 'quant', 'image']) {
+      expect(posts[0]).not.toHaveProperty(gone)
+    }
+  })
+
+  test('create: an out-of-range context is blocked inline, no POST', async ({ page }) => {
+    const posts: any[] = []
+    await page.route('**/api/profiles', async (route) => {
+      if (route.request().method() === 'POST') posts.push({})
+      return json(route, PROFILES_WITH_CUSTOM)
+    })
+
+    await gotoProfiles(page)
+    await page.click('[data-testid="pf-btn-new"]')
+    await page.fill('[data-testid="pf-input-name"]', 'too-small')
+    await page.fill('[data-testid="pf-input-ctx"]', '64')
+    await page.click('[data-testid="pf-btn-submit"]')
+    await expect(page.locator('.pf-form-panel')).toBeVisible()
+    await expect(page.locator('.hint.err')).toContainText('128')
+    expect(posts).toHaveLength(0)
+  })
+
+  test('create: a model-fact flag (--jinja) is blocked inline, no POST', async ({ page }) => {
+    const posts: any[] = []
+    await page.route('**/api/profiles', async (route) => {
+      if (route.request().method() === 'POST') posts.push({})
+      return json(route, PROFILES_WITH_CUSTOM)
+    })
+
+    await gotoProfiles(page)
+    await page.click('[data-testid="pf-btn-new"]')
+    await page.fill('[data-testid="pf-input-name"]', 'bad-flags')
+    await page.fill('[data-testid="pf-input-flags"]', '-fa on --jinja')
+    await page.click('[data-testid="pf-btn-submit"]')
+    await expect(page.locator('.pf-form-panel')).toBeVisible()
+    await expect(page.locator('.hint.err')).toContainText("--jinja can't be set on a profile")
+    expect(posts).toHaveLength(0)
+  })
+
+  test('edit: clearing the context sends ctx_size: null (PUT)', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/profiles', (route) => json(route, PROFILES_WITH_CUSTOM))
+    await page.route('**/api/profiles/my-custom', async (route) => {
+      if (route.request().method() === 'PUT') {
+        puts.push(JSON.parse(route.request().postData() || '{}'))
+        return json(route, CUSTOM_PROFILE)
+      }
+      return json(route, CUSTOM_PROFILE)
+    })
+
+    await gotoProfiles(page)
+    await cardBySlug(page, 'my-custom').locator('[data-testid="pf-btn-edit-my-custom"]').click()
+    await expect(page.locator('[data-testid="pf-input-ctx"]')).toHaveValue('32768')
+    await expect(page.locator('[data-testid="pf-select-thinking"]')).toHaveValue('off')
+    await page.fill('[data-testid="pf-input-ctx"]', '')
+    await page.click('[data-testid="pf-btn-submit"]')
+    await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
+
+    expect(puts).toHaveLength(1)
+    expect(puts[0].ctx_size).toBeNull()
   })
 
   // ── Create validation ────────────────────────────────────────────────────────

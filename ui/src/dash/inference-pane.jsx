@@ -40,13 +40,14 @@ import { useModelsFeasibility } from '@/api/hooks/useModelsFeasibility'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { hostHwFlags, runnerOptions } from './hw-cascade.js'
-import { profileApplyPreview } from './profile-apply-preview.js'
+import { profileApplyPreview, profileFitsSlot } from './profile-apply-preview.js'
 import { runtimeChips } from './profiles.jsx'
 import { ConfirmDialog } from './primitives.jsx'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { SlotBreakerChip } from './breaker-chip.jsx'
+import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
@@ -148,11 +149,13 @@ function dotCls(ind) {
   }
 }
 
-// ctx "used / max" in k-tokens. Em-dash when no ctx_max is configured, and
-// an em-dash for the used side when the live counter hasn't reported.
+// ctx "used / max" in k-tokens. `max` is the slot's EFFECTIVE window
+// (ctx_effective — the profile's ctx_size, else the model's native window;
+// ADR-0029). Em-dash when the server resolved none, and an em-dash for the
+// used side when the live counter hasn't reported.
 const kCtx = (n) => `${Math.round(n / 1024)}k`
 function ctxText(s) {
-  const max = typeof s.ctx_max === 'number' && s.ctx_max > 0 ? s.ctx_max : null
+  const max = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : null
   if (!max) return '—'
   const used = typeof s.metrics?.ctx === 'number' && s.metrics.ctx > 0 ? s.metrics.ctx : null
   return `${used ? kCtx(used) : '—'} / ${kCtx(max)}`
@@ -215,16 +218,14 @@ const PROFILE_EDIT_ROW = '__edit_slot__'
 // drawer's Profile select and the apply preview use, so a lane can't read
 // differently here) + the profile's intent line.
 //
-// Filtered exactly like the drawer's picker: `supported_slot_types` first
-// (slot-modals.jsx:1389-1393, mirroring the backend's profile_fits_slot —
-// model_fit.py:80). The drawer additionally splits device_class/backend
-// matches into `fit` vs a cross-device group; the card lists the type-fitting
-// set flat and lets the apply preview below announce a lane move, per
-// warn-never-block.
+// Filtered exactly like the drawer's picker (profileFitsSlot, mirroring the
+// backend's resolved_profile_fits_slot): the slot type, and a pinned runner's
+// device class. A pick that moves the slot's lane is announced by the apply
+// preview below, per warn-never-block.
 function profileCardOptions({ s, profiles, backends }) {
   const cur = s.profile || ''
-  const fit = (profiles || []).filter(
-    (p) => !Array.isArray(p.supported_slot_types) || p.supported_slot_types.includes(s.type),
+  const fit = (profiles || []).filter((p) =>
+    profileFitsSlot(p, { type: s.type, device: s.device }, backends),
   )
   const opts = []
   // A slot with no profile keeps today's pill word as its own row, so the
@@ -258,7 +259,7 @@ function profileCardOptions({ s, profiles, backends }) {
   opts.push({
     id: PROFILE_EDIT_ROW,
     row: '✎ Edit slot…',
-    desc: 'full editor — flags, runtime, lifecycle',
+    desc: 'full editor — profile, runtime, lifecycle',
   })
   return opts
 }
@@ -314,36 +315,30 @@ function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
 // only the eye does.) One dialog for N cards also matches the truth that the
 // confirm is modal: there is only ever one pending pick.
 //
-// ── THE APPLY PATH, VERIFIED FROM SOURCE (mockup callout F) ────────────────
+// ── THE APPLY PATH (mockup callout F) ──────────────────────────────────────
 // The slot drawer persists a profile pick as exactly TWO plain mutations,
 // with no drawer-only state between them:
-//   1. PUT /api/slots/{name}/config {profile} — assembled at
-//      slot-modals.jsx:1013 and fired at :1023 through useSlotEdit
-//      (api/hooks/useSlots.ts:617). The route is a PURE config write with no
-//      lifecycle side effect (api/routes/slots.py:1386, note at :1441), and
-//      the server re-derives the slot's `device` from the new profile itself
-//      (slots/config_write.py:444 → _reconcile_device_profile(merged,
-//      {"profile"}) at :91) — the drawer sends no device of its own.
-//   2. POST /api/slots/{name}/restart, fired in the BACKGROUND (never
-//      awaited) because `changes.profile` is part of `hwChanged`
-//      (slot-modals.jsx:990-996, restart at :1036) via useSlotRestart.
-// Both are reachable from any component, so this is branch (a) of the plan's
-// riddle: Apply performs the write here, one gesture, no half-applied state.
-// The drawer's extra Save-time gates guard fields this control cannot touch —
-// a device+profile pair edited together (slot-modals.jsx:968) and a bound
-// model stranded by a device switch the operator drove (:1135) — and the one
-// consequence that does reach a card pick, a lane move, is announced by the
-// preview's `lane` line instead of blocking (§4 warn-never-block).
+//   1. PUT /api/slots/{name}/config {profile} through useSlotEdit — a PURE
+//      config write with no lifecycle side effect. The profile IS the tune
+//      (ADR-0029): there is no model flag layer to stamp or overlay, so the
+//      write is the whole change.
+//   2. POST /api/slots/{name}/restart through useSlotRestart, fired in the
+//      BACKGROUND (never awaited), because a profile change is part of the
+//      drawer's `hwChanged`.
+// Both are reachable from any component, so Apply performs the write here, one
+// gesture, no half-applied state. The preview announces the consequences that
+// can reach a card pick — the runtime, a lane move, the typed tune fields
+// (context / thinking / vision / mtp) and how many flags differ — and never
+// blocks (§4 warn-never-block).
 //
-// `pending` is `{ s, profile, modelFlags }` or null; null renders nothing.
+// `pending` is `{ s, profile }` or null; null renders nothing.
 function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose }) {
   const editMut = useSlotEdit()
   const restartMut = useSlotRestart()
   const s = pending?.s || null
   const name = pending?.profile ?? null
   const row = name ? (profiles || []).find((p) => p.name === name) || null : null
-  // Same cascade the drawer's preview reads (slot-modals.jsx:1359-1365), fed
-  // the slot's PERSISTED device — the card has no pending-device state of its
+  // Same cascade the drawer's preview reads, fed the slot's PERSISTED device — the card has no pending-device state of its
   // own, so there is nothing to preview but the write it is about to make.
   const preview =
     row && s
@@ -358,9 +353,7 @@ function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose })
           }).options,
           baselineRunner: s.binary || '',
           currentDevice: s.device || '',
-          modelFlags: pending?.modelFlags || '',
-          currentProfileFlags:
-            (profiles || []).find((p) => p.name === (s.profile || ''))?.flags || '',
+          currentProfile: (profiles || []).find((p) => p.name === (s.profile || '')) || null,
         })
       : null
   // A stopped slot does not "restart": SlotManager.restart is unload-then-load
@@ -459,13 +452,18 @@ function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose })
                   )}
                 </div>
               )}
+              {preview.tune.map((t) => (
+                <div className="sl-apply-line" key={t.label}>
+                  · {t.label} → {t.from} → <b>{t.to}</b>
+                </div>
+              ))}
               {preview.flags > 0 && (
                 <div className="sl-apply-line">
-                  · flags → profile tune{' '}
+                  · flags →{' '}
                   <b>
-                    replaces {preview.flags} flag{preview.flags === 1 ? '' : 's'}
+                    {preview.flags} flag{preview.flags === 1 ? '' : 's'} differ
                   </b>{' '}
-                  on this slot
+                  from the current profile
                 </div>
               )}
             </React.Fragment>
@@ -644,7 +642,7 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
 export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   const feasibility = useModelsFeasibility()
   // Fires the batch probe on the FIRST dropdown open only (mockup callout A)
-  // — the slot's ctx_max is fixed for the life of this card, so a second open
+  // — the slot's ctx_effective is fixed for the life of this card, so a second open
   // has nothing new to learn and would just re-ask the same question.
   const firedRef = useRefI(false)
   if (s.type !== 'llm')
@@ -660,7 +658,7 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   )
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
-  const ctx = typeof s.ctx_max === 'number' && s.ctx_max > 0 ? s.ctx_max : undefined
+  const ctx = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : undefined
   const verdictFor = (id) => {
     const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
     return modelFitChip(row)
@@ -909,11 +907,12 @@ export function SlotScard({
           {/* #2038: breaker first — when the slot is deliberately refusing
               loads, that is the most actionable thing on the card. */}
           <SlotBreakerChip s={s} />
+          <ConversionBlockedChip s={s} />
           <BackendMismatch s={s} onEdit={onEdit} />
           <SlotImageUnknownChip s={s} />
-          {full && typeof s.ctx_max === 'number' && s.ctx_max > 0 && (
+          {full && typeof s.ctx_effective === 'number' && s.ctx_effective > 0 && (
             <span className="tag-chip" title={`ctx used / max · ${ctxText(s)}`}>
-              {kCtx(s.ctx_max)} ctx
+              {kCtx(s.ctx_effective)} ctx
             </span>
           )}
           <span className="grow" />
@@ -935,7 +934,7 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
   // card — react-query would dedupe the requests, but not the subscriptions.
   const profilesQuery = useProfiles()
   const systemInfoQuery = useSystemInfo()
-  // The picked-but-unwritten profile: `{ s, profile, modelFlags }` or null.
+  // The picked-but-unwritten profile: `{ s, profile }` or null.
   // It lives here, not in the card, because the confirm it drives has to be
   // rendered outside `.scard` (overflow-clipped, and a hover-transform
   // containing block) — see ProfileApplyConfirm.
@@ -1005,16 +1004,7 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
             modelName={modelRow ? modelRow.longName || modelRow.name || modelRow.id : ''}
             profiles={profiles}
             backends={backends}
-            onPickProfile={(profile) =>
-              setPendingProfile({
-                s,
-                profile,
-                // The base tune the preview's flag count diffs against —
-                // captured with the pick so the confirm reads the model that
-                // was bound when the operator chose.
-                modelFlags: modelRow?.defaults?.extra_args || '',
-              })
-            }
+            onPickProfile={(profile) => setPendingProfile({ s, profile })}
             grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
             dragging={reorder.dragName === s.name}
             dropProps={reorder.dropProps(s.name)}
@@ -1052,6 +1042,7 @@ function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
+        <ConversionBlockedChip s={s} />
         {/* #1939 follow-up: the utility tier runs the same container images
             as the headline tier, so it can hit the same unreadable image
             store. Rendering the chip only on SlotScard made the seam failure

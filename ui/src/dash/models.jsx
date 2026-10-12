@@ -647,19 +647,20 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
     );
   }
   const defaults = model.defaults || {};
-  // n_gpu_layers + rope_freq_base intentionally dropped from this list
-  // (spec-hw-slot-ownership §2): NGL is slot-owned hardware now (moved off
-  // the model entirely — see model-drawer.jsx's dropped n_gpu_layers input),
-  // and rope_freq_base is deprecated and never emitted. Rendering either here
-  // would just be a dead key surfacing for a legacy row that still carries one.
+  // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
+  // the file has MTP heads — plus its native context window (read-only, from
+  // metadata). The tune (flags, context, thinking, vision, MTP on/off) lives
+  // on a profile.
+  const nativeCtx = Number(model.metadata?.context_length) || null;
   const RECIPE_FIELDS = [
-    { key: "profile", label: "Profile", hint: "runtime profile that seeded this model's launch flags" },
-    { key: "context_size", label: "Context size", hint: "tokens · ⟳ requires the slot to restart to apply" },
-    { key: "extra_args", label: "Launch flags", hint: "the model's tune remainder · ⟳ requires the slot to restart to apply" },
+    { key: "chat_template", label: "Chat template", hint: "pinned template · empty = the one embedded in the GGUF" },
+    { key: "jinja", label: "Jinja", hint: "false = this file's chat template does not work with --jinja" },
+    { key: "mtp", label: "MTP heads", hint: "whether this file carries MTP heads · empty = read the 'mtp' tag" },
   ];
-  const recipeRows = RECIPE_FIELDS
-    .map(f => ({ ...f, value: defaults[f.key] }))
-    .filter(f => f.value !== null && f.value !== undefined && f.value !== "");
+  const recipeRows = [
+    ...RECIPE_FIELDS.map(f => ({ ...f, value: defaults[f.key] })),
+    { key: "native_context", label: "Native context", hint: "the window this file was trained for · a slot's profile sets the window it launches with", value: nativeCtx ? `${nativeCtx.toLocaleString("en-US")} tokens` : null },
+  ].filter(f => f.value !== null && f.value !== undefined && f.value !== "");
 
   const onPull = async () => {
     try {
@@ -731,10 +732,10 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
         {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
       </div>
       <div className="mdl-detail-recipe">
-        <div className="form-section">Recipe options</div>
+        <div className="form-section">File facts</div>
         {recipeRows.length === 0 ? (
           <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
-            No defaults set — launcher will use its own.
+            No file facts recorded — the launcher reads them from the GGUF.
           </div>
         ) : recipeRows.map(f => (
           <div key={f.key} className="form-row" data-testid={`mdl-recipe-row-${f.key}`}>

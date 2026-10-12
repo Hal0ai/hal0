@@ -8,18 +8,23 @@
  * operator input, so Save writes fields nobody touched — and a hardware key in
  * that write triggers a cold restart.
  *
+ * ADR-0029: the slot carries placement only — the context window is the
+ * profile's, shown read-only as `ctx_effective` + `ctx_source` — so there is no
+ * context ceiling to baseline and PATCH /defaults is never fired by the drawer.
+ *
  * Two live instances, one spec each below:
  *
- *   B1 (#1390) — `ctxBaseline` fell back to `slot.metrics.ctx`, a LIVE runtime
- *       metric. Open the drawer on a cold slot (metrics.ctx = 0 → the field
- *       seeds to the 8192 floor), let the slot start serving (metrics.ctx →
- *       4096), touch nothing, Save. Pre-fix: `PATCH /defaults {"ctx_size":8192}`
- *       — a transient runtime observation persisted as an operator override.
+ *   B1 (#1390) — the drawer once seeded a ctx field from `slot.metrics.ctx`, a
+ *       LIVE runtime metric, so a slot that started serving under the open
+ *       drawer made an untouched Context field dirty. The metric must stay
+ *       out of the picture: open on a cold slot, let it start serving
+ *       (metrics.ctx 0 → 4096), touch nothing, Save — zero writes, and the
+ *       effective context still reads the PROFILE's window, never the metric.
  *
  *   B2 (#1391) — a dropped `/api/slots` poll degrades the entry to the bare
  *       `/api/status` shape, which carries none of the TOML-derived config
  *       fields. Pre-fix every batched field read dirty for that interval, so an
- *       idle Save rewrote chat_template/binary/NGL and fired `POST /restart`.
+ *       idle Save rewrote binary/NGL and fired `POST /restart`.
  *       Reachable from the harness via the `__hal0MockSlotsDegraded` knob
  *       (mockFixtures.ts), which fails `GET /api/slots` and strips the config
  *       keys off the `/api/status` union entries — exactly what the backend
@@ -36,14 +41,14 @@
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
 
-/** Cold slot: nothing persisted for ctx, and the live metric reads 0. */
+/** Cold slot: its profile sets a 32K window, and the live metric reads 0. */
 const COLD = {
   name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
   model: 'qwen3.6-27b', model_id: 'qwen3.6-27b', model_default: 'qwen3.6-27b',
   group: 'chat', state: 'ready', port: 8092,
   container_status: 'running', container_health: true,
   n_gpu_layers: -1, threads: 0, binary: '', image_pin: null,
-  chat_template: null, parallel: null, llamacpp_args: '',
+  ctx_effective: 32768, ctx_source: 'profile',
   metrics: { ctx: 0, toks: 0 },
 }
 
@@ -54,12 +59,11 @@ const HOT = { ...COLD, state: 'serving', metrics: { ctx: 4096, toks: 42 } }
 const CONFIGURED = {
   ...COLD,
   state: 'serving',
-  ctx_max: 16384,
-  chat_template: 'chatml',
+  ctx_effective: 16384,
+  ctx_source: 'native',
   binary: 'rocm-7.2',
   n_gpu_layers: 48,
   threads: 12,
-  llamacpp_args: '--flash-attn',
   metrics: { ctx: 16384, toks: 42 },
 }
 
@@ -112,20 +116,14 @@ const drawer = (page: Page) => page.locator('.drawer')
 const saveBtn = (page: Page) => page.locator('.drawer button:has-text("Save")')
 const stateChip = (page: Page) => page.getByTestId('slot-state-readonly')
 
-function ctxInput(page: Page) {
-  // Context (ceiling) lives in the "How it runs" group now (Task 11a moved
-  // it IN from the old Model group, beside the hardware that enforces it).
-  const hwGroup = page.locator('.drawer .field-group').filter({
-    has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
-  })
-  return hwGroup
-    .locator('.form-row')
-    .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
-    .locator('input')
-}
+// The effective context is a read-only hint under the Profile row — there is
+// no input for it any more (ADR-0029).
+const ctxEffective = (page: Page) => page.getByTestId('slot-ctx-effective')
+const noCtxInput = (page: Page) =>
+  page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ })
 
 test.describe('Slot drawer — frozen persisted-config baseline', () => {
-  test('B1 (#1390) — an untouched Context never rides Save when the live ctx metric moves', async ({
+  test('B1 (#1390) — the live ctx metric never rides Save, and never replaces the profile window', async ({
     page,
   }) => {
     const { puts, patches, restarts } = await captureWrites(page)
@@ -133,9 +131,11 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
 
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
-    // Nothing persisted (no ctx_max) and the slot is cold (metrics.ctx = 0),
-    // so the field seeds to the backend's 8192 floor.
-    await expect(ctxInput(page)).toHaveValue('8192')
+    // The profile sets 32K; the slot is cold (metrics.ctx = 0). The ceiling
+    // input is gone, and the hint reads the profile's window.
+    await expect(noCtxInput(page)).toHaveCount(0)
+    await expect(ctxEffective(page)).toContainText('32,768')
+    await expect(ctxEffective(page)).toContainText('set by profile rocm')
 
     // The slot starts serving. metrics.ctx moves 0 → 4096 under the open
     // drawer; the state chip flipping is our proof the poll landed.
@@ -144,12 +144,13 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
     }, [HOT])
     await expect(stateChip(page)).toHaveText('serving', { timeout: 20_000 })
 
-    // The operator touched nothing — the field still shows what it seeded.
-    await expect(ctxInput(page)).toHaveValue('8192')
+    // The operator touched nothing — the hint still shows the profile's
+    // window, not the 4096 the runtime reports.
+    await expect(ctxEffective(page)).toContainText('32,768')
 
     await saveBtn(page).click()
     await expect(drawer(page)).toHaveCount(0)
-    // A live runtime observation must never become a persisted override.
+    // A live runtime observation must never become a persisted write.
     expect(patches).toEqual([])
     expect(puts).toEqual([])
     expect(restarts).toEqual([])
@@ -162,7 +163,7 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
     await seedSlots(page, [COLD])
 
     await page.goto('/#slots/primary')
-    await expect(ctxInput(page)).toHaveValue('8192')
+    await expect(ctxEffective(page)).toContainText('32,768')
     await page.evaluate((s) => {
       ;(window as any).HAL0_DATA.slots = s
     }, [HOT])
@@ -209,7 +210,7 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
 
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
-    await expect(ctxInput(page)).toHaveValue('16384')
+    await expect(ctxEffective(page)).toContainText('16,384')
 
     // One /api/slots poll drops. Every config field vanishes off the prop.
     await page.evaluate(() => {
@@ -223,7 +224,7 @@ test.describe('Slot drawer — frozen persisted-config baseline', () => {
       ;(window as any).__hal0MockSlotsDegraded = false
     })
     await expect(saveBtn(page)).toBeEnabled({ timeout: 20_000 })
-    await expect(ctxInput(page)).toHaveValue('16384')
+    await expect(ctxEffective(page)).toContainText('16,384')
 
     await saveBtn(page).click()
     await expect(drawer(page)).toHaveCount(0)

@@ -3,9 +3,11 @@
 // (mockup panel 12) and the slot card's `infer-profile-preview` apply confirm
 // (panel 02).
 //
-// Every consequence of "profile wins" enumerated in one place, BEFORE the
-// write: which runtime the profile pins, which lane the slot lands on, how
-// many flags the profile's tune replaces, and that the slot restarts. It is
+// Every consequence of switching a slot's profile enumerated in one place,
+// BEFORE the write: which runtime the profile pins, which lane the slot lands
+// on, how many flags and which typed tune fields (context / thinking / vision
+// / mtp) differ from the outgoing profile, and that the slot restarts. The
+// profile IS the tune (ADR-0029) — there is no model flag layer under it. It is
 // the operator's only chance to see the server-side reconcile (Task 5) before
 // it happens, so the lines must be derived from the SAME hw-cascade the
 // Hardware group drives (runnerOptions/applyRunnerChoice) rather than
@@ -15,7 +17,7 @@
 // window/React globals shim.
 import { describe, expect, it } from 'vitest'
 import { runnerOptions } from '../hw-cascade.js'
-import { profileApplyPreview } from '../profile-apply-preview.js'
+import { profileApplyPreview, profileFitsSlot } from '../profile-apply-preview.js'
 
 // system-info `backends` rows (Task 2 shape) — a dual-lane default, a
 // single-lane ROCm runtime and a single-lane Vulkan one, so both the
@@ -46,15 +48,25 @@ type Preview = {
   runtime: { unchanged: boolean; title: string | null; lanes: string[] }
   lane: null | { unchanged: boolean; from: string; to: string }
   flags: number
+  tune: { label: string; from: string; to: string }[]
   restart: boolean
 }
 
+type ProfileRow = {
+  name: string
+  runner?: string | null
+  flags?: string
+  ctx_size?: number | null
+  enable_thinking?: boolean | null
+  vision?: string
+  mtp?: string
+}
+
 type PreviewArgs = {
-  profile: { name: string; runner?: string | null; flags?: string } | null | undefined
+  profile: ProfileRow | null | undefined
   baselineRunner: string
   currentDevice: string
-  modelFlags?: string
-  currentProfileFlags?: string
+  currentProfile?: ProfileRow | null
 }
 
 const preview = (args: PreviewArgs): Preview | null =>
@@ -64,8 +76,7 @@ const preview = (args: PreviewArgs): Preview | null =>
     options: optionsFor(args.currentDevice),
     baselineRunner: args.baselineRunner,
     currentDevice: args.currentDevice,
-    modelFlags: args.modelFlags || '',
-    currentProfileFlags: args.currentProfileFlags || '',
+    currentProfile: args.currentProfile ?? null,
   }) as Preview | null
 
 describe('profileApplyPreview — runtime flip', () => {
@@ -74,8 +85,6 @@ describe('profileApplyPreview — runtime flip', () => {
       profile: { name: 'q3-tune', runner: 'qwen3tts', flags: '-fa on -b 512' },
       baselineRunner: 'standard',
       currentDevice: 'gpu-vulkan',
-      modelFlags: '',
-      currentProfileFlags: '',
     })
     expect(p).not.toBeNull()
     expect(p!.runtime).toEqual({ unchanged: false, title: 'Qwen3 TTS', lanes: ['rocm'] })
@@ -159,68 +168,101 @@ describe('profileApplyPreview — Auto profile (no runtime opinion)', () => {
       profile: { name: 'chat', runner: '', flags: '-fa on -b 512 --mlock' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: '',
-      currentProfileFlags: '',
     })
     expect(p!.flags).toBe(3)
     expect(p!.restart).toBe(true)
   })
 })
 
-describe('profileApplyPreview — flag delta', () => {
-  it('counts a flag the model tune already carries at the same value as NOT replaced', () => {
+describe('profileApplyPreview — flag delta (profile vs outgoing profile, nothing else)', () => {
+  it('counts only the pairs the outgoing profile does not already carry at that value', () => {
     const p = preview({
       profile: { name: 'chat', runner: '', flags: '-fa on -b 512' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: '-fa on',
-      currentProfileFlags: '',
+      currentProfile: { name: 'old', flags: '-fa on' },
     })
     expect(p!.flags).toBe(1)
   })
 
-  it('counts a flag the model tune carries at a DIFFERENT value as replaced', () => {
+  it('counts a flag carried at a DIFFERENT value as changed', () => {
     const p = preview({
       profile: { name: 'chat', runner: '', flags: '-fa on -b 512' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: '-fa off -b 512',
-      currentProfileFlags: '',
+      currentProfile: { name: 'old', flags: '-fa off -b 512' },
     })
     expect(p!.flags).toBe(1)
   })
 
-  it('diffs against the effective current tune — the outgoing profile overlay counts too', () => {
+  it('a flag the outgoing profile had and the incoming lacks is dropped, and counts', () => {
     const p = preview({
       profile: { name: 'next', runner: '', flags: '-b 2048' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: '',
-      currentProfileFlags: '-b 512',
+      currentProfile: { name: 'old', flags: '-b 2048 --mlock' },
     })
     expect(p!.flags).toBe(1)
   })
 
-  it('a tune identical to what the slot already launches replaces nothing (line omitted)', () => {
+  it('a tune identical to the outgoing profile changes nothing (line omitted)', () => {
     const p = preview({
       profile: { name: 'same', runner: '', flags: '-fa on -b 512' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: '-fa on -b 512',
-      currentProfileFlags: '',
+      currentProfile: { name: 'old', flags: '-b 512 -fa on' },
     })
     expect(p!.flags).toBe(0)
+    expect(p!.tune).toEqual([])
   })
 
   it('quoted values survive (shlex-lite tokenizer, not a whitespace split)', () => {
+    const flags = `--chat-template-kwargs '{"enable_thinking":false}'`
     const p = preview({
-      profile: { name: 'q', runner: '', flags: `--chat-template-kwargs '{"enable_thinking":false}'` },
+      profile: { name: 'q', runner: '', flags },
       baselineRunner: '',
       currentDevice: 'cpu',
-      modelFlags: `--chat-template-kwargs '{"enable_thinking":false}'`,
-      currentProfileFlags: '',
+      currentProfile: { name: 'old', flags },
     })
     expect(p!.flags).toBe(0)
+  })
+})
+
+describe('profileApplyPreview — typed tune fields', () => {
+  const base = { runner: '', flags: '' }
+  it('lists context, thinking, vision and mtp that differ, in that order', () => {
+    const p = preview({
+      profile: { name: 'next', ...base, ctx_size: 65536, enable_thinking: false, vision: 'off', mtp: 'off' },
+      baselineRunner: '',
+      currentDevice: 'cpu',
+      currentProfile: { name: 'old', ...base, ctx_size: 32768, enable_thinking: null, vision: 'auto', mtp: 'auto' },
+    })
+    expect(p!.tune).toEqual([
+      { label: 'context', from: '32K', to: '64K' },
+      { label: 'thinking', from: 'auto', to: 'off' },
+      { label: 'vision', from: 'auto', to: 'off' },
+      { label: 'mtp', from: 'auto', to: 'off' },
+    ])
+  })
+
+  it('a profile with no ctx_size defers to the model native window', () => {
+    const p = preview({
+      profile: { name: 'next', ...base, ctx_size: null },
+      baselineRunner: '',
+      currentDevice: 'cpu',
+      currentProfile: { name: 'old', ...base, ctx_size: 8192 },
+    })
+    expect(p!.tune).toEqual([{ label: 'context', from: '8K', to: 'model native' }])
+  })
+
+  it('omits fields that do not change', () => {
+    const p = preview({
+      profile: { name: 'next', ...base, ctx_size: 8192, enable_thinking: true },
+      baselineRunner: '',
+      currentDevice: 'cpu',
+      currentProfile: { name: 'old', ...base, ctx_size: 8192, enable_thinking: null },
+    })
+    expect(p!.tune).toEqual([{ label: 'thinking', from: 'auto', to: 'on' }])
   })
 })
 
@@ -228,5 +270,43 @@ describe('profileApplyPreview — nothing selected', () => {
   it('returns null with no profile (the box never renders on an empty pick)', () => {
     expect(preview({ profile: null, baselineRunner: '', currentDevice: 'gpu-rocm' })).toBeNull()
     expect(preview({ profile: undefined, baselineRunner: '', currentDevice: 'gpu-rocm' })).toBeNull()
+  })
+})
+
+describe('profileFitsSlot — the client twin of resolved_profile_fits_slot', () => {
+  const cat = {
+    standard: { device_class: 'gpu' },
+    kokoro: { device_class: 'cpu' },
+    flm: { device_class: 'npu' },
+  }
+  it('requires the slot type to be one the profile supports', () => {
+    const p = { name: 'chat', supported_slot_types: ['llm'] }
+    expect(profileFitsSlot(p, { type: 'llm', device: 'gpu-rocm' }, cat)).toBe(true)
+    expect(profileFitsSlot(p, { type: 'tts', device: 'cpu' }, cat)).toBe(false)
+  })
+  it('a profile with no supported_slot_types, or a slot with no type, is not type-fenced', () => {
+    expect(profileFitsSlot({ name: 'x' }, { type: 'llm' }, cat)).toBe(true)
+    expect(profileFitsSlot({ name: 'x', supported_slot_types: ['llm'] }, {}, cat)).toBe(true)
+  })
+  it('a pinned runner must match the slot device class (gpu-* is gpu)', () => {
+    const p = { name: 'p', supported_slot_types: ['llm'], runner: 'standard' }
+    expect(profileFitsSlot(p, { type: 'llm', device: 'gpu-vulkan' }, cat)).toBe(true)
+    expect(profileFitsSlot(p, { type: 'llm', device: 'cpu' }, cat)).toBe(false)
+    expect(profileFitsSlot({ ...p, runner: 'flm' }, { type: 'llm', device: 'npu' }, cat)).toBe(true)
+    expect(profileFitsSlot({ ...p, runner: 'flm' }, { type: 'llm', device: 'gpu-rocm' }, cat)).toBe(false)
+  })
+  it('a profile pinning no runner fits any device', () => {
+    const p = { name: 'p', supported_slot_types: ['llm'] }
+    for (const device of ['gpu-rocm', 'cpu', 'npu']) {
+      expect(profileFitsSlot(p, { type: 'llm', device }, cat)).toBe(true)
+    }
+  })
+  it('an unloaded catalogue vetoes nothing; a loaded one never fits an unknown runner', () => {
+    const p = { name: 'p', supported_slot_types: ['llm'], runner: 'ghost' }
+    expect(profileFitsSlot(p, { type: 'llm', device: 'gpu-rocm' }, {})).toBe(true)
+    expect(profileFitsSlot(p, { type: 'llm', device: 'gpu-rocm' }, cat)).toBe(false)
+  })
+  it('no profile never fits', () => {
+    expect(profileFitsSlot(null, { type: 'llm' }, cat)).toBe(false)
   })
 })

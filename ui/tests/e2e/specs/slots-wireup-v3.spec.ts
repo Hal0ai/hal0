@@ -3,7 +3,8 @@
  *
  * Covers the six lifecycle paths the slot panel must drive end-to-end:
  *   1. Create  — `New slot` modal POSTs /api/slots.
- *   2. Edit    — drawer PATCHes /defaults for a ctx-only change.
+ *   2. Edit    — drawer PUTs /config for a placement change (ADR-0029: no ctx
+ *                 ceiling, so no PATCH /defaults).
  *   3. Delete  — Edit drawer danger button → confirm → DELETE /api/slots/{name}.
  *   4. Swap    — inline popover POSTs /api/slots/{name}/swap.
  *   5. Restart — card button POSTs /api/slots/{name}/restart.
@@ -72,7 +73,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     expect(seen[0].profile).toBeUndefined()
   })
 
-  test('Edit slot — ctx-only change PATCHes /defaults without PUT /config', async ({ page }) => {
+  test('Edit slot — a placement change PUTs /config and never PATCHes /defaults', async ({ page }) => {
     const patchBodies: any[] = []
     const putBodies: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {
@@ -85,6 +86,9 @@ test.describe('Slots v3 wire-up (/slots)', () => {
       }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
+    await page.route('**/api/slots/primary/restart', (route) =>
+      route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }),
+    )
     await page.route('**/api/slots', (route) =>
       route.fulfill({
         status: 200,
@@ -94,25 +98,18 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
-    // Context (ceiling) lives in the "How it runs" group (Task 11a moved it
-    // IN from the old Model group, beside the hardware that enforces it).
-    const hwGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
-    })
-    // Label reads "Context (ceiling)": the bound model's own default
-    // context_size is authoritative; this slot value only clamps it down for
-    // lighter hardware, it never overrides it upward.
-    const contextRow = hwGroup.locator('.form-row').filter({
-      has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
-    })
-    const ctxInput = contextRow.locator('input')
-    await expect(ctxInput).toBeVisible()
-    await ctxInput.fill('16384')
+    // No Context (ceiling) row any more — the window is the profile's.
+    await expect(
+      page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
+    ).toHaveCount(0)
+    // NGL (slot-owned hardware) sits behind the Advanced disclosure.
+    await page.getByTestId('slot-hw-advanced').click()
+    await page.getByTestId('slot-hw-ngl').fill('24')
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => patchBodies.length).toBeGreaterThan(0)
-    expect(patchBodies[0].ctx_size).toBe(16384)
+    await expect.poll(() => putBodies.length).toBeGreaterThan(0)
+    expect(putBodies[0]).toEqual({ n_gpu_layers: 24 })
     await expect(page.locator('.drawer')).toHaveCount(0)
-    expect(putBodies).toEqual([])
+    expect(patchBodies).toEqual([])
   })
 
   test('Delete slot — drawer danger button → confirm → DELETE /api/slots/{name}', async ({ page }) => {

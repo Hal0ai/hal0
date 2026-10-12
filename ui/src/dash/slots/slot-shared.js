@@ -18,9 +18,9 @@ export function localModels(models) {
   return (models ?? []).map(normalizeApiModel).filter((m) => !isUpstreamModel(m));
 }
 
-// Device token derived from a model's backends/device — the model's stamped tune
-// is device-flavoured, so the slot's device is READ from the model, never chosen
-// on the slot. Returns one of: gpu-rocm | gpu-vulkan | npu | cpu.
+// Device token derived from a model's backends/device — a model's backends
+// decide where it can run, so the slot's device is READ from the model, never
+// chosen on the slot. Returns one of: gpu-rocm | gpu-vulkan | npu | cpu.
 export function deviceFromModel(model) {
   const backends = Array.isArray(model?.backends) ? model.backends : [];
   const dev = String(model?.device || "").toLowerCase();

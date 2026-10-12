@@ -34,10 +34,17 @@ export interface ApiModelRaw {
   quant?: string | null
   /** Freeform registry tags ("mtp", "coder", "user-added", …). */
   tags?: string[]
-  /** Per-model launch-default overrides (`ModelDefaults` on the backend).
-   * `defaults.mtp === true` is an explicit opt-in that wins over the legacy
-   * `mtp` tag — see `isMtpEligibleModel`. */
-  defaults?: { mtp?: boolean | null; [k: string]: unknown } | null
+  /** File facts about the model (`ModelDefaults` on the backend, ADR-0029):
+   * chat_template, tokenizer_repo, jinja and mtp. `defaults.mtp` says whether
+   * the file has MTP heads; an explicit value wins over the registry `mtp`
+   * tag — see `isMtpEligibleModel`. Every tune lives on a profile. */
+  defaults?: {
+    chat_template?: string | null
+    tokenizer_repo?: string | null
+    mtp?: boolean | null
+    jinja?: boolean | null
+    [k: string]: unknown
+  } | null
   /** Unix seconds the row was registered / first seen. */
   created?: number
   /** True when the last HF update check (GET /api/models/updates/check)
